@@ -36,11 +36,122 @@ export interface ReadExactGraphOptions extends ReadExactGraphPagedOptions {
   profile?: 'paged' | 'bounded-single-result';
 }
 
+/** Limits for one materialized payload; callers may shrink the strategy ceilings. */
+export interface BoundedGraphPayloadProfile {
+  readonly maxRows: number;
+  readonly maxResponseBytes: number;
+  readonly maxNQuadsBytes: number;
+  readonly maxHeapBytes: number;
+  readonly rowOverheadBytes: number;
+  /** Estimate the representation retained by the caller after validation. */
+  readonly heapAccounting: 'canonical-lines' | 'output-graph';
+}
+
+export interface ReadBoundedGraphPayloadOptions {
+  readonly expectedQuadCount: number;
+  readonly profile: BoundedGraphPayloadProfile;
+  readonly outputGraph?: string;
+  /** Canonical proof bytes may omit the graph retained in the returned quads. */
+  readonly canonicalGraph?: string;
+  readonly queryOptions?: QueryOptions;
+  /** Observation after the physical query settles, before payload validation. */
+  readonly onQuerySettled?: () => unknown;
+}
+
+export type BoundedGraphPayloadRefusalReason = 'store-capability' | 'row-profile'
+  | 'store-byte-profile' | 'blank-nodes' | 'heap-profile' | 'canonical-byte-profile';
+
+export type BoundedGraphPayloadResult = {
+  readonly status: 'read';
+  readonly quads: Quad[];
+  readonly canonicalBytes: number;
+  readonly heapBytes: number;
+} | {
+  readonly status: 'refused';
+  readonly reason: BoundedGraphPayloadRefusalReason;
+};
+
 /** Whether the store enforces HTTP response limits before materializing RDF. */
 export function supportsBoundedExactGraphExport(store: TripleStore): boolean {
   return findTripleStoreCapability(store, (candidate): candidate is BlazegraphStore | SparqlHttpStore => (
     candidate instanceof BlazegraphStore || candidate instanceof SparqlHttpStore
   )) !== null;
+}
+
+/**
+ * Read and validate one bounded SELECT payload. This owns no count queries,
+ * fallback, cache, or authority fences. Resource refusals retain no prefix;
+ * malformed or count-inconsistent results throw ExactGraphReadError.
+ */
+export async function readBoundedGraphPayload(
+  store: TripleStore,
+  graphIri: string,
+  options: ReadBoundedGraphPayloadOptions,
+): Promise<BoundedGraphPayloadResult> {
+  const graph = assertSafeIri(graphIri);
+  const expected = nonNegativeSafeInteger(options.expectedQuadCount, 'expectedQuadCount');
+  const profile = options.profile;
+  const maxRows = Math.min(nonNegativeSafeInteger(profile.maxRows, 'maxRows'), EXACT_GRAPH_EXPORT_MAX_ROWS);
+  const maxResponseBytes = Math.min(positiveSafeInteger(profile.maxResponseBytes, 'maxResponseBytes'),
+    EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES);
+  const maxNQuadsBytes = Math.min(nonNegativeSafeInteger(profile.maxNQuadsBytes, 'maxNQuadsBytes'),
+    DEFAULT_EXACT_GRAPH_MAX_NQUADS_BYTES);
+  const maxHeapBytes = Math.min(nonNegativeSafeInteger(profile.maxHeapBytes, 'maxHeapBytes'),
+    EXACT_GRAPH_EXPORT_MAX_HEAP_BYTES);
+  const rowOverheadBytes = nonNegativeSafeInteger(profile.rowOverheadBytes, 'rowOverheadBytes');
+  if (profile.heapAccounting !== 'canonical-lines' && profile.heapAccounting !== 'output-graph') {
+    throw new RangeError('heapAccounting must select a supported representation');
+  }
+  const refuse = (reason: BoundedGraphPayloadRefusalReason): BoundedGraphPayloadResult => ({ status: 'refused', reason });
+  throwIfPayloadAborted(options.queryOptions?.signal);
+  if (!supportsBoundedExactGraphExport(store)) return refuse('store-capability');
+  if (expected > maxRows) return refuse('row-profile');
+  let result: QueryResult;
+  try {
+    // Keep decorators in the query path so they own term translation and policy.
+    result = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } } LIMIT ${expected + 1}`,
+      { ...options.queryOptions, maxResponseBytes: Math.min(
+        options.queryOptions?.maxResponseBytes ?? maxResponseBytes, maxResponseBytes,
+      ) },
+    );
+  } catch (error) {
+    throwIfPayloadAborted(options.queryOptions?.signal);
+    if (error instanceof StoreResponseTooLargeError) return refuse('store-byte-profile');
+    throw error;
+  }
+  // Observations must never change validation or cancellation ownership.
+  try { void Promise.resolve(options.onQuerySettled?.()).catch(() => {}); } catch { /* observation only */ }
+  throwIfPayloadAborted(options.queryOptions?.signal);
+  const bindings = exactGraphBindings(graph, result, expected + 1);
+  assertQuadCount(graph, expected, bindings.length);
+  const outputGraph = options.outputGraph ?? graph;
+  const canonicalGraph = options.canonicalGraph ?? outputGraph;
+  const collector = exactGraphCollector(graph, outputGraph, maxNQuadsBytes, canonicalGraph);
+  let heapBytes = 0;
+  for (const rawRow of bindings) {
+    const { subject, predicate, object } = exactGraphBinding(graph, rawRow);
+    // Blank-node identity belongs to the bounded single-document fallback.
+    if (subject.startsWith('_:') || object.startsWith('_:')) return refuse('blank-nodes');
+    const line = quadToNQuad({ subject, predicate, object, graph: canonicalGraph });
+    heapBytes += rowOverheadBytes + 2 * (subject.length + predicate.length + object.length
+      + (profile.heapAccounting === 'canonical-lines' ? line.length : outputGraph.length));
+    if (heapBytes > maxHeapBytes) return refuse('heap-profile');
+    try {
+      collector.appendQuad(subject, predicate, object, line);
+    } catch (error) {
+      if (error instanceof ExactGraphReadError && error.code === 'NQUADS_BYTE_LIMIT_EXCEEDED') {
+        return refuse('canonical-byte-profile');
+      }
+      throw error;
+    }
+  }
+  return { status: 'read', quads: collector.quads, canonicalBytes: collector.nquadsBytes, heapBytes };
+}
+
+function throwIfPayloadAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new DOMException('Graph payload read cancelled', 'AbortError');
 }
 
 type ReadExactGraphPagedWithDiscoveredCountOptions = Omit<
@@ -123,41 +234,18 @@ async function readExactGraphSingleResult(
     maxResponseBytes: Math.min(options.queryOptions?.maxResponseBytes ?? 64 * 1024, 64 * 1024),
   };
   await verifyExactGraphCount(store, graph, expectedQuadCount, maxQuadCount, countOptions);
-  let result: QueryResult;
-  try {
-    // Query the outer store so decorators still own term translation and policy.
-    result = await store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } } LIMIT ${expectedQuadCount! + 1}`,
-      { ...options.queryOptions, maxResponseBytes: Math.min(
-        options.queryOptions?.maxResponseBytes ?? EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
-        EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
-      ) },
-    );
-  } catch (error) {
-    if (error instanceof StoreResponseTooLargeError) return null;
-    throw error;
-  }
-  const bindings = exactGraphBindings(graph, result, expectedQuadCount! + 1);
-  assertQuadCount(graph, expectedQuadCount!, bindings.length);
-  const collector = exactGraphCollector(graph, options.outputGraph ?? graph,
-    Math.min(maxNQuadsBytes, DEFAULT_EXACT_GRAPH_MAX_NQUADS_BYTES));
-  let heapBytes = 0;
-  for (const rawRow of bindings) {
-    const { subject, predicate, object } = exactGraphBinding(graph, rawRow);
-    // Only the paged reader owns blank-node single-document identity and bounds.
-    if (subject.startsWith('_:') || object.startsWith('_:')) return null;
-    let line: string;
-    try {
-      line = collector.appendQuad(subject, predicate, object);
-    } catch (error) {
-      if (error instanceof ExactGraphReadError && error.code === 'NQUADS_BYTE_LIMIT_EXCEEDED') return null;
-      throw error;
-    }
-    heapBytes += 256 + 2 * (subject.length + predicate.length + object.length + line.length);
-    if (heapBytes > EXACT_GRAPH_EXPORT_MAX_HEAP_BYTES) return null;
-  }
+  const payload = await readBoundedGraphPayload(store, graph, {
+    expectedQuadCount: expectedQuadCount!, outputGraph: options.outputGraph,
+    queryOptions: options.queryOptions,
+    profile: {
+      maxRows: EXACT_GRAPH_EXPORT_MAX_ROWS, maxResponseBytes: EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
+      maxNQuadsBytes, maxHeapBytes: EXACT_GRAPH_EXPORT_MAX_HEAP_BYTES,
+      rowOverheadBytes: 256, heapAccounting: 'canonical-lines',
+    },
+  });
+  if (payload.status === 'refused') return null;
   await verifyExactGraphCount(store, graph, expectedQuadCount, maxQuadCount, countOptions);
-  return collector.quads;
+  return payload.quads;
 }
 
 /**
@@ -357,16 +445,17 @@ function exactGraphBinding(graph: string, rawRow: unknown) {
   return { subject, predicate, object };
 }
 
-function exactGraphCollector(graph: string, outputGraph: string, maxNQuadsBytes: number) {
+function exactGraphCollector(graph: string, outputGraph: string, maxNQuadsBytes: number, canonicalGraph = outputGraph) {
   const quads: Quad[] = [];
   const seenNQuadLines = new Set<string>();
   let nquadsBytes = 0;
   return {
     quads,
+    get nquadsBytes() { return nquadsBytes; },
     reset: () => { quads.length = 0; seenNQuadLines.clear(); nquadsBytes = 0; },
-    appendQuad: (subject: string, predicate: string, object: string): string => {
+    appendQuad: (subject: string, predicate: string, object: string, canonicalLine?: string): string => {
       const quad: Quad = { subject, predicate, object, graph: outputGraph };
-      const line = quadToNQuad(quad);
+      const line = canonicalLine ?? quadToNQuad({ ...quad, graph: canonicalGraph });
       if (seenNQuadLines.has(line)) {
         throw invalidQueryResult(graph, 'Exact graph read received a duplicate triple');
       }

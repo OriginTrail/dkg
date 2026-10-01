@@ -10,11 +10,13 @@ import {
   quadsToNQuads,
   readExactGraph,
   readExactGraphPaged,
+  readBoundedGraphPayload,
   supportsBoundedExactGraphExport,
   type Quad,
   type QueryOptions,
   type QueryResult,
   type TripleStore,
+  type BoundedGraphPayloadProfile,
 } from '../src/index.js';
 
 describe('canonical storage N-Quads serialization', () => {
@@ -574,6 +576,129 @@ describe('storage-owned exact graph profiles', () => {
       expectedQuadCount: 1, profile: 'bounded-single-result',
     })).rejects.toMatchObject({ code: 'INVALID_QUERY_RESULT' });
     expect(query).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('bounded single-result payload boundary', () => {
+  const graph = 'urn:test:payload';
+  const row = { s: 'urn:s', p: 'urn:p', o: '"😀"' };
+  const profile: BoundedGraphPayloadProfile = {
+    maxRows: 2, maxResponseBytes: 1024, maxNQuadsBytes: 1024, maxHeapBytes: 1024,
+    rowOverheadBytes: 160, heapAccounting: 'output-graph',
+  };
+  function payloadStore(result: unknown = { type: 'bindings', bindings: [row] }) {
+    const store = new BlazegraphStore('http://store.test/query');
+    const query = vi.spyOn(store, 'query').mockResolvedValue(result as QueryResult);
+    return { store, query };
+  }
+
+  it('performs only one payload query and bounds graph-free UTF-8 while charging retained graph strings', async () => {
+    const { store, query } = payloadStore();
+    const outer = { innerStore: store, query: vi.fn((sparql: string, options?: QueryOptions) => store.query(sparql, options)) } as unknown as TripleStore;
+    const signal = new AbortController().signal;
+    const heapBytes = 160 + 2 * (row.s.length + row.p.length + row.o.length + graph.length);
+    const result = await readBoundedGraphPayload(outer, graph, {
+      expectedQuadCount: 1, outputGraph: graph, canonicalGraph: '',
+      profile: { ...profile, maxNQuadsBytes: 24, maxHeapBytes: heapBytes },
+      queryOptions: { source: 'test.payload', priority: 'background', signal, maxResponseBytes: 512 },
+    });
+    expect(result).toEqual({ status: 'read', canonicalBytes: 24, heapBytes,
+      quads: [{ subject: row.s, predicate: row.p, object: row.o, graph }] });
+    expect(query).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0]![0]).toMatch(/SELECT \?s \?p \?o[\s\S]+LIMIT 2$/);
+    expect(query.mock.calls[0]![0]).not.toMatch(/COUNT|OFFSET|ORDER BY/);
+    expect(query.mock.calls[0]![1]).toEqual({ source: 'test.payload', priority: 'background', signal, maxResponseBytes: 512 });
+    for (const [limit, reason] of [[{ maxNQuadsBytes: 23 }, 'canonical-byte-profile'],
+      [{ maxHeapBytes: heapBytes - 1 }, 'heap-profile']] as const) {
+      await expect(readBoundedGraphPayload(store, graph, { expectedQuadCount: 1, canonicalGraph: '',
+        profile: { ...profile, ...limit } })).resolves.toEqual({ status: 'refused', reason });
+    }
+  });
+
+  it.each([
+    null, { type: 'quads', quads: [] }, { type: 'bindings', bindings: null },
+    { type: 'bindings', bindings: [null] }, { type: 'bindings', bindings: [{ s: 'urn:s', p: 'urn:p' }] },
+    { type: 'bindings', bindings: [row, row, row] },
+  ])('rejects malformed or unbounded SELECT results without fallback: %j', async result => {
+    const { store, query } = payloadStore(result);
+    await expect(readBoundedGraphPayload(store, graph, { expectedQuadCount: 1, profile }))
+      .rejects.toMatchObject({ code: 'INVALID_QUERY_RESULT' });
+    expect(query).toHaveBeenCalledOnce();
+  });
+
+  it('rejects count mismatch and canonical duplicates through the shared integrity validator', async () => {
+    const short = payloadStore({ type: 'bindings', bindings: [] });
+    await expect(readBoundedGraphPayload(short.store, graph, { expectedQuadCount: 1, profile }))
+      .rejects.toMatchObject({ code: 'QUAD_COUNT_MISMATCH', expected: 1, actual: 0 });
+    const duplicate = payloadStore({ type: 'bindings', bindings: [
+      { ...row, o: '"1"^^urn:type' }, { ...row, o: '"1"^^<urn:type>' },
+    ] });
+    await expect(readBoundedGraphPayload(duplicate.store, graph, { expectedQuadCount: 2, profile }))
+      .rejects.toMatchObject({ code: 'INVALID_QUERY_RESULT' });
+  });
+
+  it('returns explicit capability, row, HTTP-byte and blank-node refusals without a second query', async () => {
+    const { store, query } = payloadStore();
+    const unsupported = { query: vi.fn() } as unknown as TripleStore;
+    await expect(readBoundedGraphPayload(unsupported, graph, { expectedQuadCount: 1, profile }))
+      .resolves.toEqual({ status: 'refused', reason: 'store-capability' });
+    expect(unsupported.query).not.toHaveBeenCalled();
+    await expect(readBoundedGraphPayload(store, graph, { expectedQuadCount: 3, profile }))
+      .resolves.toEqual({ status: 'refused', reason: 'row-profile' });
+    expect(query).not.toHaveBeenCalled();
+    query.mockRejectedValueOnce(new StoreResponseTooLargeError(1024, 1025));
+    await expect(readBoundedGraphPayload(store, graph, { expectedQuadCount: 1, profile }))
+      .resolves.toEqual({ status: 'refused', reason: 'store-byte-profile' });
+    query.mockResolvedValueOnce({ type: 'bindings', bindings: [{ ...row, o: '_:local' }] });
+    await expect(readBoundedGraphPayload(store, graph, { expectedQuadCount: 1, profile }))
+      .resolves.toEqual({ status: 'refused', reason: 'blank-nodes' });
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a caller raise the single-result row or physical response ceilings', async () => {
+    const { store, query } = payloadStore();
+    const enlarged = { ...profile, maxRows: Number.MAX_SAFE_INTEGER, maxResponseBytes: Number.MAX_SAFE_INTEGER };
+    await expect(readBoundedGraphPayload(store, graph, {
+      expectedQuadCount: EXACT_GRAPH_EXPORT_MAX_ROWS + 1, profile: enlarged,
+    })).resolves.toEqual({ status: 'refused', reason: 'row-profile' });
+    expect(query).not.toHaveBeenCalled();
+    await expect(readBoundedGraphPayload(store, graph, { expectedQuadCount: 1, profile: enlarged,
+      queryOptions: { maxResponseBytes: Number.MAX_SAFE_INTEGER } })).resolves.toMatchObject({ status: 'read' });
+    expect(query.mock.calls[0]![1]?.maxResponseBytes).toBe(EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES);
+  });
+
+  it('drains an uncooperative physical query before cancellation and propagates operational errors', async () => {
+    const { store, query } = payloadStore();
+    const controller = new AbortController();
+    let drain!: (result: QueryResult) => void;
+    query.mockImplementationOnce(() => new Promise(resolve => { drain = resolve; }));
+    let settled = false;
+    const cancellation = new Error('payload cancelled');
+    const pending = readBoundedGraphPayload(store, graph, { expectedQuadCount: 1, profile,
+      queryOptions: { signal: controller.signal } }).finally(() => { settled = true; });
+    const observed = pending.catch(error => error);
+    controller.abort(cancellation);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    drain({ type: 'bindings', bindings: [row] });
+    expect(await observed).toBe(cancellation);
+    expect(query).toHaveBeenCalledOnce();
+    const unavailable = new Error('payload unavailable');
+    query.mockRejectedValueOnce(unavailable);
+    await expect(readBoundedGraphPayload(store, graph, { expectedQuadCount: 1, profile })).rejects.toBe(unavailable);
+  });
+
+  it.each(['throw', 'reject'] as const)('isolates observation %s failures from the returned payload', async mode => {
+    const { store, query } = payloadStore();
+    const onQuerySettled = vi.fn(() => {
+      if (mode === 'throw') throw new Error('observation failed');
+      return Promise.reject(new Error('observation failed'));
+    });
+    await expect(readBoundedGraphPayload(store, graph, { expectedQuadCount: 1, profile, onQuerySettled }))
+      .resolves.toMatchObject({ status: 'read' });
+    await Promise.resolve();
+    expect(onQuerySettled).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledOnce();
   });
 });
 

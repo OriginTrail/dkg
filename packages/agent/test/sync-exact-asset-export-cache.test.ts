@@ -378,6 +378,7 @@ describe('bounded exact asset export ownership', () => {
       options: { maxResponseBytes: EXACT_ASSET_EXPORT_MAX_STORE_BYTES, priority: 'background' },
     });
     expect(f.reads.find((read) => read.options?.source?.endsWith('.payload'))!.query).toContain('LIMIT 10001');
+    expect(f.reads.some(read => /COUNT\(|ORDER BY|OFFSET/.test(read.query))).toBe(false);
     expect(Object.isFrozen(lease!.rows)).toBe(true);
     expect(Object.isFrozen(lease!.rows[0])).toBe(true);
     await lease!.assertCurrent();
@@ -476,6 +477,40 @@ describe('bounded exact asset export ownership', () => {
     const f = fixture(10);
     f.payload[0]!.object = '"corrupt"';
     await expect(f.cache.acquire(f)).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+    expect(f.budget.stats().snapshots).toBe(0);
+  });
+
+  it.each([null, { type: 'bindings', bindings: null }, { type: 'bindings', bindings: [null] },
+    { type: 'bindings', bindings: [{ s: 'urn:s', p: 'urn:p' }] }, { type: 'bindings', bindings: [] },
+  ])('preserves the export integrity error and releases the build for malformed payload %j', async result => {
+    const f = fixture(1);
+    const normal = f.query.getMockImplementation()!;
+    f.query.mockImplementation((sparql, options) => options?.source?.endsWith('.payload')
+      ? Promise.resolve(result as never) : normal(sparql, options));
+    await expect(f.cache.acquire(f)).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+    expect(f.reads.filter(read => read.options?.source?.endsWith('.metadata'))).toHaveLength(1);
+    expect(f.query.mock.calls.filter(([, options]) => options?.source?.endsWith('.payload'))).toHaveLength(1);
+    expect(f.budget.stats().snapshots).toBe(0);
+  });
+
+  it('rejects distinct raw rows that serialize to the same canonical triple', async () => {
+    const f = fixture(2);
+    f.payload[0]!.object = '"1"^^urn:type';
+    f.payload[1] = { ...f.payload[0]!, object: '"1"^^<urn:type>' };
+    await expect(f.cache.acquire(f)).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+    expect(f.cache.stats().exports).toBe(0);
+    expect(f.budget.stats().snapshots).toBe(0);
+  });
+
+  it.each(['blank-nodes', 'heap-profile'] as const)('retains the exporter %s refusal without count queries or fallback', async reason => {
+    const f = reason === 'heap-profile' ? fixture(1000, 'bounded', 'x'.repeat(20_000)) : fixture(1);
+    if (reason === 'blank-nodes') f.payload[0]!.object = '_:local';
+    const onFallback = vi.fn();
+    expect(await f.cache.acquire({ ...f, onFallback })).toBeNull();
+    expect(onFallback).toHaveBeenCalledWith(reason, undefined);
+    expect(f.reads.filter(read => read.options?.source?.endsWith('.payload'))).toHaveLength(1);
+    expect(f.reads.filter(read => read.options?.source?.endsWith('.metadata'))).toHaveLength(1);
+    expect(f.reads.some(read => /COUNT\(|ORDER BY|OFFSET/.test(read.query))).toBe(false);
     expect(f.budget.stats().snapshots).toBe(0);
   });
 

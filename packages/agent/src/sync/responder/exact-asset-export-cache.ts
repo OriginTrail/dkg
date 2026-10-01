@@ -1,9 +1,10 @@
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
 import {
   StoreResponseTooLargeError,
+  ExactGraphReadError,
   asGraphWriteRevisionSource,
   supportsBoundedExactGraphExport,
-  quadToNQuad,
+  readBoundedGraphPayload,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
@@ -159,11 +160,6 @@ function invalid(): Error {
 
 function compareRows(a: SyncRow, b: SyncRow): number {
   return compareCodePoint(a.s, b.s) || compareCodePoint(a.p, b.p) || compareCodePoint(a.o, b.o);
-}
-
-function rowHeapBytes(row: SyncRow): number {
-  // Charge UTF-16 worst case, including a distinct graph string per returned row.
-  return 160 + 2 * (row.s.length + row.p.length + row.o.length + row.g.length);
 }
 
 /**
@@ -377,37 +373,29 @@ export function createBoundedExactAssetExportCache(params: {
       let retained = false;
       try {
         stageStarted = performance.now();
-        const result = await store.query(`
-          SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(request.graph)}> { ?s ?p ?o } }
-          LIMIT ${request.expectedRows + 1}
-        `, {
-          source: 'sync.responder.exactAssetExport.payload', priority: 'background',
-          signal: request.signal, maxResponseBytes: EXACT_ASSET_EXPORT_MAX_STORE_BYTES,
+        const payload = await readBoundedGraphPayload(store, request.graph, {
+          expectedQuadCount: request.expectedRows, outputGraph: request.graph, canonicalGraph: '',
+          profile: {
+            maxRows: EXACT_ASSET_EXPORT_MAX_ROWS, maxResponseBytes: EXACT_ASSET_EXPORT_MAX_STORE_BYTES,
+            maxNQuadsBytes: EXACT_ASSET_EXPORT_CANONICAL_BYTES, maxHeapBytes: EXACT_ASSET_EXPORT_MAX_HEAP_BYTES,
+            rowOverheadBytes: 160, heapAccounting: 'output-graph',
+          },
+          queryOptions: {
+            source: 'sync.responder.exactAssetExport.payload', priority: 'background', signal: request.signal,
+          },
+          onQuerySettled: () => {
+            // Includes scheduler wait, HTTP/body settlement and JSON decoding.
+            observeStage('export-store-payload-query', stageStarted);
+            stageStarted = performance.now();
+          },
         });
-        // Includes scheduler wait, HTTP/body settlement and JSON decoding.
-        observeStage('export-store-payload-query', stageStarted);
         throwIfAborted(request.signal);
-        stageStarted = performance.now();
-        if (result.type !== 'bindings' || result.bindings.length !== request.expectedRows) throw invalid();
-        const rows: SyncRow[] = [];
-        let heapBytes = 0;
-        let canonicalBytes = 0;
-        for (const row of result.bindings) {
-          if (typeof row.s !== 'string' || typeof row.p !== 'string' || typeof row.o !== 'string') throw invalid();
-          if (row.s.startsWith('_:') || row.o.startsWith('_:')) return refuse('blank-nodes', request);
-          const value = Object.freeze({ s: row.s, p: row.p, o: row.o, g: request.graph });
-          heapBytes += rowHeapBytes(value);
-          if (heapBytes > EXACT_ASSET_EXPORT_MAX_HEAP_BYTES) return refuse('heap-profile', request);
-          canonicalBytes += ENCODER.encode(quadToNQuad({
-            subject: value.s, predicate: value.p, object: value.o, graph: '',
-          })).byteLength + (rows.length > 0 ? 1 : 0);
-          if (canonicalBytes > EXACT_ASSET_EXPORT_CANONICAL_BYTES) return refuse('canonical-byte-profile', request);
-          rows.push(value);
-        }
+        if (payload.status === 'refused') return refuse(payload.reason, request);
+        const { heapBytes } = payload;
+        const rows: SyncRow[] = payload.quads.map((quad) => Object.freeze({
+          s: quad.subject, p: quad.predicate, o: quad.object, g: quad.graph,
+        }));
         rows.sort(compareRows);
-        for (let i = 1; i < rows.length; i += 1) {
-          if (compareRows(rows[i - 1]!, rows[i]!) === 0) throw invalid();
-        }
         const root = computeFlatKCRootV10(rows.map((row) => ({
           subject: row.s, predicate: row.p, object: row.o, graph: '',
         })), []);
@@ -437,7 +425,7 @@ export function createBoundedExactAssetExportCache(params: {
         retained = acquired !== null;
         return acquired;
       } catch (error) {
-        if (error instanceof StoreResponseTooLargeError) return refuse('store-byte-profile', request);
+        if (error instanceof ExactGraphReadError) throw invalid();
         if (error instanceof SyncRowSnapshotBudgetError) return refuse('build-admission', request, error.reason);
         throw error;
       } finally {

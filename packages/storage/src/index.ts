@@ -167,6 +167,7 @@ export {
   ExactGraphReadError,
   quadToNQuad,
   quadsToNQuads,
+  readBoundedGraphPayload,
   readExactGraph,
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
@@ -175,6 +176,10 @@ export {
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,
   type ReadExactGraphOptions,
+  type BoundedGraphPayloadProfile,
+  type ReadBoundedGraphPayloadOptions,
+  type BoundedGraphPayloadRefusalReason,
+  type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {
