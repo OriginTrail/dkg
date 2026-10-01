@@ -188,6 +188,18 @@ export {
   type RpcUsageRecorder,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+// Observation-only split of physical RPC attempts into local admission wait and
+// endpoint latency. Process-cumulative, bounded and secret-free; consumers diff
+// two non-draining snapshots.
+export {
+  RPC_TIMING_BUCKET_UPPER_MS,
+  diffRpcRequestTiming,
+  snapshotRpcRequestTiming,
+  type RpcRequestTimingClassSnapshot,
+  type RpcRequestTimingSnapshot,
+  type RpcTimingDistribution,
+  type RpcTimingRequestClass,
+} from './rpc-request-timing.js';
 // The bounded census of call sites that reach `cgStorage.getContextGraph`.
 export {
   CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,

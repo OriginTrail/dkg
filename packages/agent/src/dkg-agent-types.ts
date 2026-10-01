@@ -1565,6 +1565,13 @@ export interface DKGAgentConfig {
    * every StorageACK, because it could not promote the ACKed data to VM.
    */
   vmReconcilerEnabled?: boolean;
+  /**
+   * EXPERIMENTAL. Prepare the sizing metadata of the next public-graph recovery
+   * batch while the current exact batch transfers, and size candidates with
+   * bounded in-order reads. Advisory planning evidence only. Env
+   * DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH wins; default off.
+   */
+  experimentalVmRecoveryPrefetch?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
