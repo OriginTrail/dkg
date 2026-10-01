@@ -13,7 +13,7 @@ import {
 } from '../exact-batch-stream-contract.js';
 import { EXACT_SYNC_GZIP_ENCODING, encodeNegotiatedExactSyncResponse } from '../wire-compression.js';
 import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js';
-import type { ExactAssetExportCache } from './exact-asset-export-cache.js';
+import type { ExactAssetExportCache, ExactAssetExportStage } from './exact-asset-export-cache.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
 import { serializeResponderRows } from './graph-plan.js';
 
@@ -31,7 +31,7 @@ export interface ExactBatchResponderBindingOptions {
   /** Positive normal CG policy read: the experimental pilot serves public CGs only. */
   readonly isPublicContextGraph: (contextGraphId: string, signal: AbortSignal) => Promise<boolean>;
   readonly servingWithheld?: (contextGraphId: string) => boolean;
-  readonly onStage?: (stage: 'metadata' | 'export' | 'encode' | 'send' | 'source-fence' | 'ack-wait', assetIndex: number, durationMs: number, context: OperationContext) => void;
+  readonly onStage?: (stage: 'metadata' | 'export' | 'encode' | 'send' | 'source-fence' | 'ack-wait' | ExactAssetExportStage, assetIndex: number, durationMs: number, context: OperationContext) => void;
   /** Successful cache lease export count, never a peer/body authority claim. */
   readonly onExport?: (assetIndex: number, wholePayloadExports: 0 | 1, context: OperationContext) => void;
   readonly onPayload?: (assetIndex: number, plainBytes: number, encodedBytes: number, context: OperationContext) => void;
@@ -96,7 +96,8 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         observeExactBatch(() => options.onStage?.('metadata', assetIndex, performance.now() - started, context));
         started = performance.now();
         const lease = await options.exportCache.acquire({ contextGraphId: request.contextGraphId, assetUal,
-          graph: metadata.graph, expectedRows: metadata.rows, expectedIdentity: metadata.identity, signal: session.signal });
+          graph: metadata.graph, expectedRows: metadata.rows, expectedIdentity: metadata.identity, signal: session.signal,
+          onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context) });
         observeExactBatch(() => options.onStage?.('export', assetIndex, performance.now() - started, context));
         if (!lease) throw new ProfileRefusal('Exact batch exporter profile refused');
         try {

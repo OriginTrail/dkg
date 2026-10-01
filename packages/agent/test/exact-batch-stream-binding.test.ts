@@ -69,7 +69,7 @@ async function fixture(assetCount = 10, rows = 2000) {
   const exportCache = resources.exportCache;
   const exportCounts: number[] = [];
   const payloadSizes: Array<{ plain: number; encoded: number }> = [];
-  const responderStage = vi.fn(() => {});
+  const responderStage = vi.fn((_stage: string, _assetIndex: number, _durationMs: number) => {});
   // The exact SAME legacy cache and admission limiter guard this binding.
   const binding = createExactBatchResponderBinding({ localPeerId: 'source', store, exportCache, parseSyncRequest: parse, authorizeSyncRequest: authorize, isPublicContextGraph: isPublic,
     admission: resources, onStage: responderStage,
@@ -155,6 +155,13 @@ describe('exact batch normal verifier/materializer binding', () => {
       expect(f.exportCounts).toEqual(Array(10).fill(1));
       expect(f.payloadSizes).toHaveLength(10);
       expect(f.payloadSizes.every(size => size.plain > size.encoded && size.encoded > 0)).toBe(true);
+      for (const stage of ['export', 'export-metadata-before', 'export-store-payload-query',
+        'export-canonical-preparation-root', 'export-metadata-after']) {
+        const observations = f.responderStage.mock.calls.filter(([observed]) => observed === stage);
+        expect(observations).toHaveLength(10);
+        expect(observations.map(([, index]) => index)).toEqual(Array.from({ length: 10 }, (_, index) => index));
+        expect(observations.every(([, , duration]) => Number.isFinite(duration) && duration >= 0)).toBe(true);
+      }
       expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.payload')).toHaveLength(10);
       expect(f.reads.some(source => source === 'sync.responder.readExactGraphRowsPage')).toBe(false);
       expect(f.authorize).toHaveBeenCalledOnce(); expect(f.parse).toHaveBeenCalledOnce();

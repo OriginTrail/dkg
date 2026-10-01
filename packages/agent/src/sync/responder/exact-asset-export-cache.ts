@@ -17,6 +17,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import type { SyncRow } from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError, type SyncResponderSnapshotBudget } from './snapshot-budget.js';
+import { observeExactBatch } from '../exact-batch-observation.js';
 
 /** Separate from the broad snapshot loader: unsigned public hints cannot raise these. */
 export const EXACT_ASSET_EXPORT_MAX_ROWS = 16_384;
@@ -43,6 +44,9 @@ export interface ExactAssetExportLease {
   release(): void;
 }
 
+export type ExactAssetExportStage = 'export-metadata-before' | 'export-store-payload-query'
+  | 'export-canonical-preparation-root' | 'export-metadata-after';
+
 export interface ExactAssetExportRequest {
   readonly contextGraphId: string;
   readonly assetUal: string;
@@ -50,6 +54,8 @@ export interface ExactAssetExportRequest {
   readonly expectedRows: number;
   readonly expectedIdentity?: string;
   readonly signal?: AbortSignal;
+  /** Optional local observation; never controls export ownership or proof. */
+  readonly onStage?: (stage: ExactAssetExportStage, durationMs: number) => unknown;
 }
 
 export interface ExactAssetExportCache {
@@ -271,11 +277,16 @@ export function createBoundedExactAssetExportCache(params: {
   return {
     stats() { return Object.freeze({ exports, cacheHits, fallbacks: Object.freeze({ ...fallbacks }) }); },
     async acquire(request) {
+      const observeStage = (stage: ExactAssetExportStage, started: number): void => {
+        observeExactBatch(() => request.onStage?.(stage, performance.now() - started));
+      };
       throwIfAborted(request.signal);
       if (!canReadWholeAsset) return refuse('store-capability');
       if (!Number.isSafeInteger(request.expectedRows) || request.expectedRows < 1
         || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile');
+      let stageStarted = performance.now();
       const metadata = await readMetadata(request);
+      observeStage('export-metadata-before', stageStarted);
       if (!metadata) return null;
       const revision = revisionKey(request.graph, metadata.metaGraph);
       const key = JSON.stringify([request.graph, metadata.identity, revision]);
@@ -293,6 +304,7 @@ export function createBoundedExactAssetExportCache(params: {
       if (!reserve(id, key, request.expectedRows + 1, BUILD_RESERVATION_BYTES, () => {})) return refuse('build-admission');
       let retained = false;
       try {
+        stageStarted = performance.now();
         const result = await store.query(`
           SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(request.graph)}> { ?s ?p ?o } }
           LIMIT ${request.expectedRows + 1}
@@ -300,7 +312,10 @@ export function createBoundedExactAssetExportCache(params: {
           source: 'sync.responder.exactAssetExport.payload', priority: 'background',
           signal: request.signal, maxResponseBytes: EXACT_ASSET_EXPORT_MAX_STORE_BYTES,
         });
+        // Includes scheduler wait, HTTP/body settlement and JSON decoding.
+        observeStage('export-store-payload-query', stageStarted);
         throwIfAborted(request.signal);
+        stageStarted = performance.now();
         if (result.type !== 'bindings' || result.bindings.length !== request.expectedRows) throw invalid();
         const rows: SyncRow[] = [];
         let heapBytes = 0;
@@ -325,8 +340,11 @@ export function createBoundedExactAssetExportCache(params: {
           subject: row.s, predicate: row.p, object: row.o, graph: '',
         })), []);
         if (!sameRoot(root, metadata.envelope)) throw invalid();
+        observeStage('export-canonical-preparation-root', stageStarted);
+        stageStarted = performance.now();
         const after = await readMetadata({ ...request, expectedIdentity: metadata.identity });
         if (!after || revisionKey(request.graph, metadata.metaGraph) !== revision) throw changed();
+        observeStage('export-metadata-after', stageStarted);
         throwIfAborted(request.signal);
         exports += 1;
         const entry: ExportEntry = {

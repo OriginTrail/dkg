@@ -40,6 +40,40 @@ function fixture(rows = 10_000, literal = 'bounded-value') {
 afterEach(() => vi.restoreAllMocks());
 
 describe('bounded exact asset export ownership', () => {
+  it('observes export substages while preserving bounded reads and the final metadata fence', async () => {
+    const f = fixture(20);
+    const onStage = vi.fn();
+    const lease = await f.cache.acquire({ ...f, onStage });
+    expect(onStage.mock.calls.map(([stage]) => stage)).toEqual([
+      'export-metadata-before', 'export-store-payload-query',
+      'export-canonical-preparation-root', 'export-metadata-after',
+    ]);
+    expect(onStage.mock.calls.every(([, duration]) => Number.isFinite(duration) && duration >= 0)).toBe(true);
+    expect(lease!.rows).toHaveLength(20);
+    expect(f.reads.filter(read => read.options?.source?.endsWith('.payload'))).toHaveLength(1);
+    expect(f.reads.filter(read => read.options?.source?.endsWith('.metadata'))).toHaveLength(2);
+    f.meta.push({ graph: f.meta[0]!.graph, subject: f.assetUal, predicate: 'urn:fence-change', object: '"changed"' });
+    await expect(lease!.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+    expect(f.reads.filter(read => read.options?.source?.endsWith('.metadata'))).toHaveLength(3);
+    lease!.release();
+    expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
+  it.each(['throw', 'reject'] as const)('keeps observer %s failures outside export and lease ownership', async mode => {
+    const f = fixture(20);
+    const onStage = vi.fn((_stage: string, _durationMs: number) => {
+      if (mode === 'throw') throw new Error('observational failure');
+      return Promise.reject(new Error('observational failure'));
+    });
+    const lease = await f.cache.acquire({ ...f, onStage });
+    expect(onStage).toHaveBeenCalledTimes(4);
+    expect(lease!.rows).toHaveLength(20);
+    await lease!.assertCurrent();
+    lease!.release();
+    await Promise.resolve();
+    expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
   it('exports a genuine 10k-root fixture in one bounded physical payload read', async () => {
     const f = fixture();
     const lease = await f.cache.acquire(f);
@@ -165,15 +199,18 @@ describe('bounded exact asset export ownership', () => {
       return normal(sparql, options);
     });
     const controller = new AbortController();
+    const onStage = vi.fn((_stage: string, _durationMs: number) => { throw new Error('observational failure during cancellation'); });
     let settled = false;
-    const work = f.cache.acquire({ ...f, signal: controller.signal }).finally(() => { settled = true; });
+    const work = f.cache.acquire({ ...f, signal: controller.signal, onStage }).finally(() => { settled = true; });
     const observed = work.catch((error) => error);
     await entered; controller.abort(Object.assign(new Error('test cancellation'), { name: 'AbortError' }));
     await Promise.resolve();
     expect(settled).toBe(false);
+    expect(onStage.mock.calls.map(([stage]) => stage)).toEqual(['export-metadata-before']);
     expect(f.budget.stats().bytesEstimate).toBe(80 * 1024 * 1024);
     finish();
     expect(await observed).toMatchObject({ name: 'AbortError' });
+    expect(onStage.mock.calls.map(([stage]) => stage)).toEqual(['export-metadata-before', 'export-store-payload-query']);
     expect(f.budget.stats().snapshots).toBe(0);
   });
 });
