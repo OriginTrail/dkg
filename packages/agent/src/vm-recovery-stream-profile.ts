@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
+  estimateVmRecoveryAssetBytes,
   planVmRecoveryMicrobatch,
   type VmRecoveryMicrobatchLimits,
   type VmRecoveryMicrobatchPlan,
@@ -36,13 +37,11 @@ function isStreamSizedTarget(candidate: VmRecoveryTargetFootprint): boolean {
     || merkleLeafCount > VM_RECOVERY_STREAM_MAX_ASSET_LEAVES
   ) return false;
 
-  const limits = VM_RECOVERY_STREAM_MICROBATCH_LIMITS;
-  // Match the existing planner's conservative integer ceiling exactly.
-  const scaledByteFloor = (byteSize * limits.byteSizeMultiplierBps + 9_999n) / 10_000n;
-  const graphAndLeafFloor = byteSize + merkleLeafCount * limits.bytesPerLeafOverhead;
-  const estimatedBytes = (
-    scaledByteFloor > graphAndLeafFloor ? scaledByteFloor : graphAndLeafFloor
-  ) + limits.fixedBytesPerAsset;
+  const estimatedBytes = estimateVmRecoveryAssetBytes(
+    byteSize,
+    merkleLeafCount,
+    VM_RECOVERY_STREAM_MICROBATCH_LIMITS,
+  );
   return estimatedBytes <= VM_RECOVERY_STREAM_MAX_ASSET_ESTIMATED_BYTES;
 }
 
