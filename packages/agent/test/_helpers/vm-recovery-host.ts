@@ -1,6 +1,7 @@
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
+import type { VmReconcilePublicCoreHolderCredit } from '../../src/dkg-agent-types.js';
 
 import type {
   OrdinalOutcome,
@@ -51,11 +52,16 @@ export interface VmRecoveryHostInternals {
   };
   preferredSyncPeers: Map<string, string>;
   peerCapabilityRegistry: PeerCapabilityRegistry;
+  vmReconcileLifecycleGeneration: number;
+  contextGraphBindingState: { bump(contextGraphId: string): number };
+  selectedVmReconcileCursors: Map<string, { bindingGeneration: number }>;
   vmReconcilePublicCoreTransportPreferences: Map<string, {
+    token: symbol;
     onChainCgId: string;
     peerId: string;
     connectionKey: string;
     expiresAt: number;
+    holderCredit?: VmReconcilePublicCoreHolderCredit;
   }>;
   readVmReconcilePublicCoreTransportPreference(localCgId: string, onChainCgId: string, eligible: readonly string[]): string | undefined;
   rememberVmReconcilePublicCoreTransportPreference(localCgId: string, onChainCgId: string, peerId: string, connectionKey: string | null): boolean;

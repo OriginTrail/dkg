@@ -397,6 +397,7 @@ import {
   type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
+  type VmReconcilePublicCoreHolderCredit,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -1350,10 +1351,12 @@ export class DKGAgentBase {
   }>();
   /** Public-VM transport hints only; separate from curator and absence evidence. */
   protected readonly vmReconcilePublicCoreTransportPreferences = new Map<string, {
+    token: symbol;
     onChainCgId: string;
     peerId: string;
     connectionKey: string;
     expiresAt: number;
+    holderCredit?: VmReconcilePublicCoreHolderCredit;
   }>();
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();

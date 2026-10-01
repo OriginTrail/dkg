@@ -908,6 +908,15 @@ export interface VmReconcileNegativeRecord {
   cleanMissPeerIds?: string[];
 }
 
+/** Fences for experimental transport reuse; never asset or absence authority. */
+export interface VmReconcilePublicCoreHolderCredit {
+  readonly deploymentId: string;
+  readonly lifecycleGeneration: number;
+  readonly bindingGeneration: number;
+  readonly selectedBindingGeneration: number | undefined;
+  readonly candidatePeerIds: readonly string[];
+}
+
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */
 export interface VmReconcileRotationRecord {
   localCgId: string;
