@@ -785,17 +785,15 @@ export function describeRetryProjection(
 ): LiftJobRetryProjection {
   const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options)
     && job.timestamps.nextRetryAt !== undefined;
-  const action = classifyRetryAction(job);
-  const blocker = blockerOfAction(action, job, autoRetryEligible, options);
-  return {
-    autoRetryEligible,
-    ...waitingReasonOf(action, autoRetryEligible),
-    ...(blocker ? { blocker } : {}),
-  };
+  return { autoRetryEligible, ...describeRetryAction(classifyRetryAction(job), job, autoRetryEligible, options) };
 }
 
-/** The blocker for a classified action - present only where the waiting reason is too coarse. */
-function blockerOfAction(
+/**
+ * Why a classified action is waiting, and - where that reason is too coarse - what exactly it waits for.
+ * ONE exhaustive switch, so each `waitingReason` sits beside its `blocker`; a key is ABSENT (never
+ * `undefined`) where nothing applies, which is what keeps the serialized projection stable.
+ */
+function describeRetryAction(
   action: FailedJobRetryAction,
   job: PersistedFailedJob,
   autoRetryEligible: boolean,
@@ -803,44 +801,26 @@ function blockerOfAction(
     readonly autoRetryEnabled: boolean;
     readonly canSettleHeldJob?: (job: PersistedFailedJob) => boolean;
   },
-): LiftJobRetryBlocker | undefined {
-  switch (action) {
-    case 'blocked_pending_chain_proof':
-      return describeHeldBlocker(job, options.canSettleHeldJob);
-    case 'skip_exhausted':
-      return blockerOf('retry_budget_spent');
-    case 'reaccept':
-      return autoRetryEligible ? undefined : describeOperatorBlocker(job, options);
-    case 'blocked_recovery':
-    case 'skip_terminal':
-      return undefined;
-    default: {
-      // A new action must decide its own blocker here rather than inherit "none".
-      const unhandled: never = action;
-      return unhandled;
-    }
-  }
-}
-
-function waitingReasonOf(
-  action: FailedJobRetryAction,
-  autoRetryEligible: boolean,
-): { waitingReason?: LiftJobRetryWaitingReason } {
+): { waitingReason?: LiftJobRetryWaitingReason; blocker?: LiftJobRetryBlocker } {
   switch (action) {
     case 'blocked_recovery':
       return { waitingReason: 'recovery' };
-    case 'blocked_pending_chain_proof':
-      return { waitingReason: 'pending_chain_proof' };
+    case 'blocked_pending_chain_proof': {
+      const blocker = describeHeldBlocker(job, options.canSettleHeldJob);
+      return { waitingReason: 'pending_chain_proof', ...(blocker ? { blocker } : {}) };
+    }
     case 'skip_exhausted':
-      return { waitingReason: 'exhausted' };
+      return { waitingReason: 'exhausted', blocker: blockerOf('retry_budget_spent') };
     case 'skip_terminal':
       return {};
     case 'reaccept':
       // The ONE place the operator's kill-switch is allowed to matter: it separates a retry the
       // node performs itself from one that waits for an operator or a client re-submit.
-      return { waitingReason: autoRetryEligible ? 'backoff' : 'operator' };
+      return autoRetryEligible
+        ? { waitingReason: 'backoff' }
+        : { waitingReason: 'operator', blocker: describeOperatorBlocker(job, options) };
     default: {
-      // A new action must decide its own reason here rather than inherit a silent default.
+      // A new action must decide its own reason AND blocker here rather than inherit a silent default.
       const unhandled: never = action;
       return unhandled;
     }
