@@ -3319,6 +3319,8 @@ export class TripleStoreAsyncLiftPublisher
     // and so precedes everything that could dispatch anything: the typed cause alone is enough. The
     // keyword chain below would otherwise record a multi-endpoint exhaustion message that carries
     // none of its words as the TERMINAL `canonicalization_failed` - a transient outage ending a job.
+    // No in-repo preflight raises a typed transport failure today (the agent's is store-only); this
+    // keeps a chain read added to one later, or a third-party handler's, from ending the job.
     const claimedTransientRpc = failedFromState === 'claimed'
       && current.status === 'claimed'
       && transientRpc;
@@ -3807,10 +3809,13 @@ export class TripleStoreAsyncLiftPublisher
    * `null` when this job cannot be asked about at all.
    *
    * The hash comes from {@link getLiftJobTransactionEvidence}, so a job whose only carrier is the
-   * recovery record is covered. The wallet comes from `broadcast` when it exists and otherwise
-   * from the claim, because a job reset once has no broadcast metadata left. The nonce is only
-   * ever on live broadcast metadata: an inherited hash carries none, and the resolver reads that
-   * absence as "no proof of absence available" rather than guessing.
+   * recovery record is covered. The wallet and the nonce come from the SAME carrier as the hash
+   * (`liftJobCheckedSigner` / `liftJobCheckedNonce`: the live `broadcast` metadata, or what an
+   * earlier reset preserved in the recovery record) — the claim is deliberately NOT a fallback for
+   * the wallet, because it names the NEXT attempt's signer. A record with no preserved nonce
+   * carries none, and the resolver reads that absence as "no proof of absence available" rather
+   * than guessing. `describeAutomaticRecoveryExit` reads the same carriers, so the exit a 503 or a
+   * `retryState.blocker` promises is one this method will actually ask about.
    *
    * `null` means stay held WITHOUT a chain read — the honest answer for a record we cannot form a
    * question about, and strictly better than the previous behaviour, which handed the resolver a

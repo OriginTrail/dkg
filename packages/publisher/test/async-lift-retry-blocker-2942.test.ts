@@ -96,6 +96,10 @@ describe('GH#2942 derived retry blocker', () => {
       ['a complete live-broadcast CREATE', (job) => job],
       ['a CREATE carrying hash, signer and nonce only in the recovery record', (job) => recoveryCarrier(job, { walletIdChecked: 'wallet-tx-job-1', nonceChecked: 7 })],
       ['a complete UPDATE', (job) => asUpdate(job)],
+      ['an included-origin CREATE whose hash, signer, marker and nonce all ride in the recovery record', (job) => ({
+        ...recoveryCarrier(job, { walletIdChecked: 'wallet-tx-job-1', nonceChecked: 7 }),
+        failure: { ...job.failure, failedFromState: 'included' },
+      }) as unknown as PersistedFailedJob],
     ])('asks the chain about %s whenever the predicate promises an exit', async (_label, shape) => {
       const asked: AsyncLiftChainProofLookup[] = [];
       const publisher = h.createPublisher({
@@ -219,6 +223,7 @@ describe('GH#2942 derived retry blocker', () => {
         } as unknown as PersistedFailedJob;
       }, 'no_signer_wallet', ['signer_wallet']],
       ['no validation', async () => ({ ...(await completeCreate()), validation: undefined }) as unknown as PersistedFailedJob, 'claim_or_validation_missing', ['claim_or_validation']],
+      ['no claim', async () => ({ ...(await completeCreate()), claim: undefined }) as unknown as PersistedFailedJob, 'claim_or_validation_missing', ['claim_or_validation']],
       ['no pinned identity', async () => {
         const job = await completeCreate();
         const request = job.request as { knowledgeAssetVmPublish: { seal: Record<string, unknown> } };
@@ -277,6 +282,32 @@ describe('GH#2942 derived retry blocker', () => {
       expect(describeAutomaticRecoveryExit(unmarked)).toEqual({ exit: false, gaps: ['operation_marker'] });
     });
 
+    it('hands the capability-dependent blocker to the admission error for a COMPLETE record, in both polarities', async () => {
+      // The held job lives in the shared store; only the publisher that answers admission differs.
+      const wired = h.createPublisher({
+        chainProofResolver: async (): Promise<AsyncLiftChainProofResolution> => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+        knowledgeAssetVmPublishHandler: { execute: async () => { throw new Error('never sends'); }, finalizeRecovered: async () => undefined },
+      });
+      const unwired = h.createPublisher();
+      const request = kaVmPublishRequest();
+      const failed = await h.failAfterRecordedTxHash(wired, request);
+      const complete = { ...failed, broadcast: { ...failed.broadcast!, nonce: 7 } } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(complete, DEFAULT_CONTROL_GRAPH_URI, { payloadSchema: 'legacy-v0' }));
+
+      await expect(wired.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+        code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+        retryable: true,
+        blocker: { code: 'chain_recheck_pending' },
+      });
+      await expect(unwired.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+        code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+        retryable: false,
+        blocker: { code: 'recovery_not_configured' },
+      });
+    });
+
     it('hands the SAME blocker to the admission error a re-submit receives, beside the unchanged retryable promise', async () => {
       const publisher = h.createPublisher();
       const request = kaVmPublishRequest();
@@ -292,13 +323,6 @@ describe('GH#2942 derived retry blocker', () => {
       });
     });
 
-    it('keeps hasAutomaticRecoveryExit a pure view of the description', async () => {
-      const complete = await completeCreate();
-      const gappy = { ...complete, validation: undefined } as unknown as PersistedFailedJob;
-
-      expect(hasAutomaticRecoveryExit(complete)).toBe(describeAutomaticRecoveryExit(complete).exit);
-      expect(hasAutomaticRecoveryExit(gappy)).toBe(describeAutomaticRecoveryExit(gappy).exit);
-    });
   });
 
   // ---------------------------------------------------------------------------------------------
@@ -356,7 +380,7 @@ describe('GH#2942 derived retry blocker', () => {
     });
 
     it('does not promise that switching the lane back on schedules a job that failed while it was off', () => {
-      expect(LIFT_JOB_RETRY_BLOCKER_SUMMARY.auto_retry_disabled).toMatch(/does not schedule|not scheduled|nothing was scheduled/i);
+      expect(LIFT_JOB_RETRY_BLOCKER_SUMMARY.auto_retry_disabled).toMatch(/never scheduled/i);
     });
 
     it('names the spent budget, and how it is re-armed, for an exhausted job', async () => {

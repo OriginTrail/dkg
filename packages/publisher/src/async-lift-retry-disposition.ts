@@ -124,8 +124,9 @@ export function isHeldForChainProof(job: PersistedFailedJob): boolean {
  *  - CREATE with a recorded nonce and a pinned identity → TRUE, and the promise is
  *    unconditional: if the transaction mined, canonical recognition finalizes it; if it can never
  *    mine, the three-proof absence release re-runs it. Every chain-truth world has an exit.
- *  - CREATE without a recorded nonce (legacy pre-write-ahead records, inherited hashes) or
- *    without a pinned identity → FALSE: recognition would move it only in the world where the
+ *  - CREATE without a nonce on EITHER carrier (the live `broadcast.nonce`, or the
+ *    `recovery.nonceChecked` an inherited hash carries; legacy pre-write-ahead records have
+ *    neither) or without a pinned identity → FALSE: recognition would move it only in the world where the
  *    transaction mined, and no absence proof exists to release it in the other — a dropped
  *    transaction leaves it holding until an operator clears it, so `retryable: true` would be a
  *    promise the lane cannot keep.
@@ -593,7 +594,8 @@ export interface LiftJobRetryBlocker {
 export const LIFT_JOB_RETRY_BLOCKER_SUMMARY: Record<LiftJobRetryBlockerCode, string> = {
   no_transaction_hash:
     'This held job has no transaction hash on its record, so chain recovery has nothing to look up. '
-    + 'No supported control can add one; the append-only journal may still hold it for inspection. '
+    + 'No supported control can add one; the best-effort journal (`GET /api/publisher/journal`, '
+    + 'named-KA jobs) may still hold it for inspection. '
     + 'An operator cannot manufacture a safe retry: clearing the job abandons tracking, it does not '
     + 'prove that no transaction was sent.',
   no_signer_wallet:
@@ -624,30 +626,34 @@ export const LIFT_JOB_RETRY_BLOCKER_SUMMARY: Record<LiftJobRetryBlockerCode, str
     + 'whether to clear the job.',
   recovery_not_configured:
     'The record is complete, but this node has no chain-recovery capability for this job\'s wallet '
-    + 'and operation (no resolver, or its chain adapter cannot answer), so nothing will ask the '
-    + 'chain. Restore chain access or the adapter capability rather than retrying: a retry is '
-    + 'refused while a transaction may exist, and clearing the job abandons tracking only.',
+    + 'and operation (no resolver, its chain adapter cannot answer, or the publisher runtime is not '
+    + 'running), so nothing will ask the chain. Restore chain access, the adapter capability or the '
+    + 'runtime rather than retrying: a retry is refused while a transaction may exist, and clearing '
+    + 'the job abandons tracking only.',
   chain_recheck_pending:
-    'Chain recovery re-checks this job on a bounded backoff. It finalizes the same job if the '
-    + 'transaction mined, and releases a CREATE for a re-run only once the transaction is proven '
-    + 'never sent. The latest lookup outcome is not retained here, so this cannot say whether the '
-    + 'provider is unavailable, the transaction is still pending, or the proof is inconclusive. '
-    + 'Waiting is the safe move; no operator action manufactures a safe retry.',
+    'While the publisher runtime is running and not paused, chain recovery re-checks this job on a '
+    + 'bounded backoff. It finalizes the same job if the transaction mined, and releases a CREATE for '
+    + 'a re-run only once the transaction is proven never sent; an UPDATE whose transaction never '
+    + 'landed stays held, because absence is never proof for an UPDATE. The latest lookup outcome is '
+    + 'not retained here, so this cannot say whether the provider is unavailable, the transaction is '
+    + 'still pending, or the proof is inconclusive. Waiting is the safe move; no operator action '
+    + 'manufactures a safe retry.',
   not_auto_retryable:
     'This failure is not one the publisher retries by itself, and it persisted no transaction '
     + 'evidence. `POST /api/publisher/retry` or re-submitting the identical request re-runs it as '
     + 'the same job.',
   auto_retry_disabled:
-    'Automatic retry is switched off on this node, so nothing was scheduled for this job. '
-    + 'Switching it back on does not schedule a job that failed while it was off: re-run it by hand '
-    + 'with `POST /api/publisher/retry` or by re-submitting the request.',
+    'Automatic retry is switched off on this node. A retry that was already scheduled fires again '
+    + 'once it is switched back on (the claim sweep releases a few per pass), but a job that failed '
+    + 'while it was off was never scheduled and is not released by switching it on: re-run it by '
+    + 'hand with `POST /api/publisher/retry` or by re-submitting the request.',
   retry_not_scheduled:
     'This failure is one the publisher retries by itself, but no retry was scheduled for it (it '
     + 'failed while automatic retry was off, or was recorded by an older build). Re-run it by hand '
     + 'with `POST /api/publisher/retry` or by re-submitting the request.',
   retry_budget_spent:
-    'The shared retry budget (automatic and manual) is spent. Re-submitting the identical request '
-    + 're-arms a full budget on this same job; nothing else does.',
+    'The shared retry budget (automatic and manual) is spent. Re-submitting the identical '
+    + '`vm/publish-async` request re-arms a full budget on this same job; nothing else does.',
 };
 
 const HELD_GAP_BLOCKER: Record<HeldRecoveryGap, LiftJobRetryBlockerCode> = {

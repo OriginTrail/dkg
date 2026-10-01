@@ -17,7 +17,7 @@ export const KEYED_RPC_URL = 'https://rpc.example/v2/SECRET-API-KEY';
  */
 export function preparationExhausted(): RpcEndpointsExhaustedError {
   return new RpcEndpointsExhaustedError(
-    `publish transaction preparation failed on all configured RPC endpoints (rpc.example): request to ${KEYED_RPC_URL} timed out`,
+    `publish transaction preparation failed on all configured RPC endpoints: request to ${KEYED_RPC_URL} timed out`,
     { rpcUrls: [KEYED_RPC_URL] },
   );
 }
@@ -55,6 +55,14 @@ export function receiptLookupFailed(): ChainRpcTransportError {
  * for (timeout / timed out / unavailable / query / store / authority / workspace / root): without
  * typed precedence a failure like this one is recorded as the TERMINAL `canonicalization_failed`.
  */
+export function keyedExhaustedWithoutKeywords(): RpcEndpointsExhaustedError {
+  return new RpcEndpointsExhaustedError(
+    `publish transaction preparation failed on all configured RPC endpoints: 429 Too Many Requests from ${KEYED_RPC_URL}`,
+    { rpcUrls: [KEYED_RPC_URL] },
+  );
+}
+
+/** The same, with no URL in it. */
 export function exhaustedWithoutKeywords(): RpcEndpointsExhaustedError {
   return new RpcEndpointsExhaustedError(
     'publish transaction preparation failed on all configured RPC endpoints (a.example, b.example): 429 Too Many Requests',

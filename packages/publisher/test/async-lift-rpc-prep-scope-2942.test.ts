@@ -25,7 +25,8 @@ import {
 import { TX_HASH, confirmedPublishResult, createAsyncLift2270Harness, expectFailed } from './_helpers/async-lift-2270-harness.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { RETRY_LANE, createStoreRejectionFixtures } from './_helpers/store-rejection-2940.js';
-import { exhaustedWithoutKeywords, preparationExhausted } from './_helpers/rpc-prep-failure-2942.js';
+import { exhaustedWithoutKeywords, keyedExhaustedWithoutKeywords, preparationExhausted } from './_helpers/rpc-prep-failure-2942.js';
+import { decideChainProofDisposition } from '../src/async-lift-retry-disposition.js';
 
 describe('GH#2942 typed transient RPC failure: scope edges', () => {
   const h = createAsyncLift2270Harness();
@@ -95,6 +96,58 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
       expect(failed.timestamps.nextRetryAt).toBeUndefined();
     });
 
+    it('reduces a URL in the message on the claimed path too', async () => {
+      const executes = { n: 0 };
+      const publisher = h.createPublisher({
+        ...RETRY_LANE,
+        knowledgeAssetVmPublishHandler: preflightFailsOnce(keyedExhaustedWithoutKeywords, executes),
+      });
+      await stage();
+      await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+      const failed = expectFailed(await publisher.processNext('wallet-1'));
+
+      expect(failed.failure.failedFromState).toBe('claimed');
+      expect(failed.failure.code).toBe('workspace_unavailable');
+      expect(failed.failure.message).not.toContain('SECRET-API-KEY');
+      expect(failed.failure.message).toContain('rpc.example');
+    });
+
+    it('keeps a claimed job that carries an UNACCOUNTED inherited hash held, never scheduled', async () => {
+      // The claimed branch is the only one without the write-ahead's positional proof, so the hold
+      // rests entirely on the evidence rule: a recorded failure keeps `recovery.txHashChecked`, and
+      // an unaccounted hash is evidence whatever the failure code says.
+      const publisher = h.createPublisher(RETRY_LANE);
+      await stage();
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+      const claimed = await publisher.claimNext('wallet-1');
+      if (!claimed) throw new Error('expected a claim');
+      const current = await publisher.getStatus(jobId) as LiftJob;
+      const carried = {
+        ...current,
+        recovery: {
+          action: 'reset_to_accepted',
+          recoveredFromStatus: 'broadcast',
+          txHashChecked: TX_HASH,
+          walletIdChecked: 'wallet-1',
+          operationKind: 'create',
+        },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(carried, DEFAULT_CONTROL_GRAPH_URI));
+      const session = publisher.openClaimSession(claimed as ActiveLiftJobClaim);
+
+      const failed = expectFailed(await session.recordExecutionFailure('claimed', exhaustedWithoutKeywords()));
+
+      expect(failed.failure).toMatchObject({ failedFromState: 'claimed', code: 'workspace_unavailable' });
+      expect(failed.recovery?.txHashChecked).toBe(TX_HASH);
+      expect(hasBroadcastEvidence(failed)).toBe(true);
+      expect(isHeldForChainProof(failed)).toBe(true);
+      expect(failed.timestamps.nextRetryAt).toBeUndefined();
+      h.advance(60_000);
+      expect(await publisher.claimNext('wallet-2')).toBeNull();
+    });
+
     it('requires the persisted record to still be claimed: a caller-reported claimed origin on a validated record keeps the legacy chain', async () => {
       const publisher = h.createPublisher(RETRY_LANE);
       await stage();
@@ -140,6 +193,25 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
       expect(finalized?.status).toBe('finalized');
     });
 
+    it('survives a hostile cause accessor on the wrapper without throwing out of failure recording', async () => {
+      const hostile = () => {
+        const wrapper = precondition(undefined);
+        Object.defineProperty(wrapper, 'cause', { get() { throw new Error('boom'); } });
+        return wrapper;
+      };
+      const publisher = h.createPublisher({
+        ...RETRY_LANE,
+        knowledgeAssetVmPublishHandler: failsOnceThenPublishes(hostile, { n: 0 }),
+      });
+      await stage();
+      await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+      const failed = expectFailed(await publisher.processNext('wallet-1'));
+
+      expect(failed.failure.failedFromState).toBe('broadcast');
+      expect(failed.failure.code).not.toBe('workspace_unavailable');
+    });
+
     it.each([
       ['a wrapper whose cause is not a typed transport failure', () => precondition(new Error('connection reset'))],
       ['a wrapper with no cause', () => precondition(undefined)],
@@ -169,7 +241,7 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
     /** A VALIDATED job whose recovery record carries a hash from an earlier (reset) attempt. */
     async function validatedWithInheritedHash(
       publisher: ReturnType<typeof h.createPublisher>,
-      options: { readonly accounted: boolean },
+      options: { readonly accounted: boolean; readonly operationKind?: 'create' | 'update' },
     ) {
       await stage();
       const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -184,7 +256,7 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
           recoveredFromStatus: 'broadcast',
           txHashChecked: TX_HASH,
           walletIdChecked: 'wallet-1',
-          operationKind: 'create',
+          operationKind: options.operationKind ?? 'create',
           ...(options.accounted ? { txHashAccounted: true } : {}),
         },
       } as unknown as LiftJob;
@@ -217,6 +289,27 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
         autoRetryEligible: false,
         waitingReason: 'pending_chain_proof',
       });
+    });
+
+    it.each([
+      ['CREATE', 'create', 'reset'],
+      ['UPDATE', 'update', 'hold'],
+    ] as const)('characterises a later reverted verdict on that second-generation %s: the origin is now validated, so the disposition is %s', async (_label, operationKind, expected) => {
+      // Recorded pre-hook, the failure's origin is 'validated' (it used to be 'broadcast'), so a
+      // reverted verdict on the INHERITED hash no longer re-fails it terminally as `tx_reverted`:
+      // it releases a CREATE for a re-run and holds an UPDATE (re-queuing an update replays an
+      // immutable request over possibly newer third-party state - the ABA hazard).
+      const publisher = h.createPublisher(RETRY_LANE);
+      const { session, jobId } = await validatedWithInheritedHash(publisher, { accounted: false, operationKind });
+      const failed = expectFailed(await session.recordExecutionFailure(
+        'broadcast',
+        preparationExhausted(),
+        { neverDispatched: true },
+      ));
+      expect(failed.jobId).toBe(jobId);
+      expect(failed.failure.failedFromState).toBe('validated');
+
+      expect(decideChainProofDisposition(failed, 'reverted')).toEqual({ action: expected });
     });
 
     it('rides the retry lane once the dispatcher has ACCOUNTED for the inherited hash', async () => {
