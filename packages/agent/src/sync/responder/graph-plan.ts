@@ -254,6 +254,11 @@ interface ExactGraphPagePlan {
   cursorBytesEstimate?: number;
   /** Page-only sessions reject local source writes instead of mixing generations. */
   writeRevisions?: readonly { prefix: string; generation: number }[];
+  /**
+   * Export rows use serialized-term lexical order; store pages use SPARQL
+   * term/value order. A retained byte-page session must never cross these.
+   */
+  bytePageReadMode?: 'export' | 'store';
   /** One exact export retains its metadata identity for this server-owned session. */
   exportIdentities?: Map<string, string>;
 }
@@ -1977,12 +1982,15 @@ async function readPagedRowsFromExactGraphPlanLoader(
     (planSignal) => loadExactGraphPlan(planSignal),
     'Sync session exact-graph plan expired before page completion',
   );
+  // A stateless request cannot retain its first reader choice across pages.
+  // Keep it on the compatible store order even when export is available now.
+  const retainedExportScope = planMemo && (planCache?.key ?? cache?.key) ? exportScope : undefined;
   const loadPage: StorePageLoader = async (pageOffset, pageLimit, pageSignal) => {
     const plan = await getPlan(pageOffset, pageSignal);
     assertExactGraphPlanRevision(store, plan);
     const rows = await (maxPageBytes !== undefined
       ? readByteBoundedRowsPageFromExactGraphPlan(
-      store, plan, pageOffset, pageLimit, rowSnapshotLimits, maxPageBytes, pageSignal, exportScope,
+      store, plan, pageOffset, pageLimit, rowSnapshotLimits, maxPageBytes, pageSignal, retainedExportScope,
       )
       : readRowsPageFromExactGraphPlan(
       store,
@@ -2386,12 +2394,17 @@ async function readByteBoundedRowsPageFromExactGraphPlan(
     const entry = plan.entries[0]!;
     const assetUal = exportScope.assetUalsByGraph.get(entry.graph) ?? exportScope.assetUal;
     if (assetUal) {
-      const lease = await exportScope.cache.acquire({
+      const lease = plan.bytePageReadMode === 'store' ? null : await exportScope.cache.acquire({
         contextGraphId: exportScope.contextGraphId, assetUal,
         graph: entry.graph, expectedRows: entry.rowCount,
         expectedIdentity: plan.exportIdentities?.get(entry.graph), signal,
       });
-      if (lease) {
+      if (lease && plan.bytePageReadMode === 'store') {
+        // A concurrent first page may have selected store paging while this
+        // acquisition was pending. Its choice owns every page in the session.
+        lease.release();
+      } else if (lease) {
+        plan.bytePageReadMode = 'export';
         exportScope.onLease(lease);
         (plan.exportIdentities ??= new Map()).set(entry.graph, lease.identity);
         const page: SyncRow[] = [];
@@ -2413,6 +2426,15 @@ async function readByteBoundedRowsPageFromExactGraphPlan(
       }
     }
   }
+  if (plan.bytePageReadMode === 'export') {
+    // The requester already consumed a lexical export prefix. A null lease
+    // is a refusal, not permission to reinterpret its offset or cursor in the
+    // store's value order. Existing requesters rotate expired session tokens.
+    throw Object.assign(new Error(
+      'Sync session exact asset export expired: export unavailable before page completion',
+    ), { code: 'SYNC_EXACT_EXPORT_UNAVAILABLE' });
+  }
+  plan.bytePageReadMode = 'store';
   const rows: SyncRow[] = [];
   let bytes = 0;
   let storePageRows = SYNC_REQUEST_SAFE_PAGE_SIZE;

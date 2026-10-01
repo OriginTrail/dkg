@@ -1,5 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createResponderPageOnlyExactGraphPlanMemo } from '../src/sync/responder/graph-plan.js';
+import {
+  createResponderExactGraphPagePlanMemo,
+  createResponderPageOnlyExactGraphPlanMemo,
+  readDurableDataPage,
+  type SyncRow,
+} from '../src/sync/responder/graph-plan.js';
+import { createGraphMembershipSnapshot } from '../src/sync/graph-membership-snapshot.js';
+import {
+  createBoundedExactAssetExportCache,
+  type ExactAssetExportLease,
+} from '../src/sync/responder/exact-asset-export-cache.js';
+import {
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
+import { BlazegraphStore, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
+} from '@origintrail-official/dkg-publisher';
 import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
@@ -119,5 +139,156 @@ describe('page-only exact plan ownership and bounds', () => {
     await expect(memo.get('large', async () => plan(`urn:${'x'.repeat(300_000)}`)))
       .rejects.toThrow('snapshot');
     expect(retained.stats().snapshots).toBe(0);
+  });
+});
+
+async function integerPageFixture() {
+  const contextGraphId = 'exact-integer-page-order';
+  const assetUal = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/1';
+  const graph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory,
+    createGraphKnowledgeAssetScope(assetUal, 1));
+  const payload: Quad[] = Array.from({ length: 8_193 }, (_, index) => ({
+    graph, subject: 'urn:integer-asset', predicate: 'urn:integer-value',
+    object: `"${index}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+  }));
+  const root = computeFlatKCRootV10(payload, []);
+  const metadata = generateGraphKnowledgeAssetMetadata({
+    ual: assetUal, contextGraphId, assertionGraph: graph, assertionVersion: '1',
+    merkleRoot: root, publisherPeerId: 'publisher', accessPolicy: 'public', timestamp: new Date(0),
+    publicTripleCount: payload.length, privateTripleCount: 0,
+  }, { status: 'confirmed', confirmation: { kind: 'transaction', provenance: {
+    txHash: `0x${'11'.repeat(32)}`, batchId: 1n, blockNumber: 1, blockTimestamp: 0,
+    publisherAddress: '0x00000000000000000000000000000000000000ab', chainId: '31337',
+  } } });
+  const backing = new OxigraphStore();
+  await backing.insert([...metadata, ...payload]);
+  // Exercise genuine SPARQL numeric ordering and the real root-verifying
+  // export cache without starting an HTTP service. The HTTP adapter profile
+  // supplies the bounded export capability; its query port uses the local store.
+  const store = new BlazegraphStore('http://127.0.0.1:1/unused');
+  const query = vi.spyOn(store, 'query').mockImplementation((sparql, options) => backing.query(sparql, options));
+  const retained = createSyncResponderSnapshotBudget({ maxRows: 100_000,
+    maxBytesEstimate: 384 * 1024 * 1024, maxSnapshotRows: 100_000,
+    maxSnapshotBytesEstimate: 128 * 1024 * 1024 });
+  const cache = createBoundedExactAssetExportCache({ store, budget: retained });
+  const originalAcquire = cache.acquire;
+  const acquire = vi.spyOn(cache, 'acquire');
+  const memo = createResponderExactGraphPagePlanMemo(60_000, 8);
+  const pressureId = Symbol('active-unrelated-response');
+  const occupy = (megabytes = 320) => retained.admit({ id: pressureId, key: 'active-unrelated-response', rows: 0,
+    bytesEstimate: megabytes * 1024 * 1024, phase: 'durable_data', controlPlane: true, onEvict: () => {} });
+  const releasePressure = () => retained.remove(pressureId);
+  const read = async (offset: number, key: string | undefined) => {
+    const leases: ExactAssetExportLease[] = [];
+    try {
+      const rows = await readDurableDataPage({ store,
+        graphMembership: createGraphMembershipSnapshot([]),
+        contextGraphId, sinceBatchId: null, offset, limit: 8_192,
+        assetUals: [assetUal], exactGraphReadMode: 'page-only',
+        exactGraphPlanMemo: memo, exactGraphPlanCacheKey: key,
+        maxPageBytes: 4 * 1024 * 1024, exactAssetExportCache: cache,
+        onExactAssetExportLease: lease => leases.push(lease) });
+      for (const lease of leases) await lease.assertCurrent();
+      return rows;
+    } finally { for (const lease of leases) lease.release(); }
+  };
+  const assertComplete = (rows: readonly SyncRow[]) => {
+    expect(rows).toHaveLength(payload.length);
+    expect(new Set(rows.map(row => row.o)).size).toBe(payload.length);
+    expect(new Set(rows.map(row => row.o))).toEqual(new Set(payload.map(quad => quad.object)));
+    expect(computeFlatKCRootV10(rows.map(row => ({
+      graph: row.g, subject: row.s, predicate: row.p, object: row.o,
+    })), [])).toEqual(root);
+  };
+  return { read, query, cache, acquire, occupy, releasePressure, assertComplete, retained, originalAcquire,
+    async close() { releasePressure(); vi.restoreAllMocks(); await backing.close(); } };
+}
+
+describe('exact DATA session pagination order', () => {
+  it('expires an export-first session when admission later refuses export, then restarts completely on store pages', async () => {
+    const f = await integerPageFixture();
+    try {
+      const first = await f.read(0, 'integer-session');
+      expect(first).toHaveLength(8_192);
+      expect(first.some(row => row.o.startsWith('"999"'))).toBe(false);
+      f.occupy();
+      await expect(f.read(first.length, 'integer-session')).rejects.toMatchObject({
+        code: 'SYNC_EXACT_EXPORT_UNAVAILABLE', message: expect.stringMatching(/sync session.*expired/i),
+      });
+      expect(f.cache.stats().fallbacks['build-admission']).toBe(1);
+      expect(f.query.mock.calls.some(([, options]) => options?.source === 'sync.responder.readExactGraphRowsPage')).toBe(false);
+      const restartedFirst = await f.read(0, 'store-restart-session');
+      f.releasePressure();
+      const restartedLast = await f.read(restartedFirst.length, 'store-restart-session');
+      f.assertComplete([...restartedFirst, ...restartedLast]);
+      expect(await f.read(8_193, 'store-restart-session')).toEqual([]);
+      // Admission recovery must not switch the restarted session back to lexical order.
+      expect(f.acquire).toHaveBeenCalledTimes(3);
+    } finally { await f.close(); }
+  });
+
+  it('keeps store-first numeric pagination when export admission becomes available between pages', async () => {
+    const f = await integerPageFixture();
+    try {
+      f.occupy();
+      const first = await f.read(0, 'integer-session');
+      expect(first[0]?.o).toBe('"0"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      expect(first.at(-1)?.o).toBe('"8191"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      f.releasePressure();
+      const last = await f.read(first.length, 'integer-session');
+      expect(last.map(row => row.o)).toEqual(['"8192"^^<http://www.w3.org/2001/XMLSchema#integer>']);
+      f.assertComplete([...first, ...last]);
+      expect(f.acquire).toHaveBeenCalledOnce();
+      const storeReads = f.query.mock.calls.filter(([, options]) => options?.source === 'sync.responder.readExactGraphRowsPage');
+      expect(storeReads.every(([sparql]) => Number(/LIMIT\s+(\d+)/.exec(sparql)?.[1]) <= 65)).toBe(true);
+    } finally { await f.close(); }
+  });
+
+  it('releases a delayed export when a concurrent first page pins store order after response admission refusal', async () => {
+    const f = await integerPageFixture();
+    const acquired = deferred<ExactAssetExportLease>();
+    const releaseAcquisition = deferred<void>();
+    const releaseLease = vi.fn();
+    f.acquire.mockImplementationOnce(async request => {
+      const lease = await f.originalAcquire(request);
+      if (!lease) throw new Error('First export lease absent');
+      releaseLease.mockImplementation(lease.release);
+      const delayed = { ...lease, release: releaseLease };
+      acquired.resolve(delayed);
+      await releaseAcquisition.promise;
+      return delayed;
+    });
+    const delayedPage = f.read(0, 'concurrent-integer-session');
+    try {
+      await Promise.race([acquired.promise, delayedPage.then(() => {
+        throw new Error('Delayed page completed before acquiring an export lease');
+      })]);
+      f.occupy(200);
+      const storePage = await f.read(0, 'concurrent-integer-session');
+      expect(f.cache.stats().fallbacks['response-admission']).toBe(1);
+      releaseAcquisition.resolve(undefined);
+      expect(await delayedPage).toEqual(storePage);
+      expect(releaseLease).toHaveBeenCalledOnce();
+      f.releasePressure();
+      const last = await f.read(storePage.length, 'concurrent-integer-session');
+      f.assertComplete([...storePage, ...last]);
+      expect(f.acquire).toHaveBeenCalledTimes(2);
+      expect(f.retained.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+    } finally {
+      releaseAcquisition.resolve(undefined);
+      await delayedPage.catch(() => {});
+      await f.close();
+    }
+  });
+
+  it('uses store paging throughout stateless requests even when export admission changes', async () => {
+    const f = await integerPageFixture();
+    try {
+      const first = await f.read(0, undefined);
+      f.occupy();
+      const last = await f.read(first.length, undefined);
+      f.assertComplete([...first, ...last]);
+      expect(f.acquire).not.toHaveBeenCalled();
+    } finally { await f.close(); }
   });
 });
