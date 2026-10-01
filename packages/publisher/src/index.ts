@@ -380,6 +380,7 @@ export {
   type AsyncLiftAdmissionContext,
   type ActiveLiftJobClaim,
   type ActiveLiftJobClaimSession,
+  type ExecutionFailureEvidence,
   type AsyncLiftAdministrativeMutations,
   type AsyncLiftDetailedRetrier,
   type AsyncLiftRetryFilter,

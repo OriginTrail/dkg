@@ -15,6 +15,7 @@ import type {
 import type {
   ActiveLiftJobClaim,
   ActiveLiftJobClaimSession,
+  ExecutionFailureEvidence,
 } from './async-lift-publisher-types.js';
 import { StaleLiftJobClaimError } from './async-lift-publisher-types.js';
 import { isHeldForChainProof } from './async-lift-retry-disposition.js';
@@ -140,6 +141,7 @@ export interface ActiveLiftJobClaimMutations {
     scope: LiftJobTransitionScope,
     failedFromState: LiftJobState,
     error: unknown,
+    evidence?: ExecutionFailureEvidence,
   ): Promise<LiftJob>;
 }
 
@@ -170,10 +172,14 @@ export class DefaultActiveLiftJobClaimSession implements ActiveLiftJobClaimSessi
     );
   }
 
-  async recordExecutionFailure(failedFromState: LiftJobState, error: unknown): Promise<LiftJob> {
+  async recordExecutionFailure(
+    failedFromState: LiftJobState,
+    error: unknown,
+    evidence?: ExecutionFailureEvidence,
+  ): Promise<LiftJob> {
     return await this.boundary.run(
       async (current, scope) =>
-        await this.mutations.recordExecutionFailure(current, scope, failedFromState, error),
+        await this.mutations.recordExecutionFailure(current, scope, failedFromState, error, evidence),
     );
   }
 }

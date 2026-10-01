@@ -76,6 +76,7 @@ import {
   withRpcUsageConsumer,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import {
@@ -2150,9 +2151,12 @@ export class EVMChainAdapterBase {
         await onBroadcast?.({ txHash: preBroadcastTxHash, nonce });
         ctx.markProgress();
       } catch (hookErr) {
-        throw new Error(
+        // Same message as ever, with the hook's own error kept as `cause` (GH#2940): a caller
+        // that needs to know WHY its durable write-ahead failed must not have to parse text.
+        throw new ChainWriteAheadHookError(
           `chain:writeahead hook failed before ${label} broadcast: ` +
           `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+          hookErr,
         );
       }
       // The nonce-critical lane ends when an endpoint accepts these exact
