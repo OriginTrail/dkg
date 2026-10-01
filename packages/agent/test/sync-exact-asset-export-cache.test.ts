@@ -51,19 +51,19 @@ function useLegacyMetadata(f: ReturnType<typeof fixture>) {
   f.meta.splice(0, f.meta.length, ...f.meta.filter(quad => predicates.has(quad.predicate)));
 }
 
-function capturedLegacyMetadata() {
-  const source = readFileSync(new URL('./fixtures/luigi-ka744-full-public-metadata-20261001.json', import.meta.url), 'utf8');
+function anonymizedLegacyMetadata() {
+  const source = readFileSync(new URL('./fixtures/legacy-public-metadata.fixture.json', import.meta.url), 'utf8');
   const captured = JSON.parse(source) as { contextGraphId: string; assetUal: string; bindings: unknown[] };
   // Use the same term validation/serialization as the production HTTP adapter.
   const result = decodeSparqlJsonQueryResult(JSON.stringify({
     head: { vars: ['predicate', 'object'] }, results: { bindings: captured.bindings },
   }));
-  if (result.type !== 'bindings') throw new Error('Captured metadata SELECT absent');
+  if (result.type !== 'bindings') throw new Error('Anonymized metadata SELECT absent');
   const identity = createHash('sha256').update(JSON.stringify(result.bindings
     .map(row => [row.predicate!, row.object!])
     .sort((a, b) => compareCodePoint(a[0]!, b[0]!) || compareCodePoint(a[1]!, b[1]!)))).digest('hex');
   const store = new BlazegraphStore('http://127.0.0.1:1/unused');
-  const noCapturedData = Object.assign(new Error('Fixture contains captured metadata only'), { code: 'FIXTURE_NO_CAPTURED_DATA' });
+  const noCapturedData = Object.assign(new Error('Fixture contains anonymized metadata only'), { code: 'FIXTURE_NO_CAPTURED_DATA' });
   const query = vi.spyOn(store, 'query').mockImplementation(async (_sparql, options) => {
     // This fixture deliberately supplies no DATA, synthetic or captured.
     if (options?.source?.endsWith('.payload')) throw noCapturedData;
@@ -73,34 +73,34 @@ function capturedLegacyMetadata() {
     maxBytesEstimate: 384 * 1024 * 1024, maxSnapshotRows: 250_000,
     maxSnapshotBytesEstimate: 128 * 1024 * 1024 });
   const request = { contextGraphId: captured.contextGraphId, assetUal: captured.assetUal,
-    graph: `did:dkg:context-graph:${captured.contextGraphId}/_verifiable_memory/0x37b1fdfd134e2b17583bcbdd3034f91504cd9c70/744`,
+    graph: `did:dkg:context-graph:${captured.contextGraphId}/_verifiable_memory/0x1111111111111111111111111111111111111111/1`,
     expectedRows: 10_000, expectedIdentity: identity };
   return { source, result, identity, store, query, budget, request, noCapturedData,
     cache: createBoundedExactAssetExportCache({ store, budget }) };
 }
 
-describe('captured Core KA744 metadata without captured DATA', () => {
-  it('validates the untouched 14-row capture with the production serializer and confirmed envelope parser', async () => {
-    const f = capturedLegacyMetadata();
-    expect(createHash('sha256').update(f.source).digest('hex')).toBe('b1577083bbd8ac899f82692e731ed480fdbd4338537b311321598a0bb0713b4c');
+describe('anonymized legacy public metadata without payload DATA', () => {
+  it('validates the anonymized 14-row fixture with the production serializer and confirmed envelope parser', async () => {
+    const f = anonymizedLegacyMetadata();
+    expect(createHash('sha256').update(f.source).digest('hex')).toBe('9415223ca9fda9cd18a8d7583962f4c63f21a3fd618e15e83b1f040abe384dc0');
     expect(f.result.bindings).toHaveLength(14);
-    expect(f.identity).toBe('053f40f6a296e0022676c257093cb1d35b1b0fc4de402c7986d5d3170a207dc3');
+    expect(f.identity).toBe('532baa74d402126f1d30a986f3a88428d93232de75dd710591c115ff2f090dbb');
     expect(f.result.bindings.some(row => row.predicate === 'http://dkg.io/ontology/accessPolicy')).toBe(false);
-    expect(f.request.assetUal).toBe('did:dkg:base:8453/0x37b1fdfd134e2b17583bcbdd3034f91504cd9c70/744');
+    expect(f.request.assetUal).toBe('did:dkg:base:8453/0x1111111111111111111111111111111111111111/1');
     const parsed = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store,
       { contextGraphId: f.request.contextGraphId, ual: f.request.assetUal });
     expect(parsed.state).toBe('confirmed');
-    if (parsed.state !== 'confirmed') throw new Error('Captured confirmed envelope absent');
+    if (parsed.state !== 'confirmed') throw new Error('Anonymized confirmed envelope absent');
     expect(parsed.envelope).toMatchObject({ assertionVersion: '1', publicTripleCount: 10_000,
       privateTripleCount: 0, assertionGraph: f.request.graph,
-      transactionHash: '0xbe3c156879b35e56f5b342a44fa5ae309bc88f33e77bcf6b18e4042fa4542393',
-      batchId: 25191691567270760314062235701068010715288728691171855589300500455534398276328n });
-    expect(Buffer.from(parsed.envelope.merkleRoot).toString('hex')).toBe('bc5422191d40c47e7c2d222b2804ca575585c1bac0f8494ab6e00145d1b3efdb');
+      transactionHash: '0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd',
+      batchId: 12345n });
+    expect(Buffer.from(parsed.envelope.merkleRoot).toString('hex')).toBe('abababababababababababababababababababababababababababababababab');
     expect(f.query.mock.calls.some(([, options]) => options?.source?.endsWith('.payload'))).toBe(false);
   });
 
-  it.each(['absent', 'false'] as const)('refuses the captured legacy policy when trusted authority is %s', async grant => {
-    const f = capturedLegacyMetadata(), authorizeMissingAccessPolicy = vi.fn(async () => false), onFallback = vi.fn();
+  it.each(['absent', 'false'] as const)('refuses the anonymized legacy policy when trusted authority is %s', async grant => {
+    const f = anonymizedLegacyMetadata(), authorizeMissingAccessPolicy = vi.fn(async () => false), onFallback = vi.fn();
     expect(await f.cache.acquireEncoded({ ...f.request, onFallback,
       ...(grant === 'false' ? { authorizeMissingAccessPolicy } : {}) })).toBeNull();
     expect(onFallback.mock.calls).toEqual([['non-public', undefined]]);
@@ -109,8 +109,8 @@ describe('captured Core KA744 metadata without captured DATA', () => {
     expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
   });
 
-  it('requires fresh public authority before a captured-metadata attempt can reach the local DATA sentinel', async () => {
-    const f = capturedLegacyMetadata();
+  it('requires fresh public authority before a metadata-fixture attempt can reach the local DATA sentinel', async () => {
+    const f = anonymizedLegacyMetadata();
     let isPublic = true;
     const authorizeMissingAccessPolicy = vi.fn(async () => isPublic);
     const request = { ...f.request, authorizeMissingAccessPolicy };
@@ -126,8 +126,8 @@ describe('captured Core KA744 metadata without captured DATA', () => {
     expect(f.query.mock.calls.filter(([, options]) => options?.source?.endsWith('.payload'))).toHaveLength(1);
   });
 
-  it('rejects captured metadata identity drift before consulting the trusted public grant', async () => {
-    const f = capturedLegacyMetadata(), authorizeMissingAccessPolicy = vi.fn(async () => true);
+  it('rejects metadata fixture identity drift before consulting the trusted public grant', async () => {
+    const f = anonymizedLegacyMetadata(), authorizeMissingAccessPolicy = vi.fn(async () => true);
     f.query.mockResolvedValue({ type: 'bindings', bindings: f.result.bindings.map(row =>
       row.predicate === 'http://dkg.io/ontology/publishedAt' ? { ...row, object: '"changed"' } : row) });
     await expect(f.cache.acquireEncoded({ ...f.request, authorizeMissingAccessPolicy })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });

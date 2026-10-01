@@ -37,7 +37,7 @@ existing signed 500-row limit and pagination behavior. Responder concurrency,
 queue limits and authorization on each request remain in force.
 
 Deploy this change to the Core or publisher nodes that hold the graph payload.
-Existing byte-budget-capable Blackbox/DKG receivers can benefit without an
+Existing byte-budget-capable DKG receivers can benefit without an
 installer change. A 512-row response can reduce small-row network requests by
 up to eight times; this is a page-count bound, not an end-to-end sync-time
 measurement. Core blockchain-metadata caching and receiver partial-KA resume

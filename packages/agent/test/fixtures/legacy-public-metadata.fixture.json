@@ -1,7 +1,7 @@
 {
-  "observedAtUtc": "2026-10-01T07:59:02.933540+00:00",
-  "contextGraphId": "0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm",
-  "assetUal": "did:dkg:base:8453/0x37b1fdfd134e2b17583bcbdd3034f91504cd9c70/744",
+  "fixtureProvenance": "Anonymized legacy confirmed-public metadata shape; no payload body included.",
+  "contextGraphId": "0x1111111111111111111111111111111111111111/public-recovery-fixture",
+  "assetUal": "did:dkg:base:8453/0x1111111111111111111111111111111111111111/1",
   "bindings": [
     {
       "predicate": {
@@ -10,7 +10,7 @@
       },
       "object": {
         "type": "uri",
-        "value": "did:dkg:context-graph:0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm"
+        "value": "did:dkg:context-graph:0x1111111111111111111111111111111111111111/public-recovery-fixture"
       }
     },
     {
@@ -20,7 +20,7 @@
       },
       "object": {
         "type": "literal",
-        "value": "bc5422191d40c47e7c2d222b2804ca575585c1bac0f8494ab6e00145d1b3efdb"
+        "value": "abababababababababababababababababababababababababababababababab"
       }
     },
     {
@@ -31,7 +31,7 @@
       "object": {
         "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
         "type": "literal",
-        "value": "2026-07-31T04:20:32.245Z"
+        "value": "2024-01-01T00:00:00.000Z"
       }
     },
     {
@@ -51,7 +51,7 @@
       },
       "object": {
         "type": "uri",
-        "value": "did:dkg:context-graph:0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm/_verifiable_memory/0x37b1fdfd134e2b17583bcbdd3034f91504cd9c70/744"
+        "value": "did:dkg:context-graph:0x1111111111111111111111111111111111111111/public-recovery-fixture/_verifiable_memory/0x1111111111111111111111111111111111111111/1"
       }
     },
     {
@@ -62,7 +62,7 @@
       "object": {
         "datatype": "http://www.w3.org/2001/XMLSchema#integer",
         "type": "literal",
-        "value": "25191691567270760314062235701068010715288728691171855589300500455534398276328"
+        "value": "12345"
       }
     },
     {
@@ -72,7 +72,7 @@
       },
       "object": {
         "type": "literal",
-        "value": "0xbe3c156879b35e56f5b342a44fa5ae309bc88f33e77bcf6b18e4042fa4542393"
+        "value": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
       }
     },
     {
@@ -82,7 +82,7 @@
       },
       "object": {
         "type": "literal",
-        "value": "51826715:0"
+        "value": "100:0"
       }
     },
     {
@@ -114,7 +114,7 @@
       },
       "object": {
         "type": "uri",
-        "value": "did:dkg:base:8453/0x37b1fdfd134e2b17583bcbdd3034f91504cd9c70/744"
+        "value": "did:dkg:base:8453/0x1111111111111111111111111111111111111111/1"
       }
     },
     {

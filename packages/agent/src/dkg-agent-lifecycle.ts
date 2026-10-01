@@ -6488,7 +6488,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // Named fetch-assets preflight and challenge-pinned requests stay on
         // their existing boundaries. Positive registered public authority
         // permits the unchanged public pipe START, without imposing a node
-        // identity/signing prerequisite on a fresh Blackbox Edge.
+        // identity/signing prerequisite on a fresh Edge.
         const accumulator = createDurableSyncAccumulator();
         const committedExactAssetUals: string[] = [];
         const selected = exactAssetUalsForSelection(exactAssetSelection);
