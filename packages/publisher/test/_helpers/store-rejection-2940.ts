@@ -5,6 +5,7 @@
  */
 import { expect } from 'vitest';
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { ChainWriteAheadHookError } from '@origintrail-official/dkg-chain';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import type { AsyncLiftPublisherConfig, RawLiftRequest } from '../../src/index.js';
 import { hasBroadcastEvidence, isHeldForChainProof } from '../../src/async-lift-retry-disposition.js';
@@ -32,8 +33,23 @@ export function schedulerBusy(
   return new StoreSchedulerBusyError(reason, 'normal', 'publisher.asyncLift.test', { storeOperation: 'query' });
 }
 
-/** What the EVM adapter does to a rejected write-ahead hook: a NEW plain Error, message only. */
+/**
+ * What the EVM adapter does to a rejected write-ahead hook: the SAME message text, re-thrown as the
+ * chain package's `ChainWriteAheadHookError` with the hook's own error kept as `cause`.
+ */
 export function adapterRewrap(hookError: unknown): Error {
+  return new ChainWriteAheadHookError(
+    `chain:writeahead hook failed before publish broadcast: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
+    hookError,
+  );
+}
+
+/**
+ * What an OLDER or third-party adapter does to the same failure: a NEW plain Error, message only —
+ * no wrapper type, no cause. The recorder's positional proof still holds for it, but the typed
+ * cause is gone, so the failure must keep today's (conservative) classification.
+ */
+export function legacyAdapterRewrap(hookError: unknown): Error {
   return new Error(
     `chain:writeahead hook failed before publish broadcast: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
   );

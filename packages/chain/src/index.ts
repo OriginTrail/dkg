@@ -265,6 +265,13 @@ export {
   type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
 export {
+  CHAIN_WRITE_AHEAD_HOOK_FAILED_CODE,
+  ChainWriteAheadHookError,
+  getChainWriteAheadHookCause,
+  isChainWriteAheadHookError,
+  type ChainWriteAheadHookErrorLike,
+} from './write-ahead-hook-error.js';
+export {
   classifyContextGraphRegistrationFailure,
   markContextGraphRegistrationNotSubmitted,
   type ContextGraphRegistrationFailureDisposition,

@@ -31,7 +31,7 @@ import { executionFailureEvidence } from '../src/async-lift-publisher-impl.js';
 import { TX_HASH, confirmedPublishResult, createAsyncLift2270Harness, expectFailed, scheduledDelay } from './_helpers/async-lift-2270-harness.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
-import { RETRY_LANE, adapterRewrap, createStoreRejectionFixtures, rawLiftRequest, schedulerBusy } from './_helpers/store-rejection-2940.js';
+import { RETRY_LANE, adapterRewrap, createStoreRejectionFixtures, legacyAdapterRewrap, rawLiftRequest, schedulerBusy } from './_helpers/store-rejection-2940.js';
 import type { FlushableStore } from './_helpers/store-rejection-2940.js';
 
 describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: classification', () => {
@@ -103,11 +103,12 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: c
       },
     );
 
-    it('records a write-ahead store rejection — re-wrapped message-only by the adapter — as pre-send too', async () => {
+    it("records a write-ahead store rejection — re-thrown by the adapter's write-ahead wrapper — as pre-send too", async () => {
       // The production shape of the write-ahead window: the recorder's own store work (job
       // transition, flush, journal) is what queue-times-out, the recorder rolls back, and the
-      // EVM adapter re-throws it as a NEW plain Error — type and `cause` gone. The tx was never
-      // signed-and-sent: the hook is awaited strictly before the send and fails closed.
+      // EVM adapter re-throws it as a ChainWriteAheadHookError that keeps the hook's error as
+      // `cause`. The tx was never signed-and-sent: the hook is awaited strictly before the send and
+      // fails closed.
       const attempts = { n: 0 };
       let flushes = 0;
       (h.store as unknown as FlushableStore).flush = async () => {
@@ -191,6 +192,43 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: c
       expectRecordedAsPreDispatchStoreRejection(failed, schedulerBusy());
     });
 
+    it('makes a concurrent second invocation wait for the first write-ahead instead of returning early', async () => {
+      // Returning before the first attempt settles would let a caller send before the record is
+      // durable. The retained write-ahead promise makes the second call await the same attempt.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      (h.store as unknown as FlushableStore).flush = async () => { await gate; };
+      let secondSettledBeforeFirst = false;
+      let firstSettled = false;
+      const publisher = h.createPublisher({
+        ...RETRY_LANE,
+        knowledgeAssetVmPublishHandler: {
+          execute: async (input) => {
+            const first = input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7 });
+            const second = input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7 });
+            void Promise.resolve(first).then(() => { firstSettled = true; });
+            void Promise.resolve(second).then(() => { secondSettledBeforeFirst = !firstSettled; });
+            // Give the second call every chance to (wrongly) resolve while the flush is gated.
+            for (let i = 0; i < 20; i += 1) await Promise.resolve();
+            const resolvedWhileGated = secondSettledBeforeFirst || firstSettled;
+            release();
+            await Promise.all([first, second]);
+            if (resolvedWhileGated) throw new Error('second invocation returned before the write-ahead was durable');
+            throw new Error('stop after the durable write-ahead');
+          },
+        },
+      });
+      await stage();
+      await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+      const processed = await publisher.processNext('wallet-1');
+
+      // The write-ahead completed once, durably; the handler's own marker error is the ambiguous
+      // post-write-ahead throw, so the job stays in broadcast with its hash.
+      expect(processed?.status).toBe('broadcast');
+      expect(secondSettledBeforeFirst).toBe(false);
+    });
+
     it('applies to an UPDATE-kind job too: pre-dispatch retries as the same job', async () => {
       // `reset_to_accepted` replays the immutable request, which is safe for an update only
       // because nothing was sent — the case the chain-proof lane refuses to release by absence.
@@ -257,6 +295,39 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: c
       // (The later successful retry journals its own hash — that is a different attempt.)
       const failedAt = journal.entries.findIndex((e) => e.kind === 'failed');
       expect(journal.entries.slice(0, failedAt + 1).every((e) => e.txHash === undefined)).toBe(true);
+    });
+
+    it('keeps an adapter that drops the cause on the legacy classification (fails conservative)', async () => {
+      // An older or third-party adapter re-throws the rejected hook as a message-only Error. The
+      // recorder's positional proof still holds, but the typed cause is gone and prose never
+      // qualifies, so nothing is promoted: the failure keeps today's classification.
+      let flushes = 0;
+      (h.store as unknown as FlushableStore).flush = async () => {
+        flushes += 1;
+        if (flushes === 1) throw schedulerBusy();
+      };
+      const publisher = h.createPublisher({
+        ...RETRY_LANE,
+        knowledgeAssetVmPublishHandler: {
+          execute: async (input) => {
+            try {
+              await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7 });
+            } catch (hookError) {
+              throw legacyAdapterRewrap(hookError);
+            }
+            throw new Error('unreachable: send after a failed write-ahead');
+          },
+        },
+      });
+      await stage();
+      await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+      const failed = expectFailed(await publisher.processNext('wallet-1'));
+
+      expect(flushes).toBe(1);
+      expect(failed.failure.failedFromState).toBe('broadcast');
+      expect(failed.failure.code).toBe('tx_submit_timeout');
+      expect(failed.timestamps.nextRetryAt).toBeUndefined();
     });
 
     it('records a typed rejection from the FINAL pre-execute preflight the same way', async () => {
@@ -378,19 +449,19 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: c
       expect(failed.failure.timeout).toBeUndefined();
     });
 
-    it('reads the typed cause from the write-ahead failure when the thrown error is message-only', async () => {
+    it("recognises the typed cause carried by the adapter's write-ahead wrapper", async () => {
       const publisher = h.createPublisher(RETRY_LANE);
       const session = await validatedSession(publisher);
 
       const failed = expectFailed(await session.recordExecutionFailure(
         'broadcast',
         adapterRewrap(schedulerBusy()),
-        { neverDispatched: true, writeAheadFailure: schedulerBusy() },
+        { neverDispatched: true },
       ));
 
       expect(failed.failure.failedFromState).toBe('validated');
       expect(failed.failure.code).toBe('workspace_unavailable');
-      // The thrown (re-wrapped) message is what is persisted, so the stage is visible in it.
+      // The thrown (wrapper) message is what is persisted, so the stage is visible in it.
       expect(failed.failure.message).toContain('chain:writeahead hook failed before publish broadcast');
     });
 
@@ -401,39 +472,56 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: c
       const failed = expectFailed(await session.recordExecutionFailure(
         'broadcast',
         adapterRewrap(new Error('ENOSPC: no space left on device')),
-        { neverDispatched: true, writeAheadFailure: new Error('ENOSPC: no space left on device') },
+        { neverDispatched: true },
       ));
 
       expect(failed.failure.failedFromState).toBe('broadcast');
       expect(failed.failure.code).not.toBe('workspace_unavailable');
+    });
+
+    it('unwraps the cause ONLY from the write-ahead wrapper, never from an arbitrary cause chain', async () => {
+      // A plain error that merely carries a typed store rejection as `cause` is not a write-ahead
+      // failure and must not be mistaken for one.
+      const publisher = h.createPublisher(RETRY_LANE);
+      const session = await validatedSession(publisher);
+
+      const failed = expectFailed(await session.recordExecutionFailure(
+        'broadcast',
+        new Error('some other failure', { cause: schedulerBusy() }),
+        { neverDispatched: true },
+      ));
+
+      expect(failed.failure.failedFromState).toBe('broadcast');
+      expect(failed.failure.code).not.toBe('workspace_unavailable');
+    });
+
+    it('survives a hostile cause accessor on the wrapper without throwing out of failure recording', async () => {
+      const publisher = h.createPublisher(RETRY_LANE);
+      const session = await validatedSession(publisher);
+      const hostile = Object.defineProperty(
+        Object.assign(new Error('hostile wrapper'), { code: 'CHAIN_WRITE_AHEAD_HOOK_FAILED' }),
+        'cause',
+        { get() { throw new Error('getter exploded'); } },
+      );
+
+      const failed = expectFailed(await session.recordExecutionFailure('broadcast', hostile, { neverDispatched: true }));
+
+      expect(failed.failure.failedFromState).toBe('broadcast');
     });
   });
 
   describe('C. the recorder outcome maps to the caller proof', () => {
     // The persisted-status barrier masks a wrong mapping in every natural flow (a recorded
     // write-ahead leaves the record at 'broadcast'), so the mapping is pinned on its own.
-    const recorder = (outcome: 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send', writeAheadFailure?: unknown) => ({
+    const recorder = (outcome: 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send') => ({
       onBeforeBroadcast: async () => undefined,
       outcome,
-      writeAheadFailure,
     });
 
     it('proves nothing dispatched only when no hash was durably recorded', () => {
-      const failure = schedulerBusy();
-      expect(executionFailureEvidence(recorder('not-reached'))).toEqual({
-        neverDispatched: true,
-        writeAheadFailure: undefined,
-      });
-      expect(executionFailureEvidence(recorder('rolled-back-pre-send', failure))).toEqual({
-        neverDispatched: true,
-        writeAheadFailure: failure,
-      });
+      expect(executionFailureEvidence(recorder('not-reached'))).toEqual({ neverDispatched: true });
+      expect(executionFailureEvidence(recorder('rolled-back-pre-send'))).toEqual({ neverDispatched: true });
       expect(executionFailureEvidence(recorder('recorded-durable'))).toEqual({ neverDispatched: false });
-    });
-
-    it('never forwards a write-ahead failure alongside a dispatched outcome', () => {
-      expect(executionFailureEvidence(recorder('recorded-durable', schedulerBusy())))
-        .toEqual({ neverDispatched: false });
     });
   });
 

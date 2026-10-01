@@ -100,10 +100,9 @@ export type ActiveLiftJobClaim = LiftJobClaimed & {
  * GH#2940 — facts the CALLER proved about a failed execution attempt, beyond the error value.
  *
  * The thrown error alone cannot say whether a transaction left this node: the pre-send write-ahead
- * is the only witness, it lives in the caller's recorder closure, and the chain adapter re-throws a
- * rejected write-ahead hook as a NEW message-only Error. This carries the witness to the one place
- * that records the failure, so nothing is ever inferred from which record fields happen to be
- * absent afterwards.
+ * is the only witness, and it lives in the caller's recorder closure. This carries the witness to
+ * the one place that records the failure, so nothing is ever inferred from which record fields
+ * happen to be absent afterwards.
  */
 export interface ExecutionFailureEvidence {
   /**
@@ -113,11 +112,6 @@ export interface ExecutionFailureEvidence {
    * publish transaction may be on the wire, and the failure keeps its chain-proof classification.
    */
   readonly neverDispatched?: boolean;
-  /**
-   * The error the write-ahead hook itself threw, when it threw. The adapter's re-wrap drops its
-   * type, so the recorder keeps the original for the typed storage-outcome contract to read.
-   */
-  readonly writeAheadFailure?: unknown;
 }
 
 /**
