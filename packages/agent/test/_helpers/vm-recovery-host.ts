@@ -12,7 +12,8 @@ import type {
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
 import { DKGAgent } from '../../src/index.js';
-import type { ExactAssetSelection } from '../../src/sync/exact-assets.js';
+import { exactAssetUalsForSelection, type ExactAssetSelection } from '../../src/sync/exact-assets.js';
+import type { ExactRecoveryTransportMode } from '../../src/sync/requester/exact-recovery-transport.js';
 import type {
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
@@ -94,8 +95,9 @@ export interface VmRecoveryHostInternals {
   syncExactKnowledgeAssetsFromPeerDetailed(
     peerId: string,
     contextGraphId: string,
-    selection: ExactAssetSelection,
-    options?: { signal?: AbortSignal; isCurrent?: () => boolean; onWorkStarted?: () => void },
+    selection: readonly string[] | ExactAssetSelection,
+    options?: { signal?: AbortSignal; isCurrent?: () => boolean; onWorkStarted?: () => void;
+      exactRecoveryTransportMode?: ExactRecoveryTransportMode },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
     localCgId: string,
@@ -231,22 +233,25 @@ export async function createVmRecoveryHostHarness<
     chainAdapter.getKnowledgeAssetUpdateContext = async (kaId) => {
       const ordinal = Number(kaId);
       if (options.sizingUnavailable) {
-        return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
+        return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0,
+          minted: 0n, endEpoch: 0n, tokenAmount: 0n, isImmutable: false };
       }
       const footprint = options.footprintForOrdinal?.(ordinal);
       return {
         merkleRootsCount: footprint?.merkleRootsCount ?? 1n,
         byteSize: footprint?.byteSize ?? 1_024n,
         merkleLeafCount: Number(footprint?.merkleLeafCount ?? 8),
+        minted: 1n, endEpoch: 1n, tokenAmount: 0n, isImmutable: false,
       };
     };
   }
   internals.syncExactKnowledgeAssetsFromPeerDetailed = async (
     peerId,
     _contextGraphId,
-    uals,
+    selection,
     requestOptions,
   ) => {
+    const uals = 'kind' in selection ? exactAssetUalsForSelection(selection) : selection;
     requestOptions?.onWorkStarted?.();
     activeFetches += 1;
     maxActiveFetches = Math.max(maxActiveFetches, activeFetches);

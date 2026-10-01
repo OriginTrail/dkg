@@ -27,7 +27,7 @@ async function harness(options: { public?: boolean; core?: boolean; advertised?:
     },
   });
   agents.push(h.agent);
-  if (options.core !== false) h.internals.peerCapabilityRegistry.observe(core, { source: 'identify', protocols: [PROTOCOL_STORAGE_ACK] });
+  if (options.core !== false) h.internals.peerCapabilityRegistry.observe(core, { source: 'identify-snapshot', protocols: [PROTOCOL_STORAGE_ACK] });
   vi.spyOn(h.agent, 'getPeerProtocols').mockImplementation(async peer => peer === core && options.advertised !== false ? [EXACT_BATCH_STREAM_PROTOCOL] : []);
   const authority = vi.spyOn(h.agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue(
     options.public === false ? { kind: 'private', onChainId: '1' } as never : { kind: 'public', onChainId: '1' } as never);
@@ -50,10 +50,14 @@ describe('experimental public Core streaming recovery host', () => {
   it('probes the supported Core first then streams ten large KAs without changing the proof roster', async () => {
     vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
     const h = await harness();
+    const sizing = vi.spyOn(h.chainAdapter, 'getKnowledgeAssetUpdateContext');
     const result = await h.run();
     expect(h.fetched.map(({ peerId, uals }) => [peerId, uals.length])).toEqual([[core, 1], [core, 10]]);
     expect(h.transportModes).toEqual(['stream-preferred', 'stream-required']);
     expect(h.authority).toHaveBeenCalledOnce(); expect(h.policy).not.toHaveBeenCalled();
+    // The probe observes one KA; the compatible holder prefix spends at most
+    // ten reads. Untouched suffix ordinals retain their independent turn.
+    expect(sizing.mock.calls.map(([id]) => id)).toEqual(Array.from({ length: 11 }, (_, ordinal) => BigInt(ordinal)));
     expect(h.maxActiveFetches()).toBe(1);
     expect(result.outcomes.size).toBe(11); expect(result.continuationOrdinal).toBe(11);
     expect(h.internals.preferredSyncPeers.get(cg)).toBe(older);

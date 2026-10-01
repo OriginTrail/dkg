@@ -267,12 +267,7 @@ import {
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import {
-  planVmRecoveryMicrobatch,
-  type VmRecoveryTargetFootprint,
-} from './vm-recovery-microbatch.js';
-import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
-import { planVmRecoveryStreamMicrobatch } from './vm-recovery-stream-profile.js';
+import { planVmRecoveryTransport, VM_EXACT_MICROBATCH_LIMITS } from './vm-recovery-transport-plan.js';
 import { EXACT_BATCH_STREAM_PROTOCOL } from './sync/exact-batch-stream-contract.js';
 import { exactBatchStreamUnsupported } from './sync/exact-batch-stream-capability.js';
 import {
@@ -280,10 +275,6 @@ import {
   type VmRecoveryProviderAttempt,
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
-import {
-  encodeExactAssetUals,
-  MAX_EXACT_SYNC_ASSETS,
-} from './sync/exact-assets.js';
 import {
   MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
   ExactAssetFetchLifecycleClosedError,
@@ -632,28 +623,6 @@ type VmReconcileOrdinalOptions = {
  * amplify into a per-message `eth_call` (Branimir review #1239 follow-on).
  */
 const HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS = 5_000;
-
-// Exact VM data responses are page-only and capped at 64 rows per page. Keep
-// one recovery microbatch near 64 non-empty pages so a single large graph does
-// not monopolize the global sync admission. This is a soft scheduling/fairness
-// cap, not a wire or correctness limit: an individually larger KA is still
-// admitted alone and remains bounded by the exact executor's hard guards.
-const VM_EXACT_MICROBATCH_PAGE_FAIRNESS_LEAVES = 4_096n;
-
-const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
-  // Executor capability: the current exact-sync envelope accepts at most ten.
-  maxAssets: MAX_EXACT_SYNC_ASSETS,
-  // Soft recovery-window targets. A single public KA may exceed either; it is
-  // still admitted alone while the exact executor's own hard byte/quad guards
-  // remain authoritative.
-  targetBytes: 24n * 1024n * 1024n,
-  targetLeaves: VM_EXACT_MICROBATCH_PAGE_FAIRNESS_LEAVES,
-  fixedBytesPerAsset: 64n * 1024n,
-  bytesPerLeafOverhead: 128n,
-  byteSizeMultiplierBps: 11_500n,
-  // Hard exact-selector cap, evaluated with the executor's real encoder.
-  maxSelectorBytes: 16 * 1024,
-});
 
 /**
  * Recovery-target root of an ordinal whose KA the node holds nowhere locally:
@@ -7457,40 +7426,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const providerAttempt = providerPolicy.beginAttempt(peerId);
       if (!providerAttempt) continue;
       const admittedConnectionKey = this.getSyncReconcilerConnectionKey(peerId);
-      let publicRecoveryAccessVerified: boolean | undefined;
-
-      let batchAttempts: VmRecoveryBatchAttempt[] = [{
-        entry,
-        installedRecord,
-        candidatePeerIds,
-      }];
-      let exactRecoveryTransportMode: ExactRecoveryTransportMode = 'legacy';
-      const streamEligibleProvider = experimentalPublicRecovery && experimentalStreamPeerIds.has(peerId)
-        && !exactBatchStreamUnsupported(this, peerId, admittedConnectionKey, Date.now(),
-          this.captureExperimentalExactBatchRefusalScope(localCgId));
-      if (streamEligibleProvider && providerAttempt.kind === 'probe') {
-        // A known public Core still earns holder reuse only by fetching one KA.
-        // Choose its wire from one bounded sizing observation; unknown or
-        // oversized work retains the original legacy singleton transport.
-        const readContext = this.chain.getKnowledgeAssetUpdateContext;
-        const singleton = await enrichVmRecoveryFootprints([{ kaId: target.kaId, target }], onChainCgId, {
-          resolvePublicAccess: async () => true,
-          sizing: typeof readContext === 'function'
-            ? { readUpdateContext: (id, readOptions) => readContext.call(this.chain, id, readOptions) }
-            : null,
-        }, { maxContextReads: 1, signal, isCurrent: isRecoveryCurrent });
-        if (!isRecoveryCurrent()) return staleRecovery();
-        const profile = planVmRecoveryStreamMicrobatch(singleton, entries => Buffer.byteLength(
-          encodeExactAssetUals(entries.map(({ target: candidate }) => candidate.ual)), 'utf8'));
-        exactRecoveryTransportMode = profile === undefined ? 'legacy' : 'stream-preferred';
-      }
-
-      // The first exact request to a peer remains a single-KA probe. Once that
-      // probe has proved the peer is a holder, pack a stable compatible prefix
-      // by authoritative size hints. Unknown footprints stay singleton; the
-      // exact-sync protocol's ten-UAL cap remains the hard upper bound.
-      if (providerAttempt.kind === 'proven-holder-reuse') {
-        const compatible: VmRecoveryBatchAttempt[] = [];
+      // Choose the admitted singleton probe or rotation-compatible holder
+      // prefix before sizing; one pipeline owns its selection and wire mode.
+      const candidateAttempts: VmRecoveryBatchAttempt[] = [];
+      if (providerAttempt.kind === 'probe') {
+        candidateAttempts.push({ entry, installedRecord, candidatePeerIds });
+      } else {
         for (let candidateIndex = eligibleIndex; candidateIndex < eligible.length; candidateIndex += 1) {
           const candidateEntry = eligible[candidateIndex]!;
           const candidateTarget = candidateEntry.target;
@@ -7510,7 +7451,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               ? this.vmReconcileUncreditedCandidateOrder(candidateInstalledRecord).includes(peerId)
               : orderedPeerIds.includes(peerId));
           if (!peerEligible) break;
-          compatible.push({
+          candidateAttempts.push({
             entry: candidateEntry,
             installedRecord: candidateInstalledRecord,
             candidatePeerIds: candidateInstalledRecord
@@ -7518,98 +7459,69 @@ export class SwmHostModeMethods extends DKGAgentBase {
               : orderedPeerIds,
           });
         }
-        // Only candidates that survived rotation/admission are sized. Keeping
-        // this hint local to the planner avoids broadening the canonical chain
-        // ordinal target and does not waste bounded RPC reads on ineligible
-        // prefixes. Missing/failed hints remain conservative singletons.
-        const readVmRecoveryUpdateContext = this.chain.getKnowledgeAssetUpdateContext;
-        const sizedCandidates = await enrichVmRecoveryFootprints(
-          compatible.map((attempt) => ({
-            attempt,
-            kaId: attempt.entry.target.kaId,
-          })),
-          onChainCgId,
-          {
-            resolvePublicAccess: async (contextGraphId) => {
-              if (experimentalPublicRecovery) {
-                // Public policy is immutable after registration. Reuse the
-                // positive registered-public observation used for ranking;
-                // canonical KA/root/version/binding checks remain per asset.
-                publicRecoveryAccessVerified = true;
-                return true;
-              }
-              publicRecoveryAccessVerified = (await withRpcUsageSite(
-                CG_AUTH_RPC_SITES.vmSizing,
-                // Sizing a recovery batch: this decides how much to READ, not
-                // who may. A bound stale by one index tick changes a batch
-                // size, and the next pass corrects it. Inert unless the
-                // operator enables `chain.boundedAuthorityReads`.
-                () => this.readLiveOnChainAccessPolicy(
-                  contextGraphId.toString(), ctx, { freshness: 'bounded' },
-                ),
-              )) === 0;
-              return publicRecoveryAccessVerified;
-            },
-            sizing: typeof readVmRecoveryUpdateContext === 'function'
-              ? {
-                  readUpdateContext: (kaId, readOptions) =>
-                    readVmRecoveryUpdateContext.call(this.chain, kaId, readOptions),
-                }
-              : null,
-          },
-          {
-            maxContextReads: MAX_EXACT_SYNC_ASSETS,
-            signal,
-            isCurrent: isRecoveryCurrent,
-          },
+      }
+      const streamEligibleProvider = experimentalPublicRecovery && experimentalStreamPeerIds.has(peerId)
+        && !exactBatchStreamUnsupported(this, peerId, admittedConnectionKey, Date.now(),
+          this.captureExperimentalExactBatchRefusalScope(localCgId));
+      const transportPlan = await planVmRecoveryTransport({
+        candidates: candidateAttempts.map(attempt => ({
+          attempt, kaId: attempt.entry.target.kaId, assetUal: attempt.entry.target.ual,
+        })),
+        providerAttemptKind: providerAttempt.kind, onChainCgId,
+        streamEligible: streamEligibleProvider, registeredPublicAccess: experimentalPublicRecovery,
+        signal, isCurrent: isRecoveryCurrent,
+      }, {
+        createSizingReader: () => {
+          const readContext = this.chain.getKnowledgeAssetUpdateContext;
+          return typeof readContext === 'function'
+            ? { readUpdateContext: (kaId, readOptions) => readContext.call(this.chain, kaId, readOptions) }
+            : null;
+        },
+        resolvePublicAccess: async contextGraphId => (await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.vmSizing,
+          // This bounded observation controls soft sizing only. Canonical
+          // root/version/binding authority is still checked per asset.
+          () => this.readLiveOnChainAccessPolicy(
+            contextGraphId.toString(), ctx, { freshness: 'bounded' },
+          ),
+        )) === 0,
+      });
+      if (!isRecoveryCurrent()) return providerAttempt.kind === 'probe' ? staleRecovery() : noRecovery();
+      const {
+        attempts: batchAttempts, transportMode: exactRecoveryTransportMode,
+        publicAccessEvidence: publicRecoveryAccessVerified, packing,
+      } = transportPlan;
+      if (batchAttempts.length === 0) {
+        this.vmReconcilePublicCoreTransportPreferencePolicy.revoke(preferenceAttempt, peerId);
+        this.log.warn(
+          ctx,
+          `VM exact recovery selector for "${localCgId}" exceeds the executor cap; `
+            + `ordinal=${target.ordinal} selectorCap=${VM_EXACT_MICROBATCH_LIMITS.maxSelectorBytes}`,
         );
-        if (!isRecoveryCurrent()) return noRecovery();
-        const plannableTargets = sizedCandidates.map(({ attempt, recoveryFootprint }) => ({
-          attempt,
-          recoveryFootprint,
-        } satisfies VmRecoveryTargetFootprint & { attempt: VmRecoveryBatchAttempt }));
-        const selectorBytesFor = (plannedTargets: readonly typeof plannableTargets[number][]) => Buffer.byteLength(
-          encodeExactAssetUals(plannedTargets.map(({ attempt }) => attempt.entry.target.ual)), 'utf8');
-        const streamPlan = streamEligibleProvider
-          ? planVmRecoveryStreamMicrobatch(plannableTargets, selectorBytesFor)
-          : undefined;
-        const plan = streamPlan ?? planVmRecoveryMicrobatch(
-          plannableTargets,
-          VM_EXACT_MICROBATCH_LIMITS,
-          selectorBytesFor,
-        );
-        exactRecoveryTransportMode = streamPlan === undefined ? 'legacy' : 'stream-required';
-        if (plan.targets.length === 0) {
-          this.vmReconcilePublicCoreTransportPreferencePolicy.revoke(preferenceAttempt, peerId);
-          this.log.warn(
-            ctx,
-            `VM exact recovery selector for "${localCgId}" exceeds the executor cap; `
-              + `ordinal=${target.ordinal} selectorCap=${VM_EXACT_MICROBATCH_LIMITS.maxSelectorBytes}`,
-          );
-          if (installedRecord) {
-            this.settleVmReconcileRotationAttempt(
-              target,
-              undefined,
-              'incomplete',
-              candidatePeerIds,
-              installedRecord,
-              providerPolicy.unavailablePeerIds(),
-            );
-          }
-          providerPolicy.finishAttempt(
-            providerAttempt,
+        if (installedRecord) {
+          this.settleVmReconcileRotationAttempt(
+            target,
+            undefined,
             'incomplete',
-            new Map<string, VmRecoveryUalDisposition>([[target.ual, 'incomplete']]),
+            candidatePeerIds,
+            installedRecord,
+            providerPolicy.unavailablePeerIds(),
           );
-          continue;
         }
-        batchAttempts = plan.targets.map(({ attempt }) => attempt);
+        providerPolicy.finishAttempt(
+          providerAttempt,
+          'incomplete',
+          new Map<string, VmRecoveryUalDisposition>([[target.ual, 'incomplete']]),
+        );
+        continue;
+      }
+      if (packing !== undefined) {
         this.log.info(
           ctx,
           `VM exact recovery plan for "${localCgId}" from ${peerId.slice(-8)}: `
-            + `assets=${batchAttempts.length} estimatedBytes=${plan.estimatedBytes} `
-            + `estimatedLeaves=${plan.estimatedLeaves} `
-            + `completeFootprints=${plan.completeFootprints} transport=${exactRecoveryTransportMode}`,
+            + `assets=${batchAttempts.length} estimatedBytes=${packing.estimatedBytes} `
+            + `estimatedLeaves=${packing.estimatedLeaves} `
+            + `completeFootprints=${packing.completeFootprints} transport=${exactRecoveryTransportMode}`,
         );
       }
 
