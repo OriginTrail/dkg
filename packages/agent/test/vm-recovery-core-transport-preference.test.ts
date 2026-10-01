@@ -7,6 +7,7 @@ import {
   withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
+import { EXACT_BATCH_STREAM_PROTOCOL } from '../src/sync/exact-batch-stream-contract.js';
 
 const older = '12D3KooWAAOlderReplica';
 const core = '12D3KooWZZVerifiedCore';
@@ -49,6 +50,18 @@ async function carriedHarness(behavior?: Parameters<typeof harness>[1], peers = 
   vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
   await h.run();
   expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.holderCredit).toBeDefined();
+  return h;
+}
+
+async function affinityHarness(behavior?: Parameters<typeof harness>[1]) {
+  vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+  const h = await harness(0, behavior, [older, core, third], { targetCount: 12, knownSizing: true });
+  vi.spyOn(h.agent, 'getPeerProtocols').mockImplementation(async peer => peer === core ? [EXACT_BATCH_STREAM_PROTOCOL] : []);
+  vi.spyOn(h.agent, 'resolveRegisteredContextGraphAuthority').mockRejectedValue(new Error('authority unavailable'));
+  vi.spyOn(h.agent, 'readLiveOnChainAccessPolicy').mockRejectedValue(new Error('policy unavailable'));
+  await h.run();
+  expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.transportScope).toBeDefined();
+  expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.holderCredit).toBeUndefined();
   return h;
 }
 afterEach(async () => { vi.unstubAllEnvs(); vi.restoreAllMocks(); await Promise.all(agents.splice(0).map((agent) => agent.stop())); });
@@ -302,8 +315,152 @@ describe('verified public Core transport preference', () => {
   });
 });
 
+describe('experimental Core ordering without holder credit', () => {
+  it('keeps Core first when fresh stream-ranking authority is unavailable, but probes and verifies every UAL', async () => {
+    const h = await affinityHarness();
+    const prior = h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)!;
+    const reconcile = vi.spyOn(h.agent, 'reconcileChainOrdinal');
+    const authority = vi.mocked(h.agent.resolveRegisteredContextGraphAuthority);
+    const publicPolicy = vi.mocked(h.agent.readLiveOnChainAccessPolicy);
+    const sizing = vi.spyOn(h.chainAdapter, 'getKnowledgeAssetUpdateContext');
+    authority.mockClear(); publicPolicy.mockClear();
+    expect(h.internals.readVmReconcilePublicCoreTransportPreference(cg, '1', [older])).toBeUndefined();
+    expect(h.internals.readVmReconcilePublicCoreTransportPreference(cg, '1', [older, core, third])).toBe(core);
+    expect(authority).not.toHaveBeenCalled();
+    expect(publicPolicy).not.toHaveBeenCalled();
+    expect(sizing).not.toHaveBeenCalled();
+    const result = await next(h);
+    expect(h.fetched.slice(3)).toEqual([
+      { peerId: core, uals: [h.targets[0]!.ual] },
+      { peerId: core, uals: [h.targets[3]!.ual] },
+    ]);
+    expect(reconcile.mock.calls.map(call => call[2])).toEqual([0, 3]);
+    expect(authority).toHaveBeenCalledTimes(1);
+    expect(result.continuationOrdinal).toBe(4);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.token).not.toBe(prior.token);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.holderCredit).toBeUndefined();
+    expect(h.internals.preferredSyncPeers.get(cg)).toBe(older);
+    expect(h.maxActiveFetches()).toBe(1);
+  });
+
+  it.each(['clean-absent', 'incomplete', 'unverified', 'throw'] as const)('removes affinity after %s and fairly tries the original fallback peers', async failure => {
+    let fail = false;
+    const h = await affinityHarness(peer => {
+      if (!fail) return peer === older ? 'clean-absent' : 'found';
+      if (peer !== core) return 'found';
+      if (failure === 'throw') throw new Error('transport failure');
+      return failure;
+    });
+    fail = true;
+    const result = await next(h);
+    expect(h.fetched.slice(3).map(({ peerId }) => peerId)).toEqual([core, older, older, third, third]);
+    expect(result.outcomes.get(0)?.status).toBe('pending');
+    expect(h.recovered.has(0)).toBe(false);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    const record = h.internals.vmReconcileRotationState.get(h.internals.vmReconcileRotationSlotKey(h.targets[0]!))!;
+    expect([...record.candidatePeerIds]).toEqual([older, core, third]);
+    expect(record.cleanAbsentPeerIds.has(core)).toBe(failure === 'clean-absent');
+    expect(new Set(h.fetched.slice(3).map(({ peerId }) => peerId)).size).toBe(DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX);
+    await next(h);
+    expect(h.recovered.has(0)).toBe(true);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+  });
+
+  it.each(['protocol', 'admission'] as const)('revokes %s failure rather than repeatedly pinning an unavailable Core', async failure => {
+    const h = await affinityHarness();
+    if (failure === 'protocol') h.internals.waitForSyncProtocol = async peer => peer.toString() !== core;
+    else h.internals.ensurePeerAdmittedForRecovery = async peer => peer !== core;
+    await next(h);
+    expect(h.fetched.slice(3).every(({ peerId }) => peerId !== core)).toBe(true);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    await next(h);
+    expect(h.fetched.slice(3).every(({ peerId }) => peerId !== core)).toBe(true);
+  });
+
+  it.each(['binding', 'binding-generation', 'selected-binding', 'deployment', 'lifecycle',
+    'expiry', 'reconnect', 'role', 'roster', 'graph-clear', 'flag-off'] as const)('rejects %s affinity before selecting untouched targets', async change => {
+    const h = await affinityHarness();
+    const prior = h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)!;
+    if (change === 'binding') prior.onChainCgId = '2';
+    if (change === 'binding-generation') h.internals.contextGraphBindingState.bump(cg);
+    if (change === 'selected-binding') vi.spyOn(h.internals.selectedVmReconcileCursors, 'get').mockReturnValue({ bindingGeneration: 99 });
+    if (change === 'deployment') vi.spyOn(h.chainAdapter, 'deploymentId', 'get').mockReturnValue('mock:replacement');
+    if (change === 'lifecycle') h.internals.vmReconcileLifecycleGeneration += 1;
+    if (change === 'expiry') h.internals.vmReconcileRotationNow = () => prior.expiresAt + 1;
+    if (change === 'reconnect') h.internals.node.libp2p.getConnections = () => [older, core, third]
+      .map(peerId => ({ remotePeer: { toString: () => peerId }, timeline: { open: 99 } }));
+    if (change === 'role') h.internals.peerCapabilityRegistry.forget(core);
+    if (change === 'roster') h.internals.node.libp2p.getConnections = () => [older, core, third, '12D3KooWNewRoster']
+      .map(peerId => ({ remotePeer: { toString: () => peerId } }));
+    if (change === 'graph-clear') h.internals.clearVmReconcileRotationStateForContextGraph(cg);
+    if (change === 'flag-off') vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
+    expect(h.internals.readVmReconcilePublicCoreTransportPreference(cg, '1', [older, core, third])).toBeUndefined();
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    await h.internals.recoverVmReconcileBatch(cg, 1n, h.targets.slice(3), 100, () => true);
+    expect(h.fetched[3]).toEqual({ peerId: older, uals: [h.targets[3]!.ual] });
+  });
+
+  it.each(['reconnect', 'binding', 'roster', 'expiry'] as const)('does not reinstall %s affinity from a late verified completion', async change => {
+    const h = await affinityHarness();
+    const execute = h.internals.executeVmRecoveryBatch.bind(h.internals);
+    h.internals.executeVmRecoveryBatch = async input => {
+      const result = await execute(input);
+      if (input.peerId === core && input.attempts[0]!.entry.target.ordinal === 3) {
+        const prior = h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)!;
+        if (change === 'reconnect') h.internals.node.libp2p.getConnections = () => [older, core, third]
+          .map(peerId => ({ remotePeer: { toString: () => peerId }, timeline: { open: 99 } }));
+        if (change === 'binding') h.internals.contextGraphBindingState.bump(cg);
+        if (change === 'roster') h.internals.node.libp2p.getConnections = () => [older, core, third, '12D3KooWNewRoster']
+          .map(peerId => ({ remotePeer: { toString: () => peerId } }));
+        if (change === 'expiry') h.internals.vmReconcileRotationNow = () => prior.expiresAt + 1;
+      }
+      return result;
+    };
+    await next(h);
+    expect(h.recovered.has(3)).toBe(true);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+  });
+
+  it.each(['found', 'incomplete'] as const)('preserves a newer affinity entry when an old %s completion returns', async disposition => {
+    let fail = false;
+    const h = await affinityHarness((peer, ordinal) => peer === older ? 'clean-absent'
+      : fail && peer === core && ordinal === 3 ? disposition : 'found');
+    fail = true;
+    let replacement: ReturnType<Harness['internals']['vmReconcilePublicCoreTransportPreferences']['get']>;
+    const execute = h.internals.executeVmRecoveryBatch.bind(h.internals);
+    h.internals.executeVmRecoveryBatch = async input => {
+      const result = await execute(input);
+      if (input.peerId === core && input.attempts[0]!.entry.target.ordinal === 3) {
+        replacement = { ...h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)!, token: Symbol('replacement') };
+        h.internals.vmReconcilePublicCoreTransportPreferences.set(cg, replacement);
+      }
+      return result;
+    };
+    await next(h);
+    expect(replacement).toBeDefined();
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)).toBe(replacement);
+  });
+
+  it('preserves the exact ordering hint across zero-work local refusal without renewing it', async () => {
+    const h = await affinityHarness();
+    const prior = h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)!;
+    const fetch = h.internals.syncExactKnowledgeAssetsFromPeerDetailed;
+    h.internals.syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async () => ({ disposition: 'incomplete' as const, result: {
+      fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+      failedPeers: 0, failedPhases: 0, deferredBackpressure: 1,
+    } }));
+    const refused = await next(h);
+    expect(refused).toMatchObject({ attemptedOrdinals: [], localAdmissionDeferred: true });
+    expect(h.fetched).toHaveLength(3);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)).toBe(prior);
+    h.internals.syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    await next(h);
+    expect(h.fetched.slice(3).map(({ uals }) => uals.length)).toEqual([1, 1]);
+  });
+});
+
 describe('experimental carried public Core holder', () => {
-  it('yields after verified unknown-hint reuse without credit and finishes through ordinary fresh probes', async () => {
+  it('retains ordering after verified unknown-hint reuse without credit and finishes through fresh probes', async () => {
     vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
     const h = await harness(0, undefined, [older, core, third]);
     vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
@@ -312,7 +469,8 @@ describe('experimental carried public Core holder', () => {
     expect(h.fetched.map(({ peerId }) => peerId)).toEqual([older, core, core]);
     expect(first.attemptedOrdinals).toEqual([0, 1, 2]);
     expect(first.continuationOrdinal).toBe(3);
-    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.transportScope).toBeDefined();
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.holderCredit).toBeUndefined();
 
     const second = await next(h);
     expect(h.fetched.slice(3)).toEqual([
@@ -320,15 +478,18 @@ describe('experimental carried public Core holder', () => {
       { peerId: core, uals: [h.targets[3]!.ual] },
     ]);
     expect(second.continuationOrdinal).toBe(4);
-    // With no preference, untouched targets still use the ordinary roster.
+    // Ordering survives, but every slice still starts with a singleton probe.
     const thirdSlice = await next(h);
-    expect(h.fetched.slice(5).map(({ peerId }) => peerId)).toEqual([older, core, core]);
-    expect(thirdSlice.attemptedOrdinals).toEqual([4, 5, 6]);
+    expect(h.fetched.slice(5)).toEqual([
+      { peerId: core, uals: [h.targets[4]!.ual] },
+      { peerId: core, uals: [h.targets[5]!.ual] },
+    ]);
+    expect(thirdSlice.attemptedOrdinals).toEqual([4, 5]);
     await next(h);
     expect([...h.recovered].sort()).toEqual(h.targets.map(({ ordinal }) => ordinal));
     expect(h.fetched.filter(({ peerId }) => peerId === core).flatMap(({ uals }) => uals))
-      .toEqual([1, 2, 0, 3, 5, 6, 4].map(ordinal => h.targets[ordinal]!.ual));
-    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+      .toEqual([1, 2, 0, 3, 4, 5, 6].map(ordinal => h.targets[ordinal]!.ual));
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.holderCredit).toBeUndefined();
     expect(h.maxActiveFetches()).toBe(1);
   });
 
@@ -488,15 +649,15 @@ describe('experimental carried public Core holder', () => {
     expect(h.fetched.slice(3)).toEqual([{ peerId: core, uals: [h.targets[0]!.ual] }]);
     expect(second.attemptedOrdinals).toEqual([0]);
     expect(second.continuationOrdinal).toBe(10);
-    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.holderCredit).toBeUndefined();
     const thirdSlice = await next(h);
     expect(h.fetched.slice(4)).toEqual([
-      { peerId: older, uals: [h.targets[10]!.ual] },
+      { peerId: core, uals: [h.targets[10]!.ual] },
       { peerId: core, uals: [h.targets[11]!.ual] },
-      { peerId: core, uals: [h.targets[12]!.ual] },
     ]);
-    expect(thirdSlice.continuationOrdinal).toBe(13);
-    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    expect(thirdSlice.continuationOrdinal).toBe(12);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.transportScope).toBeDefined();
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.get(cg)?.holderCredit).toBeUndefined();
   });
 
   it.each(['expiry', 'reconnect', 'binding', 'entry-replacement'] as const)('rechecks %s after sizing without sending an old carried batch', async change => {

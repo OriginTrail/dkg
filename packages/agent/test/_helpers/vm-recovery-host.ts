@@ -62,6 +62,7 @@ export interface VmRecoveryHostInternals {
     connectionKey: string;
     expiresAt: number;
     holderCredit?: VmReconcilePublicCoreHolderCredit;
+    transportScope?: VmReconcilePublicCoreHolderCredit;
   }>;
   readVmReconcilePublicCoreTransportPreference(localCgId: string, onChainCgId: string, eligible: readonly string[]): string | undefined;
   rememberVmReconcilePublicCoreTransportPreference(localCgId: string, onChainCgId: string, peerId: string, connectionKey: string | null): boolean;

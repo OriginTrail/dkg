@@ -1349,7 +1349,7 @@ export class DKGAgentBase {
     connectionKey: string;
     expiresAt: number;
   }>();
-  /** Public-VM transport hints only; separate from curator and absence evidence. */
+  /** Core transport ordering only; separate from authorization and absence evidence. */
   protected readonly vmReconcilePublicCoreTransportPreferences = new Map<string, {
     token: symbol;
     onChainCgId: string;
@@ -1357,6 +1357,8 @@ export class DKGAgentBase {
     connectionKey: string;
     expiresAt: number;
     holderCredit?: VmReconcilePublicCoreHolderCredit;
+    /** Same scope fences as holder reuse, without permission to skip its probe. */
+    transportScope?: VmReconcilePublicCoreHolderCredit;
   }>();
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();

@@ -6296,7 +6296,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (entry.onChainCgId !== onChainCgId
       || entry.expiresAt <= this.vmReconcileRotationNow()
       || !this.peerCapabilityRegistry.supportsCore(entry.peerId)
-      || this.getSyncReconcilerConnectionKey(entry.peerId) !== entry.connectionKey) {
+      || this.getSyncReconcilerConnectionKey(entry.peerId) !== entry.connectionKey
+      || (entry.transportScope && (process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM !== '1'
+        || !this.vmReconcilePublicCoreHolderCreditIsCurrent(localCgId, entry.transportScope)))) {
       cache.delete(localCgId);
       return undefined;
     }
@@ -6341,7 +6343,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainCgId: string,
     peerId: string,
     admittedConnectionKey: string | null,
-    holderProof?: { credit: VmReconcilePublicCoreHolderCredit; expectedToken: symbol | null },
+    holderProof?: { credit: VmReconcilePublicCoreHolderCredit; expectedToken: symbol | null; transportOnly?: boolean },
   ): boolean {
     const cache = this.vmReconcilePublicCoreTransportPreferences;
     if (!cache || admittedConnectionKey === null
@@ -6350,6 +6352,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (holderProof && (
       (cache.get(localCgId)?.token ?? null) !== holderProof.expectedToken
       || !this.vmReconcilePublicCoreHolderCreditIsCurrent(localCgId, holderProof.credit)
+      || (holderProof.transportOnly && holderProof.expectedToken !== null
+        && cache.get(localCgId)!.expiresAt <= this.vmReconcileRotationNow())
     )) return false;
     cache.delete(localCgId);
     cache.set(localCgId, {
@@ -6358,7 +6362,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       peerId,
       connectionKey: admittedConnectionKey,
       expiresAt: this.vmReconcileRotationNow() + DKGAgentBase.VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS,
-      ...(holderProof ? { holderCredit: holderProof.credit } : {}),
+      ...(holderProof?.transportOnly
+        ? { transportScope: holderProof.credit }
+        : holderProof ? { holderCredit: holderProof.credit } : {}),
     });
     while (cache.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
       const oldest = cache.keys().next().value;
@@ -7812,8 +7818,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const completelyVerified = execution.providerDisposition === 'found'
         && execution.perUalDispositions.length === batchAttempts.length
         && execution.perUalDispositions.every(([, disposition]) => disposition === 'found');
-      if (!completelyVerified || (providerAttempt.kind === 'proven-holder-reuse'
-        && publicRecoveryAccessVerified !== true)) {
+      if (!completelyVerified) {
         this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
       } else if (publicRecoveryAccessVerified === true) {
         const remembered = this.rememberVmReconcilePublicCoreTransportPreference(
@@ -7830,6 +7835,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // bounded microbatch. Every requested KA still authenticates and
         // independently reconciles against chain before credit is renewed.
         if (providerAttempt.kind === 'proven-holder-reuse' && (remembered || carriedHolder)) break;
+      } else if (experimentalHolderReuse && holderCredit) {
+        // A verified Core can remain first in the existing eligible roster
+        // even when sizing cannot prove public policy. This replaces any old
+        // holder credit with ordering only; the next slice still probes and
+        // authenticates normally. The captured token/scope must still own it.
+        const remembered = this.rememberVmReconcilePublicCoreTransportPreference(
+          localCgId, expectedOnChainCgId, peerId, admittedConnectionKey,
+          { credit: holderCredit, expectedToken: expectedPreferenceToken ?? null, transportOnly: true },
+        );
+        if (!remembered) this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
+      } else if (providerAttempt.kind === 'proven-holder-reuse') {
+        this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
       }
       if (experimentalHolderReuse && providerAttempt.kind === 'proven-holder-reuse'
         && completelyVerified && this.peerCapabilityRegistry.supportsCore(peerId)) {
