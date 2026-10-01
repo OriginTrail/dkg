@@ -178,13 +178,13 @@ async function integerPageFixture() {
   const occupy = (megabytes = 320) => retained.admit({ id: pressureId, key: 'active-unrelated-response', rows: 0,
     bytesEstimate: megabytes * 1024 * 1024, phase: 'durable_data', controlPlane: true, onEvict: () => {} });
   const releasePressure = () => retained.remove(pressureId);
-  const read = async (offset: number, key: string | undefined) => {
+  const read = async (offset: number, key: string | undefined, limit = 8_192, assetUals = [assetUal]) => {
     const leases: ExactAssetExportLease[] = [];
     try {
       const rows = await readDurableDataPage({ store,
         graphMembership: createGraphMembershipSnapshot([]),
-        contextGraphId, sinceBatchId: null, offset, limit: 8_192,
-        assetUals: [assetUal], exactGraphReadMode: 'page-only',
+        contextGraphId, sinceBatchId: null, offset, limit,
+        assetUals, exactGraphReadMode: 'page-only',
         exactGraphPlanMemo: memo, exactGraphPlanCacheKey: key,
         maxPageBytes: 4 * 1024 * 1024, exactAssetExportCache: cache,
         onExactAssetExportLease: lease => leases.push(lease) });
@@ -201,10 +201,75 @@ async function integerPageFixture() {
     })), [])).toEqual(root);
   };
   return { read, query, cache, acquire, occupy, releasePressure, assertComplete, retained, originalAcquire,
+    contextGraphId, assetUal, graph,
+    async changeMetadata() { await backing.insert([{ graph: `did:dkg:context-graph:${contextGraphId}/_meta`,
+      subject: assetUal, predicate: 'urn:changed-immutable-metadata', object: '"changed"' }]); },
     async close() { releasePressure(); vi.restoreAllMocks(); await backing.close(); } };
 }
 
 describe('exact DATA session pagination order', () => {
+  it('retains one validated singleton export identity across cached adaptive pages', async () => {
+    const f = await integerPageFixture();
+    try {
+      const rows: SyncRow[] = [];
+      let retainedAfterFirst: ReturnType<typeof f.retained.stats> | undefined;
+      for (const limit of [64, 128, 256, 512, 8_192]) {
+        const page = await f.read(rows.length, 'singleton-export-session', limit);
+        expect(page).toHaveLength(Math.min(limit, 8_193 - rows.length));
+        rows.push(...page);
+        retainedAfterFirst ??= f.retained.stats();
+        expect(f.retained.stats()).toEqual(retainedAfterFirst);
+      }
+      f.assertComplete(rows);
+      const identity = (await f.acquire.mock.results[0]!.value)!.identity;
+      expect(f.acquire).toHaveBeenCalledTimes(5);
+      expect(f.acquire.mock.calls.map(([request]) => ({
+        contextGraphId: request.contextGraphId, assetUal: request.assetUal,
+        graph: request.graph, expectedRows: request.expectedRows, expectedIdentity: request.expectedIdentity,
+      }))).toEqual(Array.from({ length: 5 }, (_, index) => ({
+        contextGraphId: f.contextGraphId, assetUal: f.assetUal, graph: f.graph,
+        expectedRows: 8_193, expectedIdentity: index === 0 ? undefined : identity,
+      })));
+      expect(f.query.mock.calls.filter(([, options]) => options?.source === 'sync.responder.readGraphScopedVmManifest'))
+        .toHaveLength(1);
+      expect(f.query.mock.calls.some(([, options]) => options?.source === 'sync.responder.readExactGraphRowsPage')).toBe(false);
+      // This adapter has no write revisions, so each page revalidates a fresh export.
+      expect(f.cache.stats()).toMatchObject({ exports: 5, cacheHits: 0, fallbacks: {} });
+    } finally { await f.close(); }
+  });
+
+  it('fences metadata changes before a cached singleton export continuation', async () => {
+    const f = await integerPageFixture();
+    try {
+      const first = await f.read(0, 'singleton-export-session', 64);
+      const identity = (await f.acquire.mock.results[0]!.value)!.identity;
+      const retainedAfterFirst = f.retained.stats();
+      await f.changeMetadata();
+      await expect(f.read(first.length, 'singleton-export-session', 128)).rejects.toMatchObject({
+        code: 'SYNC_EXACT_EXPORT_CHANGED', message: expect.stringMatching(/sync session.*expired/i),
+      });
+      expect(f.acquire.mock.calls[1]![0]).toMatchObject({
+        assetUal: f.assetUal, graph: f.graph, expectedIdentity: identity,
+      });
+      expect(f.query.mock.calls.filter(([, options]) => options?.source === 'sync.responder.readGraphScopedVmManifest'))
+        .toHaveLength(1);
+      expect(f.query.mock.calls.some(([, options]) => options?.source === 'sync.responder.readExactGraphRowsPage')).toBe(false);
+      expect(f.retained.stats()).toEqual(retainedAfterFirst);
+    } finally { await f.close(); }
+  });
+
+  it('uses store paging for a multiple-asset selection with only one confirmed match', async () => {
+    const f = await integerPageFixture();
+    try {
+      const selected = [f.assetUal, `${f.assetUal.slice(0, -1)}2`];
+      const first = await f.read(0, 'multiple-asset-session', 8_192, selected);
+      const last = await f.read(first.length, 'multiple-asset-session', 8_192, selected);
+      f.assertComplete([...first, ...last]);
+      expect(first.at(-1)?.o).toBe('"8191"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      expect(f.acquire).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
   it('expires an export-first session when admission later refuses export, then restarts completely on store pages', async () => {
     const f = await integerPageFixture();
     try {

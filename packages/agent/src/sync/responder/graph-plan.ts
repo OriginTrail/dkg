@@ -265,7 +265,8 @@ interface ExactGraphPagePlan {
 
 interface ExactAssetExportScope {
   readonly contextGraphId: string;
-  readonly assetUalsByGraph: ReadonlyMap<string, string>;
+  /** The export cache validates this selected UAL against the plan's sole graph. */
+  readonly assetUal: string;
   readonly cache: ExactAssetExportCache;
   readonly onLease: (lease: ExactAssetExportLease) => void;
 }
@@ -1749,7 +1750,6 @@ export async function readDurableDataPage(params: {
   if (params.assetUals !== undefined) {
     if (params.assetUals.length === 0) return [];
     const requested = new Set(params.assetUals);
-    const assetUalsByGraph = new Map<string, string>();
     return readPagedRowsFromExactGraphPlanLoader(
       params.store,
       params.offset,
@@ -1772,7 +1772,6 @@ export async function readDurableDataPage(params: {
           planSignal,
         );
         const entries = manifest.confirmedEntries.filter((entry) => requested.has(entry.ual));
-        for (const entry of entries) assetUalsByGraph.set(entry.graph, entry.ual);
         const payloadRevisions = revisionSource ? entries.map((entry) => {
           const current = revisionSource.getWriteRevision(entry.graph);
           if (!current.stable) {
@@ -1799,14 +1798,11 @@ export async function readDurableDataPage(params: {
         refresh: params.refreshRowList === true,
       } : undefined,
       params.maxPageBytes,
-      params.exactAssetExportCache && params.onExactAssetExportLease ? {
+      params.assetUals.length === 1 && params.exactAssetExportCache && params.onExactAssetExportLease ? {
         contextGraphId: params.contextGraphId,
-        // Cached plans do not rerun their loader, so the one selected UAL also
-        // supplies the lookup for the already-validated sole graph entry.
-        assetUalsByGraph,
+        assetUal: params.assetUals[0]!,
         cache: params.exactAssetExportCache,
         onLease: params.onExactAssetExportLease,
-        assetUal: params.assetUals.length === 1 ? params.assetUals[0] : undefined,
       } : undefined,
     );
   }
@@ -1968,7 +1964,7 @@ async function readPagedRowsFromExactGraphPlanLoader(
   loadExactGraphPlan: (signal?: AbortSignal) => Promise<ExactGraphPagePlan>,
   planCache?: { key: string; refresh: boolean },
   maxPageBytes?: number,
-  exportScope?: ExactAssetExportScope & { readonly assetUal?: string },
+  exportScope?: ExactAssetExportScope,
 ): Promise<SyncRow[]> {
   const rowSnapshotLimits = cache?.memo.snapshotLoadLimits ?? {
     maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
@@ -2388,42 +2384,39 @@ async function readByteBoundedRowsPageFromExactGraphPlan(
   snapshotLimits: ExactGraphSnapshotLimits,
   maxBytes: number,
   signal?: AbortSignal,
-  exportScope?: ExactAssetExportScope & { readonly assetUal?: string },
+  exportScope?: ExactAssetExportScope,
 ): Promise<SyncRow[]> {
   if (exportScope && plan.entries.length === 1) {
     const entry = plan.entries[0]!;
-    const assetUal = exportScope.assetUalsByGraph.get(entry.graph) ?? exportScope.assetUal;
-    if (assetUal) {
-      const lease = plan.bytePageReadMode === 'store' ? null : await exportScope.cache.acquire({
-        contextGraphId: exportScope.contextGraphId, assetUal,
-        graph: entry.graph, expectedRows: entry.rowCount,
-        expectedIdentity: plan.exportIdentities?.get(entry.graph), signal,
-      });
-      if (lease && plan.bytePageReadMode === 'store') {
-        // A concurrent first page may have selected store paging while this
-        // acquisition was pending. Its choice owns every page in the session.
-        lease.release();
-      } else if (lease) {
-        plan.bytePageReadMode = 'export';
-        exportScope.onLease(lease);
-        (plan.exportIdentities ??= new Map()).set(entry.graph, lease.identity);
-        const page: SyncRow[] = [];
-        let pageBytes = 0;
-        for (const row of lease.rows.slice(offset, offset + limit)) {
-          const next = serializedResponderRowByteLength(row) + (page.length > 0 ? 1 : 0);
-          if (pageBytes + next > maxBytes) {
-            if (page.length === 0) throw snapshotBudgetError({
-              key: 'exact-export-page', reason: 'snapshot_bytes', rows: 1,
-              bytesEstimate: next, limit: maxBytes,
-            });
-            break;
-          }
-          page.push(row);
-          pageBytes += next;
+    const lease = plan.bytePageReadMode === 'store' ? null : await exportScope.cache.acquire({
+      contextGraphId: exportScope.contextGraphId, assetUal: exportScope.assetUal,
+      graph: entry.graph, expectedRows: entry.rowCount,
+      expectedIdentity: plan.exportIdentities?.get(entry.graph), signal,
+    });
+    if (lease && plan.bytePageReadMode === 'store') {
+      // A concurrent first page may have selected store paging while this
+      // acquisition was pending. Its choice owns every page in the session.
+      lease.release();
+    } else if (lease) {
+      plan.bytePageReadMode = 'export';
+      exportScope.onLease(lease);
+      (plan.exportIdentities ??= new Map()).set(entry.graph, lease.identity);
+      const page: SyncRow[] = [];
+      let pageBytes = 0;
+      for (const row of lease.rows.slice(offset, offset + limit)) {
+        const next = serializedResponderRowByteLength(row) + (page.length > 0 ? 1 : 0);
+        if (pageBytes + next > maxBytes) {
+          if (page.length === 0) throw snapshotBudgetError({
+            key: 'exact-export-page', reason: 'snapshot_bytes', rows: 1,
+            bytesEstimate: next, limit: maxBytes,
+          });
+          break;
         }
-        rememberExactGraphReturnedPrefix(plan, offset, page);
-        return page;
+        page.push(row);
+        pageBytes += next;
       }
+      rememberExactGraphReturnedPrefix(plan, offset, page);
+      return page;
     }
   }
   if (plan.bytePageReadMode === 'export') {
