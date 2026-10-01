@@ -4,7 +4,7 @@
  * No pooled RESPONSE frame, new cipher, default registration or payload replay.
  */
 import type { Stream } from '@libp2p/interface';
-import { isProtocolUnsupportedError, type ProtocolRouter, type ExperimentalExactBatchStreamOptions } from './protocol-router.js';
+import { isProtocolUnsupportedError, type ProtocolRouter, type DuplexStreamOptions } from './protocol-router.js';
 
 export const EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL = '/dkg/experimental/exact-batch-stream/1.0.0';
 export const EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE = 2;
@@ -29,7 +29,7 @@ export type ExactBatchTransportEvent =
   | Readonly<{ event: 'bytes'; direction: 'sent' | 'received'; byteLength: number }>
   | Readonly<{ event: 'frame'; direction: 'sent' | 'received'; frameKind: ExactBatchTransportFrameKind }>;
 
-export interface ExactBatchTransportOptions extends ExperimentalExactBatchStreamOptions {
+export interface ExactBatchTransportOptions extends DuplexStreamOptions {
   /** Fixed experimental wire profile; window1 is contract unit-test coverage only. */
   windowSize: 2;
   maxRequestBytes: number;
@@ -173,7 +173,7 @@ export async function exchangeExperimentalExactBatch<F extends ExactBatchTranspo
   const stableOptions = Object.freeze({ ...options, assetUals: Object.freeze([...options.assetUals]) });
   let session: ExactBatchTransportSession<F> | undefined;
   try {
-    return await router.withExperimentalExactBatchStream(peerId, EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL, stableOptions,
+    return await router.withDuplexStream(peerId, EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL, stableOptions,
       async (stream, signal) => {
         session = new ExactBatchTransportSession(stream, signal, codec, stableOptions, stableOptions.assetUals);
         observe(stableOptions, { event: 'streamReady', elapsedMs: performance.now() - enteredAt });
@@ -198,7 +198,7 @@ export function registerExperimentalExactBatchResponder<F extends ExactBatchTran
 ): void {
   validateLimits(options);
   const stableOptions = Object.freeze({ ...options });
-  router.registerExperimentalExactBatchStream(EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
+  router.registerDuplexStream(EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
     async (stream, signal) => {
       const session = new ExactBatchTransportSession(stream, signal, codec, stableOptions);
       try {

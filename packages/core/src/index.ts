@@ -225,6 +225,8 @@ export {
   ProtocolRouter,
   QuietRetryableHandlerError,
   type AdmissionCheckOptions,
+  type DuplexStreamOptions,
+  type DuplexStreamRequest,
   type ProtocolRegistrationOptions,
   type ProtocolRouterOptions,
   type SendOptions,

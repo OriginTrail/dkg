@@ -1,4 +1,4 @@
-import type { Stream } from '@libp2p/interface';
+import type { PeerId, Stream } from '@libp2p/interface';
 import type { StreamHandler as DKGStreamHandler } from './types.js';
 import type { DKGNode } from './node.js';
 import type { PeerResolver } from './network/peer-resolver.js';
@@ -214,20 +214,41 @@ export interface ProtocolRegistrationOptions {
   maxReadBytes?: number;
 }
 
-/** Explicit experimental duplex capability; no default protocol is installed. */
-export interface ExperimentalExactBatchStreamOptions {
+/** Bounded duplex scope; the caller owns its wire protocol and framing. */
+export interface DuplexStreamOptions {
   timeoutMs: number;
   signal?: AbortSignal;
   maxReadBufferBytes: number;
 }
 
-export interface ExperimentalExactBatchRequest<T> {
+export interface DuplexStreamRequest<T> {
   requestData: Uint8Array;
-  /** The same bounded decoder/session continues reading ACK/control frames. */
+  /** The same bounded decoder/session continues reading subsequent frames. */
   continuation: T;
   /** Release parser resources only after the router has closed/aborted its stream. */
   dispose?: () => Promise<void>;
 }
+
+interface OutboundStreamOpenOptions {
+  resolverTimeoutMs: number;
+  excludeConnections?: WeakSet<ReusableConnection>;
+  /** Ordinary sends enable this on a later retry after a normal dial failed. */
+  allowLimitedWithDirectAddrs?: boolean;
+  /** Duplex scopes can try a final relay route before entering their callback. */
+  afterDialFailure: 'throw' | 'reuse-limited';
+  /** Sends forward an exhausted resolver signal to the dial's error boundary. */
+  cancelledResolution: 'throw' | 'dial-with-signal';
+  /** Records dial attempts even if negotiation throws before returning a stream. */
+  onNormalDial?: () => void;
+}
+
+interface OpenedPeerStream {
+  stream: Stream;
+  connection: ReusableConnection | null;
+  dialDurationMs: number;
+}
+
+type AdmittedPeerStreamOperation = (options: OutboundStreamOpenOptions) => Promise<OpenedPeerStream>;
 
 /**
  * The pooling options a ProtocolRouter caller may supply. `rejectInboundStream`
@@ -714,151 +735,103 @@ export class ProtocolRouter {
    * Own one dedicated duplex stream. Only negotiation may change routes;
    * after callback entry no authenticated request is retried or replayed.
    */
-  async withExperimentalExactBatchStream<T>(
+  async withDuplexStream<T>(
     peerIdStr: string,
     protocolId: string,
-    options: ExperimentalExactBatchStreamOptions,
+    options: DuplexStreamOptions,
     exchange: (stream: Stream, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    this.validateExperimentalExactBatchOptions(protocolId, options);
+    this.validateDuplexStreamOptions(options);
     const lifecycle = startRequestAbortLifecycle(options.timeoutMs, [options.signal, this.node.stopSignal]);
     const signal = lifecycle.signal;
     let stream: Stream | undefined;
     const abortOwned = () => { if (stream) abortStream(stream, signal.reason); };
     signal.addEventListener('abort', abortOwned, { once: true });
     try {
-      if (signal.aborted) throw asAbortError(signal.reason);
-      await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs: options.timeoutMs });
-      if (signal.aborted) throw asAbortError(signal.reason);
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      const peerId = peerIdFromString(peerIdStr);
-      const libp2p = this.node.libp2p;
-      const considered = new WeakSet<ReusableConnection>();
-      const connections = () => {
-        const found = rawGetConnectionsFor(libp2p, peerId);
-        for (const connection of found) considered.add(connection);
-        return found;
-      };
-      const reuseOptions = {
-        peerHasDirectAddrs: async () => {
-          const peer = await libp2p.peerStore.get(peerId);
-          return (peer.addresses ?? []).some(({ multiaddr }) => !multiaddr.toString().includes('/p2p-circuit'));
-        },
-      };
-      let reused = await tryReuseExistingConnection(connections, protocolId, signal, reuseOptions);
-      if (!reused && this.peerResolver) {
-        const connected = watchForNewPeerConnection(libp2p, peerId, considered);
-        const resolution = composeAbortSignalsScoped(signal, connected?.signal);
-        try {
-          if (!connected?.signal.aborted) {
-            await this.peerResolver.resolve(peerIdStr, {
-              signal: resolution.signal ?? signal, perStepTimeoutMs: options.timeoutMs,
-            }).catch(() => undefined);
-          }
-        } finally {
-          resolution.dispose();
-          connected?.dispose();
-        }
-        if (connected?.signal.aborted) reused = await tryReuseExistingConnection(connections, protocolId, signal, reuseOptions);
-      }
-      if (signal.aborted) {
-        if (reused) abortStream(reused.stream, signal.reason);
-        throw asAbortError(signal.reason);
-      }
-      if (reused) stream = reused.stream;
-      else {
-        try {
-          stream = await this.dialAdmittedPeer(peerIdStr, protocolId, signal);
-        } catch (error) {
-          if (signal.aborted) throw asAbortError(signal.reason);
-          // No application bytes have been sent. After an actual direct dial
-          // failure, the existing limited connection is a safe final route.
-          const relay = await tryReuseExistingConnection(connections, protocolId, signal,
-            { ...reuseOptions, allowLimitedWithDirectAddrs: true });
-          if (!relay) throw error;
-          stream = relay.stream;
-        }
-      }
-      if (signal.aborted) throw asAbortError(signal.reason);
-      this.boundExperimentalStreamBuffers(stream, options.maxReadBufferBytes);
+      const openStream = await this.createAdmittedPeerStreamOperation(peerIdStr, protocolId, signal, options.timeoutMs);
+      ({ stream } = await openStream({
+        resolverTimeoutMs: options.timeoutMs,
+        afterDialFailure: 'reuse-limited',
+        cancelledResolution: 'throw',
+      }));
+      this.boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
       const result = await exchange(stream, signal);
       if (signal.aborted) throw asAbortError(signal.reason);
-      await this.closeExperimentalStream(stream, signal);
+      await this.closeDuplexStream(stream, signal);
       return result;
     } finally {
-      if (stream && stream.status !== 'closed') abortStream(stream, new Error('experimental exact-batch scope ended'));
+      if (stream && stream.status !== 'closed') abortStream(stream, new Error('duplex stream scope ended'));
       signal.removeEventListener('abort', abortOwned);
       lifecycle.release();
     }
   }
 
-  /** Read only the bounded START frame, then retain its parser for duplex ACKs. */
-  registerExperimentalExactBatchStream<T>(
+  /** Read a bounded request, then retain its continuation for duplex work. */
+  registerDuplexStream<T>(
     protocolId: string,
-    readRequest: (stream: Stream, signal: AbortSignal) => Promise<ExperimentalExactBatchRequest<T>>,
-    handler: (request: ExperimentalExactBatchRequest<T> & {
+    readRequest: (stream: Stream, signal: AbortSignal) => Promise<DuplexStreamRequest<T>>,
+    handler: (request: DuplexStreamRequest<T> & {
       peerId: string; stream: Stream; signal: AbortSignal;
     }) => Promise<void>,
-    options: ExperimentalExactBatchStreamOptions & { maxRequestBytes: number },
+    options: DuplexStreamOptions & { maxRequestBytes: number },
   ): void {
-    this.validateExperimentalExactBatchOptions(protocolId, options);
+    this.validateDuplexStreamOptions(options);
     if (!Number.isSafeInteger(options.maxRequestBytes) || options.maxRequestBytes <= 0
-      || options.maxRequestBytes > this.maxReadBytes) throw new RangeError('Invalid experimental request limit');
+      || options.maxRequestBytes > this.maxReadBytes) throw new RangeError('Invalid duplex request limit');
     this.node.libp2p.handle(protocolId, async (stream, connection) => {
       const peerId = connection.remotePeer.toString();
       const closed = new AbortController();
-      const onClose = () => closed.abort(new Error('experimental peer stream closed'));
+      const onClose = () => closed.abort(new Error('duplex peer stream closed'));
       const lifecycle = startRequestAbortLifecycle(options.timeoutMs, [options.signal, this.node.stopSignal, closed.signal]);
       const signal = lifecycle.signal;
       const onAbort = () => abortStream(stream, signal.reason);
-      let request: ExperimentalExactBatchRequest<T> | undefined;
+      let request: DuplexStreamRequest<T> | undefined;
       stream.addEventListener('close', onClose, { once: true });
       signal.addEventListener('abort', onAbort, { once: true });
       try {
         if (signal.aborted) throw asAbortError(signal.reason);
         this.rejectKnownRejectedInboundPeer(peerId, protocolId);
-        this.boundExperimentalStreamBuffers(stream, options.maxReadBufferBytes);
+        this.boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
         request = await readRequest(stream, signal);
-        if (request.requestData.byteLength > options.maxRequestBytes) throw new RangeError('Experimental request byte limit exceeded');
+        if (request.requestData.byteLength > options.maxRequestBytes) throw new RangeError('Duplex request byte limit exceeded');
         await this.requirePeerAccepted(peerId, protocolId, 'inbound', { signal, timeoutMs: options.timeoutMs });
         if (signal.aborted) throw asAbortError(signal.reason);
         await handler({ ...request, peerId, stream, signal });
         if (signal.aborted) throw asAbortError(signal.reason);
         stream.removeEventListener('close', onClose);
-        await this.closeExperimentalStream(stream, signal);
+        await this.closeDuplexStream(stream, signal);
       } catch (error) {
         // Do not log authenticated request bytes, metadata, URLs or tokens.
-        abortStream(stream, error instanceof Error ? error : new Error('experimental stream failed'));
+        abortStream(stream, error instanceof Error ? error : new Error('duplex stream failed'));
       } finally {
         stream.removeEventListener('close', onClose);
         signal.removeEventListener('abort', onAbort);
-        if (stream.status !== 'closed') abortStream(stream, new Error('experimental exact-batch scope ended'));
+        if (stream.status !== 'closed') abortStream(stream, new Error('duplex stream scope ended'));
         await request?.dispose?.().catch(() => undefined);
         lifecycle.release();
       }
     }, { runOnLimitedConnection: true });
   }
 
-  private validateExperimentalExactBatchOptions(protocolId: string, options: ExperimentalExactBatchStreamOptions): void {
-    if (protocolId !== '/dkg/experimental/exact-batch-stream/1.0.0') throw new Error('Unexpected experimental exact-batch protocol');
+  private validateDuplexStreamOptions(options: DuplexStreamOptions): void {
     if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0
       || !Number.isSafeInteger(options.maxReadBufferBytes) || options.maxReadBufferBytes <= 0
-      || options.maxReadBufferBytes > this.maxReadBytes) throw new RangeError('Invalid experimental stream limits');
+      || options.maxReadBufferBytes > this.maxReadBytes) throw new RangeError('Invalid duplex stream limits');
   }
 
-  private boundExperimentalStreamBuffers(stream: Stream, limit: number): void {
+  private boundDuplexStreamBuffers(stream: Stream, limit: number): void {
     stream.maxReadBufferLength = Math.min(stream.maxReadBufferLength || limit, limit);
     stream.maxWriteBufferLength = Math.min(stream.maxWriteBufferLength || limit, limit);
   }
 
-  private async closeExperimentalStream(stream: Stream, signal: AbortSignal): Promise<void> {
+  private async closeDuplexStream(stream: Stream, signal: AbortSignal): Promise<void> {
     // close() flushes and half-closes only the writable end. Wait for the
-    // peer's half-close too: resetting immediately could discard BATCH_END
+    // peer's half-close too: resetting immediately could discard final bytes
     // already handed to the transport but not yet consumed by the peer.
     let onClose!: () => void;
     let onAbort!: () => void;
     const settled = new Promise<void>((resolve, reject) => {
-      onClose = () => stream.status === 'closed' ? resolve() : reject(new Error('Experimental stream closed before settlement'));
+      onClose = () => stream.status === 'closed' ? resolve() : reject(new Error('Duplex stream closed before settlement'));
       onAbort = () => reject(asAbortError(signal.reason));
       stream.addEventListener('close', onClose, { once: true });
       signal.addEventListener('abort', onAbort, { once: true });
@@ -875,8 +848,96 @@ export class ProtocolRouter {
     }
   }
 
-  private dialAdmittedPeer(peerId: string, protocolId: string, signal: AbortSignal): Promise<Stream> {
-    return this.network.dialProtocol(peerId, protocolId, { signal });
+  /**
+   * Admission is checked once for the operation, before any transport work.
+   * Each open uses a fresh connection snapshot and resolver watch. The caller
+   * owns payload retries and chooses when a failed direct dial permits relay
+   * reuse; this operation never sends or replays application bytes.
+   */
+  private async createAdmittedPeerStreamOperation(
+    peerIdStr: string,
+    protocolId: string,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): Promise<AdmittedPeerStreamOperation> {
+    if (signal.aborted) throw asAbortError(signal.reason);
+    await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
+    if (signal.aborted) throw asAbortError(signal.reason);
+    // Keep parsing lazy: pooled sends may settle without a one-shot open.
+    let peerId: PeerId | undefined;
+    return async (options) => {
+      if (signal.aborted) throw asAbortError(signal.reason);
+      peerId ??= (await import('@libp2p/peer-id')).peerIdFromString(peerIdStr);
+      const targetPeer = peerId;
+      const libp2p = this.node.libp2p;
+      // Raw walks heal keyed-lookup misses. Remember every observed connection
+      // so the resolver yields only to a connection this pass has not tried.
+      const considered = new WeakSet<ReusableConnection>();
+      const getConnections = () => {
+        const connections = rawGetConnectionsFor(libp2p, targetPeer);
+        for (const connection of connections) considered.add(connection);
+        return connections;
+      };
+      const reuseOptions: TryReuseExistingConnectionOptions = {
+        peerHasDirectAddrs: async () => {
+          const peer = await libp2p.peerStore.get(targetPeer);
+          return (peer.addresses ?? []).some(({ multiaddr }) => {
+            const address = multiaddr?.toString?.() ?? '';
+            return Boolean(address) && !address.includes('/p2p-circuit');
+          });
+        },
+        allowLimitedWithDirectAddrs: options.allowLimitedWithDirectAddrs,
+        excludeConnections: options.excludeConnections,
+      };
+      let reused = await tryReuseExistingConnection(getConnections, protocolId, signal, reuseOptions);
+      if (!reused && this.peerResolver && !signal.aborted) {
+        // Only resolution follows the connection event signal. Negotiation and
+        // payload work keep the caller's original cancellation/deadline signal.
+        const connected = watchForNewPeerConnection(libp2p, targetPeer, considered);
+        const resolution = composeAbortSignalsScoped(signal, connected?.signal);
+        try {
+          if (!connected?.signal.aborted) {
+            await this.peerResolver.resolve(peerIdStr, {
+              signal: resolution.signal ?? signal,
+              perStepTimeoutMs: options.resolverTimeoutMs,
+            }).catch(() => undefined);
+          }
+        } finally {
+          resolution.dispose();
+          connected?.dispose();
+        }
+        if (connected?.signal.aborted) {
+          reused = await tryReuseExistingConnection(getConnections, protocolId, signal, reuseOptions);
+        }
+      }
+      if (signal.aborted && (reused || options.cancelledResolution === 'throw')) {
+        if (reused) abortStream(reused.stream, signal.reason);
+        throw asAbortError(signal.reason);
+      }
+      const dialStartedAt = Date.now();
+      let stream: Stream;
+      if (reused) stream = reused.stream;
+      else {
+        options.onNormalDial?.();
+        try {
+          stream = await this.network.dialProtocol(peerIdStr, protocolId, { signal });
+        } catch (error) {
+          if (options.afterDialFailure === 'throw') throw error;
+          if (signal.aborted) throw asAbortError(signal.reason);
+          // No application bytes have been sent. A duplex scope may use an
+          // existing relay after the normal dial actually failed.
+          reused = await tryReuseExistingConnection(getConnections, protocolId, signal,
+            { ...reuseOptions, allowLimitedWithDirectAddrs: true });
+          if (!reused) throw error;
+          stream = reused.stream;
+        }
+      }
+      if (signal.aborted) {
+        abortStream(stream, signal.reason);
+        throw asAbortError(signal.reason);
+      }
+      return { stream, connection: reused?.connection ?? null, dialDurationMs: Date.now() - dialStartedAt };
+    };
   }
 
   private async sendInner(
@@ -918,11 +979,7 @@ export class ProtocolRouter {
     const overallDeadline = lifecycle.deadline;
     const stopSignal = this.node.stopSignal;
     const overallSignal = lifecycle.signal;
-    if (overallSignal.aborted) throw asAbortError(overallSignal.reason);
-    await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', {
-      signal: overallSignal,
-      timeoutMs,
-    });
+    const openStream = await this.createAdmittedPeerStreamOperation(peerIdStr, protocolId, overallSignal, timeoutMs);
 
     // Pooled overlay short-circuit. When `enablePooling(protocolId)`
     // has been called for this logical protocol AND the peer hasn't
@@ -1053,12 +1110,12 @@ export class ProtocolRouter {
         `send timeout: pooled fallback exhausted the ${timeoutMs}ms budget before one-shot attempt`,
       );
     }
-    const libp2p = this.node.libp2p;
-    const { peerIdFromString } = await import('@libp2p/peer-id');
-    const peerId = peerIdFromString(peerIdStr);
     const startedAt = overallStartedAt;
 
     if (parallelPaths > 1) {
+      const libp2p = this.node.libp2p;
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const peerId = peerIdFromString(peerIdStr);
       // Reuse the overall budget rather than starting a fresh one
       // — see comment above. Codex PR #560 round 4.
       const multipathSignalWithStop = overallSignal;
@@ -1153,163 +1210,19 @@ export class ProtocolRouter {
       let pickedConnection: ReusableConnection | null = null;
       let attemptedNormalDial = false;
       try {
-        // RFC 07 §3.2: re-prime the libp2p peerStore on EVERY attempt.
-        //
-        // Was originally a single pre-loop call (PR #497) but that left
-        // a real cold-dial gap surfaced during the two-laptop debug
-        // session that produced PR #517 + the MessageOutbox PR: if the
-        // first resolver call landed during a transient routing-table
-        // miss (peer's K-bucket entry expired, no live gossip source,
-        // DHT walk happened to time out), all 3 dialProtocol attempts
-        // hit the same empty peerStore in the next ~1.5s and the loop
-        // gave up with `'no valid addresses for peer'` before any DHT
-        // advertisement / `connection:open` event from the recipient
-        // could populate addresses for a later attempt.
-        //
-        // Re-running per-attempt is cheap on the warm path (the
-        // resolver's step 1 is a sub-millisecond live-connection check
-        // that short-circuits when we already have the peer connected
-        // or its addresses cached in the peerStore) and only pays the
-        // DHT-walk / registry-lookup cost on the cold path — which is
-        // exactly the case we want to keep paying for, because that's
-        // where address staleness actually hurts. The resolver itself
-        // never throws (returns empty array on miss); the dial below
-        // surfaces a real transport error if the peer is genuinely
-        // unreachable.
-        //
-        // Codex review feedback on PR #497: pass the same AbortSignal +
-        // remaining time budget to the resolver so a caller's
-        // `timeoutMs` bounds the entire send (resolver + dial + read).
-        // First try the existing-connection fast path: if we already
-        // have at least one open connection to this peer (of ANY
-        // direction, direct OR circuit-relay-limited), open the new
-        // stream on that connection directly via `newStream` instead
-        // of going through `dialProtocol`. This sidesteps the entire
-        // address-resolution + peerStore lookup path that returns
-        // "no valid addresses for peer" when libp2p's peerStore is
-        // empty or stale for the peer — the "Window D" failure class
-        // identified in the May 2026 Miles↔Lex 6h soak postmortem,
-        // where 31 inbound circuit `connection:open` events from peer
-        // P over 4 minutes failed to heal any of 20 opportunistic
-        // outbound flushes because each one went through dialProtocol
-        // and lost the peerStore race.
-        //
-        // Crucially: when peerStore is empty for P (the Window D
-        // shape), the connection-manager-auto-dial side effect of
-        // `peerStore.merge` documented at
-        // docs/archive/UPSTREAM_ISSUE_DRAFT.md does NOT fire — there
-        // are no direct addresses to upgrade to. So this fast path
-        // does not introduce the mid-stream-negotiation race the doc
-        // warns about; it benefits exactly the case where the doc's
-        // race cannot apply.
-        //
-        // Failure here (connection died between `getConnections` and
-        // `newStream`, peer dropped protocol support, etc.) falls
-        // through to the dialProtocol path below WITHIN THE SAME
-        // ATTEMPT, so we don't waste a retry slot on the fast-path
-        // miss.
-        // CRITICAL: feed the fast path from a RAW `getConnections()`
-        // walk filtered by `remotePeer`, NOT from the peerId-keyed
-        // `libp2p.getConnections(peerId)` lookup.
-        //
-        // The PR #533 diagnostic surface (`PeerDiagnostics`) is
-        // explicitly built around the divergence
-        // `rawConnectionCount > getConnectionsReturnsForPeer` as the
-        // smoking-gun Window D signature: libp2p's peerId-keyed
-        // lookup can return `[]` even when a raw walk over all
-        // connections shows one or more open connections whose
-        // `remotePeer` matches the target peerId. Using the keyed
-        // lookup here would make the fast path miss the EXACT case
-        // it was built to heal — `tryReuseExistingConnection` would
-        // get an empty candidate list, fall through to the resolver
-        // + dialProtocol path, and still fail with "no valid
-        // addresses for peer". Walk raw, filter ourselves, and
-        // accept that we pay the O(N) cost over the whole
-        // connection table per send — N is the total open-conn
-        // count of the node, typically <100, so the cost is a few
-        // microseconds and the correctness win is large.
-        //
-        // Every connection the walk hands the fast path is recorded, so
-        // the resolver watch below can tell a connection that opened
-        // after this pass from one the pass already skipped or failed on.
-        const consideredConnections = new WeakSet<ReusableConnection>();
-        const getPeerConnections = (): ReadonlyArray<ReusableConnection> => {
-          const connections = rawGetConnectionsFor(libp2p, peerId);
-          for (const connection of connections) consideredConnections.add(connection);
-          return connections;
-        };
-        const fastPathOptions: TryReuseExistingConnectionOptions = {
-          // Probe peerStore for non-circuit (direct) addresses; the
-          // fast path uses this to gate whether reusing a LIMITED
-          // (circuit-relay-v2) connection is safe or whether
-          // libp2p's CM is about to auto-upgrade and prune it
-          // mid-stream. See the JSDoc inside
-          // `tryReuseExistingConnection` + the PR #537 CI
-          // postmortem for the DCUtR upgrade race detail.
-          peerHasDirectAddrs: async (): Promise<boolean> => {
-            const peer = await libp2p.peerStore.get(peerId);
-            const addrs = peer.addresses ?? [];
-            for (const a of addrs) {
-              const ma = a.multiaddr?.toString?.() ?? '';
-              if (ma && !ma.includes('/p2p-circuit')) return true;
-            }
-            return false;
-          },
+        // Re-prime on each cold retry, while warm reuse skips resolution.
+        // A failed normal dial unlocks limited reuse on the next attempt;
+        // unlike a duplex scope, send() keeps its existing retry/backoff gate.
+        const opened = await openStream({
+          resolverTimeoutMs: remaining,
           allowLimitedWithDirectAddrs: normalDialFailed,
           excludeConnections: triedConnections,
-        };
-        let fastResult = await tryReuseExistingConnection(
-          getPeerConnections,
-          protocolId,
-          attemptSignal,
-          fastPathOptions,
-        );
-
-        if (this.peerResolver && !fastResult) {
-          // One resolver step can spend the whole remaining budget:
-          // kad-dht parks a findPeer until its signal aborts while the
-          // routing table is empty. A connection to the peer that opens
-          // meanwhile (the peer dialing us, or a concurrent dial) makes
-          // further resolution pointless, just as the resolver's own
-          // live-connection step would, so it ends the resolver early and
-          // the fast path runs again over it. Only the resolver's signal
-          // is cut short; the rest of the attempt keeps `attemptSignal`.
-          const peerConnected = watchForNewPeerConnection(libp2p, peerId, consideredConnections);
-          const resolverSignal = composeAbortSignalsScoped(attemptSignal, peerConnected?.signal);
-          try {
-            if (!peerConnected?.signal.aborted) {
-              await this.peerResolver
-                .resolve(peerIdStr, {
-                  signal: resolverSignal.signal ?? attemptSignal,
-                  perStepTimeoutMs: remaining,
-                })
-                .catch(() => undefined);
-            }
-          } finally {
-            resolverSignal.dispose();
-            peerConnected?.dispose();
-          }
-          if (peerConnected?.signal.aborted) {
-            fastResult = await tryReuseExistingConnection(
-              getPeerConnections,
-              protocolId,
-              attemptSignal,
-              fastPathOptions,
-            );
-          }
-        }
-        const fastStream = fastResult?.stream ?? null;
-        pickedConnection = fastResult?.connection ?? null;
-
-        const dialStartedAt = Date.now();
-        let stream: Stream;
-        if (fastStream) {
-          stream = fastStream;
-        } else {
-          attemptedNormalDial = true;
-          stream = await this.dialAdmittedPeer(peerIdStr, protocolId, attemptSignal);
-        }
-        const dialDurationMs = Date.now() - dialStartedAt;
+          afterDialFailure: 'throw',
+          cancelledResolution: 'dial-with-signal',
+          onNormalDial: () => { attemptedNormalDial = true; },
+        });
+        const { stream, dialDurationMs } = opened;
+        pickedConnection = opened.connection;
 
         if (stream.writeStatus === 'closed' || stream.writeStatus === 'closing') {
           stream.abort(new Error('stream closed before send'));
