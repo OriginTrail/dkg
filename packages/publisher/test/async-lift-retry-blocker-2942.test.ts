@@ -457,8 +457,11 @@ describe('GH#2942 derived retry blocker', () => {
 
       for (const [label, job, options, expected] of cases) {
         const projection = describeRetryProjection(job, options);
-        const actual = expected.startsWith('{') ? JSON.stringify(projection) : Object.keys(projection).join(',');
-        expect([label, actual]).toEqual([label, expected]);
+        // The KEY SET catches a key that is present but undefined (JSON.stringify would hide it)...
+        const keys = expected.startsWith('{') ? Object.keys(JSON.parse(expected)).join(',') : expected;
+        expect([label, Object.keys(projection).join(',')]).toEqual([label, keys]);
+        // ...and the serialization pins the exact content wherever no blocker text is involved.
+        if (expected.startsWith('{')) expect([label, JSON.stringify(projection)]).toEqual([label, expected]);
       }
     });
 

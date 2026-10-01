@@ -12,6 +12,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
+import { EVMChainAdapter } from '../src/evm-adapter.js';
 import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
 import { makeClient, recorder } from './rpc-failover-test-helpers.js';
 
@@ -50,6 +51,46 @@ function expectHostOnly(err: any): void {
   expect(err.message).not.toContain('/v2/');
   expect(err.message).toContain('rpc.example');
 }
+
+describe('adapter-level messages are host-only', () => {
+  const adapters: EVMChainAdapter[] = [];
+  afterEach(() => { for (const a of adapters.splice(0)) { try { a.destroy(); } catch { /* idempotent */ } } });
+  const makeAdapter = (overrides: Record<string, unknown> = {}): any => {
+    const adapter = new EVMChainAdapter({
+      rpcUrl: KEYED,
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'evm:31337',
+      allowNoAdminSigner: true,
+      ...overrides,
+    });
+    adapters.push(adapter);
+    return adapter;
+  };
+
+  it('chain initialisation failure: the exhaustion message is host-only and the cause is the original', async () => {
+    const adapter = makeAdapter();
+    adapter.initContracts = async () => { throw keyed429(); };
+
+    const err = await caught(() => adapter.init());
+
+    expect(err.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expectHostOnly(err);
+    expect(err.cause.message).toContain('SECRET-API-KEY');
+  });
+
+  it('receipt-wait timeout: the "last RPC error" it quotes is host-only, and the txHash is kept', async () => {
+    const adapter = makeAdapter({ receiptTimeoutMs: 1_000 });
+    adapter.getTransactionReceiptWithFailover = async () => { throw keyed429(); };
+
+    const err = await caught(() => adapter.waitForReceiptWithFailover(TX_HASH, 'publish'));
+
+    expect(err.code).toBe('RPC_TIMEOUT');
+    expect(err.txHash).toBe(TX_HASH);
+    expect(err.message).toContain('last RPC error');
+    expectHostOnly(err);
+  });
+});
 
 describe('write-transport exhaustion messages are host-only', () => {
   const failingContract = () => ({
