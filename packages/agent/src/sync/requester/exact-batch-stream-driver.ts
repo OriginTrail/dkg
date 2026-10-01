@@ -88,7 +88,7 @@ export async function runExactBatchStreamDriver(
   }
 
   const accumulator = createDurableSyncAccumulator();
-  const committedExactAssetUals: string[] = [];
+  let committedExactAssetUals: readonly string[] = Object.freeze([]);
   const selected = exactAssetUalsForSelection(options.selection);
   // Registered public authority permits the unchanged public START without
   // requiring an identity/signature from a requester that has not joined yet.
@@ -118,7 +118,7 @@ export async function runExactBatchStreamDriver(
   };
   try {
     if (remainingMs < 1) throw new Error('Exact batch recovery fetch deadline expired');
-    await exchangeExactBatchVerified(consume => exchangeExperimentalExactBatch(ports.router, remotePeerId,
+    const exchanged = await exchangeExactBatchVerified(consume => exchangeExperimentalExactBatch(ports.router, remotePeerId,
       exactBatchStartFrame(start),
       { ...exactBatchTransportOptions(Math.min(120_000, remainingMs), signal), assetUals: selected, onTransportEvent }, consume), {
       ...ports.verification, contextGraphId, assetUals: selected,
@@ -138,20 +138,21 @@ export async function runExactBatchStreamDriver(
       onStage: (stage, assetIndex, durationMs) => ports.logInfo(
         `Exact batch requester stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
       onCommitted: ual => {
-        committedExactAssetUals.push(ual);
-        observeExactBatch(() => ports.logInfo(
-          `Exact batch committed asset=${committedExactAssetUals.length - 1} committedAssets=${committedExactAssetUals.length}`));
+        const assetIndex = selected.indexOf(ual);
+        ports.logInfo(`Exact batch committed asset=${assetIndex} committedAssets=${assetIndex + 1}`);
       },
     });
+    committedExactAssetUals = exchanged.committedAssetUals;
     streamComplete = true;
     markDurableTerminalBoundary(accumulator, true, { countCompletedPhase: true });
     return { kind: 'settled', detailed: {
       result: finalizeDurableSyncCompletion(accumulator), exactFetchDisposition: 'found',
-      committedExactAssetUals: Object.freeze([...committedExactAssetUals]),
+      committedExactAssetUals,
     } };
   } catch (error) {
     // Core settles physical stream/decoder cleanup before rejection. Progress
     // reflects the guarded atomic callback, including a failed final close.
+    if (error instanceof ExactBatchPartialSyncError) committedExactAssetUals = error.committedAssetUals;
     if (error instanceof ExactBatchPartialSyncError && error.refusalObservation !== undefined) {
       const observed = error.refusalObservation;
       if (observed.code === 'RESOURCE_LIMIT' && !signal?.aborted && options.isCurrent?.() !== false) {
@@ -170,7 +171,7 @@ export async function runExactBatchStreamDriver(
     markDurableTerminalBoundary(accumulator, false);
     return { kind: 'settled', detailed: {
       result: finalizeDurableSyncCompletion(accumulator), exactFetchDisposition: 'incomplete',
-      committedExactAssetUals: Object.freeze([...committedExactAssetUals]),
+      committedExactAssetUals,
     } };
   } finally {
     // Encoded native payload totals exclude Noise/TCP overhead. Success also

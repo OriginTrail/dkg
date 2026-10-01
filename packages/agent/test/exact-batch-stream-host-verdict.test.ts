@@ -26,6 +26,7 @@ import { createChallengePinnedExactAssetSelection, createUalOnlyExactAssetSelect
 import { EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_PROTOCOL, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
 import { EXACT_BATCH_RESOURCE_REFUSAL_TTL_MS, exactBatchStreamUnsupported } from '../src/sync/exact-batch-stream-capability.js';
 import type { ExactBatchAgentSession } from '../src/sync/requester/exact-batch-stream.js';
+import * as exactBatchRequester from '../src/sync/requester/exact-batch-stream.js';
 import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
 import { runChallengeExactAssetFetch, runDurableSyncDetailed } from '../src/sync/requester/durable-sync.js';
 
@@ -492,6 +493,71 @@ describe('experimental exact batch actual host completion verdict', () => {
     for (const item of f.items) expect(await storedRows(f.store, item.graph)).toBe(1);
     expect(f.session.send).toHaveBeenCalledTimes(2);
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+  });
+
+  it('takes completed progress from the exchange result without an observational callback', async () => {
+    const f = fixture();
+    const committedAssetUals = Object.freeze([...f.selection.assetUals]);
+    // This exercises the driver/exchange result contract. The surrounding
+    // settlement regressions retain the real worker and atomic materializer.
+    const exchange = vi.spyOn(exactBatchRequester, 'exchangeExactBatchVerified')
+      .mockResolvedValueOnce({ complete: true, committedAssetUals });
+    try {
+      const outcome = await f.run();
+      expect(outcome).toMatchObject({ exactFetchDisposition: 'found', committedExactAssetUals: committedAssetUals,
+        result: { complete: true } });
+      expect(exchange).toHaveBeenCalledOnce();
+      expect(f.atomicStarted).not.toHaveBeenCalled();
+      expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+    } finally { exchange.mockRestore(); }
+  });
+
+  it('takes incomplete progress from the partial error without an observational callback', async () => {
+    const f = fixture();
+    const committedAssetUals = Object.freeze(f.selection.assetUals.slice(0, 1));
+    const exchange = vi.spyOn(exactBatchRequester, 'exchangeExactBatchVerified')
+      .mockRejectedValueOnce(new exactBatchRequester.ExactBatchPartialSyncError(
+        committedAssetUals, new Error('Fixture settled transport failure')));
+    try {
+      const outcome = await f.run();
+      expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: committedAssetUals,
+        result: { complete: false } });
+      expect(exchange).toHaveBeenCalledOnce();
+      expect(f.atomicStarted).not.toHaveBeenCalled();
+      expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+    } finally { exchange.mockRestore(); }
+  });
+
+  it('normalizes the exchange failure once after retaining the real applied prefix', async () => {
+    const f = fixture();
+    const prefix = f.frames.slice(0, 3);
+    const transportFailure = new Error('Fixture transport failure after commit ACK');
+    let acknowledge!: () => void;
+    const acknowledged = new Promise<void>(resolve => { acknowledge = resolve; });
+    vi.mocked(f.session.send).mockImplementation(async () => { acknowledge(); });
+    vi.mocked(f.session.next).mockImplementation(async () => {
+      if (prefix.length > 0) return prefix.shift();
+      await acknowledged;
+      throw transportFailure;
+    });
+    const actualExchange = exactBatchRequester.exchangeExactBatchVerified;
+    let partial: unknown;
+    const exchange = vi.spyOn(exactBatchRequester, 'exchangeExactBatchVerified')
+      .mockImplementation(async (...args) => {
+        try { return await actualExchange(...args); }
+        catch (error) { partial = error; throw error; }
+      });
+    try {
+      const outcome = await f.run();
+      expect(partial).toBeInstanceOf(exactBatchRequester.ExactBatchPartialSyncError);
+      expect((partial as Error).cause).toBe(transportFailure);
+      expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
+        committedExactAssetUals: f.selection.assetUals.slice(0, 1), result: { complete: false, insertedDataTriples: 1 } });
+      expect(await storedRows(f.store, f.items[0]!.graph)).toBe(1);
+      expect(await storedRows(f.store, f.items[1]!.graph)).toBe(0);
+      expect(f.session.send).toHaveBeenCalledOnce();
+      expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+    } finally { exchange.mockRestore(); }
   });
 
   it.each([undefined, '0'])('keeps requester on legacy transport when opt-in is %s', async flag => {

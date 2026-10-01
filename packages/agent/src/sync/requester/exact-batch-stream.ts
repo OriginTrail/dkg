@@ -27,7 +27,7 @@ export interface ExactBatchVerifiedReceiverOptions {
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
   readonly authenticationDeadline: () => number;
   readonly onStage?: (stage: ExactBatchStage, assetIndex: number, durationMs: number) => void;
-  /** Per-KA continuation only, invoked after the complete normal store callback. */
+  /** Observation only, after the normal store callback; progress is returned separately. */
   readonly onCommitted?: (assetUal: string) => void;
 }
 export interface ExactBatchVerifiedResult {
@@ -64,6 +64,17 @@ export class ExactBatchPartialSyncError extends Error {
     readonly refusalObservation?: ExactBatchRefusalObservation) {
     super('Exact batch stopped before verified completion', { cause });
   }
+}
+interface ExactBatchProgress {
+  readonly committedAssetUals: string[];
+  refusalObservation?: ExactBatchRefusalObservation;
+}
+function committedPrefix(progress: ExactBatchProgress): readonly string[] {
+  return Object.freeze([...progress.committedAssetUals]);
+}
+function partialSyncError(progress: ExactBatchProgress, cause: unknown, signal?: AbortSignal): ExactBatchPartialSyncError {
+  return new ExactBatchPartialSyncError(committedPrefix(progress), cause,
+    cause instanceof ExactBatchRefusalError && !signal?.aborted ? progress.refusalObservation : undefined);
 }
 const META_GRAPH_SUFFIX = '/_meta';
 const MAX_PARSED_HEAP = 32 * 1024 * 1024;
@@ -125,16 +136,34 @@ export function createExactBatchVerifiedCommitter(options: ExactBatchVerifiedRec
  * module never releases a live atomic callback by racing it against cancellation.
  */
 export async function consumeExactBatchVerifiedSession(session: ExactBatchAgentSession, options: ExactBatchVerifiedReceiverOptions): Promise<ExactBatchVerifiedResult> {
+  const selected = validateExactBatchSelection(session, options);
+  const progress: ExactBatchProgress = { committedAssetUals: [] };
+  try {
+    return await consumeExactBatchWithProgress(session, options, selected, progress);
+  } catch (cause) {
+    throw partialSyncError(progress, cause, session.signal);
+  }
+}
+
+function validateExactBatchSelection(session: ExactBatchAgentSession, options: ExactBatchVerifiedReceiverOptions): string[] {
   if (session.windowSize !== EXACT_BATCH_STREAM_WINDOW_SIZE) throw new Error('Experimental exact batch requires fixed window2');
   const selected = requireExactAssetUals(options.assetUals);
   if (selected.length !== options.assetUals.length || JSON.stringify(selected) !== JSON.stringify(session.assetUals)) throw new Error('Exact batch authorized selection mismatch');
+  return selected;
+}
+
+async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, options: ExactBatchVerifiedReceiverOptions,
+  selected: readonly string[], progress: ExactBatchProgress): Promise<ExactBatchVerifiedResult> {
   const window = new ExactBatchReceiveWindow({ assetUals: selected, windowSize: EXACT_BATCH_STREAM_WINDOW_SIZE });
   const cancellation = new AbortController();
   const signal = AbortSignal.any([session.signal, cancellation.signal]);
-  const committed: string[] = [];
-  const commit = createExactBatchVerifiedCommitter({ ...options, onCommitted: ual => {
-    committed.push(ual); observeExactBatch(() => options.onCommitted?.(ual));
-  } });
+  const verifyAndCommit = createExactBatchVerifiedCommitter(options);
+  const commit = async (asset: ReceivedExactBatchAsset, commitSignal?: AbortSignal) => {
+    await verifyAndCommit(asset, commitSignal);
+    // Required progress follows settled atomic application, independent of
+    // observers and before the receive window checks cancellation for ACK.
+    progress.committedAssetUals.push(asset.assetUal);
+  };
   let stopped = false, batchEnded = false, acknowledgedAssets = 0;
   let wake: (() => void) | undefined;
   const notify = () => { const waiting = wake; wake = undefined; waiting?.(); };
@@ -161,12 +190,12 @@ export async function consumeExactBatchVerifiedSession(session: ExactBatchAgentS
   try {
     await Promise.all([reader, committer]);
     if (!batchEnded || !window.complete) throw new Error('Exact batch did not reach verified completion');
-    return Object.freeze({ complete: true, committedAssetUals: Object.freeze([...committed]) });
+    return Object.freeze({ complete: true, committedAssetUals: committedPrefix(progress) });
   } catch (cause) {
     stopped = true; cancellation.abort(cause); notify();
     await window.close();
-    const prefix = Object.freeze([...committed]);
-    const refusalObservation = cause instanceof ExactBatchRefusalError && !session.signal.aborted
+    const prefix = progress.committedAssetUals;
+    progress.refusalObservation = cause instanceof ExactBatchRefusalError && !session.signal.aborted
       ? Object.freeze({ code: cause.refusal, startedAssets: cause.startedCount,
           committedAssets: prefix.length, acknowledgedAssets, atAssetBoundary: cause.atAssetBoundary,
           verifiedPrefix: cause.atAssetBoundary && !batchEnded
@@ -174,7 +203,9 @@ export async function consumeExactBatchVerifiedSession(session: ExactBatchAgentS
             && cause.startedCount === prefix.length && acknowledgedAssets === prefix.length
             && prefix.every((ual, index) => ual === selected[index]) })
       : undefined;
-    throw new ExactBatchPartialSyncError(prefix, cause, refusalObservation);
+    // The owning public boundary normalizes the error after its physical
+    // settlement, so a later close failure can replace refusal classification.
+    throw cause;
   } finally {
     stopped = true; notify();
     await window.close(); // physically await any verifier/write still running
@@ -195,18 +226,14 @@ export async function exchangeExactBatchVerified(
   exchange: (consume: (session: ExactBatchAgentSession) => Promise<ExactBatchVerifiedResult>) => Promise<ExactBatchVerifiedResult>,
   options: ExactBatchVerifiedReceiverOptions,
 ): Promise<ExactBatchVerifiedResult> {
-  const committed: string[] = [];
+  const progress: ExactBatchProgress = { committedAssetUals: [] };
   let sessionSignal: AbortSignal | undefined;
   try {
     return await exchange(session => {
       sessionSignal = session.signal;
-      return consumeExactBatchVerifiedSession(session, {
-        ...options,
-        onCommitted: ual => { committed.push(ual); observeExactBatch(() => options.onCommitted?.(ual)); },
-      });
+      return consumeExactBatchWithProgress(session, options, validateExactBatchSelection(session, options), progress);
     });
   } catch (cause) {
-    throw new ExactBatchPartialSyncError(Object.freeze([...committed]), cause,
-      cause instanceof ExactBatchPartialSyncError && !sessionSignal?.aborted ? cause.refusalObservation : undefined);
+    throw partialSyncError(progress, cause, sessionSignal);
   }
 }
