@@ -12,7 +12,8 @@ import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
 import { parseGraphScopedDescriptor } from '../durable-integrity.js';
 import { estimateQuadHeapBytes } from '../memory-telemetry.js';
-import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets, type DurableSyncContext } from './durable-sync.js';
+import type { DurableSyncContext } from './durable-sync.js';
+import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets } from './verified-asset-preparation.js';
 
 /** Agent consumes the public operations of Core's fixed wire session. */
 export type ExactBatchAgentSession = Pick<ExactBatchTransportSession, 'signal' | 'windowSize' | 'assetUals' | 'next' | 'send'>;
