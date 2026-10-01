@@ -1,3 +1,4 @@
+import type { SessionPlanMemo } from './session-plan-memo.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import {
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE, SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
@@ -45,13 +46,7 @@ export interface RowListCache {
  * lane (not a regression); requester-side verification still gates admission.
  */
 export function createSessionPlanGetter<T>(
-  memo: {
-    get(
-      key: string,
-      load: () => Promise<T>,
-      options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
-    ): Promise<T | null>;
-  } | undefined,
+  memo: SessionPlanMemo<T> | undefined,
   cacheKey: string | undefined,
   initialRefreshPending: boolean,
   loadPlan: (signal?: AbortSignal) => Promise<T>,

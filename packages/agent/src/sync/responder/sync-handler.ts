@@ -21,7 +21,8 @@ import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
   createResponderExactGraphPagePlanMemo,
-  createResponderPageOnlyExactGraphPlanMemo,
+  createResponderPageOnlyExactDataSessionMemo,
+  createResponderExactDataSessionMemo,
   createResponderFreshSwmDataGraphPlanMemo,
   createResponderFreshSwmMetaPlanMemo,
   createResponderSyncRowListMemo,
@@ -479,11 +480,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // peers cannot stack uncharged plans, and global pressure evicts idle ones.
     responderSnapshotBudget,
   );
-  const durableDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+  const durableDataExactSessionMemo = createResponderExactDataSessionMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
   );
-  const pageOnlyExactGraphPlanMemo = createResponderPageOnlyExactGraphPlanMemo(
+  const pageOnlyExactDataSessionMemo = createResponderPageOnlyExactDataSessionMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
     responderSnapshotBudget,
@@ -913,9 +914,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
-          exactGraphPlanMemo: durableDataPolicy.cacheMode === 'page-only'
-            ? pageOnlyExactGraphPlanMemo
-            : durableDataExactGraphPlanMemo,
+          exactDataSessionMemo: durableDataPolicy.cacheMode === 'page-only'
+            ? pageOnlyExactDataSessionMemo
+            : durableDataExactSessionMemo,
           exactGraphPlanCacheKey: durableDataPolicy.cacheMode === 'page-only'
             ? session?.refreshGeneration
             : undefined,

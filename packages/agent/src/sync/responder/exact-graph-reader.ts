@@ -1,3 +1,4 @@
+import type { SessionPlanMemo } from './session-plan-memo.js';
 import { assertSafeIri, compareCodePoint, GRAPH_KA_CONTENT_SCOPE_VERSION, MemoryLayer,
   createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, validateSubGraphName } from '@origintrail-official/dkg-core';
 import { StoreResponseTooLargeError, type TripleStore, type QueryOptions } from '@origintrail-official/dkg-storage';
@@ -81,13 +82,7 @@ export interface ExactGraphPagePlan {
 
 }
 
-export interface ExactGraphPagePlanMemo {
-  get(
-    key: string,
-    load: () => Promise<ExactGraphPagePlan>,
-    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
-  ): Promise<ExactGraphPagePlan | null>;
-}
+export type ExactGraphPagePlanMemo = SessionPlanMemo<ExactGraphPagePlan>;
 
 
 /**

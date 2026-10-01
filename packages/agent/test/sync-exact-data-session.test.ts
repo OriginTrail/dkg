@@ -5,7 +5,7 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { createGraphMembershipSnapshot } from '../src/sync/graph-membership-snapshot.js';
 import { readExactDataSessionPage } from '../src/sync/responder/exact-data-session.js';
 import {
-  createResponderPageOnlyExactGraphPlanMemo,
+  createResponderPageOnlyExactDataSessionMemo as createResponderPageOnlyExactGraphPlanMemo,
   createResponderSyncRowListMemo,
   readDurableDataPage,
 } from '../src/sync/responder/graph-plan.js';
@@ -72,7 +72,7 @@ describe('exact DATA session owner boundaries', () => {
       expect(f.query.mock.calls.some(([sparql, options]) => options?.source === 'sync.responder.readExactGraphRowsPage'
         && sparql.includes('FILTER'))).toBe(true);
       const retained = await params.exactGraphPlanMemo.get('owner-session', async () => { throw new Error('must retain session'); }, { requireExisting: true });
-      expect(retained!.cursors.size).toBeLessThanOrEqual(512);
+      expect(retained!.graphPlan.cursors.size).toBeLessThanOrEqual(512);
       await f.changeMetadata();
       await expect(readDurableDataPage({ ...params, offset: 2, refreshRowList: false })).rejects.toThrow(/store revision changed/);
     } finally { await f.close(); }

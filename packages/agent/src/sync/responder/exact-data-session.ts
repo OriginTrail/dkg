@@ -1,6 +1,8 @@
 import { asGraphWriteRevisionSource, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphMembershipSnapshot } from '../graph-membership-snapshot.js';
 import type { ExactGraphReadMode } from './durable-data-request-policy.js';
+import { createSessionPlanMemo, createPageOnlySessionPlanMemo, type SessionPlanMemo } from './session-plan-memo.js';
+import type { SyncResponderSnapshotBudget } from './snapshot-budget.js';
 import type { ExactAssetExportCache } from './exact-asset-export-cache.js';
 import {
   ExactPageSessionReader,
@@ -27,7 +29,7 @@ import {
   type SyncRowListMemo,
 } from './snapshot-cache.js';
 
-export interface DurableDataPageParams {
+interface DurableDataPageBaseParams {
   store: TripleStore;
   graphMembership: GraphMembershipSnapshot;
   contextGraphId: string;
@@ -39,14 +41,12 @@ export interface DurableDataPageParams {
   rowListCacheScope?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
-  exactGraphPlanMemo?: ExactGraphPagePlanMemo;
   /** Server-derived peer/CG/selection/session identity, independent of row caching. */
   exactGraphPlanCacheKey?: string;
   /** Assemble byte-budgeted pages from conservative store chunks. */
   maxPageBytes?: number;
   /** Keep the immutable row snapshot until an explicit empty-page EOF. */
   releaseCacheOnShortPage?: boolean;
-  assetUals?: readonly string[];
   /**
    * Select whether exact-graph payloads may use a bounded graph snapshot or
    * must use OFFSET/LIMIT reads. Resource policy is resolved by the handler;
@@ -56,8 +56,59 @@ export interface DurableDataPageParams {
   /** Negotiated single-KA gzip only; plain and older readers keep conservative paging. */
   exactAssetExportCache?: ExactAssetExportCache;
 }
+
+export interface ExactDataSession {
+  /** The retained mutable cursor/snapshot state; composition preserves its identity. */
+  readonly graphPlan: ExactGraphPagePlan;
+  assertCurrent(): void;
+  read(offset: number, limit: number, maxBytes?: number, signal?: AbortSignal): Promise<ExactPageReadResult>;
+  snapshot(cache: RowListCache): Promise<readonly SyncRow[]>;
+}
+
+export type ExactDataSessionMemo = SessionPlanMemo<ExactDataSession>;
+
+export interface ExactDataPageParams extends DurableDataPageBaseParams {
+  assetUals: readonly string[];
+  exactDataSessionMemo?: ExactDataSessionMemo;
+  /** Compatible property spelling for selected DATA; the value is a session memo. */
+  exactGraphPlanMemo?: ExactDataSessionMemo;
+}
+
+export interface LegacyDurableDataPageParams extends DurableDataPageBaseParams {
+  assetUals?: undefined;
+  exactGraphPlanMemo?: ExactGraphPagePlanMemo;
+  /** The handler shares its regular DATA retention allowance across both DATA scopes. */
+  exactDataSessionMemo?: ExactDataSessionMemo;
+}
+
+export type DurableDataPageParams = ExactDataPageParams | LegacyDurableDataPageParams;
+
+export function createResponderExactDataSessionMemo(
+  ttlMs = 10 * 60_000,
+  maxEntries = 32,
+): ExactDataSessionMemo {
+  return createSessionPlanMemo<ExactDataSession>(ttlMs, maxEntries);
+}
+
+export function createResponderPageOnlyExactDataSessionMemo(
+  ttlMs: number,
+  maxEntries: number,
+  budget: SyncResponderSnapshotBudget,
+): ExactDataSessionMemo {
+  return createPageOnlySessionPlanMemo(ttlMs, maxEntries, budget, session => session.graphPlan);
+}
+
+/** Store-only legacy DATA shares the typed retention allowance without export leases. */
+export function createStoreOnlyDataSession(
+  store: TripleStore,
+  graphPlan: ExactGraphPagePlan,
+  limits: ExactGraphSnapshotLimits,
+): ExactDataSession {
+  return new ExactDataSessionOwner(graphPlan, store, limits, [], false, undefined, false);
+}
+
 /** Selected exact DATA has its own session owner; shared snapshot loaders remain row-only. */
-export async function readExactDataSessionPage(params: DurableDataPageParams): Promise<ExactPageReadResult> {
+export async function readExactDataSessionPage(params: ExactDataPageParams): Promise<ExactPageReadResult> {
   if (!params.assetUals?.length) return { rows: [] };
   const cache: RowListCache | undefined = params.rowListMemo
     ? {
@@ -79,15 +130,11 @@ export async function readExactDataSessionPage(params: DurableDataPageParams): P
     pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
   };
   const key = params.exactGraphPlanCacheKey ?? cache?.key;
-  const getPlan = createSessionPlanGetter<ExactGraphPagePlan>(params.exactGraphPlanMemo, key,
+  const memo = params.exactDataSessionMemo ?? params.exactGraphPlanMemo;
+  const getSession = createSessionPlanGetter<ExactDataSession>(memo, key,
     params.exactGraphPlanCacheKey ? params.refreshRowList === true : cache?.refresh === true,
-    signal => loadExactDataSession(params, cache, limits, Boolean(params.exactGraphPlanMemo && key), signal),
+    signal => loadExactDataSession(params, cache, limits, Boolean(memo && key), signal),
     'Sync session exact-graph plan expired before page completion');
-  const getSession = async (offset: number, signal?: AbortSignal): Promise<ExactDataSessionOwner> => {
-    const plan = await getPlan(offset, signal);
-    if (!(plan instanceof ExactDataSessionOwner)) throw new Error('Sync session exact-graph plan expired before page completion');
-    return plan;
-  };
   if (!cache) {
     return (await getSession(params.offset, params.signal)).read(
       params.offset, params.limit, params.maxPageBytes, params.signal,
@@ -99,7 +146,7 @@ export async function readExactDataSessionPage(params: DurableDataPageParams): P
     { ...cache, expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion' },
     async (offset, limit, signal) => (await (await getSession(offset, signal)).read(offset, limit, params.maxPageBytes, signal)).rows,
     params.offset, params.limit, params.signal,
-    { loadSnapshot: async () => (await getSession(0)).snapshot(cache) },
+    { loadSnapshot: async () => (await getSession(0, undefined)).snapshot(cache) },
   ) };
 }
 
@@ -109,8 +156,8 @@ interface ExactDataRevisionFence {
   readonly stable: boolean;
 }
 
-async function loadExactDataSession(params: DurableDataPageParams, cache: RowListCache | undefined,
-  limits: ExactGraphSnapshotLimits, retained: boolean, signal?: AbortSignal): Promise<ExactDataSessionOwner> {
+async function loadExactDataSession(params: ExactDataPageParams, cache: RowListCache | undefined,
+  limits: ExactGraphSnapshotLimits, retained: boolean, signal?: AbortSignal): Promise<ExactDataSession> {
   const requested = new Set(params.assetUals);
   const revisionSource = params.exactGraphReadMode === 'page-only' ? asGraphWriteRevisionSource(params.store) : null;
   const prefix = `did:dkg:context-graph:${params.contextGraphId}/_meta`;
@@ -141,27 +188,16 @@ async function loadExactDataSession(params: DurableDataPageParams, cache: RowLis
 }
 
 /** The bounded memo retains this owner itself, alongside its reusable store cursor state. */
-class ExactDataSessionOwner implements ExactGraphPagePlan {
-  readonly entries: ExactGraphPagePlan['entries'];
-  readonly totalRows: number;
-  readonly pagedGraphs: ExactGraphPagePlan['pagedGraphs'];
-  readonly cursors: ExactGraphPagePlan['cursors'];
-  declare cursorBytesEstimate: ExactGraphPagePlan['cursorBytesEstimate'];
-  declare activeGraphRows: ExactGraphPagePlan['activeGraphRows'];
-  declare activeGraphRowsLoad: ExactGraphPagePlan['activeGraphRowsLoad'];
+class ExactDataSessionOwner implements ExactDataSession {
   private readonly reader?: ExactPageSessionReader;
 
-  constructor(plan: ExactGraphPagePlan, private readonly store: TripleStore, private readonly limits: ExactGraphSnapshotLimits,
-    private readonly fences: readonly ExactDataRevisionFence[], byteBounded: boolean,
-    exportScope: ExactPageExportScope | undefined, requiresVerifiedExport: boolean) {
-    this.entries = plan.entries;
-    this.totalRows = plan.totalRows;
-    this.pagedGraphs = plan.pagedGraphs;
-    this.cursors = plan.cursors;
-    if (byteBounded) this.reader = new ExactPageSessionReader({ totalRows: this.totalRows,
+  constructor(readonly graphPlan: ExactGraphPagePlan, private readonly store: TripleStore,
+    private readonly limits: ExactGraphSnapshotLimits, private readonly fences: readonly ExactDataRevisionFence[],
+    byteBounded: boolean, exportScope: ExactPageExportScope | undefined, requiresVerifiedExport: boolean) {
+    if (byteBounded) this.reader = new ExactPageSessionReader({ totalRows: graphPlan.totalRows,
       readRows: (offset, limit, maxResponseBytes, signal) => readRowsPageFromExactGraphPlan(
-        this.store, this, offset, limit, { ...this.limits, maxPageResponseBytes: maxResponseBytes }, signal),
-      rememberReturnedPrefix: (offset, rows) => rememberExactGraphReturnedPrefix(this, offset, rows),
+        this.store, this.graphPlan, offset, limit, { ...this.limits, maxPageResponseBytes: maxResponseBytes }, signal),
+      rememberReturnedPrefix: (offset, rows) => rememberExactGraphReturnedPrefix(this.graphPlan, offset, rows),
     }, exportScope, requiresVerifiedExport);
   }
 
@@ -180,7 +216,7 @@ class ExactDataSessionOwner implements ExactGraphPagePlan {
     this.assertCurrent();
     const page = this.reader && maxBytes !== undefined
       ? await this.reader.read({ offset, limit, maxBytes, signal })
-      : { rows: await readRowsPageFromExactGraphPlan(this.store, this, offset, limit, this.limits, signal) };
+      : { rows: await readRowsPageFromExactGraphPlan(this.store, this.graphPlan, offset, limit, this.limits, signal) };
     try {
       this.assertCurrent();
       signal?.throwIfAborted();
@@ -193,7 +229,7 @@ class ExactDataSessionOwner implements ExactGraphPagePlan {
 
   async snapshot(cache: RowListCache): Promise<readonly SyncRow[]> {
     this.assertCurrent();
-    const rows = await readExactGraphPlanSnapshot(this.store, this, cache, this.limits);
+    const rows = await readExactGraphPlanSnapshot(this.store, this.graphPlan, cache, this.limits);
     this.assertCurrent();
     return rows;
   }

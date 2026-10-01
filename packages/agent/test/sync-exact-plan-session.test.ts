@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  createResponderExactGraphPagePlanMemo,
+  createResponderExactDataSessionMemo as createResponderExactGraphPagePlanMemo,
   createResponderPageOnlyExactGraphPlanMemo,
   readDurableDataPageWithLease,
   type SyncRow,
