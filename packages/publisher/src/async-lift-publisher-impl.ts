@@ -3,7 +3,6 @@ import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import {
   getChainWriteAheadHookCause,
-  hostOnlyRpcText,
   isPendingPublishTransactionStatus,
   isTransientRpcTransportFailureWithoutTransaction,
 } from '@origintrail-official/dkg-chain';
@@ -3326,13 +3325,8 @@ export class TripleStoreAsyncLiftPublisher
       && transientRpc;
     const origin: LiftJobState = preDispatchRecoverable ? 'validated' : failedFromState;
     if (origin === 'claimed' || origin === 'validated') {
-      const rawMessage = error instanceof Error ? error.message : String(error);
-      // The keyword chain below classifies the RAW text; what is PERSISTED is host-only. A provider's
-      // own text carries the request URL (ethers embeds it) and a configured URL can carry an API key,
-      // while the failure record is echoed by the job routes - for every failure code, not just the
-      // typed transient lanes (GH#2945).
-      const message = hostOnlyRpcText(rawMessage);
-      const lower = rawMessage.toLowerCase();
+      const message = error instanceof Error ? error.message : String(error);
+      const lower = message.toLowerCase();
       const code =
         // Structured precondition failures (author capability / stale intent /
         // corrupt head) come from the SAME classifier that routed the failure

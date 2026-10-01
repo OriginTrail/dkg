@@ -1,3 +1,4 @@
+import { hostOnlyRpcText } from '@origintrail-official/dkg-chain';
 import type { LiftJobActiveState } from './lift-job-states.js';
 
 export const LIFT_JOB_FAILURE_PHASES = [
@@ -295,6 +296,10 @@ export function createLiftJobFailureMetadata(
 
   return {
     ...params,
+    // Every persisted failure message is host-only: a provider's text carries the request URL (ethers
+    // embeds it), a configured URL can carry an API key, and the failure record is echoed by the job
+    // routes. Callers classify on the raw text and pass it here; the reduction lives at the one writer.
+    message: hostOnlyRpcText(params.message),
     phase: policy.phase,
     mode: policy.mode,
     retryable: policy.retryable,

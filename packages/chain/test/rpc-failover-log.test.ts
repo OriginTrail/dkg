@@ -114,6 +114,28 @@ describe('rpc-failover-log', () => {
       expect(hostOnlyRpcText(calldata)).toBe(calldata);
       expect(performance.now() - started).toBeLessThan(50);
     });
+
+    it('scans linearly when long calldata sits before, after or right against a URL (an ethers error quotes both)', () => {
+      const calldata = `0x${'ab12'.repeat(20_000)}`;
+      const cases = [
+        { text: `RPC failed at https://rpc.example/v2/KEY with payload ${calldata}`, expected: `RPC failed at rpc.example with payload ${calldata}` },
+        { text: `payload ${calldata} failed at https://rpc.example/v2/KEY`, expected: `payload ${calldata} failed at rpc.example` },
+      ];
+      for (const { text, expected } of cases) {
+        const started = performance.now();
+        const reduced = hostOnlyRpcText(text);
+        // The quadratic scan took ~6 s on this input; a linear one takes milliseconds.
+        expect(performance.now() - started).toBeLessThan(500);
+        expect(reduced).toBe(expected);
+      }
+      // A run glued to the scheme loses at most the scheme's 32 characters of it; the key never survives.
+      const started = performance.now();
+      const glued = hostOnlyRpcText(`${calldata}https://rpc.example/v2/KEY`);
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(glued.endsWith('rpc.example')).toBe(true);
+      expect(glued).not.toContain('KEY');
+      expect(glued.length).toBeGreaterThan(calldata.length - 40);
+    });
   });
 
   describe('noteRpcFailover: dedup gate + counters', () => {
