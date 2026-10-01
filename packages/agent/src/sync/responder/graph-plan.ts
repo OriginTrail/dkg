@@ -36,7 +36,6 @@ import {
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
 import {
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
-  SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
@@ -49,7 +48,10 @@ import {
   createGraphMembershipSnapshotFromSortedCatalog,
   type GraphMembershipSnapshot,
 } from '../graph-membership-snapshot.js';
-import type { ExactAssetExportCache, ExactAssetExportLease } from './exact-asset-export-cache.js';
+import type { ExactAssetExportCache } from './exact-asset-export-cache.js';
+import { ExactPageSessionReader, type ExactPageReadResult, type ExactPageExportScope } from './exact-page-reader.js';
+import { formatTerm, serializeResponderRow, serializeResponderRows, serializedResponderRowByteLength } from './row-serialization.js';
+export { serializeResponderRows } from './row-serialization.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -254,23 +256,10 @@ interface ExactGraphPagePlan {
   cursorBytesEstimate?: number;
   /** Page-only sessions reject local source writes instead of mixing generations. */
   writeRevisions?: readonly { prefix: string; generation: number; stable: boolean }[];
-  /** An indeterminate source may serve only freshly count/root-verified exports. */
+  /** One reader owner resolves the session's byte-page order once. */
+  bytePageReader?: ExactPageSessionReader;
+  /** Unstable source recovery permits only a fresh, fully verified export. */
   requiresVerifiedExport?: true;
-  /**
-   * Export rows use serialized-term lexical order; store pages use SPARQL
-   * term/value order. A retained byte-page session must never cross these.
-   */
-  bytePageReadMode?: 'export' | 'store';
-  /** One exact export retains its metadata identity for this server-owned session. */
-  exportIdentities?: Map<string, string>;
-}
-
-interface ExactAssetExportScope {
-  readonly contextGraphId: string;
-  /** The export cache validates this selected UAL against the plan's sole graph. */
-  readonly assetUal: string;
-  readonly cache: ExactAssetExportCache;
-  readonly onLease: (lease: ExactAssetExportLease) => void;
 }
 
 export interface ExactGraphPagePlanMemo {
@@ -711,27 +700,6 @@ export function compareRows(a: SyncRow, b: SyncRow): number {
  */
 function metaSubjectKey(row: SyncRow): string {
   return `${row.g}\n${row.s}`;
-}
-
-function serializeResponderRow(row: SyncRow): string {
-  return `${formatTerm(row.s)} <${assertSafeIri(row.p)}> ${formatTerm(row.o)} <${assertSafeIri(row.g)}> .`;
-}
-
-export function serializeResponderRows(rows: readonly SyncRow[]): string {
-  return rows.map(serializeResponderRow).join('\n');
-}
-
-const RESPONDER_ROW_ENCODER = new TextEncoder();
-
-/**
- * Serialized (N-Quads, UTF-8) wire byte length of one responder row — the ONE
- * byte model for response-frame budgets, shared by the byte-budget serializer
- * and the subject-atomic extend so both reason about `maxResponseBytes` the same
- * way (#1916). This is distinct from `estimateStringRowHeapBytes`, which
- * estimates retained HEAP size for snapshot memory budgets only.
- */
-function serializedResponderRowByteLength(row: SyncRow): number {
-  return RESPONDER_ROW_ENCODER.encode(serializeResponderRow(row)).byteLength;
 }
 
 /**
@@ -1704,7 +1672,7 @@ export async function readChangelogDeltaPage(params: {
   return { kind: 'delta', era: headAfter.era, headSeq: headAfter.seq, nextSeq, records };
 }
 
-export async function readDurableDataPage(params: {
+interface DurableDataPageParams {
   store: TripleStore;
   graphMembership: GraphMembershipSnapshot;
   contextGraphId: string;
@@ -1732,8 +1700,15 @@ export async function readDurableDataPage(params: {
   exactGraphReadMode?: ExactGraphReadMode;
   /** Negotiated single-KA gzip only; plain and older readers keep conservative paging. */
   exactAssetExportCache?: ExactAssetExportCache;
-  onExactAssetExportLease?: (lease: ExactAssetExportLease) => void;
-}): Promise<SyncRow[]> {
+}
+
+/** Ordinary row callers use the conservative reader without acquiring a response lease. */
+export async function readDurableDataPage(params: Omit<DurableDataPageParams, 'exactAssetExportCache'>): Promise<SyncRow[]> {
+  return (await readDurableDataPageWithLease({ ...params, exactAssetExportCache: undefined })).rows;
+}
+
+/** Return export ownership explicitly to the response that serializes and encodes these rows. */
+export async function readDurableDataPageWithLease(params: DurableDataPageParams): Promise<ExactPageReadResult> {
   const cache = params.rowListMemo
     ? {
       memo: params.rowListMemo,
@@ -1750,7 +1725,7 @@ export async function readDurableDataPage(params: {
     : undefined;
 
   if (params.assetUals !== undefined) {
-    if (params.assetUals.length === 0) return [];
+    if (params.assetUals.length === 0) return { rows: [] };
     const requested = new Set(params.assetUals);
     return readPagedRowsFromExactGraphPlanLoader(
       params.store,
@@ -1789,7 +1764,7 @@ export async function readDurableDataPage(params: {
             // A late remote completion need not advance the local generation.
             // It cannot justify cursor paging or retained DATA snapshots.
             if (params.assetUals?.length !== 1 || !params.exactAssetExportCache
-              || !params.onExactAssetExportLease || params.maxPageBytes === undefined) {
+              || params.maxPageBytes === undefined) {
               throw new Error('Sync session exact-graph plan expired: store revision is unstable');
             }
             plan.requiresVerifiedExport = true;
@@ -1803,11 +1778,10 @@ export async function readDurableDataPage(params: {
         refresh: params.refreshRowList === true,
       } : undefined,
       params.maxPageBytes,
-      params.assetUals.length === 1 && params.exactAssetExportCache && params.onExactAssetExportLease ? {
+      params.assetUals.length === 1 && params.exactAssetExportCache ? {
         contextGraphId: params.contextGraphId,
         assetUal: params.assetUals[0]!,
         cache: params.exactAssetExportCache,
-        onLease: params.onExactAssetExportLease,
       } : undefined,
     );
   }
@@ -1897,7 +1871,7 @@ export async function readDurableDataPage(params: {
       graph.startsWith(`${cgPrefix}/`) && graph.endsWith('/_meta'),
     ),
   ];
-  return readPagedDurableDeltaRowsAcrossGraphs(
+  return { rows: await readPagedDurableDeltaRowsAcrossGraphs(
     params.store,
     graphs,
     metaGraphs,
@@ -1906,7 +1880,7 @@ export async function readDurableDataPage(params: {
     params.limit,
     cache,
     params.signal,
-  );
+  ) };
 }
 
 /**
@@ -1942,7 +1916,7 @@ async function readPagedRowsAcrossGraphs(
   planMemo?: ExactGraphPagePlanMemo,
   knownRowCounts?: ReadonlyMap<string, number>,
 ): Promise<SyncRow[]> {
-  return readPagedRowsFromExactGraphPlanLoader(
+  return (await readPagedRowsFromExactGraphPlanLoader(
     store,
     offset,
     limit,
@@ -1956,7 +1930,7 @@ async function readPagedRowsAcrossGraphs(
       planSignal,
       knownRowCounts,
     ),
-  );
+  )).rows;
 }
 
 async function readPagedRowsFromExactGraphPlanLoader(
@@ -1969,8 +1943,8 @@ async function readPagedRowsFromExactGraphPlanLoader(
   loadExactGraphPlan: (signal?: AbortSignal) => Promise<ExactGraphPagePlan>,
   planCache?: { key: string; refresh: boolean },
   maxPageBytes?: number,
-  exportScope?: ExactAssetExportScope,
-): Promise<SyncRow[]> {
+  exportScope?: Omit<ExactPageExportScope, 'graph' | 'expectedRows'>,
+): Promise<ExactPageReadResult> {
   const rowSnapshotLimits = cache?.memo.snapshotLoadLimits ?? {
     maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
     maxBytesEstimate: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
@@ -1986,45 +1960,34 @@ async function readPagedRowsFromExactGraphPlanLoader(
   // A stateless request cannot retain its first reader choice across pages.
   // Keep it on the compatible store order even when export is available now.
   const retainedExportScope = planMemo && (planCache?.key ?? cache?.key) ? exportScope : undefined;
-  const loadPage: StorePageLoader = async (pageOffset, pageLimit, pageSignal) => {
+  const loadPage = async (pageOffset: number, pageLimit: number, pageSignal?: AbortSignal): Promise<ExactPageReadResult> => {
     const plan = await getPlan(pageOffset, pageSignal);
     assertExactGraphPlanRevision(store, plan);
-    const rows = await (maxPageBytes !== undefined
-      ? readByteBoundedRowsPageFromExactGraphPlan(
-      store, plan, pageOffset, pageLimit, rowSnapshotLimits, maxPageBytes, pageSignal, retainedExportScope,
-      )
-      : readRowsPageFromExactGraphPlan(
-      store,
-      plan,
-      pageOffset,
-      pageLimit,
-      rowSnapshotLimits,
-      pageSignal,
-      ));
-    assertExactGraphPlanRevision(store, plan);
-    throwIfAborted(pageSignal);
-    return rows;
-  };
-  return readResponderRowsPage(
-    cache && {
-      ...cache,
-      expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
-    },
-    loadPage,
-    offset,
-    limit,
-    signal,
-    cache
-      ? {
-        loadSnapshot: async () => readExactGraphPlanSnapshot(
-          store,
-          await getPlan(0, undefined),
-          cache,
-          rowSnapshotLimits,
+    const page = maxPageBytes !== undefined
+      ? await (plan.bytePageReader ??= new ExactPageSessionReader({
+        totalRows: plan.totalRows,
+        readRows: (storeOffset, storeLimit, maxResponseBytes, storeSignal) => readRowsPageFromExactGraphPlan(
+          store, plan, storeOffset, storeLimit, { ...rowSnapshotLimits, maxPageResponseBytes: maxResponseBytes }, storeSignal,
         ),
-      }
-      : undefined,
-  );
+        rememberReturnedPrefix: (storeOffset, rows) => rememberExactGraphReturnedPrefix(plan, storeOffset, rows),
+      }, retainedExportScope && !cache && plan.entries.length === 1 ? {
+        ...retainedExportScope, graph: plan.entries[0]!.graph, expectedRows: plan.entries[0]!.rowCount,
+      } : undefined, plan.requiresVerifiedExport === true)).read({ offset: pageOffset, limit: pageLimit, maxBytes: maxPageBytes, signal: pageSignal })
+      : { rows: await readRowsPageFromExactGraphPlan(store, plan, pageOffset, pageLimit, rowSnapshotLimits, pageSignal) };
+    try {
+      assertExactGraphPlanRevision(store, plan);
+      throwIfAborted(pageSignal);
+      return page;
+    } catch (error) { page.responseLease?.release(); throw error; }
+  };
+  if (!cache) return loadPage(offset, limit, signal);
+  return { rows: await readResponderRowsPage(
+    { ...cache, expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion' },
+    async (pageOffset, pageLimit, pageSignal) => (await loadPage(pageOffset, pageLimit, pageSignal)).rows,
+    offset, limit, signal,
+    { loadSnapshot: async () => readExactGraphPlanSnapshot(store, await getPlan(0, undefined), cache, rowSnapshotLimits) },
+  ) };
+
 }
 
 async function buildExactGraphPagePlan(
@@ -2375,101 +2338,6 @@ async function readExactGraphPlanSnapshot(
   return rows.sort(compareRows);
 }
 
-/**
- * A larger wire page is assembled from the same conservative store windows
- * used by the old exact lane. No query materializes 512 maximum literals.
- * Stop at the serialized prefix and retain its actual boundary, so the next
- * wire offset continues by keyset even when bytes, rather than rows, fill it.
- */
-async function readByteBoundedRowsPageFromExactGraphPlan(
-  store: TripleStore,
-  plan: ExactGraphPagePlan,
-  offset: number,
-  limit: number,
-  snapshotLimits: ExactGraphSnapshotLimits,
-  maxBytes: number,
-  signal?: AbortSignal,
-  exportScope?: ExactAssetExportScope,
-): Promise<SyncRow[]> {
-  if (exportScope && plan.entries.length === 1) {
-    const entry = plan.entries[0]!;
-    const lease = plan.bytePageReadMode === 'store' ? null : await exportScope.cache.acquire({
-      contextGraphId: exportScope.contextGraphId, assetUal: exportScope.assetUal,
-      graph: entry.graph, expectedRows: entry.rowCount,
-      expectedIdentity: plan.exportIdentities?.get(entry.graph), signal,
-    });
-    if (lease && plan.bytePageReadMode === 'store') {
-      // A concurrent first page may have selected store paging while this
-      // acquisition was pending. Its choice owns every page in the session.
-      lease.release();
-    } else if (lease) {
-      plan.bytePageReadMode = 'export';
-      exportScope.onLease(lease);
-      (plan.exportIdentities ??= new Map()).set(entry.graph, lease.identity);
-      const page: SyncRow[] = [];
-      let pageBytes = 0;
-      for (const row of lease.rows.slice(offset, offset + limit)) {
-        const next = serializedResponderRowByteLength(row) + (page.length > 0 ? 1 : 0);
-        if (pageBytes + next > maxBytes) {
-          if (page.length === 0) throw snapshotBudgetError({
-            key: 'exact-export-page', reason: 'snapshot_bytes', rows: 1,
-            bytesEstimate: next, limit: maxBytes,
-          });
-          break;
-        }
-        page.push(row);
-        pageBytes += next;
-      }
-      rememberExactGraphReturnedPrefix(plan, offset, page);
-      return page;
-    }
-  }
-  if (plan.requiresVerifiedExport || plan.bytePageReadMode === 'export') {
-    // The requester already consumed a lexical export prefix. A null lease
-    // is a refusal, not permission to reinterpret its offset or cursor in the
-    // store's value order. Existing requesters rotate expired session tokens.
-    throw Object.assign(new Error(
-      'Sync session exact asset export expired: export unavailable before page completion',
-    ), { code: 'SYNC_EXACT_EXPORT_UNAVAILABLE' });
-  }
-  plan.bytePageReadMode = 'store';
-  const rows: SyncRow[] = [];
-  let bytes = 0;
-  let storePageRows = SYNC_REQUEST_SAFE_PAGE_SIZE;
-  while (rows.length < limit && offset + rows.length < plan.totalRows) {
-    throwIfAborted(signal);
-    const pageRows = Math.min(storePageRows, limit - rows.length);
-    let chunk: SyncRow[];
-    try {
-      chunk = await readRowsPageFromExactGraphPlan(
-        store, plan, offset + rows.length, pageRows,
-        { ...snapshotLimits, maxPageResponseBytes: Math.min(maxBytes * 2, SYNC_BYTE_BUDGET_RESPONSE_BYTES * 2) }, signal,
-      );
-    } catch (error) {
-      if (!(error instanceof StoreResponseTooLargeError) || pageRows <= 1) throw error;
-      storePageRows = Math.max(1, Math.floor(pageRows / 2));
-      continue;
-    }
-    for (const row of chunk) {
-      const rowBytes = serializedResponderRowByteLength(row) + (rows.length > 0 ? 1 : 0);
-      if (rows.length > 0 && bytes + rowBytes > maxBytes) {
-        rememberExactGraphReturnedPrefix(plan, offset, rows);
-        return rows;
-      }
-      if (rowBytes > maxBytes) {
-        throw snapshotBudgetError({
-          key: 'exact-data-page', reason: 'snapshot_bytes', rows: 1,
-          bytesEstimate: rowBytes, limit: maxBytes,
-        });
-      }
-      rows.push(row);
-      bytes += rowBytes;
-    }
-    if (bytes >= maxBytes) break;
-  }
-  rememberExactGraphReturnedPrefix(plan, offset, rows);
-  return rows;
-}
 
 function rememberExactGraphReturnedPrefix(
   plan: ExactGraphPagePlan,
@@ -4758,10 +4626,4 @@ function stripLiteral(value: string | undefined): string {
   if (!value) return '';
   const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
   return match ? match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : value;
-}
-
-function formatTerm(term: string): string {
-  if (term.startsWith('"') || term.startsWith('_:')) return term;
-  if (term.startsWith('<') && term.endsWith('>')) return term;
-  return `<${assertSafeIri(term)}>`;
 }

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createResponderExactGraphPagePlanMemo,
   createResponderPageOnlyExactGraphPlanMemo,
-  readDurableDataPage,
+  readDurableDataPageWithLease,
   type SyncRow,
 } from '../src/sync/responder/graph-plan.js';
 import { createGraphMembershipSnapshot } from '../src/sync/graph-membership-snapshot.js';
@@ -178,18 +178,19 @@ async function integerPageFixture() {
   const occupy = (megabytes = 320) => retained.admit({ id: pressureId, key: 'active-unrelated-response', rows: 0,
     bytesEstimate: megabytes * 1024 * 1024, phase: 'durable_data', controlPlane: true, onEvict: () => {} });
   const releasePressure = () => retained.remove(pressureId);
-  const read = async (offset: number, key: string | undefined, limit = 8_192, assetUals = [assetUal]) => {
+  const read = async (offset: number, key: string | undefined, limit = 8_192, assetUals = [assetUal],
+    options: { signal?: AbortSignal; maxPageBytes?: number } = {}) => {
     const leases: ExactAssetExportLease[] = [];
     try {
-      const rows = await readDurableDataPage({ store,
+      const page = await readDurableDataPageWithLease({ store,
         graphMembership: createGraphMembershipSnapshot([]),
         contextGraphId, sinceBatchId: null, offset, limit,
         assetUals, exactGraphReadMode: 'page-only',
         exactGraphPlanMemo: memo, exactGraphPlanCacheKey: key,
-        maxPageBytes: 4 * 1024 * 1024, exactAssetExportCache: cache,
-        onExactAssetExportLease: lease => leases.push(lease) });
+        maxPageBytes: options.maxPageBytes ?? 4 * 1024 * 1024, signal: options.signal, exactAssetExportCache: cache });
+      if (page.responseLease) leases.push(page.responseLease);
       for (const lease of leases) await lease.assertCurrent();
-      return rows;
+      return page.rows;
     } finally { for (const lease of leases) lease.release(); }
   };
   const assertComplete = (rows: readonly SyncRow[]) => {
@@ -309,41 +310,104 @@ describe('exact DATA session pagination order', () => {
     } finally { await f.close(); }
   });
 
-  it('releases a delayed export when a concurrent first page pins store order after response admission refusal', async () => {
-    const f = await integerPageFixture();
-    const acquired = deferred<ExactAssetExportLease>();
-    const releaseAcquisition = deferred<void>();
-    const releaseLease = vi.fn();
+  it('resolves one export reader while concurrent first pages await the same acquisition', async () => {
+    const f = await integerPageFixture(), acquired = deferred<void>(), settle = deferred<void>();
     f.acquire.mockImplementationOnce(async request => {
-      const lease = await f.originalAcquire(request);
-      if (!lease) throw new Error('First export lease absent');
-      releaseLease.mockImplementation(lease.release);
-      const delayed = { ...lease, release: releaseLease };
-      acquired.resolve(delayed);
-      await releaseAcquisition.promise;
-      return delayed;
+      const lease = await f.originalAcquire(request); acquired.resolve(undefined);
+      await settle.promise; return lease;
     });
-    const delayedPage = f.read(0, 'concurrent-integer-session');
+    const first = f.read(0, 'concurrent-integer-session');
+    let second: Promise<SyncRow[]> | undefined;
     try {
-      await Promise.race([acquired.promise, delayedPage.then(() => {
-        throw new Error('Delayed page completed before acquiring an export lease');
-      })]);
-      f.occupy(200);
-      const storePage = await f.read(0, 'concurrent-integer-session');
-      expect(f.cache.stats().fallbacks['response-admission']).toBe(1);
-      releaseAcquisition.resolve(undefined);
-      expect(await delayedPage).toEqual(storePage);
-      expect(releaseLease).toHaveBeenCalledOnce();
-      f.releasePressure();
-      const last = await f.read(storePage.length, 'concurrent-integer-session');
-      f.assertComplete([...storePage, ...last]);
-      expect(f.acquire).toHaveBeenCalledTimes(2);
+      await acquired.promise;
+      second = f.read(0, 'concurrent-integer-session');
+      // The second response must await the shared choice instead of beginning
+      // a competing acquisition that could select a different row order.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(f.acquire).toHaveBeenCalledOnce();
+      settle.resolve(undefined);
+      const [firstRows, secondRows] = await Promise.all([first, second]);
+      expect(secondRows).toEqual(firstRows);
+      const last = await f.read(firstRows.length, 'concurrent-integer-session');
+      f.assertComplete([...firstRows, ...last]);
+      expect(f.acquire).toHaveBeenCalledTimes(3);
+      expect(f.query.mock.calls.some(([, options]) => options?.source === 'sync.responder.readExactGraphRowsPage')).toBe(false);
       expect(f.retained.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
     } finally {
-      releaseAcquisition.resolve(undefined);
-      await delayedPage.catch(() => {});
-      await f.close();
+      settle.resolve(undefined); await Promise.allSettled([first, ...(second ? [second] : [])]); await f.close();
     }
+  });
+
+  it('keeps the selected export order when a concurrent first response cannot acquire its own lease', async () => {
+    const f = await integerPageFixture(), acquired = deferred<void>(), settle = deferred<void>();
+    const fenceEntered = deferred<void>(), finishFence = deferred<void>(), released = vi.fn();
+    f.acquire.mockImplementationOnce(async request => {
+      const lease = await f.originalAcquire(request); if (!lease) throw new Error('First lease absent');
+      acquired.resolve(undefined); await settle.promise;
+      return { ...lease, async assertCurrent() { fenceEntered.resolve(undefined); await finishFence.promise; await lease.assertCurrent(); },
+        release() { released(); lease.release(); } };
+    });
+    const first = f.read(0, 'refused-concurrent-session');
+    let second: Promise<SyncRow[]> | undefined;
+    try {
+      await acquired.promise; f.occupy(200);
+      second = f.read(0, 'refused-concurrent-session');
+      const refused = expect(second).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_UNAVAILABLE' });
+      settle.resolve(undefined); await fenceEntered.promise; await refused;
+      expect(f.query.mock.calls.some(([, options]) => options?.source === 'sync.responder.readExactGraphRowsPage')).toBe(false);
+      expect(released).not.toHaveBeenCalled();
+      finishFence.resolve(undefined); const rows = await first;
+      expect(released).toHaveBeenCalledOnce(); f.releasePressure();
+      f.assertComplete([...rows, ...await f.read(rows.length, 'refused-concurrent-session')]);
+    } finally {
+      settle.resolve(undefined); finishFence.resolve(undefined); f.releasePressure();
+      await Promise.allSettled([first, ...(second ? [second] : [])]); await f.close();
+    }
+  });
+
+  it('settles and releases a cancelled first acquisition without cancelling its concurrent waiter', async () => {
+    const f = await integerPageFixture(), acquired = deferred<void>(), settle = deferred<void>();
+    const controller = new AbortController(), released = vi.fn();
+    f.acquire.mockImplementationOnce(async request => {
+      expect(request.signal).toBeUndefined();
+      const lease = await f.originalAcquire(request); if (!lease) throw new Error('First lease absent');
+      acquired.resolve(undefined); await settle.promise;
+      return { ...lease, release() { released(); lease.release(); } };
+    });
+    let firstSettled = false;
+    const first = f.read(0, 'cancelled-first-session', 64, [f.assetUal], { signal: controller.signal });
+    void first.finally(() => { firstSettled = true; }).catch(() => {});
+    let second: Promise<SyncRow[]> | undefined;
+    try {
+      await acquired.promise; controller.abort(new Error('cancel first response'));
+      second = f.read(0, 'cancelled-first-session', 64);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(firstSettled).toBe(false); expect(released).not.toHaveBeenCalled();
+      expect(f.acquire).toHaveBeenCalledOnce();
+      const aborted = expect(first).rejects.toThrow('cancel first response');
+      settle.resolve(undefined); await aborted;
+      expect(await second).toHaveLength(64); expect(released).toHaveBeenCalledOnce();
+      expect(f.acquire).toHaveBeenCalledTimes(2);
+      expect(f.query.mock.calls.some(([, options]) => options?.source === 'sync.responder.readExactGraphRowsPage')).toBe(false);
+      expect(f.retained.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+    } finally {
+      settle.resolve(undefined); await Promise.allSettled([first, ...(second ? [second] : [])]); await f.close();
+    }
+  });
+
+  it.each(['export', 'store'] as const)('continues every byte-truncated %s prefix using its actual returned offset', async mode => {
+    const f = await integerPageFixture();
+    try {
+      if (mode === 'store') f.occupy();
+      const rows: SyncRow[] = [];
+      while (rows.length < 8_193) {
+        const page = await f.read(rows.length, 'truncated-' + mode, 8_192, [f.assetUal], { maxPageBytes: 32 * 1024 });
+        expect(page.length).toBeGreaterThan(0); expect(page.length).toBeLessThan(8_192);
+        rows.push(...page);
+      }
+      f.assertComplete(rows);
+      expect(await f.read(rows.length, 'truncated-' + mode, 8_192, [f.assetUal], { maxPageBytes: 32 * 1024 })).toEqual([]);
+    } finally { await f.close(); }
   });
 
   it('uses store paging throughout stateless requests even when export admission changes', async () => {

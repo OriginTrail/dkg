@@ -29,7 +29,7 @@ import {
   createResponderSwmAdmissionMemo,
   DurableMetaPageFrameError,
   readCatalogPage,
-  readDurableDataPage,
+  readDurableDataPageWithLease,
   readDurableMetaPage,
   readSwmDataPage,
   readSwmMetaPage,
@@ -893,7 +893,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           request.syncSessionId,
           offset,
         );
-        const rows = await readDurableDataPage({
+        const page = await readDurableDataPageWithLease({
           store,
           graphMembership: await graphListMemo.get({
             refresh: session?.refreshRowList ?? offset === 0,
@@ -929,10 +929,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           assetUals,
           exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
           exactAssetExportCache: durableDataPolicy.usesExactAssetExport ? exactAssetExportCache : undefined,
-          onExactAssetExportLease: durableDataPolicy.usesExactAssetExport
-            ? (lease) => exactExportLeases.push(lease)
-            : undefined,
         });
+        const rows = page.rows;
+        if (page.responseLease) exactExportLeases.push(page.responseLease);
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
         const serialized = usesByteBudgetPage
