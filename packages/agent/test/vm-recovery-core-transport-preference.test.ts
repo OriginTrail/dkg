@@ -303,6 +303,83 @@ describe('verified public Core transport preference', () => {
 });
 
 describe('experimental carried public Core holder', () => {
+  it('yields after verified unknown-hint reuse without credit and finishes through ordinary fresh probes', async () => {
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    const h = await harness(0, undefined, [older, core, third]);
+    vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
+    vi.spyOn(h.agent, 'readLiveOnChainAccessPolicy').mockRejectedValue(new Error('policy unavailable'));
+    const first = await h.run();
+    expect(h.fetched.map(({ peerId }) => peerId)).toEqual([older, core, core]);
+    expect(first.attemptedOrdinals).toEqual([0, 1, 2]);
+    expect(first.continuationOrdinal).toBe(3);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+
+    const second = await next(h);
+    expect(h.fetched.slice(3)).toEqual([
+      { peerId: core, uals: [h.targets[0]!.ual] },
+      { peerId: core, uals: [h.targets[3]!.ual] },
+    ]);
+    expect(second.continuationOrdinal).toBe(4);
+    // With no preference, untouched targets still use the ordinary roster.
+    const thirdSlice = await next(h);
+    expect(h.fetched.slice(5).map(({ peerId }) => peerId)).toEqual([older, core, core]);
+    expect(thirdSlice.attemptedOrdinals).toEqual([4, 5, 6]);
+    await next(h);
+    expect([...h.recovered].sort()).toEqual(h.targets.map(({ ordinal }) => ordinal));
+    expect(h.fetched.filter(({ peerId }) => peerId === core).flatMap(({ uals }) => uals))
+      .toEqual([1, 2, 0, 3, 5, 6, 4].map(ordinal => h.targets[ordinal]!.ual));
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    expect(h.maxActiveFetches()).toBe(1);
+  });
+
+  it.each(['clean-absent', 'incomplete', 'unverified', 'throw'] as const)('does not yield after unknown-hint reuse returns %s', async failure => {
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    const h = await harness(0, (peer, ordinal) => {
+      if (peer === core && ordinal === 2) {
+        if (failure === 'throw') throw new Error('transport failure');
+        return failure;
+      }
+      return peer === older ? 'clean-absent' : 'found';
+    }, [older, core, third]);
+    vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
+    vi.spyOn(h.agent, 'readLiveOnChainAccessPolicy').mockRejectedValue(new Error('policy unavailable'));
+    const result = await h.run();
+    expect(h.fetched.map(({ peerId }) => peerId)).toEqual([older, core, core, third, third]);
+    expect(result.outcomes.get(2)?.status).toBe('pending');
+    expect(result.continuationOrdinal).toBe(5);
+    expect(h.recovered.has(2)).toBe(false);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    expect(new Set(h.fetched.map(({ peerId }) => peerId)).size).toBe(DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX);
+  });
+
+  it('does not grant credit when renewal refuses a verified batch, and probes again next slice', async () => {
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    const h = await harness(0, undefined, [older, core, third], { targetCount: 35, knownSizing: true });
+    vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
+    vi.spyOn(h.internals, 'rememberVmReconcilePublicCoreTransportPreference').mockReturnValue(false);
+    const first = await h.run();
+    expect(h.fetched.map(({ uals }) => uals.length)).toEqual([1, 1, 8]);
+    expect(first.continuationOrdinal).toBe(10);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    const second = await next(h);
+    expect(h.fetched.slice(3).map(({ uals }) => uals.length)).toEqual([1, 8]);
+    expect(h.fetched[3]).toEqual({ peerId: core, uals: [h.targets[0]!.ual] });
+    expect(second.continuationOrdinal).toBe(18);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+  });
+
+  it('keeps ordinary fallback for a verified peer without Core capability', async () => {
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    const h = await harness(0, undefined, [older, core, third]);
+    h.internals.peerCapabilityRegistry.forget(core);
+    vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
+    vi.spyOn(h.agent, 'readLiveOnChainAccessPolicy').mockRejectedValue(new Error('policy unavailable'));
+    const result = await h.run();
+    expect(h.fetched.map(({ peerId }) => peerId)).toEqual([older, core, core, third, third]);
+    expect(result.continuationOrdinal).toBe(5);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+  });
+
   it('starts consecutive productive slices with one bounded ordinary batch and verifies every UAL', async () => {
     const h = await carriedHarness();
     expect(h.fetched.map(({ uals }) => uals.length)).toEqual([1, 1, 8]);
@@ -407,8 +484,18 @@ describe('experimental carried public Core holder', () => {
     const policy = vi.spyOn(h.agent, 'readLiveOnChainAccessPolicy');
     if (change === 'private') policy.mockResolvedValue(1);
     else policy.mockRejectedValue(new Error('policy unavailable'));
-    await next(h);
-    expect(h.fetched[3]!.uals).toHaveLength(1);
+    const second = await next(h);
+    expect(h.fetched.slice(3)).toEqual([{ peerId: core, uals: [h.targets[0]!.ual] }]);
+    expect(second.attemptedOrdinals).toEqual([0]);
+    expect(second.continuationOrdinal).toBe(10);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
+    const thirdSlice = await next(h);
+    expect(h.fetched.slice(4)).toEqual([
+      { peerId: older, uals: [h.targets[10]!.ual] },
+      { peerId: core, uals: [h.targets[11]!.ual] },
+      { peerId: core, uals: [h.targets[12]!.ual] },
+    ]);
+    expect(thirdSlice.continuationOrdinal).toBe(13);
     expect(h.internals.vmReconcilePublicCoreTransportPreferences.has(cg)).toBe(false);
   });
 

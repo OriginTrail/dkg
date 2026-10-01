@@ -7831,6 +7831,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // independently reconciles against chain before credit is renewed.
         if (providerAttempt.kind === 'proven-holder-reuse' && (remembered || carriedHolder)) break;
       }
+      if (experimentalHolderReuse && providerAttempt.kind === 'proven-holder-reuse'
+        && completelyVerified && this.peerCapabilityRegistry.supportsCore(peerId)) {
+        // Verified Core work earns a scheduler yield even when conservative
+        // sizing did not renew public holder credit. Credit stays fenced above;
+        // without it, the next fair slice must use the ordinary singleton probe.
+        const currentPreference = this.vmReconcilePublicCoreTransportPreferences.get(localCgId);
+        this.log.info(ctx, `VM exact recovery yield: reason=verified-core-turn assets=${batchAttempts.length} `
+          + `publicSizingAccess=${publicRecoveryAccessVerified === undefined ? 'unknown' : publicRecoveryAccessVerified} `
+          + `holderCreditPresent=${currentPreference?.peerId === peerId && currentPreference.holderCredit !== undefined}`);
+        break;
+      }
     }
 
     const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));
