@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 import { EXACT_BATCH_STREAM_PROTOCOL } from '../src/sync/exact-batch-stream-contract.js';
-import { rememberExactBatchStreamUnsupported } from '../src/sync/exact-batch-stream-capability.js';
+import { rememberExactBatchStreamResourceRefusal, rememberExactBatchStreamUnsupported } from '../src/sync/exact-batch-stream-capability.js';
 
 const older = '12D3KooWAAStreamOlder';
 const core = '12D3KooWZZStreamCore';
@@ -10,9 +10,9 @@ const cg = '0x0000000000000000000000000000000000000001/stream-profile';
 const agents: Array<{ stop(): Promise<void> }> = [];
 
 /** Planner/host fixture only: exact transport and ordinal chain outcomes are fixture ports. */
-async function harness(options: { public?: boolean; core?: boolean; advertised?: boolean; unknown?: boolean; oversize?: boolean } = {}) {
+async function harness(options: { public?: boolean; core?: boolean; advertised?: boolean; unknown?: boolean; oversize?: boolean; soleCore?: boolean } = {}) {
   const h = await createVmRecoveryHostHarness({
-    name: 'ExperimentalVmStreamProfile', localCgId: cg, peers: [older, core], targetCount: 13,
+    name: 'ExperimentalVmStreamProfile', localCgId: cg, peers: options.soleCore ? [core] : [older, core], targetCount: 13,
     accessPolicy: options.public === false ? 1 : 0,
     sizingUnavailable: options.unknown,
     footprintForOrdinal: () => ({ byteSize: (options.oversize ? 9n : 4n) * 1024n * 1024n, merkleLeafCount: 10_000n }),
@@ -84,6 +84,26 @@ describe('experimental public Core streaming recovery host', () => {
     expect(h.fetched.map(({ peerId, uals }) => [peerId, uals.length])).toEqual([[core, 1], [core, 1]]);
     expect(h.streamOnly).toEqual([false, false]);
     expect(h.streamDisabled).toEqual([true, true]);
+  });
+
+  it('plans bounded ordinary recovery from the sole Core after a scoped resource refusal', async () => {
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    const h = await harness({ soleCore: true });
+    // This fixture owns scheduling, while scope capture/settlement and the real
+    // embedded responder are exercised separately by the lifecycle suites.
+    const scope = Object.freeze({ contextGraphId: cg, bindingKey: 'fixture-binding-scope' });
+    vi.spyOn(h.agent, 'captureExperimentalExactBatchRefusalScope').mockReturnValue(scope);
+    const connectionKey = h.internals.getSyncReconcilerConnectionKey(core);
+    rememberExactBatchStreamResourceRefusal(h.agent, core, connectionKey, connectionKey,
+      // The default recovery cadence plus jitter may exceed one minute.
+      scope, scope, Date.now() - 75_000);
+    await h.run();
+    expect(h.fetched.map(({ peerId, uals }) => [peerId, uals.length])).toEqual([[core, 1], [core, 1]]);
+    expect(h.streamOnly).toEqual([false, false]);
+    expect(h.streamDisabled).toEqual([true, true]);
+    expect(h.maxActiveFetches()).toBe(1);
+    expect(h.recovered).toEqual(new Set([0, 1]));
+    expect(h.internals.peerCapabilityRegistry.supportsCore(core)).toBe(true);
   });
 
   it('leaves a stale unsupported advertisement eligible only for the ordinary smaller plan', async () => {

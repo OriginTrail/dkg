@@ -7256,7 +7256,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const advertised = await Promise.all(orderedPeerIds
         .filter((peerId) => connectedByPeerId.has(peerId)
           && this.peerCapabilityRegistry.supportsCore(peerId)
-          && !exactBatchStreamUnsupported(this, peerId, this.getSyncReconcilerConnectionKey(peerId), Date.now()))
+          && !exactBatchStreamUnsupported(this, peerId, this.getSyncReconcilerConnectionKey(peerId), Date.now(),
+            this.captureExperimentalExactBatchRefusalScope(localCgId)))
         .map(async (peerId) => {
           try { return (await this.getPeerProtocols(peerId)).includes(EXACT_BATCH_STREAM_PROTOCOL) ? peerId : undefined; }
           catch { return undefined; }
@@ -7467,7 +7468,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       let experimentalExactBatchStreamOnly = false;
       let experimentalExactBatchStreamDisabled = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1';
       const streamEligibleProvider = experimentalPublicRecovery && experimentalStreamPeerIds.has(peerId)
-        && !exactBatchStreamUnsupported(this, peerId, admittedConnectionKey, Date.now());
+        && !exactBatchStreamUnsupported(this, peerId, admittedConnectionKey, Date.now(),
+          this.captureExperimentalExactBatchRefusalScope(localCgId));
       if (streamEligibleProvider && providerAttempt.kind === 'probe') {
         // A known public Core still earns holder reuse only by fetching one KA.
         // Choose its wire from one bounded sizing observation; unknown or

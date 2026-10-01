@@ -6,7 +6,7 @@ import {
   getMetrics,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { supportsBoundedExactGraphExport, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
@@ -505,7 +505,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   // The opt-in batch profile uses two separately bounded stages. Unlike the
   // legacy runTwoStage path, it does not claim a reserved FIFO handoff between
   // authorization and response. No admission remains held across that gap.
-  params.onExperimentalExactBatchResources?.({
+  // Advertising the export-only transport requires a pre-parse bounded reader.
+  // Unsupported stores retain their existing ordinary bounded page handler.
+  if (params.onExperimentalExactBatchResources && supportsBoundedExactGraphExport(store)) params.onExperimentalExactBatchResources({
     exportCache: exactAssetExportCache,
     snapshotBudget: responderSnapshotBudget,
     withPreAuthorizationAdmission: (remotePeerId, signal, work) => limiter.run(remotePeerId, signal,

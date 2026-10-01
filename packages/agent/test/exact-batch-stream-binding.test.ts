@@ -15,7 +15,7 @@ import { parseResponderAssetMetadata } from '../src/sync/responder/asset-metadat
 import { consumeExactBatchVerifiedSession, exchangeExactBatchVerified, exactBatchStartFrame, type ExactBatchAgentSession } from '../src/sync/requester/exact-batch-stream.js';
 import { authenticateVerifiedGraphScopedAsset, materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 import { EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_MAX_FRAME_BYTES, decodeExactBatchFrames, encodeExactBatchFrame, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
-import { isExactSyncGzipFrame } from '../src/sync/wire-compression.js';
+import { decodeNegotiatedExactSyncResponse, isExactSyncGzipFrame } from '../src/sync/wire-compression.js';
 
 /** Module integration fixture, not a live-chain or encrypted-network benchmark. */
 async function fixture(assetCount = 10, rows = 2000) {
@@ -174,6 +174,25 @@ describe('exact batch normal verifier/materializer binding', () => {
     } finally { wire.abort(); await f.close(); }
   });
 
+  it('keeps embedded-store ordinary exact paging available without advertising the export-only stream', async () => {
+    const f = await fixture(1, 1);
+    try {
+      const advertiseStream = vi.fn();
+      let ordinary!: typeof f.legacyHandler;
+      registerSyncHandler({ register: (_protocol, handler) => { ordinary = handler; },
+        protocolSync: '/fixture/embedded-sync', syncDeniedResponse: 'denied', syncPageSize: 500,
+        sharedMemoryTtlMs: 0, store: f.backing, peerId: 'source',
+        parseSyncRequest: f.parse, authorizeSyncRequest: f.authorize,
+        logWarn: () => {}, logDebug: () => {}, onExperimentalExactBatchResources: advertiseStream });
+      expect(advertiseStream).not.toHaveBeenCalled();
+      const body = await ordinary(f.signed, 'requester');
+      const decoded = await decodeNegotiatedExactSyncResponse(body, { allowCompression: true });
+      const text = new TextDecoder().decode(decoded.bytes);
+      expect(text).toContain(f.items[0]!.data[0]!.subject);
+      expect(text).toContain(f.items[0]!.graph);
+      expect(text.split('\n').filter(line => line.trim() && !line.startsWith('#'))).toHaveLength(1);
+    } finally { await f.close(); }
+  });
   it('imports10 distinct confirmed fixtureKAs with oneSTART, oneexport each, realgzip/root/count verification and atomic writes', async () => {
     const f = await fixture(), wire = duplex(f.receiver.assetUals);
     try {

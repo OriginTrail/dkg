@@ -1,10 +1,8 @@
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
 import {
-  BlazegraphStore,
-  SparqlHttpStore,
   StoreResponseTooLargeError,
   asGraphWriteRevisionSource,
-  findTripleStoreCapability,
+  supportsBoundedExactGraphExport,
   quadToNQuad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -159,14 +157,6 @@ function invalid(): Error {
   });
 }
 
-function boundedHttpStore(store: TripleStore): boolean {
-  // Only these adapters enforce maxResponseBytes before JSON materialization.
-  // Embedded and third-party stores keep the existing 64-row physical read.
-  return findTripleStoreCapability(store, (value): value is BlazegraphStore | SparqlHttpStore => (
-    value instanceof BlazegraphStore || value instanceof SparqlHttpStore
-  )) !== null;
-}
-
 function compareRows(a: SyncRow, b: SyncRow): number {
   return compareCodePoint(a.s, b.s) || compareCodePoint(a.p, b.p) || compareCodePoint(a.o, b.o);
 }
@@ -215,7 +205,7 @@ export function createBoundedExactAssetExportCache(params: {
     }
   }
   let encodedCacheBytes = 0;
-  const canReadWholeAsset = boundedHttpStore(store);
+  const canReadWholeAsset = supportsBoundedExactGraphExport(store);
   let exports = 0;
   let cacheHits = 0;
   let encodedCacheHits = 0;

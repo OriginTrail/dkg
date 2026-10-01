@@ -20,7 +20,7 @@ import {
 import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
-import { exactBatchStreamUnsupported, rememberExactBatchStreamUnsupported } from './sync/exact-batch-stream-capability.js';
+import { captureExactBatchStreamRefusalScope, exactBatchStreamUnsupported, rememberExactBatchStreamResourceRefusal, rememberExactBatchStreamUnsupported } from './sync/exact-batch-stream-capability.js';
 import { observeExactBatch } from './sync/exact-batch-observation.js';
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
@@ -6104,6 +6104,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
+  /** Capture transport refusal scope without performing authority or store IO. */
+  captureExperimentalExactBatchRefusalScope(this: DKGAgent, contextGraphId: string): ReturnType<typeof captureExactBatchStreamRefusalScope> {
+    return captureExactBatchStreamRefusalScope({
+      contextGraphId, deploymentId: this.chain.deploymentId,
+      binding: this.contextGraphBindingState.currentBindingFor(contextGraphId, this.subscribedContextGraphs.get(contextGraphId)),
+      bindingGeneration: this.contextGraphBindingState.capture(contextGraphId),
+      selectedBindingGeneration: this.selectedVmReconcileCursors?.get(contextGraphId)?.bindingGeneration,
+      lifecycleGeneration: this.vmReconcileLifecycleGeneration,
+    });
+  }
+
   async runLegacyDurableSyncForContextGraphDetailed(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
@@ -6492,6 +6503,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       };
     }
     if (exactAssetSelection !== undefined) {
+      const resourceRefusalScope = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1'
+        && !experimentalExactBatchStreamDisabled
+        ? this.captureExperimentalExactBatchRefusalScope(contextGraphId) : null;
       const connectionKey = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1' && !experimentalExactBatchStreamDisabled
         ? this.getSyncReconcilerConnectionKey(remotePeerId)
         : null;
@@ -6499,7 +6513,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         && !experimentalExactBatchStreamDisabled
         && exactAssetSelection.kind === 'ual-only'
         && this.chain.chainId !== 'none'
-        && !exactBatchStreamUnsupported(this, remotePeerId, connectionKey, Date.now())
+        && !exactBatchStreamUnsupported(this, remotePeerId, connectionKey, Date.now(), resourceRefusalScope)
         && (await this.getPeerProtocols(remotePeerId)).includes(EXACT_BATCH_STREAM_PROTOCOL)
         && (await this.resolveRegisteredContextGraphAuthority(contextGraphId, {
           authorityReadMode: 'finalized-index-or-live', signal,
@@ -6582,6 +6596,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // full selection or infers that an atomic write rolled back.
           if (error instanceof ExactBatchPartialSyncError && error.refusalObservation !== undefined) {
             const observed = error.refusalObservation;
+            if (observed.code === 'RESOURCE_LIMIT' && !signal?.aborted && isCurrent?.() !== false) {
+              // The wire code includes profile and temporary export admission
+              // refusals. Suppress only this optional transport for a bounded
+              // interval; the next recovery plan retains ordinary size caps.
+              rememberExactBatchStreamResourceRefusal(this, remotePeerId, connectionKey,
+                this.getSyncReconcilerConnectionKey(remotePeerId), resourceRefusalScope,
+                this.captureExperimentalExactBatchRefusalScope(contextGraphId), Date.now());
+            }
             observeExactBatch(() => this.log.info(ctx,
               `Exact batch requester refusal code=${observed.code} startedAssets=${observed.startedAssets} committedAssets=${observed.committedAssets} acknowledgedAssets=${observed.acknowledgedAssets} atAssetBoundary=${observed.atAssetBoundary ? 1 : 0} verifiedPrefix=${observed.verifiedPrefix ? 1 : 0}`));
           }
