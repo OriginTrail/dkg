@@ -116,7 +116,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
       { request: { responseEncoding: EXACT_SYNC_GZIP_ENCODING, phase: 'data', assetUals: [UALS[i]!] } }));
     expect(zipped.every((bytes, i) => bytes.length < bodies[i]!.length)).toBe(true);
     registerExperimentalExactBatchResponder(f.routerServer, options,
-      async (request) => { expect(request).toEqual(start().payload); return UALS; },
+      async (request) => { expect(request).toEqual(start().payload); return { assetUals: UALS, context: undefined }; },
       async (_request, session) => {
         expect(session.windowSize).toBe(2);
         const window = new ExactBatchSendWindow({ assetCount: session.assetUals.length, windowSize: 2 });

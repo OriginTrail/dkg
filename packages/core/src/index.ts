@@ -245,6 +245,7 @@ export {
   type ExactBatchTransportSession,
   type ExactBatchTransportOptions,
   type ExactBatchTransportEvent,
+  type ExactBatchResponderAuthorization,
 } from './experimental-exact-batch-stream.js';
 export {
   EXACT_BATCH_STREAM_PROTOCOL, EXACT_BATCH_STREAM_WINDOW_SIZE, EXACT_BATCH_FRAME_KIND,

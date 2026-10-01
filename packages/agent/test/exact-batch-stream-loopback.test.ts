@@ -22,7 +22,7 @@ const enc = new TextEncoder();
 const UALS = Array.from({ length: 10 }, (_, i) => `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${i + 1}`).sort();
 const options: ExactBatchTransportOptions = { timeoutMs: 5000, windowSize: 2,
   maxReadBufferBytes: 65552, maxRequestBytes: 8192, maxFrameBytes: 65552, maxResponseBytes: 42 * 1024 * 1024 };
-const frame = (kind: number, assetIndex = 255, sequence = 0, payload = new Uint8Array()): ExactBatchFrame => ({ kind, assetIndex, sequence, payload });
+const frame = (kind: number, assetIndex = 255, sequence = 0, payload: Uint8Array = new Uint8Array()): ExactBatchFrame => ({ kind, assetIndex, sequence, payload });
 const start = () => frame(K.REQUEST, 255, 0, enc.encode('opaque signed START fixture'));
 const root = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 function gate() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
@@ -62,7 +62,7 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
     const releaseFirst = gate();
     let clientStream!: Stream, serverStream!: Stream;
     registerExperimentalExactBatchResponder(f.routerB, options,
-      async bytes => { expect(bytes).toEqual(start().payload); return UALS; },
+      async bytes => { expect(bytes).toEqual(start().payload); return { assetUals: UALS, context: undefined }; },
       async (_request, session) => {
         serverStream = physical(session);
         const window = new ExactBatchSendWindow({ assetCount: UALS.length, windowSize: 2 });

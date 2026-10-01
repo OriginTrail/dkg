@@ -1,5 +1,5 @@
 import { getEventListeners } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { Stream } from '@libp2p/interface';
 import type { DKGNode } from '../src/node.js';
 import type { Network } from '../src/network/network.js';
@@ -103,13 +103,36 @@ function fixture() {
 }
 
 describe('experimental exact-batch dedicated duplex transport', () => {
+  it('passes the inferred opaque authorization context once while binding only its asset selection', async () => {
+    const f = fixture();
+    const opaque = { copiedStart: start().payload.slice(), token: Symbol('authorized-session') };
+    const authorize = vi.fn(async (request: Uint8Array) => {
+      expect(request).toEqual(opaque.copiedStart);
+      return { assetUals: UALS, context: opaque };
+    });
+    const respond = vi.fn();
+    registerExperimentalExactBatchResponder(f.routerServer, options, authorize, async (context, session, peerId) => {
+      expectTypeOf(context).toEqualTypeOf<typeof opaque>();
+      expect(context).toBe(opaque);
+      expect(session.assetUals).toEqual(UALS);
+      expect(peerId).toBe(PEER);
+      respond(context);
+      await session.send(frame(K.BATCH_END, 255, UALS.length));
+    });
+    expect(await exchangeExperimentalExactBatch(f.routerClient, PEER, start(),
+      { ...options, assetUals: UALS }, session => session.next())).toEqual(frame(K.BATCH_END, 255, UALS.length));
+    await f.settled();
+    expect(authorize).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledExactlyOnceWith(opaque);
+  });
+
   it('streams ten opaque payloads and caller ACKs over the fixed wire contract', async () => {
     const f = fixture();
     const bodies = UALS.map((_, index) => text.encode(`opaque payload ${index} ${"bytes ".repeat(30)}`));
     const acknowledgments: number[] = [];
     const received: Uint8Array[] = [];
     registerExperimentalExactBatchResponder(f.routerServer, options,
-      async request => { expect(request).toEqual(start().payload); return UALS; },
+      async request => { expect(request).toEqual(start().payload); return { assetUals: UALS, context: undefined }; },
       async (_request, session) => {
         const ack = async () => {
           const item = await session.next();
@@ -155,7 +178,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
   });
 
   it('rejects known peers before reading START and rejected full admission before authorization/export', async () => {
-    const f = fixture(), auth = vi.fn(async () => UALS), exportAsset = vi.fn(async () => {});
+    const f = fixture(), auth = vi.fn(async () => ({ assetUals: UALS, context: undefined })), exportAsset = vi.fn(async () => {});
     registerExperimentalExactBatchResponder(f.routerServer, options, auth, exportAsset);
     f.rejected.mockReturnValue(true);
     await expect(exchangeExperimentalExactBatch(f.routerClient, PEER, start(), { ...options, assetUals: UALS }, s => s.next()))
@@ -187,7 +210,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
 
   it('reuses the admitted direct connection first and only uses a limited route after a real direct dial failure', async () => {
     const reply = (f: ReturnType<typeof fixture>) => registerExperimentalExactBatchResponder(f.routerServer, options,
-      async () => UALS, async (_request, session) => { await session.send(frame(K.BATCH_END, 255, 10)); });
+      async () => ({ assetUals: UALS, context: undefined }), async (_request, session) => { await session.send(frame(K.BATCH_END, 255, 10)); });
     const direct = fixture(), directStream = vi.fn(direct.open), relayStream = vi.fn(direct.open); reply(direct);
     direct.connections.push(
       { status: 'open', remotePeer: { equals: () => true }, limits: {}, newStream: relayStream },
@@ -216,7 +239,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
         await new Promise<void>(done => resolverSignal.addEventListener('abort', () => done(), { once: true }));
         return [];
       });
-      registerExperimentalExactBatchResponder(f.routerServer, options, async () => UALS,
+      registerExperimentalExactBatchResponder(f.routerServer, options, async () => ({ assetUals: UALS, context: undefined }),
         async (_request, session) => { await session.next(); });
       const reuse = vi.fn(async (_protocol: string, _options: { signal: AbortSignal }) => f.open());
       const connection = { status: 'open', remotePeer: { equals: (other: unknown) => String(other) === PEER }, newStream: reuse };
@@ -270,7 +293,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
 
   it('node stop aborts a stalled duplex read and removes linked listeners', async () => {
     const f = fixture(), entered = gate();
-    registerExperimentalExactBatchResponder(f.routerServer, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerServer, options, async () => ({ assetUals: UALS, context: undefined }),
       async (_request, session) => { entered.resolve(); await session.next(); });
     const operation = exchangeExperimentalExactBatch(f.routerClient, PEER, start(), { ...options, assetUals: UALS }, s => s.next());
     await entered.promise; f.clientStop.abort(new Error('node stopping'));
@@ -280,7 +303,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
 
   it('callback verification failure aborts a physical pending read before parser disposal settles', async () => {
     const f = fixture(), entered = gate();
-    registerExperimentalExactBatchResponder(f.routerServer, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerServer, options, async () => ({ assetUals: UALS, context: undefined }),
       async (_request, session) => { entered.resolve(); await session.next(); });
     let pending: Promise<unknown> | undefined;
     await expect(exchangeExperimentalExactBatch(f.routerClient, PEER, start(), { ...options, assetUals: UALS },
@@ -296,7 +319,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
 
   it('one deadline covers admission and pending duplex work without a payload retry', async () => {
     const f = fixture();
-    registerExperimentalExactBatchResponder(f.routerServer, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerServer, options, async () => ({ assetUals: UALS, context: undefined }),
       async (_request, session) => { await session.next(); });
     await expect(exchangeExperimentalExactBatch(f.routerClient, PEER, start(),
       { ...options, timeoutMs: 25, assetUals: UALS }, s => s.next())).rejects.toThrow('timeout');
@@ -306,7 +329,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
 
   it('waits for native write drain before advancing a frame', async () => {
     const f = fixture(); f.client.forceDrain = true;
-    registerExperimentalExactBatchResponder(f.routerServer, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerServer, options, async () => ({ assetUals: UALS, context: undefined }),
       async (_request, session) => { await session.send(frame(K.BATCH_END, 255, 10)); });
     let consumed = false;
     const operation = exchangeExperimentalExactBatch(f.routerClient, PEER, start(), { ...options, assetUals: UALS },
@@ -320,7 +343,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
     await expect(exchangeExperimentalExactBatch(f.routerClient, PEER, start(), { ...options, assetUals: UALS }, s => s.next()))
       .rejects.toBeInstanceOf(ExperimentalExactBatchUnsupportedError);
     expect(f.client.sentKinds).toEqual([]); expect(f.dial).toHaveBeenCalledOnce();
-    const g = fixture(); registerExperimentalExactBatchResponder(g.routerServer, options, async () => UALS,
+    const g = fixture(); registerExperimentalExactBatchResponder(g.routerServer, options, async () => ({ assetUals: UALS, context: undefined }),
       async () => { throw new Error('unsupported protocol after request'); });
     let failure: unknown;
     try { await exchangeExperimentalExactBatch(g.routerClient, PEER, start(), { ...options, assetUals: UALS }, s => s.next()); }
@@ -334,7 +357,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
     await expect(exchangeExperimentalExactBatch(f.routerClient, PEER, start(),
       { ...options, windowSize: 1 as 2, assetUals: UALS }, s => s.next())).rejects.toThrow('window2');
     expect(f.dial).not.toHaveBeenCalled();
-    registerExperimentalExactBatchResponder(f.routerServer, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerServer, options, async () => ({ assetUals: UALS, context: undefined }),
       async (_request, session) => { await session.send(frame(K.META, 0, 0, new Uint8Array(100))); });
     await expect(exchangeExperimentalExactBatch(f.routerClient, PEER, start(),
       { ...options, maxResponseBytes: 20, assetUals: UALS }, s => s.next())).rejects.toThrow('wire byte limit');
@@ -347,7 +370,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
       frame(K.ASSET_END, 0, 1), frame(K.BATCH_END, 255, 1)];
     const ack = frame(K.ACK, 0, 1);
     registerExperimentalExactBatchResponder(f.routerServer, { ...options, onTransportEvent: e => { serverEvents.push(e); } },
-      async () => [UALS[0]!], async (_request, session) => {
+      async () => ({ assetUals: [UALS[0]!], context: undefined }), async (_context, session) => {
         for (const item of response.slice(0, 3)) await session.send(item);
         expect(await session.next()).toEqual(ack); await session.send(response[3]!);
       });
@@ -416,7 +439,7 @@ describe('experimental exact-batch dedicated duplex transport', () => {
         if (asynchronous) return Promise.reject(new Error('observer rejected'));
         throw new Error('observer threw');
       };
-      registerExperimentalExactBatchResponder(f.routerServer, { ...options, onTransportEvent }, async () => UALS,
+      registerExperimentalExactBatchResponder(f.routerServer, { ...options, onTransportEvent }, async () => ({ assetUals: UALS, context: undefined }),
         async (_request, session) => { await session.send(frame(K.BATCH_END, 255, 10)); });
       expect(await exchangeExperimentalExactBatch(f.routerClient, PEER, start(),
         { ...options, assetUals: UALS, onTransportEvent }, s => s.next())).toEqual(frame(K.BATCH_END, 255, 10));

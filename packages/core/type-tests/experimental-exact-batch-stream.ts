@@ -17,8 +17,18 @@ void decoded;
 const response: Promise<ExactBatchFrame | undefined> = exchangeExperimentalExactBatch(router, 'peer', request,
   { ...options, assetUals: ['asset'] }, (current: ExactBatchTransportSession) => current.next());
 void response;
-registerExperimentalExactBatchResponder(router, options, async () => ['asset'],
-  async (_request, current) => { await current.send(request); });
+const authorizedContext = { operationId: 'operation', scope: Symbol('scope') };
+registerExperimentalExactBatchResponder(router, options,
+  async () => ({ assetUals: ['asset'], context: authorizedContext }),
+  async (context, current) => {
+    const operationId: string = context.operationId;
+    const scope: symbol = context.scope;
+    void operationId; void scope;
+    // @ts-expect-error Core preserves the caller's context type.
+    const bytes: Uint8Array = context;
+    void bytes;
+    await current.send(request);
+  });
 const window: 2 = session.windowSize;
 void window;
 // @ts-expect-error The fixed wire session has no caller-selected frame type.

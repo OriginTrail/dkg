@@ -180,12 +180,18 @@ export async function exchangeExperimentalExactBatch<T>(
   }
 }
 
+/** Core binds the selected assets and passes the caller's context through without interpreting it. */
+export interface ExactBatchResponderAuthorization<Context> {
+  readonly assetUals: readonly string[];
+  readonly context: Context;
+}
+
 /** Explicit responder registration. Authorization precedes any scoped export. */
-export function registerExperimentalExactBatchResponder(
+export function registerExperimentalExactBatchResponder<Context>(
   router: ProtocolRouter,
   options: ExactBatchTransportOptions,
-  authorizeRequest: (request: Uint8Array, peerId: string, signal: AbortSignal) => Promise<readonly string[]>,
-  respond: (request: Uint8Array, session: ExactBatchTransportSession, peerId: string) => Promise<void>,
+  authorizeRequest: (request: Uint8Array, peerId: string, signal: AbortSignal) => Promise<ExactBatchResponderAuthorization<Context>>,
+  respond: (context: Context, session: ExactBatchTransportSession, peerId: string) => Promise<void>,
 ): void {
   validateLimits(options);
   const stableOptions = Object.freeze({ ...options });
@@ -203,10 +209,10 @@ export function registerExperimentalExactBatchResponder(
         throw error;
       }
     }, async ({ requestData, peerId, continuation: session, signal }) => {
-      const authorizedAssets = await authorizeRequest(requestData, peerId, signal);
-      session.authorizeAssets(authorizedAssets);
+      const authorized = await authorizeRequest(requestData, peerId, signal);
+      session.authorizeAssets(authorized.assetUals);
       checkSignal(signal);
-      await respond(requestData, session, peerId);
+      await respond(authorized.context, session, peerId);
     }, stableOptions);
 }
 

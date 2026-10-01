@@ -49,7 +49,7 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
     const acknowledgments: number[] = [];
     const received: Uint8Array[] = [];
     registerExperimentalExactBatchResponder(f.routerB, options,
-      async request => { expect(request).toEqual(start().payload); return UALS; },
+      async request => { expect(request).toEqual(start().payload); return { assetUals: UALS, context: undefined }; },
       async (_request, session) => {
         const ack = async () => {
           const item = await session.next();
@@ -95,7 +95,7 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
   it('deadline aborts both native stream owners and retires the decoder before rejection', async () => {
     const f = await pair(), entered = gate(), responded = gate();
     let clientStream!: Stream, serverStream!: Stream;
-    registerExperimentalExactBatchResponder(f.routerB, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerB, options, async () => ({ assetUals: UALS, context: undefined }),
       async (_request, session) => { serverStream = physical(session); entered.resolve();
         try { await session.next(); } finally { responded.resolve(); } });
     const operation = exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(),
@@ -111,7 +111,7 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
     const f = await pair(), entered = gate(), responded = gate();
     const stopSignal = f.a.stopSignal!;
     let clientStream!: Stream, serverStream!: Stream;
-    registerExperimentalExactBatchResponder(f.routerB, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerB, options, async () => ({ assetUals: UALS, context: undefined }),
       async (_request, session) => { serverStream = physical(session); entered.resolve();
         try { await session.next(); } finally { responded.resolve(); } });
     const operation = exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(),

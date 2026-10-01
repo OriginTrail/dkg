@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, type ExactBatchResponderAuthorization, type OperationContext } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { requireExactAssetUals } from '../exact-assets.js';
@@ -34,15 +34,27 @@ export interface ExactBatchResponderBindingOptions {
   readonly onFallback?: (reason: ExactAssetExportFallbackReason, assetIndex: number, context: OperationContext, budgetReason?: SyncRowSnapshotBudgetError['reason']) => unknown;
 }
 type Authorized = { readonly request: SyncRequestEnvelope; readonly assetUals: readonly string[]; readonly context: OperationContext };
+class AuthorizedExactBatchContext {
+  private consumed = false;
+  constructor(private readonly owner: object, private readonly peerId: string, private readonly scope: Authorized) {}
+
+  claim(owner: object, peerId: string, session: ExactBatchAgentSession): Authorized {
+    if (owner !== this.owner || this.consumed) throw new Error('Exact batch response scope was not authorized');
+    this.consumed = true;
+    if (peerId !== this.peerId || session.windowSize !== EXACT_BATCH_STREAM_WINDOW_SIZE
+      || JSON.stringify(session.assetUals) !== JSON.stringify(this.scope.assetUals)) {
+      throw new Error('Exact batch response scope was not authorized');
+    }
+    session.signal.throwIfAborted();
+    return this.scope;
+  }
+}
 class ProfileRefusal extends Error {}
 
 /** Bind directly to Core's explicit registerExperimentalExactBatchResponder. */
 export function createExactBatchResponderBinding(options: ExactBatchResponderBindingOptions) {
-  // The bytes object passed to authorize and respond is owned by one Core
-  // session. Preserve the parsed authorized scope; never authorize twice or
-  // replay a single-use private nonce during response generation.
-  const requests = new WeakMap<Uint8Array, Authorized>();
-  const authorizeRequest = async (bytes: Uint8Array, peerId: string, signal: AbortSignal): Promise<readonly string[]> => {
+  const authorizationOwner = {};
+  const authorizeRequest = async (bytes: Uint8Array, peerId: string, signal: AbortSignal): Promise<ExactBatchResponderAuthorization<AuthorizedExactBatchContext>> => {
     signal.throwIfAborted();
     if (bytes.byteLength < 1 || bytes.byteLength > 8192) throw new Error('Exact batch START request allowance exceeded');
     const request = options.parseSyncRequest(bytes);
@@ -61,16 +73,14 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
     if (!(await options.isPublicContextGraph(request.contextGraphId, signal))) throw new Error('Exact batch requires public context graph authority');
     signal.throwIfAborted();
     const assetUals = Object.freeze(selected);
-    requests.set(bytes, { request: Object.freeze({ ...request, assetUals: [...assetUals] }), assetUals, context: createOperationContext('sync') });
-    return assetUals;
+    return Object.freeze({ assetUals, context: new AuthorizedExactBatchContext(authorizationOwner, peerId, {
+      request: Object.freeze({ ...request, assetUals: [...assetUals] }), assetUals, context: createOperationContext('sync'),
+    }) });
     });
   };
 
-  const respond = async (bytes: Uint8Array, session: ExactBatchAgentSession, _peerId: string): Promise<void> => {
-    const authorized = requests.get(bytes); requests.delete(bytes);
-    if (!authorized || session.windowSize !== EXACT_BATCH_STREAM_WINDOW_SIZE
-      || JSON.stringify(session.assetUals) !== JSON.stringify(authorized.assetUals)) throw new Error('Exact batch response scope was not authorized');
-    const { request, assetUals, context } = authorized;
+  const respond = async (authorized: AuthorizedExactBatchContext, session: ExactBatchAgentSession, _peerId: string): Promise<void> => {
+    const { request, assetUals, context } = authorized.claim(authorizationOwner, _peerId, session);
     return options.admission.withAuthorizedResponseAdmission(_peerId, request.contextGraphId, session.signal, async () => {
     const window = new ExactBatchSendWindow({ assetCount: assetUals.length, windowSize: EXACT_BATCH_STREAM_WINDOW_SIZE });
     const send = async (frame: ExactBatchFrame) => { window.acceptSent(frame); await session.send(frame); };
