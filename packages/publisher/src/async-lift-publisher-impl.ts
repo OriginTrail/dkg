@@ -57,6 +57,7 @@ import type {
   AsyncLiftRetryFilter,
   AsyncLiftRetryOutcome,
   AsyncLiftRetryStateReader,
+  ExecutionFailureEvidence,
   IntentLookupInput,
   IntentLookupResult,
   JournalReadInput,
@@ -106,6 +107,7 @@ import {
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
+import { isStoreOperationProvenNotStarted } from './promote-replay-safety.js';
 import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
@@ -177,6 +179,32 @@ import {
  *                            and was rolled back to `'validated'`; the tx was never sent.
  */
 type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
+
+/** The pre-send write-ahead recorder: the hook handed to the executor, and what it witnessed. */
+interface PreSendBroadcastRecorder {
+  readonly onBeforeBroadcast: (record: PreBroadcastRecord) => Promise<void>;
+  readonly outcome: PreSendOutcome;
+  /**
+   * GH#2940 — the error the write-ahead hook itself threw, set only with `rolled-back-pre-send`.
+   * The chain adapter re-throws a rejected hook as a NEW message-only Error, so this closure is
+   * the one place the original — and with it the typed storage-outcome contract — survives.
+   */
+  readonly writeAheadFailure: unknown;
+}
+
+/**
+ * GH#2940 — what the recorder PROVED about a failed attempt, handed to the failure writer.
+ *
+ * `neverDispatched` is the positional proof, not an inference from record fields: the hook is
+ * awaited strictly before the send and fails closed, so a write-ahead that never durably recorded
+ * a hash (`not-reached`, `rolled-back-pre-send`) means nothing was signed-and-sent. A durably
+ * recorded one may be on the wire, so it proves nothing.
+ */
+function executionFailureEvidence(recorder: PreSendBroadcastRecorder): ExecutionFailureEvidence {
+  return recorder.outcome === 'recorded-durable'
+    ? { neverDispatched: false }
+    : { neverDispatched: true, writeAheadFailure: recorder.writeAheadFailure };
+}
 
 type BusinessOperationResult<T> =
   | { readonly kind: 'succeeded'; readonly value: T }
@@ -689,8 +717,8 @@ export class TripleStoreAsyncLiftPublisher
             await this.applyClaimUpdateTransition(current, scope, status, data),
           recordPublishResult: async (current, scope, publishResult, options = {}) =>
             await this.applyPublishResultTransition(current, scope, publishResult, options),
-          recordExecutionFailure: async (current, scope, failedFromState, error) =>
-            await this.applyExecutionFailureTransition(current, scope, failedFromState, error),
+          recordExecutionFailure: async (current, scope, failedFromState, error, evidence) =>
+            await this.applyExecutionFailureTransition(current, scope, failedFromState, error, evidence),
         },
       },
     );
@@ -1069,7 +1097,11 @@ export class TripleStoreAsyncLiftPublisher
       },
     }));
     if (publishAttempt.kind === 'failed') {
-      return await session.recordExecutionFailure('broadcast', publishAttempt.error);
+      return await session.recordExecutionFailure(
+        'broadcast',
+        publishAttempt.error,
+        executionFailureEvidence(broadcastRecorder),
+      );
     }
     return await this.recordWorkerPublishResult(session, publishAttempt.value, { publicByteSize });
   }
@@ -1140,7 +1172,7 @@ export class TripleStoreAsyncLiftPublisher
     });
     const finalPreflight = await this.runBusinessOperation(() => handler.preflight?.(preflightInput));
     if (finalPreflight.kind === 'failed') {
-      return await this.failKnowledgeAssetVmPublishExecution(session, finalPreflight.error);
+      return await this.failKnowledgeAssetVmPublishExecution(session, finalPreflight.error, broadcastRecorder);
     }
     if (finalPreflight.value?.action === 'noop') {
       return await this.finalizeKnowledgeAssetVmPublishNoop(claim, snapshot, snapshotMetadata);
@@ -1250,7 +1282,7 @@ export class TripleStoreAsyncLiftPublisher
       // failed KA VM job IS chain-recovery-chased now, but only while it is held, and
       // `insufficient_funds` is proven-ineffective — so a whitelisted reject lands terminal and
       // stays out of the dispatcher's queue instead of costing a chain read every tick.
-      return await this.failKnowledgeAssetVmPublishExecution(session, error);
+      return await this.failKnowledgeAssetVmPublishExecution(session, error, broadcastRecorder);
     }
     if (executionAttempt.value.kind === 'detached') {
       return executionAttempt.value.job;
@@ -1283,11 +1315,16 @@ export class TripleStoreAsyncLiftPublisher
   private async failKnowledgeAssetVmPublishExecution(
     session: ActiveLiftJobClaimSession,
     error: unknown,
+    broadcastRecorder: PreSendBroadcastRecorder,
   ): Promise<LiftJob> {
     const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
       ? 'validated'
       : 'broadcast';
-    return await session.recordExecutionFailure(failedFromState, error);
+    return await session.recordExecutionFailure(
+      failedFromState,
+      error,
+      executionFailureEvidence(broadcastRecorder),
+    );
   }
 
   /**
@@ -3210,8 +3247,29 @@ export class TripleStoreAsyncLiftPublisher
     scope: LiftJobTransitionScope,
     failedFromState: LiftJobState,
     error: unknown,
+    evidence?: ExecutionFailureEvidence,
   ): Promise<LiftJob> {
-    if (failedFromState === 'claimed' || failedFromState === 'validated') {
+    // GH#2940 — a typed store rejection that PROVABLY preceded dispatch is a pre-send failure, not a
+    // transaction-submission timeout. Its message reads "Store scheduler queue wait timeout (...)",
+    // which the broadcast-origin classifiers below match on the bare word `timeout`: it used to be
+    // recorded as `tx_submit_timeout` — "check the chain" — for a job with no transaction to check,
+    // which no automatic lane can ever resolve. All four conjuncts are required and each is its own
+    // barrier:
+    //   - the caller's legacy label is 'broadcast' (this is the only origin being re-routed);
+    //   - the write-ahead never durably recorded a hash (the recorder's positional proof — the hook
+    //     is awaited strictly before the send and fails closed);
+    //   - the PERSISTED status, read here under the transition lock, is still 'validated' — if the
+    //     write-ahead rollback itself failed the record is `broadcast` + hash, and recording it
+    //     "from validated" would discard that evidence (the state model throws), so it falls back to
+    //     the held failure it has always been;
+    //   - the cause is the storage layer's typed `not_started` contract, on the thrown error or on
+    //     the write-ahead failure the adapter's message-only re-wrap hid. Prose never qualifies.
+    const preDispatchStoreRejection = failedFromState === 'broadcast'
+      && evidence?.neverDispatched === true
+      && current.status === 'validated'
+      && [error, evidence.writeAheadFailure].some(isStoreOperationProvenNotStarted);
+    const origin: LiftJobState = preDispatchStoreRejection ? 'validated' : failedFromState;
+    if (origin === 'claimed' || origin === 'validated') {
       const message = error instanceof Error ? error.message : String(error);
       const lower = message.toLowerCase();
       const code =
@@ -3220,7 +3278,9 @@ export class TripleStoreAsyncLiftPublisher
         // to this pre-send branch, so their state and code cannot drift apart.
         // Everything message-keyed stays in the legacy chain below (#1974).
         this.classifyKnowledgeAssetVmPublishPreconditionCode(error)
-          ?? (lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
+          ?? (preDispatchStoreRejection
+          ? 'workspace_unavailable'
+          : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'
           : lower.includes('authority')
           ? 'authority_forbidden'
@@ -3228,7 +3288,7 @@ export class TripleStoreAsyncLiftPublisher
             ? 'workspace_slice_not_found'
             : 'canonicalization_failed');
       const failure = createLiftJobFailureMetadata({
-        failedFromState,
+        failedFromState: origin,
         code,
         message,
         errorPayloadRef: `urn:dkg:publisher:error:${current.jobId}`,
@@ -3249,6 +3309,11 @@ export class TripleStoreAsyncLiftPublisher
       timeout:
         lower.includes('timeout') || lower.includes('timed out')
           ? {
+              // A PLACEHOLDER, not a measurement: the executor reports no configured or elapsed
+              // deadline, so 0 means "unknown" — never "the configured timeout was zero" nor
+              // "it took zero time". `timeoutAt` is when this failure was recorded. GH#2940: a
+              // typed pre-dispatch store rejection never reaches here (it is recorded above as a
+              // non-timeout failure, which cannot carry timeout metadata at all).
               timeoutMs: 0,
               timeoutAt: this.now(),
               // Both carriers a timeout can land on here (`tx_submit_timeout` from 'broadcast',
@@ -3278,7 +3343,7 @@ export class TripleStoreAsyncLiftPublisher
     claim: ActiveLiftJobClaim;
     merkleRoot?: LiftJobHex;
     publicByteSize?: number;
-  }): { onBeforeBroadcast: (record: PreBroadcastRecord) => Promise<void>; readonly outcome: PreSendOutcome } {
+  }): PreSendBroadcastRecorder {
     // #1864 — the pre-send write-ahead outcome is tracked in this closure (like `recordedTxHash`)
     // rather than threaded as a mutable out-parameter through the publish path. The
     // processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs terminal. It
@@ -3289,6 +3354,7 @@ export class TripleStoreAsyncLiftPublisher
     // away is a contract that lived in a naming convention and in the ORDER two breadcrumbs were
     // emitted. The nonce arrives as a field on the signal, so there is nothing left to correlate.
     let outcome: PreSendOutcome = 'not-reached';
+    let writeAheadFailure: unknown;
     let recordedTxHash: string | undefined;
     const onBeforeBroadcast = async (record: PreBroadcastRecord): Promise<void> => {
       if (recordedTxHash) return;
@@ -3310,6 +3376,7 @@ export class TripleStoreAsyncLiftPublisher
         // recordDurableBroadcastBeforeSend rolled the transition back before re-throwing (or the
         // write-ahead never durably mutated state): the tx was never sent.
         outcome = 'rolled-back-pre-send';
+        writeAheadFailure = error;
         throw error;
       }
     };
@@ -3317,6 +3384,9 @@ export class TripleStoreAsyncLiftPublisher
       onBeforeBroadcast,
       get outcome() {
         return outcome;
+      },
+      get writeAheadFailure() {
+        return writeAheadFailure;
       },
     };
   }
