@@ -261,6 +261,21 @@ describe('GH#2942 derived retry blocker', () => {
       expect(describeAutomaticRecoveryExit(unmarked)).toEqual({ exit: false, gaps: ['operation_marker'] });
     });
 
+    it('hands the SAME blocker to the admission error a re-submit receives, beside the unchanged retryable promise', async () => {
+      const publisher = h.createPublisher();
+      const request = kaVmPublishRequest();
+      const held = await h.failAfterRecordedTxHash(publisher, request);
+      const blocker = publisher.describeConfiguredRetryState(held).blocker;
+      expect(blocker?.code).toBe('nonce_missing');
+
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+        code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+        existingJobId: held.jobId,
+        retryable: false,
+        blocker,
+      });
+    });
+
     it('keeps hasAutomaticRecoveryExit a pure view of the description', async () => {
       const complete = await completeCreate();
       const gappy = { ...complete, validation: undefined } as unknown as PersistedFailedJob;
