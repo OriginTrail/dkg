@@ -1,7 +1,12 @@
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
-import { getChainWriteAheadHookCause, isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
+import {
+  getChainWriteAheadHookCause,
+  hostOnlyRpcText,
+  isPendingPublishTransactionStatus,
+  isTransientRpcTransportFailureWithoutTransaction,
+} from '@origintrail-official/dkg-chain';
 import {
   ChainProofRetrySchedule,
   type ChainProofSchedulePass,
@@ -3267,24 +3272,39 @@ export class TripleStoreAsyncLiftPublisher
     // transaction-submission timeout. Its message reads "Store scheduler queue wait timeout (...)",
     // which the broadcast-origin classifiers below match on the bare word `timeout`: it used to be
     // recorded as `tx_submit_timeout` — "check the chain" — for a job with no transaction to check,
-    // which no automatic lane can ever resolve. All three conjuncts are required, and each is an
-    // independent barrier (the first two overlap in practice — a recorded write-ahead leaves the
-    // record at 'broadcast' — which is exactly why neither may stand in for the other):
+    // which no automatic lane can ever resolve.
+    // GH#2942 — the same holds for a typed TRANSIENT RPC transport failure that names no transaction
+    // (`isTransientRpcTransportFailureWithoutTransaction`): estimate / populate / sign exhausted
+    // every endpoint, the request governor was full, a bounded request ran out of time. Those are
+    // raised while the publish transaction is still being prepared, strictly before the write-ahead
+    // hook, so they follow the same rule. An approval or a context-graph registration may already
+    // have been sent by this attempt; neither is the publication, and nothing here says otherwise.
+    // All three conjuncts are required, and each is an independent barrier (the first two overlap
+    // in practice — a recorded write-ahead leaves the record at 'broadcast' — which is exactly why
+    // neither may stand in for the other):
     //   - the write-ahead never durably recorded a hash (the recorder's positional proof — the hook
     //     is awaited strictly before the send and fails closed);
     //   - the PERSISTED status, read here under the transition lock, is still 'validated' — if the
     //     write-ahead rollback itself failed the record is `broadcast` + hash, and recording it
     //     "from validated" would discard that evidence (the state model throws), so it falls back to
     //     the held failure it has always been;
-    //   - the cause is the storage layer's typed `not_started` contract, on the thrown error or on
+    //   - the cause is typed: the storage layer's `not_started` contract, on the thrown error or on
     //     the hook error that the chain adapter's write-ahead wrapper carries as `cause`
-    //     (`isProvenStoreRejection`). Prose never qualifies.
-    const preDispatchStoreRejection = evidence?.neverDispatched === true
+    //     (`isProvenStoreRejection`), or the chain's transient transport failure. Prose never
+    //     qualifies, and an absent `txHash` is never a proof — it is only one more exclusion.
+    const transientRpcPreparation = isTransientRpcTransportFailureWithoutTransaction(error);
+    const preDispatchRecoverable = evidence?.neverDispatched === true
       && current.status === 'validated'
-      && isProvenStoreRejection(error);
-    const origin: LiftJobState = preDispatchStoreRejection ? 'validated' : failedFromState;
+      && (isProvenStoreRejection(error) || transientRpcPreparation);
+    const origin: LiftJobState = preDispatchRecoverable ? 'validated' : failedFromState;
     if (origin === 'claimed' || origin === 'validated') {
-      const message = error instanceof Error ? error.message : String(error);
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      // A single-endpoint transport message is the provider's own text, and ethers embeds the
+      // request URL in it; a configured URL can carry an API key. The persisted message is echoed
+      // by the job routes, so reduce every URL in it to its host.
+      const message = preDispatchRecoverable && transientRpcPreparation
+        ? hostOnlyRpcText(rawMessage)
+        : rawMessage;
       const lower = message.toLowerCase();
       const code =
         // Structured precondition failures (author capability / stale intent /
@@ -3292,7 +3312,7 @@ export class TripleStoreAsyncLiftPublisher
         // to this pre-send branch, so their state and code cannot drift apart.
         // Everything message-keyed stays in the legacy chain below (#1974).
         this.classifyKnowledgeAssetVmPublishPreconditionCode(error)
-          ?? (preDispatchStoreRejection
+          ?? (preDispatchRecoverable
           ? 'workspace_unavailable'
           : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'
