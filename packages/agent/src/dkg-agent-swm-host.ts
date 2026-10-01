@@ -10,6 +10,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { performance } from 'node:perf_hooks';
 import {
@@ -5865,6 +5866,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
     }
     this.pruneVmReconcileState();
+  }
+
+  initializeVmReconcilePublicCoreTransportPreferencePolicy(this: DKGAgent): void {
+    this.vmReconcilePublicCoreTransportPreferencePolicy ??= new VmRecoveryCoreTransportPreferencePolicy({
+      now: () => this.vmReconcileRotationNow(),
+      connectionKey: peerId => this.getSyncReconcilerConnectionKey(peerId),
+      supportsCore: peerId => this.peerCapabilityRegistry.supportsCore(peerId),
+      holderReuseEnabled: () => process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1',
+      captureScope: (localCgId, candidatePeerIds) => typeof this.chain.deploymentId === 'string' ? {
+        deploymentId: this.chain.deploymentId,
+        lifecycleGeneration: this.vmReconcileLifecycleGeneration,
+        bindingGeneration: this.contextGraphBindingState.capture(localCgId),
+        selectedBindingGeneration: this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration,
+        candidatePeerIds: [...candidatePeerIds],
+      } : undefined,
+      scopeIsCurrent: (localCgId, scope) => this.chain.deploymentId === scope.deploymentId
+        && this.vmReconcileLifecycleGeneration === scope.lifecycleGeneration
+        && !this.vmReconcileRotationClosed
+        && this.contextGraphBindingState.capture(localCgId) === scope.bindingGeneration
+        && this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration === scope.selectedBindingGeneration
+        && this.vmReconcilePeerMembershipMatches(
+          new Set(scope.candidatePeerIds),
+          this.vmReconcileObservedCandidatePeerIds(localCgId),
+        ),
+    }, {
+      ttlMs: DKGAgentBase.VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS,
+      maxEntries: DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES,
+    });
   }
 
   vmReconcileRotationNow(this: DKGAgent): number {
