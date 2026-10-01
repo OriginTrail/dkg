@@ -9,7 +9,7 @@ import { ProtocolRouter } from '../src/protocol-router.js';
 import {
   exchangeExperimentalExactBatch, registerExperimentalExactBatchResponder,
   ExperimentalExactBatchUnsupportedError, ExactBatchTransportSession, type ExactBatchTransportOptions,
-  type ExactBatchTransportEvent,
+  EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL, type ExactBatchTransportEvent,
 } from '../src/experimental-exact-batch-stream.js';
 import {
   EXACT_BATCH_FRAME_KIND as K, ExactBatchReceiveWindow, ExactBatchSendWindow,
@@ -23,7 +23,7 @@ const text = new TextEncoder();
 const codec = { encode: encodeExactBatchFrame, decode: decodeExactBatchFrames };
 const options: ExactBatchTransportOptions = { timeoutMs: 2000, windowSize: 2,
   maxReadBufferBytes: 65552, maxRequestBytes: 8192, maxFrameBytes: 65552, maxResponseBytes: 64 * 1024 * 1024 };
-const frame = (kind: number, assetIndex = 255, sequence = 0, payload = new Uint8Array()): ExactBatchFrame => ({ kind, assetIndex, sequence, payload });
+const frame = (kind: number, assetIndex = 255, sequence = 0, payload: Uint8Array = new Uint8Array()): ExactBatchFrame => ({ kind, assetIndex, sequence, payload });
 const start = () => frame(K.REQUEST, 255, 0, text.encode('existing signed START fixture'));
 function gate() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 
@@ -85,12 +85,16 @@ class MemoryStream extends EventTarget {
 function fixture() {
   const client = new MemoryStream(), server = new MemoryStream(); client.peer = server; server.peer = client;
   const clientStop = new AbortController(), serverStop = new AbortController();
+  const connectionEvents = new EventTarget();
   let inbound!: (stream: Stream, connection: { remotePeer: { toString(): string } }) => Promise<void>;
   let inboundDone: Promise<void> = Promise.resolve();
-  const admission = vi.fn(async (..._args: unknown[]) => true), rejected = vi.fn(() => false), resolved = vi.fn(async () => []);
+  const admission = vi.fn(async (..._args: unknown[]) => true), rejected = vi.fn(() => false);
+  const resolved = vi.fn(async (_peer: string, _options?: { signal?: AbortSignal; perStepTimeoutMs?: number }) => [] as string[]);
   const connections: unknown[] = [], addresses: { multiaddr: { toString(): string } }[] = [];
   const node = (stop: AbortController, handle: (...args: unknown[]) => void) => ({ stopSignal: stop.signal,
-    libp2p: { getConnections: () => connections, peerStore: { get: async () => ({ addresses }) }, handle } }) as unknown as DKGNode;
+    libp2p: { getConnections: () => connections, peerStore: { get: async () => ({ addresses }) }, handle,
+      addEventListener: connectionEvents.addEventListener.bind(connectionEvents),
+      removeEventListener: connectionEvents.removeEventListener.bind(connectionEvents) } }) as unknown as DKGNode;
   const open = async () => {
     inboundDone = inbound(server as unknown as Stream, { remotePeer: { toString: () => PEER } });
     return client as unknown as Stream;
@@ -100,7 +104,7 @@ function fixture() {
     peerResolver: { resolve: resolved } as unknown as PeerResolver, isPeerAccepted: admission, isPeerKnownRejected: rejected });
   const routerServer = new ProtocolRouter(node(serverStop, (_protocol, handler) => { inbound = handler as typeof inbound; }),
     { isPeerAccepted: admission, isPeerKnownRejected: rejected });
-  return { client, server, clientStop, serverStop, admission, rejected, resolved, dial, open, connections, addresses, routerClient, routerServer,
+  return { client, server, clientStop, serverStop, connectionEvents, admission, rejected, resolved, dial, open, connections, addresses, routerClient, routerServer,
     settled: () => inboundDone };
 }
 
@@ -218,6 +222,69 @@ describe('experimental exact-batch dedicated duplex transport', () => {
     await exchangeExperimentalExactBatch(limited.routerClient, PEER, start(), codec, { ...options, assetUals: UALS }, s => s.next());
     await limited.settled(); expect(limited.dial).toHaveBeenCalledOnce(); expect(limitedStream).toHaveBeenCalledOnce();
     expect(limited.dial).toHaveBeenCalledBefore(limitedStream); expect(limited.client.sentKinds).toEqual([K.REQUEST]);
+  });
+
+  it('interrupts stalled resolution on connection:open, sends START once and keeps the original deadline through duplex work', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture(), resolving = gate(), callbackEntered = gate(), caller = new AbortController();
+      let resolverSignal!: AbortSignal, exchangeSignal!: AbortSignal, callbacks = 0;
+      f.resolved.mockImplementation(async (_peer, options) => {
+        resolverSignal = options!.signal!;
+        resolving.resolve();
+        await new Promise<void>(done => resolverSignal.addEventListener('abort', () => done(), { once: true }));
+        return [];
+      });
+      registerExperimentalExactBatchResponder(f.routerServer, codec, options, async () => UALS,
+        async (_request, session) => { await session.next(); });
+      const reuse = vi.fn(async (_protocol: string, _options: { signal: AbortSignal }) => f.open());
+      const connection = { status: 'open', remotePeer: { equals: (other: unknown) => String(other) === PEER }, newStream: reuse };
+      const outcome = exchangeExperimentalExactBatch(f.routerClient, PEER, start(), codec,
+        { ...options, timeoutMs: 1_000, signal: caller.signal, assetUals: UALS }, async session => {
+          callbacks++;
+          exchangeSignal = session.signal;
+          callbackEntered.resolve();
+          return session.next();
+        }).catch(error => error);
+      await resolving.promise;
+      const admission = f.admission.mock.calls.find(call => call[2] === 'outbound')!;
+      const originalSignal = (admission[3] as { signal: AbortSignal }).signal;
+      expect(f.client.sentKinds).toEqual([]);
+      await vi.advanceTimersByTimeAsync(600);
+      f.connections.push(connection);
+      f.connectionEvents.dispatchEvent(new CustomEvent('connection:open', { detail: connection }));
+      await callbackEntered.promise;
+
+      expect(resolverSignal.aborted).toBe(true);
+      expect(reuse).toHaveBeenCalledExactlyOnceWith(EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
+        { runOnLimitedConnection: true, signal: originalSignal });
+      expect(exchangeSignal).toBe(originalSignal);
+      expect(exchangeSignal).not.toBe(resolverSignal);
+      expect(exchangeSignal.aborted).toBe(false);
+      expect(callbacks).toBe(1);
+      expect(f.client.sentKinds).toEqual([K.REQUEST]);
+      expect(f.resolved).toHaveBeenCalledOnce();
+      expect(f.dial).not.toHaveBeenCalled();
+      expect(getEventListeners(f.connectionEvents, 'connection:open')).toHaveLength(0);
+
+      // Resolution consumed 600 ms; stream entry must not reset the deadline.
+      await vi.advanceTimersByTimeAsync(399);
+      expect(exchangeSignal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(exchangeSignal.reason).toMatchObject({ name: 'TimeoutError' });
+      await f.settled();
+      expect(callbacks).toBe(1);
+      expect(reuse).toHaveBeenCalledOnce();
+      expect(f.client.sentKinds).toEqual([K.REQUEST]);
+      expect(f.dial).not.toHaveBeenCalled();
+      for (const signal of [caller.signal, f.clientStop.signal, f.serverStop.signal, originalSignal, resolverSignal]) {
+        expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+      }
+      expect(getEventListeners(f.client, 'close')).toHaveLength(0);
+      expect(getEventListeners(f.server, 'close')).toHaveLength(0);
+      expect(getEventListeners(f.connectionEvents, 'connection:open')).toHaveLength(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it('node stop aborts a stalled duplex read and removes linked listeners', async () => {
