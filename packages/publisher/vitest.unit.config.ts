@@ -46,6 +46,8 @@ export default defineConfig({
       'test/pre-broadcast-signal-await.test.ts',
       'test/async-lift-admission-clear-2270.test.ts',
       'test/async-lift-store-rejection-2940.test.ts',
+      'test/async-lift-store-rejection-recovery-2940.test.ts',
+      'test/async-lift-store-rejection-retry-2940.test.ts',
       'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
       'test/async-promote-writejob-atomicity.test.ts',
