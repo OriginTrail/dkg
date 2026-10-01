@@ -113,7 +113,7 @@ import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 
 const DKG = 'http://dkg.io/ontology/';
-const contextGraphId = 'agent-blackbox-vm';
+const contextGraphId = 'public-recovery-vm';
 const ual = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1';
 const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/asset/1`;
 const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
@@ -514,7 +514,7 @@ describe('durable sync lifecycle chain binding', () => {
     const detailed = await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
       agentLike as any,
       '12D3KooWExactRecoveryPeer',
-      '0x1111111111111111111111111111111111111111/blackbox',
+      '0x1111111111111111111111111111111111111111/public-recovery',
       { kind: 'ual-only', assetUals: [exactUal] },
       { signal: controller.signal },
     );
