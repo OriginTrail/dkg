@@ -253,7 +253,9 @@ interface ExactGraphPagePlan {
   cursors: Map<number, ExactGraphPageCursor | null>;
   cursorBytesEstimate?: number;
   /** Page-only sessions reject local source writes instead of mixing generations. */
-  writeRevisions?: readonly { prefix: string; generation: number }[];
+  writeRevisions?: readonly { prefix: string; generation: number; stable: boolean }[];
+  /** An indeterminate source may serve only freshly count/root-verified exports. */
+  requiresVerifiedExport?: true;
   /**
    * Export rows use serialized-term lexical order; store pages use SPARQL
    * term/value order. A retained byte-page session must never cross these.
@@ -1763,9 +1765,6 @@ export async function readDurableDataPage(params: {
           : null;
         const prefix = contextGraphMetaGraphUri(params.contextGraphId);
         const revision = revisionSource?.getWriteRevision(prefix);
-        if (revision && !revision.stable) {
-          throw new Error('Sync session exact-graph plan expired: store revision is unstable');
-        }
         const manifest = await readGraphScopedVmManifest(
           params.store,
           params.contextGraphId,
@@ -1774,10 +1773,7 @@ export async function readDurableDataPage(params: {
         const entries = manifest.confirmedEntries.filter((entry) => requested.has(entry.ual));
         const payloadRevisions = revisionSource ? entries.map((entry) => {
           const current = revisionSource.getWriteRevision(entry.graph);
-          if (!current.stable) {
-            throw new Error('Sync session exact-graph plan expired: store revision is unstable');
-          }
-          return { prefix: entry.graph, generation: current.generation };
+          return { prefix: entry.graph, generation: current.generation, stable: current.stable };
         }) : [];
         const plan = await buildExactGraphPagePlan(
           params.store,
@@ -1788,7 +1784,16 @@ export async function readDurableDataPage(params: {
           params.exactGraphReadMode,
         );
         if (revision) {
-          plan.writeRevisions = [{ prefix, generation: revision.generation }, ...payloadRevisions];
+          plan.writeRevisions = [{ prefix, generation: revision.generation, stable: revision.stable }, ...payloadRevisions];
+          if (plan.writeRevisions.some((current) => !current.stable)) {
+            // A late remote completion need not advance the local generation.
+            // It cannot justify cursor paging or retained DATA snapshots.
+            if (params.assetUals?.length !== 1 || !params.exactAssetExportCache
+              || !params.onExactAssetExportLease || params.maxPageBytes === undefined) {
+              throw new Error('Sync session exact-graph plan expired: store revision is unstable');
+            }
+            plan.requiresVerifiedExport = true;
+          }
           assertExactGraphPlanRevision(params.store, plan);
         }
         return plan;
@@ -2071,7 +2076,7 @@ function assertExactGraphPlanRevision(store: TripleStore, plan: ExactGraphPagePl
   const source = asGraphWriteRevisionSource(store);
   for (const expected of plan.writeRevisions) {
     const revision = source?.getWriteRevision(expected.prefix);
-    if (!revision || !revision.stable || revision.generation !== expected.generation) {
+    if (!revision || revision.stable !== expected.stable || revision.generation !== expected.generation) {
       throw new Error('Sync session exact-graph plan expired: store revision changed before page completion');
     }
   }
@@ -2419,7 +2424,7 @@ async function readByteBoundedRowsPageFromExactGraphPlan(
       return page;
     }
   }
-  if (plan.bytePageReadMode === 'export') {
+  if (plan.requiresVerifiedExport || plan.bytePageReadMode === 'export') {
     // The requester already consumed a lexical export prefix. A null lease
     // is a refusal, not permission to reinterpret its offset or cursor in the
     // store's value order. Existing requesters rotate expired session tokens.

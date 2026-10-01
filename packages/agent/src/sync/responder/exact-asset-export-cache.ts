@@ -302,19 +302,22 @@ export function createBoundedExactAssetExportCache(params: {
     return { identity, envelope: parsed.envelope, metaGraph, bindings: metadata.bindings };
   };
 
-  const revisionKey = (graph: string, metaGraph: string): string | null => {
-    if (!revisions) return null;
+  const sourceRevision = (graph: string, metaGraph: string): { key: string | null; reusable: boolean } => {
+    if (!revisions) return { key: null, reusable: true };
     const meta = revisions.getWriteRevision(metaGraph);
     const body = revisions.getWriteRevision(graph);
-    if (!meta.stable || !body.stable) throw changed();
-    return JSON.stringify([meta.generation, body.generation]);
+    // An indeterminate remote write never proves quiescence. Keep its token
+    // as a local-write fence, but only fresh count/root-verified assertion
+    // bytes may be served: neither row nor encoded caches may replay it.
+    return { key: JSON.stringify([meta.generation, body.generation, meta.stable, body.stable]),
+      reusable: meta.stable && body.stable };
   };
 
   const lease = (
     entry: ExportEntry,
     keep: boolean,
     request: ExactAssetExportRequest,
-    sourceRevision: string | null,
+    revision: string | null,
     wholePayloadExports: 0 | 1,
   ): ExactAssetExportLease | null => {
     const responseId = Symbol('exact-export-response');
@@ -334,7 +337,7 @@ export function createBoundedExactAssetExportCache(params: {
       async assertCurrent() {
         if (released) throw changed();
         const metadata = await readMetadata(request, { ...request, expectedIdentity: entry.identity });
-        if (!metadata || revisionKey(request.graph, metadata.metaGraph) !== sourceRevision) throw changed();
+        if (!metadata || sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
         throwIfAborted(request.signal);
       },
       release() {
@@ -365,14 +368,14 @@ export function createBoundedExactAssetExportCache(params: {
       const metadata = knownMetadata ?? await readMetadata(request, request);
       if (!knownMetadata) observeStage('export-metadata-before', stageStarted);
       if (!metadata) return null;
-      const revision = revisionKey(request.graph, metadata.metaGraph);
+      const { key: revision, reusable } = sourceRevision(request.graph, metadata.metaGraph);
       const key = JSON.stringify([request.graph, metadata.identity, revision]);
       prune();
-      if (revision !== null) {
+      if (reusable && revision !== null) {
         const hit = cache.get(key);
         if (hit && Date.now() - hit.cachedAt < ttlMs) {
           throwIfAborted(request.signal);
-          if (revisionKey(request.graph, metadata.metaGraph) !== revision) throw changed();
+          if (sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
           cacheHits += 1;
           return lease(hit, true, request, revision, 0);
         }
@@ -413,7 +416,7 @@ export function createBoundedExactAssetExportCache(params: {
         observeStage('export-canonical-preparation-root', stageStarted);
         stageStarted = performance.now();
         const after = await readMetadata(request, { ...request, expectedIdentity: metadata.identity });
-        if (!after || revisionKey(request.graph, metadata.metaGraph) !== revision) throw changed();
+        if (!after || sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
         observeStage('export-metadata-after', stageStarted);
         throwIfAborted(request.signal);
         exports += 1;
@@ -423,7 +426,7 @@ export function createBoundedExactAssetExportCache(params: {
         };
         budget.admit({ id, replaceId: id, key, rows: rows.length, bytesEstimate: heapBytes,
           phase: 'durable_data', onEvict: () => { if (cache.get(key) === entry) cache.delete(key); } });
-        if (revision !== null) {
+        if (reusable && revision !== null) {
           while (cache.size >= maxEntries) {
             const idle = [...cache.values()].find((value) => value.active === 0);
             if (!idle || !discard(idle)) break;
@@ -467,7 +470,7 @@ export function createBoundedExactAssetExportCache(params: {
     request: ExactAssetExportRequest, identity: string, revision: string | null,
   ) => {
     const after = await readMetadata(request, { ...request, expectedIdentity: identity });
-    if (!after || revisionKey(request.graph, after.metaGraph) !== revision) throw changed();
+    if (!after || sourceRevision(request.graph, after.metaGraph).key !== revision) throw changed();
     throwIfAborted(request.signal);
   };
   const retainEncoded = (key: string, body: Uint8Array, plainBytes: number, identity: string): void => {
@@ -526,16 +529,16 @@ export function createBoundedExactAssetExportCache(params: {
       }))));
       if (metaBytes.byteLength > EXACT_BATCH_MAX_FRAME_BYTES) return refuse('metadata-profile', request);
       const metaDigest = bytesToHex(sha256(metaBytes));
-      const revision = revisionKey(request.graph, metadata.metaGraph);
+      const { key: revision, reusable } = sourceRevision(request.graph, metadata.metaGraph);
       const key = encodedKey(request, metadata, revision);
       pruneEncoded();
-      const hit = encodedCache.get(key);
+      const hit = reusable ? encodedCache.get(key) : undefined;
       if (hit && Date.now() - hit.lastUsedAt < encodedTtlMs) {
         // Only the independently verified immutable assertion copy is reused.
         // On revisionless stores this is not evidence that present physical
         // DATA remains unchanged. Fresh metadata/public profile and the final
         // fence still apply, and the receiver still authenticates chain truth.
-        if (revisionKey(request.graph, metadata.metaGraph) !== revision) throw changed();
+        if (sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
         if (bytesToHex(sha256(hit.body)) !== hit.digest) {
           discardEncoded(hit);
           throw invalid();
@@ -608,7 +611,7 @@ export function createBoundedExactAssetExportCache(params: {
             // The cold response is caller-owned until promotion. Never retain
             // bytes changed by a send adapter or another response consumer.
             if (bytesToHex(sha256(body)) !== digest) throw invalid();
-            if (!retained) {
+            if (!retained && reusable) {
               retainEncoded(key, body, plainBytes, rows.identity);
               retained = true;
             }
