@@ -1769,6 +1769,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
+            // GH#2942 - WHY this job is held (what its record lacks, or whether this node can act on
+            // it), in the vocabulary `retryState.blocker` uses. Additive: the prose above and
+            // `retryable` keep their meaning, and a thrower with no blocker simply omits the key.
+            ...(err.blocker ? { blocker: err.blocker } : {}),
           });
         }
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {

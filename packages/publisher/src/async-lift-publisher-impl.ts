@@ -1,7 +1,13 @@
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
-import { getChainWriteAheadHookCause, isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
+import {
+  getChainWriteAheadHookCause,
+  hostOnlyRpcText,
+  isPendingPublishTransactionStatus,
+  isTransientRpcTransportFailureWithoutTransaction,
+} from '@origintrail-official/dkg-chain';
+import { isRpcPreconditionError } from './ack-errors.js';
 import {
   ChainProofRetrySchedule,
   type ChainProofSchedulePass,
@@ -82,6 +88,7 @@ import {
   FAILED_JOB_RETRY_ACTION_COUNT,
   classifyRetryAction,
   deriveLiftJobRetryProjection,
+  describeHeldBlocker,
   isAutomaticallyRetryableLiftJob,
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
@@ -212,6 +219,23 @@ export function executionFailureEvidence(recorder: PreSendBroadcastRecorder): Ex
 function isProvenStoreRejection(error: unknown): boolean {
   return isStoreOperationProvenNotStarted(error)
     || isStoreOperationProvenNotStarted(getChainWriteAheadHookCause(error));
+}
+
+/**
+ * GH#2942 — is this failure a typed TRANSIENT transport failure that names no transaction?
+ * Reads the chain's own typed contract on the thrown error or — the ONE wrapper the publisher
+ * owns — on the `cause` of an `RpcPreconditionError`, which the agent puts around the cold-start
+ * chain reads that precede ACK collection (chain id, lifecycle address, quorum). Nothing else is
+ * unwrapped: an arbitrary cause chain is not walked, and prose never qualifies. Throw-safe.
+ */
+function isTransientRpcFailure(error: unknown): boolean {
+  if (isTransientRpcTransportFailureWithoutTransaction(error)) return true;
+  if (!isRpcPreconditionError(error)) return false;
+  try {
+    return isTransientRpcTransportFailureWithoutTransaction(error.cause);
+  } catch {
+    return false;
+  }
 }
 
 type BusinessOperationResult<T> =
@@ -3267,24 +3291,48 @@ export class TripleStoreAsyncLiftPublisher
     // transaction-submission timeout. Its message reads "Store scheduler queue wait timeout (...)",
     // which the broadcast-origin classifiers below match on the bare word `timeout`: it used to be
     // recorded as `tx_submit_timeout` — "check the chain" — for a job with no transaction to check,
-    // which no automatic lane can ever resolve. All three conjuncts are required, and each is an
-    // independent barrier (the first two overlap in practice — a recorded write-ahead leaves the
-    // record at 'broadcast' — which is exactly why neither may stand in for the other):
+    // which no automatic lane can ever resolve.
+    // GH#2942 — the same holds for a typed TRANSIENT RPC transport failure that names no transaction
+    // (`isTransientRpcTransportFailureWithoutTransaction`): estimate / populate / sign exhausted
+    // every endpoint, the request governor was full, a bounded request ran out of time. Those are
+    // raised while the publish transaction is still being prepared, strictly before the write-ahead
+    // hook, so they follow the same rule. An approval or a context-graph registration may already
+    // have been sent by this attempt; neither is the publication, and nothing here says otherwise.
+    // All three conjuncts are required, and each is an independent barrier (the first two overlap
+    // in practice — a recorded write-ahead leaves the record at 'broadcast' — which is exactly why
+    // neither may stand in for the other):
     //   - the write-ahead never durably recorded a hash (the recorder's positional proof — the hook
     //     is awaited strictly before the send and fails closed);
     //   - the PERSISTED status, read here under the transition lock, is still 'validated' — if the
     //     write-ahead rollback itself failed the record is `broadcast` + hash, and recording it
     //     "from validated" would discard that evidence (the state model throws), so it falls back to
     //     the held failure it has always been;
-    //   - the cause is the storage layer's typed `not_started` contract, on the thrown error or on
+    //   - the cause is typed: the storage layer's `not_started` contract, on the thrown error or on
     //     the hook error that the chain adapter's write-ahead wrapper carries as `cause`
-    //     (`isProvenStoreRejection`). Prose never qualifies.
-    const preDispatchStoreRejection = evidence?.neverDispatched === true
+    //     (`isProvenStoreRejection`), or the chain's transient transport failure. Prose never
+    //     qualifies, and an absent `txHash` is never a proof — it is only one more exclusion.
+    const transientRpc = isTransientRpcFailure(error);
+    const preDispatchRecoverable = evidence?.neverDispatched === true
       && current.status === 'validated'
-      && isProvenStoreRejection(error);
-    const origin: LiftJobState = preDispatchStoreRejection ? 'validated' : failedFromState;
+      && (isProvenStoreRejection(error) || transientRpc);
+    // A failure raised while the job is still 'claimed' (the initial preflight) precedes validation,
+    // and so precedes everything that could dispatch anything: the typed cause alone is enough. The
+    // keyword chain below would otherwise record a multi-endpoint exhaustion message that carries
+    // none of its words as the TERMINAL `canonicalization_failed` - a transient outage ending a job.
+    // No in-repo preflight raises a typed transport failure today (the agent's is store-only); this
+    // keeps a chain read added to one later, or a third-party handler's, from ending the job.
+    const claimedTransientRpc = failedFromState === 'claimed'
+      && current.status === 'claimed'
+      && transientRpc;
+    const origin: LiftJobState = preDispatchRecoverable ? 'validated' : failedFromState;
     if (origin === 'claimed' || origin === 'validated') {
-      const message = error instanceof Error ? error.message : String(error);
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      // A transport message is the provider's own text, and ethers embeds the request URL in it; a
+      // configured URL can carry an API key. The persisted message is echoed by the job routes, so
+      // reduce every URL in it to its host.
+      const message = transientRpc && (preDispatchRecoverable || claimedTransientRpc)
+        ? hostOnlyRpcText(rawMessage)
+        : rawMessage;
       const lower = message.toLowerCase();
       const code =
         // Structured precondition failures (author capability / stale intent /
@@ -3292,7 +3340,7 @@ export class TripleStoreAsyncLiftPublisher
         // to this pre-send branch, so their state and code cannot drift apart.
         // Everything message-keyed stays in the legacy chain below (#1974).
         this.classifyKnowledgeAssetVmPublishPreconditionCode(error)
-          ?? (preDispatchStoreRejection
+          ?? (preDispatchRecoverable || claimedTransientRpc
           ? 'workspace_unavailable'
           : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'
@@ -3551,7 +3599,12 @@ export class TripleStoreAsyncLiftPublisher
    * that knows must narrow it — see {@link AsyncLiftRetryStateReader}).
    */
   describeConfiguredRetryState(job: PersistedLiftJob): LiftJobRetryProjection {
-    return deriveLiftJobRetryProjection(job, { autoRetryEnabled: this.autoRetryEnabled });
+    return deriveLiftJobRetryProjection(job, {
+      autoRetryEnabled: this.autoRetryEnabled,
+      // GH#2942 - the capability half of a held job's blocker: the SAME answer admission gives
+      // (`automaticExitIsConfiguredFor`), so the projection and the 503 cannot disagree.
+      canSettleHeldJob: (held) => this.automaticExitIsConfiguredFor(held),
+    });
   }
 
   private async reacceptDueFailedJobs(now: number): Promise<number> {
@@ -3641,6 +3694,7 @@ export class TripleStoreAsyncLiftPublisher
           + 'it cannot be republished until chain recovery proves the transaction absent',
         current.jobId,
         this.automaticExitIsConfiguredFor(current),
+        describeHeldBlocker(current, (held) => this.automaticExitIsConfiguredFor(held)),
       );
     }
     const reset = resetFailedLiftJobToAccepted(current, this.now());
@@ -3755,10 +3809,13 @@ export class TripleStoreAsyncLiftPublisher
    * `null` when this job cannot be asked about at all.
    *
    * The hash comes from {@link getLiftJobTransactionEvidence}, so a job whose only carrier is the
-   * recovery record is covered. The wallet comes from `broadcast` when it exists and otherwise
-   * from the claim, because a job reset once has no broadcast metadata left. The nonce is only
-   * ever on live broadcast metadata: an inherited hash carries none, and the resolver reads that
-   * absence as "no proof of absence available" rather than guessing.
+   * recovery record is covered. The wallet and the nonce come from the SAME carrier as the hash
+   * (`liftJobCheckedSigner` / `liftJobCheckedNonce`: the live `broadcast` metadata, or what an
+   * earlier reset preserved in the recovery record) — the claim is deliberately NOT a fallback for
+   * the wallet, because it names the NEXT attempt's signer. A record with no preserved nonce
+   * carries none, and the resolver reads that absence as "no proof of absence available" rather
+   * than guessing. `describeAutomaticRecoveryExit` reads the same carriers, so the exit a 503 or a
+   * `retryState.blocker` promises is one this method will actually ask about.
    *
    * `null` means stay held WITHOUT a chain read — the honest answer for a record we cannot form a
    * question about, and strictly better than the previous behaviour, which handed the resolver a
