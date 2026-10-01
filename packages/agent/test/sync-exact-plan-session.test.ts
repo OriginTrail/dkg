@@ -24,6 +24,7 @@ import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapsho
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { SYNC_REQUEST_PAGE_SIZE } from '../src/dkg-agent-constants.js';
+import { serializeResponderRows } from '../src/sync/responder/row-serialization.js';
 
 function budget(maxBytesEstimate = 2 * 1024 * 1024) {
   return createSyncResponderSnapshotBudget({
@@ -399,14 +400,27 @@ describe('exact DATA session pagination order', () => {
     const f = await integerPageFixture();
     try {
       if (mode === 'store') f.occupy();
+      // This HTTP-profile fixture has no write revisions, so every export
+      // page re-verifies the entire asset. Keep several real byte boundaries
+      // without repeating that 8,193-row verification dozens of times.
+      const maxPageBytes = 512 * 1024;
       const rows: SyncRow[] = [];
+      let pages = 0;
       while (rows.length < 8_193) {
-        const page = await f.read(rows.length, 'truncated-' + mode, 8_192, [f.assetUal], { maxPageBytes: 32 * 1024 });
+        const page = await f.read(rows.length, 'truncated-' + mode, 8_192, [f.assetUal], { maxPageBytes });
         expect(page.length).toBeGreaterThan(0); expect(page.length).toBeLessThan(8_192);
+        expect(Buffer.byteLength(serializeResponderRows(page), 'utf8')).toBeLessThanOrEqual(maxPageBytes);
         rows.push(...page);
+        pages++;
       }
+      expect(pages).toBeGreaterThanOrEqual(3);
       f.assertComplete(rows);
-      expect(await f.read(rows.length, 'truncated-' + mode, 8_192, [f.assetUal], { maxPageBytes: 32 * 1024 })).toEqual([]);
+      expect(await f.read(rows.length, 'truncated-' + mode, 8_192, [f.assetUal], { maxPageBytes })).toEqual([]);
+      if (mode === 'export') {
+        expect(f.cache.stats()).toMatchObject({ exports: pages + 1, cacheHits: 0, fallbacks: {} });
+      } else {
+        expect(f.acquire).toHaveBeenCalledOnce();
+      }
     } finally { await f.close(); }
   });
 
