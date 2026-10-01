@@ -51,6 +51,27 @@ function setPublicRows(f: ReturnType<typeof fixture>, rows: number) {
 
 afterEach(() => vi.restoreAllMocks());
 
+async function responseLeaseFixture(kind: 'rows' | 'encoded') {
+  const f = fixture(3);
+  if (kind === 'rows') Object.assign(f.store, { getWriteRevision: () => ({ generation: 1, stable: true }) });
+  const cache = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget });
+  const acquire = () => kind === 'rows' ? cache.acquire(f) : cache.acquireEncoded(f);
+  const cold = await acquire();
+  await cold!.assertCurrent(); cold!.release();
+  expect(f.budget.stats().snapshots).toBe(1);
+  return { f, cache, acquire, idle: f.budget.stats() };
+}
+
+function fillLeaseBudget(budget: ReturnType<typeof fixture>['budget'], pressure: symbol[]) {
+  let remaining = budget.limits().maxBytesEstimate - budget.stats().bytesEstimate;
+  while (remaining > 0) {
+    const bytesEstimate = Math.min(remaining, budget.limits().maxSnapshotBytesEstimate);
+    const id = Symbol('lease-pressure');
+    budget.admit({ id, key: 'lease-pressure', rows: 0, bytesEstimate, phase: 'durable_data', onEvict: () => {} });
+    pressure.push(id); remaining -= bytesEstimate;
+  }
+}
+
 function useLegacyMetadata(f: ReturnType<typeof fixture>) {
   // Only the canonical confirmed immutable envelope; no publisher policy hint.
   const predicates = new Set(['contentScopeVersion', 'assertionVersion', 'publicTripleCount',
@@ -141,6 +162,90 @@ describe('anonymized legacy public metadata without payload DATA', () => {
     await expect(f.cache.acquire({ ...f.request, authorizeMissingAccessPolicy })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
     expect(authorizeMissingAccessPolicy).not.toHaveBeenCalled();
     expect(f.query.mock.calls.some(([, options]) => options?.source?.endsWith('.payload'))).toBe(false);
+  });
+});
+
+describe('exact export response lease budget ownership', () => {
+  it.each(['rows', 'encoded'] as const)('keeps overlapping %s leases pinned until the last idempotent release', async kind => {
+    const { f, cache, acquire, idle } = await responseLeaseFixture(kind);
+    const first = await acquire(), second = await acquire();
+    const pressure: symbol[] = [], extra = Symbol('lease-pressure-extra');
+    const admitExtra = () => f.budget.admit({ id: extra, key: 'lease-pressure-extra', rows: 0,
+      bytesEstimate: 1, phase: 'durable_data', onEvict: () => {} });
+    try {
+      expect(f.budget.stats().bytesEstimate).toBe(idle.bytesEstimate + 2 * 96 * 1024 * 1024);
+      first!.release(); first!.release();
+      expect(f.budget.stats().bytesEstimate).toBe(idle.bytesEstimate + 96 * 1024 * 1024);
+      fillLeaseBudget(f.budget, pressure);
+      expect(admitExtra).toThrow(SyncRowSnapshotBudgetError);
+      await second!.assertCurrent();
+      second!.release(); second!.release();
+      fillLeaseBudget(f.budget, pressure);
+      admitExtra();
+      expect(f.budget.stats().rows).toBe(0);
+      expect(cache.stats().encodedCacheEntries).toBe(0);
+    } finally {
+      first!.release(); second!.release();
+      for (const id of [...pressure, extra]) f.budget.remove(id);
+    }
+    expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
+  it.each([
+    ['rows', false], ['encoded', false], ['rows', true], ['encoded', true],
+  ] as const)('rolls back rejected %s admission with an existing active lease=%s', async (kind, active) => {
+    const { f, cache, acquire } = await responseLeaseFixture(kind);
+    const held = active ? await acquire() : undefined;
+    const pressure: symbol[] = [], extra = Symbol('lease-rejection-extra'), onFallback = vi.fn();
+    const admitExtra = () => f.budget.admit({ id: extra, key: 'lease-rejection-extra', rows: 0,
+      bytesEstimate: 1, phase: 'durable_data', onEvict: () => {} });
+    try {
+      fillLeaseBudget(f.budget, pressure);
+      const charged = f.budget.stats();
+      const rejected = await (kind === 'rows' ? cache.acquire({ ...f, onFallback }) : cache.acquireEncoded({ ...f, onFallback }));
+      expect(rejected).toBeNull();
+      expect(onFallback.mock.calls).toEqual([['response-admission', 'global_bytes']]);
+      expect(f.budget.stats()).toEqual(charged);
+      if (held) {
+        expect(admitExtra).toThrow(SyncRowSnapshotBudgetError);
+        await held.assertCurrent(); held.release();
+        fillLeaseBudget(f.budget, pressure);
+      }
+      admitExtra();
+      expect(f.reads.filter(read => read.options?.source?.endsWith('.payload'))).toHaveLength(1);
+      expect(cache.stats().encodedCacheEntries).toBe(0);
+    } finally {
+      held?.release();
+      for (const id of [...pressure, extra]) f.budget.remove(id);
+    }
+    expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
+  it('rolls back a warm body copy failure without applying the ordinary idle TTL policy', async () => {
+    const f = fixture(3);
+    let now = 100;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const cache = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget, encodedTtlMs: 50 });
+    const body = await warmEncoded(f, cache), idle = f.budget.stats();
+    const admit = f.budget.admit.bind(f.budget), slice = Uint8Array.prototype.slice;
+    const copyFailure = new Error('Fixture response copy failure');
+    let responseAdmitted = false;
+    vi.spyOn(f.budget, 'admit').mockImplementation(params => {
+      admit(params);
+      if (params.key.endsWith(':response')) { responseAdmitted = true; now += 51; }
+    });
+    vi.spyOn(Uint8Array.prototype, 'slice').mockImplementation(function (this: Uint8Array, start, end) {
+      if (responseAdmitted && this.byteLength === body.byteLength) {
+        responseAdmitted = false;
+        throw copyFailure;
+      }
+      return slice.call(this, start, end);
+    });
+    await expect(cache.acquireEncoded(f)).rejects.toBe(copyFailure);
+    expect(f.budget.stats()).toEqual(idle);
+    // The normal idle sweep, rather than rollback, applies the expired TTL.
+    expect(cache.stats().encodedCacheEntries).toBe(0);
+    expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
   });
 });
 

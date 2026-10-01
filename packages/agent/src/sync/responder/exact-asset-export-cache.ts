@@ -23,7 +23,7 @@ import {
   EXACT_SYNC_GZIP_MAX_INFLATED_BYTES,
   encodeNegotiatedExactSyncResponse,
 } from '../wire-compression.js';
-import { serializeResponderRows } from './graph-plan.js';
+import { serializeResponderRows } from './row-serialization.js';
 import { parseResponderAssetMetadata, type ResponderAssetMetadataBinding } from './asset-metadata.js';
 
 /** Separate from the broad snapshot loader: unsigned public hints cannot raise these. */
@@ -248,6 +248,28 @@ export function createBoundedExactAssetExportCache(params: {
     }
   };
 
+  const reserveResponseLease = (entry: Pick<ExportEntry, 'id' | 'key' | 'active'>, responseId: symbol) => {
+    budget.touch(entry.id);
+    const rejected = reserve(responseId, `${entry.key}:response`, 0, RESPONSE_RESERVATION_BYTES, () => {});
+    if (rejected) {
+      if (entry.active === 0) budget.release(entry.id);
+      return rejected;
+    }
+    entry.active += 1;
+    let released = false;
+    return {
+      get released() { return released; },
+      release(retainIdleEntry: () => boolean) {
+        if (released) return;
+        released = true;
+        budget.remove(responseId);
+        entry.active -= 1;
+        // Retention policy belongs to the row or encoded cache caller.
+        if (entry.active === 0 && retainIdleEntry()) budget.release(entry.id);
+      },
+    };
+  };
+
   const readMetadata = async (
     request: ExactAssetEncodedExportRequest,
     expected?: Pick<ExactAssetExportRequest, 'graph' | 'expectedRows' | 'expectedIdentity'>,
@@ -320,35 +342,27 @@ export function createBoundedExactAssetExportCache(params: {
     revision: string | null,
     wholePayloadExports: 0 | 1,
   ): ExactAssetExportLease | null => {
-    const responseId = Symbol('exact-export-response');
-    budget.touch(entry.id);
-    const rejected = reserve(responseId, `${entry.key}:response`, 0, RESPONSE_RESERVATION_BYTES, () => {});
-    if (rejected) {
-      if (entry.active === 0) budget.release(entry.id);
+    const response = reserveResponseLease(entry, Symbol('exact-export-response'));
+    if (response instanceof SyncRowSnapshotBudgetError) {
       if (!keep) discard(entry);
-      return refuse('response-admission', request, rejected.reason);
+      return refuse('response-admission', request, response.reason);
     }
-    entry.active += 1;
-    let released = false;
     return Object.freeze({
       rows: entry.rows,
       identity: entry.identity,
       wholePayloadExports,
       async assertCurrent() {
-        if (released) throw changed();
+        if (response.released) throw changed();
         const metadata = await readMetadata(request, { ...request, expectedIdentity: entry.identity });
         if (!metadata || sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
         throwIfAborted(request.signal);
       },
       release() {
-        if (released) return;
-        released = true;
-        budget.remove(responseId);
-        entry.active -= 1;
-        if (entry.active === 0) {
-          if (keep && cache.get(entry.key) === entry) budget.release(entry.id);
-          else discard(entry);
-        }
+        response.release(() => {
+          if (keep && cache.get(entry.key) === entry) return true;
+          discard(entry);
+          return false;
+        });
       },
     });
   };
@@ -543,15 +557,10 @@ export function createBoundedExactAssetExportCache(params: {
           discardEncoded(hit);
           throw invalid();
         }
-        const responseId = Symbol('exact-encoded-response');
-        budget.touch(hit.id);
-        const rejected = reserve(responseId, `${key}:response`, 0, RESPONSE_RESERVATION_BYTES, () => {});
-        if (rejected) {
-          if (hit.active === 0) budget.release(hit.id);
-          return refuse('response-admission', request, rejected.reason);
+        const response = reserveResponseLease(hit, Symbol('exact-encoded-response'));
+        if (response instanceof SyncRowSnapshotBudgetError) {
+          return refuse('response-admission', request, response.reason);
         }
-        hit.active += 1;
-        let released = false;
         try {
           const body = hit.body.slice();
           hit.lastUsedAt = Date.now();
@@ -560,25 +569,22 @@ export function createBoundedExactAssetExportCache(params: {
           return Object.freeze({ metadata: metaBytes, body, plainBytes: hit.plainBytes, identity: hit.identity,
             wholePayloadExports: 0 as const, encodingDurationMs: 0,
             async assertCurrent() {
-              if (released) throw changed();
+              if (response.released) throw changed();
               await assertEncodedCurrent(request, hit.identity, revision);
               if (bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
             },
             release() {
-              if (released) return;
-              released = true;
-              budget.remove(responseId);
-              hit.active -= 1;
-              if (hit.active === 0) {
-                if (Date.now() - hit.lastUsedAt >= encodedTtlMs) discardEncoded(hit);
-                else budget.release(hit.id);
-              }
+              response.release(() => {
+                if (Date.now() - hit.lastUsedAt >= encodedTtlMs) {
+                  discardEncoded(hit);
+                  return false;
+                }
+                return true;
+              });
             },
           });
         } catch (error) {
-          budget.remove(responseId);
-          hit.active -= 1;
-          if (hit.active === 0) budget.release(hit.id);
+          response.release(() => true);
           throw error;
         }
       }
