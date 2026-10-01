@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from
   './_helpers/swm-target-executor-session-fixture.js';
 
@@ -292,6 +293,40 @@ describe('durable sync lifecycle chain binding', () => {
     },
   );
 
+  it.each<ExactRecoveryTransportMode>(['legacy', 'stream-preferred', 'stream-required'])(
+    'shares only matching transport decisions for concurrent %s work', async exactRecoveryTransportMode => {
+      const agentLike: any = {
+        config: {}, node: {},
+        processDurableBatchInWorker: async () => ({}),
+        runContextGraphSyncWithBackpressure: LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure,
+        log: { info: () => {}, warn: () => {}, debug: () => {} },
+      };
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const physical = vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+        .mockImplementationOnce(async () => {
+          entered();
+          await held;
+          return { result: {} as Awaited<ReturnType<typeof runDurableSync>>, exactFetchDisposition: 'incomplete' };
+        })
+        .mockResolvedValue({ result: {} as Awaited<ReturnType<typeof runDurableSync>>, exactFetchDisposition: 'incomplete' });
+      const run = (mode?: ExactRecoveryTransportMode) => LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+        agentLike, ctx, 'fixture-peer-mode', [contextGraphId], undefined, undefined, undefined,
+        { exactAssetSelection: { kind: 'ual-only', assetUals: [ual] }, exactRecoveryTransportMode: mode },
+      );
+      const first = run();
+      try {
+        await started;
+        const second = run(exactRecoveryTransportMode);
+        release();
+        await Promise.all([first, second]);
+        expect(physical).toHaveBeenCalledTimes(exactRecoveryTransportMode === 'stream-preferred' ? 1 : 2);
+      } finally { release(); await first; }
+    },
+  );
+
   it('returns typed durable admission deferral without invoking work callbacks', async () => {
     const config = { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 };
     const agentLike: any = {
@@ -500,6 +535,28 @@ describe('durable sync lifecycle chain binding', () => {
       signal: controller.signal,
     });
   });
+
+  it.each<ExactRecoveryTransportMode>(['legacy', 'stream-preferred', 'stream-required'])(
+    'passes the closed %s transport decision through exact durable dispatch', async exactRecoveryTransportMode => {
+      const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+        admission: 'work-started' as const,
+        result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+        exactFetchDisposition: 'incomplete' as const,
+      }));
+      const signal = new AbortController().signal;
+      const onWorkStarted = vi.fn();
+      const isCurrent = () => true;
+      await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+        { runLegacyDurableSyncDetailed } as any, 'fixture-peer', contextGraphId,
+        { kind: 'ual-only', assetUals: [ual] },
+        { exactRecoveryTransportMode, signal, onWorkStarted, isCurrent },
+      );
+      expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
+        exactRecoveryTransportMode, signal, onWorkStarted, isCurrent,
+        exactAssetSelection: { kind: 'ual-only', assetUals: [ual] },
+      });
+    },
+  );
 
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
     const physicalResult = {} as Awaited<ReturnType<typeof runDurableSync>>;

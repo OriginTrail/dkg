@@ -10,6 +10,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { performance } from 'node:perf_hooks';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -6748,8 +6749,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
-    experimentalExactBatchStreamOnly?: boolean;
-    experimentalExactBatchStreamDisabled?: boolean;
+    exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   }): Promise<VmRecoveryBatchExecutionResult> {
     const {
       localCgId,
@@ -6762,8 +6762,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       isRecoveryCurrent,
       revalidateTarget,
       ctx,
-      experimentalExactBatchStreamOnly,
-      experimentalExactBatchStreamDisabled,
+      exactRecoveryTransportMode = 'stream-preferred',
     } = input;
     const unavailablePeerIdSet = new Set(unavailablePeerIds);
 
@@ -6772,7 +6771,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // until this exact lifecycle has been re-proved at the ownership boundary.
     if (!isRecoveryCurrent()) return { kind: 'not-started-stale' };
 
-    const useCachedLegacyFallback = !experimentalExactBatchStreamOnly
+    const useCachedLegacyFallback = exactRecoveryTransportMode !== 'stream-required'
       && this.vmReconcileExactFilterUnsupported(peerId);
 
     const handledOrdinals: number[] = [];
@@ -6852,7 +6851,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           peerId,
           localCgId,
           attempts.map(({ entry }) => entry.target.ual),
-          { signal, isCurrent: isRecoveryCurrent, onWorkStarted, experimentalExactBatchStreamOnly, experimentalExactBatchStreamDisabled },
+          { signal, isCurrent: isRecoveryCurrent, onWorkStarted, exactRecoveryTransportMode },
         );
         const { result } = detailed;
         disposition = detailed.disposition;
@@ -6860,7 +6859,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // its later ordinary fallback cannot acquire local capacity.
         if (detailed.admission === 'work-started' || detailed.responderCapability !== undefined) onWorkStarted();
         localAdmissionDeferred = !workStarted && detailed.admission === 'local-admission-deferred';
-        if (!experimentalExactBatchStreamOnly && detailed.responderCapability === 'legacy-filter-unsupported') {
+        if (exactRecoveryTransportMode !== 'stream-required' && detailed.responderCapability === 'legacy-filter-unsupported') {
           this.rememberVmReconcileExactFilterUnsupported(peerId);
           if (isRecoveryCurrent() && disposition === 'incomplete') {
             await runLegacyFallback();
@@ -7465,8 +7464,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         installedRecord,
         candidatePeerIds,
       }];
-      let experimentalExactBatchStreamOnly = false;
-      let experimentalExactBatchStreamDisabled = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1';
+      let exactRecoveryTransportMode: ExactRecoveryTransportMode = 'legacy';
       const streamEligibleProvider = experimentalPublicRecovery && experimentalStreamPeerIds.has(peerId)
         && !exactBatchStreamUnsupported(this, peerId, admittedConnectionKey, Date.now(),
           this.captureExperimentalExactBatchRefusalScope(localCgId));
@@ -7484,7 +7482,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (!isRecoveryCurrent()) return staleRecovery();
         const profile = planVmRecoveryStreamMicrobatch(singleton, entries => Buffer.byteLength(
           encodeExactAssetUals(entries.map(({ target: candidate }) => candidate.ual)), 'utf8'));
-        experimentalExactBatchStreamDisabled = profile === undefined;
+        exactRecoveryTransportMode = profile === undefined ? 'legacy' : 'stream-preferred';
       }
 
       // The first exact request to a peer remains a single-KA probe. Once that
@@ -7580,9 +7578,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           VM_EXACT_MICROBATCH_LIMITS,
           selectorBytesFor,
         );
-        experimentalExactBatchStreamOnly = streamPlan !== undefined;
-        experimentalExactBatchStreamDisabled = streamPlan === undefined
-          && process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1';
+        exactRecoveryTransportMode = streamPlan === undefined ? 'legacy' : 'stream-required';
         if (plan.targets.length === 0) {
           this.vmReconcilePublicCoreTransportPreferencePolicy.revoke(preferenceAttempt, peerId);
           this.log.warn(
@@ -7613,7 +7609,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           `VM exact recovery plan for "${localCgId}" from ${peerId.slice(-8)}: `
             + `assets=${batchAttempts.length} estimatedBytes=${plan.estimatedBytes} `
             + `estimatedLeaves=${plan.estimatedLeaves} `
-            + `completeFootprints=${plan.completeFootprints} streamOnly=${experimentalExactBatchStreamOnly}`,
+            + `completeFootprints=${plan.completeFootprints} transport=${exactRecoveryTransportMode}`,
         );
       }
 
@@ -7640,8 +7636,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         isRecoveryCurrent,
         revalidateTarget,
         ctx,
-        experimentalExactBatchStreamOnly,
-        experimentalExactBatchStreamDisabled,
+        exactRecoveryTransportMode,
       });
       if (execution.kind === 'local-admission-deferred') {
         // Capacity is node-local, so trying other providers would burn their

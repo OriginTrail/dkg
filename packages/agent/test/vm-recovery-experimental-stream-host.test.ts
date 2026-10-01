@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
+import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
 import { EXACT_BATCH_STREAM_PROTOCOL } from '../src/sync/exact-batch-stream-contract.js';
 import { rememberExactBatchStreamResourceRefusal, rememberExactBatchStreamUnsupported } from '../src/sync/exact-batch-stream-capability.js';
 
@@ -31,15 +32,13 @@ async function harness(options: { public?: boolean; core?: boolean; advertised?:
   const authority = vi.spyOn(h.agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue(
     options.public === false ? { kind: 'private', onChainId: '1' } as never : { kind: 'public', onChainId: '1' } as never);
   const policy = vi.spyOn(h.agent, 'readLiveOnChainAccessPolicy');
-  const streamOnly: boolean[] = [];
-  const streamDisabled: boolean[] = [];
+  const transportModes: Array<ExactRecoveryTransportMode | undefined> = [];
   const fetch = h.internals.syncExactKnowledgeAssetsFromPeerDetailed.bind(h.internals);
   h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async (peer, graph, uals, requestOptions) => {
-    streamOnly.push((requestOptions as { experimentalExactBatchStreamOnly?: boolean } | undefined)?.experimentalExactBatchStreamOnly === true);
-    streamDisabled.push((requestOptions as { experimentalExactBatchStreamDisabled?: boolean } | undefined)?.experimentalExactBatchStreamDisabled === true);
+    transportModes.push(requestOptions?.exactRecoveryTransportMode);
     return fetch(peer, graph, uals, requestOptions);
   };
-  return { ...h, authority, policy, streamOnly, streamDisabled };
+  return { ...h, authority, policy, transportModes };
 }
 
 afterEach(async () => {
@@ -53,8 +52,7 @@ describe('experimental public Core streaming recovery host', () => {
     const h = await harness();
     const result = await h.run();
     expect(h.fetched.map(({ peerId, uals }) => [peerId, uals.length])).toEqual([[core, 1], [core, 10]]);
-    expect(h.streamOnly).toEqual([false, true]);
-    expect(h.streamDisabled).toEqual([false, false]);
+    expect(h.transportModes).toEqual(['stream-preferred', 'stream-required']);
     expect(h.authority).toHaveBeenCalledOnce(); expect(h.policy).not.toHaveBeenCalled();
     expect(h.maxActiveFetches()).toBe(1);
     expect(result.outcomes.size).toBe(11); expect(result.continuationOrdinal).toBe(11);
@@ -73,7 +71,7 @@ describe('experimental public Core streaming recovery host', () => {
     await h.run();
     expect(h.fetched[0]!.peerId).toBe(older);
     expect(h.fetched.every(({ uals }) => uals.length === 1)).toBe(true);
-    expect(h.streamOnly.every(flag => !flag)).toBe(true);
+    expect(h.transportModes.every(mode => mode === 'legacy')).toBe(true);
     if (guard === 'unset' || guard === '0' || guard === 'not-core' || guard === 'no-protocol') expect(h.authority).not.toHaveBeenCalled();
   });
 
@@ -82,8 +80,7 @@ describe('experimental public Core streaming recovery host', () => {
     const h = await harness({ unknown: footprint === 'unknown', oversize: footprint === 'oversize' });
     await h.run();
     expect(h.fetched.map(({ peerId, uals }) => [peerId, uals.length])).toEqual([[core, 1], [core, 1]]);
-    expect(h.streamOnly).toEqual([false, false]);
-    expect(h.streamDisabled).toEqual([true, true]);
+    expect(h.transportModes).toEqual(['legacy', 'legacy']);
   });
 
   it('plans bounded ordinary recovery from the sole Core after a scoped resource refusal', async () => {
@@ -99,8 +96,7 @@ describe('experimental public Core streaming recovery host', () => {
       scope, scope, Date.now() - 75_000);
     await h.run();
     expect(h.fetched.map(({ peerId, uals }) => [peerId, uals.length])).toEqual([[core, 1], [core, 1]]);
-    expect(h.streamOnly).toEqual([false, false]);
-    expect(h.streamDisabled).toEqual([true, true]);
+    expect(h.transportModes).toEqual(['legacy', 'legacy']);
     expect(h.maxActiveFetches()).toBe(1);
     expect(h.recovered).toEqual(new Set([0, 1]));
     expect(h.internals.peerCapabilityRegistry.supportsCore(core)).toBe(true);
@@ -113,7 +109,7 @@ describe('experimental public Core streaming recovery host', () => {
     rememberExactBatchStreamUnsupported(h.agent, core, connectionKey, connectionKey, Date.now());
     await h.run();
     expect(h.fetched[0]!.peerId).toBe(older);
-    expect(h.streamOnly.every(flag => !flag)).toBe(true);
+    expect(h.transportModes.every(mode => mode === 'legacy')).toBe(true);
     expect(h.fetched.every(({ uals }) => uals.length === 1)).toBe(true);
     expect(h.internals.peerCapabilityRegistry.supportsCore(core)).toBe(true);
   });
