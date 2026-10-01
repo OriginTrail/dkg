@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { encodeExactBatchFrame as encodeCoreFrame, decodeExactBatchFrames as decodeCoreFrames,
+  EXACT_BATCH_FRAME_KIND as CORE_FRAME_KIND } from '@origintrail-official/dkg-core';
 import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_MAX_FRAME_BYTES,
   EXACT_BATCH_MAX_CHUNKS_PER_ASSET, ExactBatchReceiveWindow, ExactBatchSendWindow,
@@ -29,6 +31,11 @@ function sendAsset(window: ExactBatchSendWindow, index = 0) { window.acceptSent(
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 
 describe('experimental exact batch bounded framing', () => {
+  it('uses the single Core wire codec and vocabulary', () => {
+    expect(encodeExactBatchFrame).toBe(encodeCoreFrame);
+    expect(decodeExactBatchFrames).toBe(decodeCoreFrames);
+    expect(K).toBe(CORE_FRAME_KIND);
+  });
   it('decodes split headers and payloads without treating chunk boundaries as frames', async () => {
     const frames = [frame(K.REQUEST, 255, 0, encoder.encode('{"authorizedEnvelope":"input"}')), meta(), data(), end(), eof()];
     const bytes = joined(frames);

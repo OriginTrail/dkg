@@ -243,11 +243,16 @@ export {
   registerExperimentalExactBatchResponder,
   ExperimentalExactBatchUnsupportedError,
   type ExactBatchTransportSession,
-  type ExactBatchTransportFrame,
-  type ExactBatchTransportCodec,
   type ExactBatchTransportOptions,
   type ExactBatchTransportEvent,
 } from './experimental-exact-batch-stream.js';
+export {
+  EXACT_BATCH_STREAM_PROTOCOL, EXACT_BATCH_STREAM_WINDOW_SIZE, EXACT_BATCH_FRAME_KIND,
+  EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_FRAME_BYTES,
+  EXACT_BATCH_MAX_REQUEST_BYTES, EXACT_BATCH_MAX_ASSETS, EXACT_BATCH_MAX_CHUNKS_PER_ASSET,
+  EXACT_BATCH_REFUSALS, encodeExactBatchFrame, decodeExactBatchFrames, validateExactBatchFrame,
+  type ExactBatchFrame, type ExactBatchFrameKind, type ExactBatchRefusal,
+} from './experimental-exact-batch-wire.js';
 export {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,

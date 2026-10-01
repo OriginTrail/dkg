@@ -1,33 +1,27 @@
 /**
  * Opt-in exact-batch transport over the router's existing encrypted libp2p
- * connections. Framing/KA proofs/gzip/verified atomic commits stay agent-owned.
+ * connections. Core owns framing; KA proofs/gzip/verified atomic commits stay agent-owned.
  * No pooled RESPONSE frame, new cipher, default registration or payload replay.
  */
 import type { Stream } from '@libp2p/interface';
 import { isProtocolUnsupportedError, type ProtocolRouter, type DuplexStreamOptions } from './protocol-router.js';
 
-export const EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL = '/dkg/experimental/exact-batch-stream/1.0.0';
-export const EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE = 2;
+import {
+  EXACT_BATCH_STREAM_PROTOCOL, EXACT_BATCH_STREAM_WINDOW_SIZE, EXACT_BATCH_FRAME_KIND,
+  EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_MAX_REQUEST_BYTES, EXACT_BATCH_MAX_FRAME_BYTES,
+  EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_ASSETS, encodeExactBatchFrame,
+  decodeExactBatchFrames, validateExactBatchFrame, type ExactBatchFrame, type ExactBatchFrameKind,
+} from './experimental-exact-batch-wire.js';
+export {
+  EXACT_BATCH_STREAM_PROTOCOL as EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
+  EXACT_BATCH_STREAM_WINDOW_SIZE as EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE,
+} from './experimental-exact-batch-wire.js';
 
-/** Structural injection prevents a Core -> agent package dependency cycle. */
-export interface ExactBatchTransportFrame {
-  kind: number;
-  assetIndex: number;
-  sequence: number;
-  payload: Uint8Array;
-}
-
-export interface ExactBatchTransportCodec<F extends ExactBatchTransportFrame> {
-  encode(frame: F): Uint8Array;
-  decode(source: AsyncIterable<Uint8Array>, options: { signal: AbortSignal }): AsyncGenerator<F>;
-}
-
-export type ExactBatchTransportFrameKind = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 /** Closed numeric observations; never request text, scope identifiers or peers. */
 export type ExactBatchTransportEvent =
   | Readonly<{ event: 'streamReady'; elapsedMs: number }>
   | Readonly<{ event: 'bytes'; direction: 'sent' | 'received'; byteLength: number }>
-  | Readonly<{ event: 'frame'; direction: 'sent' | 'received'; frameKind: ExactBatchTransportFrameKind }>;
+  | Readonly<{ event: 'frame'; direction: 'sent' | 'received'; frameKind: ExactBatchFrameKind }>;
 
 export interface ExactBatchTransportOptions extends DuplexStreamOptions {
   /** Fixed experimental wire profile; window1 is contract unit-test coverage only. */
@@ -57,7 +51,7 @@ function observe(options: ExactBatchTransportOptions, event: ExactBatchTransport
 function observeFrame(options: ExactBatchTransportOptions, direction: 'sent' | 'received', kind: number): void {
   if (!options.onTransportEvent) return;
   if (Number.isInteger(kind) && kind >= 1 && kind <= 7) {
-    observe(options, { event: 'frame', direction, frameKind: kind as ExactBatchTransportFrameKind });
+    observe(options, { event: 'frame', direction, frameKind: kind as ExactBatchFrameKind });
   }
 }
 
@@ -69,13 +63,13 @@ function validateLimits(options: ExactBatchTransportOptions): void {
   for (const value of [options.maxRequestBytes, options.maxFrameBytes, options.maxResponseBytes]) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError('Exact batch transport limits must be positive safe integers');
   }
-  if (options.maxRequestBytes > 8192 || options.maxFrameBytes > 65536 + 16
+  if (options.maxRequestBytes > EXACT_BATCH_MAX_REQUEST_BYTES || options.maxFrameBytes > EXACT_BATCH_MAX_FRAME_BYTES + EXACT_BATCH_FRAME_HEADER_BYTES
     || options.maxReadBufferBytes > options.maxFrameBytes * 2) throw new RangeError('Exact batch transport exceeds experimental wire limits');
   if (options.windowSize !== 2) throw new Error('Experimental exact-batch profile requires window2');
 }
 
 function validateAssets(assetUals: readonly string[]): void {
-  if (!Array.isArray(assetUals) || assetUals.length < 1 || assetUals.length > 10
+  if (!Array.isArray(assetUals) || assetUals.length < 1 || assetUals.length > EXACT_BATCH_MAX_ASSETS
     || assetUals.some((ual) => typeof ual !== 'string' || ual.length === 0)
     || new Set(assetUals).size !== assetUals.length) throw new Error('Exact batch requires 1-10 distinct authorized asset UALs');
 }
@@ -86,9 +80,9 @@ export class ExperimentalExactBatchUnsupportedError extends Error {
   constructor(cause: unknown) { super('Experimental exact-batch protocol unsupported before START', { cause }); }
 }
 
-export class ExactBatchTransportSession<F extends ExactBatchTransportFrame> {
-  private readonly frames: AsyncGenerator<F>;
-  readonly windowSize = EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE;
+export class ExactBatchTransportSession {
+  private readonly frames: AsyncGenerator<ExactBatchFrame>;
+  readonly windowSize = EXACT_BATCH_STREAM_WINDOW_SIZE;
   private authorizedAssets?: readonly string[];
   get assetUals(): readonly string[] {
     if (!this.authorizedAssets) throw new Error('Exact batch asset scope has not been authorized');
@@ -98,7 +92,6 @@ export class ExactBatchTransportSession<F extends ExactBatchTransportFrame> {
   constructor(
     private readonly stream: Stream,
     readonly signal: AbortSignal,
-    private readonly codec: ExactBatchTransportCodec<F>,
     private readonly options: ExactBatchTransportOptions,
     assetUals?: readonly string[],
   ) {
@@ -119,7 +112,7 @@ export class ExactBatchTransportSession<F extends ExactBatchTransportFrame> {
         }
       },
     };
-    this.frames = codec.decode(source, { signal });
+    this.frames = decodeExactBatchFrames(source, { signal });
   }
 
   authorizeAssets(assetUals: readonly string[]): void {
@@ -128,7 +121,7 @@ export class ExactBatchTransportSession<F extends ExactBatchTransportFrame> {
     this.authorizedAssets = Object.freeze([...assetUals]);
   }
 
-  async next(): Promise<F | undefined> {
+  async next(): Promise<ExactBatchFrame | undefined> {
     checkSignal(this.signal);
     const frame = await this.frames.next();
     if (!frame.done) observeFrame(this.options, 'received', frame.value.kind);
@@ -136,10 +129,10 @@ export class ExactBatchTransportSession<F extends ExactBatchTransportFrame> {
     return frame.done ? undefined : frame.value;
   }
 
-  async send(frame: F): Promise<void> {
+  async send(frame: ExactBatchFrame): Promise<void> {
     checkSignal(this.signal);
     const frameKind = frame.kind;
-    const bytes = this.codec.encode(frame);
+    const bytes = encodeExactBatchFrame(frame);
     if (bytes.byteLength > this.options.maxFrameBytes) throw new RangeError('Exact batch frame byte limit exceeded');
     if (this.stream.writableNeedsDrain) await this.stream.onDrain({ signal: this.signal });
     checkSignal(this.signal);
@@ -157,25 +150,24 @@ export class ExactBatchTransportSession<F extends ExactBatchTransportFrame> {
 }
 
 /** Client owns REQUEST and subsequent ACKs on the same duplex stream. */
-export async function exchangeExperimentalExactBatch<F extends ExactBatchTransportFrame, T>(
+export async function exchangeExperimentalExactBatch<T>(
   router: ProtocolRouter,
   peerId: string,
-  request: F,
-  codec: ExactBatchTransportCodec<F>,
+  request: ExactBatchFrame,
   options: ExactBatchTransportOptions & { assetUals: readonly string[] },
-  consume: (session: ExactBatchTransportSession<F>) => Promise<T>,
+  consume: (session: ExactBatchTransportSession) => Promise<T>,
 ): Promise<T> {
   const enteredAt = performance.now();
   validateLimits(options);
   validateStart(request, options.maxRequestBytes);
   validateAssets(options.assetUals);
-  const stableRequest = { ...request, payload: request.payload.slice() } as F;
+  const stableRequest = { ...request, payload: request.payload.slice() };
   const stableOptions = Object.freeze({ ...options, assetUals: Object.freeze([...options.assetUals]) });
-  let session: ExactBatchTransportSession<F> | undefined;
+  let session: ExactBatchTransportSession | undefined;
   try {
-    return await router.withDuplexStream(peerId, EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL, stableOptions,
+    return await router.withDuplexStream(peerId, EXACT_BATCH_STREAM_PROTOCOL, stableOptions,
       async (stream, signal) => {
-        session = new ExactBatchTransportSession(stream, signal, codec, stableOptions, stableOptions.assetUals);
+        session = new ExactBatchTransportSession(stream, signal, stableOptions, stableOptions.assetUals);
         observe(stableOptions, { event: 'streamReady', elapsedMs: performance.now() - enteredAt });
         await session.send(stableRequest);
         return consume(session);
@@ -189,18 +181,17 @@ export async function exchangeExperimentalExactBatch<F extends ExactBatchTranspo
 }
 
 /** Explicit responder registration. Authorization precedes any scoped export. */
-export function registerExperimentalExactBatchResponder<F extends ExactBatchTransportFrame>(
+export function registerExperimentalExactBatchResponder(
   router: ProtocolRouter,
-  codec: ExactBatchTransportCodec<F>,
   options: ExactBatchTransportOptions,
   authorizeRequest: (request: Uint8Array, peerId: string, signal: AbortSignal) => Promise<readonly string[]>,
-  respond: (request: Uint8Array, session: ExactBatchTransportSession<F>, peerId: string) => Promise<void>,
+  respond: (request: Uint8Array, session: ExactBatchTransportSession, peerId: string) => Promise<void>,
 ): void {
   validateLimits(options);
   const stableOptions = Object.freeze({ ...options });
-  router.registerDuplexStream(EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
+  router.registerDuplexStream(EXACT_BATCH_STREAM_PROTOCOL,
     async (stream, signal) => {
-      const session = new ExactBatchTransportSession(stream, signal, codec, stableOptions);
+      const session = new ExactBatchTransportSession(stream, signal, stableOptions);
       try {
         const start = await session.next();
         if (!start) throw new Error('Exact batch START missing');
@@ -219,7 +210,8 @@ export function registerExperimentalExactBatchResponder<F extends ExactBatchTran
     }, stableOptions);
 }
 
-function validateStart(frame: ExactBatchTransportFrame, limit: number): void {
-  if (frame.kind !== 1 || frame.assetIndex !== 255 || frame.sequence !== 0
+function validateStart(frame: ExactBatchFrame, limit: number): void {
+  validateExactBatchFrame(frame);
+  if (frame.kind !== EXACT_BATCH_FRAME_KIND.REQUEST || frame.assetIndex !== EXACT_BATCH_BATCH_INDEX || frame.sequence !== 0
     || frame.payload.byteLength > limit) throw new Error('Invalid bounded exact-batch START');
 }

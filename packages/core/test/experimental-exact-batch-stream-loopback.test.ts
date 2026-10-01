@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Stream } from '@libp2p/interface';
@@ -9,26 +8,20 @@ import { ProtocolRouter } from '../src/protocol-router.js';
 import {
   EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL as PROTOCOL,
   exchangeExperimentalExactBatch, registerExperimentalExactBatchResponder,
-  ExperimentalExactBatchUnsupportedError, type ExactBatchTransportOptions,
+  type ExactBatchTransportOptions,
   type ExactBatchTransportSession,
 } from '../src/experimental-exact-batch-stream.js';
-import {
-  EXACT_BATCH_FRAME_KIND as K, ExactBatchReceiveWindow, ExactBatchSendWindow,
-  decodeExactBatchAsset, decodeExactBatchFrames, encodeExactBatchFrame, type ExactBatchFrame,
-} from '../../agent/src/sync/exact-batch-stream-contract.js';
-import { encodeNegotiatedExactSyncResponse, EXACT_SYNC_GZIP_ENCODING } from '../../agent/src/sync/wire-compression.js';
+import { EXACT_BATCH_FRAME_KIND as K, type ExactBatchFrame } from '../src/experimental-exact-batch-wire.js';
 
 const enc = new TextEncoder();
 const UALS = Array.from({ length: 10 }, (_, i) => `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${i + 1}`).sort();
-const codec = { encode: encodeExactBatchFrame, decode: decodeExactBatchFrames };
 const options: ExactBatchTransportOptions = { timeoutMs: 5000, windowSize: 2,
   maxReadBufferBytes: 65552, maxRequestBytes: 8192, maxFrameBytes: 65552, maxResponseBytes: 42 * 1024 * 1024 };
 const frame = (kind: number, assetIndex = 255, sequence = 0, payload = new Uint8Array()): ExactBatchFrame => ({ kind, assetIndex, sequence, payload });
 const start = () => frame(K.REQUEST, 255, 0, enc.encode('opaque signed START fixture'));
-const root = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 function gate() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 // Observe a private owned resource in tests without adding a raw-stream API.
-const physical = (session: ExactBatchTransportSession<ExactBatchFrame>): Stream => (session as unknown as { stream: Stream }).stream;
+const physical = (session: ExactBatchTransportSession): Stream => (session as unknown as { stream: Stream }).stream;
 
 /** Real encrypted sockets, fixture proofs/writes. No agent/store/chain runtime. */
 describe('experimental exact-batch production router over libp2p Noise loopback', () => {
@@ -50,77 +43,49 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
     return { a, b, routerA, routerB, resolve, accepted };
   }
 
-  it('registers only explicitly, then flushes all ten gzip assets, verified ACKs and BATCH_END on one Noise stream', async () => {
+  it('streams ten opaque payloads and caller ACKs over the fixed wire contract', async () => {
     const f = await pair();
-    expect(f.a.libp2p.getProtocols()).not.toContain(PROTOCOL);
-    expect(f.b.libp2p.getProtocols()).not.toContain(PROTOCOL);
-    await expect(exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(), codec,
-      { ...options, assetUals: UALS }, s => s.next())).rejects.toBeInstanceOf(ExperimentalExactBatchUnsupportedError);
-    expect(f.b.libp2p.getProtocols()).not.toContain(PROTOCOL);
-
-    const bodies = UALS.map((_, i) => enc.encode(`<urn:asset:${i}> <urn:payload> "${'compressible unchanged N-Quads '.repeat(1000)}" .\n`));
-    const written = new Map<string, Uint8Array>(), exports = Array(10).fill(0), acknowledgments: number[] = [];
-    const releaseFirst = gate();
-    let clientStream!: Stream, serverStream!: Stream;
-    registerExperimentalExactBatchResponder(f.routerB, codec, options,
-      async bytes => { expect(bytes).toEqual(start().payload); return UALS; },
+    const bodies = UALS.map((_, index) => enc.encode(`opaque payload ${index} ${"bytes ".repeat(30)}`));
+    const acknowledgments: number[] = [];
+    const received: Uint8Array[] = [];
+    registerExperimentalExactBatchResponder(f.routerB, options,
+      async request => { expect(request).toEqual(start().payload); return UALS; },
       async (_request, session) => {
-        serverStream = physical(session);
-        const window = new ExactBatchSendWindow({ assetCount: UALS.length, windowSize: 2 });
         const ack = async () => {
-          const item = await session.next(); expect(item?.kind).toBe(K.ACK);
-          window.acceptAck(item!); acknowledgments.push(item!.assetIndex);
-          expect(written.has(UALS[item!.assetIndex]!)).toBe(true);
+          const item = await session.next();
+          expect(item).toEqual(frame(K.ACK, acknowledgments.length, 1));
+          acknowledgments.push(item!.assetIndex);
         };
         for (let index = 0; index < UALS.length; index++) {
-          while (!window.canStartAsset) await ack();
-          // One fixture export/compression per KA, never per frame.
-          exports[index]++;
-          const body = await encodeNegotiatedExactSyncResponse(bodies[index]!, { request: {
-            responseEncoding: EXACT_SYNC_GZIP_ENCODING, phase: 'data', assetUals: [UALS[index]!] }, signal: session.signal });
-          expect(body.byteLength).toBeLessThan(bodies[index]!.byteLength);
-          let sequence = 0;
-          const send = async (item: ExactBatchFrame) => { window.acceptSent(item); await session.send(item); };
-          await send(frame(K.META, index, 0, enc.encode(JSON.stringify({ ual: UALS[index], root: root(bodies[index]!) }))));
-          for (let offset = 0; offset < body.byteLength; offset += 23) await send(frame(K.DATA, index, sequence++, body.subarray(offset, offset + 23)));
-          await send(frame(K.ASSET_END, index, sequence));
+          while (index - acknowledgments.length >= session.windowSize) await ack();
+          await session.send(frame(K.META, index, 0, new Uint8Array([index])));
+          await session.send(frame(K.DATA, index, 0, bodies[index]));
+          await session.send(frame(K.ASSET_END, index, 1));
         }
-        while (window.acknowledgedCount < UALS.length) await ack();
-        const end = frame(K.BATCH_END, 255, UALS.length); window.acceptSent(end); await session.send(end);
-        expect(window.complete).toBe(true);
+        while (acknowledgments.length < UALS.length) await ack();
+        await session.send(frame(K.BATCH_END, 255, UALS.length));
       });
-    expect(f.b.libp2p.getProtocols()).toContain(PROTOCOL);
-    const committed = await exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(), codec,
+    const count = await exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(),
       { ...options, assetUals: UALS }, async session => {
-        clientStream = physical(session);
-        const window = new ExactBatchReceiveWindow({ assetUals: session.assetUals, windowSize: 2 });
-        let committing: Promise<void> | undefined;
-        const kick = () => {
-          if (committing) return;
-          const asset = window.takeReady(); if (!asset) return;
-          committing = window.commitAsset(asset, async owned => {
-            if (owned.assetIndex === 0) await releaseFirst.promise;
-            const decoded = await decodeExactBatchAsset(owned, { signal: session.signal });
-            const proof = JSON.parse(new TextDecoder().decode(owned.metadataBytes));
-            expect(proof.ual).toBe(owned.assetUal); expect(proof.root).toBe(root(decoded.bytes));
-            written.set(owned.assetUal, decoded.bytes);
-          }, { signal: session.signal }).then(ack => session.send(ack)).finally(() => { committing = undefined; kick(); });
-        };
-        try {
-          while (true) {
-            const item = await session.next(); expect(item).toBeDefined(); window.accept(item!);
-            if (item!.kind === K.META && item!.assetIndex === 1) {
-              expect(written.size).toBe(0); expect(acknowledgments).toEqual([]); releaseFirst.resolve();
-            }
-            kick(); if (item!.kind === K.BATCH_END) break;
+        let index = 0;
+        while (index < UALS.length) {
+          expect(await session.next()).toEqual(frame(K.META, index, 0, new Uint8Array([index])));
+          if (index === 1) {
+            expect(acknowledgments).toEqual([]);
+            await session.send(frame(K.ACK, 0, 1));
           }
-          await committing; expect(window.complete).toBe(true); return window.committedCount;
-        } finally { await window.close(); }
+          const body = await session.next();
+          expect(body).toEqual(frame(K.DATA, index, 0, bodies[index]));
+          received.push(body!.payload);
+          expect(await session.next()).toEqual(frame(K.ASSET_END, index, 1));
+          if (index > 0) await session.send(frame(K.ACK, index, 1));
+          index++;
+        }
+        expect(await session.next()).toEqual(frame(K.BATCH_END, 255, UALS.length));
+        return index;
       });
-    expect(committed).toBe(10); expect(exports).toEqual(Array(10).fill(1));
-    expect(acknowledgments).toEqual(Array.from({ length: 10 }, (_, i) => i));
-    expect(clientStream.status).toBe('closed');
-    await vi.waitFor(() => expect(serverStream.status).toBe('closed'));
+    expect(count).toBe(10); expect(received).toEqual(bodies);
+    expect(acknowledgments).toEqual(Array.from({ length: 10 }, (_, index) => index));
     const connections = f.a.libp2p.getConnections().filter(c => c.remotePeer.toString() === f.b.peerId);
     expect(connections).toHaveLength(1); expect(connections[0]!.encryption).toBe('/noise');
     expect(connections[0]!.streams.filter(s => s.protocol === PROTOCOL)).toHaveLength(0);
@@ -130,10 +95,10 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
   it('deadline aborts both native stream owners and retires the decoder before rejection', async () => {
     const f = await pair(), entered = gate(), responded = gate();
     let clientStream!: Stream, serverStream!: Stream;
-    registerExperimentalExactBatchResponder(f.routerB, codec, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerB, options, async () => UALS,
       async (_request, session) => { serverStream = physical(session); entered.resolve();
         try { await session.next(); } finally { responded.resolve(); } });
-    const operation = exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(), codec,
+    const operation = exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(),
       { ...options, timeoutMs: 150, assetUals: UALS }, async session => { clientStream = physical(session); return session.next(); });
     const outcome = expect(operation).rejects.toThrow('timeout');
     await entered.promise; await outcome; await responded.promise;
@@ -146,10 +111,10 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
     const f = await pair(), entered = gate(), responded = gate();
     const stopSignal = f.a.stopSignal!;
     let clientStream!: Stream, serverStream!: Stream;
-    registerExperimentalExactBatchResponder(f.routerB, codec, options, async () => UALS,
+    registerExperimentalExactBatchResponder(f.routerB, options, async () => UALS,
       async (_request, session) => { serverStream = physical(session); entered.resolve();
         try { await session.next(); } finally { responded.resolve(); } });
-    const operation = exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(), codec,
+    const operation = exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(),
       { ...options, assetUals: UALS }, async session => { clientStream = physical(session); return session.next(); });
     const outcome = expect(operation).rejects.toThrow();
     await entered.promise; await f.a.stop(); await outcome; await responded.promise;

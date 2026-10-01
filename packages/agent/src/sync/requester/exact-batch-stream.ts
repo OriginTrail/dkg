@@ -1,24 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
+import { EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_FRAME_BYTES, EXACT_BATCH_MAX_REQUEST_BYTES,
+  EXACT_BATCH_MAX_ASSETS, EXACT_BATCH_MAX_CHUNKS_PER_ASSET, type ExactBatchTransportSession, type ExactBatchTransportOptions } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_WINDOW_SIZE,
-  ExactBatchReceiveWindow, decodeExactBatchAsset, encodeExactBatchFrame, decodeExactBatchFrames,
+  ExactBatchReceiveWindow, decodeExactBatchAsset,
   type ExactBatchFrame, type ExactBatchRefusal, type ReceivedExactBatchAsset,
 } from '../exact-batch-stream-contract.js';
+import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES } from '../wire-compression.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
 import { parseGraphScopedDescriptor } from '../durable-integrity.js';
 import { estimateQuadHeapBytes } from '../memory-telemetry.js';
 import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets, type DurableSyncContext } from './durable-sync.js';
 
-/** Structural port implemented by Core's dedicated duplex transport. */
-export interface ExactBatchAgentSession {
-  readonly signal: AbortSignal;
-  readonly windowSize: number;
-  readonly assetUals: readonly string[];
-  next(): Promise<ExactBatchFrame | undefined>;
-  send(frame: ExactBatchFrame): Promise<void>;
-}
+/** Agent consumes the public operations of Core's fixed wire session. */
+export type ExactBatchAgentSession = Pick<ExactBatchTransportSession, 'signal' | 'windowSize' | 'assetUals' | 'next' | 'send'>;
 export type ExactBatchStage = 'decode' | 'parse' | 'verify' | 'authenticate-and-store';
 export interface ExactBatchVerifiedReceiverOptions {
   readonly contextGraphId: string;
@@ -37,13 +34,14 @@ export interface ExactBatchVerifiedResult {
   readonly complete: true;
   readonly committedAssetUals: readonly string[];
 }
-export const EXACT_BATCH_AGENT_CODEC = Object.freeze({ encode: encodeExactBatchFrame, decode: decodeExactBatchFrames });
 
-export function exactBatchTransportOptions(timeoutMs: number, signal?: AbortSignal) {
+export function exactBatchTransportOptions(timeoutMs: number, signal?: AbortSignal): ExactBatchTransportOptions {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new RangeError('Exact batch transport deadline outside bounded recovery profile');
-  const maxFrameBytes = 65_536 + 16;
-  return { timeoutMs, signal, maxRequestBytes: 8192, maxFrameBytes, maxReadBufferBytes: 2 * maxFrameBytes,
-    maxResponseBytes: 10 * (4 * 1024 * 1024 + 65_536 + 1026 * 16) + 8192 + 16,
+  const maxFrameBytes = EXACT_BATCH_MAX_FRAME_BYTES + EXACT_BATCH_FRAME_HEADER_BYTES;
+  return { timeoutMs, signal, maxRequestBytes: EXACT_BATCH_MAX_REQUEST_BYTES, maxFrameBytes, maxReadBufferBytes: 2 * maxFrameBytes,
+    maxResponseBytes: EXACT_BATCH_MAX_ASSETS * (EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES + EXACT_BATCH_MAX_FRAME_BYTES
+      + (EXACT_BATCH_MAX_CHUNKS_PER_ASSET + 2) * EXACT_BATCH_FRAME_HEADER_BYTES)
+      + EXACT_BATCH_MAX_REQUEST_BYTES + EXACT_BATCH_FRAME_HEADER_BYTES,
     windowSize: EXACT_BATCH_STREAM_WINDOW_SIZE };
 }
 /** Settled local observations only; these never grant recovery or holder credit. */

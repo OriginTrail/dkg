@@ -65,6 +65,8 @@ export default defineConfig({
       "test/rfc64-precommit-owner-attribution.test.ts",
       "test/exact-assets.test.ts",
       "test/exact-batch-stream-contract.test.ts",
+      "test/exact-batch-stream-duplex.test.ts",
+      "test/exact-batch-stream-loopback.test.ts",
       "test/exact-batch-stream-capability.test.ts",
       "test/vm-recovery-stream-profile.test.ts",
       "test/vm-recovery-experimental-stream-host.test.ts",
