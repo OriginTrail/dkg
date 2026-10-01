@@ -437,6 +437,44 @@ describe('GH#2942 derived retry blocker', () => {
       expect(describeRetryProjection(terminal, { autoRetryEnabled: true })).toEqual({ autoRetryEligible: false });
     });
 
+    it('serializes every action with exactly its keys, in order, with an ABSENT (not undefined) blocker', async () => {
+      // `toEqual` ignores `blocker: undefined`; a consumer that serializes the projection does not.
+      const base = expectFailed(await h.failWithUnmetQuorum(h.createPublisher()));
+      expect(base.timestamps.nextRetryAt).toBeDefined();
+      const withRetries = (retryCount: number) => ({ ...base, retries: { ...base.retries, retryCount } }) as unknown as PersistedFailedJob;
+      const held = await completeCreate();
+
+      const cases: ReadonlyArray<readonly [string, PersistedFailedJob, Parameters<typeof describeRetryProjection>[1], string]> = [
+        ['reaccept, scheduled', base, { autoRetryEnabled: true }, '{"autoRetryEligible":true,"waitingReason":"backoff"}'],
+        ['reaccept, lane off', base, { autoRetryEnabled: false }, 'autoRetryEligible,waitingReason,blocker'],
+        ['skip_exhausted', withRetries(base.retries.maxRetries), { autoRetryEnabled: true }, 'autoRetryEligible,waitingReason,blocker'],
+        ['skip_terminal', { ...base, failure: { ...base.failure, retryable: false } } as unknown as PersistedFailedJob, { autoRetryEnabled: true }, '{"autoRetryEligible":false}'],
+        ['blocked_recovery', { ...base, failure: { ...base.failure, resolution: 'retry_recovery' } } as unknown as PersistedFailedJob, { autoRetryEnabled: true }, '{"autoRetryEligible":false,"waitingReason":"recovery"}'],
+        ['held, capability absent', held, { autoRetryEnabled: true }, '{"autoRetryEligible":false,"waitingReason":"pending_chain_proof"}'],
+        ['held, capable', held, { autoRetryEnabled: true, canSettleHeldJob: () => true }, 'autoRetryEligible,waitingReason,blocker'],
+        ['held, not capable', held, { autoRetryEnabled: true, canSettleHeldJob: () => false }, 'autoRetryEligible,waitingReason,blocker'],
+      ];
+
+      for (const [label, job, options, expected] of cases) {
+        const projection = describeRetryProjection(job, options);
+        const actual = expected.startsWith('{') ? JSON.stringify(projection) : Object.keys(projection).join(',');
+        expect([label, actual]).toEqual([label, expected]);
+      }
+    });
+
+    it('consults the capability exactly once, and only for a COMPLETE held record', async () => {
+      const base = expectFailed(await h.failWithUnmetQuorum(h.createPublisher()));
+      const complete = await completeCreate();
+      const incomplete = { ...complete, validation: undefined } as unknown as PersistedFailedJob;
+      const calls = (job: PersistedFailedJob): number => {
+        const canSettleHeldJob = vi.fn(() => true);
+        describeRetryProjection(job, { autoRetryEnabled: true, canSettleHeldJob });
+        return canSettleHeldJob.mock.calls.length;
+      };
+
+      expect([calls(base), calls(incomplete), calls(complete)]).toEqual([0, 0, 1]);
+    });
+
     it('keeps every summary free of anything instance-specific', () => {
       for (const summary of Object.values(LIFT_JOB_RETRY_BLOCKER_SUMMARY)) {
         expect(summary).not.toMatch(/https?:\/\//i);
