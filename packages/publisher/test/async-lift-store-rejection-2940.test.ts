@@ -22,7 +22,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
-import type { AsyncLiftPublisherConfig, LiftJob, RawLiftRequest } from '../src/index.js';
+import type {
+  ActiveLiftJobClaim,
+  AsyncLiftPublisherConfig,
+  LiftJob,
+  RawLiftRequest,
+} from '../src/index.js';
+import { executionFailureEvidence } from '../src/async-lift-publisher-impl.js';
 import { hasBroadcastEvidence, isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import {
   TX_HASH,
@@ -34,6 +40,7 @@ import {
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 import {
   KA_VM_KA_UAL,
+  KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
 } from '../../../scripts/testing/ka-vm-publish.js';
@@ -197,6 +204,40 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout', 
       expect((await publisher.getStatus(jobId))?.status).toBe('failed');
       expect((await publisher.getStatus(jobId))?.broadcast).toBeUndefined();
 
+      h.advance(100);
+      const finalized = await publisher.processNext('wallet-2');
+      expect(finalized?.jobId).toBe(jobId);
+      expect(finalized?.status).toBe('finalized');
+      expect(finalized?.retries.retryCount).toBe(1);
+    });
+
+    it('records a typed rejection from the FINAL pre-execute preflight the same way', async () => {
+      // The second `handler.preflight` runs after the recorder exists and before `execute`; its
+      // failure goes through the same failure writer and must carry the same proof.
+      const attempts = { n: 0 };
+      let preflights = 0;
+      const publisher = h.createPublisher({
+        ...RETRY_LANE,
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            preflights += 1;
+            if (preflights === 2) throw schedulerBusy();
+            return { action: 'execute' as const };
+          },
+          execute: async () => {
+            attempts.n += 1;
+            return confirmedPublishResult();
+          },
+        },
+      });
+      await stage();
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+
+      const failed = expectFailed(await publisher.processNext('wallet-1'));
+
+      expect(preflights).toBe(2);
+      expect(attempts.n).toBe(0);
+      expectRecordedAsPreDispatchStoreRejection(failed, schedulerBusy());
       h.advance(100);
       const finalized = await publisher.processNext('wallet-2');
       expect(finalized?.jobId).toBe(jobId);
@@ -379,7 +420,125 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout', 
   });
 
   // ---------------------------------------------------------------------------------------------
-  // C/D. Neighbouring classifications must not move: the fix is a proof, not a relabel.
+  // C. Each barrier is independent. The positional proof and the persisted status overlap in
+  // practice (a recorded write-ahead leaves the record at 'broadcast'), so a row that only runs
+  // the happy flow cannot tell them apart. These drive the claim session directly.
+  // ---------------------------------------------------------------------------------------------
+  describe('C. the caller proof is trusted on its own, not inferred from the record', () => {
+    async function validatedSession(publisher: ReturnType<typeof h.createPublisher>) {
+      await stage();
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+      const claimed = await publisher.claimNext('wallet-1');
+      if (!claimed) throw new Error('expected a claim');
+      await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+      return publisher.openClaimSession(claimed as ActiveLiftJobClaim);
+    }
+
+    it('keeps the legacy failure when the caller says a transaction may have been dispatched', async () => {
+      // The record reads 'validated' and the cause is typed — everything but the caller's proof
+      // says "pre-send". The proof is positional (the write-ahead's own outcome); a record that
+      // merely LOOKS pre-send is not evidence that nothing left the node.
+      const publisher = h.createPublisher(RETRY_LANE);
+      const session = await validatedSession(publisher);
+
+      const failed = expectFailed(await session.recordExecutionFailure(
+        'broadcast',
+        schedulerBusy(),
+        { neverDispatched: false },
+      ));
+
+      expect(failed.failure.failedFromState).toBe('broadcast');
+      expect(failed.failure.code).toBe('tx_submit_timeout');
+      expect(failed.timestamps.nextRetryAt).toBeUndefined();
+    });
+
+    it('keeps the legacy failure when no proof is supplied at all', async () => {
+      const publisher = h.createPublisher(RETRY_LANE);
+      const session = await validatedSession(publisher);
+
+      const failed = expectFailed(await session.recordExecutionFailure('broadcast', schedulerBusy()));
+
+      expect(failed.failure.failedFromState).toBe('broadcast');
+      expect(failed.failure.code).toBe('tx_submit_timeout');
+    });
+
+    it('re-routes on the same session call once the caller proves the attempt never dispatched', async () => {
+      // The positive twin of the two rows above: only the caller's proof differs.
+      const publisher = h.createPublisher(RETRY_LANE);
+      const session = await validatedSession(publisher);
+
+      const failed = expectFailed(await session.recordExecutionFailure(
+        'broadcast',
+        schedulerBusy(),
+        { neverDispatched: true },
+      ));
+
+      expect(failed.failure.failedFromState).toBe('validated');
+      expect(failed.failure.code).toBe('workspace_unavailable');
+      expect(failed.failure.timeout).toBeUndefined();
+    });
+
+    it('reads the typed cause from the write-ahead failure when the thrown error is message-only', async () => {
+      const publisher = h.createPublisher(RETRY_LANE);
+      const session = await validatedSession(publisher);
+
+      const failed = expectFailed(await session.recordExecutionFailure(
+        'broadcast',
+        adapterRewrap(schedulerBusy()),
+        { neverDispatched: true, writeAheadFailure: schedulerBusy() },
+      ));
+
+      expect(failed.failure.failedFromState).toBe('validated');
+      expect(failed.failure.code).toBe('workspace_unavailable');
+      // The thrown (re-wrapped) message is what is persisted, so the stage is visible in it.
+      expect(failed.failure.message).toContain('chain:writeahead hook failed before publish broadcast');
+    });
+
+    it('does not take an untyped write-ahead failure as a store rejection, even with the proof', async () => {
+      const publisher = h.createPublisher(RETRY_LANE);
+      const session = await validatedSession(publisher);
+
+      const failed = expectFailed(await session.recordExecutionFailure(
+        'broadcast',
+        adapterRewrap(new Error('ENOSPC: no space left on device')),
+        { neverDispatched: true, writeAheadFailure: new Error('ENOSPC: no space left on device') },
+      ));
+
+      expect(failed.failure.failedFromState).toBe('broadcast');
+      expect(failed.failure.code).not.toBe('workspace_unavailable');
+    });
+  });
+
+  describe('C. the recorder outcome maps to the caller proof', () => {
+    // The persisted-status barrier masks a wrong mapping in every natural flow (a recorded
+    // write-ahead leaves the record at 'broadcast'), so the mapping is pinned on its own.
+    const recorder = (outcome: 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send', writeAheadFailure?: unknown) => ({
+      onBeforeBroadcast: async () => undefined,
+      outcome,
+      writeAheadFailure,
+    });
+
+    it('proves nothing dispatched only when no hash was durably recorded', () => {
+      const failure = schedulerBusy();
+      expect(executionFailureEvidence(recorder('not-reached'))).toEqual({
+        neverDispatched: true,
+        writeAheadFailure: undefined,
+      });
+      expect(executionFailureEvidence(recorder('rolled-back-pre-send', failure))).toEqual({
+        neverDispatched: true,
+        writeAheadFailure: failure,
+      });
+      expect(executionFailureEvidence(recorder('recorded-durable'))).toEqual({ neverDispatched: false });
+    });
+
+    it('never forwards a write-ahead failure alongside a dispatched outcome', () => {
+      expect(executionFailureEvidence(recorder('recorded-durable', schedulerBusy())))
+        .toEqual({ neverDispatched: false });
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // D. Neighbouring classifications must not move: the fix is a proof, not a relabel.
   // ---------------------------------------------------------------------------------------------
   describe('D. classifications that must stay exactly as they were', () => {
     const LEGACY_CONTROLS: ReadonlyArray<readonly [string, () => unknown]> = [

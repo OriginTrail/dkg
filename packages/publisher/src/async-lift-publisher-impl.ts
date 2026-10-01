@@ -200,7 +200,7 @@ interface PreSendBroadcastRecorder {
  * a hash (`not-reached`, `rolled-back-pre-send`) means nothing was signed-and-sent. A durably
  * recorded one may be on the wire, so it proves nothing.
  */
-function executionFailureEvidence(recorder: PreSendBroadcastRecorder): ExecutionFailureEvidence {
+export function executionFailureEvidence(recorder: PreSendBroadcastRecorder): ExecutionFailureEvidence {
   return recorder.outcome === 'recorded-durable'
     ? { neverDispatched: false }
     : { neverDispatched: true, writeAheadFailure: recorder.writeAheadFailure };
@@ -3253,9 +3253,9 @@ export class TripleStoreAsyncLiftPublisher
     // transaction-submission timeout. Its message reads "Store scheduler queue wait timeout (...)",
     // which the broadcast-origin classifiers below match on the bare word `timeout`: it used to be
     // recorded as `tx_submit_timeout` — "check the chain" — for a job with no transaction to check,
-    // which no automatic lane can ever resolve. All four conjuncts are required and each is its own
-    // barrier:
-    //   - the caller's legacy label is 'broadcast' (this is the only origin being re-routed);
+    // which no automatic lane can ever resolve. All three conjuncts are required, and each is an
+    // independent barrier (the first two overlap in practice — a recorded write-ahead leaves the
+    // record at 'broadcast' — which is exactly why neither may stand in for the other):
     //   - the write-ahead never durably recorded a hash (the recorder's positional proof — the hook
     //     is awaited strictly before the send and fails closed);
     //   - the PERSISTED status, read here under the transition lock, is still 'validated' — if the
@@ -3264,8 +3264,7 @@ export class TripleStoreAsyncLiftPublisher
     //     the held failure it has always been;
     //   - the cause is the storage layer's typed `not_started` contract, on the thrown error or on
     //     the write-ahead failure the adapter's message-only re-wrap hid. Prose never qualifies.
-    const preDispatchStoreRejection = failedFromState === 'broadcast'
-      && evidence?.neverDispatched === true
+    const preDispatchStoreRejection = evidence?.neverDispatched === true
       && current.status === 'validated'
       && [error, evidence.writeAheadFailure].some(isStoreOperationProvenNotStarted);
     const origin: LiftJobState = preDispatchStoreRejection ? 'validated' : failedFromState;
