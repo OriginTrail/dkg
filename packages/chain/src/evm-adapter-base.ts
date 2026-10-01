@@ -1945,7 +1945,7 @@ export class EVMChainAdapterBase {
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
-        (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
+        (lastError ? ` (last RPC error: ${hostOnlyRpcText(errorMessage(lastError))})` : ''),
     });
   }
 
@@ -3214,7 +3214,7 @@ export class EVMChainAdapterBase {
       // its original shape.
       if (classifyRpcRetryDisposition(err) === 'failover') {
         throw new RpcEndpointsExhaustedError(
-          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
+          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${hostOnlyRpcText(errorMessage(err))}`,
           { cause: err, rpcUrls: this.rpcUrls },
         );
       }
@@ -3984,7 +3984,7 @@ export class EVMChainAdapterBase {
     }
     throw new Error(
       `${operationLabel}: eth_getCode for ${contractLabel} ${address} at block ${block} ` +
-        `failed after 3 attempts: ${errorMessage(lastErr)}`,
+        `failed after 3 attempts: ${hostOnlyRpcText(errorMessage(lastErr))}`,
       { cause: lastErr },
     );
   }

@@ -135,7 +135,10 @@ export function isHeldForChainProof(job: PersistedFailedJob): boolean {
  *    the transaction actually mined. An update has no absence lane at all (the ABA hazard), so a
  *    dropped update keeps answering 503 until the operator acts — the record cannot distinguish
  *    that world from the about-to-converge one, and this cell is where the honest per-job answer
- *    bottoms out.
+ *    bottoms out. The same holds for an update that carries an earlier attempt's INHERITED hash and
+ *    a later `reverted` verdict: a revert proves that transaction had no effect, not that the
+ *    queued request is still current, so recovery holds it (see `decideChainProofDisposition`)
+ *    until an operator acts.
  *  - UPDATE without a derivable recognition identity, and any job whose lookup cannot even be
  *    formed (no hash, no wallet) → FALSE: nothing automatic can ever ask a question about it.
  */
@@ -782,17 +785,15 @@ export function describeRetryProjection(
 ): LiftJobRetryProjection {
   const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options)
     && job.timestamps.nextRetryAt !== undefined;
-  const action = classifyRetryAction(job);
-  const blocker = blockerOfAction(action, job, autoRetryEligible, options);
-  return {
-    autoRetryEligible,
-    ...waitingReasonOf(action, autoRetryEligible),
-    ...(blocker ? { blocker } : {}),
-  };
+  return { autoRetryEligible, ...describeRetryAction(classifyRetryAction(job), job, autoRetryEligible, options) };
 }
 
-/** The blocker for a classified action - present only where the waiting reason is too coarse. */
-function blockerOfAction(
+/**
+ * Why a classified action is waiting, and - where that reason is too coarse - what exactly it waits for.
+ * ONE exhaustive switch, so each `waitingReason` sits beside its `blocker`; a key is ABSENT (never
+ * `undefined`) where nothing applies, which is what keeps the serialized projection stable.
+ */
+function describeRetryAction(
   action: FailedJobRetryAction,
   job: PersistedFailedJob,
   autoRetryEligible: boolean,
@@ -800,44 +801,26 @@ function blockerOfAction(
     readonly autoRetryEnabled: boolean;
     readonly canSettleHeldJob?: (job: PersistedFailedJob) => boolean;
   },
-): LiftJobRetryBlocker | undefined {
-  switch (action) {
-    case 'blocked_pending_chain_proof':
-      return describeHeldBlocker(job, options.canSettleHeldJob);
-    case 'skip_exhausted':
-      return blockerOf('retry_budget_spent');
-    case 'reaccept':
-      return autoRetryEligible ? undefined : describeOperatorBlocker(job, options);
-    case 'blocked_recovery':
-    case 'skip_terminal':
-      return undefined;
-    default: {
-      // A new action must decide its own blocker here rather than inherit "none".
-      const unhandled: never = action;
-      return unhandled;
-    }
-  }
-}
-
-function waitingReasonOf(
-  action: FailedJobRetryAction,
-  autoRetryEligible: boolean,
-): { waitingReason?: LiftJobRetryWaitingReason } {
+): { waitingReason?: LiftJobRetryWaitingReason; blocker?: LiftJobRetryBlocker } {
   switch (action) {
     case 'blocked_recovery':
       return { waitingReason: 'recovery' };
-    case 'blocked_pending_chain_proof':
-      return { waitingReason: 'pending_chain_proof' };
+    case 'blocked_pending_chain_proof': {
+      const blocker = describeHeldBlocker(job, options.canSettleHeldJob);
+      return { waitingReason: 'pending_chain_proof', ...(blocker ? { blocker } : {}) };
+    }
     case 'skip_exhausted':
-      return { waitingReason: 'exhausted' };
+      return { waitingReason: 'exhausted', blocker: blockerOf('retry_budget_spent') };
     case 'skip_terminal':
       return {};
     case 'reaccept':
       // The ONE place the operator's kill-switch is allowed to matter: it separates a retry the
       // node performs itself from one that waits for an operator or a client re-submit.
-      return { waitingReason: autoRetryEligible ? 'backoff' : 'operator' };
+      return autoRetryEligible
+        ? { waitingReason: 'backoff' }
+        : { waitingReason: 'operator', blocker: describeOperatorBlocker(job, options) };
     default: {
-      // A new action must decide its own reason here rather than inherit a silent default.
+      // A new action must decide its own reason AND blocker here rather than inherit a silent default.
       const unhandled: never = action;
       return unhandled;
     }

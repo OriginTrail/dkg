@@ -51,6 +51,8 @@ export default defineConfig({
       'test/async-lift-rpc-prep-retry-2942.test.ts',
       'test/async-lift-rpc-prep-scope-2942.test.ts',
       'test/async-lift-retry-blocker-2942.test.ts',
+      'test/async-lift-failure-message-2945.test.ts',
+      'test/dkg-publisher-reserved-ka-id-2945.test.ts',
       'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
       'test/async-promote-writejob-atomicity.test.ts',

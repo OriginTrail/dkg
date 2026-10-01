@@ -3,7 +3,6 @@ import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import {
   getChainWriteAheadHookCause,
-  hostOnlyRpcText,
   isPendingPublishTransactionStatus,
   isTransientRpcTransportFailureWithoutTransaction,
 } from '@origintrail-official/dkg-chain';
@@ -3326,13 +3325,7 @@ export class TripleStoreAsyncLiftPublisher
       && transientRpc;
     const origin: LiftJobState = preDispatchRecoverable ? 'validated' : failedFromState;
     if (origin === 'claimed' || origin === 'validated') {
-      const rawMessage = error instanceof Error ? error.message : String(error);
-      // A transport message is the provider's own text, and ethers embeds the request URL in it; a
-      // configured URL can carry an API key. The persisted message is echoed by the job routes, so
-      // reduce every URL in it to its host.
-      const message = transientRpc && (preDispatchRecoverable || claimedTransientRpc)
-        ? hostOnlyRpcText(rawMessage)
-        : rawMessage;
+      const message = error instanceof Error ? error.message : String(error);
       const lower = message.toLowerCase();
       const code =
         // Structured precondition failures (author capability / stale intent /
@@ -3791,20 +3784,6 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   /**
-   * GH#2270 — re-record a held job's failure as `tx_reverted` once the chain has PROVEN its
-   * transaction reverted.
-   *
-   * The code is not cosmetic: `isHeldForChainProof` is `hasBroadcastEvidence && !provenIneffective`,
-   * and `tx_reverted` is one of the two codes the registry marks proven-ineffective. Writing it is
-   * therefore how the hold is released — through the disposition module's own rule rather than
-   * around it — while the evidence stays on the job (the merge keeps `broadcast`/`recovery`), so
-   * an operator can still see which transaction was checked. `isOccupyingLifecycleJob` then stops
-   * binding the KA's lifecycle, which is what lets the same KA be published again.
-   *
-   * No retry is scheduled: a revert is terminal by registry policy, and re-running it would spend
-   * gas to revert again.
-   */
-  /**
    * GH#2270 PR-3 — the facts a chain-proof lookup needs, from whichever carrier holds them, or
    * `null` when this job cannot be asked about at all.
    *
@@ -3839,6 +3818,20 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
+  /**
+   * GH#2270 — re-record a held job's failure as `tx_reverted` once the chain has PROVEN its
+   * transaction reverted.
+   *
+   * The code is not cosmetic: `isHeldForChainProof` is `hasBroadcastEvidence && !provenIneffective`,
+   * and `tx_reverted` is one of the two codes the registry marks proven-ineffective. Writing it is
+   * therefore how the hold is released — through the disposition module's own rule rather than
+   * around it — while the evidence stays on the job (the merge keeps `broadcast`/`recovery`), so
+   * an operator can still see which transaction was checked. `isOccupyingLifecycleJob` then stops
+   * binding the KA's lifecycle, which is what lets the same KA be published again.
+   *
+   * No retry is scheduled: a revert is terminal by registry policy, and re-running it would spend
+   * gas to revert again.
+   */
   private failProvenRevertedJob(
     job: PersistedFailedJob,
     failedFromState: 'broadcast' | 'included',
@@ -3862,7 +3855,9 @@ export class TripleStoreAsyncLiftPublisher
       message:
         `Named knowledge asset VM publish job ${job.jobId} reached ${job.status} state with tx ${job.broadcast.txHash}, ` +
         `but generic chain recovery cannot safely perform lifecycle finalization for this job type. ` +
-        `Inspect the on-chain transaction and re-run the named lifecycle publish if needed.`,
+        `The transaction's fate is unknown: do not re-run or re-submit this publish while it may have mined ` +
+        `(re-submits are refused until chain recovery accounts for it). Inspect the transaction on chain; ` +
+        `this job's retryState says what recovery is waiting for.`,
       errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:ka-recovery-inconclusive`,
     });
 

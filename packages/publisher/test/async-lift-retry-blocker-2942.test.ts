@@ -22,6 +22,7 @@ import type { PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
 import {
   LIFT_JOB_RETRY_BLOCKER_SUMMARY,
   describeAutomaticRecoveryExit,
+  decideChainProofDisposition,
   describeRetryProjection,
   hasAutomaticRecoveryExit,
   type HeldRecoveryGap,
@@ -125,6 +126,21 @@ describe('GH#2942 derived retry blocker', () => {
       // And the read view of the SAME publisher says so: wired, so the chain is being re-checked.
       const reread = expectFailed(await publisher.getStatus(job.jobId));
       expect(publisher.describeConfiguredRetryState(reread).blocker?.code).toBe('chain_recheck_pending');
+    });
+
+    it('agrees with the dispatcher for a raw-lift CREATE (marker and transitionType say the same)', async () => {
+      // A raw lift carries its operation in `request.lift.transitionType`, a named KA in the durable marker.
+      // For a CREATE they agree, so the exit the 503 promises and the release the dispatcher takes coincide.
+      // (A raw MUTATE/REVOKE would read `create` from the marker but `update` from `transitionType`: a
+      // divergence recorded in #2945, deliberately not changed here - a fix needs a ruling.)
+      const base = await completeCreate();
+      const raw = {
+        ...base,
+        request: { lift: { transitionType: 'CREATE', seal: { reservedKaId: '7' } } },
+      } as unknown as PersistedFailedJob;
+
+      expect(hasAutomaticRecoveryExit(raw)).toBe(true);
+      expect(decideChainProofDisposition(raw, 'not-found')).toEqual({ action: 'reset' });
     });
 
     it('never asks about a record that has no hash or no preserved signer — the shapes whose exit is denied', async () => {
@@ -419,6 +435,47 @@ describe('GH#2942 derived retry blocker', () => {
       expect(publisher.describeConfiguredRetryState(backoff)).toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
       const terminal = { ...backoff, failure: { ...backoff.failure, retryable: false } } as unknown as PersistedFailedJob;
       expect(describeRetryProjection(terminal, { autoRetryEnabled: true })).toEqual({ autoRetryEligible: false });
+    });
+
+    it('serializes every action with exactly its keys, in order, with an ABSENT (not undefined) blocker', async () => {
+      // `toEqual` ignores `blocker: undefined`; a consumer that serializes the projection does not.
+      const base = expectFailed(await h.failWithUnmetQuorum(h.createPublisher()));
+      expect(base.timestamps.nextRetryAt).toBeDefined();
+      const withRetries = (retryCount: number) => ({ ...base, retries: { ...base.retries, retryCount } }) as unknown as PersistedFailedJob;
+      const held = await completeCreate();
+
+      const cases: ReadonlyArray<readonly [string, PersistedFailedJob, Parameters<typeof describeRetryProjection>[1], string]> = [
+        ['reaccept, scheduled', base, { autoRetryEnabled: true }, '{"autoRetryEligible":true,"waitingReason":"backoff"}'],
+        ['reaccept, lane off', base, { autoRetryEnabled: false }, 'autoRetryEligible,waitingReason,blocker'],
+        ['skip_exhausted', withRetries(base.retries.maxRetries), { autoRetryEnabled: true }, 'autoRetryEligible,waitingReason,blocker'],
+        ['skip_terminal', { ...base, failure: { ...base.failure, retryable: false } } as unknown as PersistedFailedJob, { autoRetryEnabled: true }, '{"autoRetryEligible":false}'],
+        ['blocked_recovery', { ...base, failure: { ...base.failure, resolution: 'retry_recovery' } } as unknown as PersistedFailedJob, { autoRetryEnabled: true }, '{"autoRetryEligible":false,"waitingReason":"recovery"}'],
+        ['held, capability absent', held, { autoRetryEnabled: true }, '{"autoRetryEligible":false,"waitingReason":"pending_chain_proof"}'],
+        ['held, capable', held, { autoRetryEnabled: true, canSettleHeldJob: () => true }, 'autoRetryEligible,waitingReason,blocker'],
+        ['held, not capable', held, { autoRetryEnabled: true, canSettleHeldJob: () => false }, 'autoRetryEligible,waitingReason,blocker'],
+      ];
+
+      for (const [label, job, options, expected] of cases) {
+        const projection = describeRetryProjection(job, options);
+        // The KEY SET catches a key that is present but undefined (JSON.stringify would hide it)...
+        const keys = expected.startsWith('{') ? Object.keys(JSON.parse(expected)).join(',') : expected;
+        expect([label, Object.keys(projection).join(',')]).toEqual([label, keys]);
+        // ...and the serialization pins the exact content wherever no blocker text is involved.
+        if (expected.startsWith('{')) expect([label, JSON.stringify(projection)]).toEqual([label, expected]);
+      }
+    });
+
+    it('consults the capability exactly once, and only for a COMPLETE held record', async () => {
+      const base = expectFailed(await h.failWithUnmetQuorum(h.createPublisher()));
+      const complete = await completeCreate();
+      const incomplete = { ...complete, validation: undefined } as unknown as PersistedFailedJob;
+      const calls = (job: PersistedFailedJob): number => {
+        const canSettleHeldJob = vi.fn(() => true);
+        describeRetryProjection(job, { autoRetryEnabled: true, canSettleHeldJob });
+        return canSettleHeldJob.mock.calls.length;
+      };
+
+      expect([calls(base), calls(incomplete), calls(complete)]).toEqual([0, 0, 1]);
     });
 
     it('keeps every summary free of anything instance-specific', () => {
