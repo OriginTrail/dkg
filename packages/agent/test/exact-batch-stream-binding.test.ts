@@ -4,7 +4,7 @@ import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { BlazegraphStore, OxigraphStore, StoreResponseTooLargeError, type Quad } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, StoreResponseTooLargeError, quadToNQuad, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
@@ -15,7 +15,7 @@ import { parseResponderAssetMetadata } from '../src/sync/responder/asset-metadat
 import { consumeExactBatchVerifiedSession, exchangeExactBatchVerified, exactBatchStartFrame, type ExactBatchAgentSession } from '../src/sync/requester/exact-batch-stream.js';
 import { authenticateVerifiedGraphScopedAsset, materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 import { EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_MAX_FRAME_BYTES, decodeExactBatchFrames, encodeExactBatchFrame, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
-import { decodeNegotiatedExactSyncResponse, isExactSyncGzipFrame } from '../src/sync/wire-compression.js';
+import { EXACT_SYNC_GZIP_ENCODING, decodeNegotiatedExactSyncResponse, encodeNegotiatedExactSyncResponse, isExactSyncGzipFrame } from '../src/sync/wire-compression.js';
 
 /** Module integration fixture, not a live-chain or encrypted-network benchmark. */
 async function fixture(assetCount = 10, rows = 2000) {
@@ -456,6 +456,72 @@ describe('exact batch normal verifier/materializer binding', () => {
       expect(wire.sent[0]!.filter(frame => frame.kind === K.ACK).map(frame => frame.assetIndex)).toEqual([0]);
       const second = await f.target.query(`SELECT (COUNT(*) AS ?count) WHERE { GRAPH <${f.items[1]!.graph}> { ?s ?p ?o } }`);
       expect(second.type === 'bindings' && second.bindings[0]?.count).toBe('"0"^^<http://www.w3.org/2001/XMLSchema#integer>');
+    } finally { wire.abort(); await f.close(); }
+  });
+
+  it.each(['plaintext', 'gzip'] as const)('rejects a valid %s second body with the wrong root while preserving the verified first asset', async encoding => {
+    const f = await fixture(2, 20);
+    const first = f.items[0]!, poisoned = f.items[1]!;
+    const changed = poisoned.data.map((quad, index) => index === 0
+      ? { ...quad, object: JSON.stringify('changed public literal') } : quad);
+    const plain = new TextEncoder().encode(changed.map(quadToNQuad).join('\n'));
+    const payload = encoding === 'gzip' ? await encodeNegotiatedExactSyncResponse(plain, {
+      request: { responseEncoding: EXACT_SYNC_GZIP_ENCODING, includeSharedMemory: false,
+        phase: 'data', assetUals: [poisoned.ual] },
+    }) : plain;
+    const wire = duplex(f.receiver.assetUals, frame => frame.kind === K.DATA && frame.assetIndex === 1
+      ? { ...frame, payload } : frame);
+    const verify = vi.fn(f.receiver.processDurableBatchInWorker);
+    const store = vi.fn(f.receiver.storeGraphScopedAsset);
+    const stages = vi.fn((_stage: string, _index: number, _duration: number) => {});
+    const receiver = { ...f.receiver, processDurableBatchInWorker: verify,
+      storeGraphScopedAsset: store, onStage: stages };
+    try {
+      // This is valid RDF and a fresh valid gzip envelope, not a codec failure:
+      // only one literal differs, while graph, count and advertised metadata stay intact.
+      expect(changed.filter((quad, index) => quad.object !== poisoned.data[index]!.object)).toHaveLength(1);
+      expect(changed.every(quad => quad.graph === poisoned.graph)).toBe(true);
+      expect(computeFlatKCRootV10(changed, [])).not.toEqual(poisoned.root);
+      expect(payload.byteLength).toBeLessThan(EXACT_BATCH_MAX_FRAME_BYTES);
+      expect(isExactSyncGzipFrame(payload)).toBe(encoding === 'gzip');
+      const decoded = await decodeNegotiatedExactSyncResponse(payload, { allowCompression: true });
+      expect(decoded.compressed).toBe(encoding === 'gzip');
+      expect(decoded.bytes).toEqual(plain);
+      const parsed = await f.receiver.parseAndFilter(new TextDecoder().decode(decoded.bytes), poisoned.graph, f.contextGraphId);
+      expect(parsed.totalQuads).toBe(poisoned.data.length);
+      expect(parsed.quads).toEqual(changed);
+
+      await expect(run(f, wire, receiver)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL',
+        committedAssetUals: [first.ual], cause: { message: 'Exact batch canonical integrity verification rejected' } });
+      expect(wire.sent[1]!.filter(frame => frame.kind === K.DATA && frame.assetIndex === 1)).toHaveLength(1);
+      expect(wire.sent[1]!.filter(frame => frame.kind === K.ASSET_END).map(frame => frame.assetIndex)).toEqual([0, 1]);
+      expect(stages.mock.calls.filter(([, index]) => index === 1).map(([stage]) => stage)).toEqual(['decode', 'parse', 'verify']);
+      expect(verify).toHaveBeenCalledTimes(2);
+      const [data, meta, , acceptUnverified, mode] = verify.mock.calls[1]!;
+      expect(data).toEqual(changed);
+      expect(meta).toHaveLength(poisoned.meta.length);
+      const rootPredicate = 'http://dkg.io/ontology/merkleRoot';
+      expect(meta.find(quad => quad.predicate === rootPredicate)).toEqual(poisoned.meta.find(quad => quad.predicate === rootPredicate));
+      expect(acceptUnverified).toBe(false);
+      expect(mode).toEqual({ kind: 'changelogPage', changedDataGraphs: [poisoned.graph] });
+      const rejected = await verify.mock.results[1]!.value;
+      expect(rejected).toMatchObject({ rejectedKcs: 1, dataRejectedMissingMeta: 0,
+        totalFetchedDataQuads: poisoned.data.length, verifiedData: [], verifiedMeta: [] });
+      expect(rejected.logs.some(log => log.message.startsWith(`Merkle mismatch for graph-scoped KA ${poisoned.ual}`))).toBe(true);
+      expect(store.mock.calls.map(([request]) => request.asset.ual)).toEqual([first.ual]);
+      expect(f.applied).toEqual([first.ual]);
+      expect(wire.sent[0]!.filter(frame => frame.kind === K.ACK).map(frame => frame.assetIndex)).toEqual([0]);
+      const preserved = await f.target.query(`SELECT ?s ?p ?o WHERE { GRAPH <${first.graph}> { ?s ?p ?o } }`);
+      expect(preserved.type).toBe('bindings');
+      if (preserved.type !== 'bindings') throw new Error('Fixture result shape');
+      const preservedData = preserved.bindings.map(row => ({ graph: first.graph, subject: row.s!, predicate: row.p!, object: row.o! }));
+      expect(preservedData).toHaveLength(first.data.length);
+      expect(computeFlatKCRootV10(preservedData, [])).toEqual(first.root);
+      for (const pattern of [`GRAPH <${poisoned.graph}> { ?s ?p ?o }`,
+        `GRAPH <did:dkg:context-graph:${f.contextGraphId}/_meta> { <${poisoned.ual}> ?p ?o }`]) {
+        const absent = await f.target.query(`SELECT (COUNT(*) AS ?count) WHERE { ${pattern} }`);
+        expect(absent.type === 'bindings' && absent.bindings[0]?.count).toBe('"0"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      }
     } finally { wire.abort(); await f.close(); }
   });
 
