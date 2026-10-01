@@ -118,6 +118,9 @@ describe('GH#2942 derived retry blocker', () => {
 
       expect(asked).toHaveLength(1);
       expect(asked[0]?.txHash).toBe(TX_HASH);
+      // And the read view of the SAME publisher says so: wired, so the chain is being re-checked.
+      const reread = expectFailed(await publisher.getStatus(job.jobId));
+      expect(publisher.describeConfiguredRetryState(reread).blocker?.code).toBe('chain_recheck_pending');
     });
 
     it('never asks about a record that has no hash or no preserved signer — the shapes whose exit is denied', async () => {
@@ -168,6 +171,19 @@ describe('GH#2942 derived retry blocker', () => {
         code: 'recovery_not_configured',
         summary: LIFT_JOB_RETRY_BLOCKER_SUMMARY.recovery_not_configured,
       });
+    });
+
+    it('reads the publisher\'s OWN wiring: capable with a resolver pair, not configured without one', async () => {
+      const job = await completeCreate();
+      const unwired = h.createPublisher();
+      const wired = h.createPublisher({
+        chainProofResolver: async (): Promise<AsyncLiftChainProofResolution> => ({ status: 'inconclusive' }),
+        knowledgeAssetVmPublishRecoveryResolver: async () => null,
+        knowledgeAssetVmPublishHandler: { execute: async () => { throw new Error('never sends'); }, finalizeRecovered: async () => undefined },
+      });
+
+      expect(unwired.describeConfiguredRetryState(job).blocker?.code).toBe('recovery_not_configured');
+      expect(wired.describeConfiguredRetryState(job).blocker?.code).toBe('chain_recheck_pending');
     });
 
     it('does not guess when the caller supplies no capability: no blocker, the same two keys as before', async () => {
