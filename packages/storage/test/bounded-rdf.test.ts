@@ -17,6 +17,7 @@ import {
   type QueryResult,
   type TripleStore,
   type BoundedGraphPayloadProfile,
+  asBoundedQueryResponseCapability,
 } from '../src/index.js';
 
 describe('canonical storage N-Quads serialization', () => {
@@ -704,9 +705,11 @@ describe('bounded single-result payload boundary', () => {
 
 describe('bounded HTTP query responses', () => {
   it.each([
-    ['SPARQL HTTP', () => new SparqlHttpStore({ queryEndpoint: 'http://store.test/query' })],
-    ['Blazegraph', () => new BlazegraphStore('http://store.test/query')],
-  ])('rejects an oversized %s SELECT response before JSON materialization', async (_name, makeStore) => {
+    ['SPARQL HTTP', 'SELECT ?o WHERE { ?s ?p ?o }', () => new SparqlHttpStore({ queryEndpoint: 'http://store.test/query' })],
+    ['SPARQL HTTP', 'ASK { ?s ?p ?o }', () => new SparqlHttpStore({ queryEndpoint: 'http://store.test/query' })],
+    ['Blazegraph', 'SELECT ?o WHERE { ?s ?p ?o }', () => new BlazegraphStore('http://store.test/query')],
+    ['Blazegraph', 'ASK { ?s ?p ?o }', () => new BlazegraphStore('http://store.test/query')],
+  ])('rejects an oversized %s JSON response for %s before materialization', async (_name, sparql, makeStore) => {
     const originalFetch = globalThis.fetch;
     const body = JSON.stringify({
       head: { vars: ['o'] },
@@ -721,8 +724,9 @@ describe('bounded HTTP query responses', () => {
 
     try {
       const store = makeStore();
+      expect(asBoundedQueryResponseCapability(store)).toBe(store);
       await expect(store.query(
-        'SELECT ?o WHERE { ?s ?p ?o }',
+        sparql,
         { maxResponseBytes: 64 },
       )).rejects.toMatchObject({
         code: 'STORE_RESPONSE_TOO_LARGE',
@@ -750,6 +754,7 @@ describe('bounded HTTP query responses', () => {
 
     try {
       const store = makeStore();
+      expect(asBoundedQueryResponseCapability(store)).toBe(store);
       await expect(store.query(sparql, { maxResponseBytes: 64 }))
         .rejects.toMatchObject({
           code: 'STORE_RESPONSE_TOO_LARGE',

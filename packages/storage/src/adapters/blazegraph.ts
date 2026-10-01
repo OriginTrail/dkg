@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import type {
   TripleStore,
+  BoundedQueryResponseCapability,
   Quad as DKGQuad,
   QueryOptions,
   UpdateOptions,
@@ -227,7 +228,8 @@ function createStoreOperationDeadline(
  * All operations are translated to standard SPARQL 1.1 Query / Update
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
-export class BlazegraphStore implements TripleStore {
+export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability {
+  readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;

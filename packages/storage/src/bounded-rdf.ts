@@ -8,9 +8,7 @@ import type {
   QueryOptions,
   TripleStore,
 } from './triple-store.js';
-import { findTripleStoreCapability } from './triple-store.js';
-import { BlazegraphStore } from './adapters/blazegraph.js';
-import { SparqlHttpStore } from './adapters/sparql-http.js';
+import { asBoundedQueryResponseCapability } from './triple-store.js';
 import { StoreResponseTooLargeError } from './http-response-limit.js';
 
 const DEFAULT_EXACT_GRAPH_PAGE_SIZE = 256;
@@ -71,11 +69,9 @@ export type BoundedGraphPayloadResult = {
   readonly reason: BoundedGraphPayloadRefusalReason;
 };
 
-/** Whether the store enforces HTTP response limits before materializing RDF. */
+/** Whether the store enforces response limits before materializing RDF. */
 export function supportsBoundedExactGraphExport(store: TripleStore): boolean {
-  return findTripleStoreCapability(store, (candidate): candidate is BlazegraphStore | SparqlHttpStore => (
-    candidate instanceof BlazegraphStore || candidate instanceof SparqlHttpStore
-  )) !== null;
+  return asBoundedQueryResponseCapability(store) !== null;
 }
 
 /**
