@@ -9,6 +9,8 @@ import { createSyncResponderSnapshotBudget, SyncRowSnapshotBudgetError } from '.
 import { createBoundedExactAssetExportCache, EXACT_ASSET_EXPORT_MAX_ROWS, EXACT_ASSET_EXPORT_MAX_STORE_BYTES,
   EXACT_ASSET_ENCODED_CACHE_MAX_BYTES, type ExactAssetExportCache } from '../src/sync/responder/exact-asset-export-cache.js';
 import * as wireCompression from '../src/sync/wire-compression.js';
+import { serializeResponderRows } from '../src/sync/responder/graph-plan.js';
+import { EXACT_BATCH_MAX_FRAME_BYTES } from '../src/sync/exact-batch-stream-contract.js';
 
 function fixture(rows = 10_000, literal = 'bounded-value', contextGraphId = 'bounded-export-public') {
   const assetUal = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/1';
@@ -23,7 +25,8 @@ function fixture(rows = 10_000, literal = 'bounded-value', contextGraphId = 'bou
     merkleRoot: computeFlatKCRootV10(payload, []), publisherPeerId: 'publisher',
     accessPolicy: 'public', timestamp: new Date(0), publicTripleCount: rows, privateTripleCount: 0,
   }, { status: 'confirmed', confirmation: { kind: 'transaction', provenance: {
-    txHash: `0x${'11'.repeat(32)}`, batchId: 1n,
+    txHash: `0x${'11'.repeat(32)}`, batchId: 1n, blockNumber: 1, blockTimestamp: 0,
+    publisherAddress: '0x00000000000000000000000000000000000000ab', chainId: '31337',
   } } });
   const store = new BlazegraphStore('http://127.0.0.1:1/unused');
   const reads: Array<{ query: string; options?: QueryOptions }> = [];
@@ -39,6 +42,11 @@ function fixture(rows = 10_000, literal = 'bounded-value', contextGraphId = 'bou
   });
   return { contextGraphId, assetUal, graph, expectedRows: rows, payload, meta, store, query, reads, budget,
     cache: createBoundedExactAssetExportCache({ store, budget }) };
+}
+
+function setPublicRows(f: ReturnType<typeof fixture>, rows: number) {
+  const quad = f.meta.find(quad => quad.predicate === 'http://dkg.io/ontology/publicTripleCount')!;
+  quad.object = quad.object.replace(/^"[^"\n]*"/, JSON.stringify(String(rows)));
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -57,7 +65,7 @@ function anonymizedLegacyMetadata() {
   // Use the same term validation/serialization as the production HTTP adapter.
   const result = decodeSparqlJsonQueryResult(JSON.stringify({
     head: { vars: ['predicate', 'object'] }, results: { bindings: captured.bindings },
-  }));
+  }), 'select');
   if (result.type !== 'bindings') throw new Error('Anonymized metadata SELECT absent');
   const identity = createHash('sha256').update(JSON.stringify(result.bindings
     .map(row => [row.predicate!, row.object!])
@@ -126,11 +134,11 @@ describe('anonymized legacy public metadata without payload DATA', () => {
     expect(f.query.mock.calls.filter(([, options]) => options?.source?.endsWith('.payload'))).toHaveLength(1);
   });
 
-  it('rejects metadata fixture identity drift before consulting the trusted public grant', async () => {
+  it('keeps ordinary metadata fixture identity fences before consulting the trusted public grant', async () => {
     const f = anonymizedLegacyMetadata(), authorizeMissingAccessPolicy = vi.fn(async () => true);
     f.query.mockResolvedValue({ type: 'bindings', bindings: f.result.bindings.map(row =>
       row.predicate === 'http://dkg.io/ontology/publishedAt' ? { ...row, object: '"changed"' } : row) });
-    await expect(f.cache.acquireEncoded({ ...f.request, authorizeMissingAccessPolicy })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+    await expect(f.cache.acquire({ ...f.request, authorizeMissingAccessPolicy })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
     expect(authorizeMissingAccessPolicy).not.toHaveBeenCalled();
     expect(f.query.mock.calls.some(([, options]) => options?.source?.endsWith('.payload'))).toBe(false);
   });
@@ -227,7 +235,7 @@ describe('legacy missing KA policy authority', () => {
     const cold = await f.cache.acquireEncoded(request); await cold!.assertCurrent(); cold!.release();
     const calls = authorizeMissingAccessPolicy.mock.calls.length;
     f.meta.push({ ...f.meta[0]!, predicate: 'urn:changed-immutable-metadata', object: '"changed"' });
-    await expect(f.cache.acquireEncoded({ ...request, expectedIdentity: cold!.identity })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+    await expect(f.cache.acquire({ ...request, expectedIdentity: cold!.identity })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
     expect(authorizeMissingAccessPolicy).toHaveBeenCalledTimes(calls);
     expect(f.cache.stats().encodedCacheHits).toBe(0);
   });
@@ -280,10 +288,11 @@ describe('bounded exact asset export ownership', () => {
       if (failure === 'throw') throw new Error('Observation failure');
       return Promise.reject(new Error('Observation failure'));
     });
-    expect(await f.cache.acquireEncoded({ ...f, expectedRows: EXACT_ASSET_EXPORT_MAX_ROWS + 1, onFallback })).toBeNull();
+    setPublicRows(f, EXACT_ASSET_EXPORT_MAX_ROWS + 1);
+    expect(await f.cache.acquireEncoded({ ...f, onFallback })).toBeNull();
     expect(onFallback.mock.calls).toEqual([['row-profile', undefined]]);
     expect(f.cache.stats().fallbacks).toEqual({ 'row-profile': 1 });
-    expect(f.reads).toHaveLength(0);
+    expect(f.reads.map(read => read.options?.source)).toEqual(['sync.responder.exactAssetExport.metadata']);
     await Promise.resolve();
   });
 
@@ -303,7 +312,8 @@ describe('bounded exact asset export ownership', () => {
     const first = f.cache.acquireEncoded({ ...f, onFallback: oversized });
     try {
       await started;
-      expect(await f.cache.acquireEncoded({ ...f, expectedRows: EXACT_ASSET_EXPORT_MAX_ROWS + 1, onFallback: overRows })).toBeNull();
+      setPublicRows(f, EXACT_ASSET_EXPORT_MAX_ROWS + 1);
+      expect(await f.cache.acquireEncoded({ ...f, onFallback: overRows })).toBeNull();
       expect(overRows.mock.calls).toEqual([['row-profile', undefined]]);
       expect(oversized).not.toHaveBeenCalled();
       finish();
@@ -562,6 +572,40 @@ async function warmEncoded(f: ReturnType<typeof fixture>, cache: ExactAssetExpor
 }
 
 describe('bounded verified encoded asset retention', () => {
+  it.each([0, 1])('owns scope-only metadata preparation at the META frame byte limit plus %i', async extra => {
+    const f = fixture(1), onFallback = vi.fn();
+    const padding = { ...f.meta[0]!, predicate: 'urn:metadata-padding', object: '""' };
+    f.meta.push(padding);
+    const initialBytes = new TextEncoder().encode(serializeResponderRows(f.meta.map(quad => ({
+      s: quad.subject, p: quad.predicate, o: quad.object, g: quad.graph,
+    })))).byteLength;
+    padding.object = JSON.stringify('x'.repeat(EXACT_BATCH_MAX_FRAME_BYTES - initialBytes + extra));
+    const lease = await f.cache.acquireEncoded({ contextGraphId: f.contextGraphId, assetUal: f.assetUal, onFallback });
+    if (extra === 1) {
+      expect(lease).toBeNull();
+      expect(onFallback.mock.calls).toEqual([['metadata-profile', undefined]]);
+      expect(f.reads.some(read => read.options?.source?.endsWith('.payload'))).toBe(false);
+      expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+    } else {
+      expect(lease!.metadata.byteLength).toBe(EXACT_BATCH_MAX_FRAME_BYTES);
+      expect(new TextDecoder().decode(lease!.metadata)).toContain('<urn:metadata-padding>');
+      try { await lease!.assertCurrent(); } finally { lease!.release(); }
+      expect(f.reads.filter(read => read.options?.source?.endsWith('.payload'))).toHaveLength(1);
+      expect(onFallback).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(['cold', 'warm'] as const)('rejects caller mutation of %s prepared metadata before completion', async mode => {
+    const f = fixture(30);
+    if (mode === 'warm') await warmEncoded(f);
+    const lease = await f.cache.acquireEncoded({ contextGraphId: f.contextGraphId, assetUal: f.assetUal });
+    lease!.metadata[0] ^= 0xff;
+    try { await expect(lease!.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' }); }
+    finally { lease!.release(); }
+    expect(f.cache.stats().encodedCacheEntries).toBe(mode === 'cold' ? 0 : 1);
+    expect(f.budget.stats().bytesEstimate).toBe(f.cache.stats().encodedCacheBytes);
+  });
+
   it.each(['rows', 'store-bytes', 'canonical-bytes'] as const)('preserves the cold %s profile instead of retaining oversized bytes', async profile => {
     const f = profile === 'canonical-bytes' ? fixture(80, 'x'.repeat(60_000)) : fixture(30);
     const encode = vi.spyOn(wireCompression, 'encodeNegotiatedExactSyncResponse');
@@ -571,8 +615,8 @@ describe('bounded verified encoded asset retention', () => {
         ? Promise.reject(new StoreResponseTooLargeError(EXACT_ASSET_EXPORT_MAX_STORE_BYTES, EXACT_ASSET_EXPORT_MAX_STORE_BYTES + 1))
         : query(sparql, options));
     }
-    const request = profile === 'rows' ? { ...f, expectedRows: EXACT_ASSET_EXPORT_MAX_ROWS + 1 } : f;
-    expect(await f.cache.acquireEncoded(request)).toBeNull();
+    if (profile === 'rows') setPublicRows(f, EXACT_ASSET_EXPORT_MAX_ROWS + 1);
+    expect(await f.cache.acquireEncoded(f)).toBeNull();
     expect(encode).not.toHaveBeenCalled();
     expect(f.cache.stats().encodedCacheEntries).toBe(0);
     expect(f.budget.stats().snapshots).toBe(0);
@@ -582,7 +626,7 @@ describe('bounded verified encoded asset retention', () => {
     // The graph IRI is repeated on the wire but excluded from the canonical
     // root. Unicode makes its UTF-8 wire size exceed the codec cap while the
     // existing row heap and graph-free canonical construction remain bounded.
-    const f = fixture(10_000, 'bounded-value', '界'.repeat(1_200));
+    const f = fixture(10_000, 'bounded-value', '界'.repeat(900));
     await expect(f.cache.acquireEncoded(f)).rejects.toThrow('decoded page exceeds bounded transport profile');
     expect(f.cache.stats().encodedCacheEntries).toBe(0);
     expect(f.budget.stats().snapshots).toBe(0);
@@ -657,7 +701,7 @@ describe('bounded verified encoded asset retention', () => {
       f.meta.find(quad => quad.predicate === `http://dkg.io/ontology/${predicate}`)!.object = '"changed"';
       await expect(lease!.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
       lease!.release();
-      await expect(f.cache.acquireEncoded({ ...f, expectedIdentity: lease!.identity }))
+      await expect(f.cache.acquire({ ...f, expectedIdentity: lease!.identity }))
         .rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
       expect(f.reads.filter(read => read.options?.source?.endsWith('.payload'))).toHaveLength(1);
     },
@@ -684,10 +728,11 @@ describe('bounded verified encoded asset retention', () => {
       publisherPeerId: 'publisher', accessPolicy: 'public', timestamp: new Date(0),
       publicTripleCount: f.expectedRows, privateTripleCount: 0,
     }, { status: 'confirmed', confirmation: { kind: 'transaction', provenance: {
-      txHash: `0x${'11'.repeat(32)}`, batchId: 1n,
+      txHash: `0x${'11'.repeat(32)}`, batchId: 1n, blockNumber: 1, blockTimestamp: 0,
+    publisherAddress: '0x00000000000000000000000000000000000000ab', chainId: '31337',
     } } });
     f.meta.splice(0, f.meta.length, ...meta);
-    const version = await f.cache.acquireEncoded({ ...f, graph });
+    const version = await f.cache.acquireEncoded(f);
     expect(version!.wholePayloadExports).toBe(1);
     await version!.assertCurrent(); version!.release();
     expect(f.reads.filter(read => read.options?.source?.endsWith('.payload'))).toHaveLength(3);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertSafeIri, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
-import { StoreResponseTooLargeError, type TripleStore } from '@origintrail-official/dkg-storage';
+import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
@@ -12,11 +12,8 @@ import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js'
 import type { ExactAssetExportCache, ExactAssetExportFallbackReason, ExactAssetExportStage } from './exact-asset-export-cache.js';
 import type { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
-import { serializeResponderRows } from './graph-plan.js';
-import { parseResponderAssetMetadata } from './asset-metadata.js';
 
 const ENCODER = new TextEncoder();
-const MAX_META_ROWS = 128;
 const EMPTY = new Uint8Array(0);
 export interface ExactBatchResponderBindingOptions {
   readonly localPeerId: string;
@@ -92,11 +89,8 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         // becomes private. This never enters the private/member join lane.
         if (!(await options.isPublicContextGraph(request.contextGraphId, session.signal))) throw new Error('Exact batch public context graph authority changed');
         let started = performance.now();
-        const metadata = await readMetadata(options.store, request.contextGraphId, assetUal, session.signal);
-        observeExactBatch(() => options.onStage?.('metadata', assetIndex, performance.now() - started, context));
-        started = performance.now();
         const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
-          graph: metadata.graph, expectedRows: metadata.rows, expectedIdentity: metadata.identity, signal: session.signal,
+          signal: session.signal,
           authorizeMissingAccessPolicy: () => options.isPublicContextGraph(request.contextGraphId, session.signal),
           onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context),
           onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) });
@@ -114,7 +108,7 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
           observeExactBatch(() => options.onStage?.('encode', assetIndex, lease.encodingDurationMs, context));
           observeExactBatch(() => options.onPayload?.(assetIndex, plainBytes, body.byteLength, context));
           started = performance.now();
-          await send({ kind: K.META, assetIndex, sequence: 0, payload: metadata.bytes });
+          await send({ kind: K.META, assetIndex, sequence: 0, payload: lease.metadata });
           let sequence = 0;
           for (let offset = 0; offset < body.byteLength; offset += EXACT_BATCH_MAX_FRAME_BYTES) {
             await send({ kind: K.DATA, assetIndex, sequence: sequence++, payload: body.subarray(offset, offset + EXACT_BATCH_MAX_FRAME_BYTES) });
@@ -146,25 +140,4 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
     });
   };
   return { authorizeRequest, respond };
-}
-
-async function readMetadata(store: TripleStore, contextGraphId: string, assetUal: string, signal: AbortSignal) {
-  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-  let result;
-  try {
-    result = await store.query(`SELECT ?predicate ?object WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(assetUal)}> ?predicate ?object } } LIMIT ${MAX_META_ROWS + 1}`,
-      { source: 'sync.responder.exactBatch.metadata', priority: 'background', signal, maxResponseBytes: EXACT_BATCH_MAX_FRAME_BYTES });
-  } catch (error) { if (error instanceof StoreResponseTooLargeError) throw new ProfileRefusal('Exact batch metadata profile refused'); throw error; }
-  signal.throwIfAborted();
-  if (result.type !== 'bindings' || result.bindings.length === 0) throw new Error('Exact batch asset metadata missing');
-  if (result.bindings.length > MAX_META_ROWS) throw new ProfileRefusal('Exact batch metadata rows refused');
-  const metadata = parseResponderAssetMetadata(result.bindings, { contextGraphId, ual: assetUal });
-  if (!metadata) throw new Error('Exact batch metadata malformed');
-  const { confirmed: parsed, identity, bindings } = metadata;
-  if (parsed.state !== 'confirmed' || parsed.envelope.privateTripleCount !== 0 || parsed.envelope.publicTripleCount < 1) throw new Error('Exact batch metadata is not a public confirmed body');
-  // Passing the shared full metadata identity into acquire binds this header
-  // to the body before any bytes are served.
-  const bytes = ENCODER.encode(serializeResponderRows(bindings.map(row => ({ s: assetUal, p: row.predicate, o: row.object, g: metaGraph }))));
-  if (bytes.byteLength > EXACT_BATCH_MAX_FRAME_BYTES) throw new ProfileRefusal('Exact batch metadata frame refused');
-  return { graph: parsed.envelope.assertionGraph, rows: parsed.envelope.publicTripleCount, identity, bytes };
 }

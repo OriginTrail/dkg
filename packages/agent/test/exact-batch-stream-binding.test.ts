@@ -142,9 +142,11 @@ async function run(f: Awaited<ReturnType<typeof fixture>>, wire = duplex(f.recei
 }
 
 describe('exact batch normal verifier/materializer binding', () => {
-  it('binds batch metadata to the same envelope and full identity as the cache despite fetched row order changes', async () => {
-    const f = await fixture(1, 20), wire = duplex(f.receiver.assetUals);
+  it('owns cold and warm metadata/body leases from one initial snapshot despite fetched row order changes', async () => {
+    const f = await fixture(1, 20), cold = duplex(f.receiver.assetUals), warm = duplex(f.receiver.assetUals);
     try {
+      await f.backing.insert([{ graph: f.items[0]!.meta[0]!.graph, subject: f.items[0]!.ual,
+        predicate: 'urn:full-metadata', object: '"unknown preserved row"' }]);
       const parsedReads: NonNullable<ReturnType<typeof parseResponderAssetMetadata>>[] = [];
       const acquire = vi.spyOn(f.exportCache, 'acquireEncoded');
       const query = vi.mocked(f.store.query), original = query.getMockImplementation()!;
@@ -157,21 +159,31 @@ describe('exact batch normal verifier/materializer binding', () => {
         }
         return result;
       });
-      await run(f, wire);
+      await run(f, cold);
+      expect(metadataReads).toBe(3); // One initial snapshot, post-export and post-send fences.
+      await run(f, warm);
+      expect(metadataReads).toBe(5); // Fresh initial header and post-send fence; no DATA read.
       const expected = parsedReads[0]!;
       expect(parsedReads.every(read => read.identity === expected.identity)).toBe(true);
       expect(parsedReads.every(read => read.confirmed.state === 'confirmed')).toBe(true);
-      expect(expected.confirmed.state).toBe('confirmed');
-      if (expected.confirmed.state !== 'confirmed') throw new Error('Confirmed fixture absent');
-      expect(acquire).toHaveBeenCalledOnce();
-      expect(acquire.mock.calls[0]![0]).toMatchObject({ expectedIdentity: expected.identity,
-        graph: expected.confirmed.envelope.assertionGraph, expectedRows: expected.confirmed.envelope.publicTripleCount });
-      expect((await acquire.mock.results[0]!.value)!.identity).toBe(expected.identity);
-      // One batch header read and the unchanged before/after/completion cache fences.
-      expect(metadataReads).toBe(4);
-      expect(f.applied).toEqual(f.receiver.assetUals);
-      expect(wire.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(1);
-    } finally { wire.abort(); await f.close(); }
+      expect(acquire).toHaveBeenCalledTimes(2);
+      for (const [index, wire] of [cold, warm].entries()) {
+        const request = acquire.mock.calls[index]![0];
+        expect(request).toMatchObject({ contextGraphId: f.contextGraphId, assetUal: f.items[0]!.ual });
+        for (const field of ['graph', 'expectedRows', 'expectedIdentity']) expect(request).not.toHaveProperty(field);
+        const lease = (await acquire.mock.results[index]!.value)!;
+        expect(lease.identity).toBe(expected.identity);
+        expect(lease.metadata.byteLength).toBeLessThanOrEqual(EXACT_BATCH_MAX_FRAME_BYTES);
+        const header = wire.sent[1]!.find(frame => frame.kind === K.META)!;
+        expect(header.payload).toEqual(lease.metadata);
+        expect(new TextDecoder().decode(header.payload)).toContain('<urn:full-metadata> "unknown preserved row"');
+        expect(wire.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(1);
+      }
+      expect(f.reads).not.toContain('sync.responder.exactBatch.metadata');
+      expect(f.exportCounts).toEqual([1, 0]);
+      expect(f.applied).toEqual([...f.receiver.assetUals, ...f.receiver.assetUals]);
+      expect(f.exportCache.stats()).toMatchObject({ exports: 1, encodedCacheHits: 1 });
+    } finally { cold.abort(); warm.abort(); await f.close(); }
   });
 
   it('keeps embedded-store ordinary exact paging available without advertising the export-only stream', async () => {
@@ -230,14 +242,14 @@ describe('exact batch normal verifier/materializer binding', () => {
   }, 60_000);
 
   it.each(['byte-limit', 'row-limit', 'malformed-binding'] as const)(
-    'keeps metadata %s refusal handling at the batch transport boundary', async kind => {
+    'keeps exporter metadata %s refusal handling at the batch transport boundary', async kind => {
       const f = await fixture(1, 2), signal = new AbortController().signal;
-      const session = { signal, windowSize: 2, assetUals: f.receiver.assetUals,
+      const session = { signal, windowSize: 2 as const, assetUals: f.receiver.assetUals,
         send: vi.fn(async (_frame: ExactBatchFrame) => {}), next: vi.fn(async () => undefined) };
       try {
         const query = vi.mocked(f.store.query), original = query.getMockImplementation()!;
         query.mockImplementation(async (sparql, options) => {
-          if (options?.source !== 'sync.responder.exactBatch.metadata') return original(sparql, options);
+          if (options?.source !== 'sync.responder.exactAssetExport.metadata') return original(sparql, options);
           expect(sparql).toContain('LIMIT 129');
           expect(options).toMatchObject({ priority: 'background', signal, maxResponseBytes: EXACT_BATCH_MAX_FRAME_BYTES });
           if (kind === 'byte-limit') throw new StoreResponseTooLargeError(EXACT_BATCH_MAX_FRAME_BYTES, EXACT_BATCH_MAX_FRAME_BYTES + 1);
@@ -248,7 +260,7 @@ describe('exact batch normal verifier/materializer binding', () => {
         await f.binding.authorizeRequest(f.signed, 'requester', signal);
         const respond = f.binding.respond(f.signed, session, 'requester');
         if (kind === 'malformed-binding') {
-          await expect(respond).rejects.toThrow('metadata malformed');
+          await expect(respond).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
           expect(session.send).not.toHaveBeenCalled();
         } else {
           await expect(respond).resolves.toBeUndefined();
@@ -446,7 +458,7 @@ describe('exact batch normal verifier/materializer binding', () => {
   it('preserves a committed prefix when the next canonical chain binding fails', async () => {
     const f = await fixture(3, 20), wire = duplex(f.receiver.assetUals);
     const store = f.receiver.storeGraphScopedAsset;
-    const receiver = { ...f.receiver, storeGraphScopedAsset: async request => {
+    const receiver = { ...f.receiver, storeGraphScopedAsset: async (request: Parameters<typeof f.receiver.storeGraphScopedAsset>[0]) => {
       if (request.asset.ual === f.receiver.assetUals[1]) throw Object.assign(new Error('Canonical chain fixture CG mismatch'), { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
       return store(request);
     } };
@@ -507,7 +519,7 @@ describe('exact batch normal verifier/materializer binding', () => {
       const rejected = await verify.mock.results[1]!.value;
       expect(rejected).toMatchObject({ rejectedKcs: 1, dataRejectedMissingMeta: 0,
         totalFetchedDataQuads: poisoned.data.length, verifiedData: [], verifiedMeta: [] });
-      expect(rejected.logs.some(log => log.message.startsWith(`Merkle mismatch for graph-scoped KA ${poisoned.ual}`))).toBe(true);
+      expect(rejected.logs.some((log: { message: string }) => log.message.startsWith(`Merkle mismatch for graph-scoped KA ${poisoned.ual}`))).toBe(true);
       expect(store.mock.calls.map(([request]) => request.asset.ual)).toEqual([first.ual]);
       expect(f.applied).toEqual([first.ual]);
       expect(wire.sent[0]!.filter(frame => frame.kind === K.ACK).map(frame => frame.assetIndex)).toEqual([0]);
@@ -568,6 +580,65 @@ describe('exact batch normal verifier/materializer binding', () => {
     } finally { wire.abort(); await f.close(); }
   });
 
+  it.each(['cold', 'warm'] as const)('preserves a committed prefix when the next %s metadata snapshot changes before ASSET_END', async mode => {
+    const f = await fixture(2, 30), wire = duplex(f.receiver.assetUals);
+    try {
+      if (mode === 'warm') {
+        const first = duplex(f.receiver.assetUals);
+        try { await run(f, first); } finally { first.abort(); }
+        f.applied.length = 0;
+      }
+      const replace = vi.spyOn(f.target, 'replaceGraphAndSubject');
+      let committed!: () => void;
+      const prefix = new Promise<void>(resolve => { committed = resolve; });
+      const sendAck = wire.client.send.bind(wire.client), send = wire.server.send.bind(wire.server);
+      wire.client.send = async frame => {
+        await sendAck(frame);
+        if (frame.kind === K.ACK && frame.assetIndex === 0) committed();
+      };
+      let changed = false;
+      wire.server.send = async frame => {
+        if (frame.kind === K.META && frame.assetIndex === 1) await prefix;
+        await send(frame);
+        if (frame.kind === K.DATA && frame.assetIndex === 1 && !changed) {
+          changed = true;
+          await f.backing.insert([{ graph: f.items[1]!.meta[0]!.graph, subject: f.items[1]!.ual,
+            predicate: 'urn:changed-full-metadata', object: '"changed after DATA"' }]);
+        }
+      };
+      await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL',
+        committedAssetUals: [f.items[0]!.ual], cause: { code: 'SYNC_EXACT_EXPORT_CHANGED' } });
+      expect(wire.sent[1]!.filter(frame => frame.kind === K.ASSET_END).map(frame => frame.assetIndex)).toEqual([0]);
+      expect(wire.sent[0]!.filter(frame => frame.kind === K.ACK).map(frame => frame.assetIndex)).toEqual([0]);
+      expect(f.applied).toEqual([f.items[0]!.ual]);
+      expect(replace).toHaveBeenCalledOnce();
+      expect(f.resources.snapshotBudget.stats().bytesEstimate).toBe(f.exportCache.stats().encodedCacheBytes);
+    } finally { wire.abort(); await f.close(); }
+  });
+
+  it.each(['cold', 'warm'] as const)('sends no ACK or write when the %s prepared META bytes are mutated by the send adapter', async mode => {
+    const f = await fixture(1, 30), wire = duplex(f.receiver.assetUals);
+    try {
+      if (mode === 'warm') {
+        const first = duplex(f.receiver.assetUals);
+        try { await run(f, first); } finally { first.abort(); }
+        f.applied.length = 0;
+      }
+      const replace = vi.spyOn(f.target, 'replaceGraphAndSubject'), send = wire.server.send.bind(wire.server);
+      wire.server.send = async frame => {
+        await send(frame);
+        if (frame.kind === K.META) frame.payload[0] ^= 0xff;
+      };
+      await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL',
+        committedAssetUals: [], cause: { code: 'SYNC_EXACT_EXPORT_INVALID' } });
+      expect(wire.sent[1]!.some(frame => frame.kind === K.ASSET_END)).toBe(false);
+      expect(wire.sent[0]!.some(frame => frame.kind === K.ACK)).toBe(false);
+      expect(replace).not.toHaveBeenCalled();
+      expect(f.applied).toEqual([]);
+      expect(f.resources.snapshotBudget.stats().bytesEstimate).toBe(f.exportCache.stats().encodedCacheBytes);
+    } finally { wire.abort(); await f.close(); }
+  });
+
   it('does not replay an authorized START binding and rejects wrong session scopes', async () => {
     const f = await fixture(1, 2), wire = duplex(f.receiver.assetUals);
     try {
@@ -617,7 +688,7 @@ describe('exact batch normal verifier/materializer binding', () => {
     let entered!: () => void, release!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
     const original = f.receiver.storeGraphScopedAsset;
-    const receiver = { ...f.receiver, storeGraphScopedAsset: async request => { entered(); await held; return original(request); } };
+    const receiver = { ...f.receiver, storeGraphScopedAsset: async (request: Parameters<typeof f.receiver.storeGraphScopedAsset>[0]) => { entered(); await held; return original(request); } };
     const streamed = run(f, wire, receiver);
     let legacySettled = false;
     let legacy: Promise<Uint8Array> | undefined;

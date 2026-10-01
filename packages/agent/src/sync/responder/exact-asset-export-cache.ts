@@ -16,6 +16,7 @@ import { bytesToHex } from '@noble/hashes/utils.js';
 import type { SyncRow } from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError, type SyncResponderSnapshotBudget } from './snapshot-budget.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
+import { EXACT_BATCH_MAX_FRAME_BYTES } from '../exact-batch-stream-contract.js';
 import {
   EXACT_SYNC_GZIP_ENCODING,
   EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES,
@@ -23,7 +24,7 @@ import {
   encodeNegotiatedExactSyncResponse,
 } from '../wire-compression.js';
 import { serializeResponderRows } from './graph-plan.js';
-import { parseResponderAssetMetadata } from './asset-metadata.js';
+import { parseResponderAssetMetadata, type ResponderAssetMetadataBinding } from './asset-metadata.js';
 
 /** Separate from the broad snapshot loader: unsigned public hints cannot raise these. */
 export const EXACT_ASSET_EXPORT_MAX_ROWS = 16_384;
@@ -57,6 +58,8 @@ export interface ExactAssetExportLease {
 }
 
 export interface ExactAssetEncodedExportLease {
+  /** Response-owned bounded META bytes from the same initial snapshot as the body. */
+  readonly metadata: Uint8Array;
   /** Response-owned bytes. Mutating them cannot change the retained copy. */
   readonly body: Uint8Array;
   readonly plainBytes: number;
@@ -91,11 +94,14 @@ export interface ExactAssetExportRequest {
   readonly authorizeMissingAccessPolicy?: () => Promise<boolean>;
 }
 
+/** Encoded exports derive graph/count/identity from their own bounded metadata read. */
+export type ExactAssetEncodedExportRequest = Omit<ExactAssetExportRequest, 'graph' | 'expectedRows' | 'expectedIdentity'>;
+
 export interface ExactAssetExportCache {
   /** null is a resource/capability refusal; the existing conservative reader remains available. */
   acquire(request: ExactAssetExportRequest): Promise<ExactAssetExportLease | null>;
   /** Experimental batch only; legacy row export ownership remains unchanged. */
-  acquireEncoded(request: ExactAssetExportRequest): Promise<ExactAssetEncodedExportLease | null>;
+  acquireEncoded(request: ExactAssetEncodedExportRequest): Promise<ExactAssetEncodedExportLease | null>;
   stats(): Readonly<{
     exports: number;
     cacheHits: number;
@@ -125,6 +131,7 @@ interface VerifiedMetadata {
   readonly identity: string;
   readonly envelope: ConfirmedGraphKnowledgeAssetMetadataEnvelope;
   readonly metaGraph: string;
+  readonly bindings: readonly ResponderAssetMetadataBinding[];
 }
 
 interface EncodedEntry {
@@ -208,7 +215,7 @@ export function createBoundedExactAssetExportCache(params: {
   const fallbacks: Partial<Record<ExactAssetExportFallbackReason, number>> = {};
   const refuse = (
     reason: ExactAssetExportFallbackReason,
-    request: ExactAssetExportRequest,
+    request: ExactAssetEncodedExportRequest,
     budgetReason?: SyncRowSnapshotBudgetError['reason'],
   ): null => {
     fallbacks[reason] = (fallbacks[reason] ?? 0) + 1;
@@ -241,7 +248,10 @@ export function createBoundedExactAssetExportCache(params: {
     }
   };
 
-  const readMetadata = async (request: ExactAssetExportRequest): Promise<VerifiedMetadata | null> => {
+  const readMetadata = async (
+    request: ExactAssetEncodedExportRequest,
+    expected?: Pick<ExactAssetExportRequest, 'graph' | 'expectedRows' | 'expectedIdentity'>,
+  ): Promise<VerifiedMetadata | null> => {
     throwIfAborted(request.signal);
     const metaGraph = `did:dkg:context-graph:${request.contextGraphId}/_meta`;
     let result;
@@ -254,27 +264,27 @@ export function createBoundedExactAssetExportCache(params: {
       signal: request.signal, maxResponseBytes: METADATA_MAX_BYTES,
     }); } catch (error) {
       if (error instanceof StoreResponseTooLargeError) {
-        if (request.expectedIdentity !== undefined) throw changed();
+        if (expected?.expectedIdentity !== undefined) throw changed();
         return refuse('metadata-profile', request);
       }
       throw error;
     }
     throwIfAborted(request.signal);
     if (result.type !== 'bindings' || result.bindings.length > METADATA_MAX_ROWS) {
-      if (request.expectedIdentity !== undefined) throw changed();
+      if (expected?.expectedIdentity !== undefined) throw changed();
       return refuse('metadata-profile', request);
     }
     const metadata = parseResponderAssetMetadata(result.bindings,
       { contextGraphId: request.contextGraphId, ual: request.assetUal });
     if (!metadata) {
-      if (request.expectedIdentity !== undefined) throw changed();
+      if (expected?.expectedIdentity !== undefined) throw changed();
       throw invalid();
     }
     // A retained export must never silently downgrade into the paged fallback
     // after its metadata changes, including a new private/over-limit profile.
     const { identity, confirmed: parsed } = metadata;
     throwIfAborted(request.signal);
-    if (request.expectedIdentity !== undefined && identity !== request.expectedIdentity) throw changed();
+    if (expected?.expectedIdentity !== undefined && identity !== expected.expectedIdentity) throw changed();
     if (parsed.state !== 'confirmed') throw invalid();
     if (metadata.accessPolicy !== 'public') {
       if (metadata.accessPolicy !== 'absent' || parsed.envelope.privateTripleCount !== 0
@@ -286,10 +296,10 @@ export function createBoundedExactAssetExportCache(params: {
       throwIfAborted(request.signal);
     }
     if (parsed.envelope.privateTripleCount !== 0) return refuse('private-commitments', request);
-    if (parsed.envelope.assertionGraph !== request.graph || parsed.envelope.publicTripleCount !== request.expectedRows) {
+    if (expected && (parsed.envelope.assertionGraph !== expected.graph || parsed.envelope.publicTripleCount !== expected.expectedRows)) {
       throw changed();
     }
-    return { identity, envelope: parsed.envelope, metaGraph };
+    return { identity, envelope: parsed.envelope, metaGraph, bindings: metadata.bindings };
   };
 
   const revisionKey = (graph: string, metaGraph: string): string | null => {
@@ -323,7 +333,7 @@ export function createBoundedExactAssetExportCache(params: {
       wholePayloadExports,
       async assertCurrent() {
         if (released) throw changed();
-        const metadata = await readMetadata({ ...request, expectedIdentity: entry.identity });
+        const metadata = await readMetadata(request, { ...request, expectedIdentity: entry.identity });
         if (!metadata || revisionKey(request.graph, metadata.metaGraph) !== sourceRevision) throw changed();
         throwIfAborted(request.signal);
       },
@@ -352,7 +362,7 @@ export function createBoundedExactAssetExportCache(params: {
       if (!Number.isSafeInteger(request.expectedRows) || request.expectedRows < 1
         || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile', request);
       let stageStarted = performance.now();
-      const metadata = knownMetadata ?? await readMetadata(request);
+      const metadata = knownMetadata ?? await readMetadata(request, request);
       if (!knownMetadata) observeStage('export-metadata-before', stageStarted);
       if (!metadata) return null;
       const revision = revisionKey(request.graph, metadata.metaGraph);
@@ -402,7 +412,7 @@ export function createBoundedExactAssetExportCache(params: {
         if (!sameRoot(root, metadata.envelope)) throw invalid();
         observeStage('export-canonical-preparation-root', stageStarted);
         stageStarted = performance.now();
-        const after = await readMetadata({ ...request, expectedIdentity: metadata.identity });
+        const after = await readMetadata(request, { ...request, expectedIdentity: metadata.identity });
         if (!after || revisionKey(request.graph, metadata.metaGraph) !== revision) throw changed();
         observeStage('export-metadata-after', stageStarted);
         throwIfAborted(request.signal);
@@ -456,7 +466,7 @@ export function createBoundedExactAssetExportCache(params: {
   const assertEncodedCurrent = async (
     request: ExactAssetExportRequest, identity: string, revision: string | null,
   ) => {
-    const after = await readMetadata({ ...request, expectedIdentity: identity });
+    const after = await readMetadata(request, { ...request, expectedIdentity: identity });
     if (!after || revisionKey(request.graph, after.metaGraph) !== revision) throw changed();
     throwIfAborted(request.signal);
   };
@@ -500,15 +510,22 @@ export function createBoundedExactAssetExportCache(params: {
         fallbacks: Object.freeze({ ...fallbacks }) });
     },
     acquire: acquireRows,
-    async acquireEncoded(request) {
-      throwIfAborted(request.signal);
-      if (!canReadWholeAsset) return refuse('store-capability', request);
+    async acquireEncoded(scope) {
+      throwIfAborted(scope.signal);
+      if (!canReadWholeAsset) return refuse('store-capability', scope);
+      const started = performance.now();
+      const metadata = await readMetadata(scope);
+      observeExactBatch(() => scope.onStage?.('export-metadata-before', performance.now() - started));
+      if (!metadata) return null;
+      const request: ExactAssetExportRequest = { ...scope, graph: metadata.envelope.assertionGraph,
+        expectedRows: metadata.envelope.publicTripleCount, expectedIdentity: metadata.identity };
       if (!Number.isSafeInteger(request.expectedRows) || request.expectedRows < 1
         || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile', request);
-      const started = performance.now();
-      const metadata = await readMetadata(request);
-      observeExactBatch(() => request.onStage?.('export-metadata-before', performance.now() - started));
-      if (!metadata) return null;
+      const metaBytes = ENCODER.encode(serializeResponderRows(metadata.bindings.map(row => ({
+        s: request.assetUal, p: row.predicate, o: row.object, g: metadata.metaGraph,
+      }))));
+      if (metaBytes.byteLength > EXACT_BATCH_MAX_FRAME_BYTES) return refuse('metadata-profile', request);
+      const metaDigest = bytesToHex(sha256(metaBytes));
       const revision = revisionKey(request.graph, metadata.metaGraph);
       const key = encodedKey(request, metadata, revision);
       pruneEncoded();
@@ -537,11 +554,12 @@ export function createBoundedExactAssetExportCache(params: {
           hit.lastUsedAt = Date.now();
           encodedCache.delete(key); encodedCache.set(key, hit);
           encodedCacheHits += 1;
-          return Object.freeze({ body, plainBytes: hit.plainBytes, identity: hit.identity,
+          return Object.freeze({ metadata: metaBytes, body, plainBytes: hit.plainBytes, identity: hit.identity,
             wholePayloadExports: 0 as const, encodingDurationMs: 0,
             async assertCurrent() {
               if (released) throw changed();
               await assertEncodedCurrent(request, hit.identity, revision);
+              if (bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
             },
             release() {
               if (released) return;
@@ -581,11 +599,12 @@ export function createBoundedExactAssetExportCache(params: {
         const digest = bytesToHex(sha256(body));
         let released = false;
         let retained = false;
-        const encoded = Object.freeze({ body, plainBytes, identity: rows.identity,
+        const encoded = Object.freeze({ metadata: metaBytes, body, plainBytes, identity: rows.identity,
           wholePayloadExports: rows.wholePayloadExports ?? 1, encodingDurationMs,
           async assertCurrent() {
             if (released) throw changed();
             await rows.assertCurrent();
+            if (bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
             // The cold response is caller-owned until promotion. Never retain
             // bytes changed by a send adapter or another response consumer.
             if (bytesToHex(sha256(body)) !== digest) throw invalid();
