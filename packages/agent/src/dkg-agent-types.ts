@@ -1540,6 +1540,8 @@ export interface DKGAgentConfig {
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
   /** Optional caller-owned snapshot store, used by the daemon to inject durable page indexing. */
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /** Construct after the RDF store exists; an explicit publicSnapshotStore takes precedence. */
+  publicSnapshotStoreFactory?: (store: TripleStore) => WorkspacePublicSnapshotStore | undefined;
   /**
    * Max automatic-retry budget stamped onto async VM-publish jobs admitted
    * through this agent's `publishAsync` (EPCIS / Kafka plugin paths). Mirrors

@@ -2,6 +2,7 @@ export type {
   AsyncLiftAdmissionContext,
   ActiveLiftJobClaim,
   ActiveLiftJobClaimSession,
+  ExecutionFailureEvidence,
   AsyncLiftAdministrativeMutations,
   AsyncLiftDetailedRetrier,
   AsyncLiftRetryFilter,

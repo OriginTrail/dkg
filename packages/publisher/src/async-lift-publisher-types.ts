@@ -97,6 +97,24 @@ export type ActiveLiftJobClaim = LiftJobClaimed & {
 };
 
 /**
+ * GH#2940 — facts the CALLER proved about a failed execution attempt, beyond the error value.
+ *
+ * The thrown error alone cannot say whether a transaction left this node: the pre-send write-ahead
+ * is the only witness, and it lives in the caller's recorder closure. This carries the witness to
+ * the one place that records the failure, so nothing is ever inferred from which record fields
+ * happen to be absent afterwards.
+ */
+export interface ExecutionFailureEvidence {
+  /**
+   * The write-ahead never durably recorded a transaction (`not-reached` or
+   * `rolled-back-pre-send`), so no PUBLISH transaction was signed-and-sent (a TRAC approval or a
+   * context-graph registration may have preceded it; neither is a publish). Absent or false means a
+   * publish transaction may be on the wire, and the failure keeps its chain-proof classification.
+   */
+  readonly neverDispatched?: boolean;
+}
+
+/**
  * The mutation authority for one acquired claim.
  *
  * Runtime workers retain this session rather than a bare job id. Every mutation is fenced by
@@ -110,7 +128,11 @@ export interface ActiveLiftJobClaimSession {
     publishResult: PublishResult,
     options?: { publicByteSize?: number },
   ): Promise<LiftJob>;
-  recordExecutionFailure(failedFromState: LiftJobState, error: unknown): Promise<LiftJob>;
+  recordExecutionFailure(
+    failedFromState: LiftJobState,
+    error: unknown,
+    evidence?: ExecutionFailureEvidence,
+  ): Promise<LiftJob>;
 }
 
 /** Explicit by-id compatibility surface for control-plane callers, never runtime workers. */

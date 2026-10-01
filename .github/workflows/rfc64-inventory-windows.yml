@@ -122,3 +122,12 @@ jobs:
           pnpm --filter @origintrail-official/dkg-agent exec vitest run
           --config vitest.unit.config.ts
           ${{ matrix.tests }}
+
+      - name: Test snapshot retirement aliases and metadata leases
+        if: matrix.group == 'object-stores'
+        run: >-
+          pnpm --filter @origintrail-official/dkg-publisher exec vitest run
+          --config vitest.unit.config.ts
+          test/workspace-snapshot-retirement.test.ts
+          test/workspace-snapshot-write-scope.test.ts
+          test/finalized-snapshot-collector.test.ts
