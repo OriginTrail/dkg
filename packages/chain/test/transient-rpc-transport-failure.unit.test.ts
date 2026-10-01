@@ -61,7 +61,7 @@ describe('isTransientRpcTransportFailureWithoutTransaction — real producers', 
     expect(isTransientRpcTransportFailureWithoutTransaction(err)).toBe(true);
   });
 
-  it('qualifies the single-endpoint preparation exhaustion too (message kept verbatim by the producer)', async () => {
+  it('qualifies the single-endpoint preparation exhaustion too (the producer keeps the provider text, URLs reduced to hosts)', async () => {
     const client = makeClient([{}], [URLS[0]], NEVER_SIGNED);
 
     const err = await caught(() => client.populateAndSign(alwaysFailingContract(), 'doWrite', [], makeSigner(), 'publish'));

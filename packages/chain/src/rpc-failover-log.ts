@@ -77,19 +77,30 @@ export function rpcHost(url: string): string {
  * message of an HTTP-level error, or a link in a provider's own words. It ends
  * at whitespace, a quote or an angle bracket, so a URL quoted in JSON
  * (`"requestUrl": "https://…"`) or in HTML is matched without its closing
- * delimiter. Global: use it only with `replace`.
+ * delimiter. Prose punctuation after the URL (`)` `,` `.` `:` `;` `!` `?`) is not
+ * part of it, so "(https://h/KEY)" and "https://h:8545: boom" keep their
+ * punctuation and their host; a key can still never survive, because the greedy
+ * prefix swallows everything up to the final non-punctuation character. `]` is
+ * deliberately not excluded (IPv6 hosts). Global: use it only with `replace`.
  */
-export const RPC_TEXT_URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+export const RPC_TEXT_URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*[^\s"'<>),.:;!?]/gi;
 
 /**
  * `text` with every URL in it reduced to its host ({@link rpcHost}). A
  * configured RPC URL can carry an API key in its path or query, and ethers
  * embeds the full request URL in the message of an HTTP-level error, so
  * provider text passes through this before an error message or a log line
- * quotes it.
+ * quotes it. Idempotent, and total: a non-string is coerced, because this runs
+ * on failure paths that must not throw.
+ *
+ * The `://` guard is a performance fix, not a shortcut: the pattern is scanned
+ * from every start position over any long `[a-z0-9+.-]` run, so a URL-free
+ * 50 kB message (hex calldata) used to cost about a second.
  */
 export function hostOnlyRpcText(text: string): string {
-  return text.replace(RPC_TEXT_URL_PATTERN, (url) => rpcHost(url));
+  const value = typeof text === 'string' ? text : String(text ?? '');
+  if (!value.includes('://')) return value;
+  return value.replace(RPC_TEXT_URL_PATTERN, (url) => rpcHost(url));
 }
 
 // --- Process-wide counters (host-only) --------------------------------------

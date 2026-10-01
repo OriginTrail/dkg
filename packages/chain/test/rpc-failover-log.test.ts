@@ -80,6 +80,40 @@ describe('rpc-failover-log', () => {
     it('returns text without a URL unchanged', () => {
       expect(hostOnlyRpcText('connect ECONNREFUSED 127.0.0.1:8545')).toBe('connect ECONNREFUSED 127.0.0.1:8545');
     });
+
+    // GH#2945: prose punctuation after a URL is not part of it - it used to be consumed with the URL,
+    // which glued words together and, for "host:port:", dropped the host entirely.
+    it.each([
+      ['(https://h.example/KEY)', '(h.example)'],
+      ['https://a.example/K1, https://b.example/K2: boom', 'a.example, b.example: boom'],
+      ['https://h.example:8545: boom', 'h.example:8545: boom'],
+      ['see https://h.example/KEY.', 'see h.example.'],
+      ['wait! https://h.example/KEY?', 'wait! h.example?'],
+      ['a https://h.example/KEY; b', 'a h.example; b'],
+      ['http://[::1]:8545/KEY failed', '[::1]:8545 failed'],
+    ])('keeps the punctuation after a URL and still reduces it: %s', (input, expected) => {
+      expect(hostOnlyRpcText(input)).toBe(expected);
+    });
+
+    it('leaves a bare scheme alone and is idempotent on its own output', () => {
+      expect(hostOnlyRpcText('proxy via https:// only')).toBe('proxy via https:// only');
+      const once = hostOnlyRpcText('failed (https://h.example/KEY), retry https://h.example:8545/K2: boom');
+      expect(hostOnlyRpcText(once)).toBe(once);
+      expect(once).not.toMatch(/KEY|K2/);
+    });
+
+    it('is total: a non-string input is coerced instead of throwing on a failure path', () => {
+      expect(hostOnlyRpcText(undefined as unknown as string)).toBe('');
+      expect(hostOnlyRpcText(null as unknown as string)).toBe('');
+      expect(hostOnlyRpcText(42 as unknown as string)).toBe('42');
+    });
+
+    it('does not scan a URL-free message: a long hex run costs microseconds, not seconds', () => {
+      const calldata = `0x${'ab12'.repeat(40_000)}`;
+      const started = performance.now();
+      expect(hostOnlyRpcText(calldata)).toBe(calldata);
+      expect(performance.now() - started).toBeLessThan(50);
+    });
   });
 
   describe('noteRpcFailover: dedup gate + counters', () => {

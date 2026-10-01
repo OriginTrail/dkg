@@ -13,7 +13,8 @@ export const KEYED_RPC_URL = 'https://rpc.example/v2/SECRET-API-KEY';
  * `RpcFailoverClient.populateAndSign` exhaustion: every endpoint failed while the publish
  * transaction was being PREPARED. Names no transaction. The text deliberately says "timed out" —
  * the wording that used to select `tx_submit_timeout` — and quotes a keyed URL the way the
- * single-endpoint producer message does (it forwards the provider's own text verbatim).
+ * single-endpoint producer message used to (GH#2945: the producer now reduces it to its host, so
+ * this fixture is what a third-party adapter, or a record written before that fix, still carries).
  */
 export function preparationExhausted(): RpcEndpointsExhaustedError {
   return new RpcEndpointsExhaustedError(
