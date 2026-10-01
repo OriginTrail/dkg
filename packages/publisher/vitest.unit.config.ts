@@ -7,6 +7,7 @@ export default defineConfig({
       'test/workspace-snapshot-source.test.ts',
       'test/workspace-snapshot-page-index.test.ts',
       'test/graph-publish-envelope.test.ts',
+      'test/confirmed-metadata-parser.test.ts',
       'test/workspace-metadata-subjects.test.ts',
       'test/entity-share-metadata.test.ts',
       'test/ka-update-submit-failure.test.ts',

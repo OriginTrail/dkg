@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertSafeIri, compareCodePoint, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
-import { readConfirmedGraphKnowledgeAssetMetadataEnvelope } from '@origintrail-official/dkg-publisher';
+import { assertSafeIri, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import { StoreResponseTooLargeError, type TripleStore } from '@origintrail-official/dkg-storage';
-import { sha256 } from '@noble/hashes/sha2.js';
-import { bytesToHex } from '@noble/hashes/utils.js';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
@@ -16,6 +13,7 @@ import type { ExactAssetExportCache, ExactAssetExportFallbackReason, ExactAssetE
 import type { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
 import { serializeResponderRows } from './graph-plan.js';
+import { parseResponderAssetMetadata } from './asset-metadata.js';
 
 const ENCODER = new TextEncoder();
 const MAX_META_ROWS = 128;
@@ -160,15 +158,13 @@ async function readMetadata(store: TripleStore, contextGraphId: string, assetUal
   signal.throwIfAborted();
   if (result.type !== 'bindings' || result.bindings.length === 0) throw new Error('Exact batch asset metadata missing');
   if (result.bindings.length > MAX_META_ROWS) throw new ProfileRefusal('Exact batch metadata rows refused');
-  if (result.bindings.some(row => typeof row.predicate !== 'string' || typeof row.object !== 'string')) throw new Error('Exact batch metadata malformed');
-  const reader = new Proxy(store, { get(target, key, receiver) { return key === 'query' ? async () => result : Reflect.get(target, key, receiver); } });
-  const parsed = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(reader, { contextGraphId, ual: assetUal });
+  const metadata = parseResponderAssetMetadata(result.bindings, { contextGraphId, ual: assetUal });
+  if (!metadata) throw new Error('Exact batch metadata malformed');
+  const { confirmed: parsed, identity, bindings } = metadata;
   if (parsed.state !== 'confirmed' || parsed.envelope.privateTripleCount !== 0 || parsed.envelope.publicTripleCount < 1) throw new Error('Exact batch metadata is not a public confirmed body');
-  // Same immutable metadata identity used by the existing export cache. Passing
-  // it into acquire binds this header to the body before any bytes are served.
-  const identity = bytesToHex(sha256(ENCODER.encode(JSON.stringify(result.bindings.map(row => [row.predicate!, row.object!])
-    .sort((a, b) => compareCodePoint(a[0]!, b[0]!) || compareCodePoint(a[1]!, b[1]!))))));
-  const bytes = ENCODER.encode(serializeResponderRows(result.bindings.map(row => ({ s: assetUal, p: row.predicate!, o: row.object!, g: metaGraph }))));
+  // Passing the shared full metadata identity into acquire binds this header
+  // to the body before any bytes are served.
+  const bytes = ENCODER.encode(serializeResponderRows(bindings.map(row => ({ s: assetUal, p: row.predicate, o: row.object, g: metaGraph }))));
   if (bytes.byteLength > EXACT_BATCH_MAX_FRAME_BYTES) throw new ProfileRefusal('Exact batch metadata frame refused');
   return { graph: parsed.envelope.assertionGraph, rows: parsed.envelope.publicTripleCount, identity, bytes };
 }

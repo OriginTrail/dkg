@@ -11,9 +11,10 @@ import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { registerSyncHandler, type ExperimentalExactBatchResponderResources } from '../src/sync/responder/sync-handler.js';
 import { createExactBatchResponderBinding } from '../src/sync/responder/exact-batch-stream.js';
+import { parseResponderAssetMetadata } from '../src/sync/responder/asset-metadata.js';
 import { consumeExactBatchVerifiedSession, exchangeExactBatchVerified, exactBatchStartFrame, type ExactBatchAgentSession } from '../src/sync/requester/exact-batch-stream.js';
 import { authenticateVerifiedGraphScopedAsset, materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
-import { EXACT_BATCH_FRAME_KIND as K, decodeExactBatchFrames, encodeExactBatchFrame, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
+import { EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_MAX_FRAME_BYTES, decodeExactBatchFrames, encodeExactBatchFrame, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
 import { isExactSyncGzipFrame } from '../src/sync/wire-compression.js';
 
 /** Module integration fixture, not a live-chain or encrypted-network benchmark. */
@@ -141,6 +142,38 @@ async function run(f: Awaited<ReturnType<typeof fixture>>, wire = duplex(f.recei
 }
 
 describe('exact batch normal verifier/materializer binding', () => {
+  it('binds batch metadata to the same envelope and full identity as the cache despite fetched row order changes', async () => {
+    const f = await fixture(1, 20), wire = duplex(f.receiver.assetUals);
+    try {
+      const parsedReads: NonNullable<ReturnType<typeof parseResponderAssetMetadata>>[] = [];
+      const acquire = vi.spyOn(f.exportCache, 'acquireEncoded');
+      const query = vi.mocked(f.store.query), original = query.getMockImplementation()!;
+      let metadataReads = 0;
+      query.mockImplementation(async (sparql, options) => {
+        const result = await original(sparql, options);
+        if (result.type === 'bindings' && options?.source?.endsWith('.metadata')) {
+          if (++metadataReads % 2 === 1) result.bindings.reverse();
+          parsedReads.push(parseResponderAssetMetadata(result.bindings, { contextGraphId: f.contextGraphId, ual: f.items[0]!.ual })!);
+        }
+        return result;
+      });
+      await run(f, wire);
+      const expected = parsedReads[0]!;
+      expect(parsedReads.every(read => read.identity === expected.identity)).toBe(true);
+      expect(parsedReads.every(read => read.confirmed.state === 'confirmed')).toBe(true);
+      expect(expected.confirmed.state).toBe('confirmed');
+      if (expected.confirmed.state !== 'confirmed') throw new Error('Confirmed fixture absent');
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(acquire.mock.calls[0]![0]).toMatchObject({ expectedIdentity: expected.identity,
+        graph: expected.confirmed.envelope.assertionGraph, expectedRows: expected.confirmed.envelope.publicTripleCount });
+      expect((await acquire.mock.results[0]!.value)!.identity).toBe(expected.identity);
+      // One batch header read and the unchanged before/after/completion cache fences.
+      expect(metadataReads).toBe(4);
+      expect(f.applied).toEqual(f.receiver.assetUals);
+      expect(wire.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(1);
+    } finally { wire.abort(); await f.close(); }
+  });
+
   it('imports10 distinct confirmed fixtureKAs with oneSTART, oneexport each, realgzip/root/count verification and atomic writes', async () => {
     const f = await fixture(), wire = duplex(f.receiver.assetUals);
     try {
@@ -176,6 +209,39 @@ describe('exact batch normal verifier/materializer binding', () => {
       }
     } finally { wire.abort(); await f.close(); }
   }, 60_000);
+
+  it.each(['byte-limit', 'row-limit', 'malformed-binding'] as const)(
+    'keeps metadata %s refusal handling at the batch transport boundary', async kind => {
+      const f = await fixture(1, 2), signal = new AbortController().signal;
+      const session = { signal, windowSize: 2, assetUals: f.receiver.assetUals,
+        send: vi.fn(async (_frame: ExactBatchFrame) => {}), next: vi.fn(async () => undefined) };
+      try {
+        const query = vi.mocked(f.store.query), original = query.getMockImplementation()!;
+        query.mockImplementation(async (sparql, options) => {
+          if (options?.source !== 'sync.responder.exactBatch.metadata') return original(sparql, options);
+          expect(sparql).toContain('LIMIT 129');
+          expect(options).toMatchObject({ priority: 'background', signal, maxResponseBytes: EXACT_BATCH_MAX_FRAME_BYTES });
+          if (kind === 'byte-limit') throw new StoreResponseTooLargeError(EXACT_BATCH_MAX_FRAME_BYTES, EXACT_BATCH_MAX_FRAME_BYTES + 1);
+          return { type: 'bindings', bindings: kind === 'row-limit'
+            ? Array.from({ length: 129 }, () => ({ predicate: 'urn:overflow', object: '"value"' }))
+            : [{ predicate: 'urn:missing-object' }] };
+        });
+        await f.binding.authorizeRequest(f.signed, 'requester', signal);
+        const respond = f.binding.respond(f.signed, session, 'requester');
+        if (kind === 'malformed-binding') {
+          await expect(respond).rejects.toThrow('metadata malformed');
+          expect(session.send).not.toHaveBeenCalled();
+        } else {
+          await expect(respond).resolves.toBeUndefined();
+          expect(session.send).toHaveBeenCalledOnce();
+          const refusal = session.send.mock.calls[0]![0];
+          expect(refusal.kind).toBe(K.REFUSE);
+          expect(new TextDecoder().decode(refusal.payload)).toBe('RESOURCE_LIMIT');
+        }
+        expect(f.exportCache.stats().exports).toBe(0);
+        expect(f.reads.some(source => source.endsWith('.payload'))).toBe(false);
+      } finally { await f.close(); }
+    });
 
   it('never exports before normal authorization and public-only gates pass', async () => {
     const f = await fixture(1, 2);

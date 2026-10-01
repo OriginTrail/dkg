@@ -10,7 +10,6 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
-  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   type ConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '@origintrail-official/dkg-publisher';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -25,6 +24,7 @@ import {
   encodeNegotiatedExactSyncResponse,
 } from '../wire-compression.js';
 import { serializeResponderRows } from './graph-plan.js';
+import { parseResponderAssetMetadata } from './asset-metadata.js';
 
 /** Separate from the broad snapshot loader: unsigned public hints cannot raise these. */
 export const EXACT_ASSET_EXPORT_MAX_ROWS = 16_384;
@@ -37,7 +37,6 @@ const BUILD_RESERVATION_BYTES = 80 * 1024 * 1024;
 const RESPONSE_RESERVATION_BYTES = 96 * 1024 * 1024;
 const METADATA_MAX_ROWS = 128;
 const METADATA_MAX_BYTES = 64 * 1024;
-const DKG = 'http://dkg.io/ontology/';
 const ENCODER = new TextEncoder();
 // Compressed performance copies share the ordinary responder budget. These
 // bounds are local construction limits, never unsigned request allowances.
@@ -279,30 +278,20 @@ export function createBoundedExactAssetExportCache(params: {
       if (request.expectedIdentity !== undefined) throw changed();
       return refuse('metadata-profile', request);
     }
-    if (result.bindings.some((row) => typeof row.predicate !== 'string' || typeof row.object !== 'string')) {
+    const metadata = parseResponderAssetMetadata(result.bindings,
+      { contextGraphId: request.contextGraphId, ual: request.assetUal });
+    if (!metadata) {
       if (request.expectedIdentity !== undefined) throw changed();
       throw invalid();
     }
     // A retained export must never silently downgrade into the paged fallback
     // after its metadata changes, including a new private/over-limit profile.
-    const identity = bytesToHex(sha256(ENCODER.encode(JSON.stringify(result.bindings
-      .map((row) => [row.predicate, row.object])
-      .sort((a, b) => compareCodePoint(a[0]!, b[0]!) || compareCodePoint(a[1]!, b[1]!))))));
-    if (request.expectedIdentity !== undefined && identity !== request.expectedIdentity) throw changed();
-    // Use the canonical metadata parser on the already bounded result, with no second IO.
-    const metadataReader = new Proxy(store, {
-      get(target, key, receiver) {
-        return key === 'query' ? async () => result : Reflect.get(target, key, receiver);
-      },
-    });
-    const parsed = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(
-      metadataReader, { contextGraphId: request.contextGraphId, ual: request.assetUal },
-    );
+    const { identity, confirmed: parsed } = metadata;
     throwIfAborted(request.signal);
+    if (request.expectedIdentity !== undefined && identity !== request.expectedIdentity) throw changed();
     if (parsed.state !== 'confirmed') throw invalid();
-    const publicPolicies = result.bindings.filter((row) => row.predicate === `${DKG}accessPolicy`);
-    if (publicPolicies.length !== 1 || !/^"public"(?:\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#string>)?$/.test(publicPolicies[0]!.object!)) {
-      if (publicPolicies.length !== 0 || parsed.envelope.privateTripleCount !== 0
+    if (metadata.accessPolicy !== 'public') {
+      if (metadata.accessPolicy !== 'absent' || parsed.envelope.privateTripleCount !== 0
         || !request.authorizeMissingAccessPolicy || (await request.authorizeMissingAccessPolicy()) !== true) {
         return refuse('non-public', request);
       }

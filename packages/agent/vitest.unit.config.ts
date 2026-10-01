@@ -73,6 +73,7 @@ export default defineConfig({
       "test/exact-graph-content-export.test.ts",
       "test/vm-recovery-local-admission.test.ts",
       "test/exact-asset-responder.test.ts",
+      "test/responder-asset-metadata.test.ts",
       "test/exact-asset-wire-parse.test.ts",
       "test/swm/host-catchup-sign.test.ts",
       "test/swm/host-catchup-wire.test.ts",

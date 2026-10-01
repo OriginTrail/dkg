@@ -421,6 +421,15 @@ describe('bounded exact asset export ownership', () => {
     expect(f.reads.filter((read) => read.options?.source?.endsWith('.payload'))).toHaveLength(1);
   });
 
+  it('keeps malformed cold metadata an integrity error before any authority grant or payload read', async () => {
+    const f = fixture(20), authorizeMissingAccessPolicy = vi.fn(async () => true);
+    f.query.mockResolvedValue({ type: 'bindings', bindings: [{ predicate: 'urn:missing-object' }] });
+    await expect(f.cache.acquire({ ...f, authorizeMissingAccessPolicy })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+    expect(authorizeMissingAccessPolicy).not.toHaveBeenCalled();
+    expect(f.query).toHaveBeenCalledOnce();
+    expect(f.budget.stats().snapshots).toBe(0);
+  });
+
   it.each(['byte-limit', 'row-limit', 'non-bindings', 'malformed-binding'] as const)(
     'expires retained metadata on an unreadable %s profile', async (kind) => {
       const f = fixture(20);
