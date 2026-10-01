@@ -21,8 +21,7 @@ import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
-import { decodeNegotiatedExactSyncResponse, EXACT_SYNC_GZIP_ENCODING, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES,
-  EXACT_SYNC_GZIP_MAX_ROWS } from '../wire-compression.js';
+import { decodeNegotiatedExactSyncResponse, EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from '../wire-compression.js';
 import {
   getSyncCheckpointKey,
   type DurableManifestDigest,
@@ -684,12 +683,12 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     logDebug,
   } = params;
 
-  const usesExactGzip = responseEncoding === EXACT_SYNC_GZIP_ENCODING && !includeSharedMemory
-    && (phase === 'data' || phase === 'meta') && assetUals?.length === 1;
-  const admittedByteLimit = usesExactGzip ? Math.min(maxAcceptedBytes ?? EXACT_SYNC_GZIP_MAX_INFLATED_BYTES,
-    EXACT_SYNC_GZIP_MAX_INFLATED_BYTES) : maxAcceptedBytes;
-  const admittedHeapLimit = usesExactGzip ? Math.min(maxAcceptedHeapBytesEstimate ?? 32 * 1024 * 1024,
-    32 * 1024 * 1024) : maxAcceptedHeapBytesEstimate;
+  const profile = resolveExactSyncGzipProfile({ responseEncoding, includeSharedMemory, phase, assetUals });
+  const usesExactGzip = profile !== undefined;
+  const admittedByteLimit = profile ? Math.min(maxAcceptedBytes ?? profile.maxInflatedBytes,
+    profile.maxInflatedBytes) : maxAcceptedBytes;
+  const admittedHeapLimit = profile ? Math.min(maxAcceptedHeapBytesEstimate ?? profile.maxHeapBytesEstimate,
+    profile.maxHeapBytesEstimate) : maxAcceptedHeapBytesEstimate;
 
   const allQuads: Quad[] = [];
   const allQuadRawOffsets: number[] = [];
@@ -803,8 +802,8 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       throw new SyncPageAccumulationLimitError('bytes', nextDecodedBytes, admittedByteLimit);
     }
     const nextDecodedRows = decodedRowsReceived + (decoded.rows ?? 0);
-    if (usesExactGzip && nextDecodedRows > EXACT_SYNC_GZIP_MAX_ROWS) {
-      throw new SyncPageAccumulationLimitError('quads', nextDecodedRows, EXACT_SYNC_GZIP_MAX_ROWS);
+    if (profile && nextDecodedRows > profile.maxRows) {
+      throw new SyncPageAccumulationLimitError('quads', nextDecodedRows, profile.maxRows);
     }
     decodedBytesReceived = nextDecodedBytes; decodedRowsReceived = nextDecodedRows;
     return decodeSyncResponse(decoded.bytes);
@@ -838,7 +837,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     contextGraphId,
     includeSharedMemory,
     phase,
-    responseEncoding: usesExactGzip ? EXACT_SYNC_GZIP_ENCODING : undefined,
+    responseEncoding: profile?.responseEncoding,
   } satisfies SyncPageSizeProfileScope;
   const adaptivePageSizer = new AdaptiveSyncPageSizer(
     syncPageSize,

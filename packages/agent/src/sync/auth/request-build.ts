@@ -6,7 +6,7 @@ import {
 } from '../../dkg-agent-constants.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
-import { EXACT_SYNC_GZIP_ENCODING } from '../wire-compression.js';
+import { EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from '../wire-compression.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -191,8 +191,9 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // Cold public recovery still uses an authenticated envelope. This hint is
   // independent of needsAuth and is appended after the unchanged digest;
   // responder authorization must succeed before any compression or export.
-  const responseEncoding = !includeSharedMemory && assetUals?.length === 1
-    && (phase === 'data' || phase === 'meta') ? EXACT_SYNC_GZIP_ENCODING : undefined;
+  const responseEncoding = resolveExactSyncGzipProfile({
+    includeSharedMemory, phase, assetUals, responseEncoding: EXACT_SYNC_GZIP_ENCODING,
+  })?.responseEncoding;
   // Advertise byte-budget page mode for durable DATA and META (#1916/#1923).
   // Additive/rolling-upgrade safe both directions: an OLD responder ignores the
   // meta pageMode (its meta path is not byte-budget-gated → serves legacy meta),

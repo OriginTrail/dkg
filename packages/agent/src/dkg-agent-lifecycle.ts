@@ -324,7 +324,7 @@ import {
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
-import { EXACT_SYNC_GZIP_ENCODING } from './sync/wire-compression.js';
+import { EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from './sync/wire-compression.js';
 import {
   getSyncCheckpointKey,
   MemorySyncCheckpointStore,
@@ -6968,11 +6968,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     // Match the additive builder negotiation. Authorization is still evaluated
     // by buildSyncRequest and by the responder before any export is admitted.
-    const responseEncoding = !includeSharedMemory
-      && (phase === 'data' || phase === 'meta')
-      && assetUals?.length === 1
-      ? EXACT_SYNC_GZIP_ENCODING
-      : undefined;
+    const responseEncoding = resolveExactSyncGzipProfile({
+      includeSharedMemory, phase, assetUals, responseEncoding: EXACT_SYNC_GZIP_ENCODING,
+    })?.responseEncoding;
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
       : exactSyncPhaseAccumulationLimits(assetUals, responseEncoding);

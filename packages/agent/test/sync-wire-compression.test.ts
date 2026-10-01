@@ -181,6 +181,31 @@ function fetchParams(overrides: Partial<FetchParams> = {}): FetchParams {
 
 describe('negotiated exact requester page-size profile', () => {
   const scope = { remotePeerId: 'profile-peer', contextGraphId: 'profile-cg', includeSharedMemory: false, phase: 'data' as const };
+  it.each([
+    { responseEncoding: undefined },
+    { includeSharedMemory: true },
+    { phase: 'snapshot' as const },
+    { assetUals: [UAL, UAL_2] },
+  ])('rejects a compressed page outside the declared profile before parsing: %j', async (outside) => {
+    const parseAndFilter = vi.fn(async () => ({ quads: [], totalQuads: 0 }));
+    await expect(fetchSyncPages(fetchParams({
+      ...outside, send: async () => rawFrame(rdf), parseAndFilter,
+    }))).rejects.toThrow(/Unnegotiated/);
+    expect(parseAndFilter).not.toHaveBeenCalled();
+  });
+
+  it.each(['bytes', 'quads'] as const)('preserves a tighter caller %s allowance after negotiation', async (dimension) => {
+    const parseAndFilter = vi.fn(async () => ({
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"valid"', graph: 'urn:g' }],
+      totalQuads: 1,
+    }));
+    await expect(fetchSyncPages(fetchParams({
+      ...(dimension === 'bytes' ? { maxAcceptedBytes: rdf.byteLength - 1 } : { maxAcceptedQuads: 0 }),
+      send: async () => rawFrame(rdf), parseAndFilter,
+    }))).rejects.toThrow(dimension === 'bytes' ? /Invalid exact sync/ : /quads/);
+    expect(parseAndFilter).toHaveBeenCalledTimes(dimension === 'bytes' ? 0 : 1);
+  });
+
   it('starts the actual cold request at 8192 and requires explicit old-plaintext EOF', async () => {
     const requested: number[] = [];
     let sends = 0;

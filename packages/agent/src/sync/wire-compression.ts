@@ -5,6 +5,14 @@ export const EXACT_SYNC_GZIP_ENCODING = 'gzip-nquads-v1' as const;
 export const EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES = 4 * 1024 * 1024;
 export const EXACT_SYNC_GZIP_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
 export const EXACT_SYNC_GZIP_MAX_ROWS = 100_000;
+export const EXACT_SYNC_GZIP_MAX_HEAP_BYTES_ESTIMATE = 32 * 1024 * 1024;
+const EXACT_SYNC_GZIP_PROFILE = Object.freeze({
+  responseEncoding: EXACT_SYNC_GZIP_ENCODING,
+  maxCompressedBytes: EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES,
+  maxInflatedBytes: EXACT_SYNC_GZIP_MAX_INFLATED_BYTES,
+  maxRows: EXACT_SYNC_GZIP_MAX_ROWS,
+  maxHeapBytesEstimate: EXACT_SYNC_GZIP_MAX_HEAP_BYTES_ESTIMATE,
+});
 const MAGIC = new TextEncoder().encode('DKGZQ01\n');
 const HEADER_BYTES = 20;
 const CODEC_TIMEOUT_MS = 5_000;
@@ -17,6 +25,10 @@ export function normalizeExactSyncResponseEncoding(value: unknown): typeof EXACT
 export function negotiatesExactSyncGzip(request: CompressionRequest): boolean {
   return request.responseEncoding === EXACT_SYNC_GZIP_ENCODING && request.includeSharedMemory !== true
     && (request.phase === 'data' || request.phase === 'meta') && request.assetUals?.length === 1;
+}
+/** One negotiated encoding decision and its fixed resource ceilings. */
+export function resolveExactSyncGzipProfile(request: CompressionRequest): typeof EXACT_SYNC_GZIP_PROFILE | undefined {
+  return negotiatesExactSyncGzip(request) ? EXACT_SYNC_GZIP_PROFILE : undefined;
 }
 export function isExactSyncGzipFrame(bytes: Uint8Array): boolean {
   return bytes.byteLength >= MAGIC.length && MAGIC.every((byte, index) => bytes[index] === byte);
@@ -31,22 +43,23 @@ export async function encodeNegotiatedExactSyncResponse(bytes: Uint8Array, optio
   readonly request: CompressionRequest; readonly signal?: AbortSignal;
 }): Promise<Uint8Array> {
   options.signal?.throwIfAborted();
-  if (!negotiatesExactSyncGzip(options.request) || bytes.byteLength === 0) return bytes;
-  if (bytes.byteLength > EXACT_SYNC_GZIP_MAX_INFLATED_BYTES || lines(bytes) > EXACT_SYNC_GZIP_MAX_ROWS) {
+  const profile = resolveExactSyncGzipProfile(options.request);
+  if (!profile || bytes.byteLength === 0) return bytes;
+  if (bytes.byteLength > profile.maxInflatedBytes || lines(bytes) > profile.maxRows) {
     throw new RangeError('Exact sync decoded page exceeds bounded transport profile');
   }
   let compressed: Uint8Array;
   try {
-    compressed = await gzipBounded(bytes, { maxInputBytes: EXACT_SYNC_GZIP_MAX_INFLATED_BYTES,
-      maxOutputBytes: EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES - HEADER_BYTES, timeoutMs: CODEC_TIMEOUT_MS, signal: options.signal });
+    compressed = await gzipBounded(bytes, { maxInputBytes: profile.maxInflatedBytes,
+      maxOutputBytes: profile.maxCompressedBytes - HEADER_BYTES, timeoutMs: CODEC_TIMEOUT_MS, signal: options.signal });
   } catch (error) {
     options.signal?.throwIfAborted();
     // The responder can use its existing plain path only within that path's
     // four-MiB body cap. Larger codec refusal is an error, never a partial EOF.
-    if (bytes.byteLength <= EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES) return bytes;
+    if (bytes.byteLength <= profile.maxCompressedBytes) return bytes;
     throw error;
   }
-  if (compressed.byteLength + HEADER_BYTES >= bytes.byteLength && bytes.byteLength <= EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES) return bytes;
+  if (compressed.byteLength + HEADER_BYTES >= bytes.byteLength && bytes.byteLength <= profile.maxCompressedBytes) return bytes;
   const frame = new Uint8Array(HEADER_BYTES + compressed.byteLength);
   frame.set(MAGIC); const view = new DataView(frame.buffer);
   view.setUint32(8, bytes.byteLength); view.setUint32(12, lines(bytes)); view.setUint32(16, compressed.byteLength);
