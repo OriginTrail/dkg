@@ -258,6 +258,7 @@ export {
   RpcEndpointsExhaustedError,
   isChainRpcTransportError,
   isRpcEndpointsExhaustedError,
+  isTransientRpcTransportFailureWithoutTransaction,
   createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
@@ -288,6 +289,9 @@ export {
   noteRpcExhaustion,
   notePreferredEndpoint,
   noteRpcServed,
+  // GH#2942 — the publisher persists a transport failure's message and must reduce any URL in
+  // it (a configured RPC URL can carry an API key) to its host first.
+  hostOnlyRpcText,
 } from './rpc-failover-log.js';
 export {
   HubResolutionCache,

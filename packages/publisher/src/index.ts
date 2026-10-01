@@ -363,6 +363,9 @@ export {
 // consumer reads a job's `retryState` off the publisher and the counts off `retryDetailed`, so
 // nothing outside this package re-derives either.
 export {
+  type HeldRecoveryGap,
+  type LiftJobRetryBlocker,
+  type LiftJobRetryBlockerCode,
   type LiftJobRetryProjection,
   type LiftJobRetryWaitingReason,
 } from './async-lift-retry-disposition.js';
