@@ -197,8 +197,10 @@ interface PreSendBroadcastRecorder {
  *
  * `neverDispatched` is the positional proof, not an inference from record fields: the hook is
  * awaited strictly before the send and fails closed, so a write-ahead that never durably recorded
- * a hash (`not-reached`, `rolled-back-pre-send`) means nothing was signed-and-sent. A durably
- * recorded one may be on the wire, so it proves nothing.
+ * a hash (`not-reached`, `rolled-back-pre-send`) means no PUBLISH transaction was signed-and-sent
+ * (a TRAC approval or a context-graph registration may have preceded the hook; neither is a
+ * publish). A durably recorded one may be on the wire, so it proves nothing. The proof holds for
+ * an executor that awaits the hook before sending — see `PublishOptions.onBeforeBroadcast`.
  */
 export function executionFailureEvidence(recorder: PreSendBroadcastRecorder): ExecutionFailureEvidence {
   return recorder.outcome === 'recorded-durable'
@@ -2027,6 +2029,12 @@ export class TripleStoreAsyncLiftPublisher
    * message chains below and in `recordExecutionFailure` (their consolidation
    * is #1974's scope).
    */
+  // GH#2940 — only register causes that are pre-send BY CONSTRUCTION (raised before anything is
+  // signed). A typed store rejection is position-agnostic: it can equally arise after the send, so
+  // it must NOT be added here. This function also routes the failure to 'validated' unconditionally
+  // (`isKnowledgeAssetPublishPreconditionFailure`), with no write-ahead proof; the store-rejection
+  // case is decided in `applyExecutionFailureTransition`, where that proof and the persisted
+  // status are both in hand.
   private classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJobFailureCode | null {
     // GH#1786 — permanent author-capability refusal; no transaction was ever sent.
     if (isPermanentAuthorCapabilityFailure(error)) return 'authority_forbidden';
@@ -3356,6 +3364,12 @@ export class TripleStoreAsyncLiftPublisher
     let writeAheadFailure: unknown;
     let recordedTxHash: string | undefined;
     const onBeforeBroadcast = async (record: PreBroadcastRecord): Promise<void> => {
+      // GH#2940 — FAIL CLOSED after a rejected write-ahead. The once-only latch below stays set
+      // when the first attempt fails, so without this a second invocation (a caller that reuses
+      // the hook across dispatches) would return silently and let a send proceed under a
+      // 'rolled-back-pre-send' outcome — the one outcome the failure writer treats as proof that no
+      // publish transaction left this node.
+      if (outcome === 'rolled-back-pre-send') throw writeAheadFailure;
       if (recordedTxHash) return;
       recordedTxHash = record.txHash;
       try {

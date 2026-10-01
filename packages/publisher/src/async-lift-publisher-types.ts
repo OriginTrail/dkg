@@ -108,8 +108,9 @@ export type ActiveLiftJobClaim = LiftJobClaimed & {
 export interface ExecutionFailureEvidence {
   /**
    * The write-ahead never durably recorded a transaction (`not-reached` or
-   * `rolled-back-pre-send`), so none was signed-and-sent. Absent or false means a transaction may
-   * be on the wire, and the failure keeps its chain-proof classification.
+   * `rolled-back-pre-send`), so no PUBLISH transaction was signed-and-sent (a TRAC approval or a
+   * context-graph registration may have preceded it; neither is a publish). Absent or false means a
+   * publish transaction may be on the wire, and the failure keeps its chain-proof classification.
    */
   readonly neverDispatched?: boolean;
   /**
@@ -121,7 +122,6 @@ export interface ExecutionFailureEvidence {
 
 /**
  * The mutation authority for one acquired claim.
-
  *
  * Runtime workers retain this session rather than a bare job id. Every mutation is fenced by
  * the immutable wallet/token pair in {@link claim}; a recovered or re-claimed job therefore
