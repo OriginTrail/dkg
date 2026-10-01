@@ -136,6 +136,20 @@ export function groupDiscoveredAgentIdentityRows(
   }));
 }
 
+/** Upper bound of one {@link DiscoveryClient.findCoreAgentPeerHints} read. */
+export const MAX_CORE_AGENT_PEER_HINTS = 1024;
+
+/**
+ * One core-role phonebook binding. UNSIGNED: anyone can publish a profile that
+ * names any peer id next to any wallet, so it only ever ranks dial candidates.
+ */
+export interface CoreAgentPeerHint {
+  peerId: string;
+  /** The profile's `dkg:agentAddress`, possibly empty; validated by the consumer. */
+  agentAddress: string;
+  lastSeen?: string;
+}
+
 export interface DiscoveredOffering {
   agentUri: string;
   agentName: string;
@@ -260,6 +274,9 @@ export class DiscoveryClient implements AgentPeerDiscovery {
   ): Promise<AgentPeerPage> {
     options = Object.freeze({ ...options });
     validateAgentPeerPageRequest(options);
+    // A profile can carry the empty literal as its `dkg:agentAddress`. It binds
+    // no wallet, so no lookup may match it: an empty wallet resolves to nobody.
+    if (agentAddress.trim().length === 0) return { peerIds: [], nextAfterPeerId: null };
     const isEvmAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress);
     const addressMatch = isEvmAddress
       ? `?agent <${DKG}agentAddress> ?storedAgentAddress .
@@ -293,6 +310,61 @@ export class DiscoveryClient implements AgentPeerDiscovery {
       peerIds,
       nextAfterPeerId: result.bindings.length > options.limit ? peerIds[peerIds.length - 1] : null,
     }, options);
+  }
+
+  /**
+   * Core-role phonebook rows for the VM holder tier: one row per distinct
+   * (peerId, agentAddress) binding, freshest `lastSeen` first, at most `limit`.
+   *
+   * Every value is an UNSIGNED profile claim. The `nodeRole` filter is only a
+   * cost bound (an Edge with the phonebook holds ~1,900 profiles on Base
+   * mainnet, about 60 of them Core), never a trust signal: the consumer must
+   * still bind each address to a ShardingTable identity on chain. A profile
+   * without an `agentAddress` cannot match the required pattern, so it never
+   * reaches the consumer at all.
+   */
+  async findCoreAgentPeerHints(options: {
+    limit: number;
+    signal?: AbortSignal;
+  }): Promise<CoreAgentPeerHint[]> {
+    const { limit } = options;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_CORE_AGENT_PEER_HINTS) {
+      throw new RangeError(`Core peer hint limit must be an integer from 1 to ${MAX_CORE_AGENT_PEER_HINTS}`);
+    }
+    options.signal?.throwIfAborted();
+    // Grouping keeps a profile with several `lastSeen` rows (a re-published
+    // heartbeat) from multiplying rows ahead of LIMIT and hiding another Core.
+    const result = await this.engine.query(`
+      SELECT ?peerId ?agentAddress (MAX(?seen) AS ?lastSeen) WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${DKG}peerId> ?peerId ;
+               <${DKG}agentAddress> ?agentAddress ;
+               <${DKG}nodeRole> ?nodeRole .
+        FILTER(STR(?nodeRole) = "core")
+        OPTIONAL { ?agent <${DKG}lastSeen> ?seen }
+      }
+      GROUP BY ?peerId ?agentAddress
+      ORDER BY DESC(?lastSeen) ASC(STR(?peerId))
+      LIMIT ${limit}
+    `, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
+    options.signal?.throwIfAborted();
+    if (result.bindings.length > limit) {
+      throw new Error('Core peer hint query exceeded its row limit');
+    }
+    return result.bindings.flatMap((row) => {
+      const peerId = stripQuotes(row['peerId'] ?? '');
+      const agentAddress = stripQuotes(row['agentAddress'] ?? '');
+      if (peerId.length === 0) return [];
+      const lastSeen = row['lastSeen'] ? stripQuotes(row['lastSeen']) : undefined;
+      return [{
+        peerId,
+        agentAddress,
+        ...(lastSeen ? { lastSeen } : {}),
+      }];
+    });
   }
 
   async findSkillOfferings(options: SkillSearchOptions = {}): Promise<DiscoveredOffering[]> {

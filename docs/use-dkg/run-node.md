@@ -254,6 +254,18 @@ public StorageACK.** `syncReconcilerEnabled` / `DKG_SYNC_RECONCILER_ENABLED`
 only control the periodic peer-sync reconciler and never switch VM
 reconciliation off.
 
+**Holders you are not connected to.** When VM reconciliation recovers a public
+graph's missing Knowledge Assets it asks the graph's curators and your
+connected peers first. Behind them it also dials ShardingTable Cores it is not
+connected to, when the local `agents` phonebook holds a core-role profile whose
+`agentAddress` is an operational wallet registered on chain to an identity in
+the ShardingTable (at most 32 peers, 2 per identity). A profile names its own
+peer id, so it is an unsigned routing hint: it decides only whom to dial, and
+every asset is still verified against its on-chain merkle root. A profile with
+no `agentAddress`, or a wallet that is not a ShardingTable identity's, is
+ignored, and any unreadable chain or phonebook fact leaves the peer set
+unchanged. `DKG_VM_RECONCILE_HOLDER_TIER=0` turns the tier off.
+
 **Updates.** A Core stores a public update as its own ACK copy, replacing the
 Knowledge Asset's SWM copy, only once the version it replaces is in its VM.
 Until then it declines the update transiently and promotes that version at

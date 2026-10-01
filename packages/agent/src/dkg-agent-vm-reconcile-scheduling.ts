@@ -126,12 +126,17 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphIds: readonly string[],
   ): void {
+    // The same phonebook rows feed the holder tier's identity->peer hints, so a
+    // cached "no hint" answer is stale too. One shared resolution is re-read
+    // (bounded) by the first graph to run again.
+    this.vmReconcileHolderHints?.invalidate();
     for (const contextGraphId of contextGraphIds) {
       if (!this.subscribedContextGraphs.has(contextGraphId)) continue;
       this.clearVmReconcileRotationStateForContextGraph(contextGraphId);
       this.clearVmReconcileActiveFetchCooldown(contextGraphId);
       this.vmReconcileCuratorPeersByCg.delete(contextGraphId);
       this.vmReconcileCuratorPageCursorByCg.delete(contextGraphId);
+      this.vmReconcileHolderTierByCg?.delete(contextGraphId);
       this.vmReconcileScheduling?.releaseLiveHold(contextGraphId);
       this.vmReconcileScheduling?.triggerLive(contextGraphId);
     }
