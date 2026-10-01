@@ -83,7 +83,8 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
   };
 });
 
-import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC_CHANGELOG, createOperationContext } from '@origintrail-official/dkg-core';
+import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
@@ -251,6 +252,74 @@ describe('durable sync lifecycle chain binding', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it.each(['ordinary-first', 'callback-first', 'two-callbacks'] as const)(
+    'admits concurrent same-selection owners independently: %s', async (mode) => {
+      const agentLike: any = {
+        config: {}, node: {},
+        processDurableBatchInWorker: async () => ({}),
+        runContextGraphSyncWithBackpressure: LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure,
+        log: { info: () => {}, warn: () => {}, debug: () => {} },
+      };
+      let entered!: () => void;
+      let release!: () => void;
+      const firstStarted = new Promise<void>(resolve => { entered = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const firstCallback = vi.fn();
+      const secondCallback = vi.fn();
+      mockedRunDurableSyncDetailed.mockImplementationOnce(async () => {
+        entered();
+        await held;
+        return { result: {} as Awaited<ReturnType<typeof runDurableSync>>, exactFetchDisposition: 'incomplete' };
+      });
+      const run = (onWorkStarted?: () => void) => LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+        agentLike, ctx, 'peer-admission-owner', [contextGraphId], undefined, undefined, undefined,
+        { exactAssetSelection: { kind: 'ual-only', assetUals: [ual] }, onWorkStarted },
+      );
+      const first = run(mode === 'ordinary-first' ? undefined : firstCallback);
+      try {
+        await firstStarted;
+        const second = run(mode === 'callback-first' ? undefined : secondCallback);
+        expect(secondCallback).not.toHaveBeenCalled();
+        release();
+        const results = await Promise.all([first, second]);
+        expect(results.map(result => result.admission)).toEqual(['work-started', 'work-started']);
+        expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(2);
+        expect(firstCallback).toHaveBeenCalledTimes(mode === 'ordinary-first' ? 0 : 1);
+        expect(secondCallback).toHaveBeenCalledTimes(mode === 'callback-first' ? 0 : 1);
+      } finally { release(); await first; }
+    },
+  );
+
+  it('returns typed durable admission deferral without invoking work callbacks', async () => {
+    const config = { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 };
+    const agentLike: any = {
+      config, node: {},
+      processDurableBatchInWorker: async () => ({}),
+      runContextGraphSyncWithBackpressure: LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure,
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const blocker = withGlobalSyncBackpressure({
+      policy: resolveSyncGlobalBackpressure(config), ctx: createOperationContext('sync'),
+      label: 'durable:admission-owner-blocker', lane: 'durable', source: 'sync-on-connect',
+    }, async () => { entered(); await held; });
+    const onWorkStarted = vi.fn();
+    try {
+      await started;
+      const result = await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+        agentLike, ctx, 'peer-admission-refused', [contextGraphId], undefined, undefined, undefined,
+        { exactAssetSelection: { kind: 'ual-only', assetUals: [ual] }, onWorkStarted },
+      );
+      expect(result).toMatchObject({ admission: 'local-admission-deferred',
+        result: { deferredBackpressure: 1, complete: false } });
+      expect(onWorkStarted).not.toHaveBeenCalled();
+      expect(mockedRunDurableSyncDetailed).not.toHaveBeenCalled();
+    } finally { release(); await blocker; }
   });
 
   it('starts a fresh bounded authentication phase after network fetch', async () => {

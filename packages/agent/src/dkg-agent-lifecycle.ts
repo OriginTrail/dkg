@@ -1,3 +1,4 @@
+import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { startAuthorityIndexSnapshotRuntime } from './authority-index-snapshot-runtime.js';
@@ -1318,6 +1319,7 @@ function durableSyncSingleFlightKey(params: {
   syncAgentsMeta: boolean;
   hasPhaseCallback: boolean;
   hasAtomicCommitCallback: boolean;
+  hasWorkStartedCallback: boolean;
   hasAccessDeniedCallback: boolean;
   hasSinceBatchIdResolver: boolean;
   hasSignal: boolean;
@@ -1333,6 +1335,7 @@ function durableSyncSingleFlightKey(params: {
   if (
     params.hasPhaseCallback
     || params.hasAtomicCommitCallback
+    || params.hasWorkStartedCallback
     || params.hasAccessDeniedCallback
     || params.hasSinceBatchIdResolver
     || params.hasSignal
@@ -1681,6 +1684,8 @@ export type DurableSyncOptions = {
    * materialization check it before any subsequent commit boundary.
    */
   signal?: AbortSignal;
+  /** Called synchronously when local capacity admits physical work. */
+  onWorkStarted?: () => void;
   /** Internal lifecycle fence for exact VM recovery. */
   isCurrent?: () => boolean;
   /**
@@ -1717,6 +1722,7 @@ export type DurableSyncOptions = {
 };
 
 export interface ExactKnowledgeAssetSyncResult {
+  readonly admission: DurableSyncAdmissionOutcome;
   readonly result: DurableSyncResult;
   readonly disposition: ExactDurableFetchDisposition;
   readonly responderCapability?: ExactAssetResponderCapability;
@@ -1731,6 +1737,10 @@ type PhysicalDurableSyncResult = {
   readonly exactResponderCapability?: ExactAssetResponderCapability;
   readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
   readonly committedExactAssetUals?: readonly string[];
+};
+
+type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
+  readonly admission: DurableSyncAdmissionOutcome;
 };
 
 type LegacyDurableContextGraphOptions = {
@@ -2091,6 +2101,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       source?: SyncAdmissionSource;
       /** Admit the selected graph-complete RFC-64 SWM transfer into its reserved slot. */
       selectedSwmPriority?: boolean;
+      /** Runs only inside the acquired capacity boundary, before physical work. */
+      onWorkStarted?: () => void;
     } = {},
     /**
      * Nothing may follow `admission`. Typed `never[]` so a TypeScript caller passing
@@ -2158,6 +2170,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // lanes, and the changelog lane's legacy `runResync` fallback) reports
         // its attempts and bytes under this label without carrying it as a
         // parameter, so it can never reach a coalescing key.
+        admission.onWorkStarted?.();
         return await withSyncAdmissionSource(source, work);
       } catch (error) {
         // Causal, exactly like the attempt-level classifier: an operation is
@@ -4361,9 +4374,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
     this.vmReconcileExactPeerCapabilities?.delete(remotePeer);
-    for (const [localCgId, preference] of this.vmReconcilePublicCoreTransportPreferences ?? []) {
-      if (preference.peerId === remotePeer) this.vmReconcilePublicCoreTransportPreferences.delete(localCgId);
-    }
+    this.vmReconcilePublicCoreTransportPreferencePolicy?.forgetPeer(remotePeer);
   }
 
   queueSelectedSwmFromPeerOnConnect(
@@ -5751,7 +5762,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     onAccessDenied?: (contextGraphId: string) => void,
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     options?: DurableSyncOptions,
-  ): Promise<PhysicalDurableSyncResult> {
+  ): Promise<AdmittedDurableSyncResult> {
+    const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
     const exactAssetSelection = options?.exactAssetSelection;
@@ -5788,7 +5800,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         'incomplete',
       );
     };
-    const runSync = async (): Promise<PhysicalDurableSyncResult> => {
+    const runSync = async (): Promise<AdmittedDurableSyncResult> => {
       const accumulator = await runOrderedContextGraphSyncs<DurableSyncAccumulator>({
         work: orderedContextGraphIds.map((contextGraphId) => ({
           contextGraphId,
@@ -5858,6 +5870,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   priorityOverride: options?.priority,
                   operationSignal: operationBoundary.signal,
                   source: options?.source,
+                  onWorkStarted: admissionBoundary.startWork,
                 },
               ),
               operationBoundary.signal,
@@ -5870,6 +5883,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
         merge: mergeDurableSyncAccumulatorInto,
         markDeferred: (summary) => {
+          admissionBoundary.defer();
           markExactFetchIncomplete();
           recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
           return markDurableTerminalBoundary(summary, false);
@@ -5897,6 +5911,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ),
       });
       return {
+        admission: admissionBoundary.snapshot(),
         result: finalizeDurableSyncCompletion(accumulator),
         ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
         ...(exactResponderCapability ? { exactResponderCapability } : {}),
@@ -5918,6 +5933,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncAgentsMeta,
       hasPhaseCallback: Boolean(onPhase),
       hasAtomicCommitCallback: Boolean(options?.onAtomicCommitStarted),
+      hasWorkStartedCallback: Boolean(options?.onWorkStarted),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
       hasSignal: Boolean(operationBoundary.signal),
@@ -5996,6 +6012,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     assetUals: readonly string[],
     options?: {
+      onWorkStarted?: () => void;
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
@@ -6008,6 +6025,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     selection: ExactAssetSelection,
     options?: {
+      onWorkStarted?: () => void;
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
@@ -6020,6 +6038,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     selectionInput: ExactAssetSelection | readonly string[],
     options: {
+      onWorkStarted?: () => void;
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
@@ -6046,11 +6065,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
+        onWorkStarted: options.onWorkStarted,
         signal: options.signal,
         isCurrent: options.isCurrent,
       },
     );
     return {
+      admission: detailed.admission,
       result: detailed.result,
       disposition: detailed.exactFetchDisposition ?? 'incomplete',
       ...(detailed.exactResponderCapability === undefined

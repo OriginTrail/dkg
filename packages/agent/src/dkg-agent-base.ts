@@ -1,3 +1,4 @@
+import { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -397,7 +398,6 @@ import {
   type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
-  type VmReconcilePublicCoreHolderCredit,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -1349,17 +1349,32 @@ export class DKGAgentBase {
     connectionKey: string;
     expiresAt: number;
   }>();
-  /** Core transport ordering only; separate from authorization and absence evidence. */
-  protected readonly vmReconcilePublicCoreTransportPreferences = new Map<string, {
-    token: symbol;
-    onChainCgId: string;
-    peerId: string;
-    connectionKey: string;
-    expiresAt: number;
-    holderCredit?: VmReconcilePublicCoreHolderCredit;
-    /** Same scope fences as holder reuse, without permission to skip its probe. */
-    transportScope?: VmReconcilePublicCoreHolderCredit;
-  }>();
+  /** Owns process-local Core ordering and reusable-holder transitions. */
+  protected readonly vmReconcilePublicCoreTransportPreferencePolicy = new VmRecoveryCoreTransportPreferencePolicy({
+    now: () => (this as unknown as DKGAgent).vmReconcileRotationNow(),
+    connectionKey: peerId => (this as unknown as DKGAgent).getSyncReconcilerConnectionKey(peerId),
+    supportsCore: peerId => this.peerCapabilityRegistry.supportsCore(peerId),
+    holderReuseEnabled: () => process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1',
+    captureScope: (localCgId, candidatePeerIds) => typeof this.chain.deploymentId === 'string' ? {
+      deploymentId: this.chain.deploymentId,
+      lifecycleGeneration: this.vmReconcileLifecycleGeneration,
+      bindingGeneration: this.contextGraphBindingState.capture(localCgId),
+      selectedBindingGeneration: this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration,
+      candidatePeerIds: [...candidatePeerIds],
+    } : undefined,
+    scopeIsCurrent: (localCgId, scope) => this.chain.deploymentId === scope.deploymentId
+      && this.vmReconcileLifecycleGeneration === scope.lifecycleGeneration
+      && !this.vmReconcileRotationClosed
+      && this.contextGraphBindingState.capture(localCgId) === scope.bindingGeneration
+      && this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration === scope.selectedBindingGeneration
+      && (this as unknown as DKGAgent).vmReconcilePeerMembershipMatches(
+        new Set(scope.candidatePeerIds),
+        (this as unknown as DKGAgent).vmReconcileObservedCandidatePeerIds(localCgId),
+      ),
+  }, {
+    ttlMs: DKGAgentBase.VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS,
+    maxEntries: DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES,
+  });
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
   /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */

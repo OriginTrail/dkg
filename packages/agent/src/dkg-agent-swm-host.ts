@@ -489,7 +489,6 @@ import {
   type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
-  type VmReconcilePublicCoreHolderCredit,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -694,18 +693,6 @@ type VmRecoveryBatchExecutionResult =
     )[];
   };
 
-/** A local refusal with no evidence that peer work or a commit ran. */
-function isZeroWorkVmAdmissionDeferral(result: DurableSyncResult): boolean {
-  return (result.deferredBackpressure ?? 0) > 0
-    && result.complete !== true
-    && [
-      result.fetchedDataTriples, result.fetchedMetaTriples, result.insertedTriples,
-      result.failedPeers, result.failedPhases, result.deniedPhases,
-      result.timedOutPhases, result.completedPhases, result.checkpointAdvances,
-      result.metaOnlyResponses, result.verifiedPrivateOnlyResponses,
-      result.dataRejectedMissingMeta, result.rejectedKcs,
-    ].every((count) => (count ?? 0) === 0);
-}
 
 function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
@@ -6264,7 +6251,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ? this.vmReconcileUncreditedCandidateOrder(record)
       : fallbackCandidatePeerIds;
     const preferredPeerId = binding
-      ? this.readVmReconcilePublicCoreTransportPreference(
+      ? this.vmReconcilePublicCoreTransportPreferencePolicy.preferredPeer(
           binding.localCgId, binding.onChainCgId, uncreditedCandidateOrder,
         )
       : undefined;
@@ -6282,96 +6269,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       transportOrder,
       DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
     );
-  }
-
-  readVmReconcilePublicCoreTransportPreference(
-    this: DKGAgent,
-    localCgId: string,
-    onChainCgId: string,
-    eligiblePeerIds: readonly string[],
-  ): string | undefined {
-    const cache = this.vmReconcilePublicCoreTransportPreferences;
-    const entry = cache?.get(localCgId);
-    if (!entry) return undefined;
-    if (entry.onChainCgId !== onChainCgId
-      || entry.expiresAt <= this.vmReconcileRotationNow()
-      || !this.peerCapabilityRegistry.supportsCore(entry.peerId)
-      || this.getSyncReconcilerConnectionKey(entry.peerId) !== entry.connectionKey
-      || (entry.transportScope && (process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM !== '1'
-        || !this.vmReconcilePublicCoreHolderCreditIsCurrent(localCgId, entry.transportScope)))) {
-      cache.delete(localCgId);
-      return undefined;
-    }
-    if (!eligiblePeerIds.includes(entry.peerId)) return undefined;
-    cache.delete(localCgId);
-    cache.set(localCgId, entry);
-    return entry.peerId;
-  }
-
-  forgetVmReconcilePublicCoreTransportPreference(
-    this: DKGAgent,
-    localCgId: string,
-    peerId: string,
-    expectedToken?: symbol | null,
-  ): void {
-    const entry = this.vmReconcilePublicCoreTransportPreferences?.get(localCgId);
-    if (entry?.peerId === peerId
-      && (expectedToken === undefined || entry.token === expectedToken)) {
-      this.vmReconcilePublicCoreTransportPreferences.delete(localCgId);
-    }
-  }
-
-  vmReconcilePublicCoreHolderCreditIsCurrent(
-    this: DKGAgent,
-    localCgId: string,
-    credit: VmReconcilePublicCoreHolderCredit,
-  ): boolean {
-    return this.chain.deploymentId === credit.deploymentId
-      && this.vmReconcileLifecycleGeneration === credit.lifecycleGeneration
-      && !this.vmReconcileRotationClosed
-      && this.contextGraphBindingState.capture(localCgId) === credit.bindingGeneration
-      && this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration
-        === credit.selectedBindingGeneration
-      && this.vmReconcilePeerMembershipMatches(
-        new Set(credit.candidatePeerIds), this.vmReconcileObservedCandidatePeerIds(localCgId),
-      );
-  }
-
-  rememberVmReconcilePublicCoreTransportPreference(
-    this: DKGAgent,
-    localCgId: string,
-    onChainCgId: string,
-    peerId: string,
-    admittedConnectionKey: string | null,
-    holderProof?: { credit: VmReconcilePublicCoreHolderCredit; expectedToken: symbol | null; transportOnly?: boolean },
-  ): boolean {
-    const cache = this.vmReconcilePublicCoreTransportPreferences;
-    if (!cache || admittedConnectionKey === null
-      || !this.peerCapabilityRegistry.supportsCore(peerId)
-      || this.getSyncReconcilerConnectionKey(peerId) !== admittedConnectionKey) return false;
-    if (holderProof && (
-      (cache.get(localCgId)?.token ?? null) !== holderProof.expectedToken
-      || !this.vmReconcilePublicCoreHolderCreditIsCurrent(localCgId, holderProof.credit)
-      || (holderProof.transportOnly && holderProof.expectedToken !== null
-        && cache.get(localCgId)!.expiresAt <= this.vmReconcileRotationNow())
-    )) return false;
-    cache.delete(localCgId);
-    cache.set(localCgId, {
-      token: Symbol(localCgId),
-      onChainCgId,
-      peerId,
-      connectionKey: admittedConnectionKey,
-      expiresAt: this.vmReconcileRotationNow() + DKGAgentBase.VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS,
-      ...(holderProof?.transportOnly
-        ? { transportScope: holderProof.credit }
-        : holderProof ? { holderCredit: holderProof.credit } : {}),
-    });
-    while (cache.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
-      const oldest = cache.keys().next().value;
-      if (oldest === undefined) break;
-      cache.delete(oldest);
-    }
-    return true;
   }
 
   findVmReconcileRotationReplacement(
@@ -6454,7 +6351,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (key.startsWith(prefix)) this.vmReconcileRotationState.delete(key);
     }
     this.vmReconcileRotationAdmissionCursorByCg.delete(localCgId);
-    this.vmReconcilePublicCoreTransportPreferences?.delete(localCgId);
+    this.vmReconcilePublicCoreTransportPreferencePolicy?.forgetContextGraph(localCgId);
   }
 
   closeVmReconcileRotationState(this: DKGAgent): void {
@@ -6470,7 +6367,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
     this.vmReconcileExactPeerCapabilities?.clear();
-    this.vmReconcilePublicCoreTransportPreferences?.clear();
+    this.vmReconcilePublicCoreTransportPreferencePolicy?.clear();
     this.vmRefreshQueue?.clear();
   }
 
@@ -6832,10 +6729,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Execute one already-admitted provider attempt. The caller owns
-   * roster/admission, packing, and provider affinity; this executor owns the
-   * exact request or cached legacy fallback, per-UAL chain revalidation, and
-   * rotation settlement.
+   * Execute one provider after connection/network readiness. The caller owns
+   * roster, packing, and provider affinity; local sync admission starts the
+   * physical attempt before rotation marks are installed. This executor owns
+   * exact or cached legacy work, per-UAL chain revalidation, and settlement.
    * Returns immutable evidence for the caller to merge. A stale lifecycle is
    * discriminated by whether the physical attempt had already been admitted;
    * only the pre-admission variant guarantees zero attempt side effects.
@@ -6881,50 +6778,37 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const handledOrdinals: number[] = [];
     const attemptedOrdinals: number[] = [];
     const outcomes: Array<readonly [number, OrdinalOutcome]> = [];
-    const ownedRotationAttempts: Array<{
-      target: OrdinalRecoveryTarget;
-      record: VmReconcileRotationRecord;
-      addedPeer: boolean;
-      previousLastPeer: string | undefined;
-      previousDeadline: number;
-      installedDeadline: number;
-    }> = [];
-
-    for (const attempt of attempts) {
-      const batchTarget = attempt.entry.target;
-      handledOrdinals.push(batchTarget.ordinal);
-      attemptedOrdinals.push(batchTarget.ordinal);
-      if (attempt.installedRecord) {
-        const installedDeadline = this.vmReconcileRotationNow()
-          + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
-        ownedRotationAttempts.push({
-          target: batchTarget,
-          record: attempt.installedRecord,
-          addedPeer: !attempt.installedRecord.attemptedPeerIds.has(peerId),
-          previousLastPeer: attempt.installedRecord.lastAttemptedPeerId,
-          previousDeadline: attempt.installedRecord.collectionDeadlineAt,
-          installedDeadline,
+    let workStarted = false;
+    const onWorkStarted = (): void => {
+      if (workStarted || !isRecoveryCurrent()) return;
+      workStarted = true;
+      for (const attempt of attempts) {
+        const batchTarget = attempt.entry.target;
+        handledOrdinals.push(batchTarget.ordinal);
+        attemptedOrdinals.push(batchTarget.ordinal);
+        const record = attempt.installedRecord;
+        const slotKey = this.vmReconcileRotationSlotKey(batchTarget);
+        if (record && this.vmReconcileRotationState.get(slotKey) === record
+          && record.fingerprint === this.vmReconcileRotationFingerprint(batchTarget)) {
+          record.lastAttemptedPeerId = peerId;
+          record.attemptedPeerIds.add(peerId);
+          record.collectionDeadlineAt = this.vmReconcileRotationNow()
+            + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+          this.touchVmReconcileRotationRecord(slotKey, record);
+        }
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'fetch',
+          ordinal: batchTarget.ordinal,
+          kaId: batchTarget.kaId,
+          ual: batchTarget.ual,
+          detail: useCachedLegacyFallback
+            ? 'legacy-sync'
+            : attempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
         });
-        attempt.installedRecord.lastAttemptedPeerId = peerId;
-        attempt.installedRecord.attemptedPeerIds.add(peerId);
-        attempt.installedRecord.collectionDeadlineAt = installedDeadline;
-        this.touchVmReconcileRotationRecord(
-          this.vmReconcileRotationSlotKey(batchTarget),
-          attempt.installedRecord,
-        );
       }
-      this.emitReplication({
-        contextGraphId: localCgId,
-        onChainCgId: onChainCgId.toString(),
-        action: 'fetch',
-        ordinal: batchTarget.ordinal,
-        kaId: batchTarget.kaId,
-        ual: batchTarget.ual,
-        detail: useCachedLegacyFallback
-          ? 'legacy-sync'
-          : attempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
-      });
-    }
+    };
     let disposition: VmRecoveryUalDisposition = 'incomplete';
     let localAdmissionDeferred = false;
     const runLegacyFallback = async (): Promise<void> => {
@@ -6940,16 +6824,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
             stopOnBackoffWorthyFailure: true,
             priority: 1_000,
             source: 'vm-recovery',
+            onWorkStarted,
             signal,
             isCurrent: isRecoveryCurrent,
           },
         );
-        // A fresh exact request may already have crossed the wire before its
-        // legacy fallback was locally refused. Only a cached legacy-only turn
-        // can be proved never-started from this fallback's result.
-        if (useCachedLegacyFallback && isZeroWorkVmAdmissionDeferral(fallback.result)) {
-          localAdmissionDeferred = true;
-        }
+        if (fallback.admission === 'work-started') onWorkStarted();
+        // An admitted exact request retains its attempt through a refused
+        // fallback. Only the original never-started operation can defer.
+        localAdmissionDeferred = !workStarted && fallback.admission === 'local-admission-deferred';
         this.log.info(
           ctx,
           `VM legacy fallback for "${localCgId}" from ${peerId.slice(-8)}: fetched=${fallback.result.fetchedDataTriples + fallback.result.fetchedMetaTriples} inserted=${fallback.result.insertedTriples} failed=${fallback.result.failedPeers + fallback.result.failedPhases}`,
@@ -6969,13 +6852,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
           peerId,
           localCgId,
           attempts.map(({ entry }) => entry.target.ual),
-          { signal, isCurrent: isRecoveryCurrent, experimentalExactBatchStreamOnly, experimentalExactBatchStreamDisabled },
+          { signal, isCurrent: isRecoveryCurrent, onWorkStarted, experimentalExactBatchStreamOnly, experimentalExactBatchStreamDisabled },
         );
         const { result } = detailed;
         disposition = detailed.disposition;
-        localAdmissionDeferred = disposition === 'incomplete'
-          && detailed.responderCapability === undefined
-          && isZeroWorkVmAdmissionDeferral(result);
+        // A fresh capability response is physical peer evidence even when
+        // its later ordinary fallback cannot acquire local capacity.
+        if (detailed.admission === 'work-started' || detailed.responderCapability !== undefined) onWorkStarted();
+        localAdmissionDeferred = !workStarted && detailed.admission === 'local-admission-deferred';
         if (!experimentalExactBatchStreamOnly && detailed.responderCapability === 'legacy-filter-unsupported') {
           this.rememberVmReconcileExactFilterUnsupported(peerId);
           if (isRecoveryCurrent() && disposition === 'incomplete') {
@@ -6993,23 +6877,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
-    if (localAdmissionDeferred) {
-      // The per-CG dispatcher owns this physical operation. Roll back only its
-      // new attempt marks while the captured record/target/marker still owns
-      // the slot; a rebind, roster refresh, or newer rotation wins unchanged.
-      for (const owned of ownedRotationAttempts) {
-        const slotKey = this.vmReconcileRotationSlotKey(owned.target);
-        if (this.vmReconcileRotationState.get(slotKey) !== owned.record
-          || owned.record.fingerprint !== this.vmReconcileRotationFingerprint(owned.target)
-          || owned.record.lastAttemptedPeerId !== peerId
-          || owned.record.collectionDeadlineAt !== owned.installedDeadline) continue;
-        if (owned.addedPeer) owned.record.attemptedPeerIds.delete(peerId);
-        owned.record.lastAttemptedPeerId = owned.previousLastPeer;
-        owned.record.collectionDeadlineAt = owned.previousDeadline;
-      }
-      return { kind: 'local-admission-deferred' };
-    }
+    if (!isRecoveryCurrent()) return { kind: workStarted ? 'stale-after-attempt' : 'not-started-stale' };
+    if (localAdmissionDeferred) return { kind: 'local-admission-deferred' };
 
     const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
     for (const attempt of attempts) {
@@ -7036,6 +6905,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           : 'incomplete';
       perUalDispositions.set(batchTarget.ual, perTargetDisposition);
       if (outcome.status === 'pending' && outcome.recovery) {
+        if (!workStarted) continue;
         const batchRecord = attempt.installedRecord;
         if (!batchRecord || this.vmReconcileRotationClosed) continue;
         if (
@@ -7480,7 +7350,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // byte/leaf-aware microbatch of untouched targets in this same slice. One
     // clean absence or incomplete response removes the hint immediately.
     const providerPolicy = new VmRecoveryProviderPolicy();
-    const experimentalHolderReuse = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1';
     const handledBatchOrdinals = new Set<number>();
     let recoveryWorkRan = false;
     let localAdmissionDeferred = false;
@@ -7511,20 +7380,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         providerPolicy,
         { localCgId, onChainCgId: expectedOnChainCgId, experimentalStreamPeerIds },
       );
-      const preference = this.vmReconcilePublicCoreTransportPreferences.get(localCgId);
-      const expectedPreferenceToken = experimentalHolderReuse ? preference?.token ?? null : undefined;
-      // Capture before any awaited readiness/sizing/fetch boundary. An old
-      // completion may neither renew nor remove a replacement entry.
-      const holderCredit: VmReconcilePublicCoreHolderCredit | undefined = experimentalHolderReuse
-        && typeof this.chain.deploymentId === 'string'
-        ? {
-            deploymentId: this.chain.deploymentId,
-            lifecycleGeneration: rotationGeneration,
-            bindingGeneration: this.contextGraphBindingState.capture(localCgId),
-            selectedBindingGeneration: this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration,
-            candidatePeerIds: [...orderedPeerIds],
-          }
-        : undefined;
+      // One policy capture owns every later transition and token fence.
+      const preferenceAttempt = this.vmReconcilePublicCoreTransportPreferencePolicy.capture(
+        localCgId, expectedOnChainCgId, orderedPeerIds,
+      );
       if (candidatePeerId) {
         let connectedPeer = connectedByPeerId.get(candidatePeerId);
         if (!connectedPeer) {
@@ -7564,11 +7423,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       if (!peerId) {
         if (candidatePeerId) {
-          this.forgetVmReconcilePublicCoreTransportPreference(localCgId, candidatePeerId, expectedPreferenceToken);
+          this.vmReconcilePublicCoreTransportPreferencePolicy.revoke(preferenceAttempt, candidatePeerId);
         }
         // A failed connection/protocol/network-admission probe still consumes
         // its bounded provider turn. A ready peer is marked only by the exact
-        // executor, which can undo a never-started local sync refusal.
+        // executor after local sync capacity admits its physical work.
         if (candidatePeerId) {
           attemptedOrdinals.add(target.ordinal);
           if (installedRecord) {
@@ -7591,21 +7450,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
         continue;
       }
-      let carriedHolder = false;
-      if (experimentalHolderReuse && preference?.peerId === peerId && preference.holderCredit) {
-        const ownsEntry = this.vmReconcilePublicCoreTransportPreferences.get(localCgId)?.token === preference.token;
-        const currentPeer = ownsEntry
-          ? this.readVmReconcilePublicCoreTransportPreference(localCgId, expectedOnChainCgId, candidatePeerIds)
-          : undefined;
-        if (currentPeer === peerId
-          && this.vmReconcilePublicCoreTransportPreferences.get(localCgId)?.token === preference.token
-          && this.vmReconcilePublicCoreHolderCreditIsCurrent(localCgId, preference.holderCredit)) {
-          providerPolicy.seedProvenHolder(peerId);
-          carriedHolder = true;
-        } else {
-          this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
-        }
-      }
+      const carriedHolder = this.vmReconcilePublicCoreTransportPreferencePolicy.canReuse(
+        preferenceAttempt, peerId, candidatePeerIds,
+      );
+      if (carriedHolder) providerPolicy.seedProvenHolder(peerId);
       const providerAttempt = providerPolicy.beginAttempt(peerId);
       if (!providerAttempt) continue;
       const admittedConnectionKey = this.getSyncReconcilerConnectionKey(peerId);
@@ -7734,7 +7582,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         experimentalExactBatchStreamDisabled = streamPlan === undefined
           && process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1';
         if (plan.targets.length === 0) {
-          this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
+          this.vmReconcilePublicCoreTransportPreferencePolicy.revoke(preferenceAttempt, peerId);
           this.log.warn(
             ctx,
             `VM exact recovery selector for "${localCgId}" exceeds the executor cap; `
@@ -7767,16 +7615,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
       }
 
-      if (carriedHolder && preference?.holderCredit && (
-        this.vmReconcilePublicCoreTransportPreferences.get(localCgId)?.token !== preference.token
-        || preference.expiresAt <= this.vmReconcileRotationNow()
-        || this.getSyncReconcilerConnectionKey(peerId) !== admittedConnectionKey
-        || !this.peerCapabilityRegistry.supportsCore(peerId)
-        || !this.vmReconcilePublicCoreHolderCreditIsCurrent(localCgId, preference.holderCredit)
+      if (carriedHolder && !this.vmReconcilePublicCoreTransportPreferencePolicy.revalidateReuse(
+        preferenceAttempt, peerId, admittedConnectionKey,
       )) {
-        // Sizing can outlive the credit or its connection/binding. Send no
-        // carried batch under that old proof; let the next bounded slice probe.
-        this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
+        // Sizing outlived the captured holder proof; the next slice must probe.
         if (activeFetchCooldownOwner !== undefined) {
           this.clearVmReconcileActiveFetchCooldown(localCgId, activeFetchCooldownOwner);
         }
@@ -7818,45 +7660,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const completelyVerified = execution.providerDisposition === 'found'
         && execution.perUalDispositions.length === batchAttempts.length
         && execution.perUalDispositions.every(([, disposition]) => disposition === 'found');
-      if (!completelyVerified) {
-        this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
-      } else if (publicRecoveryAccessVerified === true) {
-        const remembered = this.rememberVmReconcilePublicCoreTransportPreference(
-          localCgId, expectedOnChainCgId, peerId, admittedConnectionKey,
-          holderCredit ? { credit: holderCredit, expectedToken: expectedPreferenceToken ?? null } : undefined,
-        );
-        if (!remembered && experimentalHolderReuse) {
-          this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
-        }
-        // A successful public Core probe plus one bounded verified reuse is
-        // enough work for this slice. Yield through the existing continuation
-        // rather than immediately spending another slot on an older provider.
-        // Experimental carried holders can start the next slice with its one
-        // bounded microbatch. Every requested KA still authenticates and
-        // independently reconciles against chain before credit is renewed.
-        if (providerAttempt.kind === 'proven-holder-reuse' && (remembered || carriedHolder)) break;
-      } else if (experimentalHolderReuse && holderCredit) {
-        // A verified Core can remain first in the existing eligible roster
-        // even when sizing cannot prove public policy. This replaces any old
-        // holder credit with ordering only; the next slice still probes and
-        // authenticates normally. The captured token/scope must still own it.
-        const remembered = this.rememberVmReconcilePublicCoreTransportPreference(
-          localCgId, expectedOnChainCgId, peerId, admittedConnectionKey,
-          { credit: holderCredit, expectedToken: expectedPreferenceToken ?? null, transportOnly: true },
-        );
-        if (!remembered) this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
-      } else if (providerAttempt.kind === 'proven-holder-reuse') {
-        this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId, expectedPreferenceToken);
-      }
-      if (experimentalHolderReuse && providerAttempt.kind === 'proven-holder-reuse'
-        && completelyVerified && this.peerCapabilityRegistry.supportsCore(peerId)) {
-        // Verified Core work earns a scheduler yield even when conservative
-        // sizing did not renew public holder credit. Credit stays fenced above;
-        // without it, the next fair slice must use the ordinary singleton probe.
-        const currentPreference = this.vmReconcilePublicCoreTransportPreferences.get(localCgId);
+      const preferenceSettlement = this.vmReconcilePublicCoreTransportPreferencePolicy.settle(preferenceAttempt, {
+        peerId, connectionKey: admittedConnectionKey, completelyVerified,
+        publicAccessVerified: publicRecoveryAccessVerified,
+        reusedHolder: providerAttempt.kind === 'proven-holder-reuse', carriedHolder,
+      });
+      if (preferenceSettlement.yield) {
         this.log.info(ctx, `VM exact recovery yield: reason=verified-core-turn assets=${batchAttempts.length} `
           + `publicSizingAccess=${publicRecoveryAccessVerified === undefined ? 'unknown' : publicRecoveryAccessVerified} `
-          + `holderCreditPresent=${currentPreference?.peerId === peerId && currentPreference.holderCredit !== undefined}`);
+          + `holderCreditPresent=${preferenceSettlement.holderCreditPresent}`);
         break;
       }
     }

@@ -69,7 +69,7 @@ describe('VM recovery under node-local admission pressure', () => {
     });
 
     const wirePeers: string[] = [];
-    internals.syncExactKnowledgeAssetsFromPeerDetailed = async (peer: string, cg: string, uals: string[]) => {
+    internals.syncExactKnowledgeAssetsFromPeerDetailed = async (peer: string, cg: string, uals: string[], options: { onWorkStarted?: () => void }) => {
       try {
         const result = await internals.runContextGraphSyncWithBackpressure(
           createOperationContext('sync'), cg, 'durable', `durable:${cg}:${peer}`, async () => {
@@ -79,12 +79,12 @@ describe('VM recovery under node-local admission pressure', () => {
             }
             return emptyResult({ fetchedDataTriples: uals.length * 4,
               insertedTriples: uals.length * 4, deferredBackpressure: 0, complete: true });
-          }, { priorityOverride: 1_000, source: 'vm-recovery' },
+          }, { priorityOverride: 1_000, source: 'vm-recovery', onWorkStarted: options.onWorkStarted },
         );
-        return { disposition: 'found', result };
+        return { admission: 'work-started', disposition: 'found', result };
       } catch (error) {
         if (!getSyncBackpressureBusyError(error)) throw error;
-        return { disposition: 'incomplete', result: emptyResult() };
+        return { admission: 'local-admission-deferred', disposition: 'incomplete', result: emptyResult() };
       }
     };
 
@@ -142,7 +142,7 @@ describe('VM recovery under node-local admission pressure', () => {
 
   it('stops the entire slice after one zero-work local rejection', async () => {
     const h = await harness();
-    const sync = vi.fn(async () => ({ disposition: 'incomplete' as const, result: emptyResult() }));
+    const sync = vi.fn(async () => ({ admission: 'local-admission-deferred' as const, disposition: 'incomplete' as const, result: emptyResult() }));
     h.internals.syncExactKnowledgeAssetsFromPeerDetailed = sync;
     try {
       const result = await h.run();
@@ -161,7 +161,7 @@ describe('VM recovery under node-local admission pressure', () => {
     ['clean absence', { deferredBackpressure: 0, complete: true }, 'clean-absent'],
   ] as const)('retains physical attempt evidence after %s', async (_label, counts, disposition) => {
     const h = await harness(1);
-    h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => ({ disposition, result: emptyResult(counts) });
+    h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async (_peer, _cg, _uals, options) => { options?.onWorkStarted?.(); return { admission: 'work-started', disposition, result: emptyResult(counts) }; };
     try {
       const result = await h.run();
       expect(result.localAdmissionDeferred).not.toBe(true);
@@ -172,7 +172,45 @@ describe('VM recovery under node-local admission pressure', () => {
     } finally { await h.agent.stop(); }
   });
 
-  it('does not roll back a replacement rotation installed while admission was pending', async () => {
+  it('uses typed admission deferral even when diagnostic counters are populated', async () => {
+    const h = await harness(1);
+    h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => ({
+      admission: 'local-admission-deferred', disposition: 'incomplete',
+      result: emptyResult({ fetchedDataTriples: 9, fetchedMetaTriples: 8, insertedTriples: 7,
+        failedPeers: 6, failedPhases: 5, deniedPhases: 4, timedOutPhases: 3,
+        completedPhases: 2, checkpointAdvances: 1, metaOnlyResponses: 9,
+        verifiedPrivateOnlyResponses: 8, dataRejectedMissingMeta: 7, rejectedKcs: 6 }),
+    });
+    try {
+      const result = await h.run();
+      expect(result).toMatchObject({ localAdmissionDeferred: true, attemptedOrdinals: [] });
+      const record = h.internals.vmReconcileRotationState.get(h.internals.vmReconcileRotationSlotKey(h.targets[0]!))!;
+      expect(record.attemptedPeerIds.size).toBe(0);
+      expect(record.lastAttemptedPeerId).toBeUndefined();
+      expect(record.failures).toBe(0);
+    } finally { await h.agent.stop(); }
+  });
+
+  it('retains an admitted attempt with zero diagnostic progress', async () => {
+    const h = await harness(1);
+    h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async (_peer, _cg, _uals, options) => {
+      const record = h.internals.vmReconcileRotationState.get(h.internals.vmReconcileRotationSlotKey(h.targets[0]!))!;
+      expect(record.attemptedPeerIds.size).toBe(0);
+      options?.onWorkStarted?.();
+      expect([...record.attemptedPeerIds]).toEqual([preferred]);
+      return { admission: 'work-started', disposition: 'incomplete', result: emptyResult() };
+    };
+    try {
+      const result = await h.run();
+      expect(result.localAdmissionDeferred).not.toBe(true);
+      expect(result.attemptedOrdinals).toEqual([0]);
+      const record = h.internals.vmReconcileRotationState.get(h.internals.vmReconcileRotationSlotKey(h.targets[0]!))!;
+      expect([...record.attemptedPeerIds]).toEqual([preferred]);
+      expect(record.cleanAbsentPeerIds.size).toBe(0);
+    } finally { await h.agent.stop(); }
+  });
+
+  it('does not mutate a replacement rotation installed while admission was pending', async () => {
     const h = await harness(1);
     let replacement: unknown;
     h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => {
@@ -183,7 +221,7 @@ describe('VM recovery under node-local admission pressure', () => {
         collectionDeadlineAt: old.collectionDeadlineAt + 100, failures: 7 };
       h.internals.vmReconcileRotationState.set(key, newer);
       replacement = newer;
-      return { disposition: 'incomplete', result: emptyResult() };
+      return { admission: 'local-admission-deferred', disposition: 'incomplete', result: emptyResult() };
     };
     try {
       const result = await h.run();
@@ -197,20 +235,20 @@ describe('VM recovery under node-local admission pressure', () => {
     } finally { await h.agent.stop(); }
   });
 
-  it('does not erase a newer marker on the same retained record', async () => {
+  it('does not install an attempt over another marker when local admission defers', async () => {
     const h = await harness(1);
     h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => {
       const record = h.internals.vmReconcileRotationState.get(h.internals.vmReconcileRotationSlotKey(h.targets[0]!))!;
       record.lastAttemptedPeerId = fallback;
       record.collectionDeadlineAt += 100;
       record.attemptedPeerIds.add(fallback);
-      return { disposition: 'incomplete', result: emptyResult() };
+      return { admission: 'local-admission-deferred', disposition: 'incomplete', result: emptyResult() };
     };
     try {
       await h.run();
       const record = h.internals.vmReconcileRotationState.get(h.internals.vmReconcileRotationSlotKey(h.targets[0]!))!;
       expect(record.lastAttemptedPeerId).toBe(fallback);
-      expect([...record.attemptedPeerIds]).toEqual([preferred, fallback]);
+      expect([...record.attemptedPeerIds]).toEqual([fallback]);
     } finally { await h.agent.stop(); }
   });
 
@@ -222,7 +260,7 @@ describe('VM recovery under node-local admission pressure', () => {
     h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => {
       controller.abort();
       replacementOwner = internals.installVmReconcileActiveFetchCooldown(localCgId, 123);
-      return { disposition: 'incomplete', result: emptyResult() };
+      return { admission: 'local-admission-deferred', disposition: 'incomplete', result: emptyResult() };
     };
     try {
       const result = await h.internals.recoverVmReconcileBatch(localCgId, 1n, h.targets, 100,
@@ -239,7 +277,7 @@ describe('VM recovery under node-local admission pressure', () => {
     internals.rememberVmReconcileExactFilterUnsupported(preferred);
     const exact = vi.fn();
     internals.syncExactKnowledgeAssetsFromPeerDetailed = exact;
-    internals.runLegacyDurableSyncDetailed = async () => ({ result: emptyResult() });
+    internals.runLegacyDurableSyncDetailed = async () => ({ admission: 'local-admission-deferred', result: emptyResult() });
     try {
       const result = await h.run();
       expect(result.localAdmissionDeferred).toBe(true);
@@ -253,11 +291,20 @@ describe('VM recovery under node-local admission pressure', () => {
   it('keeps a fresh remote capability response credited when its legacy fallback is locally refused', async () => {
     const h = await harness(1);
     const internals = h.agent as any;
-    internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => ({
-      disposition: 'incomplete', responderCapability: 'legacy-filter-unsupported',
-      result: emptyResult(),
-    });
-    internals.runLegacyDurableSyncDetailed = async () => ({ result: emptyResult() });
+    let admittedDeadline: number | undefined;
+    internals.syncExactKnowledgeAssetsFromPeerDetailed = async (_peer: string, _cg: string, _uals: string[], options: { onWorkStarted: () => void }) => {
+      options.onWorkStarted();
+      const record = h.internals.vmReconcileRotationState.get(h.internals.vmReconcileRotationSlotKey(h.targets[0]!))!;
+      expect([...record.attemptedPeerIds]).toEqual([preferred]);
+      admittedDeadline = record.collectionDeadlineAt;
+      return { admission: 'work-started', disposition: 'incomplete', responderCapability: 'legacy-filter-unsupported', result: emptyResult() };
+    };
+    internals.runLegacyDurableSyncDetailed = async () => {
+      const record = h.internals.vmReconcileRotationState.get(h.internals.vmReconcileRotationSlotKey(h.targets[0]!))!;
+      expect(record.lastAttemptedPeerId).toBe(preferred);
+      expect(record.collectionDeadlineAt).toBe(admittedDeadline);
+      return { admission: 'local-admission-deferred', result: emptyResult() };
+    };
     try {
       const result = await h.run();
       expect(result.localAdmissionDeferred).not.toBe(true);

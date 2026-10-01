@@ -1,7 +1,8 @@
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
-import type { VmReconcilePublicCoreHolderCredit } from '../../src/dkg-agent-types.js';
+import type { VmRecoveryCoreTransportPreferencePolicy } from '../../src/vm-recovery-core-transport-preference.js';
+import type { DurableSyncAdmissionOutcome } from '../../src/sync/requester/admission-boundary.js';
 
 import type {
   OrdinalOutcome,
@@ -21,6 +22,7 @@ interface TestPeerId {
 }
 
 interface ExactFetchResult {
+  admission: DurableSyncAdmissionOutcome;
   result: {
     fetchedDataTriples: number;
     fetchedMetaTriples: number;
@@ -55,17 +57,7 @@ export interface VmRecoveryHostInternals {
   vmReconcileLifecycleGeneration: number;
   contextGraphBindingState: { bump(contextGraphId: string): number };
   selectedVmReconcileCursors: Map<string, { bindingGeneration: number }>;
-  vmReconcilePublicCoreTransportPreferences: Map<string, {
-    token: symbol;
-    onChainCgId: string;
-    peerId: string;
-    connectionKey: string;
-    expiresAt: number;
-    holderCredit?: VmReconcilePublicCoreHolderCredit;
-    transportScope?: VmReconcilePublicCoreHolderCredit;
-  }>;
-  readVmReconcilePublicCoreTransportPreference(localCgId: string, onChainCgId: string, eligible: readonly string[]): string | undefined;
-  rememberVmReconcilePublicCoreTransportPreference(localCgId: string, onChainCgId: string, peerId: string, connectionKey: string | null): boolean;
+  vmReconcilePublicCoreTransportPreferencePolicy: VmRecoveryCoreTransportPreferencePolicy;
   getSyncReconcilerConnectionKey(peerId: string): string | null;
   clearVmReconcileRotationStateForContextGraph(localCgId: string): void;
   closeVmReconcileRotationState(): void;
@@ -103,7 +95,7 @@ export interface VmRecoveryHostInternals {
     peerId: string,
     contextGraphId: string,
     selection: ExactAssetSelection,
-    options?: { signal?: AbortSignal; isCurrent?: () => boolean },
+    options?: { signal?: AbortSignal; isCurrent?: () => boolean; onWorkStarted?: () => void },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
     localCgId: string,
@@ -134,7 +126,7 @@ export interface VmRecoveryHostInternals {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
-  }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' }>;
+  }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' | 'local-admission-deferred' }>;
   recoverVmReconcileBatch(
     localCgId: string,
     onChainCgId: bigint,
@@ -255,6 +247,7 @@ export async function createVmRecoveryHostHarness<
     uals,
     requestOptions,
   ) => {
+    requestOptions?.onWorkStarted?.();
     activeFetches += 1;
     maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
     try {
@@ -271,6 +264,7 @@ export async function createVmRecoveryHostHarness<
         requestOptions?.signal,
       );
       return {
+        admission: 'work-started',
         result: {
           fetchedDataTriples: disposition === 'found' ? requested.length : 0,
           fetchedMetaTriples: disposition === 'found' ? requested.length * 8 : 0,
