@@ -49,6 +49,7 @@ export default defineConfig({
       'test/async-lift-store-rejection-recovery-2940.test.ts',
       'test/async-lift-store-rejection-retry-2940.test.ts',
       'test/async-lift-rpc-prep-retry-2942.test.ts',
+      'test/async-lift-rpc-prep-scope-2942.test.ts',
       'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
       'test/async-promote-writejob-atomicity.test.ts',

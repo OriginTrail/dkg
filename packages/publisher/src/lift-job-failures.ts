@@ -84,15 +84,21 @@ export interface LiftJobFailurePolicy {
    * (`isAutomaticallyRetryable` → `scheduleRetryIfEligible` + the claim-time sweep).
    *
    * QUALIFICATION — a code may set this only when ALL THREE hold:
-   *   1. NO transaction can have been accepted when the failure is recorded. For
+   *   1. NO PUBLICATION transaction can have been accepted when the failure is recorded. For
    *      `workspace_unavailable` this is STRUCTURAL: every state in
    *      `LIFT_JOB_FAILURE_ALLOWED_STATES` is pre-send and `createLiftJobFailureMetadata`
    *      throws on the others, so the guarantee is enforced, not documented. What is NOT
-   *      structural is which producers may claim it: a typed STORE rejection (GH#2940) is
+   *      structural is which producers may claim it: a typed STORE rejection (GH#2940) or a
+   *      typed transient RPC TRANSPORT failure that names no transaction (GH#2942) is
    *      position-agnostic — it can equally arise after a send — so it is recorded under this
    *      code only when the failure writer holds the write-ahead's own proof that no PUBLISH
    *      transaction left the node (`ExecutionFailureEvidence`) AND the persisted record still
-   *      reads 'validated'. That proof assumes an executor that awaits
+   *      reads 'validated'. (The one exception is a `claimed`-origin transport failure, where
+   *      nothing can have been dispatched at all.) "No publication transaction" is deliberate
+   *      wording: a TRAC approval or a context-graph registration may already have been sent by
+   *      the attempt, and the code says nothing about them; the `phase` of this code is
+   *      `validation` by registry shape, not because an RPC outage is a validation fact. That
+   *      proof assumes an executor that awaits
    *      `PublishOptions.onBeforeBroadcast` before sending; an executor that does not is outside
    *      it. For
    *      `quorum_unmet` it comes from the PRODUCER's position instead — its allowed state is

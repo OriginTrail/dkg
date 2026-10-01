@@ -49,3 +49,15 @@ export function receiptWaitTimeout(txHash: string): ChainRpcTransportError {
 export function receiptLookupFailed(): ChainRpcTransportError {
   return new ChainRpcTransportError('RPC_RECEIPT_LOOKUP_FAILED', 'receipt lookup failed on every configured endpoint');
 }
+
+/**
+ * A multi-endpoint exhaustion message that carries NONE of the words the legacy keyword chain looks
+ * for (timeout / timed out / unavailable / query / store / authority / workspace / root): without
+ * typed precedence a failure like this one is recorded as the TERMINAL `canonicalization_failed`.
+ */
+export function exhaustedWithoutKeywords(): RpcEndpointsExhaustedError {
+  return new RpcEndpointsExhaustedError(
+    'publish transaction preparation failed on all configured RPC endpoints (a.example, b.example): 429 Too Many Requests',
+    { rpcUrls: ['https://a.example', 'https://b.example'] },
+  );
+}

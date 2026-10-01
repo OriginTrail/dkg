@@ -7,6 +7,7 @@ import {
   isPendingPublishTransactionStatus,
   isTransientRpcTransportFailureWithoutTransaction,
 } from '@origintrail-official/dkg-chain';
+import { isRpcPreconditionError } from './ack-errors.js';
 import {
   ChainProofRetrySchedule,
   type ChainProofSchedulePass,
@@ -217,6 +218,23 @@ export function executionFailureEvidence(recorder: PreSendBroadcastRecorder): Ex
 function isProvenStoreRejection(error: unknown): boolean {
   return isStoreOperationProvenNotStarted(error)
     || isStoreOperationProvenNotStarted(getChainWriteAheadHookCause(error));
+}
+
+/**
+ * GH#2942 — is this failure a typed TRANSIENT transport failure that names no transaction?
+ * Reads the chain's own typed contract on the thrown error or — the ONE wrapper the publisher
+ * owns — on the `cause` of an `RpcPreconditionError`, which the agent puts around the cold-start
+ * chain reads that precede ACK collection (chain id, lifecycle address, quorum). Nothing else is
+ * unwrapped: an arbitrary cause chain is not walked, and prose never qualifies. Throw-safe.
+ */
+function isTransientRpcFailure(error: unknown): boolean {
+  if (isTransientRpcTransportFailureWithoutTransaction(error)) return true;
+  if (!isRpcPreconditionError(error)) return false;
+  try {
+    return isTransientRpcTransportFailureWithoutTransaction(error.cause);
+  } catch {
+    return false;
+  }
 }
 
 type BusinessOperationResult<T> =
@@ -3292,17 +3310,24 @@ export class TripleStoreAsyncLiftPublisher
     //     the hook error that the chain adapter's write-ahead wrapper carries as `cause`
     //     (`isProvenStoreRejection`), or the chain's transient transport failure. Prose never
     //     qualifies, and an absent `txHash` is never a proof — it is only one more exclusion.
-    const transientRpcPreparation = isTransientRpcTransportFailureWithoutTransaction(error);
+    const transientRpc = isTransientRpcFailure(error);
     const preDispatchRecoverable = evidence?.neverDispatched === true
       && current.status === 'validated'
-      && (isProvenStoreRejection(error) || transientRpcPreparation);
+      && (isProvenStoreRejection(error) || transientRpc);
+    // A failure raised while the job is still 'claimed' (the initial preflight) precedes validation,
+    // and so precedes everything that could dispatch anything: the typed cause alone is enough. The
+    // keyword chain below would otherwise record a multi-endpoint exhaustion message that carries
+    // none of its words as the TERMINAL `canonicalization_failed`  a transient outage ending a job.
+    const claimedTransientRpc = failedFromState === 'claimed'
+      && current.status === 'claimed'
+      && transientRpc;
     const origin: LiftJobState = preDispatchRecoverable ? 'validated' : failedFromState;
     if (origin === 'claimed' || origin === 'validated') {
       const rawMessage = error instanceof Error ? error.message : String(error);
-      // A single-endpoint transport message is the provider's own text, and ethers embeds the
-      // request URL in it; a configured URL can carry an API key. The persisted message is echoed
-      // by the job routes, so reduce every URL in it to its host.
-      const message = preDispatchRecoverable && transientRpcPreparation
+      // A transport message is the provider's own text, and ethers embeds the request URL in it; a
+      // configured URL can carry an API key. The persisted message is echoed by the job routes, so
+      // reduce every URL in it to its host.
+      const message = transientRpc && (preDispatchRecoverable || claimedTransientRpc)
         ? hostOnlyRpcText(rawMessage)
         : rawMessage;
       const lower = message.toLowerCase();
@@ -3312,7 +3337,7 @@ export class TripleStoreAsyncLiftPublisher
         // to this pre-send branch, so their state and code cannot drift apart.
         // Everything message-keyed stays in the legacy chain below (#1974).
         this.classifyKnowledgeAssetVmPublishPreconditionCode(error)
-          ?? (preDispatchRecoverable
+          ?? (preDispatchRecoverable || claimedTransientRpc
           ? 'workspace_unavailable'
           : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'
