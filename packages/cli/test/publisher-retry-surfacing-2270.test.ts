@@ -204,7 +204,14 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
 
     const res = await request(control, 'GET', `/api/publisher/job?id=${jobId}`);
 
-    expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
+    // GH#2942 - and WHY, beside the reason: this fixture's record carries no operation marker, so recovery
+    // cannot apply any operation-specific proof to it and guesses none.
+    expect(res.body.retryState).toEqual({
+      autoRetryEligible: false,
+      waitingReason: 'pending_chain_proof',
+      blocker: expect.objectContaining({ code: 'operation_unmarked', missing: ['operation_marker'] }),
+    });
+    expect(typeof res.body.retryState.blocker.summary).toBe('string');
   });
 
   it('omits waitingReason for jobs that are not waiting on a retry at all', async () => {
@@ -232,7 +239,11 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
 
     const res = await request(control, 'GET', `/api/publisher/job?id=${jobId}`);
 
-    expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+    expect(res.body.retryState).toEqual({
+      autoRetryEligible: false,
+      waitingReason: 'operator',
+      blocker: expect.objectContaining({ code: 'auto_retry_disabled' }),
+    });
   });
 
   // The publisher's projection answers what the CONFIGURED lane would do; it cannot see whether a
@@ -306,12 +317,16 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     expect(await admissionVerdictFor(control, 'rpc')).toEqual({ retryable: true });
     // The probe was asked about the wallet that actually signed, not a placeholder.
     expect(probedWallets).toContain('wallet-rpc');
+    // GH#2942 - and the read view (`retryState`) answers from the SAME wiring, so the reason an
+    // operator reads cannot disagree with the verdict a client gets.
+    expect(control.describeConfiguredRetryState(heldJob).blocker?.code).toBe('chain_recheck_pending');
 
     // Both polarities through the SAME wiring: a runtime that cannot settle this job must not be
     // reported as having an automatic exit. Asserting only `true` would pass on a forwarding edge
     // replaced by a constant.
     liveRuntimeCapable = false;
     expect(await admissionVerdictFor(control, 'rpc')).toEqual({ retryable: false });
+    expect(control.describeConfiguredRetryState(heldJob).blocker?.code).toBe('recovery_not_configured');
   });
 
   it('leaves a chain-proof hold alone when the publisher runtime is unavailable', async () => {
@@ -329,7 +344,12 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
       operatorActionRequired: true,
     });
 
-    expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
+    // The hold is not repainted, and neither is its blocker: it is the record's, not the runtime's.
+    expect(res.body.retryState).toEqual({
+      autoRetryEligible: false,
+      waitingReason: 'pending_chain_proof',
+      blocker: expect.objectContaining({ code: 'operation_unmarked' }),
+    });
   });
 
   it('reports a TERMINAL failure that broadcast a transaction as waiting on chain proof', async () => {
@@ -340,7 +360,8 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     const heldJobId = await failTerminallyHeld(control);
 
     const res = await request(control, 'GET', `/api/publisher/job?id=${heldJobId}`);
-    expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
+    expect(res.body.retryState).toMatchObject({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
+    expect(res.body.retryState.blocker?.code).toEqual(expect.any(String));
 
     const retry = await request(control, 'POST', '/api/publisher/retry', JSON.stringify({ status: 'failed' }));
     expect(retry.body).toEqual({ retried: 0, blockedPendingRecovery: 1, skipped: 0 });
@@ -351,7 +372,11 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     const control = newControl();
     const jobId = await failAfterRecordedTxHash(control);
     const job = JSON.parse(JSON.stringify(await statusOf(control, jobId)));
-    const expected = { autoRetryEligible: false, waitingReason: 'pending_chain_proof' };
+    const expected = {
+      autoRetryEligible: false,
+      waitingReason: 'pending_chain_proof',
+      blocker: expect.objectContaining({ code: 'operation_unmarked' }),
+    };
 
     const withPayload = await request(control, 'GET', `/api/publisher/job-payload?id=${jobId}`);
     expect(withPayload.body.job).toEqual(job);

@@ -635,8 +635,8 @@ export const LIFT_JOB_RETRY_BLOCKER_SUMMARY: Record<LiftJobRetryBlockerCode, str
     + 'Waiting is the safe move; no operator action manufactures a safe retry.',
   not_auto_retryable:
     'This failure is not one the publisher retries by itself, and it persisted no transaction '
-    + 'evidence. `POST /api/publisher/retry` or re-submitting the request re-runs it as the same '
-    + 'job, consuming one unit of the shared retry budget.',
+    + 'evidence. `POST /api/publisher/retry` or re-submitting the identical request re-runs it as '
+    + 'the same job.',
   auto_retry_disabled:
     'Automatic retry is switched off on this node, so nothing was scheduled for this job. '
     + 'Switching it back on does not schedule a job that failed while it was off: re-run it by hand '
@@ -767,7 +767,7 @@ export function describeRetryProjection(
   options: {
     readonly autoRetryEnabled: boolean;
     /**
-     * GH#2942  can THIS node settle the held job (the capability half of "does an automatic exit
+     * GH#2942 - can THIS node settle the held job (the capability half of "does an automatic exit
      * exist")? Only a held job with a COMPLETE record consults it. Omitted, such a job gets no
      * blocker rather than a guess, and the projection keeps the two keys it always had.
      */
@@ -785,7 +785,7 @@ export function describeRetryProjection(
   };
 }
 
-/** The blocker for a classified action  present only where the waiting reason is too coarse. */
+/** The blocker for a classified action - present only where the waiting reason is too coarse. */
 function blockerOfAction(
   action: FailedJobRetryAction,
   job: PersistedFailedJob,

@@ -3318,7 +3318,7 @@ export class TripleStoreAsyncLiftPublisher
     // A failure raised while the job is still 'claimed' (the initial preflight) precedes validation,
     // and so precedes everything that could dispatch anything: the typed cause alone is enough. The
     // keyword chain below would otherwise record a multi-endpoint exhaustion message that carries
-    // none of its words as the TERMINAL `canonicalization_failed`  a transient outage ending a job.
+    // none of its words as the TERMINAL `canonicalization_failed` - a transient outage ending a job.
     const claimedTransientRpc = failedFromState === 'claimed'
       && current.status === 'claimed'
       && transientRpc;
@@ -3599,7 +3599,7 @@ export class TripleStoreAsyncLiftPublisher
   describeConfiguredRetryState(job: PersistedLiftJob): LiftJobRetryProjection {
     return deriveLiftJobRetryProjection(job, {
       autoRetryEnabled: this.autoRetryEnabled,
-      // GH#2942  the capability half of a held job's blocker: the SAME answer admission gives
+      // GH#2942 - the capability half of a held job's blocker: the SAME answer admission gives
       // (`automaticExitIsConfiguredFor`), so the projection and the 503 cannot disagree.
       canSettleHeldJob: (held) => this.automaticExitIsConfiguredFor(held),
     });

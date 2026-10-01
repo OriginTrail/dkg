@@ -58,7 +58,7 @@ export class LiftJobPendingChainProofError extends Error {
     readonly existingJobId: string,
     readonly retryable: boolean,
     /**
-     * GH#2942  why THIS job is held, in the same vocabulary `retryState.blocker` uses. Optional
+     * GH#2942 - why THIS job is held, in the same vocabulary `retryState.blocker` uses. Optional
      * and additive: a thrower that has no blocker to give (or an older one) keeps the generic text.
      */
     readonly blocker?: LiftJobRetryBlocker,

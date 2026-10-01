@@ -140,7 +140,7 @@ describe('GH#2270 failed-job retry disposition', () => {
     // backoff/operator, blocked ↔ recovery/pending_chain_proof, skipped ↔ exhausted/no reason.
     expect([retryable, blocked, terminal].map((job) => publisher.describeConfiguredRetryState(job))).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      // GH#2942  held, and WHY: the fixture's CREATE recorded no nonce, so absence can never be proven.
+      // GH#2942 - held, and WHY: the fixture's CREATE recorded no nonce, so absence can never be proven.
       { autoRetryEligible: false, waitingReason: 'pending_chain_proof', blocker: expect.objectContaining({ code: 'nonce_missing' }) },
       { autoRetryEligible: false },
     ]);
