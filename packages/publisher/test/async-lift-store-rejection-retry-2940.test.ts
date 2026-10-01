@@ -36,6 +36,7 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: r
       expect(publisher.describeConfiguredRetryState(failed)).toEqual({
         autoRetryEligible: false,
         waitingReason: 'operator',
+        blocker: expect.objectContaining({ code: 'auto_retry_disabled' }),
       });
       h.advance(10_000);
       expect(await publisher.claimNext('wallet-2')).toBeNull();
@@ -76,6 +77,7 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: r
       expect(publisher.describeConfiguredRetryState(failed)).toEqual({
         autoRetryEligible: false,
         waitingReason: 'exhausted',
+        blocker: expect.objectContaining({ code: 'retry_budget_spent' }),
       });
       expect(attempts.n).toBe(3);
       h.advance(60_000);

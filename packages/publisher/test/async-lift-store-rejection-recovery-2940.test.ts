@@ -73,7 +73,7 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: p
       expect(failed.broadcast?.txHash).toBe(TX_HASH);
       expect(isHeldForChainProof(failed)).toBe(true);
       expect(failed.timestamps.nextRetryAt).toBeUndefined();
-      expect(publisher.describeConfiguredRetryState(failed)).toEqual({
+      expect(publisher.describeConfiguredRetryState(failed)).toMatchObject({
         autoRetryEligible: false,
         waitingReason: 'pending_chain_proof',
       });
@@ -131,7 +131,7 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: p
       expect(failed.failure.code).not.toBe('workspace_unavailable');
       expect(isHeldForChainProof(failed)).toBe(true);
       expect(failed.timestamps.nextRetryAt).toBeUndefined();
-      expect(publisher.describeConfiguredRetryState(failed)).toEqual({
+      expect(publisher.describeConfiguredRetryState(failed)).toMatchObject({
         autoRetryEligible: false,
         waitingReason: 'pending_chain_proof',
       });

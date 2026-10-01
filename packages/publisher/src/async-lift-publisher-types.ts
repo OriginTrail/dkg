@@ -16,6 +16,7 @@ import type {
   LiftPublishSnapshotRequest,
 } from './lift-job.js';
 import type {
+  LiftJobRetryBlocker,
   LiftJobRetryProjection,
 } from './async-lift-retry-disposition.js';
 import type { DKGPublisher } from './dkg-publisher.js';
@@ -56,6 +57,11 @@ export class LiftJobPendingChainProofError extends Error {
     message: string,
     readonly existingJobId: string,
     readonly retryable: boolean,
+    /**
+     * GH#2942  why THIS job is held, in the same vocabulary `retryState.blocker` uses. Optional
+     * and additive: a thrower that has no blocker to give (or an older one) keeps the generic text.
+     */
+    readonly blocker?: LiftJobRetryBlocker,
   ) {
     super(message);
     this.name = 'LiftJobPendingChainProofError';

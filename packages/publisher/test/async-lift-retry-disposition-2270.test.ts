@@ -140,7 +140,8 @@ describe('GH#2270 failed-job retry disposition', () => {
     // backoff/operator, blocked ↔ recovery/pending_chain_proof, skipped ↔ exhausted/no reason.
     expect([retryable, blocked, terminal].map((job) => publisher.describeConfiguredRetryState(job))).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      { autoRetryEligible: false, waitingReason: 'pending_chain_proof' },
+      // GH#2942  held, and WHY: the fixture's CREATE recorded no nonce, so absence can never be proven.
+      { autoRetryEligible: false, waitingReason: 'pending_chain_proof', blocker: expect.objectContaining({ code: 'nonce_missing' }) },
       { autoRetryEligible: false },
     ]);
     expect(await publisher.retryDetailed())
@@ -479,9 +480,9 @@ describe('GH#2270 failed-job retry disposition', () => {
       publisher.describeConfiguredRetryState((await publisher.getStatus(acceptedJobId))!),
     ]).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      { autoRetryEligible: false, waitingReason: 'pending_chain_proof' },
-      { autoRetryEligible: false, waitingReason: 'operator' },
-      { autoRetryEligible: false, waitingReason: 'exhausted' },
+      { autoRetryEligible: false, waitingReason: 'pending_chain_proof', blocker: expect.objectContaining({ code: 'nonce_missing' }) },
+      { autoRetryEligible: false, waitingReason: 'operator', blocker: expect.objectContaining({ code: 'not_auto_retryable' }) },
+      { autoRetryEligible: false, waitingReason: 'exhausted', blocker: expect.objectContaining({ code: 'retry_budget_spent' }) },
       { autoRetryEligible: false },
       { autoRetryEligible: false },
     ]);
@@ -496,7 +497,11 @@ describe('GH#2270 failed-job retry disposition', () => {
 
     expect(enabled.describeConfiguredRetryState(failed)).toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
     expect(createCorruptHeadPublisher({ autoRetryEnabled: false }).describeConfiguredRetryState(failed))
-      .toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+      .toEqual({
+        autoRetryEligible: false,
+        waitingReason: 'operator',
+        blocker: expect.objectContaining({ code: 'auto_retry_disabled' }),
+      });
   });
 
   it('reports an allow-listed failure that was never SCHEDULED as operator work, not backoff', async () => {
@@ -513,7 +518,11 @@ describe('GH#2270 failed-job retry disposition', () => {
     // Re-enabled publisher, same job: allow-listed, budget intact, and still not going anywhere.
     const reEnabled = createCorruptHeadPublisher({ retryBackoffBaseMs: 100, retryBackoffMaxMs: 250, rand: () => 0.5 });
     expect(reEnabled.describeConfiguredRetryState(unscheduled))
-      .toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+      .toEqual({
+        autoRetryEligible: false,
+        waitingReason: 'operator',
+        blocker: expect.objectContaining({ code: 'retry_not_scheduled' }),
+      });
 
     // 'operator' is exactly right: the manual path DOES move it, which is what the operator is
     // being told to reach for.
@@ -536,7 +545,11 @@ describe('GH#2270 failed-job retry disposition', () => {
     expect(publisher.describeConfiguredRetryState({
       ...scheduled,
       timestamps: { ...scheduled.timestamps, nextRetryAt: undefined },
-    })).toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+    })).toEqual({
+      autoRetryEligible: false,
+      waitingReason: 'operator',
+      blocker: expect.objectContaining({ code: 'retry_not_scheduled' }),
+    });
   });
 
   // The action IS the partition: both consumers read this one function, so a divergence between
@@ -564,7 +577,7 @@ describe('GH#2270 failed-job retry disposition', () => {
       .toEqual([reaccept, blocked, skip].map((job) => describeRetryProjection(job, options)));
     expect([reaccept, blocked, skip].map((job) => describeRetryProjection(job, options))).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      { autoRetryEligible: false, waitingReason: 'pending_chain_proof' },
+      { autoRetryEligible: false, waitingReason: 'pending_chain_proof', blocker: expect.objectContaining({ code: 'nonce_missing' }) },
       { autoRetryEligible: false },
     ]);
     expect(await publisher.retryDetailed())
@@ -583,7 +596,11 @@ describe('GH#2270 failed-job retry disposition', () => {
       describeRetryProjection(job, { autoRetryEnabled: false }),
     ]).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
-      { autoRetryEligible: false, waitingReason: 'operator' },
+      {
+        autoRetryEligible: false,
+        waitingReason: 'operator',
+        blocker: expect.objectContaining({ code: 'auto_retry_disabled' }),
+      },
     ]);
   });
 

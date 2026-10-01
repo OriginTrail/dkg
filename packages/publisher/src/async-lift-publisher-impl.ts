@@ -88,6 +88,7 @@ import {
   FAILED_JOB_RETRY_ACTION_COUNT,
   classifyRetryAction,
   deriveLiftJobRetryProjection,
+  describeHeldBlocker,
   isAutomaticallyRetryableLiftJob,
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
@@ -3596,7 +3597,12 @@ export class TripleStoreAsyncLiftPublisher
    * that knows must narrow it — see {@link AsyncLiftRetryStateReader}).
    */
   describeConfiguredRetryState(job: PersistedLiftJob): LiftJobRetryProjection {
-    return deriveLiftJobRetryProjection(job, { autoRetryEnabled: this.autoRetryEnabled });
+    return deriveLiftJobRetryProjection(job, {
+      autoRetryEnabled: this.autoRetryEnabled,
+      // GH#2942  the capability half of a held job's blocker: the SAME answer admission gives
+      // (`automaticExitIsConfiguredFor`), so the projection and the 503 cannot disagree.
+      canSettleHeldJob: (held) => this.automaticExitIsConfiguredFor(held),
+    });
   }
 
   private async reacceptDueFailedJobs(now: number): Promise<number> {
@@ -3686,6 +3692,7 @@ export class TripleStoreAsyncLiftPublisher
           + 'it cannot be republished until chain recovery proves the transaction absent',
         current.jobId,
         this.automaticExitIsConfiguredFor(current),
+        describeHeldBlocker(current, (held) => this.automaticExitIsConfiguredFor(held)),
       );
     }
     const reset = resetFailedLiftJobToAccepted(current, this.now());
