@@ -11,7 +11,7 @@ const cg = '0x0000000000000000000000000000000000000001/stream-profile';
 const agents: Array<{ stop(): Promise<void> }> = [];
 
 /** Planner/host fixture only: exact transport and ordinal chain outcomes are fixture ports. */
-async function harness(options: { public?: boolean; core?: boolean; advertised?: boolean; unknown?: boolean; oversize?: boolean; soleCore?: boolean } = {}) {
+async function harness(options: { public?: boolean; core?: boolean; advertised?: boolean; unknown?: boolean; oversize?: boolean; soleCore?: boolean; failCoreProbe?: boolean } = {}) {
   const h = await createVmRecoveryHostHarness({
     name: 'ExperimentalVmStreamProfile', localCgId: cg, peers: options.soleCore ? [core] : [older, core], targetCount: 13,
     accessPolicy: options.public === false ? 1 : 0,
@@ -22,6 +22,7 @@ async function harness(options: { public?: boolean; core?: boolean; advertised?:
       ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}` }),
     onFetch: (peer, targets, recovered) => {
       if (peer === older) return 'clean-absent';
+      if (options.failCoreProbe) return 'incomplete';
       for (const target of targets) recovered.add(target.ordinal);
       return 'found';
     },
@@ -33,12 +34,14 @@ async function harness(options: { public?: boolean; core?: boolean; advertised?:
     options.public === false ? { kind: 'private', onChainId: '1' } as never : { kind: 'public', onChainId: '1' } as never);
   const policy = vi.spyOn(h.agent, 'readLiveOnChainAccessPolicy');
   const transportModes: Array<ExactRecoveryTransportMode | undefined> = [];
+  const attemptTimeouts: Array<{ peerId: string; totalTimeoutMs?: number }> = [];
   const fetch = h.internals.syncExactKnowledgeAssetsFromPeerDetailed.bind(h.internals);
   h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async (peer, graph, uals, requestOptions) => {
     transportModes.push(requestOptions?.exactRecoveryTransportMode);
+    attemptTimeouts.push({ peerId: peer, totalTimeoutMs: requestOptions?.totalTimeoutMs });
     return fetch(peer, graph, uals, requestOptions);
   };
-  return { ...h, authority, policy, transportModes };
+  return { ...h, authority, policy, transportModes, attemptTimeouts };
 }
 
 afterEach(async () => {
@@ -47,6 +50,39 @@ afterEach(async () => {
 });
 
 describe('experimental public Core streaming recovery host', () => {
+  it('bounds the legacy peer after a failed public Core stream without shortening the Core attempt', async () => {
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    const h = await harness({ failCoreProbe: true });
+    await h.run();
+    expect(h.attemptTimeouts[0]).toEqual({ peerId: core, totalTimeoutMs: undefined });
+    expect(h.attemptTimeouts.some((attempt) => attempt.peerId === older
+      && attempt.totalTimeoutMs === 120_000)).toBe(true);
+  });
+
+  it('retains the ordinary legacy budget when no stream Core is available', async () => {
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0');
+    const h = await harness();
+    await h.run();
+    expect(h.attemptTimeouts.length).toBeGreaterThan(0);
+    expect(h.attemptTimeouts.every((attempt) => attempt.totalTimeoutMs === undefined)).toBe(true);
+  });
+
+  it('restores the full legacy probe budget on a periodic compatibility cycle', async () => {
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    const h = await harness({ failCoreProbe: true });
+    await h.run();
+    for (const record of h.internals.vmReconcileRotationState.values()) {
+      record.phase = 'backoff';
+      record.failures = 3;
+      record.nextRetryAt = 0;
+    }
+    h.internals.clearVmReconcileActiveFetchCooldown(cg);
+    h.attemptTimeouts.length = 0;
+    await h.run();
+    expect(h.attemptTimeouts.some((attempt) => attempt.peerId === older
+      && attempt.totalTimeoutMs === undefined)).toBe(true);
+  });
+
   it('probes the supported Core first then streams ten large KAs without changing the proof roster', async () => {
     vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness();
@@ -85,6 +121,7 @@ describe('experimental public Core streaming recovery host', () => {
     expect(h.fetched[0]!.peerId).toBe(older);
     expect(h.fetched.every(({ uals }) => uals.length === 1)).toBe(true);
     expect(h.transportModes.every(mode => mode === 'legacy')).toBe(true);
+    expect(h.attemptTimeouts.every((attempt) => attempt.totalTimeoutMs === undefined)).toBe(true);
     if (guard === 'unset' || guard === '0' || guard === 'not-core' || guard === 'no-protocol') expect(h.authority).not.toHaveBeenCalled();
   });
 

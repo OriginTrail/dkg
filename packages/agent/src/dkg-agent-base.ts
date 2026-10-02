@@ -1081,6 +1081,12 @@ export class DKGAgentBase {
   );
   /** Maximum peers connected/probed/transported by one exact-recovery pass. */
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
+  /**
+   * A legacy probe competing with an advertised stream Core must not spend the
+   * stream recovery window walking a whole graph through small durable pages.
+   * Proven holders and periodic compatibility probes retain the ordinary budget.
+   */
+  static readonly VM_RECONCILE_MIXED_LEGACY_ATTEMPT_TIMEOUT_MS = 120_000;
   /** How long a clean legacy exact-filter miss suppresses one peer. */
   static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
   /** Transport affinity is short-lived and never establishes asset coverage. */

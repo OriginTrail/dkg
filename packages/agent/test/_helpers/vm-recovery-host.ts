@@ -99,6 +99,7 @@ export interface VmRecoveryHostInternals {
     selection: readonly string[] | ExactAssetSelection,
     options?: { signal?: AbortSignal; isCurrent?: () => boolean; onWorkStarted?: () => void;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+      totalTimeoutMs?: number;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
