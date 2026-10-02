@@ -11,7 +11,8 @@ export const INVENTORY_V1_APPLICATION_ID = 0x444b3634;
 export const INVENTORY_V1_LEGACY_USER_VERSION = 1;
 export const INVENTORY_V1_V2_USER_VERSION = 2;
 export const INVENTORY_V1_V3_USER_VERSION = 3;
-export const INVENTORY_V1_USER_VERSION = 4;
+export const INVENTORY_V1_V4_USER_VERSION = 4;
+export const INVENTORY_V1_USER_VERSION = 5;
 export const INVENTORY_V1_RELATIVE_PATH =
   `${RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1}/${RFC64_INVENTORY_DATABASE_FILENAME_V1}`;
 export const INVENTORY_V1_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
@@ -462,6 +463,38 @@ CREATE TABLE rfc64_finalized_private_placement_repairs_v1 (
   PRIMARY KEY (repair_digest)
 ) WITHOUT ROWID, STRICT`;
 
+/**
+ * One owner-signed unregistered authority seed per (network, Context Graph).
+ * The row stores the exact canonical signed policy envelope so a replica can
+ * re-authenticate it with a point lookup instead of scanning the deprecated
+ * ontology system-graph carrier. Era/version are pinned to '0' by the policy
+ * shape, so exactly one legitimate generation exists per key: the first
+ * verified writer wins and a differing digest is refused, never replaced.
+ */
+export const INVENTORY_V1_UNREGISTERED_AUTHORITY_SEEDS_TABLE_SQL = `
+CREATE TABLE rfc64_unregistered_authority_seeds_v1 (
+  network_id TEXT NOT NULL COLLATE BINARY CHECK (
+    typeof(network_id) = 'text' AND length(network_id) > 0 AND length(network_id) <= 128
+  ),
+  context_graph_id TEXT NOT NULL COLLATE BINARY CHECK (
+    typeof(context_graph_id) = 'text'
+    AND length(context_graph_id) > 0 AND length(context_graph_id) <= 256
+  ),
+  owner_address BLOB NOT NULL CHECK (
+    typeof(owner_address) = 'blob' AND length(owner_address) = 20
+    AND owner_address <> zeroblob(20)
+  ),
+  policy_digest BLOB NOT NULL CHECK (
+    typeof(policy_digest) = 'blob' AND length(policy_digest) = 32
+  ),
+  signed_envelope BLOB NOT NULL CHECK (
+    typeof(signed_envelope) = 'blob'
+    AND length(signed_envelope) >= 1
+    AND length(signed_envelope) <= 4096
+  ),
+  PRIMARY KEY (network_id, context_graph_id)
+) WITHOUT ROWID, STRICT`;
+
 export const INVENTORY_V1_LEGACY_DDL = [
   INVENTORY_V1_LOADS_TABLE_SQL,
   INVENTORY_V1_ROWS_TABLE_SQL,
@@ -474,6 +507,7 @@ export const INVENTORY_V1_DDL = [
   INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL,
   INVENTORY_V1_STAGED_HEADS_TABLE_SQL,
   INVENTORY_V1_FINALIZED_PRIVATE_PLACEMENT_REPAIRS_TABLE_SQL,
+  INVENTORY_V1_UNREGISTERED_AUTHORITY_SEEDS_TABLE_SQL,
 ].join(';\n\n').concat(';');
 
 export const INVENTORY_V1_LEGACY_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
@@ -498,13 +532,20 @@ export const INVENTORY_V1_V3_USER_OBJECTS: Readonly<Record<string, string>> = Ob
   ),
 });
 
-export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+export const INVENTORY_V1_V4_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
   ...INVENTORY_V1_V3_USER_OBJECTS,
   rfc64_staged_catalog_heads_v1: normalizeInventoryV1SchemaSql(
     INVENTORY_V1_STAGED_HEADS_TABLE_SQL,
   ),
   rfc64_finalized_private_placement_repairs_v1: normalizeInventoryV1SchemaSql(
     INVENTORY_V1_FINALIZED_PRIVATE_PLACEMENT_REPAIRS_TABLE_SQL,
+  ),
+});
+
+export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+  ...INVENTORY_V1_V4_USER_OBJECTS,
+  rfc64_unregistered_authority_seeds_v1: normalizeInventoryV1SchemaSql(
+    INVENTORY_V1_UNREGISTERED_AUTHORITY_SEEDS_TABLE_SQL,
   ),
 });
 export const INVENTORY_V1_MIGRATE_V1_TO_V2_SQL = `
@@ -519,6 +560,10 @@ PRAGMA user_version = ${INVENTORY_V1_V3_USER_VERSION};`;
 export const INVENTORY_V1_MIGRATE_V3_TO_V4_SQL = `
 ${INVENTORY_V1_STAGED_HEADS_TABLE_SQL};
 ${INVENTORY_V1_FINALIZED_PRIVATE_PLACEMENT_REPAIRS_TABLE_SQL};
+PRAGMA user_version = ${INVENTORY_V1_V4_USER_VERSION};`;
+
+export const INVENTORY_V1_MIGRATE_V4_TO_V5_SQL = `
+${INVENTORY_V1_UNREGISTERED_AUTHORITY_SEEDS_TABLE_SQL};
 PRAGMA user_version = ${INVENTORY_V1_USER_VERSION};`;
 
 export function normalizeInventoryV1SchemaSql(sql: string): string {

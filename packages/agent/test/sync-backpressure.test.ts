@@ -7,8 +7,11 @@ import {
 import {
   getSyncBackpressureSnapshot,
   resolveBooleanSwitch,
+  resolveExactBatchStreamEnabled,
   resolveNonNegativeIntegerSwitch,
   resolveSyncGlobalBackpressure,
+  resolveSyncReconcilerEnabled,
+  resolveVmReconcilerEnabled,
   SyncBackpressureBusyError,
   withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
@@ -1405,6 +1408,92 @@ describe('sync global backpressure', () => {
       else process.env.DKG_SYNC_RECONCILER_ENABLED = oldReconciler;
       if (oldDeadline === undefined) delete process.env.DKG_STORAGE_ACK_HANDLER_DEADLINE_MS;
       else process.env.DKG_STORAGE_ACK_HANDLER_DEADLINE_MS = oldDeadline;
+    }
+  });
+
+  it('resolves the VM reconciler switch as env, then config, then default on', () => {
+    const oldVm = process.env.DKG_VM_RECONCILER_ENABLED;
+    const oldSync = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    try {
+      delete process.env.DKG_VM_RECONCILER_ENABLED;
+      delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      expect(resolveVmReconcilerEnabled()).toBe(true);
+      expect(resolveVmReconcilerEnabled(undefined)).toBe(true);
+      expect(resolveVmReconcilerEnabled(false)).toBe(false);
+      expect(resolveVmReconcilerEnabled(true)).toBe(true);
+
+      process.env.DKG_VM_RECONCILER_ENABLED = '0';
+      expect(resolveVmReconcilerEnabled(true)).toBe(false);
+      expect(resolveVmReconcilerEnabled()).toBe(false);
+      process.env.DKG_VM_RECONCILER_ENABLED = 'enabled';
+      expect(resolveVmReconcilerEnabled(false)).toBe(true);
+      // An unrecognised value is not a decision; config and default apply.
+      process.env.DKG_VM_RECONCILER_ENABLED = 'maybe';
+      expect(resolveVmReconcilerEnabled(false)).toBe(false);
+      expect(resolveVmReconcilerEnabled()).toBe(true);
+    } finally {
+      if (oldVm === undefined) delete process.env.DKG_VM_RECONCILER_ENABLED;
+      else process.env.DKG_VM_RECONCILER_ENABLED = oldVm;
+      if (oldSync === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      else process.env.DKG_SYNC_RECONCILER_ENABLED = oldSync;
+    }
+  });
+
+  it('keeps the peer-sync and VM reconciler switches independent', () => {
+    const oldVm = process.env.DKG_VM_RECONCILER_ENABLED;
+    const oldSync = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    try {
+      delete process.env.DKG_VM_RECONCILER_ENABLED;
+      process.env.DKG_SYNC_RECONCILER_ENABLED = '0';
+      // Peer sync off must not switch VM reconcile off.
+      expect(resolveSyncReconcilerEnabled(false)).toBe(false);
+      expect(resolveVmReconcilerEnabled()).toBe(true);
+
+      delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      process.env.DKG_VM_RECONCILER_ENABLED = 'off';
+      expect(resolveVmReconcilerEnabled()).toBe(false);
+      expect(resolveSyncReconcilerEnabled()).toBe(true);
+    } finally {
+      if (oldVm === undefined) delete process.env.DKG_VM_RECONCILER_ENABLED;
+      else process.env.DKG_VM_RECONCILER_ENABLED = oldVm;
+      if (oldSync === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      else process.env.DKG_SYNC_RECONCILER_ENABLED = oldSync;
+    }
+  });
+
+  it('resolves the exact-batch stream switch from its current name, then the name it was first deployed under', () => {
+    const oldCurrent = process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+    const oldFirst = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+    try {
+      delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // A node configured before the rename keeps its setting.
+      delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // Once the current name is set it decides, in either direction.
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '0';
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = 'on';
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '0';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // An unrecognised value is not a decision; the earlier name still applies.
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = 'maybe';
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+    } finally {
+      if (oldCurrent === undefined) delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      else process.env.DKG_EXACT_BATCH_STREAM_ENABLED = oldCurrent;
+      if (oldFirst === undefined) delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+      else process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = oldFirst;
     }
   });
 

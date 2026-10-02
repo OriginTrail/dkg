@@ -5,6 +5,7 @@ import {
   noteRpcExhaustion,
   noteRpcServed,
   classifyRpcFailoverError,
+  hostOnlyRpcText,
   rpcHost,
   getRpcFailoverStats,
   _resetRpcFailoverStatsForTest,
@@ -52,6 +53,88 @@ describe('rpc-failover-log', () => {
     it('reduces a URL to host-only and never throws on garbage', () => {
       expect(rpcHost('https://base-rpc.publicnode.com/v1/key')).toBe('base-rpc.publicnode.com');
       expect(rpcHost('not a url')).toBe('unparseable-rpc');
+    });
+  });
+
+  describe('hostOnlyRpcText', () => {
+    it('reduces every URL in provider text to its host, however the text quotes it', () => {
+      // ethers' message for an HTTP-level error quotes the request URL in JSON.
+      expect(hostOnlyRpcText(
+        'server response 401 Unauthorized (info={ "requestUrl": '
+          + '"https://rpc.example.invalid/v2/FAKEKEY123?apikey=FAKEKEY123", "responseStatus": "401 Unauthorized" })',
+      )).toBe(
+        'server response 401 Unauthorized (info={ "requestUrl": "rpc.example.invalid", '
+          + '"responseStatus": "401 Unauthorized" })',
+      );
+      // HTML attributes and angle brackets end a URL too; any scheme, any case,
+      // and userinfo never survives.
+      expect(hostOnlyRpcText(
+        '<a href="HTTPS://user:FAKEKEY123@rpc.example.invalid:8545/v2/FAKEKEY123">sign up</a>',
+      )).toBe('<a href="rpc.example.invalid:8545">sign up</a>');
+      expect(hostOnlyRpcText("see <wss://rpc.example.invalid/ws/FAKEKEY123> or 'https://docs.example.invalid/limits'"))
+        .toBe("see <rpc.example.invalid> or 'docs.example.invalid'");
+      // Nothing of a URL that cannot be parsed survives either.
+      expect(hostOnlyRpcText('https://[FAKEKEY123')).toBe('unparseable-rpc');
+    });
+
+    it('returns text without a URL unchanged', () => {
+      expect(hostOnlyRpcText('connect ECONNREFUSED 127.0.0.1:8545')).toBe('connect ECONNREFUSED 127.0.0.1:8545');
+    });
+
+    // GH#2945: prose punctuation after a URL is not part of it - it used to be consumed with the URL,
+    // which glued words together and, for "host:port:", dropped the host entirely.
+    it.each([
+      ['(https://h.example/KEY)', '(h.example)'],
+      ['https://a.example/K1, https://b.example/K2: boom', 'a.example, b.example: boom'],
+      ['https://h.example:8545: boom', 'h.example:8545: boom'],
+      ['see https://h.example/KEY.', 'see h.example.'],
+      ['wait! https://h.example/KEY?', 'wait! h.example?'],
+      ['a https://h.example/KEY; b', 'a h.example; b'],
+      ['http://[::1]:8545/KEY failed', '[::1]:8545 failed'],
+    ])('keeps the punctuation after a URL and still reduces it: %s', (input, expected) => {
+      expect(hostOnlyRpcText(input)).toBe(expected);
+    });
+
+    it('leaves a bare scheme alone and is idempotent on its own output', () => {
+      expect(hostOnlyRpcText('proxy via https:// only')).toBe('proxy via https:// only');
+      const once = hostOnlyRpcText('failed (https://h.example/KEY), retry https://h.example:8545/K2: boom');
+      expect(hostOnlyRpcText(once)).toBe(once);
+      expect(once).not.toMatch(/KEY|K2/);
+    });
+
+    it('is total: a non-string input is coerced instead of throwing on a failure path', () => {
+      expect(hostOnlyRpcText(undefined as unknown as string)).toBe('');
+      expect(hostOnlyRpcText(null as unknown as string)).toBe('');
+      expect(hostOnlyRpcText(42 as unknown as string)).toBe('42');
+    });
+
+    it('does not scan a URL-free message: a long hex run costs microseconds, not seconds', () => {
+      const calldata = `0x${'ab12'.repeat(40_000)}`;
+      const started = performance.now();
+      expect(hostOnlyRpcText(calldata)).toBe(calldata);
+      expect(performance.now() - started).toBeLessThan(50);
+    });
+
+    it('scans linearly when long calldata sits before, after or right against a URL (an ethers error quotes both)', () => {
+      const calldata = `0x${'ab12'.repeat(20_000)}`;
+      const cases = [
+        { text: `RPC failed at https://rpc.example/v2/KEY with payload ${calldata}`, expected: `RPC failed at rpc.example with payload ${calldata}` },
+        { text: `payload ${calldata} failed at https://rpc.example/v2/KEY`, expected: `payload ${calldata} failed at rpc.example` },
+      ];
+      for (const { text, expected } of cases) {
+        const started = performance.now();
+        const reduced = hostOnlyRpcText(text);
+        // The quadratic scan took ~6 s on this input; a linear one takes milliseconds.
+        expect(performance.now() - started).toBeLessThan(500);
+        expect(reduced).toBe(expected);
+      }
+      // A run glued to the scheme loses at most the scheme's 32 characters of it; the key never survives.
+      const started = performance.now();
+      const glued = hostOnlyRpcText(`${calldata}https://rpc.example/v2/KEY`);
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(glued.endsWith('rpc.example')).toBe(true);
+      expect(glued).not.toContain('KEY');
+      expect(glued.length).toBeGreaterThan(calldata.length - 40);
     });
   });
 

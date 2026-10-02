@@ -487,6 +487,23 @@ export interface ContextGraphCatchupReadinessClassification {
 }
 
 /**
+ * A subscription known only by its on-chain name hash cannot sync anything
+ * under that id, whatever the peers answered: holders key the graph by its
+ * cleartext id. Report exactly that (with the next step) instead of a generic
+ * "retry" verdict. `identity` is the agent's note for the job's graph id;
+ * anything other than a hash-only note returns null and the ordinary
+ * classifier decides.
+ */
+export function classifyNameHashOnlyCatchup(
+  identity: { readonly state: string; readonly message: string } | null | undefined,
+): { jobStatus: 'unreachable'; error: string } | null {
+  if (identity?.state !== 'name-hash-only' && identity?.state !== 'name-hash-only-private') {
+    return null;
+  }
+  return { jobStatus: 'unreachable', error: identity.message };
+}
+
+/**
  * Canonical policy for converting one catch-up result into externally visible
  * subscription readiness. The HTTP route gathers live metadata and applies
  * the returned patches; all readiness decisions remain in this pure function.
@@ -877,62 +894,210 @@ export function registerProjectSyncedReadinessPersistence(input: {
 }
 
 /**
+ * Deadline (ms) for confirming one legacy row during the readiness migration.
+ *
+ * The migration runs before the daemon API opens, and confirming a row can wait
+ * on chain reads: a reverse name-hash scan for a row without an on-chain id,
+ * and a finalized authority read queued on the agent's shared single-slot
+ * authority coordinator. A row that misses the deadline fails closed exactly
+ * like a row whose metadata could not be confirmed.
+ */
+export const CONTEXT_GRAPH_READINESS_MIGRATION_ROW_TIMEOUT_MS = 8_000;
+
+/**
+ * Wall-clock budget (ms) for every confirmation in one migration pass. Rows
+ * still waiting when it is spent fail closed without any lookup, so the pass
+ * stays bounded however many legacy rows a node holds.
+ */
+export const CONTEXT_GRAPH_READINESS_MIGRATION_BUDGET_MS = 30_000;
+
+interface LegacyReadinessRowState {
+  subscribed?: boolean;
+  coreHosted?: boolean;
+  synced?: boolean;
+  sharedMemorySynced?: boolean;
+}
+
+/**
+ * Whether this node holds the graph as a member subscription or a Core hosting
+ * obligation. Anything else is a catalogue row: discovered from the store or
+ * the chain, or a durable intent the node left dormant.
+ */
+function hasActiveContextGraphIntent<T extends LegacyReadinessRowState>(
+  row: T | undefined,
+): row is T {
+  return row?.subscribed === true || row?.coreHosted === true;
+}
+
+type LegacyReadinessVerdict =
+  | { kind: 'preserve'; reason: 'locally curated' | 'confirmed public' }
+  | { kind: 'reset'; authoritativePrivateMeta: boolean };
+
+/** A confirmation that did not finish inside its deadline or the pass budget. */
+const CONFIRMATION_DEADLINE_MISSED = Symbol('context-graph-readiness-confirmation-deadline');
+
+/**
+ * Race `task` against a deadline. On expiry the task's signal is aborted and
+ * the task is abandoned rather than awaited, so an operation that ignores the
+ * signal still cannot hold the caller past the deadline.
+ */
+async function withConfirmationDeadline<T>(
+  timeoutMs: number,
+  task: (signal: AbortSignal) => Promise<T>,
+): Promise<T | typeof CONFIRMATION_DEADLINE_MISSED> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<typeof CONFIRMATION_DEADLINE_MISSED>((resolve) => {
+    timer = setTimeout(() => {
+      // Settle the race before aborting, so the task's abort rejection cannot
+      // win it.
+      resolve(CONFIRMATION_DEADLINE_MISSED);
+      controller.abort(new DOMException(
+        `context-graph readiness confirmation exceeded ${timeoutMs}ms`,
+        'TimeoutError',
+      ));
+    }, timeoutMs);
+  });
+  const work = task(controller.signal);
+  // An abandoned task may still reject after the deadline.
+  work.catch(() => undefined);
+  try {
+    return await Promise.race([work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Decide whether one legacy row's persisted readiness bits may be kept.
+ *
+ * Every lookup takes `signal`, and none starts once it has aborted. The
+ * migration's deadline therefore also covers the chain work behind these
+ * calls: the reverse name-hash scan and the finalized authority read.
+ */
+async function classifyLegacyContextGraphReadiness(
+  agent: DKGAgent,
+  contextGraphId: string,
+  signal: AbortSignal,
+): Promise<LegacyReadinessVerdict> {
+  // A locally curated graph is authoritative on this node, so its existing
+  // flags can seed provenance. Remote membership proves authorization, not
+  // that either data plane completed cleanly, and therefore cannot preserve
+  // legacy readiness bits.
+  const locallyCurated = typeof agent.isCuratorOf === 'function'
+    ? await agent.isCuratorOf(contextGraphId, { signal }).catch(() => false)
+    : false;
+  if (locallyCurated) return { kind: 'preserve', reason: 'locally curated' };
+
+  signal.throwIfAborted();
+  const hasConfirmedMeta = await agent.hasConfirmedMetaState(contextGraphId, { signal })
+    .catch(() => false);
+  signal.throwIfAborted();
+  const locallyPrivate = hasConfirmedMeta
+    ? await agent.isPrivateContextGraph(contextGraphId, { signal }).catch(() => true)
+    : true;
+  // Only a confirmed, locally public graph can still be preserved, so only it
+  // needs the on-chain policy.
+  if (!hasConfirmedMeta || locallyPrivate) {
+    return { kind: 'reset', authoritativePrivateMeta: hasConfirmedMeta && locallyPrivate };
+  }
+
+  signal.throwIfAborted();
+  const onChainPolicy = typeof agent.getContextGraphOnChainPolicy === 'function'
+    ? await agent.getContextGraphOnChainPolicy(contextGraphId, { signal }).catch(() => ({}))
+    : {};
+  signal.throwIfAborted();
+  const chainPrivate = (onChainPolicy as { accessPolicy?: number }).accessPolicy === 1;
+  return chainPrivate
+    ? { kind: 'reset', authoritativePrivateMeta: false }
+    : { kind: 'preserve', reason: 'confirmed public' };
+}
+
+/**
  * One-time migration for subscription flags written before readiness carried
  * durable per-plane proof. Private/unconfirmed rows fail closed and must
  * complete a new catch-up. Confirmed public rows retain historical clean-empty
  * compatibility and receive provenance matching their already-persisted bits.
+ *
+ * The daemon awaits this before its API opens, so the pass is bounded: each
+ * confirmation has a deadline, all of them share one budget, and a row that
+ * misses either fails closed. Only rows this node actively holds are migrated.
  */
 export async function migrateLegacyContextGraphReadiness(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
   log: (message: string) => void;
+  /** Per-row confirmation deadline; defaults to {@link CONTEXT_GRAPH_READINESS_MIGRATION_ROW_TIMEOUT_MS}. */
+  rowTimeoutMs?: number;
+  /** Budget for the whole pass; defaults to {@link CONTEXT_GRAPH_READINESS_MIGRATION_BUDGET_MS}. */
+  budgetMs?: number;
 }): Promise<void> {
   const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
+  const rowTimeoutMs = input.rowTimeoutMs ?? CONTEXT_GRAPH_READINESS_MIGRATION_ROW_TIMEOUT_MS;
+  const startedAt = Date.now();
+  const budgetEndsAt = startedAt + (input.budgetMs ?? CONTEXT_GRAPH_READINESS_MIGRATION_BUDGET_MS);
+  const tally = { preserved: 0, reset: 0, missedDeadline: 0, notSynced: 0, inactive: 0 };
 
-  for (const [contextGraphId, subscription] of input.agent.getSubscribedContextGraphs()) {
+  // Iterate a snapshot. Discovery keeps adding catalogue rows to the live map
+  // while this pass awaits, and they are not part of it.
+  const rows = [...input.agent.getSubscribedContextGraphs()];
+  for (const [contextGraphId, subscription] of rows) {
     if (systemContextGraphs.has(contextGraphId)) continue;
-    const stored = readContextGraphReadiness(input.store, contextGraphId);
-    if (stored.version >= CONTEXT_GRAPH_READINESS_VERSION) continue;
+    if (
+      readContextGraphReadiness(input.store, contextGraphId).version
+      >= CONTEXT_GRAPH_READINESS_VERSION
+    ) continue;
 
-    // A locally curated graph is authoritative on this node, so its existing
-    // flags can seed provenance. Remote membership proves authorization, not
-    // that either data plane completed cleanly, and therefore cannot preserve
-    // legacy readiness bits.
-    const locallyCurated = typeof input.agent.isCuratorOf === 'function'
-      ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
-      : false;
-    if (locallyCurated) {
+    // A catalogue row is already "not ready" at readiness version 0, so leave
+    // it there and never write its subscription state. Persisting an inactive
+    // row deletes its durable record (and with it this readiness row) and
+    // clears its dormancy, so the next boot would re-activate it.
+    if (!hasActiveContextGraphIntent(subscription)) {
+      tally.inactive += 1;
+      continue;
+    }
+
+    // Nothing was claimed ready, so there is nothing to preserve or reset.
+    if (subscription.synced !== true && subscription.sharedMemorySynced !== true) {
       writeContextGraphReadiness(input.store, contextGraphId, {
-        durableVerified: subscription.synced === true,
-        sharedMemoryVerified: subscription.sharedMemorySynced === true,
+        durableVerified: false,
+        sharedMemoryVerified: false,
       });
+      tally.notSynced += 1;
+      continue;
+    }
+
+    const remainingBudgetMs = budgetEndsAt - Date.now();
+    const verdict = remainingBudgetMs > 0
+      ? await withConfirmationDeadline(
+        Math.min(rowTimeoutMs, remainingBudgetMs),
+        (signal) => classifyLegacyContextGraphReadiness(input.agent, contextGraphId, signal),
+      ).catch((): LegacyReadinessVerdict => ({ kind: 'reset', authoritativePrivateMeta: false }))
+      : CONFIRMATION_DEADLINE_MISSED;
+
+    // Re-validate after the await. A row deactivated meanwhile is now a
+    // catalogue row, and a proof persisted meanwhile is newer than this pass.
+    const live = input.agent.getSubscribedContextGraphs().get(contextGraphId);
+    if (!hasActiveContextGraphIntent(live)) continue;
+    if (
+      readContextGraphReadiness(input.store, contextGraphId).version
+      >= CONTEXT_GRAPH_READINESS_VERSION
+    ) continue;
+
+    if (verdict !== CONFIRMATION_DEADLINE_MISSED && verdict.kind === 'preserve') {
+      writeContextGraphReadiness(input.store, contextGraphId, {
+        durableVerified: live.synced === true,
+        sharedMemoryVerified: live.sharedMemorySynced === true,
+      });
+      tally.preserved += 1;
       input.log(
-        `Preserved locally curated context-graph readiness during provenance migration: ${contextGraphId}`,
+        `Preserved ${verdict.reason} context-graph readiness during provenance migration: ${contextGraphId}`,
       );
       continue;
     }
 
-    const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(contextGraphId)
-      .catch(() => false);
-    const locallyPrivate = hasConfirmedMeta
-      ? await input.agent.isPrivateContextGraph(contextGraphId).catch(() => true)
-      : true;
-    const onChainPolicy = typeof input.agent.getContextGraphOnChainPolicy === 'function'
-      ? await input.agent.getContextGraphOnChainPolicy(contextGraphId).catch(() => ({}))
-      : {};
-    const chainPrivate = (onChainPolicy as { accessPolicy?: number }).accessPolicy === 1;
-    const confirmedPublic = !chainPrivate && hasConfirmedMeta && !locallyPrivate;
-
-    if (confirmedPublic) {
-      writeContextGraphReadiness(input.store, contextGraphId, {
-        durableVerified: subscription.synced === true,
-        sharedMemoryVerified: subscription.sharedMemorySynced === true,
-      });
-      input.log(`Preserved confirmed public context-graph readiness during provenance migration: ${contextGraphId}`);
-      continue;
-    }
-
-    const authoritativePrivateMeta = hasConfirmedMeta && locallyPrivate;
+    const authoritativePrivateMeta = verdict !== CONFIRMATION_DEADLINE_MISSED
+      && verdict.authoritativePrivateMeta;
     input.agent.markContextGraphSubscriptionState(contextGraphId, {
       synced: false,
       sharedMemorySynced: false,
@@ -943,6 +1108,25 @@ export async function migrateLegacyContextGraphReadiness(input: {
       durableVerified: false,
       sharedMemoryVerified: false,
     });
-    input.log(`Reset legacy unproven context-graph readiness: ${contextGraphId}`);
+    tally.reset += 1;
+    if (verdict === CONFIRMATION_DEADLINE_MISSED) {
+      tally.missedDeadline += 1;
+      input.log(
+        `Reset legacy context-graph readiness; ${remainingBudgetMs > 0
+          ? `confirmation missed its ${Math.min(rowTimeoutMs, remainingBudgetMs)}ms deadline`
+          : 'migration budget spent before confirmation'}: ${contextGraphId}`,
+      );
+    } else {
+      input.log(`Reset legacy unproven context-graph readiness: ${contextGraphId}`);
+    }
+  }
+
+  if (tally.preserved + tally.reset + tally.notSynced > 0) {
+    input.log(
+      `Context-graph readiness migration finished in ${Date.now() - startedAt}ms: `
+        + `${tally.preserved} preserved, ${tally.reset} reset `
+        + `(${tally.missedDeadline} past deadline), ${tally.notSynced} not synced, `
+        + `${tally.inactive} inactive left unmigrated`,
+    );
   }
 }

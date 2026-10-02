@@ -105,4 +105,56 @@ describe('selected SWM metadata retention budget', () => {
     first.release();
     second.release();
   });
+
+  it('separates a lease-own prefix ceiling from shared-pool contention', () => {
+    const budget = createSelectedSwmMetaRetentionBudget({
+      maxRows: 4,
+      maxBytesEstimate: 400,
+      maxPrefixRows: 1,
+      maxPrefixBytesEstimate: 100,
+    });
+    const lease = budget.lease();
+
+    const admittedFirst = lease.reserve();
+    expect(admittedFirst.exhaustion).toBeNull();
+    admittedFirst.release();
+
+    // At this lease's OWN per-prefix ceiling while the shared pool still has
+    // room: no later pass can widen it, so the caller must keep failing closed
+    // instead of waiting for capacity that is already its own limit.
+    lease.replace(1, 100);
+    const ownCeiling = lease.reserve();
+    expect(ownCeiling).toEqual(expect.objectContaining({
+      maxRows: 0,
+      exhaustion: 'prefix',
+    }));
+    ownCeiling.release();
+    lease.release();
+
+    // Below its own ceiling but blocked by rows the pool already handed to a
+    // sibling: transient, and therefore reported as a different exhaustion.
+    const shared = createSelectedSwmMetaRetentionBudget({
+      maxRows: 1,
+      maxBytesEstimate: 400,
+      maxPrefixRows: 4,
+      maxPrefixBytesEstimate: 400,
+    });
+    const holder = shared.lease();
+    const waiter = shared.lease();
+    holder.replace(1, 100);
+    const contended = waiter.reserve();
+    expect(contended).toEqual(expect.objectContaining({
+      maxRows: 0,
+      exhaustion: 'shared',
+    }));
+    contended.release();
+
+    // Releasing the holder restores capacity, so the waiter is admitted again.
+    holder.release();
+    const admitted = waiter.reserve();
+    expect(admitted.exhaustion).toBeNull();
+    expect(admitted.maxRows).toBe(1);
+    admitted.release();
+    waiter.release();
+  });
 });

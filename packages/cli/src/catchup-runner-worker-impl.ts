@@ -36,7 +36,10 @@ import {
 import {
   catchupPeerResponded,
   catchupPeerSucceeded,
+  isCatchupPlaneNotAttempted,
   type CatchupJobResult,
+  type CatchupLegacySharedMemoryFallback,
+  type CatchupPlaneNotAttempted,
   type CatchupRunRequest,
 } from './catchup-runner.js';
 
@@ -91,9 +94,25 @@ type CatchupDurableResult = DurableSyncResult & { verifiedPrivateOnlyResponses: 
  * Ordinary fan-out keeps the historical raw result. An RFC-64 selected
  * provider returns its discriminated terminal verdict as well, so the Worker
  * never has to infer completion from diagnostic counters that deliberately
- * retain resolved voluntary yields.
+ * retain resolved voluntary yields. A typed legacy fallback preserves the
+ * host's lane switch even when the worker requested selected scheduling.
  */
-type CatchupSharedMemoryRpcResult = SharedMemorySyncResult | SelectedSharedMemorySyncResult;
+type CatchupSharedMemoryRpcResult =
+  | SharedMemorySyncResult
+  | SelectedSharedMemorySyncResult
+  | CatchupLegacySharedMemoryFallback
+  | CatchupPlaneNotAttempted;
+
+/**
+ * A plane the host declined to run, as the plane policy sees it: the policy
+ * retries on `deferredBackpressure`, and a plane that never ran has none.
+ */
+type NotAttemptedPlane = CatchupPlaneNotAttempted & { readonly deferredBackpressure?: undefined };
+
+/** A plane the host declined to run is absent from the round, like a skipped one. */
+function attemptedPlane<T>(plane: T | NotAttemptedPlane | null): T | null {
+  return plane === null || isCatchupPlaneNotAttempted(plane) ? null : plane;
+}
 
 function selectedSharedMemoryResult(
   result: CatchupSharedMemoryRpcResult | null | undefined,
@@ -115,6 +134,8 @@ interface CatchupSharedMemoryPlane {
   readonly progress: DurableProgressClassification;
   readonly terminalBoundaryRequired: boolean;
   readonly selectedScopeProven: boolean;
+  /** A selected provider whose active lane was revoked is only an ordinary peer. */
+  readonly legacyFallback: boolean;
   /** Projected for the generic catch-up admission retry policy. */
   readonly deferredBackpressure?: number;
 }
@@ -131,14 +152,17 @@ function normalizeCatchupSharedMemoryResult(
   policy: CatchupSharedMemoryPolicy,
 ): CatchupSharedMemoryPlane {
   const selected = selectedSharedMemoryResult(result);
-  const payload = selected?.shared ?? result as SharedMemorySyncResult;
+  const legacyFallback = 'kind' in result && result.kind === 'legacy-shared-memory-fallback'
+    ? result
+    : undefined;
+  const payload = selected?.shared ?? legacyFallback?.shared ?? result as SharedMemorySyncResult;
   // Only an operator-pinned graph-complete provider may terminate the whole
   // selected SWM scope. Every explicitly subscribed PUBLIC CG still uses the
   // selected scheduler/continuation lane by default, but an ordinary peer's
   // terminal verdict describes only that peer's local manifest and must not
   // replace multi-peer union convergence. A complete-provider request that
   // receives an older/raw host response remains fail-closed.
-  const progress = policy.selectedSchedulingRequested
+  const progress = policy.selectedSchedulingRequested && !legacyFallback
     ? classifySharedMemoryFreshness(payload, {
       complete: policy.terminalBoundaryRequired
         ? selected?.scopeComplete === true
@@ -148,18 +172,20 @@ function normalizeCatchupSharedMemoryResult(
   return {
     payload,
     progress,
-    terminalBoundaryRequired: policy.terminalBoundaryRequired,
-    selectedScopeProven: policy.terminalBoundaryRequired
+    terminalBoundaryRequired: policy.terminalBoundaryRequired && !legacyFallback,
+    selectedScopeProven: policy.terminalBoundaryRequired && !legacyFallback
       && selected?.scopeComplete === true
       && progress.completedWithoutFailure,
+    legacyFallback: legacyFallback !== undefined,
     deferredBackpressure: payload.deferredBackpressure,
   };
 }
 
 /**
  * One peer's sync round. A plane is `null` when the walk deliberately skipped
- * it because the authority already settled that plane — that is the ONLY
- * exceptional case, and it is distinct from a plane that ran and failed.
+ * it because the authority already settled that plane, or when the host could
+ * not run it for this graph (see `CatchupPlaneNotAttempted`). Both are distinct
+ * from a plane that ran and failed: nothing was asked of the peer.
  */
 interface PeerRound {
   peerId: string;
@@ -443,8 +469,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersTried.add(peerId);
     const syncDurable = (
       { priority, source }: CatchupPlaneContext,
-    ): Promise<CatchupDurableResult> =>
-      invoke<DurableSyncResult>(
+    ): Promise<CatchupDurableResult | NotAttemptedPlane> =>
+      invoke<DurableSyncResult | CatchupPlaneNotAttempted>(
         request.graphOwnedDurableRecovery ? 'syncDurableRecovery' : 'syncDurable',
         peerId,
         request.contextGraphId,
@@ -452,18 +478,21 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         source,
       )
         .catch(() => createFailedPeerDurableSyncResult())
-        .then((rawDurable) => ({
-          ...rawDurable,
-          verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
-        }));
+        .then((rawDurable) => (isCatchupPlaneNotAttempted(rawDurable)
+          ? rawDurable
+          : {
+            ...rawDurable,
+            verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
+          }));
     const syncSharedMemory = (
       { priority, source }: CatchupPlaneContext,
-    ): Promise<CatchupSharedMemoryPlane> => {
+    ): Promise<CatchupSharedMemoryPlane | NotAttemptedPlane> => {
       // A foreground subscribe job is already scoped to one explicit CG. For
       // public SWM, make RFC-64 selected scheduling and bounded continuation the
       // default on every candidate peer. This does NOT make every candidate an
       // authority: only a pinned complete provider may furnish the terminal
-      // whole-scope proof consumed below.
+      // whole-scope proof consumed below. The host decides on each call
+      // whether the lane may run and answers not attempted if it may not.
       const policy: CatchupSharedMemoryPolicy = {
         selectedSchedulingRequested: request.includeSharedMemory
           && !prepared.isPrivateContextGraph,
@@ -477,7 +506,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         source,
         policy.selectedSchedulingRequested,
       )
-        .then((result) => normalizeCatchupSharedMemoryResult(result, policy))
+        .then((result) => (isCatchupPlaneNotAttempted(result)
+          ? result
+          : normalizeCatchupSharedMemoryResult(result, policy)))
         .catch(() => normalizeCatchupSharedMemoryResult(emptyShared(), policy));
     };
 
@@ -527,7 +558,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         fromDurableAuthority,
         fromSharedMemoryAuthority,
         durable: null,
-        shared,
+        shared: attemptedPlane(shared),
       };
     }
     const round = await runCatchupPlanesWithPolicy({
@@ -543,7 +574,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       syncDurable,
       syncSharedMemory,
     });
-    return { peerId, fromDurableAuthority, fromSharedMemoryAuthority, ...round };
+    return {
+      peerId,
+      fromDurableAuthority,
+      fromSharedMemoryAuthority,
+      durable: attemptedPlane(round.durable),
+      shared: attemptedPlane(round.shared),
+    };
   };
 
   const accumulate = (
@@ -559,6 +596,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     let peerDenied = false;
     const shared = sharedResult?.payload ?? null;
     const sharedCompletedWithoutFailure = sharedResult?.progress.completedWithoutFailure ?? false;
+    // Preparation may have named this peer a complete provider before the
+    // kill switch revoked its selected lane. The typed fallback still carries
+    // useful ordinary progress, but it no longer speaks for the whole graph.
+    const sharedFromAuthority = fromSharedMemoryAuthority && !sharedResult?.legacyFallback;
     if (shared) {
       passTracker.recordPeerRound(
         peerId,
@@ -612,7 +653,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
           ...shared,
           swmCoverage: {
             ...shared.swmCoverage,
-            fromAuthority: fromSharedMemoryAuthority,
+            fromAuthority: sharedFromAuthority,
           },
         }
         : shared;
@@ -650,14 +691,14 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // evidence only ever has data/empty set — the same reducer still applies.
       const sharedEvidence = catchupPeerPlaneEvidence(shared, {
         completedWithoutFailure: sharedCompletedWithoutFailure,
-        fromAuthority: fromSharedMemoryAuthority,
+        fromAuthority: sharedFromAuthority,
         plane: 'shared-memory',
       });
       if (sharedResult?.selectedScopeProven) {
         sharedEvidence.selectedScopeCompletePeers = 1;
       }
       addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
-      if (fromSharedMemoryAuthority) {
+      if (sharedFromAuthority) {
         addCatchupPlaneEvidence(authorityEvidence.sharedMemory, sharedEvidence);
         if (sharedCompletedWithoutFailure) {
           authorityAnswered.sharedMemory = true;

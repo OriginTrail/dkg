@@ -7,8 +7,10 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   getPromoteFailureDisposition,
+  isPromoteStepName,
   type PromoteFailureDisposition,
   type PromoteFailureClassification,
+  type PromoteStepName,
 } from '@origintrail-official/dkg-publisher';
 
 // Keep the publisher's discriminated union intact. Legacy prose/store results
@@ -23,15 +25,16 @@ export type ClassifiedPromoteError = (
 ) & { message?: string };
 
 const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
-const PROMOTE_DIAGNOSTIC_STAGES = new Set([
-  'ensureSubGraphRegistered',
-  'assertGraphScopedLifecycleWritable',
-  'knowledgeAssetPrivateQuads',
-  'assertionScopedQuads',
-  'assertTrustedCatalogTriplesAllowed',
-  'encodeWorkspaceGossipPayload',
-]);
 
+// Three closed sets guard this boundary, under two deliberately different
+// ownership rules. A promote STAGE is by construction a producer-owned literal
+// — it only exists as an argument the publisher passes to `tagPromoteStep` —
+// so the publisher owns that set and the CLI narrows through its
+// `isPromoteStepName` predicate; a second copy here could only ever drift.
+// An error NAME or CODE can originate anywhere upstream, including in a
+// caller-influenced throw, so those two sets stay locally owned below and are
+// never widened by a producer-side change.
+//
 // Only producer-owned, source-defined identities are safe to retain verbatim.
 // Arbitrary upstream name/code strings can be credentials even when they are
 // syntactically simple, so everything outside these closed sets becomes unknown.
@@ -58,11 +61,9 @@ function untagPromoteMessage(message: string): string {
   return message.replace(PROMOTE_STEP_TAG, '');
 }
 
-export function diagnosticPromoteStage(message: string): string {
+export function diagnosticPromoteStage(message: string): PromoteStepName | 'unknown' {
   const candidate = PROMOTE_STEP_TAG.exec(message)?.[1];
-  return candidate !== undefined && PROMOTE_DIAGNOSTIC_STAGES.has(candidate)
-    ? candidate
-    : 'unknown';
+  return candidate !== undefined && isPromoteStepName(candidate) ? candidate : 'unknown';
 }
 
 export function safePromoteErrorIdentity(

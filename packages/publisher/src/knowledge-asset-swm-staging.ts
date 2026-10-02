@@ -7,12 +7,15 @@ import {
   canonicalSharedMemoryScopeWriteGraph,
   invalidateSwmMaterializationWitness,
   resolveSharedMemoryScopeGraphs,
-  tryReplaceGraphAtomically,
   type Quad,
   type SharedMemoryGraphScope,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
+import {
+  tryReplaceGraphWithDurableRootCompanionAtomically,
+  type DurableRootAtomicCompanionResolver,
+} from './durable-root-atomic-companion.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { toHex } from './metadata.js';
 import {
@@ -61,6 +64,7 @@ interface StageKnowledgeAssetSharedWorkingMemoryStorageInputV1
   readonly writeLocks: Map<string, Promise<void>>;
   readonly graphManager: GraphManager;
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  readonly resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
 }
 
 /**
@@ -148,6 +152,36 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       ) {
         throw stale();
       }
+      // A queued root operation can predate late-boundary tracking. Reusing
+      // its immutable intent must therefore establish the marker from the
+      // exact verified snapshot bytes before returning. The graph and marker
+      // are one transaction; a graph-then-marker sequence would reopen the
+      // crash window this boundary exists to close.
+      const companion = input.subGraphName === undefined
+        ? input.resolveDurableRootAtomicCompanion?.(Object.freeze({
+            contextGraphId: input.contextGraphId,
+            kaUal: scope.ual,
+            assertionVersion: scope.assertionVersion,
+            shareOperationId: input.shareOperationId,
+          }))
+        : undefined;
+      if (companion !== undefined) {
+        const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
+          input.store,
+          swmGraph,
+          snapshot.quads.map((quad) => ({ ...quad, graph: swmGraph })),
+          companion,
+        );
+        await invalidateSwmMaterializationWitness(input.store, swmGraph, {
+          source: 'publisher.stageKnowledgeAssetSharedWorkingMemoryV1.reuseWitnessInvalidate',
+        }).catch(() => {});
+        if (!replaced) {
+          throw Object.assign(
+            new Error(`Graph-scoped update requires atomic SWM replacement at ${swmGraph}`),
+            { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED', graphUri: swmGraph },
+          );
+        }
+      }
       return Object.freeze({
         contextGraphId: input.contextGraphId,
         shareOperationId: input.shareOperationId,
@@ -164,10 +198,19 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       swmBucket,
       sharedMemoryScope,
     );
-    const replaced = await tryReplaceGraphAtomically(
+    const companion = input.subGraphName === undefined
+      ? input.resolveDurableRootAtomicCompanion?.(Object.freeze({
+          contextGraphId: input.contextGraphId,
+          kaUal: scope.ual,
+          assertionVersion: scope.assertionVersion,
+          shareOperationId: input.shareOperationId,
+        }))
+      : undefined;
+    const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
       input.store,
       swmGraph,
       publicQuads.map((quad) => ({ ...quad, graph: swmGraph })),
+      companion,
     );
     await invalidateSwmMaterializationWitness(input.store, swmGraph, {
       source: 'publisher.stageKnowledgeAssetSharedWorkingMemoryV1.witnessInvalidate',

@@ -166,6 +166,100 @@ function batchRejectionAgent(extra: Record<string, unknown> = {}) {
 }
 
 describe('knowledge-assets publish routes — transport-status mapping (#1329)', () => {
+  it('uses the locked create disposition when sealing wins after the pre-read', async () => {
+    let historyCalls = 0;
+    const agent = publishAgent({
+      assertion: {
+        history: async () => (++historyCalls === 1 ? null : { status: 'wm-sealed' }),
+        create: async (_cg: string, _name: string, opts: any) => {
+          opts.onDisposition('sealed-noop');
+          return 'urn:test:sealed-assertion';
+        },
+      },
+    });
+    const { res, done } = runKaCtx('POST', '/api/knowledge-assets', agent, {
+      contextGraphId: 'cg-1', name: 'concurrently-sealed',
+    });
+
+    await done;
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body)).toMatchObject({
+      assertionUri: 'urn:test:sealed-assertion',
+      alreadyExists: true,
+      status: 'wm-sealed',
+    });
+    expect(historyCalls).toBe(2);
+  });
+
+  it('fails closed when a concurrent sealed no-op cannot be read back', async () => {
+    const agent = publishAgent({
+      assertion: {
+        history: async () => null,
+        create: async (_cg: string, _name: string, opts: any) => {
+          opts.onDisposition('sealed-noop');
+          return 'urn:test:sealed-assertion';
+        },
+      },
+    });
+    const { res, done } = runKaCtx('POST', '/api/knowledge-assets', agent, {
+      contextGraphId: 'cg-1', name: 'unreadable-concurrent-seal',
+    });
+
+    await done;
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body).error).toContain('was not readable as sealed');
+  });
+
+  it('maps create recovery and sealed-write guards to actionable conflicts', async () => {
+    const recoveryError = Object.assign(new Error('resume interrupted sharing'), {
+      code: 'KA_PROMOTE_RECOVERY_REQUIRED',
+    });
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const createAgent = publishAgent({
+        assertion: {
+          history: async () => null,
+          create: async () => { throw recoveryError; },
+        },
+      });
+      const create = runKaCtx('POST', '/api/knowledge-assets', createAgent, {
+        contextGraphId: 'cg-1', name: 'interrupted-share',
+      });
+      await create.done;
+      expect(create.res.statusCode).toBe(409);
+      expect(JSON.parse(create.res.body)).toMatchObject({
+        code: 'KA_PROMOTE_RECOVERY_REQUIRED',
+        retryAction: 'resume_existing_knowledge_asset',
+        retryKnowledgeAssetName: 'interrupted-share',
+      });
+      expect(stderr).toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+    }
+
+    const sealedError = Object.assign(new Error('already finalized'), {
+      code: 'KA_ASSERTION_ALREADY_FINALIZED',
+    });
+    const writeAgent = publishAgent({
+      assertion: {
+        history: async () => ({ status: 'wm-sealed' }),
+        write: async () => { throw sealedError; },
+      },
+    });
+    const write = runKaCtx(
+      'POST',
+      '/api/knowledge-assets/sealed/wm/write',
+      writeAgent,
+      {
+        contextGraphId: 'cg-1',
+        quads: [{ subject: 'http://s', predicate: 'http://p', object: '"o"' }],
+      },
+    );
+    await write.done;
+    expect(write.res.statusCode).toBe(409);
+    expect(JSON.parse(write.res.body).code).toBe('KA_ASSERTION_ALREADY_FINALIZED');
+  });
+
   it('does not serve KA batch-rejection endpoints from memory routes', async () => {
     const { res, done } = runMemoryCtx(
       'POST',

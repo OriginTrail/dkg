@@ -1,12 +1,22 @@
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent as RealDKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {
-  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
-    return RealDKGAgent.create({
+  async create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    const agent = await RealDKGAgent.create({
       rfc64CatalogActivation: { enabled: false },
       ...config,
     });
+    // This file's synthetic persisted rows exercise persistence, caps and
+    // ordering. Give them local-create provenance so the admission guard does
+    // not turn those mechanics tests into remote-authority tests. The latter
+    // have their own rehydration coverage in private-read-chain-authority.
+    const rows = await config.contextGraphSubscriptionStore?.loadAll();
+    for (const row of rows ?? []) {
+      (agent as any).localContextGraphProvenance.recordLocalCreate(row.id);
+    }
+    return agent;
   },
 };
 
@@ -51,6 +61,61 @@ async function createAgentWithContextGraphPersistence(
     contextGraphSubscriptionStore: fixture.subscriptionStore,
     contextGraphMembershipStore: fixture.membershipStore,
   });
+}
+
+function createPromotionHarness(
+  rows: Array<Record<string, unknown>>,
+  options: {
+    cap?: number;
+    authority?: 'allowed' | 'denied' | 'unavailable';
+    load?: (id: string) => Promise<Record<string, unknown> | null>;
+    activate?: (row: Record<string, unknown>, activationOptions?: unknown) => Promise<void>;
+  } = {},
+) {
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  const load = options.load ?? (async (id: string) => byId.get(id) ?? null);
+  const agent: any = {
+    config: { contextGraphSubscriptionStore: { load } },
+    contextGraphSubscriptionRehydrationStatus: {
+      rehydrationEnabled: true,
+      activationCap: options.cap ?? 64,
+      updatedAt: 0,
+    },
+    contextGraphSubscriptionRehydrationPromotionRuntime: { owns: () => true },
+    contextGraphSubscriptionRehydrationPendingIds: new Set<string>(),
+    contextGraphSubscriptionRehydrationSlotIds: new Set<string>(),
+    contextGraphSubscriptionDormancyById: new Map<string, string>(),
+    contextGraphSubscriptionPersistRevisions: new Map<string, number>(),
+    subscribedContextGraphs: new Map<string, any>(),
+    started: true,
+    log: { warn: vi.fn(), info: vi.fn() },
+    updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn(),
+    updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn(),
+    persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
+    reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => undefined),
+    resolveContextGraphSubscriptionBootstrapAuthority: vi.fn(async () => ({
+      outcome: options.authority ?? 'allowed',
+      source: 'test',
+      reason: 'test',
+      metadataBootstrap: 'eligible',
+    })),
+  };
+  agent.activatePersistedContextGraphSubscriptionRecord = options.activate
+    ? vi.fn(options.activate)
+    : vi.fn(async (row: Record<string, unknown>) => {
+      agent.subscribedContextGraphs.set(row.id, {
+        subscribed: row.subscribed === true,
+        coreHosted: row.coreHosted === true,
+        synced: false,
+        metaSynced: false,
+        pendingMeta: false,
+      });
+    });
+  for (const row of rows) {
+    agent.contextGraphSubscriptionRehydrationPendingIds.add(String(row.id));
+    agent.contextGraphSubscriptionDormancyById.set(String(row.id), 'activationCap');
+  }
+  return { agent, load: vi.mocked(load) };
 }
 
 beforeAll(async () => {
@@ -137,7 +202,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: true,
           sharedMemorySynced: true,
           metaSynced: true,
-          onChainId: '0x1234',
+          onChainId: '4660',
         });
         await new Promise((resolve) => setTimeout(resolve, 0));
       } finally {
@@ -150,7 +215,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
         sharedMemorySynced: true,
         metaSynced: true,
-        onChainId: '0x1234',
+        onChainId: '4660',
         syncScoped: true,
       });
       expect(persistedMembers.get(`persisted-cg|node|${agentAPeerId}`)).toMatchObject({
@@ -163,6 +228,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       });
 
       const agentB = await createAgentWithContextGraphPersistence('PersistedSubscriptionsB', fixture);
+      const liveAuthority = vi.spyOn(agentB, 'resolveLiveOnChainAccessPolicyState')
+        .mockResolvedValue({ kind: 'available', accessPolicy: 0 });
 
       try {
         await agentB.start();
@@ -172,8 +239,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: true,
           sharedMemorySynced: true,
           metaSynced: true,
-          onChainId: '0x1234',
+          onChainId: '4660',
         });
+        expect(liveAuthority).toHaveBeenCalled();
         expect((agentB as any).config.syncContextGraphs ?? []).toContain('persisted-cg');
         await new Promise((resolve) => setTimeout(resolve, 0));
         expect(persistedMembers.get(`persisted-cg|node|${agentB.peerId}`)).toMatchObject({
@@ -404,10 +472,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       try {
         await agentA.start();
         agentA.subscribeToContextGraph(localCgId, { syncMode: 'on-demand' });
+        // The member subscription is bound to its on-chain graph: core
+        // hosting joins a bound row, and never binds an unbound one.
         agentA.markContextGraphSubscriptionState(localCgId, {
           synced: true,
           sharedMemorySynced: true,
           metaSynced: true,
+          onChainId: '14',
         });
         (agentA as any).chain.getContextGraphAccessPolicy = async () => 0;
         (agentA as any).chain.isContextGraphActiveOnChain = async () => true;
@@ -443,6 +514,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         contextGraphSubscriptionStore: subscriptionStore,
         nodeRole: 'core',
       });
+      const liveAuthority = vi.spyOn(agentB, 'resolveLiveOnChainAccessPolicyState')
+        .mockResolvedValue({ kind: 'available', accessPolicy: 0 });
       try {
         await agentB.start();
         expect(agentB.getSubscribedContextGraphs().get(localCgId)).toMatchObject({
@@ -454,6 +527,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           coreHosted: true,
           onChainId: '14',
         });
+        expect(liveAuthority).toHaveBeenCalled();
         expect((agentB as any).config.syncContextGraphs ?? []).not.toContain(localCgId);
       } finally {
         await agentB.stop().catch(() => {});
@@ -470,7 +544,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: false,
           sharedMemorySynced: false,
           metaSynced: false,
-          onChainId: '0xabcd',
+          onChainId: '43981',
           syncScoped: false,
         }],
         save: async () => {},
@@ -483,6 +557,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
         contextGraphSubscriptionStore: subscriptionStore,
       });
+      const liveAuthority = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
+        .mockResolvedValue({ kind: 'available', accessPolicy: 0 });
 
       try {
         await agent.start();
@@ -491,8 +567,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: false,
           sharedMemorySynced: false,
           metaSynced: false,
-          onChainId: '0xabcd',
+          onChainId: '43981',
         });
+        expect(liveAuthority).toHaveBeenCalled();
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain('discovered-cg');
       } finally {
         await agent.stop().catch(() => {});
@@ -506,7 +583,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const confirmedId = 'approved-b-confirmed';
       const dormantId = 'approved-z-dormant';
       const confirmedOnChainHash = ethers.keccak256(ethers.toUtf8Bytes(confirmedId));
+      const confirmedMeta = contextGraphMetaUri(confirmedId);
+      const confirmedDelegation =
+        `did:dkg:agent-delegation:${confirmedId}:${localAgentAddress.toLowerCase()}`;
       const subscriptionWrites: any[] = [];
+      let agent!: DKGAgent;
       const subscriptionStore = {
         loadAll: async () => [
           // Reproduce the v10.0.6 poison: an unrelated empty peer promoted all
@@ -519,44 +600,55 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         delete: async () => {},
       };
       const membershipStore = {
-        loadAll: async () => [
-          ...[pendingId, confirmedId, dormantId].map((contextGraphId, index) => ({
-            contextGraphId,
-            principalType: 'agent' as const,
-            principalId: localAgentAddress,
-            role: 'participant',
-            status: 'active' as const,
-            source: 'join-approved',
-            metadata: { curatorPeerId: `12D3KooWRestartCurator${index}` },
-            firstSeenAt: 100 + index,
-            updatedAt: 200 + index,
-          })),
-          // A newer but non-local approval must not steer this node's signer.
-          {
-            contextGraphId: pendingId,
-            principalType: 'agent' as const,
-            principalId: ethers.Wallet.createRandom().address,
-            role: 'participant',
-            status: 'active' as const,
-            source: 'join-approved',
-            updatedAt: 999,
-          },
-          // Only explicit join-approved facts carry the bootstrap signer hint.
-          {
-            contextGraphId: pendingId,
-            principalType: 'agent' as const,
-            principalId: localAgentAddress,
-            role: 'participant',
-            status: 'active' as const,
-            source: 'allowed-agent',
-            updatedAt: 1_000,
-          },
-        ],
+        loadAll: async () => {
+          // Membership restoration runs after the network identity starts.
+          // Install the persisted receiver binding at that boundary so the
+          // registered-metadata proof exercises the real local peer id.
+          await agent.store.insert([{
+            subject: confirmedDelegation,
+            predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
+            object: sparqlString(agent.peerId),
+            graph: confirmedMeta,
+          }]);
+          return [
+            ...[pendingId, confirmedId, dormantId].map((contextGraphId, index) => ({
+              contextGraphId,
+              principalType: 'agent' as const,
+              principalId: localAgentAddress,
+              role: 'participant',
+              status: 'active' as const,
+              source: 'join-approved',
+              metadata: { curatorPeerId: `12D3KooWRestartCurator${index}` },
+              firstSeenAt: 100 + index,
+              updatedAt: 200 + index,
+            })),
+            // A newer but non-local approval must not steer this node's signer.
+            {
+              contextGraphId: pendingId,
+              principalType: 'agent' as const,
+              principalId: ethers.Wallet.createRandom().address,
+              role: 'participant',
+              status: 'active' as const,
+              source: 'join-approved',
+              updatedAt: 999,
+            },
+            // Only explicit join-approved facts carry the bootstrap signer hint.
+            {
+              contextGraphId: pendingId,
+              principalType: 'agent' as const,
+              principalId: localAgentAddress,
+              role: 'participant',
+              status: 'active' as const,
+              source: 'allowed-agent',
+              updatedAt: 1_000,
+            },
+          ];
+        },
         upsert: async () => {},
         delete: async () => {},
       };
 
-      const agent = await DKGAgent.create({
+      agent = await DKGAgent.create({
         name: 'ApprovedMembershipRestart',
         listenHost: '127.0.0.1',
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
@@ -570,9 +662,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const pendingUri = contextGraphDataGraphUri(pendingId);
       const pendingMeta = contextGraphMetaUri(pendingId);
       const confirmedUri = contextGraphDataGraphUri(confirmedId);
-      const confirmedMeta = contextGraphMetaUri(confirmedId);
-      const confirmedDelegation =
-        `did:dkg:agent-delegation:${confirmedId}:${localAgentAddress.toLowerCase()}`;
+      const confirmedCuratorPeerId = '12D3KooWRestartCurator1';
       await agent.store.insert([
         {
           subject: pendingUri,
@@ -613,7 +703,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         {
           subject: confirmedUri,
           predicate: DKG_ONTOLOGY.DKG_CREATOR,
-          object: 'did:dkg:agent:12D3KooWRestartCuratorCreator',
+          object: `did:dkg:agent:${confirmedCuratorPeerId}`,
           graph: confirmedMeta,
         },
         {
@@ -659,10 +749,20 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           graph: confirmedMeta,
         },
       ]);
+      await agent.writeRequesterJoinRequestState(confirmedId, localAgentAddress, {
+        status: 'approved',
+        requestGeneration: `0x${'12'.repeat(32)}`,
+        curatorPeerId: confirmedCuratorPeerId,
+        curatorAgentAddress: localAgentAddress.toLowerCase(),
+        curatorAuthorityEra: '0',
+      });
 
       try {
+        // Rehydration starts the retrying recovery loop (#2832), which runs
+        // this single attempt.
+        const recoverPendingMetadata = vi.spyOn(agent, 'recoverPendingJoinApprovalMetadata');
         const resumePendingMetadata = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
-          .mockResolvedValue(undefined);
+          .mockResolvedValue('completed');
         await agent.start();
         expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(localAgentAddress.toLowerCase());
 
@@ -687,6 +787,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain(pendingId);
         await expect(agent.canReadContextGraph(pendingId)).resolves.toBe(false);
+        expect(recoverPendingMetadata).toHaveBeenCalledWith(pendingId, '12D3KooWRestartCurator0');
         expect(resumePendingMetadata).toHaveBeenCalledWith(
           pendingId,
           '12D3KooWRestartCurator0',
@@ -698,6 +799,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           onChainHash: confirmedOnChainHash.toLowerCase(),
         });
         expect(agent.getSubscribedContextGraphs().get(confirmedId)?.pendingMeta).toBeUndefined();
+        expect(recoverPendingMetadata).not.toHaveBeenCalledWith(
+          confirmedId,
+          '12D3KooWRestartCurator1',
+        );
         expect(subscriptionWrites.filter((row) => row.id === confirmedId).at(-1)).toMatchObject({
           id: confirmedId,
           subscribed: true,
@@ -867,6 +972,316 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       } finally {
         await agent.stop().catch(() => {});
       }
+    });
+
+    it('rolls a capped subscription into the next slot after safe readiness', async () => {
+      const rows = [
+        { id: 'rolling-cg-a', name: 'Rolling A', subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: false, syncScoped: true },
+        { id: 'rolling-cg-b', name: 'Rolling B', subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: false, syncScoped: true },
+      ];
+      const subscriptionStore = {
+        loadAll: async () => rows,
+        save: async () => {},
+        delete: async () => {},
+      };
+      const agent = await DKGAgent.create({
+        name: 'RollingRehydration',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: subscriptionStore,
+        maxRehydratedContextGraphSubscriptions: 1,
+      });
+      try {
+        await agent.start();
+        expect(agent.getSubscribedContextGraphs().get('rolling-cg-a')?.subscribed).toBe(true);
+        expect(agent.getSubscribedContextGraphs().get('rolling-cg-b')).toBeUndefined();
+        expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 1,
+          dormant: 1,
+          dormantIds: ['rolling-cg-b'],
+        });
+
+        agent.setContextGraphSubscription('rolling-cg-a', {
+          ...agent.getSubscribedContextGraphs().get('rolling-cg-a')!,
+          synced: true,
+          metaSynced: true,
+        });
+
+        await vi.waitFor(() => {
+          expect(agent.getSubscribedContextGraphs().get('rolling-cg-b')?.subscribed).toBe(true);
+        }, { timeout: 5_000, interval: 10 });
+        expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 2,
+          dormant: 0,
+          dormantIds: [],
+        });
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('reconciles rolling promotion races and retry outcomes', async () => {
+      const inactive: any = {
+        config: { contextGraphSubscriptionStore: undefined },
+        contextGraphSubscriptionRehydrationStatus: null,
+        contextGraphSubscriptionRehydrationPromotionRuntime: undefined,
+        started: false,
+      };
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          inactive,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('idle');
+
+      const missing = createPromotionHarness([{ id: 'missing' }], {
+        load: async () => null,
+      });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          missing.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('idle');
+      expect(missing.agent.contextGraphSubscriptionRehydrationPendingIds.size).toBe(0);
+      expect(missing.agent.updateContextGraphSubscriptionRehydrationStatusAfterClear)
+        .toHaveBeenCalledWith(['missing']);
+
+      const revoked = createPromotionHarness([{ id: 'revoked', subscribed: false, coreHosted: false }]);
+      await LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        revoked.agent,
+        new AbortController().signal,
+      );
+      expect(revoked.agent.updateContextGraphSubscriptionRehydrationStatusAfterClear)
+        .toHaveBeenCalledWith([], ['revoked']);
+
+      const alreadyActive = createPromotionHarness([{ id: 'already-active', subscribed: true }]);
+      alreadyActive.agent.subscribedContextGraphs.set('already-active', { subscribed: true });
+      await LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        alreadyActive.agent,
+        new AbortController().signal,
+      );
+      expect(alreadyActive.agent.activatePersistedContextGraphSubscriptionRecord).not.toHaveBeenCalled();
+      expect(alreadyActive.agent.contextGraphSubscriptionRehydrationPendingIds.size).toBe(0);
+
+      for (const authority of ['denied', 'unavailable'] as const) {
+        const blocked = createPromotionHarness([{ id: `blocked-${authority}`, subscribed: true }], { authority });
+        await LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          blocked.agent,
+          new AbortController().signal,
+        );
+        expect(blocked.agent.log.warn).toHaveBeenCalled();
+        expect(blocked.agent.contextGraphSubscriptionDormancyById.get(`blocked-${authority}`))
+          .toBe(authority === 'denied' ? 'authorityDenied' : 'authorityUnavailable');
+      }
+
+      let reread = 0;
+      const stale = createPromotionHarness([{ id: 'stale' }], {
+        load: async () => (++reread === 1 ? { id: 'stale', subscribed: true } : null),
+      });
+      await LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        stale.agent,
+        new AbortController().signal,
+      );
+      expect(stale.agent.updateContextGraphSubscriptionRehydrationStatusAfterClear)
+        .toHaveBeenCalledWith(['stale']);
+
+      let currentBinding = {
+        id: 'binding-race',
+        subscribed: true,
+        onChainId: '7',
+        onChainHash: `0x${'aa'.repeat(32)}`,
+      };
+      const laterEligible = {
+        id: 'later-eligible',
+        subscribed: true,
+        onChainId: '8',
+      };
+      let enterAuthority!: () => void;
+      let releaseAuthority!: () => void;
+      const authorityEntered = new Promise<void>((resolve) => { enterAuthority = resolve; });
+      const authorityGate = new Promise<void>((resolve) => { releaseAuthority = resolve; });
+      const bindingRace = createPromotionHarness([currentBinding, laterEligible], {
+        load: async (id) => ({ ...(id === currentBinding.id ? currentBinding : laterEligible) }),
+      });
+      bindingRace.agent.resolveContextGraphSubscriptionBootstrapAuthority
+        .mockImplementation(async (id: string) => {
+          if (id === currentBinding.id) {
+            enterAuthority();
+            await authorityGate;
+          }
+          return {
+            outcome: 'allowed',
+            source: 'registered-chain',
+            reason: 'open-context-graph',
+            metadataBootstrap: 'not-needed',
+            onChainId: 7n,
+          } as const;
+        });
+      const racedPromotion = LifecycleSyncMethods.prototype
+        .promoteDormantContextGraphSubscriptions.call(
+          bindingRace.agent,
+          new AbortController().signal,
+        );
+      await authorityEntered;
+      currentBinding = {
+        ...currentBinding,
+        onChainHash: `0x${'bb'.repeat(32)}`,
+      };
+      releaseAuthority();
+      await expect(racedPromotion).resolves.toBe('rearm');
+      expect(bindingRace.agent.activatePersistedContextGraphSubscriptionRecord)
+        .toHaveBeenCalledOnce();
+      expect(bindingRace.agent.activatePersistedContextGraphSubscriptionRecord)
+        .toHaveBeenCalledWith(laterEligible, expect.any(Object));
+      expect(bindingRace.agent.contextGraphSubscriptionRehydrationPendingIds)
+        .toContain('binding-race');
+
+      const activationFailure = createPromotionHarness([{ id: 'activation-failure', subscribed: true }], {
+        activate: async () => { throw new Error('activation failed'); },
+      });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          activationFailure.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('rearm');
+      expect(activationFailure.agent.log.warn).toHaveBeenCalled();
+
+      const batch = createPromotionHarness(
+        Array.from({ length: 8 }, (_, i) => ({ id: `batch-${i}`, subscribed: true })),
+        { cap: 9 },
+      );
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          batch.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('idle');
+      expect(batch.agent.activatePersistedContextGraphSubscriptionRecord).toHaveBeenCalledTimes(8);
+      expect(batch.agent.contextGraphSubscriptionRehydrationPendingIds.size).toBe(0);
+    });
+
+    it('fences capped promotion after authority and across strict binding repair', async () => {
+      const reclassified = createPromotionHarness([
+        { id: 'reclassified-after-authority', subscribed: true, onChainId: '7' },
+      ]);
+      reclassified.agent.resolveContextGraphSubscriptionBootstrapAuthority
+        .mockImplementation(async (contextGraphId: string) => {
+          reclassified.agent.contextGraphSubscriptionDormancyById
+            .set(contextGraphId, 'authorityUnavailable');
+          return {
+            outcome: 'allowed',
+            source: 'registered-chain',
+            reason: 'open-context-graph',
+            metadataBootstrap: 'not-needed',
+            onChainId: 7n,
+          };
+        });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          reclassified.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('rearm');
+      expect(reclassified.agent.activatePersistedContextGraphSubscriptionRecord)
+        .not.toHaveBeenCalled();
+
+      const concurrentlyActive = createPromotionHarness([
+        { id: 'active-after-authority', subscribed: true, onChainId: '7' },
+      ]);
+      concurrentlyActive.agent.resolveContextGraphSubscriptionBootstrapAuthority
+        .mockImplementation(async (contextGraphId: string) => {
+          concurrentlyActive.agent.subscribedContextGraphs.set(contextGraphId, {
+            subscribed: true,
+          });
+          return {
+            outcome: 'allowed',
+            source: 'registered-chain',
+            reason: 'open-context-graph',
+            metadataBootstrap: 'not-needed',
+            onChainId: 7n,
+          };
+        });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          concurrentlyActive.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('idle');
+      expect(concurrentlyActive.agent.activatePersistedContextGraphSubscriptionRecord)
+        .not.toHaveBeenCalled();
+      expect(concurrentlyActive.agent.contextGraphSubscriptionRehydrationPendingIds.size)
+        .toBe(0);
+      expect(concurrentlyActive.agent.contextGraphSubscriptionDormancyById.size).toBe(0);
+
+      const staleBeforePrepare = createPromotionHarness([
+        { id: 'stale-before-prepare', subscribed: true, onChainId: '7' },
+      ]);
+      staleBeforePrepare.agent.activatePersistedContextGraphSubscriptionRecord
+        .mockImplementation(async (row: any, options: any) => {
+          const subscription = { subscribed: true, onChainId: row.onChainId };
+          staleBeforePrepare.agent.subscribedContextGraphs.set(row.id, subscription);
+          staleBeforePrepare.agent.contextGraphSubscriptionDormancyById
+            .set(row.id, 'authorityUnavailable');
+          await options.prepare(subscription);
+          return subscription;
+        });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          staleBeforePrepare.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('rearm');
+      expect(staleBeforePrepare.agent.log.warn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('became stale'),
+      );
+
+      const staleDuringRepair = createPromotionHarness([
+        { id: 'stale-during-repair', subscribed: true, onChainId: '042' },
+      ]);
+      staleDuringRepair.agent.resolveContextGraphSubscriptionBootstrapAuthority
+        .mockResolvedValue({
+          outcome: 'allowed',
+          source: 'registered-chain',
+          reason: 'open-context-graph',
+          metadataBootstrap: 'not-needed',
+          onChainId: 8n,
+        });
+      const staleDuringRepairNetworkEffects = vi.fn();
+      staleDuringRepair.agent.persistContextGraphSubscriptionStrict
+        .mockImplementation(async (contextGraphId: string) => {
+          await Promise.resolve();
+          staleDuringRepair.agent.contextGraphSubscriptionPersistRevisions
+            .set(contextGraphId, 1);
+        });
+      staleDuringRepair.agent.activatePersistedContextGraphSubscriptionRecord
+        .mockImplementation(async (row: any, options: any) => {
+          const subscription = { subscribed: true, onChainId: options.onChainId };
+          staleDuringRepair.agent.subscribedContextGraphs.set(row.id, subscription);
+          await options.prepare(subscription);
+          if (!options.isCurrent(subscription)) throw new Error('stale activation');
+          staleDuringRepairNetworkEffects();
+          return subscription;
+        });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          staleDuringRepair.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('rearm');
+      expect(staleDuringRepair.agent.persistContextGraphSubscriptionStrict)
+        .toHaveBeenCalledOnce();
+      expect(staleDuringRepair.agent.reconcileRfc64CatalogResponsibilityV1)
+        .not.toHaveBeenCalled();
+      expect(staleDuringRepairNetworkEffects).not.toHaveBeenCalled();
+      expect(staleDuringRepair.agent.contextGraphSubscriptionRehydrationPendingIds)
+        .toContain('stale-during-repair');
+      expect(staleDuringRepair.agent.log.warn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('became stale'),
+      );
     });
 
     it('keeps rehydration diagnostics when a persisted subscription delete fails', async () => {

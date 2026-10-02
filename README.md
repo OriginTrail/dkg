@@ -64,7 +64,7 @@ the writer, but do not encrypt GossipSub payload bytes.
 
 ## Quick Start
 
-**Prerequisites:** Node.js 22+, npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
+**Prerequisites:** Node.js 22.13+ (or 23.4+), npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
 
 ### Hermes adapter
 
@@ -353,7 +353,7 @@ Use adapters for OpenClaw, ElizaOS, Hermes, or your own Node.js / TypeScript pro
 
 ## Benchmarking
 
-Benchmarking docs live in [`BENCHMARKING.md`](BENCHMARKING.md). The current
+Benchmarking docs live in [`bench/README.md`](bench/README.md). The current
 suite covers DKG publish/get and memory-layer flows:
 
 - get/read retrieval
@@ -543,6 +543,7 @@ This is a pnpm + Turborepo monorepo.
 @origintrail-official/dkg-query              Query execution and retrieval
 @origintrail-official/dkg-agent              Identity, discovery, messaging, wallet keys
 @origintrail-official/dkg-node-ui            Web dashboard, chat memory, SPARQL explorer
+@origintrail-official/dkg-node-store         Daemon protocol persistence (outbox, sync checkpoints, cursors, KA numbers, chain log)
 @origintrail-official/dkg-graph-viz          RDF visualization
 @origintrail-official/dkg-evm-module         Solidity contracts and deployment assets
 @origintrail-official/dkg-network-sim        Multi-node simulation tooling
@@ -576,7 +577,7 @@ This is a pnpm + Turborepo monorepo.
 
 ## Development
 
-Clone the repo and use pnpm (v10+) with Node.js 22+ to work across all workspace packages:
+Clone the repo and use pnpm (v10+) with Node.js 22.13+ (or 23.4+) to work across all workspace packages:
 
 ```bash
 pnpm install                                     # install all workspace deps

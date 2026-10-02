@@ -49,9 +49,9 @@ jobs:
   # Produce one fail-closed test plan for every workflow in this repository.
   # PRs run the affected package lane plus declared downstream consumers.
   # Protected pushes, manual runs, and merge queue candidates select every
-  # lane. Global/unknown changes, package manifests, large changes, and
-  # `ci:full` run every Node/EVM lane; Solidity retains its independent PR
-  # path gate.
+  # lane. Global/unknown changes, install-affecting manifest edits, large
+  # changes, and `ci:full` run every Node/EVM lane; Solidity retains its
+  # independent PR path gate.
   # ------------------------------------------------------------------
   changes:
     name: Plan CI delta
@@ -60,10 +60,7 @@ jobs:
     outputs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
-      # The protected-history controller pin predates this capability output.
-      # Keep its trusted lane outputs as a compatibility path until a reviewed
-      # controller rotation after merge; never execute candidate policy here.
-      node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts || (steps.plan.outputs.tornado_core == 'true' || steps.plan.outputs.tornado_publisher == 'true' || steps.plan.outputs.tornado_agent == 'true' || steps.plan.outputs.bura_cli == 'true' || steps.plan.outputs.kosava_hardhat_plugins == 'true') }}
+      node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -97,7 +94,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
+          ref: dfb3460719c13d592e2bb4d7d3c29fe55567fbe3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -105,6 +102,7 @@ jobs:
             scripts/ci/assert-ci-results.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
+            scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
       - name: Compute fail-closed CI plan
         id: plan
@@ -112,7 +110,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           MERGE_SHA: ${{ github.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          SAMPLE_KEY: ${{ github.event.pull_request.head.sha || github.sha }}
           # Both active protected branches require the aggregate gates and use
           # merge queues, so they can share the same fail-closed delta policy.
           DELTA_ENABLED: ${{ vars.CI_DELTA_ENABLED == 'true' && (github.base_ref == 'main' || github.base_ref == 'testnet-canary') }}
@@ -136,6 +133,10 @@ jobs:
             BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"
             git -C candidate diff --name-status -z \
               "${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"
+            # Lets the planner compare modified workspace manifests between the
+            # same two commits (read as git blobs, never executed). Environment,
+            # not flags, so an older pinned controller simply ignores it.
+            export CI_CANDIDATE_REPO=candidate CI_DIFF_BASE_SHA="${BASE_SHA}" CI_DIFF_HEAD_SHA="${MERGE_SHA}"
           fi
 
           PLAN_EVENT="${EVENT_NAME}"
@@ -147,7 +148,6 @@ jobs:
             --event "${PLAN_EVENT}" \
             --changes-z "${CHANGES_FILE}" \
             --labels-json "${PR_LABELS:-[]}" \
-            --sample-key "${SAMPLE_KEY}" \
             --github-output "${GITHUB_OUTPUT}" \
             --summary "${GITHUB_STEP_SUMMARY}"
       # Package README files are documentation for routing purposes, but they
@@ -296,6 +296,13 @@ jobs:
           pnpm release:build-info --dist-tag ci --commit "${GITHUB_SHA}" --ci-run "${GITHUB_RUN_ID}"
           pnpm release:verify-pack
 
+      # The controller wiring test checks this workflow's planner flags against
+      # the pinned controller's parser, which a depth-1 checkout does not hold.
+      # The provenance test requires the pin to be on protected testnet-canary
+      # or main history, so this also fetches those branches back to a day
+      # before the pin's commit date. A failed fetch fails this step.
+      - name: Fetch the pinned CI controller and protected branch history
+        run: node scripts/ci/fetch-trusted-controller.mjs
       - name: Test repository scripts
         run: pnpm run test:scripts
       - name: Verify every test has an execution route
@@ -504,7 +511,7 @@ jobs:
   tornado-blazegraph:
     name: "Tornado: storage Blazegraph integration (live server)"
     needs: [changes, build]
-    if: needs.changes.outputs.tornado_blazegraph == 'true' || needs.changes.outputs.tornado_agent == 'true'
+    if: needs.changes.outputs.tornado_blazegraph == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -634,7 +641,7 @@ jobs:
   # existing unit config. Both sets come from Vitest discovery, are disjoint,
   # and together cover the full package suite. JUnit weights include every
   # measured file; unknown files receive a conservative 60s estimate. The last
-  # unit shard reserves time for the rollout/Gate 1 evidence steps below.
+  # unit shard reserves time for the RFC-64 evidence sidecar steps below.
   # See scripts/ci/plan-agent-shards.mjs and scripts/ci/timings/README.md.
   # ------------------------------------------------------------------
   tornado-agent:
@@ -669,11 +676,16 @@ jobs:
       - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Agent tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      # Gate 0's unit tests also run here because the Windows inventory leg
+      # skips their POSIX symlink and 0600 cases.
+      - name: "RFC-64 Gate 0 lifecycle harness unit tests (POSIX)"
+        if: matrix.sidecars
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:unit
       - name: "RFC-64 rollout transition certificate (Oxigraph)"
-        if: matrix.gate1
+        if: matrix.sidecars
         run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
       - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
-        if: matrix.gate1
+        if: matrix.sidecars
         run: pnpm test:gate1:rfc64-public-open-harness
       - name: Upload Vitest JUnit report
         if: always()
@@ -1568,7 +1580,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 780f14aa60c39bdca788967121085c3c0d82d85c
+          ref: dfb3460719c13d592e2bb4d7d3c29fe55567fbe3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -1576,13 +1588,8 @@ jobs:
             scripts/ci/assert-ci-results.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
+            scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
-      - name: Require selected Windows lifecycle tests
-        env:
-          SELECTED: ${{ needs.changes.outputs.tornado_agent }}
-          RESULT: ${{ needs.inventory-windows.result }}
-        run: |
-          if [[ "$SELECTED" == true ]]; then test "$RESULT" = success; else test "$RESULT" = skipped; fi
       - name: Require the coverage verdict
         env:
           COVERAGE_RESULT: ${{ needs.coverage-results.result }}

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
-import { _autoUpdateDependencies, _autoUpdateIo } from '../src/daemon.js';
+import { _autoUpdateIo } from '../src/daemon.js';
 
 const MARKITDOWN_TARGETS_JSON = JSON.stringify([
   { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64', runner: 'ubuntu-latest' },
@@ -52,7 +52,6 @@ function mockReadFileSyncValue(path: unknown): string {
 
 // Save original _autoUpdateIo values for restoration
 const origIo = { ..._autoUpdateIo };
-const origDependencies = { ..._autoUpdateDependencies };
 
 // Tracking arrays
 let readFileCalls: [any, ...any[]][] = [];
@@ -135,7 +134,6 @@ function resetMocks() {
 }
 
 function installMocks() {
-  _autoUpdateDependencies.cleanStaleWorkspacePackages = async () => {};
   _autoUpdateIo.readFile = (async (path: any, ...rest: any[]) => {
     readFileCalls.push([path, ...rest]);
     return readFileImpl(path, ...rest);
@@ -194,7 +192,6 @@ function installMocks() {
 
 function restoreIo() {
   Object.assign(_autoUpdateIo, origIo);
-  Object.assign(_autoUpdateDependencies, origDependencies);
 }
 
 import {
@@ -207,7 +204,8 @@ import {
   resolveAutoUpdateGitRef,
   resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
-import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
+import { createVolatileHoldoffDeadline } from '../src/daemon/auto-update-holdoff-deadline.js';
+import { createUpdateHoldoffGate } from '../src/daemon/auto-update-holdoff-gate.js';
 import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
 import type { LastUpdateCheck } from '../src/daemon/state.js';
 
@@ -1624,6 +1622,17 @@ describe('performNpmUpdate', () => {
     )).toBe(true);
   });
 
+  it('refuses slot activation when the runtime cannot provide node:sqlite', async () => {
+    (_autoUpdateIo as any).runtime = { version: 'v22.12.0' };
+    const logCalls: string[] = [];
+    const result = await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', (message) => {
+      logCalls.push(message);
+    });
+    expect(result).toBe('failed');
+    expect(swapSlotCalls).toEqual([]);
+    expect(logCalls.join('\n')).toContain('node:sqlite');
+  });
+
   it('returns failed when npm install throws', async () => {
     execImpl = async () => { throw new Error('npm ERR! 404'); };
     const result = await performNpmUpdate('9.99.0', () => {});
@@ -2232,25 +2241,31 @@ describe('autoupdater hardening', () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
     const events: string[] = [];
-    _autoUpdateDependencies.cleanStaleWorkspacePackages = async (slot) => {
-      expect(slot).toMatch(/\/releases\/b$/);
-      events.push('clean');
-    };
     execImpl = async (cmd) => {
       if (cmd.includes('pnpm install')) events.push('install');
       return { stdout: '', stderr: '' };
     };
-    await performUpdate(AU, () => {});
+    await performUpdate(AU, () => {}, {
+      dependencies: {
+        cleanStaleWorkspacePackages: async (slot) => {
+          expect(slot).toMatch(/\/releases\/b$/);
+          events.push('clean');
+        },
+      },
+    });
     expect(events).toEqual(['clean', 'install']);
   });
 
   it('does not install or activate when stale workspace cleanup fails', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
-    _autoUpdateDependencies.cleanStaleWorkspacePackages = async () => {
-      throw new Error('quarantine failed');
-    };
-    expect(await performUpdate(AU, () => {})).toBe(false);
+    expect(await performUpdate(AU, () => {}, {
+      dependencies: {
+        cleanStaleWorkspacePackages: async () => {
+          throw new Error('quarantine failed');
+        },
+      },
+    })).toBe(false);
     expect(execCalls.some(({ cmd }) => cmd.includes('pnpm install'))).toBe(false);
     expect(swapSlotCalls).toEqual([]);
   });
@@ -2344,23 +2359,23 @@ describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false)).toBe('9.1.0');
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toEqual({ status: 'available', target: '9.1.0' });
   });
 
-  it('returns null when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
+  it('returns none when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     // 9.1.0 pulled; latest rolled back to what the node already runs.
     fetchImpl = async () => makeRegistryResponse({ latest: '9.0.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false)).toBeNull();
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toEqual({ status: 'none' });
   });
 
-  it('returns null when a pinned channel no longer has an acceptable target', async () => {
+  it('returns none when a pinned channel no longer has an acceptable target', async () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     // The 'mainnet' dist-tag is absent -> no-target -> nothing to apply.
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toBeNull();
+    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toEqual({ status: 'none' });
   });
 });
 
@@ -2380,14 +2395,14 @@ describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
     const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111'; // current commit
     remoteSha('bbb2222');
-    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBe('bbb2222');
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'available', target: 'bbb2222' });
   });
 
-  it('returns null when the ref moved back to the running commit during the hold-off', async () => {
+  it('returns none when the ref moved back to the running commit during the hold-off', async () => {
     const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111';
     remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
-    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBeNull();
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'none' });
   });
 });
 
@@ -2399,9 +2414,13 @@ function freshLastCheck(): LastUpdateCheck {
   return { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false };
 }
 function noJitterGate(log: (m: string) => void) {
-  return createUpdateHoldoffGate({ jitterMs: 0, isShuttingDown: () => false, setUpdating: () => {}, log });
+  return createUpdateHoldoffGate({
+    deadline: createVolatileHoldoffDeadline({ jitterMs: 0 }),
+    isShuttingDown: () => false,
+    setUpdating: () => {},
+    log,
+  });
 }
-
 describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
   function currentVersion(v: string) {
     readFileImpl = async (path: any) => {
@@ -2429,9 +2448,9 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     const lastUpdateCheck = freshLastCheck();
     const onRestart = vi.fn(async () => {});
     const runCheck = createNpmUpdateRunCheck({
-      gate: noJitterGate((m) => logs.push(m)),
       log: (m) => logs.push(m),
-      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart,
+      lastUpdateCheck, allowPrerelease: false,
+      autoApply: { gate: noJitterGate((m) => logs.push(m)), nodeRole: 'core', onRestart },
     });
 
     await runCheck();
@@ -2446,8 +2465,8 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     currentVersion('9.0.0');
     registrySequence({ latest: '9.1.0' }); // available on both detect and revalidate
     const runCheck = createNpmUpdateRunCheck({
-      gate: noJitterGate(() => {}), log: () => {},
-      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+      log: () => {}, lastUpdateCheck: freshLastCheck(), allowPrerelease: false,
+      autoApply: { gate: noJitterGate(() => {}), nodeRole: 'core', onRestart: async () => {} },
     });
 
     // The installer may error under the shallow IO mocks; we only assert it was ENTERED.
@@ -2460,8 +2479,7 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     registrySequence({ latest: '9.1.0' });
     const lastUpdateCheck = freshLastCheck();
     const runCheck = createNpmUpdateRunCheck({
-      gate: null, log: () => {},
-      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+      log: () => {}, lastUpdateCheck, allowPrerelease: false, autoApply: null,
     });
 
     await runCheck();

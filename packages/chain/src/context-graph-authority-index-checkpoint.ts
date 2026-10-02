@@ -12,7 +12,8 @@ import {
 } from './context-graph-authority-generation.js';
 import {
   freezeContextGraphAuthorityIndexState,
-  MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
+  normalizeAuthorityIndexAddress,
+  normalizeAuthorityIndexParticipantAgents,
   normalizeContextGraphAuthorityAccessPolicy,
   normalizeContextGraphAuthorityPublishDomain,
   type ContextGraphAuthorityIndexState,
@@ -62,28 +63,7 @@ export interface ContextGraphAuthorityIndexStore {
   invalidate(scope: string, expectedToken: number): Promise<number | undefined>;
 }
 
-const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/i;
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
-
-export function normalizeAuthorityIndexAddress(value: unknown): string | undefined {
-  return typeof value === 'string' && ADDRESS_PATTERN.test(value)
-    ? value.toLowerCase()
-    : undefined;
-}
-
-export function normalizeAuthorityIndexParticipantAgents(
-  value: unknown,
-): readonly string[] | undefined {
-  if (!Array.isArray(value) || value.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
-    return undefined;
-  }
-  const agents = value.map(normalizeAuthorityIndexAddress);
-  if (agents.some((agent) => agent === undefined || agent === ZERO_ADDRESS)) return undefined;
-  const unique = new Set(agents as string[]);
-  return unique.size === agents.length
-    ? Object.freeze([...unique].sort())
-    : undefined;
-}
 
 function compareContextGraphIds(left: string, right: string): number {
   return left.length - right.length || left.localeCompare(right);
