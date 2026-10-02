@@ -159,18 +159,22 @@ export function packageImports(source) {
   return packageNames(importSpecifiers(source));
 }
 
-// The file a package subpath import loads (`@origintrail-official/x/sub`),
-// through the workspace's `exports` map (a string, or the require, import or
-// default condition) in `context`; undefined when the map names none or its
-// file (or the source it is built from) does not exist, so the import counts
-// as the whole package.
-function subpathTarget(specifier, { workspaces, isFile }) {
+// The files a package subpath import loads (`@origintrail-official/x/sub`),
+// through the workspace's `exports` map in `context`: a string, or the
+// require, import and default conditions. Which condition applies depends on
+// how the importing file is loaded, which this reading does not track, so
+// every one is followed. Undefined when the map names none, or when a file it
+// names (or the source that file is built from) does not exist, so the import
+// counts as the whole package.
+function subpathTargets(specifier, { workspaces, isFile }) {
   const [, name, subpath] = specifier.match(/^(@origintrail-official\/[a-z0-9-]+)\/(.+)$/) ?? [];
   const workspace = name && workspaces.workspaceByName.get(name);
-  let entry = workspace ? workspaces.manifests.get(workspace)?.exports?.[`./${subpath}`] : undefined;
-  while (entry && typeof entry === 'object') entry = entry.require ?? entry.import ?? entry.default;
-  const target = typeof entry === 'string' ? sourcePath(path.posix.normalize(path.posix.join(workspace, entry)), isFile) : undefined;
-  return target !== undefined && isFile(target) ? target : undefined;
+  const files = (entry) => (typeof entry === 'string' ? [entry]
+    : entry && typeof entry === 'object' ? ['require', 'import', 'default'].flatMap((condition) => files(entry[condition]))
+      : []);
+  const named = workspace ? [...new Set(files(workspaces.manifests.get(workspace)?.exports?.[`./${subpath}`]))] : [];
+  const targets = named.map((file) => sourcePath(path.posix.normalize(path.posix.join(workspace, file)), isFile));
+  return targets.length > 0 && targets.every((target) => target !== undefined && isFile(target)) ? [...new Set(targets)] : undefined;
 }
 
 const isLiteral = (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
@@ -599,8 +603,8 @@ const namedScripts = (text, context) => commandFiles(text, { exists: followable(
 // What `file` (repo-relative, with `source` as its contents) loads by path:
 // - `modules`: relative imports (side-effect `import './x.js'` included),
 //   dynamic imports, `import(new URL(...))` and CommonJS require(), and the
-//   one file a package subpath import loads through its exports map, whose
-//   own imports load too;
+//   files a package subpath import loads through its exports map (every
+//   runtime condition's), whose own imports load too;
 // - `paths`: files it reads without importing or running: other `new URL(...)`
 //   paths, require.resolve(), paths join/resolve builds from its own
 //   directory (analyzeModule's builtPaths) and, in tests and test-runner
@@ -625,12 +629,12 @@ export function loadReferences(file, source, context = checkoutContext()) {
   const walks = /\b(?:readdir|opendir)(?:Sync)?\(/.test(code);
   const relative = (specifier) => path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
   const specifiers = importSpecifiers(code);
-  // A package subpath its exports map resolves loads that one file, not the
-  // whole package.
-  const subpaths = new Map(specifiers.map((specifier) => [specifier, subpathTarget(specifier, context)]).filter(([, target]) => target));
+  // A package subpath its exports map resolves loads the files that map
+  // names, not the whole package.
+  const subpaths = new Map(specifiers.map((specifier) => [specifier, subpathTargets(specifier, context)]).filter(([, targets]) => targets));
   const modules = [...new Set([
     ...specifiers.filter((specifier) => /^\.\.?\//.test(specifier)).map((specifier) => sourcePath(relative(specifier), context.isFile)),
-    ...subpaths.values(),
+    ...[...subpaths.values()].flat(),
   ])].filter((target) => !outsideSources(target));
   const { builtPaths, unresolvedReads, computedLoads, strings, assembledScriptPaths, runPaths, unresolvedRuns } = analyzeModule(file, code, context);
   const literals = (TEST_FILE.test(file) ? [...code.matchAll(REPO_PATH_LITERAL)] : [])

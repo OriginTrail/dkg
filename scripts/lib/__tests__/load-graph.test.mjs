@@ -266,8 +266,8 @@ test('a source file runs what a promisified runner names, and reports a runner i
   assert.deepEqual(escaped.assembled, ['execFile', 'withRetry(execFile)', 'spawnProcess = spawn']);
 });
 
-test('a package subpath import loads the one file its exports map names', () => {
-  // Through the require, import or default condition; a bare import, a
+test('a package subpath import loads the files its exports map names', () => {
+  // Through the require, import and default conditions; a bare import, a
   // subpath the map does not list and one whose file does not exist count as
   // the whole package.
   const files = new Map([
@@ -286,6 +286,49 @@ test('a package subpath import loads the one file its exports map names', () => 
   for (const specifier of ['@origintrail-official/dkg-fixture', '@origintrail-official/dkg-fixture/missing', '@origintrail-official/dkg-fixture/unlisted']) {
     assert.deepEqual(references(specifier).packages, ['@origintrail-official/dkg-fixture'], specifier);
   }
+});
+
+test('a package subpath with different import and require files loads both', () => {
+  // The reading does not track whether the importer is loaded as ESM or as
+  // CommonJS, so it follows the file of every runtime condition: an ESM import
+  // reaches what the import target loads, and a require() what the require
+  // target loads. `types` is not a runtime condition.
+  const files = new Map([
+    ['pnpm-workspace.yaml', 'packages:\n  - fixture/*\n'],
+    ['fixture/pkg/package.json', JSON.stringify({
+      name: '@origintrail-official/dkg-fixture',
+      exports: {
+        './contract': { types: './contract.d.ts', import: './esm.mjs', require: './cjs.cjs' },
+        './nested': { import: { types: './nested.d.mts', default: './nested.mjs' }, require: { default: './nested.cjs' } },
+        './half': { import: './esm.mjs', require: './absent.cjs' },
+      },
+    })],
+    ['fixture/pkg/esm.mjs', "import '../../scripts/only-esm.mjs';"],
+    ['fixture/pkg/cjs.cjs', "require('../../scripts/only-cjs.cjs');"],
+    ['fixture/pkg/nested.mjs', ''],
+    ['fixture/pkg/nested.cjs', ''],
+    ['fixture/pkg/src/index.ts', ''],
+    ['scripts/only-esm.mjs', ''],
+    ['scripts/only-cjs.cjs', ''],
+    ['fixture/static.mjs', "import { contract } from '@origintrail-official/dkg-fixture/contract';"],
+    ['fixture/dynamic.mjs', "const { contract } = await import('@origintrail-official/dkg-fixture/contract');"],
+    ['fixture/required.cjs', "const { contract } = require('@origintrail-official/dkg-fixture/contract');"],
+  ]);
+  const context = fixtureContext(files);
+  for (const importer of ['fixture/static.mjs', 'fixture/dynamic.mjs', 'fixture/required.cjs']) {
+    const { modules, packages } = loadReferences(importer, files.get(importer), context);
+    assert.deepEqual([modules.toSorted(), packages], [['fixture/pkg/cjs.cjs', 'fixture/pkg/esm.mjs'], []], importer);
+    // The trace reaches what each target loads, so a dependency only the ESM
+    // file has cannot escape through the require target, nor the reverse.
+    const { loaded } = traceLaneLoads(new Map([[importer, new Map([['tornado_core', 'seed']])]]), { context });
+    assert.equal(loaded.get('scripts/only-esm.mjs')?.get('tornado_core'), 'fixture/pkg/esm.mjs', importer);
+    assert.equal(loaded.get('scripts/only-cjs.cjs')?.get('tornado_core'), 'fixture/pkg/cjs.cjs', importer);
+  }
+  const nested = loadReferences('fixture/app.mjs', "import '@origintrail-official/dkg-fixture/nested';", context);
+  assert.deepEqual(nested.modules.toSorted(), ['fixture/pkg/nested.cjs', 'fixture/pkg/nested.mjs']);
+  // One named file missing: the subpath counts as the whole package.
+  const half = loadReferences('fixture/app.mjs', "import '@origintrail-official/dkg-fixture/half';", context);
+  assert.deepEqual([half.modules, half.packages], [[], ['@origintrail-official/dkg-fixture']]);
 });
 
 test('a fixture context is its files alone, manifests and directories included', () => {
