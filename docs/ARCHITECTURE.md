@@ -320,7 +320,7 @@ sequenceDiagram
   participant Engineer as Implementation Agent
   participant Tests as Validation and Review
   participant Docs as Mermaid Docs Agent
-  participant Arch as ARCHITECTURE.md
+  participant Arch as docs/ARCHITECTURE.md
 
   Planner->>Engineer: assign focused implementation subtask
   Engineer->>Engineer: update scoped source files and tests
@@ -706,7 +706,7 @@ sequenceDiagram
 
 Current repository state separates triple-store persistence from peer-to-peer
 message confidentiality. See
-[ADR 0004](./docs/adr/0004-private-store-plaintext-rdf.md) for the accepted
+[ADR 0004](./archive/internal/adr/0004-private-store-plaintext-rdf.md) for the accepted
 decision to keep private-store RDF plaintext after message decryption.
 
 - **WM assertions** live in assertion named graphs such as
@@ -840,7 +840,7 @@ participant Workflow as CodexWorkflowGraph
 participant Implementer as ImplementFocusedChange
 participant Validation as TestsAndCodeReview
 participant DocsAgent as MermaidArchitectureAgent
-participant Architecture as ARCHITECTURE.md
+participant Architecture as docs/ARCHITECTURE.md
 participant Git as LocalGit
 
 User->>Workflow: continue from failure checkpoint
@@ -1062,8 +1062,7 @@ authors can ship route plugins without a registry review cycle.
 
 ### Route plugin mechanism (ADR 0001)
 
-Approved 2026-05-20 (`docs/adr/0001-daemon-route-plugins.md`, design
-`docs/superpowers/specs/2026-05-20-daemon-route-plugins-design.md`):
+Approved 2026-05-20 (`docs/archive/internal/adr/0001-daemon-route-plugins.md`):
 
 - **Public contract.** `plugin-api.ts` re-exports `RequestContext` and
   the small set of `http-utils` helpers (`jsonResponse`, `readBody`,

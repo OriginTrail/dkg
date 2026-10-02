@@ -1763,6 +1763,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           options.allowApprovedPrivateReplicaFinalizedAbsence,
       },
     );
+    // Preserve source-qualified non-applicability alongside the legacy read
+    // fallback; kind='unregistered' alone is deliberately not a VM exemption.
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
 

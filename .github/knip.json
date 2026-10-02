@@ -23,8 +23,12 @@
     ".": {
       "entry": [
         "scripts/**/*.{ts,mjs,cjs,js}",
-        "vitest.*.ts"
-      ]
+        "vitest.*.ts",
+        "test-policy/vitest.*.ts"
+      ],
+      "stryker": {
+        "config": ["test-policy/stryker.config.mjs"]
+      }
     },
     "demo": {
       "entry": ["*.mjs"]

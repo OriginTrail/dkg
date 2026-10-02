@@ -2,6 +2,9 @@ import { access, readFile, writeFile } from 'node:fs/promises';
 import { dirname, relative, sep } from 'node:path';
 import { defineConfig, htmlReporter, NodeExecutor, rawReporter, textReporter } from 'esbench/host';
 
+// Every path below (result files, suite globs, tempDir) is resolved against the
+// working directory, not this file. Run ESBench from the repository root:
+//   esbench --config bench/esbench.config.mjs
 const resultFile = process.env.ESBENCH_RESULT ?? 'bench/results/latest.json';
 const htmlFile = process.env.ESBENCH_HTML_FILE ?? 'bench/results/latest.html';
 const diffFile = process.env.ESBENCH_DIFF ?? null;

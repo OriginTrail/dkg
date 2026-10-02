@@ -1835,10 +1835,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           'contextGraphSubscriptionPersistAppliedRevisions',
           'contextGraphSubscriptionPersistCanceledRevisions',
           'contextGraphSubscriptionPersistPendingRevisions',
-          'contextGraphSubscriptionPersistChains',
         ]) {
           expect((agent as any)[mapName].has('clear-cg-0')).toBe(false);
         }
+        expect((agent as any).contextGraphSubscriptionPersistence.hasLane('clear-cg-0')).toBe(false);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -1930,10 +1930,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           'contextGraphSubscriptionPersistAppliedRevisions',
           'contextGraphSubscriptionPersistCanceledRevisions',
           'contextGraphSubscriptionPersistPendingRevisions',
-          'contextGraphSubscriptionPersistChains',
         ]) {
           expect((agent as any)[mapName].has('preclear-created')).toBe(false);
         }
+        expect((agent as any).contextGraphSubscriptionPersistence.hasLane('preclear-created')).toBe(false);
       } finally {
         for (const { resolve } of saveResolvers) resolve();
         await agent.stop().catch(() => {});
@@ -1970,10 +1970,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           'contextGraphSubscriptionPersistAppliedRevisions',
           'contextGraphSubscriptionPersistCanceledRevisions',
           'contextGraphSubscriptionPersistPendingRevisions',
-          'contextGraphSubscriptionPersistChains',
         ]) {
           expect((agent as any)[mapName].has('storeless-transient')).toBe(false);
         }
+        expect((agent as any).contextGraphSubscriptionPersistence.hasLane('storeless-transient')).toBe(false);
       } finally {
         await agent.stop().catch(() => {});
       }

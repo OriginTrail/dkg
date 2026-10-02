@@ -171,6 +171,12 @@ export {
   ContextGraphMembershipPersistShutdownTimeoutError,
   CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
 } from './context-graph-membership-persist-scheduler.js';
+export {
+  ContextGraphSubscriptionPersistQueueClosedError,
+  ContextGraphSubscriptionPersistQueueFullError,
+  ContextGraphSubscriptionPersistShutdownTimeoutError,
+  CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
+} from './context-graph-subscription-persist-scheduler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,

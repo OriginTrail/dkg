@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
+import { MemoryWorkspaceSnapshotStore } from './_helpers/memory-workspace-snapshot-store.js';
 
 function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
   const calls: A[] = [];
@@ -322,7 +323,7 @@ describe('implicit SWM context graph metadata', () => {
       'resolveContextGraphIdByNameHash',
     ).mockRejectedValue(new Error('registry RPC unavailable'));
     await expect(agent.resolveContextGraphRegistrationBinding(contextGraphId))
-      .resolves.toEqual({ kind: 'unregistered' });
+      .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
     expect(registryResolve).not.toHaveBeenCalled();
   }, 15000);
 
@@ -368,6 +369,9 @@ describe('implicit SWM context graph metadata', () => {
         listenPort: 0,
         listenHost: '127.0.0.1',
         dataDir,
+        // This test persists local-origin authority, not snapshot capacity.
+        // Keep an unrelated host disk reserve from blocking its tiny SWM write.
+        publicSnapshotStore: new MemoryWorkspaceSnapshotStore(),
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
         rfc64CatalogActivation: { enabled: false },
         contextGraphMembershipStore: membershipStore,
@@ -417,7 +421,7 @@ describe('implicit SWM context graph metadata', () => {
       await restarted.start();
 
       await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
-        .resolves.toEqual({ kind: 'unregistered' });
+        .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
       await expect(restarted.getContextGraphOnChainPolicy(contextGraphId))
         .resolves.toEqual({});
       expect(registryResolve).not.toHaveBeenCalled();
