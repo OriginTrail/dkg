@@ -733,3 +733,87 @@ describe('DKGAgent rootless update boundary', () => {
     expect(published).toEqual(Array(broadcasts).fill(contextGraphUpdateTopic(CG)));
   });
 });
+
+describe('GH#2958 update() refuses a seal that is not the next version with a typed, terminal error', () => {
+  async function refusedUpdate(assertionVersion: string) {
+    const store = new OxigraphStore();
+    await seedConfirmedRootlessHead(store); // confirmed version 1: the next publishable version is 2
+    const publicQuads = [q('urn:update:asset', 'urn:value', '"two"')];
+    const { attestation } = await updateAttestation(publicQuads);
+    let publisherCalls = 0;
+    const agent = await makeAgentLike(store, async () => {
+      publisherCalls += 1;
+      throw new Error('publisher must not be called');
+    });
+    const error = await (PublishMethods.prototype as any).update.call(
+      agent,
+      KA_ID,
+      CG,
+      publicQuads,
+      [],
+      { precomputedUpdateAttestation: attestation, assertionVersion },
+    ).catch((err: unknown) => err) as Error & { code?: string };
+
+    // Refused before anything was staged: no SWM graph, no private content at the next version.
+    const graphManager = new GraphManager(store);
+    expect(await store.countQuads(canonicalSharedMemoryScopeWriteGraph(
+      graphManager.sharedMemoryUri(CG),
+      { kind: 'named-lifecycle', identity: { agentAddress: ORIGINAL_AUTHOR, kaNumber: KA_NUMBER } },
+    ))).toBe(0);
+    expect(await new PrivateContentStore(store, graphManager)
+      .getKnowledgeAssetPrivateTriples(CG, createGraphKnowledgeAssetScope(UAL, 2)))
+      .toEqual([]);
+    expect(publisherCalls).toBe(0);
+    return error;
+  }
+
+  it('a seal numbered above the next version: PUBLISH_INTENT_STALE, with both numbers and the way back', async () => {
+    const error = await refusedUpdate('3');
+    expect(error).toBeInstanceOf(Error);
+    expect(error.code).toBe('PUBLISH_INTENT_STALE');
+    expect(error.message).toContain(UAL);
+    expect(error.message).toMatch(/numbered 3/);
+    expect(error.message).toMatch(/next publishable version is 2/);
+    expect(error.message).toMatch(/confirmed version is 1/);
+    expect(error.message).toMatch(/pull-from \(layer "swm"/);
+  });
+
+  it('a seal numbered below the next version: the published version moved on, re-base on it', async () => {
+    const error = await refusedUpdate('1');
+    expect(error.code).toBe('PUBLISH_INTENT_STALE');
+    expect(error.message).toMatch(/numbered 1/);
+    expect(error.message).toMatch(/next publishable version is 2/);
+    expect(error.message).toMatch(/pull-from \(layer "vm"/);
+  });
+
+  it('the next version is accepted, and a caller that names no version (POST /api/update) is unchanged', async () => {
+    for (const opts of [{ assertionVersion: '2' }, {}]) {
+      const store = new OxigraphStore();
+      await seedConfirmedRootlessHead(store);
+      const publicQuads = [q('urn:update:asset', 'urn:value', '"two"')];
+      const { attestation, canonical } = await updateAttestation(publicQuads);
+      let seen: Record<string, any> | undefined;
+      const agent = await makeAgentLike(store, async (kaId, options) => {
+        seen = options;
+        return {
+          kaId,
+          ual: UAL,
+          merkleRoot: attestation.expectedNewMerkleRoot,
+          kaManifest: [],
+          status: 'tentative',
+          publicQuads: canonical.publicQuads,
+        };
+      });
+      const result = await (PublishMethods.prototype as any).update.call(
+        agent,
+        KA_ID,
+        CG,
+        publicQuads,
+        [],
+        { precomputedUpdateAttestation: attestation, ...opts },
+      );
+      expect(result.status).toBe('tentative');
+      expect(seen?.assertionVersion).toBe('2');
+    }
+  });
+});

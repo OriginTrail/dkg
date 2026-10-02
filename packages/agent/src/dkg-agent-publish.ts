@@ -198,7 +198,7 @@ export interface ResolveAssertionAuthorOptions {
   /** GH#1786 — selects among authors already resident at this coordinate. */
   selectedAuthorAgentAddress?: string;
 }
-import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
+import { RootlessUpdateError, isRootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -305,6 +305,7 @@ import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-ha
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
   throwIfRecoveryDeadlineReached,
@@ -619,6 +620,30 @@ function updateAttestationNotCustodialError(authorAddress: string): Error {
 
 function rootlessUpdateError(code: RootlessUpdateErrorCode, message: string): Error {
   return new RootlessUpdateError(code, message);
+}
+
+/**
+ * GH#2958 — a finalized update numbered anything but `confirmed + 1` can never be published: the
+ * publisher, the StorageACK handler, peers and the chain all require exactly that number. Coded
+ * `PUBLISH_INTENT_STALE` (the draft no longer matches what can be published) so the async lane
+ * records a terminal pre-send failure instead of the retryable `rpc_unavailable` an untyped
+ * error falls into, and both publish routes answer 409. The recovery depends on which way the
+ * number is off: a draft numbered too high keeps its shared content, a draft numbered too low
+ * means the published version moved on, so it is re-based on that.
+ */
+function versionGapError(kaUal: string, sealVersion: bigint | string | number, requiredVersion: bigint): Error {
+  const sealed = BigInt(sealVersion);
+  const recovery = sealed > requiredVersion
+    ? 'Re-open the draft with wm/pull-from (layer "swm" keeps the shared content), then finalize and share it again.'
+    : 'The published version has moved on since this draft was finalized: re-base it with wm/pull-from '
+      + '(layer "vm"), re-apply your edits, then finalize and share it again.';
+  return Object.assign(
+    new Error(
+      `Cannot publish the update of ${kaUal}: this finalized version is numbered ${sealed}, but the next `
+        + `publishable version is ${requiredVersion} (the confirmed version is ${requiredVersion - 1n}). ${recovery}`,
+    ),
+    { code: 'PUBLISH_INTENT_STALE' as const },
+  );
 }
 
 function latestShareOperationId(history: {
@@ -2213,10 +2238,7 @@ export class PublishMethods extends DKGAgentBase {
       opts.assertionVersion !== undefined
       && BigInt(opts.assertionVersion) !== BigInt(nextAssertionVersion)
     ) {
-      throw new Error(
-        `Graph-scoped update assertionVersion ${String(opts.assertionVersion)} must advance ` +
-          `the durable current version to ${nextAssertionVersion}`,
-      );
+      throw versionGapError(updateScope.ual, opts.assertionVersion, BigInt(nextAssertionVersion));
     }
     if (
       opts.publicTripleCount !== undefined
@@ -3435,6 +3457,23 @@ export class PublishMethods extends DKGAgentBase {
         ),
         { code: SEAL_CAPABILITY_GAP_CODE },
       );
+    }
+
+    // GH#2958 — a draft of a PUBLISHED KA is numbered from the confirmed record `update()` will
+    // validate, not from the lifecycle counter. That counter is "last FINALIZED": it only ever
+    // grows, so every finalized update that is abandoned before it is published (superseded,
+    // discarded, replaced by pull-from) would push the next draft one number too high, past
+    // what `update()`, the publisher and the chain accept, and the KA could never be updated
+    // again. An abandoned draft instead shares its number with its successor, as an
+    // unpublished mint already does. The lifecycle counter above stays the fallback for a
+    // record that cannot answer. The number is not signed (the attestation binds merkleRoot,
+    // author, reservedKaId and scheme), so deriving it here changes no signature.
+    if (hasConfirmedVm) {
+      assertionVersion = await this._nextUpdateVersionOrUndefined(
+        reservedKaId,
+        contextGraphId,
+        opts?.subGraphName,
+      ) ?? assertionVersion;
     }
 
     // 8. Build EIP-712 typed data (binds reservedKaId — OT-RFC-43 §F2).
@@ -4712,6 +4751,21 @@ export class PublishMethods extends DKGAgentBase {
         { code: 'PUBLISH_INTENT_STALE' },
       );
     }
+    if (operationPlan.kind === 'update') {
+      // GH#2958 — refuse a finalized update `update()` is going to refuse, here, before a job
+      // exists, so the client learns it at the moment it can act. Last, so every recovery this
+      // error recommends (re-open from the shared copy) is possible whenever it is raised. A
+      // confirmed record that cannot answer leaves the decision to `update()`.
+      const sealScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+      const requiredVersion = await this._nextUpdateVersionOrUndefined(
+        packKnowledgeAssetIdFromIdentity(sealScope),
+        contextGraphId,
+        opts?.subGraphName,
+      );
+      if (requiredVersion !== undefined && requiredVersion !== BigInt(seal.assertionVersion)) {
+        throw versionGapError(seal.kaUal, seal.assertionVersion, requiredVersion);
+      }
+    }
     const sealMerkleRoot = (merkleBare.startsWith('0x') ? merkleBare : `0x${merkleBare}`) as `0x${string}`;
     const queuedSeal: LiftRequestAuthorSeal = {
       merkleRoot: ethers.hexlify(seal.merkleRoot) as `0x${string}`,
@@ -4771,6 +4825,38 @@ export class PublishMethods extends DKGAgentBase {
       ...request,
       intentKey: createKnowledgeAssetVmPublishIntentKey(request),
     };
+  }
+
+  /**
+   * GH#2958 — the version a finalized update of this KA must carry, read from the SAME confirmed
+   * record `update()` validates, so the number a draft is sealed with and the number `update()`
+   * demands cannot disagree. `undefined` when that record cannot answer (not materialized here,
+   * not confirmed yet, corrupt or legacy): the caller then falls back to its own rule. Anything
+   * else (a store failure) propagates - a transient read error must never silently pick a number.
+   */
+  async _nextUpdateVersionOrUndefined(
+    this: DKGAgent,
+    kaId: bigint,
+    contextGraphId: string,
+    subGraphName?: string,
+  ): Promise<bigint | undefined> {
+    try {
+      const scope = await resolveDirectRootlessUpdateScope(
+        this,
+        this.chain.chainId,
+        kaId,
+        contextGraphId,
+        subGraphName,
+      );
+      return BigInt(scope.assertionVersion);
+    } catch (err) {
+      if (!isRootlessUpdateError(err) && !(err instanceof LegacyKnowledgeAssetReadOnlyError)) throw err;
+      this.log.debug(
+        createOperationContext('publish'),
+        `The confirmed record of KA ${kaId} cannot number its next update (${(err as { code?: string }).code}); using the lifecycle counter`,
+      );
+      return undefined;
+    }
   }
 
   async preflightKnowledgeAssetVmPublishSnapshot(
