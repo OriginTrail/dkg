@@ -1491,7 +1491,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               // fence instead; stop still drains physical index work before
               // tearing down the store, without turning valid bindings into
               // request-deadline failures. No result is memoized by this owner.
-              coldResolution.retainDrain(indexReader.whenIdle());
+              coldResolution.retainSharedDrain(indexReader, () => indexReader.whenIdle());
             }
           },
           {

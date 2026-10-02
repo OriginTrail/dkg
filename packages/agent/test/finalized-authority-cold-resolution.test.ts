@@ -164,7 +164,12 @@ describe('finalized authority cold resolution single flight', () => {
   it('does not cache a settled authority result while an unrelated drain is pending', async () => {
     const coordinator = new FinalizedAuthorityColdResolutionV1({ coldTimeoutMs: () => COLD_MS });
     let release!: () => void;
-    coordinator.retainDrain(new Promise<void>((resolve) => { release = resolve; }));
+    const owner = {};
+    const pendingDrain = new Promise<void>((resolve) => { release = resolve; });
+    const startDrain = vi.fn(() => pendingDrain);
+    coordinator.retainSharedDrain(owner, startDrain);
+    coordinator.retainSharedDrain(owner, startDrain);
+    expect(startDrain).toHaveBeenCalledOnce();
     try {
       await expect(coordinator.read('graph:1', async () => 'unregistered', {
         label: 'first', requestTimeoutMs: REQUEST_MS,
@@ -177,6 +182,9 @@ describe('finalized authority cold resolution single flight', () => {
       release();
       await coordinator.whenIdle();
     }
+    coordinator.retainSharedDrain(owner, startDrain);
+    await coordinator.whenIdle();
+    expect(startDrain).toHaveBeenCalledTimes(2);
   });
 
   it('keeps shutdown waiting for a physical operation that settles after its bounded flight', async () => {

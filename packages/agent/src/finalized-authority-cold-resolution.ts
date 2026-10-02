@@ -65,6 +65,7 @@ export interface FinalizedAuthorityColdResolutionOptions {
 export class FinalizedAuthorityColdResolutionV1 {
   readonly #flights = new Map<string, ColdResolutionFlight>();
   readonly #drains = new Set<Promise<unknown>>();
+  readonly #sharedDrains = new Map<object, Promise<unknown>>();
   readonly #coldTimeoutMs: () => number;
   readonly #now: () => number;
   #closed = false;
@@ -119,6 +120,16 @@ export class FinalizedAuthorityColdResolutionV1 {
   retainDrain(drain: Promise<unknown>): void {
     this.#drains.add(drain);
     const retire = () => { this.#drains.delete(drain); };
+    drain.then(retire, retire);
+  }
+
+  /** One global drain per reader, even while foreground traffic stays busy. */
+  retainSharedDrain(owner: object, start: () => Promise<unknown>): void {
+    if (this.#sharedDrains.has(owner)) return;
+    const drain = start();
+    this.#sharedDrains.set(owner, drain);
+    this.retainDrain(drain);
+    const retire = () => { this.#sharedDrains.delete(owner); };
     drain.then(retire, retire);
   }
 
