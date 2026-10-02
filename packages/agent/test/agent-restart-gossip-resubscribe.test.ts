@@ -207,6 +207,30 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     expect(internals.swmHostModeHandlers.size).toBe(0);
   }, 60_000);
 
+  it('wires the fresh manager when the retired session wrote its bookkeeping back after the stop', async () => {
+    const boot = await createEdgeAgent('RestartGossipLateWrite');
+    agent = boot.agent;
+    const { internals } = boot;
+    await agent.start();
+    await createLocalContextGraph(agent);
+    await expect.poll(() => internals.sharedMemoryGossipRegistered.has(CG)).toBe(true);
+    const firstManager = internals.gossip;
+
+    await agent.stop();
+    // What a detached subscribe of the retired session leaves behind when it
+    // settles after stop() has cleared the registries.
+    internals.gossipRegistered.add(CG);
+    internals.sharedMemoryGossipRegistered.add(CG);
+    await agent.start();
+
+    // The reset at the manager swap dropped the stale entries, so the
+    // subscribe helpers did not short-circuit on them.
+    expect(internals.gossip).not.toBe(firstManager);
+    const swmTopic = contextGraphSharedMemoryTopic(internals.gossipWireIdFor(CG));
+    await expect.poll(() => internals.gossip.subscribedTopics).toContain(swmTopic);
+    for (const topic of memberTopics(CG)) expect(internals.gossip.subscribedTopics).toContain(topic);
+  }, 60_000);
+
   it('lets a host-mode handler be wired again on the fresh manager', async () => {
     const boot = await createEdgeAgent('RestartGossipHostMode');
     agent = boot.agent;
