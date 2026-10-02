@@ -574,20 +574,24 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.stop();
   });
 
-  it('logs a job run that crashes and keeps the supervisor running', async () => {
-    // A claimed job without a lease makes the runner throw before any promote.
-    // The supervisor has to report that and carry on; with no lease there is
-    // nothing to park, so the row is left to startup recovery.
+  it('logs a job run that crashes and goes on to run the next job', async () => {
+    // The first claimed job loses its lease, so its run throws before any
+    // promote. The supervisor has to report that and stay in service: with no
+    // lease there is nothing to park, and the next job must still complete.
     const crashLogs: string[] = [];
-    const leaseless = Object.create(queue) as AsyncPromoteQueue;
-    leaseless.claimNext = async (workerId) => {
+    let claims = 0;
+    const firstClaimLeaseless = Object.create(queue) as AsyncPromoteQueue;
+    firstClaimLeaseless.claimNext = async (workerId) => {
       const claimed = await queue.claimNext(workerId);
-      return claimed ? { ...claimed, lease: undefined } : claimed;
+      if (!claimed) return claimed;
+      claims += 1;
+      return claims === 1 ? { ...claimed, lease: undefined } : claimed;
     };
     await queue.enqueue(makeRequest('crashing'));
+    await queue.enqueue(makeRequest('healthy'));
     const sup = createPromoteWorkerSupervisor({
       agent: {
-        promoteQueue: leaseless,
+        promoteQueue: firstClaimLeaseless,
         assertion: { promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
@@ -598,13 +602,25 @@ describe('createPromoteWorkerSupervisor', () => {
     });
 
     await sup.start();
-    await sup.tickOnce();
-    await sup.stop();
+    try {
+      expect(await sup.tickOnce()).toBe(1);
+      await vi.waitFor(() => {
+        expect(crashLogs.filter((line) => line.includes('crashed processing'))).toEqual([
+          expect.stringMatching(/^Worker test-slot-0 crashed processing \S+: .*active lease/),
+        ]);
+      });
 
-    expect(crashLogs.filter((line) => line.includes('crashed processing'))).toEqual([
-      expect.stringMatching(/^Worker test-slot-0 crashed processing \S+: .*active lease/),
-    ]);
-    expect(await sup.tickOnce()).toBe(0);
+      // Still in service: the same started supervisor frees the slot, claims
+      // the next job and completes it. The poll is disabled in this test, so
+      // the claim is driven by an explicit tick.
+      expect(await sup.tickOnce()).toBe(1);
+      await vi.waitFor(async () => {
+        expect((await queue.getStats()).succeeded).toBe(1);
+      });
+      expect(sup.getCounters()).toMatchObject({ attempted: 2, succeeded: 1 });
+    } finally {
+      await sup.stop();
+    }
   });
 
   it('wakes immediately on enqueue while retaining a slow durable fallback poll', async () => {
