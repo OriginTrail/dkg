@@ -32,6 +32,8 @@ import {
 } from '../src/daemon/worker/async-promote-worker.js';
 import {
   createAsyncPromoteWorkerFixture,
+  deferred,
+  promoteFailureDiagnostics,
   retryableBookkeepingFailure,
   type AsyncPromoteWorkerFixture,
 } from './_helpers/async-promote-worker-fixture.js';
@@ -84,29 +86,6 @@ describe('claim failure backoff', () => {
     expect(high.recordFailure()).toBe(30_000);
   });
 });
-
-function deferred<T = void>(): {
-  promise: Promise<T>;
-  resolve: (value?: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-} {
-  let resolve!: (value?: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-const PROMOTE_FAILURE_LOG_PREFIX = '[async-promote-worker] ';
-
-function promoteFailureDiagnostics(logs: readonly string[]): Record<string, unknown>[] {
-  return logs
-    .filter((line) => line.startsWith(PROMOTE_FAILURE_LOG_PREFIX))
-    .map((line) => JSON.parse(line.slice(PROMOTE_FAILURE_LOG_PREFIX.length)) as Record<string, unknown>)
-    .filter((entry) => entry['event'] === 'async_promote_attempt_failed');
-}
 
 describe('runPromoteJob', () => {
   let fixture: AsyncPromoteWorkerFixture;
