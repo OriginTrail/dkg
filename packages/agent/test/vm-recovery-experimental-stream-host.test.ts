@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
 import { EXACT_BATCH_STREAM_PROTOCOL } from '../src/sync/exact-batch-stream-contract.js';
@@ -57,6 +57,46 @@ describe('experimental public Core streaming recovery host', () => {
     expect(h.attemptTimeouts[0]).toEqual({ peerId: core, totalTimeoutMs: undefined });
     expect(h.attemptTimeouts.some((attempt) => attempt.peerId === older
       && attempt.totalTimeoutMs === 120_000)).toBe(true);
+  });
+
+  it('does not restart a full legacy scan after an exact probe spends its shared deadline', async () => {
+    const h = await harness();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const legacy = vi.spyOn(h.agent, 'runLegacyDurableSyncDetailed');
+    h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async (_peer, _graph, _uals, options) => {
+      options?.onWorkStarted?.();
+      clock.mockReturnValue(1_120_000);
+      return {
+        admission: 'work-started',
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+        responderCapability: 'legacy-filter-unsupported',
+      };
+    };
+
+    const result = await h.internals.executeVmRecoveryBatch({
+      localCgId: cg,
+      onChainCgId: h.contextGraphId,
+      peerId: older,
+      attempts: [{
+        entry: { index: 0, target: h.targets[0]!, prepared: { slotKey: 'fixture', suppressed: false } },
+        installedRecord: undefined,
+        candidatePeerIds: [older, core],
+      }],
+      unavailablePeerIds: [],
+      headBlock: 100,
+      isRecoveryCurrent: () => true,
+      ctx: createOperationContext('system'),
+      exactRecoveryTransportMode: 'legacy',
+      legacyAttemptTimeoutMs: 120_000,
+    });
+
+    expect(legacy).not.toHaveBeenCalled();
+    expect(result.kind).toBe('completed');
+    expect(h.recovered.size).toBe(0);
   });
 
   it('retains the ordinary legacy budget when no stream Core is available', async () => {

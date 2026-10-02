@@ -34,6 +34,7 @@ interface ExactFetchResult {
     deferredBackpressure: number;
   };
   disposition: VmRecoveryUalDisposition;
+  responderCapability?: 'legacy-filter-unsupported';
 }
 
 /**
@@ -131,6 +132,8 @@ export interface VmRecoveryHostInternals {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
+    exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+    legacyAttemptTimeoutMs?: number;
     registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
   }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' | 'local-admission-deferred' }>;
   recoverVmReconcileBatch(
