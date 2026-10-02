@@ -22,6 +22,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { ethers } from 'ethers';
 import {
   ChainRpcTransportError,
   noteRpcFailover,
@@ -55,6 +56,7 @@ import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
@@ -190,6 +192,9 @@ async function requestStatusWithAgent(
   rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
   rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
   routeRpcTransport?: DaemonRouteRpcTransport,
+  opWalletsOverride: RequestContext['opWallets'] = { wallets: [] },
+  // The node operator, unless a test names another caller.
+  authentication = requestAuthentication({ kind: 'nodeOperator' }),
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -232,6 +237,8 @@ async function requestStatusWithAgent(
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
       routeRpcTransport,
+      opWallets: opWalletsOverride,
+      authentication,
     } as unknown as RequestContext);
   });
 
@@ -246,6 +253,159 @@ async function requestStatusWithAgent(
     });
   }
 }
+
+describe('/api/wallets/balances governed transport', () => {
+  const hubAddress = '0x1111111111111111111111111111111111111111';
+  const tokenAddress = '0x2222222222222222222222222222222222222222';
+  const walletAddress = '0x3333333333333333333333333333333333333333';
+  const opWallets: RequestContext['opWallets'] = {
+    wallets: [{
+      address: walletAddress,
+      privateKey: `0x${'11'.repeat(32)}`,
+    }],
+  };
+
+  it('accounts every wallet RPC through the daemon-owned governor', async () => {
+    const methods: string[] = [];
+    const abi = ethers.AbiCoder.defaultAbiCoder();
+    const rpc = createServer((req, res) => {
+      let raw = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        const call = JSON.parse(raw) as {
+          id: string | number;
+          method: string;
+          params?: Array<{ data?: string }>;
+        };
+        methods.push(call.method);
+        const data = call.params?.[0]?.data?.toLowerCase();
+        const result = call.method === 'eth_chainId'
+          ? '0x7a69'
+          : call.method === 'eth_getBalance'
+            ? ethers.toBeHex(ethers.parseEther('1.5'))
+            : call.method === 'eth_call' && data?.startsWith('0x95d89b41')
+              ? abi.encode(['string'], ['TRAC'])
+              : call.method === 'eth_call' && data?.startsWith('0x70a08231')
+                ? abi.encode(['uint256'], [ethers.parseEther('7')])
+                : '0x10';
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const chain = {
+      type: 'evm',
+      rpcUrl,
+      chainId: 'evm:31337',
+      hubAddress,
+      tokenAddress,
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 100,
+        foregroundReservePercent: 80,
+        burstRequests: 10,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    };
+    const runtime = createDaemonRpcRuntime(chain)!;
+    try {
+      const response = await requestStatusWithAgent(
+        {},
+        { chain },
+        '/api/wallets/balances',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+        opWallets,
+      );
+
+      expect(response).toMatchObject({
+        status: 200,
+        body: {
+          wallets: [walletAddress],
+          balances: [{
+            address: walletAddress,
+            eth: '1.5',
+            trac: '7.0',
+            symbol: 'TRAC',
+          }],
+          symbol: 'TRAC',
+        },
+      });
+      const usage = runtime.drainRouteRpcUsage();
+      expect(usage.byMethod.eth_getBalance).toBe(1);
+      expect(usage.byMethod.eth_call).toBe(2);
+      expect(methods).toEqual(expect.arrayContaining([
+        'eth_chainId',
+        'eth_getBalance',
+        'eth_call',
+      ]));
+      expect(runtime.governor.snapshot().foregroundAdmitted).toBe(methods.length);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+
+  it('fails locally without reaching RPC when the governed queue is saturated', async () => {
+    let hits = 0;
+    const rpc = createServer((_req, res) => {
+      hits += 1;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x7a69' }));
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const chain = {
+      type: 'evm',
+      rpcUrl,
+      chainId: 'evm:31337',
+      hubAddress,
+      tokenAddress,
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 1,
+        foregroundReservePercent: 99,
+        burstRequests: 1,
+        maxQueueSize: 1,
+        startupJitterMs: 0,
+      },
+    };
+    const runtime = createDaemonRpcRuntime(chain)!;
+    const controller = new AbortController();
+    await runtime.governor.acquire('foreground');
+    const queued = runtime.governor.acquire('foreground', controller.signal);
+    await vi.waitFor(() => expect(runtime.governor.snapshot().foregroundQueued).toBe(1));
+    try {
+      const response = await requestStatusWithAgent(
+        {},
+        { chain },
+        '/api/wallets/balances',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+        opWallets,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.balances).toEqual([]);
+      expect(response.body.error).toContain('RPC request governor queue is full');
+      expect(hits).toBe(0);
+      expect(runtime.governor.snapshot().rejected).toBeGreaterThanOrEqual(1);
+    } finally {
+      controller.abort(new Error('test cleanup'));
+      await expect(queued).rejects.toThrow('test cleanup');
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+});
 
 describe('/api/chain/rpc-health partial adapter configuration', () => {
   it('uses the governed daemon transport when rpcUrl exists without a Hub address', async () => {
@@ -1186,38 +1346,88 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
 });
 
 describe('/api/status effective sync lifecycle switches', () => {
+  async function withSwitchEnv<T>(
+    env: { sync?: string; vm?: string },
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previousSync = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    const previousVm = process.env.DKG_VM_RECONCILER_ENABLED;
+    const restore = (name: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    };
+    restore('DKG_SYNC_RECONCILER_ENABLED', env.sync);
+    restore('DKG_VM_RECONCILER_ENABLED', env.vm);
+    try {
+      return await run();
+    } finally {
+      restore('DKG_SYNC_RECONCILER_ENABLED', previousSync);
+      restore('DKG_VM_RECONCILER_ENABLED', previousVm);
+    }
+  }
+
   it('surfaces the configured reconciler switch', async () => {
-    const response = await requestStatusWithAgent(
+    const response = await withSwitchEnv({}, () => requestStatusWithAgent(
       {},
       { syncReconcilerEnabled: false },
-    );
+    ));
 
     expect(response.status).toBe(200);
+    // Peer sync off no longer implies VM reconcile off.
     expect(response.body.syncLifecycle).toEqual({
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: true,
     });
   });
 
   it('surfaces the environment override that runtime actually honors', async () => {
-    const previous = process.env.DKG_SYNC_RECONCILER_ENABLED;
-    process.env.DKG_SYNC_RECONCILER_ENABLED = 'true';
-    try {
-      const response = await requestStatusWithAgent(
-        {},
-        { syncReconcilerEnabled: false },
-      );
+    const response = await withSwitchEnv({ sync: 'true' }, () => requestStatusWithAgent(
+      {},
+      { syncReconcilerEnabled: false },
+    ));
 
-      expect(response.status).toBe(200);
-      expect(response.body.syncLifecycle).toEqual({
-        syncReconcilerEnabled: true,
-      });
-    } finally {
-      if (previous === undefined) {
-        delete process.env.DKG_SYNC_RECONCILER_ENABLED;
-      } else {
-        process.env.DKG_SYNC_RECONCILER_ENABLED = previous;
-      }
-    }
+    expect(response.status).toBe(200);
+    expect(response.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: true,
+      vmReconcilerEnabled: true,
+    });
+  });
+
+  it('surfaces the VM reconciler switch with config and environment precedence', async () => {
+    const configured = await withSwitchEnv({}, () => requestStatusWithAgent(
+      {},
+      { vmReconcilerEnabled: false },
+    ));
+    expect(configured.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: true,
+      vmReconcilerEnabled: false,
+    });
+
+    const overridden = await withSwitchEnv({ vm: 'on' }, () => requestStatusWithAgent(
+      {},
+      { vmReconcilerEnabled: false },
+    ));
+    expect(overridden.body.syncLifecycle.vmReconcilerEnabled).toBe(true);
+  });
+
+  it('reports the agent VM promotion state and omits it for agents without it', async () => {
+    const vmPromotion = {
+      vmReconcilerEnabled: false,
+      vmReconcileActive: false,
+      unavailableReason: 'switched off (vmReconcilerEnabled=false or DKG_VM_RECONCILER_ENABLED)',
+      runtimeReady: true,
+      storageAckGate: 'declining',
+      storageAckHandler: 'registered',
+      coreHostedGraphs: 0,
+      storageAckDeclinesLastHour: { CORE_VM_PROMOTION_DISABLED: 3 },
+      audit: { lastRunAt: null, ledgerReady: false, stalledOnChain: 0 },
+    };
+    const reported = await requestStatusWithAgent({ getVmPromotionStatus: () => vmPromotion });
+    expect(reported.body.vmPromotion).toEqual(vmPromotion);
+
+    const legacy = await requestStatusWithAgent({});
+    expect(legacy.status).toBe(200);
+    expect(legacy.body).not.toHaveProperty('vmPromotion');
   });
 });
 
@@ -1409,6 +1619,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
       requestedContextGraphs: ['explicit-public-cg'],
+      requestedContextGraphCount: 1,
       catalogBackedContextGraphs: [],
     });
   });
@@ -1425,6 +1636,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
       requestedContextGraphs: ['explicit-public-cg', 'private-network-default-cg'],
+      requestedContextGraphCount: 2,
       catalogBackedContextGraphs: [],
     });
   });
@@ -1525,6 +1737,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
       requestedContextGraphs: ['selected-public-cg'],
+      requestedContextGraphCount: 1,
       catalogBackedContextGraphs: ['selected-public-cg'],
     });
   });
@@ -1559,6 +1772,66 @@ describe('/api/status RFC-64 selected-public activation', () => {
       completeSwmProviders: [],
       bootstrap,
     });
+  });
+});
+
+describe('/api/status RFC-64 requested scope by caller', () => {
+  // The live scope holds a public catalog graph, a private graph and the
+  // cleartext id an adopted name hash resolved to; the network adds a default.
+  const requestScopeAs = (authentication: ReturnType<typeof requestAuthentication>) => requestStatusWithAgent(
+    { getSyncContextGraphIds: () => ['selected-public-cg', 'acme-private-cg', 'acme-adopted-cg'] },
+    {
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: { acceptedPublicPolicies: [rfc64PublicCatalogPolicy('selected-public-cg')] },
+      },
+    },
+    '/api/status',
+    { defaultContextGraphs: ['network-default-cg'] } as never,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    authentication,
+  );
+  const wholeScope = ['selected-public-cg', 'acme-private-cg', 'acme-adopted-cg', 'network-default-cg'];
+
+  it('names the whole scope to the node operator, and to every caller when auth is off', async () => {
+    for (const authentication of [
+      requestAuthentication({ kind: 'nodeOperator' }),
+      requestAuthentication({ kind: 'nodeOperator', mode: 'public' }),
+      requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+    ]) {
+      const response = await requestScopeAs(authentication);
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64SelectedPublicSync).toEqual({
+        defaultEnabled: true,
+        requestedContextGraphs: wholeScope,
+        requestedContextGraphCount: 4,
+        catalogBackedContextGraphs: ['selected-public-cg'],
+      });
+    }
+  });
+
+  it('names only the selected public catalog graphs to any other caller, with the whole count', async () => {
+    for (const authentication of [
+      requestAuthentication({ kind: 'anonymous' }),
+      requestAuthentication({ kind: 'anonymous', presentedToken: 'not-a-valid-token' }),
+      requestAuthentication({ kind: 'agent', agentAddress: `0x${'44'.repeat(20)}`, mode: 'public' }),
+    ]) {
+      const response = await requestScopeAs(authentication);
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64SelectedPublicSync).toEqual({
+        defaultEnabled: true,
+        requestedContextGraphs: ['selected-public-cg'],
+        requestedContextGraphCount: 4,
+        catalogBackedContextGraphs: ['selected-public-cg'],
+      });
+      // The public catalog already lists that graph; nothing names the rest.
+      expect(response.body.rfc64PublicCatalog.selectedContextGraphs).toEqual(['selected-public-cg']);
+      const text = JSON.stringify(response.body);
+      for (const hidden of wholeScope.slice(1)) expect(text).not.toContain(hidden);
+    }
   });
 });
 
@@ -1601,6 +1874,7 @@ describe('/api/status selected overlay details', () => {
         // handleRequest; stubbed here because this hand-built ctx drives the full
         // /api/status body, which now surfaces the admission block.
         admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+        authentication: requestAuthentication({ kind: 'anonymous' }),
       } as unknown as RequestContext);
     });
 
@@ -1669,6 +1943,7 @@ describe('/api/status selected overlay details', () => {
           nodeVersion: '0.0.0-test',
           nodeCommit: '',
           admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+          authentication: requestAuthentication({ kind: 'anonymous' }),
         } as unknown as RequestContext);
       });
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

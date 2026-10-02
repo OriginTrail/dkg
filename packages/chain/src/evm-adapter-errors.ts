@@ -9,45 +9,17 @@
  * `TooLowAllowance` classifier. Bodies are a 1:1 move from the original
  * module.
  */
-import { ethers, Interface } from 'ethers';
+import { ethers, ErrorFragment, Interface } from 'ethers';
 import {
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
   messageIndicatesNoFundedPublisherWallet,
 } from '@origintrail-official/dkg-core';
-import { loadAbi } from './evm-adapter-abi.js';
+import { loadAbi, loadVendoredAbis } from './evm-adapter-abi.js';
 
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   try { return JSON.stringify(err); } catch { return String(err); }
-}
-
-/**
- * Flatten the nested text fields used by ethers and managed JSON-RPC
- * providers. Transport classifiers share this boundary so domain reducers do
- * not grow their own incomplete error-envelope parsers.
- */
-export function collectEvmErrorText(err: unknown): string {
-  const parts: string[] = [];
-  const seen = new Set<unknown>();
-  const visit = (value: unknown, depth: number): void => {
-    if (value == null || depth > 5 || seen.has(value)) return;
-    if (typeof value === 'string') {
-      parts.push(value);
-      return;
-    }
-    if (typeof value !== 'object') return;
-    seen.add(value);
-    const record = value as Record<string, unknown>;
-    for (const key of ['message', 'shortMessage', 'reason', 'body']) {
-      if (typeof record[key] === 'string') parts.push(record[key]);
-    }
-    for (const key of ['error', 'info', 'cause', 'data']) {
-      visit(record[key], depth + 1);
-    }
-  };
-  visit(err, 0);
-  return parts.join(' ').toLowerCase();
 }
 
 /**
@@ -152,24 +124,6 @@ export function errorRetryAfterMs(
   return delays.length === 0 ? undefined : Math.max(...delays);
 }
 
-export const ERROR_ABI_CONTRACTS = [
-  'KnowledgeAssets', 'KnowledgeAssetsLifecycle', 'KnowledgeAssetsStorage',
-  'DKGKnowledgeAssets', 'ContextGraphs', 'ContextGraphStorage',
-  'ContextGraphNameRegistry', 'Profile', 'Identity', 'IdentityStorage',
-  'Staking', 'StakingStorage', 'StakingV10', 'StakingKPI',
-  'ConvictionStakingStorage',
-  'DKGStakingConvictionNFT', 'DKGPublishingConvictionNFT',
-  // Post PR #650 split — PCA business errors are declared on the logic
-  // and storage contracts, NOT the slim wrapper. Both must be in this
-  // list so wrapper-bubbled reverts (e.g. NoConvictionAccount, AccountExpired,
-  // UnknownAccount, InvalidAmount, AgentAlreadyRegistered) decode at runtime.
-  'PublishingConviction', 'PublishingConvictionStorage',
-  'Hub', 'Token', 'Ask', 'AskStorage',
-  'Paymaster', 'ShardingTable', 'ParametersStorage',
-  'PublishingConvictionAccount',
-  'RandomSampling', 'RandomSamplingStorage',
-];
-
 /**
  * Substrings we treat as "the Hub no longer recognises this contract
  * as a registered participant" — i.e. the cached address is stale and
@@ -205,21 +159,24 @@ export function getPcaLogicInterface(): Interface {
   return _pcaLogicInterface;
 }
 
+/**
+ * Lazy-cached `ethers.Interface` over the custom errors of every vendored
+ * ABI (see `loadVendoredAbis`). An error from a base contract or library is
+ * declared by every ABI that can revert with it, so fragments are deduped
+ * by selector. The first declaration wins, which ranks the live top-level
+ * ABIs ahead of `archive/`.
+ */
 export function getErrorInterface(): Interface {
   if (_errorInterface) return _errorInterface;
-  const errorFragments: string[] = [];
-  for (const name of ERROR_ABI_CONTRACTS) {
-    try {
-      const abi = loadAbi(name) as any[];
-      for (const entry of abi) {
-        if (entry.type === 'error') {
-          const params = (entry.inputs ?? []).map((i: any) => `${i.type} ${i.name}`).join(', ');
-          errorFragments.push(`error ${entry.name}(${params})`);
-        }
-      }
-    } catch { /* ABI not available */ }
+  const errors = new Map<string, ErrorFragment>();
+  for (const abi of loadVendoredAbis()) {
+    for (const entry of abi) {
+      if (entry.type !== 'error') continue;
+      const fragment = ErrorFragment.from(entry);
+      if (!errors.has(fragment.selector)) errors.set(fragment.selector, fragment);
+    }
   }
-  _errorInterface = new Interface([...new Set(errorFragments)]);
+  _errorInterface = new Interface([...errors.values()]);
   return _errorInterface;
 }
 
@@ -435,6 +392,17 @@ export class InsufficientPublisherFundsError extends Error {
     super(message, options);
     this.name = 'InsufficientPublisherFundsError';
     this.balances = balances;
+  }
+}
+
+/** A strict publish cannot prove PCA coverage while its chain reads are unavailable. */
+export class PcaFundingUnknownError extends Error {
+  readonly code = 'PCA_FUNDING_UNKNOWN';
+  readonly readCode?: string;
+  constructor(readCode?: string) {
+    super('PCA funding verification is inconclusive; retry when chain reads recover.');
+    this.name = 'PcaFundingUnknownError';
+    this.readCode = readCode;
   }
 }
 

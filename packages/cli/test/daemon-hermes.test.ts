@@ -1,7 +1,16 @@
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  Agent,
+  errors as undiciErrors,
+  fetch as undiciFetch,
+  getGlobalDispatcher,
+  setGlobalDispatcher,
+} from 'undici';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { DkgConfig } from '../src/config.js';
 import {
@@ -69,8 +78,8 @@ function makeJsonResponse() {
     res.statusCode = status;
     res.headers = headers;
   };
-  res.write = (chunk: string | Buffer) => {
-    res.body += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+  res.write = (chunk: string | Uint8Array) => {
+    res.body += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
     return true;
   };
   res.end = (chunk?: string | Buffer) => {
@@ -3014,6 +3023,176 @@ describe('Hermes daemon routes', () => {
       'http://127.0.0.1:9444/health',
       'http://127.0.0.1:9444/stream',
     ]);
+  });
+
+  it("does not replay Hermes chat send when undici's header timer ends the bridge forward", async () => {
+    const urls: string[] = [];
+    let sendInit: RequestInit | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl === 'http://127.0.0.1:9444/health') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9444/send') {
+        sendInit = init;
+        // What Node's fetch throws when undici's headersTimeout fires before the bridge answers.
+        throw new TypeError('fetch failed', { cause: new undiciErrors.HeadersTimeoutError() });
+      }
+      return new Response(JSON.stringify({ text: 'gateway reply', correlationId: 'corr-1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(504);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes bridge response timeout',
+      code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'bridge',
+      correlationId: 'corr-1',
+      timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+    });
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'http://127.0.0.1:9444/send',
+    ]);
+    // The forward brings its own dispatcher instead of inheriting the default 300 s timers.
+    expect((sendInit as { dispatcher?: unknown } | undefined)?.dispatcher).toBeInstanceOf(Agent);
+    expect(sendInit?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("ends a Hermes stream with the structured timeout when undici's body timer fires", async () => {
+    let streamInit: RequestInit | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      streamInit = init;
+      let sentDelta = false;
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sentDelta) {
+            sentDelta = true;
+            controller.enqueue(new TextEncoder().encode(
+              `data: ${JSON.stringify({ type: 'delta', text: 'working' })}\n\n`,
+            ));
+            return;
+          }
+          // What reading the body throws when undici's bodyTimeout fires mid-turn.
+          controller.error(new TypeError('terminated', { cause: new undiciErrors.BodyTimeoutError() }));
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {}, '/api/hermes-channel/stream');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.writableEnded).toBe(true);
+    const frames = res.body
+      .split('\n\n')
+      .filter(Boolean)
+      .map((frame: string) => JSON.parse(frame.replace(/^data: /, '')));
+    expect(frames).toEqual([
+      { type: 'delta', text: 'working' },
+      expect.objectContaining({
+        type: 'error',
+        code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'hermes-channel',
+        target: 'bridge',
+        correlationId: 'corr-1',
+        timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+      }),
+    ]);
+    expect((streamInit as { dispatcher?: unknown } | undefined)?.dispatcher).toBeInstanceOf(Agent);
+  });
+
+  it('keeps Hermes chat send waiting past the default fetch dispatcher timers', async () => {
+    const bridge = createServer((req, res) => {
+      req.resume();
+      if (req.url === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      // Like the real bridges, answer a non-streaming turn only when the agent finishes.
+      const reply = setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ text: 'slow reply', correlationId: 'corr-slow' }));
+      }, 1_000);
+      res.on('close', () => clearTimeout(reply));
+    });
+    await new Promise<void>((resolve) => bridge.listen(0, '127.0.0.1', resolve));
+    const bridgeUrl = `http://127.0.0.1:${(bridge.address() as AddressInfo).port}`;
+    // Stand-in for undici's 300 s defaults: a default dispatcher that gives up
+    // after 250 ms. undici's own fetch stands in for Node's: it resolves the
+    // dispatcher the same way (init.dispatcher, else the global default) and
+    // always sees the default that setGlobalDispatcher installs.
+    const defaultDispatcher = getGlobalDispatcher();
+    const impatientDispatcher = new Agent({ headersTimeout: 250, bodyTimeout: 250 });
+    setGlobalDispatcher(impatientDispatcher);
+    vi.stubGlobal('fetch', undiciFetch);
+    try {
+      // A plain fetch on the default dispatcher gives up on the slow reply.
+      await expect(undiciFetch(`${bridgeUrl}/send`, { method: 'POST', body: '{}' }))
+        .rejects.toMatchObject({ cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } });
+
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'hello',
+        correlationId: 'corr-slow',
+      }, {
+        hasChatTurn: vi.fn(async () => false),
+        storeChatExchange: vi.fn(async () => {}),
+      }, {
+        localAgentIntegrations: {
+          hermes: {
+            enabled: true,
+            transport: { kind: 'hermes-channel', bridgeUrl },
+          },
+        },
+      }, '/api/hermes-channel/send');
+
+      await handleHermesRoutes(ctx);
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toMatchObject({ text: 'slow reply', correlationId: 'corr-slow' });
+    } finally {
+      setGlobalDispatcher(defaultDispatcher);
+      await impatientDispatcher.destroy();
+      bridge.closeAllConnections();
+      await new Promise((resolve) => bridge.close(resolve));
+    }
   });
 
   it('accepts authenticated persist-turn even when UI chat is not enabled', async () => {

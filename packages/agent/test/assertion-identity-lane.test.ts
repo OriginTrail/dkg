@@ -85,6 +85,23 @@ function recordingPublisher() {
 }
 
 describe('DKGAgent assertion identity lane — create + legacy-WM migrate', () => {
+  it('forwards the create disposition callback to the publisher unchanged', async () => {
+    const rec = recordingPublisher();
+    const agent = makeBareAgent({
+      defaultAgentAddress: DEFAULT_EVM,
+      publisher: rec.publisher,
+    });
+    const dispositions: string[] = [];
+    const onDisposition = (disposition: 'created' | 'sealed-noop') => dispositions.push(disposition);
+
+    await agent.assertion.create('agent-context', 'chat-turns', { onDisposition });
+
+    const options = (rec.createCalls[0] as any[])[4];
+    expect(options.onDisposition).toBe(onDisposition);
+    options.onDisposition('sealed-noop');
+    expect(dispositions).toEqual(['sealed-noop']);
+  });
+
   it(
     'migrate forwards contextGraphId, name, the EXPLICIT agentAddress, subGraphName, ' +
       'and an allocator callback to the publisher',

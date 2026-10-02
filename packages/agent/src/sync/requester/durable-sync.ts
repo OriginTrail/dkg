@@ -1,19 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import {
-  parseDeterministicKnowledgeAssetUal,
-  isRfc64SemanticControlGraphV1,
-  SYSTEM_CONTEXT_GRAPHS,
-} from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import {
-  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-  readGraphKnowledgeAssetConfirmationKindV1,
-  type PhaseCallback,
-} from '@origintrail-official/dkg-publisher';
+import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
-import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import {
   createGraphScopedDurableManifestPlan,
   graphScopedDurableManifestPrefixAtOffset,
@@ -21,7 +12,13 @@ import {
   planBoundedGraphScopedDurableBatch,
   type GraphScopedDurableManifestPlan,
 } from '../durable-integrity.js';
-import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
+import {
+  didSyncPeerRespond,
+  isSyncBackoffWorthyError,
+  isSyncPermanentRejection,
+  isSyncTargetSupersededError,
+  isSyncTransportFailure,
+} from '../error-tags.js';
 import {
   createDurableSyncAccumulator,
   finalizeDurableSyncCompletion,
@@ -41,6 +38,10 @@ import type {
   GraphScopedMaterializationOutcome,
   VerifiedGraphScopedAsset,
 } from './graph-scoped-materialization.js';
+import {
+  assertNoLegacyRfc64ControlGraphs,
+  partitionVerifiedGraphScopedAssets,
+} from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import {
   normalizeDurableSyncContext,
@@ -48,9 +49,12 @@ import {
 } from './durable-sync-compat.js';
 import {
   classifyExactDurableFetch,
+  classifyExactAssetResponderCapability,
   exactAssetFetchSessionPolicy,
   filterExactAssetDurablePayload,
+  mergeExactAssetResponderCapability,
   mergeExactDurableFetchDisposition,
+  type ExactAssetResponderCapability,
   type ExactDurableFetchDisposition,
 } from './exact-durable-fetch.js';
 import {
@@ -80,7 +84,14 @@ export type {
 } from './durable-sync-budget.js';
 export type { LegacyDurableSyncContext } from './durable-sync-compat.js';
 export { filterExactAssetDurablePayload } from './exact-durable-fetch.js';
-export type { ExactDurableFetchDisposition } from './exact-durable-fetch.js';
+export {
+  assertNoLegacyRfc64ControlGraphs,
+  partitionVerifiedGraphScopedAssets,
+} from './verified-asset-preparation.js';
+export type {
+  ExactAssetResponderCapability,
+  ExactDurableFetchDisposition,
+} from './exact-durable-fetch.js';
 
 /** Normalize arbitrary AbortSignal reasons without mutating caller-owned errors. */
 function normalizeDurableSyncAbortReason(reason: unknown): Error {
@@ -104,6 +115,8 @@ export interface DetailedDurableSyncResult {
   readonly result: InitializedDurableSyncResult;
   /** Present only when this physical run used an exact-asset filter. */
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
+  /** Present when a clean legacy response proved the exact filter was ignored. */
+  readonly exactResponderCapability?: ExactAssetResponderCapability;
 }
 
 /** Invocation-local proof material returned by the non-durable exact fetch. */
@@ -112,38 +125,6 @@ export interface ChallengeExactAssetFetchResult {
   readonly disposition: ExactDurableFetchDisposition;
   readonly authenticatedAssets: readonly ChallengePinnedGraphScopedAsset[];
 }
-
-const DKG_NS = 'http://dkg.io/ontology/';
-const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
-const KA_UAL = `${DKG_NS}kaUal`;
-const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
-const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
-const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
-const BATCH_ID = `${DKG_NS}batchId`;
-const MATERIALIZED_VERSION = `${DKG_NS}materializedVersion`;
-const TRANSACTION_HASH = `${DKG_NS}transactionHash`;
-const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
-const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
-  MATERIALIZED_VERSION,
-  `${DKG_NS}accessPolicy`,
-  `${DKG_NS}allowedPeer`,
-  `${DKG_NS}publisherPeerId`,
-  `${DKG_NS}status`,
-]);
-const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
-  `${DKG_NS}merkleRoot`,
-  `${DKG_NS}contentScopeVersion`,
-  `${DKG_NS}kaUal`,
-  ASSERTION_VERSION,
-  `${DKG_NS}publicTripleCount`,
-  `${DKG_NS}privateTripleCount`,
-  `${DKG_NS}privateMerkleRoot`,
-  ASSERTION_GRAPH,
-  `${DKG_NS}contextGraph`,
-  `${DKG_NS}subGraphName`,
-  TRANSACTION_HASH,
-  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-]);
 
 /** Graph inventory from one clean, complete legacy full snapshot. */
 export interface VerifiedFullSnapshot {
@@ -286,6 +267,7 @@ function prepareDurableVerificationPayload(input: {
   readonly dataResult: SyncPageResult;
   readonly metaResult: SyncPageResult;
   readonly exactDescriptorCoverageComplete: boolean;
+  readonly exactReturnedDescriptorCount: number;
 } {
   if (input.exactAssetSelection === undefined) {
     return {
@@ -293,6 +275,7 @@ function prepareDurableVerificationPayload(input: {
       metaResult: input.preparedMeta.metaForManifest,
       exactDescriptorCoverageComplete:
         input.preparedMeta.exactDescriptorCoverageComplete,
+      exactReturnedDescriptorCount: 0,
     };
   }
   const exact = filterExactAssetDurablePayload(
@@ -314,6 +297,7 @@ function prepareDurableVerificationPayload(input: {
         : { quadRawOffsets: undefined }),
     },
     exactDescriptorCoverageComplete: exact.descriptorCoverageComplete,
+    exactReturnedDescriptorCount: exact.returnedDescriptorCount,
   };
 }
 
@@ -585,6 +569,9 @@ export async function runDurableSyncDetailed(
     ...(detailed.exactFetchDisposition === undefined
       ? {}
       : { exactFetchDisposition: detailed.exactFetchDisposition }),
+    ...(detailed.exactResponderCapability === undefined
+      ? {}
+      : { exactResponderCapability: detailed.exactResponderCapability }),
   };
 }
 
@@ -658,6 +645,7 @@ async function runDurableSyncWithBudget(
 
   const accumulator = createDurableSyncAccumulator();
   const exactFetchDispositions: ExactDurableFetchDisposition[] = [];
+  const exactResponderCapabilities: (ExactAssetResponderCapability | undefined)[] = [];
   const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
 
   const recordPhaseOutcome = (
@@ -770,6 +758,7 @@ async function runDurableSyncWithBudget(
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
     let exactFetchDispositionIndex: number | undefined;
+    let exactResponderCapabilityIndex: number | undefined;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
       activePhase = phase;
       onPhase?.(phase, 'start');
@@ -828,6 +817,7 @@ async function runDurableSyncWithBudget(
         && !isSystemContextGraph;
       if (exactAssetUals !== undefined) {
         exactFetchDispositionIndex = exactFetchDispositions.push('incomplete') - 1;
+        exactResponderCapabilityIndex = exactResponderCapabilities.push(undefined) - 1;
       }
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
@@ -1030,6 +1020,8 @@ async function runDurableSyncWithBudget(
       const effectiveMetaResult = preparedPayload.metaResult;
       const exactAssetDescriptorCoverageComplete =
         preparedPayload.exactDescriptorCoverageComplete;
+      const exactAssetReturnedDescriptorCount =
+        preparedPayload.exactReturnedDescriptorCount;
       if (exactAssetUals !== undefined && !exactAssetDescriptorCoverageComplete) {
         logWarn(
           ctx,
@@ -1281,6 +1273,19 @@ async function runDurableSyncWithBudget(
           dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
         })
       );
+      const settledExactResponderCapability = (): ExactAssetResponderCapability | undefined => {
+        if (exactAssetSelection?.kind !== 'ual-only') return undefined;
+        return classifyExactAssetResponderCapability({
+          requestedAssetCount: exactAssetUals?.length ?? 0,
+          metaResult,
+          dataResult: rawDataResult,
+          metaFetched: !skipAgentsMeta,
+          descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
+          returnedDescriptorCount: exactAssetReturnedDescriptorCount,
+          rejectedKcs: processed.rejectedKcs,
+          dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+        });
+      };
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -1309,6 +1314,9 @@ async function runDurableSyncWithBudget(
         markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
         if (exactFetchDispositionIndex !== undefined) {
           exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
+        }
+        if (exactResponderCapabilityIndex !== undefined) {
+          exactResponderCapabilities[exactResponderCapabilityIndex] = settledExactResponderCapability();
         }
         if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
@@ -1478,6 +1486,9 @@ async function runDurableSyncWithBudget(
       if (exactFetchDispositionIndex !== undefined) {
         exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
       }
+      if (exactResponderCapabilityIndex !== undefined) {
+        exactResponderCapabilities[exactResponderCapabilityIndex] = settledExactResponderCapability();
+      }
       endPhase();
       if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
@@ -1494,6 +1505,13 @@ async function runDurableSyncWithBudget(
     } catch (pidErr) {
       markDurableTerminalBoundary(accumulator, false);
       endPhase();
+      if (isSyncTargetSupersededError(pidErr)) {
+        // The node adopted this name-hash id's cleartext id mid-sync. Nothing
+        // was written under the retired id, and it is no fault of the peer.
+        logDebug(ctx, `Sync for context graph "${pid}" from ${remotePeerId} stopped: ${pidErr.message}`);
+        if (signal?.aborted) break;
+        continue;
+      }
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       if (
         proofOnlyChallengeFetch
@@ -1545,218 +1563,17 @@ async function runDurableSyncWithBudget(
     mergeExactDurableFetchDisposition,
     undefined,
   );
+  const exactResponderCapability = exactResponderCapabilities.reduce<ExactAssetResponderCapability | undefined>(
+    mergeExactAssetResponderCapability,
+    undefined,
+  );
 
   return {
     result,
     ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
+    ...(exactResponderCapability ? { exactResponderCapability } : {}),
     ...(authenticatedExactAssets.length === 0
       ? {}
       : { authenticatedExactAssets: Object.freeze([...authenticatedExactAssets]) }),
   };
-}
-
-function partitionVerifiedGraphScopedAssets(
-  contextGraphId: string,
-  verifiedData: Quad[],
-  verifiedMeta: Quad[],
-  verifiedGraphs: readonly string[],
-): {
-  assets: VerifiedGraphScopedAsset[];
-  remainingData: Quad[];
-  remainingMeta: Quad[];
-} {
-  const graphSet = new Set(verifiedGraphs);
-  // Apply the peer-control quarantine only to graph-scoped metadata subjects.
-  // Legacy read-only KAs still rely on their already-verified status/access
-  // rows, and stripping those globally would make an otherwise valid legacy
-  // snapshot unreadable. An assertionVersion-only subject is included here as
-  // a fail-closed torn-V2 marker even when its remaining envelope is missing.
-  const graphScopedMetadataSubjects = new Set(
-    verifiedMeta
-      .filter((quad) => (
-        quad.predicate === CONTENT_SCOPE_VERSION
-        || quad.predicate === ASSERTION_GRAPH
-        || quad.predicate === ASSERTION_VERSION
-      ))
-      .map((quad) => quad.subject),
-  );
-  // These predicates participate in local stale-write control. A peer may
-  // supply assertionVersion only inside a fully verified graph-scoped asset;
-  // materializedVersion is never peer-owned.
-  const peerSafeMetadata = verifiedMeta.filter(
-    (quad) => (
-      !graphScopedMetadataSubjects.has(quad.subject)
-      || !PEER_UNTRUSTED_METADATA_PREDICATES.has(quad.predicate)
-    ),
-  );
-  if (graphSet.size === 0) {
-    return {
-      assets: [],
-      remainingData: verifiedData,
-      remainingMeta: peerSafeMetadata.filter((quad) => !(
-        graphScopedMetadataSubjects.has(quad.subject)
-        && quad.predicate === ASSERTION_VERSION
-      )),
-    };
-  }
-
-  const dataByGraph = new Map<string, Quad[]>();
-  const remainingData: Quad[] = [];
-  for (const quad of verifiedData) {
-    if (!graphSet.has(quad.graph)) {
-      remainingData.push(quad);
-      continue;
-    }
-    const graphQuads = dataByGraph.get(quad.graph) ?? [];
-    graphQuads.push(quad);
-    dataByGraph.set(quad.graph, graphQuads);
-  }
-
-  const ualByGraph = new Map<string, Set<string>>();
-  const metadataBySubject = new Map<string, Quad[]>();
-  for (const quad of peerSafeMetadata) {
-    const subjectQuads = metadataBySubject.get(quad.subject) ?? [];
-    subjectQuads.push(quad);
-    metadataBySubject.set(quad.subject, subjectQuads);
-  }
-  // One V2 KA has two legitimate metadata subjects that may point at the same
-  // exact graph: the self-bound UAL descriptor and the name-keyed lifecycle
-  // row. Only the descriptor owns the graph. Treating every assertionGraph
-  // pointer as an owner rejects normal publishes as "2 metadata owners".
-  //
-  // The self-binding is also a fail-closed boundary: a second complete KA
-  // descriptor must carry `<candidate> dkg:kaUal <candidate>` and therefore is
-  // still counted as a conflicting owner, while lifecycle/provenance pointers
-  // cannot impersonate one merely by naming the exact graph.
-  const descriptorSubjects = new Set(
-    [...metadataBySubject.entries()]
-      .filter(([subject, quads]) => quads.some(
-        (quad) => quad.predicate === KA_UAL && stripLiteral(quad.object) === subject,
-      ))
-      .map(([subject]) => subject),
-  );
-  for (const quad of peerSafeMetadata) {
-    if (quad.predicate !== ASSERTION_GRAPH || !descriptorSubjects.has(quad.subject)) continue;
-    const graph = stripLiteral(quad.object);
-    if (!graphSet.has(graph)) continue;
-    const owners = ualByGraph.get(graph) ?? new Set<string>();
-    owners.add(quad.subject);
-    ualByGraph.set(graph, owners);
-  }
-
-  const assets: VerifiedGraphScopedAsset[] = [];
-  const handledUals = new Set<string>();
-  for (const assertionGraph of [...graphSet].sort()) {
-    const owners = ualByGraph.get(assertionGraph);
-    if (!owners || owners.size !== 1) {
-      throw new Error(`Verified graph-scoped assertion ${assertionGraph} has ${owners?.size ?? 0} metadata owners`);
-    }
-    const [ual] = owners;
-    // Carry only structural fields plus the bounded provenance discriminator
-    // and receipt claim consumed by the chain authenticator below. ACLs,
-    // status, timestamps, and local ordering are never accepted as trusted
-    // controls from a peer.
-    const metadataQuads = (metadataBySubject.get(ual) ?? []).filter(
-      (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
-    );
-    const versions = new Set(
-      metadataQuads
-        .filter((quad) => quad.predicate === ASSERTION_VERSION)
-        .map((quad) => stripLiteral(quad.object)),
-    );
-    if (versions.size !== 1) {
-      throw new Error(`Verified graph-scoped KA ${ual} has ${versions.size} assertion versions`);
-    }
-    const [versionRaw] = versions;
-    if (!versionRaw || !/^\d+$/.test(versionRaw)) {
-      throw new Error(`Verified graph-scoped KA ${ual} has invalid assertionVersion ${versionRaw ?? '<missing>'}`);
-    }
-    try {
-      readGraphKnowledgeAssetConfirmationKindV1(metadataQuads);
-    } catch (cause) {
-      throw new Error(
-        `Verified graph-scoped KA ${ual} has invalid confirmation metadata`,
-        { cause },
-      );
-    }
-    const metaGraphs = new Set(metadataQuads.map((quad) => quad.graph));
-    if (metaGraphs.size !== 1) {
-      throw new Error(`Verified graph-scoped KA ${ual} spans ${metaGraphs.size} metadata graphs`);
-    }
-    const [metaGraph] = metaGraphs;
-    const expectedContextGraph = `did:dkg:context-graph:${contextGraphId}`;
-    const contextGraphs = new Set(
-      metadataQuads
-        .filter((quad) => quad.predicate === CONTEXT_GRAPH)
-        .map((quad) => stripLiteral(quad.object)),
-    );
-    if (
-      metaGraph !== `${expectedContextGraph}/_meta`
-      || contextGraphs.size !== 1
-      || !contextGraphs.has(expectedContextGraph)
-    ) {
-      throw new Error(
-        `Verified graph-scoped KA ${ual} is not bound to requested context graph ${contextGraphId}`,
-      );
-    }
-    const identity = parseDeterministicKnowledgeAssetUal(ual);
-    const batchId = packKnowledgeAssetIdFromIdentity(identity);
-    metadataQuads.push({
-      subject: ual,
-      predicate: BATCH_ID,
-      object: `"${batchId}"^^<${XSD_INTEGER}>`,
-      graph: metaGraph,
-    });
-    assets.push({
-      contextGraphId,
-      ual,
-      assertionVersion: BigInt(versionRaw),
-      assertionGraph,
-      metaGraph,
-      dataQuads: dataByGraph.get(assertionGraph) ?? [],
-      metadataQuads,
-    });
-    handledUals.add(ual);
-  }
-
-  return {
-    assets,
-    remainingData,
-    remainingMeta: peerSafeMetadata.filter(
-      (quad) => (
-        !handledUals.has(quad.subject)
-        && !(
-          graphScopedMetadataSubjects.has(quad.subject)
-          && quad.predicate === ASSERTION_VERSION
-        )
-      ),
-    ),
-  };
-}
-
-function assertNoLegacyRfc64ControlGraphs(
-  contextGraphId: string,
-  verifiedData: readonly Quad[],
-  verifiedMeta: readonly Quad[],
-  verifiedGraphScopedDataGraphs: readonly string[],
-): void {
-  const reject = (graph: string): void => {
-    // The verified worker result owns structural decoding. This boundary keeps
-    // that typed contract and classifies only reserved graph IRIs.
-    if (!isRfc64SemanticControlGraphV1(graph, contextGraphId)) return;
-    throw Object.assign(
-      new Error(
-        `Legacy durable sync returned reserved RFC-64 control graph ${graph}`,
-      ),
-      { code: 'RFC64_CONTROL_GRAPH_LEGACY_SYNC_REJECTED' },
-    );
-  };
-  for (const quad of verifiedData) reject(quad.graph);
-  for (const quad of verifiedMeta) reject(quad.graph);
-  for (const graph of verifiedGraphScopedDataGraphs) reject(graph);
-}
-
-function stripLiteral(raw: string): string {
-  const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
-  return match ? match[1]! : raw;
 }

@@ -51,12 +51,16 @@ step timeout. A [Windows cancellation probe](https://github.com/OriginTrail/dkg/
 confirmed that native timeout cleanup terminates a parent, child, and grandchild
 before the next step executes.
 
-Focused evidence-encoder, child-process cleanup, repository-state, and
-artifact-publication tests run with:
+Focused evidence-encoder, child-process cleanup, repository-state,
+artifact-publication, and verifier tests run with:
 
 ```sh
 pnpm test:gate0:rfc64-persistence-lifecycle:unit
 ```
+
+CI runs this as a named step on the Windows inventory shard before generation,
+where the two symlink-rejection tests skip and the `0600` mode assertions do not
+run, and on the Linux agent sidecar shard, which runs every case.
 
 Strictly typecheck the producer, runner, verifier, and focused tests with:
 

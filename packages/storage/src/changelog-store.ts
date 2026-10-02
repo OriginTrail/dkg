@@ -115,10 +115,22 @@ const P_OP = `${NS}op`;
 const P_SCHEMA_VERSION = `${NS}schemaVersion`;
 const P_ERA = `${NS}era`;
 const ENTRY_PREFIX = 'urn:dkg:changelog:e:';
+/**
+ * The marker entry IRI for one seq. The writer mints it and the reader looks it
+ * up directly, so the two must never drift: a page read is valid only because
+ * every marker's IRI embeds its seq.
+ */
+const entryIri = (seq: number): string => `${ENTRY_PREFIX}${seq}`;
 const META_SUBJECT = `${NS}self`;
 
 /** On-disk marker schema version, so a future shape change is detectable. */
 export const CHANGELOG_SCHEMA_VERSION = 1;
+
+/**
+ * Marker entries fetched per direct-lookup query in {@link ChangelogStore.readChanges}
+ * (bounds the `VALUES` list, ~15 KiB of query text per batch).
+ */
+export const CHANGELOG_LOOKUP_BATCH = 500;
 
 export type ChangeOp = 'upsert' | 'drop';
 
@@ -159,7 +171,10 @@ export interface ChangelogReader {
    * {@link headSeq} for an explicitly durable storage read with query metadata.
    */
   changelogHead(options?: QueryOptions): Promise<ChangelogHead>;
-  /** Change records with `seq > sinceSeq`, ascending, at most `limit`. */
+  /**
+   * Change records with `seq > sinceSeq`, ascending, covering at most `limit`
+   * distinct seqs (a seq carried by two markers yields both rows).
+   */
   readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]>;
   /** Highest seq durably present in the log (0 if empty). */
   headSeq(options?: QueryOptions): Promise<number>;
@@ -283,7 +298,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       }
       // Data + markers in ONE insert() → one backend transaction → atomic.
       await this.inner.insert([...safe, ...markers], options);
-      this.seq = candidate; // advance only after durable success (gapless)
+      this.adoptDurableSeq(candidate); // advance only after durable success (gapless)
       await this.noteHighWater();
       this.fire(records);
     });
@@ -597,14 +612,107 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   /**
-   * Change records with `seq > sinceSeq`, in ascending seq order, at most
-   * `limit`. This is the O(delta) read the whole RFC exists to enable. In PR1
-   * it is a range query over the (small) reserved changelog graph; PR2 serves
-   * it from an ordered SQLite projection for O(log L + delta).
+   * Change records with `seq > sinceSeq`, in ascending seq order, covering at
+   * most `limit` distinct seqs. This is the O(delta) read the whole RFC exists
+   * to enable.
+   *
+   * Every marker's entry IRI embeds its seq, so a page is read by direct entry
+   * lookup ({@link lookupChanges}) — O(limit · log L) — and never by the
+   * `FILTER(?seq > N) ORDER BY ?seq` range scan, which sorts the whole log
+   * (O(L log L); >30 s on a million-entry beacon log, tripping the managed
+   * store deadline and restarting Oxigraph on every sync poll).
+   *
+   * The page is assembled window by window until it covers `limit` distinct
+   * seqs or the log is exhausted. A seq missing from a window (a marker removed
+   * out-of-band) only widens the next window, so a hole costs a few extra entry
+   * lookups rather than the range scan, and never a short page: the responder
+   * reads `records < limit` as "log drained" and would advance the requester
+   * past unread changes. A seq carried by two markers (two writer processes
+   * overlapping across an A/B release swap, each with its own counter) is
+   * served as both rows; the responder folds per graph.
+   *
+   * The in-memory counter is this writer's head, not necessarily the log's:
+   * an overlapping writer appends above it. Once a window reaches the counter,
+   * one entry probe past it detects such markers; they are adopted as the head
+   * ({@link adoptDurableSeq}) and served. A caught-up cursor therefore costs
+   * one O(log L) probe instead of a `MAX(?seq)` scan, and a durable marker is
+   * never reported as drained.
    */
   async readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]> {
     const since = Number.isFinite(sinceSeq) ? Math.max(0, Math.floor(sinceSeq)) : 0;
     const cap = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1;
+    const readOptions: QueryOptions = { ...options, source: options?.source ?? 'changelog.readChanges' };
+    if (!this.enabled) return this.scanChanges(since, cap, readOptions);
+    const signal = options?.signal;
+    throwIfAborted(signal);
+    await this.ensureSeeded();
+    const out: ChangeRecord[] = [];
+    let from = since + 1;
+    let need = cap;
+    while (need > 0) {
+      throwIfAborted(signal);
+      let to = Math.min(this.seq, from + need - 1);
+      if (to < from) {
+        // The window starts past this writer's counter. One entry probe tells
+        // a caught-up cursor from markers another writer appended above it.
+        const probe = await this.lookupChanges(from, from, readOptions);
+        if (probe.length === 0) break;
+        to = from + need - 1;
+      }
+      const page = await this.lookupChanges(from, to, readOptions);
+      if (page.length > 0) {
+        out.push(...page);
+        need -= distinctSeqCoverage(page);
+        this.adoptDurableSeq(page[page.length - 1].seq);
+      }
+      from = to + 1;
+    }
+    return out;
+  }
+
+  /**
+   * Advance the in-memory head to a seq proven durable, never backwards. The
+   * writer proves its own markers; the reader proves markers another writer
+   * appended (two workers overlap across a release swap, each with its own
+   * counter). The head reported to sync peers thus never lags a served record,
+   * and this writer's next marker lands above everything already in the log.
+   */
+  private adoptDurableSeq(seq: number): void {
+    if (seq > this.seq) this.seq = seq;
+  }
+
+  /** Entries `fromSeq..toSeq` (inclusive) by direct IRI lookup, in seq order. */
+  private async lookupChanges(
+    fromSeq: number,
+    toSeq: number,
+    options: QueryOptions,
+  ): Promise<ChangeRecord[]> {
+    const out: ChangeRecord[] = [];
+    for (let start = fromSeq; start <= toSeq; start += CHANGELOG_LOOKUP_BATCH) {
+      const stop = Math.min(toSeq, start + CHANGELOG_LOOKUP_BATCH - 1);
+      const entries: string[] = [];
+      for (let seq = start; seq <= stop; seq += 1) entries.push(`<${entryIri(seq)}>`);
+      const res = await this.inner.query(
+        `SELECT ?seq ?graph ?op WHERE {
+  GRAPH <${CHANGELOG_GRAPH}> {
+    VALUES ?e { ${entries.join(' ')} }
+    ?e <${P_SEQ}> ?seq ; <${P_GRAPH}> ?graph ; <${P_OP}> ?op .
+  }
+} ORDER BY ?seq`,
+        options,
+      );
+      if (res.type !== 'bindings') return out;
+      collectChangeRecords(res.bindings, out);
+    }
+    return out;
+  }
+
+  /** The exact `seq > since` range scan; only a disabled decorator's passthrough uses it. */
+  private async scanChanges(
+    since: number,
+    cap: number,
+    options: QueryOptions,
+  ): Promise<ChangeRecord[]> {
     const res = await this.inner.query(
       `SELECT ?seq ?graph ?op WHERE {
   GRAPH <${CHANGELOG_GRAPH}> {
@@ -612,17 +720,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     FILTER(?seq > ${since})
   }
 } ORDER BY ?seq LIMIT ${cap}`,
-      { ...options, source: options?.source ?? 'changelog.readChanges' },
+      options,
     );
     if (res.type !== 'bindings') return [];
     const out: ChangeRecord[] = [];
-    for (const b of res.bindings) {
-      const seq = parseIntTerm(b.seq);
-      const graph = stripIri(b.graph);
-      const op = stripLiteral(b.op);
-      if (seq == null || !graph || (op !== 'upsert' && op !== 'drop')) continue;
-      out.push({ seq, graph, op });
-    }
+    collectChangeRecords(res.bindings, out);
     return out;
   }
 
@@ -857,7 +959,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
         quads.push(...markerQuads(candidate, spec.graph, spec.op));
       }
       await this.inner.insert(quads, options);
-      this.seq = candidate;
+      this.adoptDurableSeq(candidate);
       await this.noteHighWater();
       this.fire(records);
     } catch (err) {
@@ -951,7 +1053,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 // ====================================================================
 
 function markerQuads(seq: number, graph: string, op: ChangeOp): Quad[] {
-  const entry = `${ENTRY_PREFIX}${seq}`;
+  const entry = entryIri(seq);
   return [
     { subject: entry, predicate: P_SEQ, object: `"${seq}"^^<${XSD_INTEGER}>`, graph: CHANGELOG_GRAPH },
     { subject: entry, predicate: P_GRAPH, object: graph, graph: CHANGELOG_GRAPH },
@@ -967,6 +1069,33 @@ export function changelogSchemaQuad(): Quad {
     object: `"${CHANGELOG_SCHEMA_VERSION}"^^<${XSD_INTEGER}>`,
     graph: CHANGELOG_GRAPH,
   };
+}
+
+/**
+ * Distinct seqs one page covers — the load-bearing count behind
+ * {@link ChangelogStore.readChanges}. A page keeps widening until it covers
+ * `limit` distinct seqs or the log is drained, because the responder reads a
+ * page shorter than `limit` as "log drained" and advances the requester past
+ * everything it did not receive. Duplicate rows for one seq (two writers across
+ * a release swap) count once; a missing seq (a hole) is what the next window
+ * makes up for. Never relax this to the row count.
+ */
+function distinctSeqCoverage(page: readonly ChangeRecord[]): number {
+  return new Set(page.map((record) => record.seq)).size;
+}
+
+/** Append well-formed `{ seq, graph, op }` rows from a SELECT binding set, skipping malformed rows. */
+function collectChangeRecords(
+  bindings: ReadonlyArray<Record<string, string | undefined>>,
+  out: ChangeRecord[],
+): void {
+  for (const b of bindings) {
+    const seq = parseIntTerm(b.seq);
+    const graph = stripIri(b.graph);
+    const op = stripLiteral(b.op);
+    if (seq == null || !graph || (op !== 'upsert' && op !== 'drop')) continue;
+    out.push({ seq, graph, op });
+  }
 }
 
 /** Extract an integer from a binding term (`"42"^^<…integer>`, `42`, or `"42"`). */

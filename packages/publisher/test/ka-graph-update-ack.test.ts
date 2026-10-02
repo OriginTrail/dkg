@@ -12,6 +12,7 @@ import {
   MemoryLayer,
   PROTOCOL_STORAGE_UPDATE_ACK_V2,
   STORAGE_ACK_DECLINE_CODES,
+  STORAGE_ACK_MAX_STAGING_BYTES,
   TypedEventBus,
   createGraphKnowledgeAssetScope,
   decodeStorageACK,
@@ -23,6 +24,10 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
+import type {
+  PublishResult,
+  V10UpdateACKProvider,
+} from '../src/publisher.js';
 import {
   StorageACKHandler,
   type StorageACKHandlerConfig,
@@ -30,7 +35,13 @@ import {
 import {
   computeFlatKCMerkleLeafCountV10,
   computeFlatKCRootV10,
+  computePrivateRootV10,
 } from '../src/merkle.js';
+import {
+  buildPublicQuadsWithByteSize,
+  encodePublicNQuads,
+  encodedPublicByteLength,
+} from './_helpers/public-nquads.js';
 import { buildUpdateSeal, mockSealCtx } from './_helpers/seal.js';
 
 const TARGET_CG_ID = '42';
@@ -106,6 +117,18 @@ function config(wallet: ethers.Wallet, curated = false): StorageACKHandlerConfig
   };
 }
 
+function createHandler({
+  store = new OxigraphStore(),
+  wallet = ethers.Wallet.createRandom(),
+  curated = false,
+}: {
+  store?: OxigraphStore;
+  wallet?: ethers.Wallet;
+  curated?: boolean;
+} = {}): StorageACKHandler {
+  return new StorageACKHandler(store, config(wallet, curated), new TypedEventBus());
+}
+
 function byteSizeFloor(quads: readonly Quad[]): number {
   return quads.reduce(
     (sum, quad) => sum
@@ -116,10 +139,131 @@ function byteSizeFloor(quads: readonly Quad[]): number {
   );
 }
 
-function wireNquads(quads: readonly Quad[]): Uint8Array {
-  return new TextEncoder().encode(quads.map((quad) =>
-    `<${quad.subject}> <${quad.predicate}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} <${quad.graph}> .`,
-  ).join('\n'));
+type CapturedUpdateParams = Parameters<V10UpdateACKProvider>[0];
+
+interface GraphUpdateRun {
+  result: PublishResult;
+  params: CapturedUpdateParams;
+  privateRoot?: Uint8Array;
+}
+
+interface RunGraphUpdateOptions {
+  publicQuads: Quad[];
+  privateQuads?: Quad[];
+  fromSharedMemory?: boolean;
+}
+
+async function runGraphUpdate(
+  {
+    publicQuads,
+    privateQuads = [],
+    fromSharedMemory = false,
+  }: RunGraphUpdateOptions,
+  receiverStore = new OxigraphStore(),
+): Promise<GraphUpdateRun> {
+  const store = new OxigraphStore();
+  const publisher = new DKGPublisher({
+    store,
+    chain: new NoChainAdapter(),
+    eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(),
+    publisherAddress: AUTHOR,
+  });
+  const initial = await publisher.publish({
+    contextGraphId: SOURCE_CG_ID,
+    quads: [{
+      subject: 'urn:entity:producer',
+      predicate: 'urn:p:value',
+      object: '"v1"',
+      graph: '',
+    }],
+    publisherPeerId: 'publisher-peer',
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: UAL,
+    assertionVersion: 1,
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+  });
+  expect(initial.kaId).toBe(KA_ID);
+
+  const chain = new ProducerUpdateChain();
+  chain.__registerKC({
+    kaId: KA_ID,
+    contextGraphId: BigInt(TARGET_CG_ID),
+    merkleRootHex: ethers.hexlify(initial.merkleRoot),
+    chunks: [],
+    merkleLeafCount: 1,
+    publisherAddress: AUTHOR,
+  });
+  (publisher as unknown as { chain: ProducerUpdateChain }).chain = chain;
+
+  const handler = createHandler({ store: receiverStore });
+  const collector = new ACKCollector({
+    gossipPublish: async () => {},
+    sendP2P: async (_peerId, _protocol, data) => handler.updateHandler(data, PEER),
+    getConnectedCorePeers: () => ['core-1'],
+    verifyIdentity: async () => true,
+    log: () => {},
+  });
+
+  const privateRoot = privateQuads.length > 0
+    ? computePrivateRootV10(privateQuads)
+    : undefined;
+  if (privateQuads.length > 0 && privateRoot === undefined) {
+    throw new Error('private graph-update fixture did not produce a Merkle root');
+  }
+  const updateSeal = await buildUpdateSeal({
+    kaId: KA_ID,
+    quads: publicQuads,
+    ...(privateQuads.length > 0 ? { privateQuads } : {}),
+    author: PRODUCER_WALLET,
+    ctx: mockSealCtx(),
+  });
+  let captured: CapturedUpdateParams | undefined;
+  const v10UpdateACKProvider: V10UpdateACKProvider = async (params) => {
+    captured = params;
+    const collected = await collector.collectUpdate({
+      ...params,
+      contextGraphId: BigInt(params.contextGraphId),
+      chainId: 31337n,
+      kav10Address: '0x000000000000000000000000000000000000c10a',
+      publisherPeerId: 'publisher-peer',
+      requiredACKs: 1,
+    });
+    return collected.acks;
+  };
+  const commonOptions = {
+    contextGraphId: SOURCE_CG_ID,
+    publishContextGraphId: TARGET_CG_ID,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: UAL,
+    assertionVersion: 2,
+    publicTripleCount: publicQuads.length,
+    privateTripleCount: privateQuads.length,
+    ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
+    precomputedUpdateAttestation: updateSeal,
+    v10UpdateACKProvider,
+  };
+
+  let result: PublishResult;
+  if (fromSharedMemory) {
+    await store.insert(publicQuads.map((quad) => ({ ...quad, graph: EXACT_SWM_GRAPH })));
+    result = await publisher.updateKnowledgeAssetFromSharedMemory(KA_ID, commonOptions);
+  } else {
+    result = await publisher.update(KA_ID, {
+      ...commonOptions,
+      quads: publicQuads,
+      privateQuads,
+    });
+  }
+  if (captured === undefined) {
+    throw new Error('graph-update fixture did not invoke its ACK provider');
+  }
+  return {
+    result,
+    params: captured,
+    ...(privateRoot === undefined ? {} : { privateRoot }),
+  };
 }
 
 function intent(
@@ -167,11 +311,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
   ])('rejects an update intent with $label before signing', async ({ overrides }) => {
     const wallet = ethers.Wallet.createRandom();
     const signMessage = vi.spyOn(wallet, 'signMessage');
-    const handler = new StorageACKHandler(
-      new OxigraphStore(),
-      config(wallet),
-      new TypedEventBus(),
-    );
+    const handler = createHandler({ wallet });
 
     await expect(handler.updateHandler(intent([], 0, overrides), PEER))
       .rejects.toThrow('invalid graph-scoped content envelope');
@@ -179,97 +319,196 @@ describe('StorageACKHandler graph-scoped updates', () => {
   });
 
   it('accepts the inline VM payload emitted by a public graph-update producer', async () => {
-    const store = new OxigraphStore();
-    const publisher = new DKGPublisher({
-      store,
-      chain: new NoChainAdapter(),
-      eventBus: new TypedEventBus(),
-      keypair: await generateEd25519Keypair(),
-      publisherAddress: AUTHOR,
-    });
-    const initial = await publisher.publish({
-      contextGraphId: SOURCE_CG_ID,
-      quads: [{
-        subject: 'urn:entity:producer',
-        predicate: 'urn:p:value',
-        object: '"v1"',
-        graph: '',
-      }],
-      publisherPeerId: 'publisher-peer',
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: UAL,
-      assertionVersion: 1,
-      publicTripleCount: 1,
-      privateTripleCount: 0,
-    });
-    expect(initial.kaId).toBe(KA_ID);
-
-    const updatedSWMQuad: Quad = {
+    const publicQuads: Quad[] = [{
       subject: 'urn:entity:producer',
       predicate: 'urn:p:value',
       object: '"v2"',
-      graph: EXACT_SWM_GRAPH,
-    };
-    await store.insert([updatedSWMQuad]);
+      graph: '',
+    }];
 
-    const chain = new ProducerUpdateChain();
-    chain.__registerKC({
-      kaId: KA_ID,
-      contextGraphId: BigInt(TARGET_CG_ID),
-      merkleRootHex: ethers.hexlify(initial.merkleRoot),
-      chunks: [],
-      merkleLeafCount: 1,
-      publisherAddress: AUTHOR,
-    });
-    (publisher as unknown as { chain: ProducerUpdateChain }).chain = chain;
-
-    const handler = new StorageACKHandler(
-      new OxigraphStore(),
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
-    const deps: ACKCollectorDeps = {
-      gossipPublish: async () => {},
-      sendP2P: async (_peerId, _protocol, data) => handler.updateHandler(data, PEER),
-      getConnectedCorePeers: () => ['core-1'],
-      verifyIdentity: async () => true,
-      log: () => {},
-    };
-    const collector = new ACKCollector(deps);
-    let producedStagingQuads: Uint8Array | undefined;
-    const updateSeal = await buildUpdateSeal({
-      kaId: KA_ID,
-      quads: [{ ...updatedSWMQuad, graph: '' }],
-      author: PRODUCER_WALLET,
-      ctx: mockSealCtx(),
-    });
-
-    const result = await publisher.updateKnowledgeAssetFromSharedMemory(KA_ID, {
-      contextGraphId: SOURCE_CG_ID,
-      publishContextGraphId: TARGET_CG_ID,
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: UAL,
-      assertionVersion: 2,
-      publicTripleCount: 1,
-      privateTripleCount: 0,
-      precomputedUpdateAttestation: updateSeal,
-      v10UpdateACKProvider: async (params) => {
-        producedStagingQuads = params.stagingQuads;
-        const collected = await collector.collectUpdate({
-          ...params,
-          contextGraphId: BigInt(params.contextGraphId),
-          chainId: 31337n,
-          kav10Address: '0x000000000000000000000000000000000000c10a',
-          publisherPeerId: 'publisher-peer',
-          requiredACKs: 1,
-        });
-        return collected.acks;
-      },
+    const { result, params } = await runGraphUpdate({
+      publicQuads,
+      fromSharedMemory: true,
     });
 
     expect(result.status).toBe('confirmed');
-    expect(new TextDecoder().decode(producedStagingQuads)).toContain(`<${EXACT_VM_GRAPH}>`);
-    expect(new TextDecoder().decode(producedStagingQuads)).not.toContain(`<${EXACT_SWM_GRAPH}>`);
+    expect(params.stagingQuads).toBeDefined();
+    expect(new TextDecoder().decode(params.stagingQuads)).toContain(`<${EXACT_VM_GRAPH}>`);
+    expect(new TextDecoder().decode(params.stagingQuads)).not.toContain(`<${EXACT_SWM_GRAPH}>`);
+  });
+
+  it('accepts an inline public-plus-private graph update with no local SWM copy', async () => {
+    const quads: Quad[] = [
+      { subject: 'urn:entity:a', predicate: 'urn:p:value', object: '"a"', graph: EXACT_VM_GRAPH },
+      { subject: 'urn:entity:b', predicate: 'urn:p:value', object: '"b"', graph: EXACT_VM_GRAPH },
+    ];
+    const stagingQuads = encodePublicNQuads(quads);
+    const handler = createHandler();
+
+    const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 3, {
+      stagingQuads,
+      newByteSize: stagingQuads.length,
+    }), PEER));
+
+    expect(isStorageACKDecline(ack)).toBe(false);
+    expect(ethers.hexlify(ack.merkleRoot)).toBe(
+      ethers.hexlify(computeFlatKCRootV10(quads, [PRIVATE_ROOT])),
+    );
+  });
+
+  it('declines the same public-plus-private graph update when staging is absent and SWM is empty', async () => {
+    const quads: Quad[] = [
+      { subject: 'urn:entity:a', predicate: 'urn:p:value', object: '"a"', graph: EXACT_VM_GRAPH },
+      { subject: 'urn:entity:b', predicate: 'urn:p:value', object: '"b"', graph: EXACT_VM_GRAPH },
+    ];
+    const handler = createHandler();
+
+    const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 3), PEER));
+
+    expect(isStorageACKDecline(ack)).toBe(true);
+    expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM);
+    expect(ack.declineMessage).toContain(
+      'graph-scoped public triple count mismatch: intent=2, local=0',
+    );
+  });
+
+  it('declines inline graph updates whose claimed root omits the private commitment', async () => {
+    const quads: Quad[] = [{
+      subject: 'urn:entity:a',
+      predicate: 'urn:p:value',
+      object: '"a"',
+      graph: EXACT_VM_GRAPH,
+    }];
+    const stagingQuads = encodePublicNQuads(quads);
+    const handler = createHandler();
+
+    const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 1, {
+      stagingQuads,
+      newByteSize: stagingQuads.length,
+      newMerkleRoot: computeFlatKCRootV10(quads, []),
+    }), PEER));
+
+    expect(isStorageACKDecline(ack)).toBe(true);
+    expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM);
+    expect(ack.declineMessage).toContain('graph-scoped newMerkleRoot mismatch');
+  });
+
+  it('declines inline private-root updates whose public triple count does not match the payload', async () => {
+    const quads: Quad[] = [{
+      subject: 'urn:entity:a',
+      predicate: 'urn:p:value',
+      object: '"a"',
+      graph: EXACT_VM_GRAPH,
+    }];
+    const stagingQuads = encodePublicNQuads(quads);
+    const handler = createHandler();
+
+    const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 1, {
+      stagingQuads,
+      newByteSize: stagingQuads.length,
+      publicTripleCount: 2,
+    }), PEER));
+
+    expect(isStorageACKDecline(ack)).toBe(true);
+    expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM);
+    expect(ack.declineMessage).toContain('public triple count mismatch: intent=2, local=1');
+  });
+
+  it('keeps fully private unencrypted graph updates outside the public ACK path', async () => {
+    const handler = createHandler();
+
+    await expect(handler.updateHandler(intent([], 1), PEER)).rejects.toThrow(
+      'newMerkleLeafCount must be positive for public KAs',
+    );
+  });
+
+  it('ships graph-scoped public quads inline with a private root so an empty core can sign', async () => {
+    const publicQuads: Quad[] = [{
+      subject: 'urn:entity:producer',
+      predicate: 'urn:p:value',
+      object: '"v2"',
+      graph: '',
+    }];
+    const privateQuads: Quad[] = [{
+      subject: 'urn:entity:producer',
+      predicate: 'urn:p:secret',
+      object: '"secret"',
+      graph: '',
+    }];
+    const { result, params, privateRoot } = await runGraphUpdate({
+      publicQuads,
+      privateQuads,
+    });
+
+    expect(result.status).toBe('confirmed');
+    const stagingQuads = params.stagingQuads;
+    expect(stagingQuads).toBeDefined();
+    if (stagingQuads === undefined) {
+      throw new Error('small mixed graph update did not carry inline staging quads');
+    }
+    expect(params.publicTripleCount).toBe(1);
+    expect(params.privateTripleCount).toBe(1);
+    expect(params.privateMerkleRoot).toEqual(privateRoot);
+    expect(params.newByteSize).toBe(BigInt(stagingQuads.length));
+    expect(new TextDecoder().decode(stagingQuads)).toContain(`<${EXACT_VM_GRAPH}>`);
+    expect(new TextDecoder().decode(stagingQuads)).not.toContain(`<${EXACT_SWM_GRAPH}>`);
+  });
+
+  it('inlines an exact-limit public-only graph update', async () => {
+    const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES;
+    const vmQuads = buildPublicQuadsWithByteSize(targetBytes, EXACT_VM_GRAPH);
+    const publicQuads = vmQuads.map((quad) => ({ ...quad, graph: '' }));
+
+    expect(encodedPublicByteLength(vmQuads)).toBe(targetBytes);
+    const { result, params } = await runGraphUpdate({ publicQuads });
+
+    expect(result.status).toBe('confirmed');
+    expect(params.stagingQuads).toHaveLength(targetBytes);
+    expect(params.newByteSize).toBe(BigInt(targetBytes));
+    expect(params.publicTripleCount).toBe(publicQuads.length);
+    expect(params.privateTripleCount).toBe(0);
+  });
+
+  it('omits just-over-limit public-only staging and verifies from exact SWM', async () => {
+    const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
+    const vmQuads = buildPublicQuadsWithByteSize(targetBytes, EXACT_VM_GRAPH);
+    const publicQuads = vmQuads.map((quad) => ({ ...quad, graph: '' }));
+    const receiverStore = new OxigraphStore();
+    await receiverStore.insert(vmQuads.map((quad) => ({ ...quad, graph: EXACT_SWM_GRAPH })));
+
+    expect(encodedPublicByteLength(vmQuads)).toBe(targetBytes);
+    const { result, params } = await runGraphUpdate({ publicQuads }, receiverStore);
+
+    expect(result.status).toBe('confirmed');
+    expect(params.stagingQuads).toBeUndefined();
+    expect(params.newByteSize).toBe(BigInt(targetBytes));
+    expect(params.publicTripleCount).toBe(publicQuads.length);
+    expect(params.privateTripleCount).toBe(0);
+  });
+
+  it('omits just-over-limit mixed update staging and verifies from exact SWM', async () => {
+    const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
+    const vmQuads = buildPublicQuadsWithByteSize(targetBytes, EXACT_VM_GRAPH);
+    const publicQuads = vmQuads.map((quad) => ({ ...quad, graph: '' }));
+    const receiverStore = new OxigraphStore();
+    await receiverStore.insert(vmQuads.map((quad) => ({ ...quad, graph: EXACT_SWM_GRAPH })));
+
+    expect(encodedPublicByteLength(vmQuads)).toBe(targetBytes);
+    const { result, params } = await runGraphUpdate({
+      publicQuads,
+      privateQuads: [{
+        subject: publicQuads[0].subject,
+        predicate: 'urn:p:secret',
+        object: '"secret"',
+        graph: '',
+      }],
+    }, receiverStore);
+
+    expect(result.status).toBe('confirmed');
+    expect(params.stagingQuads).toBeUndefined();
+    expect(params.newByteSize).toBe(BigInt(targetBytes));
+    expect(params.publicTripleCount).toBe(publicQuads.length);
+    expect(params.privateTripleCount).toBe(1);
   });
 
   it('verifies a public-plus-private update from only its exact per-KA SWM graph', async () => {
@@ -284,11 +523,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       // change both the triple count and Merkle root and therefore decline.
       { subject: 'urn:legacy', predicate: 'urn:p:value', object: '"wrong"', graph: LEGACY_SWM_GRAPH },
     ]);
-    const handler = new StorageACKHandler(
-      store,
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
+    const handler = createHandler({ store });
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 3), PEER));
 
@@ -307,11 +542,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       object: '"wrong"',
       graph: LEGACY_SWM_GRAPH,
     }]);
-    const handler = new StorageACKHandler(
-      store,
-      config(ethers.Wallet.createRandom(), true),
-      new TypedEventBus(),
-    );
+    const handler = createHandler({ store, curated: true });
     const catalogTriples = [{
       subject: `did:dkg:context-graph:${TARGET_CG_ID}`,
       predicate: 'http://purl.org/dc/terms/identifier',
@@ -384,11 +615,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       graph: LEGACY_SWM_GRAPH,
     }];
     await store.insert(content);
-    const handler = new StorageACKHandler(
-      store,
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
+    const handler = createHandler({ store });
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(content, 0), PEER));
 
@@ -398,11 +625,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
   });
 
   it('rejects an assertion version that is not pre-update count plus one', async () => {
-    const handler = new StorageACKHandler(
-      new OxigraphStore(),
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
+    const handler = createHandler();
 
     await expect(handler.updateHandler(intent([], 1, {
       assertionVersion: '3',
@@ -410,11 +633,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
   });
 
   it('rejects a non-canonical sub-graph before deriving an SWM graph URI', async () => {
-    const handler = new StorageACKHandler(
-      new OxigraphStore(),
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
+    const handler = createHandler();
 
     await expect(handler.updateHandler(intent([], 1, {
       subGraphName: 'nested/graph',
@@ -427,11 +646,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       subject: 'urn:entity:a', predicate: 'urn:p:value', object: '"a"', graph: EXACT_SWM_GRAPH,
     }];
     await store.insert(quads);
-    const handler = new StorageACKHandler(
-      store,
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
+    const handler = createHandler({ store });
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 0, {
       newMerkleLeafCount: 999,
@@ -459,11 +674,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       },
     ];
     await store.insert(quads);
-    const handler = new StorageACKHandler(
-      store,
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
+    const handler = createHandler({ store });
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 0), PEER));
 
@@ -477,12 +688,8 @@ describe('StorageACKHandler graph-scoped updates', () => {
       object: '"legacy"',
       graph: `did:dkg:context-graph:${SOURCE_CG_ID}/sub/_shared_memory`,
     };
-    const stagingQuads = wireNquads([quad]);
-    const handler = new StorageACKHandler(
-      new OxigraphStore(),
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
+    const stagingQuads = encodePublicNQuads([quad]);
+    const handler = createHandler();
     const encoded = encodeUpdateIntent({
       kaId: KA_ID.toString(),
       contextGraphId: TARGET_CG_ID,
@@ -510,15 +717,11 @@ describe('StorageACKHandler graph-scoped updates', () => {
       object: '"attacker-authored"',
       graph: EXACT_SWM_GRAPH,
     }];
-    const handler = new StorageACKHandler(
-      new OxigraphStore(),
-      config(ethers.Wallet.createRandom()),
-      new TypedEventBus(),
-    );
+    const handler = createHandler();
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(malicious, 0, {
-      stagingQuads: wireNquads(malicious),
-      newByteSize: wireNquads(malicious).length,
+      stagingQuads: encodePublicNQuads(malicious),
+      newByteSize: encodedPublicByteLength(malicious),
     }), PEER));
 
     expect(isStorageACKDecline(ack)).toBe(true);

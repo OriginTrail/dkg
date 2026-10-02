@@ -206,6 +206,9 @@ type CatchupStatusCommandOptions = { watch?: boolean; interval?: string | number
 
 function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus']>>) {
   console.log(`Context Graph: ${status.contextGraphId}`);
+  if (status.resolvedContextGraphId) {
+    console.log(`Resolved To:   ${status.resolvedContextGraphId}`);
+  }
   console.log(`Job:           ${status.jobId}`);
   console.log(`Job Status:    ${status.jobStatus}`);
   if (status.graphSync) {
@@ -239,6 +242,9 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   }
   if (status.error) {
     console.log(`Error:         ${status.error}`);
+  }
+  if (status.identity && status.identity.message !== status.error) {
+    console.log(`Identity:      ${status.identity.message}`);
   }
   if (
     status.result &&

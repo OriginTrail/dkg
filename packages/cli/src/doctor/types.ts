@@ -41,7 +41,7 @@ export interface Finding {
 }
 
 /**
- * §4.7.0 always-reported state summary. Eighteen fields; the agent /
+ * §4.7.0 always-reported state summary. The agent /
  * operator / support engineer gets the full disambiguation context
  * in one place rather than running five separate commands.
  *
@@ -51,6 +51,12 @@ export interface Finding {
  * may be cross-referenced by checks below.
  */
 export interface StateSummary {
+  /** Node capability snapshot used by SQLite-backed DKG features. */
+  runtime: {
+    nodeVersion: string;
+    nodeSqliteAvailable: boolean;
+    probe: 'getBuiltinModule' | 'unavailable';
+  };
   /** ~/.dkg/daemon.pid — `null` if absent. */
   daemon: {
     pid: number | null;
@@ -151,6 +157,11 @@ export interface DoctorReport {
 export interface DoctorDeps {
   /** Platform used for static capability checks; defaults to the current process. */
   platform?: NodeJS.Platform;
+  /** Optional runtime surface for deterministic capability-check tests. */
+  runtime?: {
+    version: string;
+    getBuiltinModule?: (name: string) => unknown;
+  };
   /** Resolved DKG home (`~/.dkg/` typically). */
   dkgHome: string;
   /** `process.env.DKG_HOME` at invocation time. */

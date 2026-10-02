@@ -262,6 +262,43 @@ describe('DKGAgent ACK signer gating', () => {
       expect((agent as any).chain).toBeInstanceOf(EVMChainAdapter);
       expect((agent as any).chain.finalityConfirmations).toBe(3);
       expect((agent as any).chain.maxFeePerGasWei).toBe(100n);
+      // The RFC-64 precommits must anchor at the SAME depth the adapter's own
+      // authority reads use, and they must read it FROM the adapter.
+      expect((agent as any).chain.getFinalityConfirmations()).toBe(3);
+      expect((agent as any).resolveChainFinalityConfirmationsV1()).toBe(3);
+    });
+
+    it('takes the precommit finality depth from a pre-built adapter, not chainConfig', async () => {
+      // `dkg-agent-types.ts` documents `chainAdapter` as "If provided,
+      // chainConfig is ignored". Reading `chainConfig.finalityConfirmations`
+      // for the RFC-64 precommits therefore pinned them to the default while
+      // the adapter's own authority reads honoured the operator — two anchors
+      // in one process, and nothing anywhere reported the divergence.
+      const operational = ethers.Wallet.createRandom();
+      const built = await DKGAgent.create({
+        name: 'PreBuiltAdapterDepthSource',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:0',
+          hubAddress: ethers.ZeroAddress,
+          operationalKeys: [operational.privateKey],
+          finalityConfirmations: 7,
+        },
+        nodeRole: 'edge',
+      });
+      const prebuilt = (built as any).chain as EVMChainAdapter;
+
+      const agent = await DKGAgent.create({
+        name: 'PreBuiltAdapterDepthConsumer',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainAdapter: prebuilt,
+        nodeRole: 'edge',
+      });
+
+      expect((agent as any).config.chainConfig?.finalityConfirmations).toBeUndefined();
+      expect((agent as any).resolveChainFinalityConfirmationsV1()).toBe(7);
     });
 
 

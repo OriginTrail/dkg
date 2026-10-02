@@ -2,13 +2,22 @@ import { withRpcRequestContext } from '@origintrail-official/dkg-chain';
 import { CoalescingRecurringTask } from '@origintrail-official/dkg-core';
 
 /**
- * Bounded ContextGraphNameRegistry discovery scheduling.
+ * Bounded on-chain Context Graph discovery scheduling.
  *
- * Live discovery and historical repair are deliberately different lanes:
- * live discovery always runs first, resumes its durable cursor with the chain
- * adapter's reorg overlap, and is the only lane whose failure is retried as a
- * pinned scheduler slot. Historical repair runs only after live success, owns
- * an independent atomic cursor/target, and is bounded on every invocation.
+ * ContextGraphStorage id enumeration runs first on every pass. It is the
+ * authoritative history source: it lists every Context Graph that exists on
+ * chain from a durable id cursor, with view calls only. The repair slot keeps
+ * its mutable facts fresh at the repair cadence.
+ *
+ * The ContextGraphNameRegistry lanes run only while a registry is bound in the
+ * Hub. The registry is archived and neither mainnet registers it, so there the
+ * agent reports its absence once and both registry lanes are skipped instead
+ * of scanning nothing every tick. Where it is bound, live discovery and
+ * historical repair stay deliberately different lanes: live discovery resumes
+ * its durable cursor with the chain adapter's reorg overlap and is the only
+ * lane whose failure is retried as a pinned scheduler slot; historical repair
+ * runs only after live success, owns an independent atomic cursor/target, and
+ * is bounded on every invocation.
  */
 
 /** Default completed-repair generation interval: about once per day. */
@@ -176,6 +185,18 @@ export function createChainDiscoveryScanRunner(input: {
       minimumIntervalMs: number;
       signal: AbortSignal;
     }): Promise<number>;
+    /**
+     * Whether a ContextGraphNameRegistry is bound. When it resolves false the
+     * registry lanes are skipped; agents without the probe keep them.
+     */
+    hasContextGraphNameRegistry?(): Promise<boolean>;
+    /** ContextGraphStorage id enumeration from its durable cursor. */
+    discoverContextGraphsFromStorage?(options: { signal: AbortSignal }): Promise<number>;
+    /** Refresh enumerated graphs' mutable facts, at most once per interval. */
+    refreshContextGraphsFromStorage?(options: {
+      minimumIntervalMs: number;
+      signal: AbortSignal;
+    }): Promise<number>;
   };
   log: (msg: string) => void;
   pageBudget?: number;
@@ -214,7 +235,74 @@ export function createChainDiscoveryScanRunner(input: {
     }
   };
 
-  const execute = async (signal: AbortSignal): Promise<void> => {
+  const repairIntervalMs = (): number => {
+    const configuredRepairEvery = input.repairEveryTicks ?? input.fullScanEvery;
+    const repairEvery = typeof configuredRepairEvery === 'number'
+      && Number.isFinite(configuredRepairEvery)
+      && configuredRepairEvery >= 1
+      ? Math.floor(configuredRepairEvery)
+      : CHAIN_REPAIR_AUDIT_EVERY_TICKS;
+    return repairEvery * CHAIN_DISCOVERY_SCAN_INTERVAL_MS;
+  };
+
+  /**
+   * ContextGraphStorage enumeration: the authoritative history lane. Its
+   * failure is reported and retried next tick without blocking the registry
+   * lanes. Resolves whether the lane ran and succeeded.
+   */
+  const discoverFromStorage = async (signal: AbortSignal): Promise<boolean> => {
+    try {
+      const found = await withRpcRequestContext(
+        { requestClass: 'background', signal },
+        () => input.agent.discoverContextGraphsFromStorage!({ signal }),
+      );
+      if (found > 0) safeLog(`Chain storage scan: discovered ${found} new context graph(s)`);
+      return true;
+    } catch (error) {
+      if (!signal.aborted) {
+        safeLog(`Chain storage scan failed; retrying next tick: ${describeError(error)}`);
+      }
+      return false;
+    }
+  };
+
+  /** Keeps enumerated graphs' mutable facts fresh at the repair cadence. */
+  const refreshFromStorage = async (signal: AbortSignal): Promise<void> => {
+    if (!input.agent.refreshContextGraphsFromStorage) return;
+    try {
+      const changed = await withRpcRequestContext(
+        { requestClass: 'background', signal },
+        () => input.agent.refreshContextGraphsFromStorage!({
+          minimumIntervalMs: repairIntervalMs(),
+          signal,
+        }),
+      );
+      if (changed > 0) safeLog(`Chain storage refresh: updated ${changed} context graph(s)`);
+    } catch (error) {
+      if (!signal.aborted) {
+        safeLog(`Chain storage refresh failed; retrying next tick: ${describeError(error)}`);
+      }
+    }
+  };
+
+  /**
+   * The registry lanes run while a registry is bound. An agent without the
+   * probe keeps them, and a failed probe does too: an unreadable Hub fails the
+   * registry scan the same way, under its existing retry accounting.
+   */
+  const registryBound = async (signal: AbortSignal): Promise<boolean> => {
+    try {
+      return await withRpcRequestContext(
+        { requestClass: 'background', signal },
+        () => input.agent.hasContextGraphNameRegistry!(),
+      );
+    } catch {
+      return true;
+    }
+  };
+
+  /** The ContextGraphNameRegistry live lane, then its bounded repair audit. */
+  const runRegistryLanes = async (signal: AbortSignal): Promise<void> => {
     const step = planScan(state, { pageBudget: input.pageBudget });
     let plan: ScanPlan;
     if (step.kind === 'ready') {
@@ -269,18 +357,12 @@ export function createChainDiscoveryScanRunner(input: {
     // Do not add repair traffic while live catch-up is unhealthy. On success,
     // live has already committed before this independently bounded lane starts.
     if (outcome.ok && input.agent.repairContextGraphRegistry) {
-      const configuredRepairEvery = input.repairEveryTicks ?? input.fullScanEvery;
-      const repairEvery = typeof configuredRepairEvery === 'number'
-        && Number.isFinite(configuredRepairEvery)
-        && configuredRepairEvery >= 1
-        ? Math.floor(configuredRepairEvery)
-        : CHAIN_REPAIR_AUDIT_EVERY_TICKS;
       try {
         const found = await withRpcRequestContext(
           { requestClass: 'background', signal },
           () => input.agent.repairContextGraphRegistry!({
             pageBudget: input.pageBudget ?? CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-            minimumIntervalMs: repairEvery * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
+            minimumIntervalMs: repairIntervalMs(),
             signal,
           }),
         );
@@ -289,6 +371,20 @@ export function createChainDiscoveryScanRunner(input: {
         safeLog(`Chain repair audit failed; retrying next tick: ${describeError(error)}`);
       }
     }
+  };
+
+  const execute = async (signal: AbortSignal): Promise<void> => {
+    // Agents without the storage lane or the registry probe take the legacy
+    // path with no extra awaits, so its scheduling is unchanged.
+    const storageHealthy = input.agent.discoverContextGraphsFromStorage
+      ? await discoverFromStorage(signal)
+      : false;
+    if (signal.aborted) return;
+    const bound = input.agent.hasContextGraphNameRegistry ? await registryBound(signal) : true;
+    if (bound) await runRegistryLanes(signal);
+    if (signal.aborted) return;
+    // Like the registry audit, refresh adds traffic only after a healthy pass.
+    if (storageHealthy) await refreshFromStorage(signal);
   };
 
   const task = new CoalescingRecurringTask({
@@ -301,7 +397,7 @@ export function createChainDiscoveryScanRunner(input: {
     onError: (error) => {
       safeLog(`Chain discovery scheduler failed; retrying next tick: ${describeError(error)}`);
     },
-    closingMessage: 'ContextGraphNameRegistry scan runner is closing',
+    closingMessage: 'Chain Context Graph discovery runner is closing',
   });
 
   return {

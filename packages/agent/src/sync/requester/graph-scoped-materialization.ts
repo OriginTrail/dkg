@@ -11,8 +11,8 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   mergeSameVersionGraphKnowledgeAssetMetadataV1,
+  overlayLocallyTrustedKnowledgeAssetControls,
   readGraphKnowledgeAssetConfirmationKindV1,
-  readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -24,6 +24,24 @@ import {
   exactAssetCommitmentMatchesDescriptor,
   type ExactAssetCommitment,
 } from '../exact-assets.js';
+
+/**
+ * Name the setting that grants the missing capability.
+ *
+ * The store refuses this write because its adapter reports no transactional
+ * replacement. For an explicitly configured `sparql-http` endpoint that is the
+ * `best-effort` default rather than a property of the server: the adapter
+ * cannot know what is behind the URL, so the operator declares it. Without
+ * this hint the failure reads as a product bug, which has cost real debugging
+ * sessions on nodes whose endpoint did support the guarantee all along.
+ */
+const ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1 = (capability: string): string => (
+  `Graph-scoped durable sync requires ${capability} support. An explicitly `
+  + 'configured sparql-http endpoint defaults to consistencyProfile '
+  + '"best-effort"; set store.options.consistencyProfile to "atomic-update" '
+  + '(or "atomic-readback" when the endpoint also guarantees read-after-write) '
+  + 'if it provides that guarantee.'
+);
 
 const ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
 const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
@@ -293,8 +311,11 @@ export async function authenticateVerifiedGraphScopedAsset(
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
+    // Only the receipt's batch, root, hash and ordering are consumed below, so
+    // the adapter's unused block-header lookup for `blockTimestamp` is skipped.
     const resolved = await chain.resolvePublishByTxHash(transactionHash, {
       signal: options.signal,
+      skipBlockTimestamp: true,
     });
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (
@@ -440,7 +461,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       }
       assertCurrent();
     }
-    const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
+    const committedMetadata = await overlayLocallyTrustedKnowledgeAssetControls(
       store,
       asset.metaGraph,
       asset.ual,
@@ -459,12 +480,14 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       asset.dataQuads,
       asset.metaGraph,
       asset.ual,
-      [...replacementMetadata, ...locallyTrustedMetadata],
+      committedMetadata,
       commitOptions,
     );
     if (!replaced) {
       throw Object.assign(
-        new Error('Graph-scoped durable sync requires atomic data/metadata replacement support'),
+        new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
+          'atomic data/metadata replacement',
+        )),
         { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
       );
     }
@@ -480,7 +503,9 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       );
       if (!quarantined) {
         throw Object.assign(
-          new Error('Graph-scoped durable sync requires atomic stale-binding quarantine support'),
+          new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
+            'atomic stale-binding quarantine',
+          )),
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
         );
       }

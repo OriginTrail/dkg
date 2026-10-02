@@ -1,6 +1,6 @@
-import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { Parser, type Quad as N3Quad } from 'n3';
 import type { JsonLdDocument, Options as JsonLdOptions } from 'jsonld';
+import { formatCanonicalRdfTerm } from '@origintrail-official/dkg-rdf-utils';
 
 export interface SimpleQuad {
   subject: string;
@@ -111,10 +111,10 @@ function parseN3Quads(
       if (!quad) { resolve(quads); return; }
 
       quads.push({
-        subject: termToString(quad.subject),
-        predicate: termToString(quad.predicate),
-        object: termToString(quad.object),
-        graph: quad.graph.value ? termToString(quad.graph) : defaultGraph,
+        subject: formatCanonicalRdfTerm(quad.subject),
+        predicate: formatCanonicalRdfTerm(quad.predicate),
+        object: formatCanonicalRdfTerm(quad.object),
+        graph: quad.graph.value ? formatCanonicalRdfTerm(quad.graph) : defaultGraph,
       });
     });
   });
@@ -150,16 +150,4 @@ function decodeLegacyQuads(value: unknown, defaultGraph: string): SimpleQuad[] |
   return value.map(({ subject, predicate, object, graph }) => ({
     subject, predicate, object, graph: graph || defaultGraph,
   }));
-}
-
-function termToString(term: { termType: string; value: string; language?: string; datatype?: { value: string } }): string {
-  if (term.termType === 'Literal') {
-    return formatCanonicalRdfLiteralTerm(term.language
-      ? { kind: 'language', value: term.value, language: term.language }
-      : term.datatype
-        ? { kind: 'typed', value: term.value, datatype: term.datatype.value }
-        : { kind: 'plain', value: term.value });
-  }
-  if (term.termType === 'BlankNode') return `_:${term.value}`;
-  return term.value;
 }

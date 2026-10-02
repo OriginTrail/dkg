@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import {
   InMemoryPeerSyncLease,
   runSyncOnConnect,
   runSelectedSharedMemoryRetry,
-  type SyncOnConnectContext,
+  type SyncOnConnectInput,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/peer-event-lifecycle.js';
 
@@ -33,9 +34,9 @@ describe('peer sync session lifecycle', () => {
     const ordinary = vi.fn(transfer);
     const log = vi.fn();
     const account = vi.fn();
-    const context: SyncOnConnectContext = {
+    const context: SyncOnConnectInput = {
       signal: controller.signal, remotePeer: 'peer', syncingPeers,
-      getPeerProtocols: async () => [PROTOCOL_SYNC], knownCorePeerIds: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC], peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => phase === 'discovered' && discovered ? ['initial', 'new'] : ['initial'],
       getDurableSyncContextGraphs: () => ['initial'], syncFromPeer: sync,
       refreshMetaSyncedFlags: refresh, discoverContextGraphsFromStore: discover,
@@ -123,6 +124,7 @@ describe('peer sync session lifecycle', () => {
     const gate = deferred<void>();
     let now = 1_000;
     try {
+      vi.spyOn(f.agent.node.libp2p, 'getPeers').mockReturnValue([]);
       vi.spyOn(Date, 'now').mockImplementation(() => now);
       f.dispatchClose();
       expect(f.state.disconnectTimestamp(f.peerId)).toBe(1_000);
@@ -204,6 +206,7 @@ describe('peer sync session lifecycle', () => {
   it('clears freshness and cooldown state for a peer absent from the stop-time connection list', async () => {
     const f = await createPeerEventFixture();
     try {
+      vi.spyOn(f.agent.node.libp2p, 'getPeers').mockReturnValue([]);
       const now = Date.now();
       f.state.session.recordFreshness(f.peerId, {
         successfulAt: now,

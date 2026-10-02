@@ -22,7 +22,7 @@ import {
 } from '@origintrail-official/dkg-rdf-utils';
 import { z } from 'zod';
 import type { DkgClient } from '../client.js';
-import { DkgHttpError } from '../client.js';
+import { DkgHttpError, DkgOutcomeUnknownError } from '../client.js';
 import type { DkgConfig } from '../config.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './context-graph-description.js';
 
@@ -39,6 +39,14 @@ const errResult = (text: string): ToolResult => ({
 
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
+
+/**
+ * A long Knowledge Asset mutation timed out client-side after reaching the
+ * daemon. It may still complete and a blind retry can 409, so it is reported
+ * as a non-error result that points at dkg_knowledge_asset_history.
+ */
+const outcomeUnknownResult = (e: unknown, operation: string): ToolResult | undefined =>
+  e instanceof DkgOutcomeUnknownError ? ok(`${operation}: ${e.message}`) : undefined;
 
 // #1116 share-outcome warnings. These three constants + the classifier below are
 // duplicated byte-identical across the MCP, OpenClaw, and Hermes adapters. There
@@ -344,6 +352,8 @@ export function registerAssertionTools(
           `${next}\n\n${jsonBlock}`,
         );
       } catch (e) {
+        const unknown = outcomeUnknownResult(e, `Create of knowledge asset '${name}' (project '${pid}')`);
+        if (unknown) return unknown;
         return errResult(`Failed to create knowledge asset: ${formatError(e)}`);
       }
     },
@@ -537,6 +547,8 @@ export function registerAssertionTools(
           `(sealed:true, publish-ready).`,
         );
       } catch (e) {
+        const unknown = outcomeUnknownResult(e, `Share of knowledge asset '${name}' (project '${pid}')`);
+        if (unknown) return unknown;
         // #1116: a default (sealing) share that cannot seal fails CLOSED — the
         // daemon returns 409 UNSEALED_SHARE_BLOCKED with a recovery hint and WM
         // preserved. Older daemons recommend retired skipSeal/SWM-write modes;
@@ -692,6 +704,8 @@ export function registerAssertionTools(
           )}\n\`\`\``,
         );
       } catch (e) {
+        const unknown = outcomeUnknownResult(e, `Publish of knowledge asset '${name}' (project '${pid}')`);
+        if (unknown) return unknown;
         return errResult(`Failed to publish knowledge asset: ${formatError(e)}`);
       }
     },
@@ -1051,6 +1065,8 @@ export function registerAssertionTools(
           .join('\n');
         return ok(lines);
       } catch (e) {
+        const unknown = outcomeUnknownResult(e, `Import of '${fileName}' into knowledge asset '${name}' (project '${pid}')`);
+        if (unknown) return unknown;
         return errResult(`Failed to import file: ${formatError(e)}`);
       }
     },
