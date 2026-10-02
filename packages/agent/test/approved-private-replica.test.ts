@@ -6,10 +6,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY as D,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  computeWorkspaceAgentEncryptionKeyProofPayload,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
+  encodeWorkspaceEncryptionKey,
+  generateWorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import type {
   ContextGraphMembershipRecord,
   ContextGraphSubscriptionRecord,
@@ -21,7 +26,60 @@ const OWNER = '0x4bf5c3c4b96894c7f1e7f7d625e4b48051b443b4';
 const OUTSIDER = '0x1111111111111111111111111111111111111111';
 const CONTEXT_GRAPH_ID = 'eu-open-calls';
 const CURATOR_PEER = '12D3KooWHgiPDA9sub2NCvWnCM1hAgK6YcXZYBzi7hALYMHGtgxm';
+const THIRD_ALLOWED_PEER = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const AGENT_PROFILE_GRAPH = 'did:dkg:system/agents';
 const h = createRfc64RolloutAgentHarness();
+
+type TestSigningWallet = ethers.Wallet | ethers.HDNodeWallet;
+
+function signedWorkspaceProfileKeyQuads(
+  wallet: TestSigningWallet,
+  peerId: string,
+  keyLabel: string,
+): Quad[] {
+  const agentAddress = ethers.getAddress(wallet.address);
+  const agentUri = `did:dkg:agent:${agentAddress}`;
+  const key = generateWorkspaceRecipientEncryptionKey(
+    agentUri,
+    `${agentUri}#${keyLabel}`,
+  );
+  const publicKeyBytes = key.publicKeyBytes;
+  if (publicKeyBytes === undefined) {
+    throw new Error('test workspace recipient key is missing its public half');
+  }
+  const proofPayload = computeWorkspaceAgentEncryptionKeyProofPayload({
+    agentAddress,
+    encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+    publicKeyBytes,
+  });
+  const proof = wallet.signingKey.sign(ethers.hashMessage(proofPayload)).serialized;
+  return [
+    {
+      subject: agentUri,
+      predicate: D.DKG_PUBLIC_ENCRYPTION_KEY,
+      object: JSON.stringify(encodeWorkspaceEncryptionKey(publicKeyBytes)),
+      graph: AGENT_PROFILE_GRAPH,
+    },
+    {
+      subject: agentUri,
+      predicate: D.DKG_ENCRYPTION_KEY_ALGORITHM,
+      object: JSON.stringify(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519),
+      graph: AGENT_PROFILE_GRAPH,
+    },
+    {
+      subject: agentUri,
+      predicate: D.DKG_ENCRYPTION_KEY_PROOF,
+      object: JSON.stringify(proof),
+      graph: AGENT_PROFILE_GRAPH,
+    },
+    {
+      subject: agentUri,
+      predicate: D.DKG_PEER_ID,
+      object: JSON.stringify(peerId),
+      graph: AGENT_PROFILE_GRAPH,
+    },
+  ];
+}
 
 function createApprovedReplicaPersistence() {
   type DurableMembership = ContextGraphMembershipRecord & {
@@ -92,6 +150,7 @@ interface ApprovedReplicaFixtureOptions {
   readonly delegationPeer?: string;
   readonly delegationIssuedAt?: number;
   readonly delegationExpiresAt?: number;
+  readonly peerAllowlist?: 'receiver-only' | 'curator-only';
   readonly indexError?: Error;
   readonly installSubscription?: boolean;
   readonly nonDefaultMember?: boolean;
@@ -157,6 +216,11 @@ async function approvedBareNameReplicaFixture(options: ApprovedReplicaFixtureOpt
   const root = (predicate: string, object: string) => ({ graph, subject, predicate, object });
   const creators = options.creators ?? [CURATOR_PEER];
   const curators = options.curators ?? [OWNER];
+  const allowedPeers = options.peerAllowlist === 'receiver-only'
+    ? [receiver.peerId]
+    : options.peerAllowlist === 'curator-only'
+      ? [CURATOR_PEER]
+      : [];
   const delegationSubject = `did:dkg:agent-delegation:${CONTEXT_GRAPH_ID}:${approvedAddress}`;
   await receiver.store.insert([
     root(D.RDF_TYPE, D.DKG_CONTEXT_GRAPH),
@@ -164,8 +228,9 @@ async function approvedBareNameReplicaFixture(options: ApprovedReplicaFixtureOpt
     ...creators.map((peerId) => root(D.DKG_CREATOR, `did:dkg:agent:${peerId}`)),
     ...curators.map((address) => root(D.DKG_CURATOR, `did:dkg:agent:${address}`)),
     root(D.DKG_REGISTRATION_STATUS, JSON.stringify(options.registrationStatus ?? 'unregistered')),
+    ...allowedPeers.map((peerId) => root(D.DKG_ALLOWED_PEER, JSON.stringify(peerId))),
     ...[
-      OWNER,
+      options.requesterOwner ?? OWNER,
       approvedAddress,
       ...(options.additionalAllowedAgents ?? []),
     ].map((address) => root(D.DKG_ALLOWED_AGENT, JSON.stringify(address))),
@@ -202,6 +267,7 @@ async function approvedBareNameReplicaFixture(options: ApprovedReplicaFixtureOpt
   }
   return {
     receiver,
+    member,
     memberAddress,
     approvedAddress,
     approvals,
@@ -339,6 +405,138 @@ describe('approved private bare-name replica authorization', () => {
       source: 'rfc64-private',
       reason: 'rfc64-participant',
     });
+  });
+
+  it.each([
+    ['includes', 'receiver-only', true],
+    ['excludes', 'curator-only', false],
+  ] as const)(
+    '%s this receiver according to the graph peer allowlist',
+    async (_label, peerAllowlist, expected) => {
+      const fixture = await approvedBareNameReplicaFixture({ peerAllowlist });
+
+      await expect(fixture.receiver.canReadContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress: fixture.memberAddress,
+        allowSubscriptionFallback: false,
+      })).resolves.toBe(expected);
+      await expect(fixture.receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress: fixture.memberAddress,
+      })).resolves.toBe(expected);
+    },
+  );
+
+  it('fails closed when the source-qualified graph peer metadata cannot be read', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    vi.spyOn(fixture.receiver, 'getOwnCgMetaFacts')
+      .mockRejectedValue(new Error('peer allowlist unavailable'));
+
+    await expect(fixture.receiver.resolveContextGraphReadAuthority(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: fixture.memberAddress,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    await expect(fixture.receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: fixture.memberAddress,
+    })).resolves.toBe(false);
+  });
+
+  it('keeps approved-replica SWM encrypted to the full private metadata roster', async () => {
+    const curator = new ethers.Wallet(`0x${'31'.repeat(32)}`);
+    const thirdAllowed = new ethers.Wallet(`0x${'32'.repeat(32)}`);
+    const curatorAddress = curator.address.toLowerCase();
+    const thirdAllowedAddress = thirdAllowed.address.toLowerCase();
+    const fixture = await approvedBareNameReplicaFixture({
+      requesterOwner: curatorAddress,
+      curators: [curatorAddress],
+      additionalAllowedAgents: [thirdAllowedAddress],
+    });
+    if (fixture.member.privateKey === undefined) {
+      throw new Error('approved fixture member must be custodial');
+    }
+    const memberWallet = new ethers.Wallet(fixture.member.privateKey);
+    await fixture.receiver.store.insert([
+      ...signedWorkspaceProfileKeyQuads(curator, CURATOR_PEER, 'curator-x25519'),
+      ...signedWorkspaceProfileKeyQuads(
+        memberWallet,
+        fixture.receiver.peerId,
+        'approved-member-x25519',
+      ),
+      ...signedWorkspaceProfileKeyQuads(
+        thirdAllowed,
+        THIRD_ALLOWED_PEER,
+        'third-member-x25519',
+      ),
+    ]);
+
+    const resolveTransport = () => fixture.receiver.resolveSwmTransportAuthority(
+      CONTEXT_GRAPH_ID,
+      { authorityReadMode: 'finalized-index-or-live' },
+    );
+    const resolveRecipients = () => fixture.receiver
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId: CONTEXT_GRAPH_ID });
+
+    await expect(resolveTransport()).resolves.toEqual({ kind: 'legacy-unregistered' });
+    await expect(fixture.receiver.isContextGraphSwmPublic(CONTEXT_GRAPH_ID))
+      .resolves.toBe(false);
+    const resolution = await resolveRecipients();
+    expect(resolution.requiresEncryption).toBe(true);
+    if (!resolution.requiresEncryption) throw new Error('private SWM unexpectedly resolved plaintext');
+    const recipientAddresses = new Set(
+      resolution.recipients.map(({ agentAddress }) => agentAddress.toLowerCase()),
+    );
+    expect(recipientAddresses).toEqual(new Set([
+      curatorAddress,
+      fixture.memberAddress,
+      thirdAllowedAddress,
+    ]));
+    expect(recipientAddresses.size).toBeGreaterThan(1);
+
+    const requestGeneration = `0x${'12'.repeat(32)}`;
+    await fixture.receiver.writeRequesterJoinRequestState(
+      CONTEXT_GRAPH_ID,
+      fixture.approvedAddress,
+      {
+        status: 'rejected',
+        requestGeneration,
+        curatorPeerId: CURATOR_PEER,
+        curatorAgentAddress: curatorAddress,
+        curatorAuthorityEra: '0',
+      },
+    );
+    await expect(resolveTransport()).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    await expect(resolveRecipients()).rejects.toThrow(/authority is unavailable/u);
+
+    await fixture.receiver.writeRequesterJoinRequestState(
+      CONTEXT_GRAPH_ID,
+      fixture.approvedAddress,
+      {
+        status: 'approved',
+        requestGeneration,
+        curatorPeerId: CURATOR_PEER,
+        curatorAgentAddress: curatorAddress,
+        curatorAuthorityEra: '0',
+      },
+    );
+    await expect(resolveTransport()).resolves.toEqual({ kind: 'legacy-unregistered' });
+
+    await fixture.receiver.store.insert([{
+      graph: fixture.graph,
+      subject: fixture.subject,
+      predicate: D.DKG_REVOKED_AGENT,
+      object: JSON.stringify(fixture.memberAddress),
+    }]);
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+    await expect(resolveTransport()).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    await expect(resolveRecipients()).rejects.toThrow(/authority is unavailable/u);
   });
 
   it('reactivates an approved non-default private replica after restart and keeps a rejected approval dormant', async () => {
@@ -634,6 +832,7 @@ describe('approved private bare-name replica authorization', () => {
   it.each([
     ['curator', D.DKG_CURATOR, `did:dkg:agent:${OUTSIDER}`],
     ['creator', D.DKG_CREATOR, `did:dkg:agent:${CURATOR_PEER}-other`],
+    ['peer allowlist', D.DKG_ALLOWED_PEER, JSON.stringify(CURATOR_PEER)],
   ] as const)(
     'rejects a %s mutation while the metadata proof is in flight',
     async (_label, predicate, object) => {

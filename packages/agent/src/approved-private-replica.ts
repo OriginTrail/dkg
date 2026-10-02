@@ -58,6 +58,10 @@ export async function resolveApprovedPrivateReplicaAuthority(
     || !owners.has(ownerAddress)
     || creators.size !== 1
     || !creators.has(`did:dkg:agent:${state.curatorPeerId}`)
+    // Agent membership and the graph-level peer gate are conjunctive. The
+    // member's delegation proves that this peer may act for the agent; it does
+    // not override an explicit curator-maintained receiver allowlist.
+    || (meta.allowedPeers.length > 0 && !meta.allowedPeers.includes(agent.peerId))
     || meta.onChainId !== undefined
     || await agent.readLocalContextGraphRegistrationStatus(contextGraphId) !== 'unregistered'
   ) return null;
