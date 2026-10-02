@@ -5981,37 +5981,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return `${target.ual}\0${target.merkleRoot.toLowerCase()}`;
   }
 
-  vmReconcilePhysicalAttemptKey(
-    this: DKGAgent,
-    target: OrdinalRecoveryTarget,
-    peerId: string,
-  ): string {
-    return `${this.vmReconcileRotationSlotKey(target)}\0${this.vmReconcileRotationFingerprint(target)}\0${peerId}`;
-  }
-
-  vmReconcilePhysicalAttemptOrdinal(
-    this: DKGAgent,
-    target: OrdinalRecoveryTarget,
-    peerId: string,
-  ): number {
-    return this.vmReconcilePhysicalAttemptOrdinals.get(this.vmReconcilePhysicalAttemptKey(target, peerId)) ?? 0;
-  }
-
-  recordVmReconcilePhysicalAttempt(
-    this: DKGAgent,
-    target: OrdinalRecoveryTarget,
-    peerId: string,
-  ): void {
-    const key = this.vmReconcilePhysicalAttemptKey(target, peerId);
-    const next = (this.vmReconcilePhysicalAttemptOrdinals.get(key) ?? 0) + 1;
-    this.vmReconcilePhysicalAttemptOrdinals.delete(key);
-    this.vmReconcilePhysicalAttemptOrdinals.set(key, next % 4);
-    if (this.vmReconcilePhysicalAttemptOrdinals.size > DKGAgentBase.VM_RECONCILE_PHYSICAL_ATTEMPT_HISTORY_MAX) {
-      const oldest = this.vmReconcilePhysicalAttemptOrdinals.keys().next().value;
-      if (oldest !== undefined) this.vmReconcilePhysicalAttemptOrdinals.delete(oldest);
-    }
-  }
-
   vmReconcileObservedCandidatePeerIds(
     this: DKGAgent,
     localCgId: string,
@@ -6438,9 +6407,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     for (const key of this.vmReconcileRotationState.keys()) {
       if (key.startsWith(prefix)) this.vmReconcileRotationState.delete(key);
     }
-    for (const key of this.vmReconcilePhysicalAttemptOrdinals.keys()) {
-      if (key.startsWith(prefix)) this.vmReconcilePhysicalAttemptOrdinals.delete(key);
-    }
+    this.vmReconcileTransportBudgetPolicy.forgetContextGraph(localCgId);
     this.vmReconcileRotationAdmissionCursorByCg.delete(localCgId);
     this.vmReconcilePublicCoreTransportPreferencePolicy?.forgetContextGraph(localCgId);
     existingVmRecoveryPreparation(this)?.discard(localCgId);
@@ -6455,7 +6422,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // without running the base constructor. Shutdown must remain best-effort
     // for that supported test seam and never mask later teardown failures.
     this.vmReconcileRotationState?.clear();
-    this.vmReconcilePhysicalAttemptOrdinals?.clear();
+    this.vmReconcileTransportBudgetPolicy?.clear();
     this.vmReconcileRotationAdmissionCursorByCg?.clear();
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
@@ -6894,7 +6861,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       workStarted = true;
       for (const attempt of attempts) {
         const batchTarget = attempt.entry.target;
-        this.recordVmReconcilePhysicalAttempt(batchTarget, peerId);
+        this.vmReconcileTransportBudgetPolicy.recordAdmitted(batchTarget, peerId);
         handledOrdinals.push(batchTarget.ordinal);
         attemptedOrdinals.push(batchTarget.ordinal);
         const record = attempt.installedRecord;
@@ -7720,9 +7687,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           })),
           providerAttemptKind: providerAttempt.kind, onChainCgId,
           streamEligible: streamEligibleProvider, registeredPublicAccess: passAuthority.isPublic,
-          competingStreamAvailable: passAuthority.isPublic
-            && experimentalStreamPeerIds.size > 0 && !experimentalStreamPeerIds.has(peerId),
-          physicalAttemptOrdinal: this.vmReconcilePhysicalAttemptOrdinal(target, peerId),
+          legacyAttemptTimeoutMs: this.vmReconcileTransportBudgetPolicy.timeoutFor({
+            target, peerId, providerAttemptKind: providerAttempt.kind,
+            registeredPublicAccess: passAuthority.isPublic,
+            competingStreamAvailable: experimentalStreamPeerIds.size > 0
+              && !experimentalStreamPeerIds.has(peerId),
+            streamEligible: streamEligibleProvider,
+          }),
           signal, isCurrent: isRecoveryCurrent,
           observeSizing: recordSizing,
           // Start reads in candidate order with a small bound so each read's

@@ -2,6 +2,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from '../../src/vm-recovery-core-transport-preference.js';
+import type { VmRecoveryTransportBudgetPolicy } from '../../src/vm-recovery-transport-budget-policy.js';
 import type { DurableSyncAdmissionOutcome } from '../../src/sync/requester/admission-boundary.js';
 
 import type {
@@ -68,8 +69,7 @@ export interface VmRecoveryHostInternals {
   clearNetworkRejectedPeerState(peerId: string): void;
   vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
   vmReconcileRotationAdmissionCursorByCg: Map<string, number>;
-  vmReconcilePhysicalAttemptOrdinal(target: OrdinalRecoveryTarget, peerId: string): number;
-  recordVmReconcilePhysicalAttempt(target: OrdinalRecoveryTarget, peerId: string): void;
+  vmReconcileTransportBudgetPolicy: VmRecoveryTransportBudgetPolicy;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;

@@ -27,9 +27,6 @@ export const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
   maxSelectorBytes: 16 * 1024,
 });
 
-/** One competing legacy probe shares this window with any full-scan fallback. */
-export const VM_MIXED_LEGACY_ATTEMPT_TIMEOUT_MS = 120_000;
-
 export interface VmRecoveryTransportCandidate<T> {
   readonly attempt: T;
   readonly kaId: string;
@@ -43,10 +40,8 @@ export interface VmRecoveryTransportPlanningOptions<T> {
   readonly onChainCgId: bigint;
   readonly streamEligible: boolean;
   readonly registeredPublicAccess: boolean;
-  /** A different connected Core advertises exact-batch streaming for this graph. */
-  readonly competingStreamAvailable?: boolean;
-  /** Physical attempts of this KA against this peer, modulo four; no absence proof implied. */
-  readonly physicalAttemptOrdinal?: number;
+  /** Budget selected by transport policy for this probe and its full-scan fallback. */
+  readonly legacyAttemptTimeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly isCurrent: () => boolean;
   /** Observation only: outcome counts of this plan's sizing, never consulted by a decision. */
@@ -112,11 +107,8 @@ export async function planVmRecoveryTransport<T>(
   const probe = options.providerAttemptKind === 'probe';
   const candidates = probe ? options.candidates.slice(0, 1) : options.candidates;
   if (probe && !options.streamEligible) {
-    const boundedLegacyProbe = options.registeredPublicAccess
-      && options.competingStreamAvailable === true
-      && (options.physicalAttemptOrdinal ?? 0) % 4 !== 3;
     return freezePlan(candidates.map(({ attempt }) => attempt), 'legacy', undefined,
-      undefined, [], boundedLegacyProbe ? VM_MIXED_LEGACY_ATTEMPT_TIMEOUT_MS : undefined);
+      undefined, [], options.legacyAttemptTimeoutMs);
   }
 
   let publicAccessEvidence: boolean | undefined;

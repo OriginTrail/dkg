@@ -1,4 +1,5 @@
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
+import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -1081,8 +1082,6 @@ export class DKGAgentBase {
   );
   /** Maximum peers connected/probed/transported by one exact-recovery pass. */
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
-  /** Bounded process-local transport cadence, separate from absence-proof rotation. */
-  static readonly VM_RECONCILE_PHYSICAL_ATTEMPT_HISTORY_MAX = 16_384;
   /** How long a clean legacy exact-filter miss suppresses one peer. */
   static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
   /** Transport affinity is short-lived and never establishes asset coverage. */
@@ -1346,7 +1345,7 @@ export class DKGAgentBase {
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
-  protected readonly vmReconcilePhysicalAttemptOrdinals = new Map<string, number>();
+  protected readonly vmReconcileTransportBudgetPolicy = new VmRecoveryTransportBudgetPolicy();
   /**
    * #2858 — confirmed VM copies behind an on-chain update, queued by the
    * `KnowledgeAssetUpdated` nudge and worked off by a refresh worker each

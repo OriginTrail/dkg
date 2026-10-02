@@ -156,10 +156,10 @@ describe('experimental public Core streaming recovery host', () => {
     vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness({ failCoreProbe: true, targetCount: 2 });
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      h.internals.recordVmReconcilePhysicalAttempt(h.targets[1]!, older);
+      h.internals.vmReconcileTransportBudgetPolicy.recordAdmitted(h.targets[1]!, older);
     }
     h.internals.vmReconcileRotationState.clear();
-    expect(h.internals.vmReconcilePhysicalAttemptOrdinal(h.targets[1]!, older)).toBe(3);
+    expect(h.internals.vmReconcileTransportBudgetPolicy.attemptOrdinal(h.targets[1]!, older)).toBe(3);
     await h.run();
     expect(h.attemptTimeouts.some((attempt) => attempt.peerId === older
       && attempt.totalTimeoutMs === undefined)).toBe(true);
