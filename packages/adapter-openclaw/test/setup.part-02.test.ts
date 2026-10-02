@@ -144,13 +144,13 @@ const fakeNetwork = {
 describe('writeDkgConfig', () => {
 
 
-  it('creates a new config from network defaults', () => {
+  it('creates a new config from network defaults', async () => {
     const dkgHome = join(testDir, '.dkg');
     const original = process.env.DKG_HOME;
     process.env.DKG_HOME = dkgHome;
 
     try {
-      writeDkgConfig('test-agent', fakeNetwork, 9200);
+      await writeDkgConfig('test-agent', fakeNetwork, 9200);
 
       const config = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf-8'));
       expect(config.name).toBe('test-agent');
@@ -174,7 +174,7 @@ describe('writeDkgConfig', () => {
     }
   });
 
-  it('merges with existing config without overwriting', () => {
+  it('merges with existing config without overwriting', async () => {
     const dkgHome = join(testDir, '.dkg');
     mkdirSync(dkgHome, { recursive: true });
     writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({
@@ -190,7 +190,7 @@ describe('writeDkgConfig', () => {
     process.env.DKG_HOME = dkgHome;
 
     try {
-      writeDkgConfig('new-agent', fakeNetwork, 9200);
+      await writeDkgConfig('new-agent', fakeNetwork, 9200);
 
       const config = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf-8'));
       // Existing values preserved
@@ -207,7 +207,7 @@ describe('writeDkgConfig', () => {
     }
   });
 
-  it('mirrors only autoUpdate.enabled from network default and preserves existing pins', () => {
+  it('mirrors only autoUpdate.enabled from network default and preserves existing pins', async () => {
     // Regression: previously `writeDkgConfig` copied the entire
     // `network.autoUpdate` block into the user's config when absent,
     // which froze repo/branch/checkInterval at first-run values and broke
@@ -225,7 +225,7 @@ describe('writeDkgConfig', () => {
     const original = process.env.DKG_HOME;
     process.env.DKG_HOME = fresh;
     try {
-      writeDkgConfig('test-agent', {
+      await writeDkgConfig('test-agent', {
         ...fakeNetwork,
         autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'main' },
       } as any, 9200);
@@ -240,7 +240,7 @@ describe('writeDkgConfig', () => {
     const disabled = join(testDir, '.dkg-disabled');
     process.env.DKG_HOME = disabled;
     try {
-      writeDkgConfig('test-agent', {
+      await writeDkgConfig('test-agent', {
         ...fakeNetwork,
         autoUpdate: { enabled: false, repo: 'OriginTrail/dkg', branch: 'main' },
       } as any, 9200);
@@ -271,7 +271,7 @@ describe('writeDkgConfig', () => {
     }));
     process.env.DKG_HOME = persisted;
     try {
-      writeDkgConfig('pinned-node', {
+      await writeDkgConfig('pinned-node', {
         ...fakeNetwork,
         autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'main' },
       } as any, 9300);
@@ -285,7 +285,7 @@ describe('writeDkgConfig', () => {
     }
   });
 
-  it('heals legacy auto-pinned chain/autoUpdate copies on rerun (PR #322 follow-up)', () => {
+  it('heals legacy auto-pinned chain/autoUpdate copies on rerun (PR #322 follow-up)', async () => {
     // Earlier `dkg openclaw setup` runs blindly copied the entire `chain` and
     // `autoUpdate` blocks from `network/<env>.json` into ~/.dkg/config.json.
     // After PR #322 fresh installs no longer do that, but operators who
@@ -327,7 +327,7 @@ describe('writeDkgConfig', () => {
     }));
     process.env.DKG_HOME = legacy;
     try {
-      writeDkgConfig('legacy-node', networkV2, 9300);
+      await writeDkgConfig('legacy-node', networkV2, 9300);
       const cfg = JSON.parse(readFileSync(join(legacy, 'config.json'), 'utf-8'));
       expect(cfg.chain).toBeUndefined();
       expect(cfg.autoUpdate).toEqual({ enabled: true });
@@ -361,7 +361,7 @@ describe('writeDkgConfig', () => {
     }));
     process.env.DKG_HOME = mixed;
     try {
-      writeDkgConfig('mixed-node', networkV2, 9301);
+      await writeDkgConfig('mixed-node', networkV2, 9301);
       const cfg = JSON.parse(readFileSync(join(mixed, 'config.json'), 'utf-8'));
       expect(cfg.chain).toEqual({ rpcUrl: 'https://my-private.rpc.example' });
       expect(cfg.autoUpdate).toEqual({ enabled: true, branch: 'release/v10' });
@@ -386,7 +386,7 @@ describe('writeDkgConfig', () => {
     }));
     process.env.DKG_HOME = disabledOverride;
     try {
-      writeDkgConfig('opt-out-node', networkV2, 9302);
+      await writeDkgConfig('opt-out-node', networkV2, 9302);
       const cfg = JSON.parse(readFileSync(join(disabledOverride, 'config.json'), 'utf-8'));
       expect(cfg.autoUpdate).toEqual({ enabled: false });
     } finally {
@@ -394,7 +394,7 @@ describe('writeDkgConfig', () => {
     }
   });
 
-  it('removes stale legacy OpenClaw flags from an existing DKG config', () => {
+  it('removes stale legacy OpenClaw flags from an existing DKG config', async () => {
     const dkgHome = join(testDir, '.dkg');
     mkdirSync(dkgHome, { recursive: true });
     writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({
@@ -410,7 +410,7 @@ describe('writeDkgConfig', () => {
     process.env.DKG_HOME = dkgHome;
 
     try {
-      writeDkgConfig('existing-node', fakeNetwork, 9200);
+      await writeDkgConfig('existing-node', fakeNetwork, 9200);
 
       const config = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf-8'));
       expect(config.openclawAdapter).toBeUndefined();
@@ -420,7 +420,7 @@ describe('writeDkgConfig', () => {
     }
   });
 
-  it('migrates legacy OpenClaw transport hints into localAgentIntegrations before removing the old key', () => {
+  it('migrates legacy OpenClaw transport hints into localAgentIntegrations before removing the old key', async () => {
     const dkgHome = join(testDir, '.dkg');
     mkdirSync(dkgHome, { recursive: true });
     writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({
@@ -444,7 +444,7 @@ describe('writeDkgConfig', () => {
     process.env.DKG_HOME = dkgHome;
 
     try {
-      writeDkgConfig('existing-node', fakeNetwork, 9200);
+      await writeDkgConfig('existing-node', fakeNetwork, 9200);
 
       const config = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf-8'));
       expect(config.openclawChannel).toBeUndefined();

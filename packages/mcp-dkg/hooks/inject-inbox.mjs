@@ -66,8 +66,9 @@
  * Design principles (mirrors capture-chat.mjs):
  *   1. FAIL OPEN — any error returns `{}` so the prompt goes
  *      through unchanged. Errors go to /tmp/dkg-inject-inbox.log.
- *   2. NO NEW CONFIG SURFACE — reads `DKG_HOME/config.json` or
- *      walks cwd for `.dkg/config.yaml`, same precedence as
+ *   2. NO NEW CONFIG SURFACE — reads the daemon config at DKG_HOME
+ *      (`config.json`, else a daemon-shaped `config.yaml`) or walks cwd
+ *      for `.dkg/config.yaml`, same precedence as
  *      `packages/mcp-dkg/src/config.ts`.
  *   3. NO PEER TEXT IN PROMPT — see SECURITY MODEL above.
  */
@@ -169,32 +170,54 @@ function tokenFromFile(filePath) {
   return line ? line.trim() : null;
 }
 
-function loadDaemonConfig() {
+/**
+ * The daemon config at DKG_HOME: `config.json`, else `config.yaml` when it
+ * is daemon-shaped (sets `apiPort`, `nodeRole` or `networkConfig` and has
+ * no workspace `node` block) — the same rule as `readDaemonConfig` in
+ * `src/config.ts`, so this hook and `dkg_check_inbox` resolve the same
+ * daemon identity. Returns `{ path, apiPort }`, or null to fall through to
+ * the workspace lookup (also when config.json does not parse).
+ */
+function readDaemonHomeConfig(dkgHome) {
+  const jsonPath = path.join(dkgHome, 'config.json');
+  if (fs.existsSync(jsonPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+      return { path: jsonPath, apiPort: parsed.apiPort };
+    } catch (err) {
+      log(`DKG_HOME config.json parse failed: ${err?.message ?? err}`);
+      return null;
+    }
+  }
+  const yamlPath = path.join(dkgHome, 'config.yaml');
+  const raw = readIfExists(yamlPath);
+  if (!raw) return null;
+  const parsed = parseDotDkgConfig(raw);
+  const hasWorkspaceNode = parsed.node !== null && typeof parsed.node === 'object';
+  const hasDaemonKey = ['apiPort', 'nodeRole', 'networkConfig'].some((key) => key in parsed);
+  return hasDaemonKey && !hasWorkspaceNode ? { path: yamlPath, apiPort: parsed.apiPort } : null;
+}
+
+export function loadDaemonConfig() {
   const envApi = process.env.DKG_API ?? process.env.DEVNET_API;
   const envToken =
     process.env.DKG_TOKEN ?? process.env.DEVNET_TOKEN ?? process.env.DKG_AUTH;
   const dkgHome = process.env.DKG_HOME?.trim() || null;
 
-  // Path A: DKG_HOME/config.json (daemon-config shape) — what
-  // `dkg mcp setup` writes for GUI clients launched without inheriting
-  // shell env.
+  // Path A: the daemon config at DKG_HOME — config.json as `dkg mcp setup`
+  // writes it for GUI clients launched without inheriting shell env, or
+  // the config.yaml of a YAML-configured node, which setup keeps in YAML.
   if (dkgHome) {
-    const jsonPath = path.join(dkgHome, 'config.json');
-    if (fs.existsSync(jsonPath)) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-        const apiPort = typeof parsed.apiPort === 'number' ? parsed.apiPort : 9200;
-        const tokenPath = path.join(dkgHome, 'auth.token');
-        const fileToken = fs.existsSync(tokenPath) ? tokenFromFile(tokenPath) : null;
-        return {
-          api: envApi ?? `http://localhost:${apiPort}`,
-          token: envToken ?? fileToken ?? '',
-          source: jsonPath,
-        };
-      } catch (err) {
-        log(`DKG_HOME config.json parse failed: ${err?.message ?? err}`);
-        // fall through to workspace lookup
-      }
+    const daemon = readDaemonHomeConfig(dkgHome);
+    if (daemon) {
+      const apiPort = typeof daemon.apiPort === 'number' ? daemon.apiPort : 9200;
+      const tokenPath = path.join(dkgHome, 'auth.token');
+      const fileToken = fs.existsSync(tokenPath) ? tokenFromFile(tokenPath) : null;
+      return {
+        api: envApi ?? `http://localhost:${apiPort}`,
+        token: envToken ?? fileToken ?? '',
+        source: daemon.path,
+      };
     }
   }
 

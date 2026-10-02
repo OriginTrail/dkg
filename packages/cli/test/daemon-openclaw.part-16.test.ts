@@ -184,7 +184,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     ];
     let probeIdx = 0;
     const probeHealth = async () => probeResults[probeIdx++] as any;
-    const saveConfig = async () => {};
+    const persistIntegration = async () => {};
     // Real verifyMemorySlot reads the temp openclaw.json to confirm election.
     const verifyMemorySlot = () => {
       const raw = readFileSync(openclawConfigPath, 'utf-8');
@@ -201,7 +201,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },

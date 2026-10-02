@@ -1,8 +1,7 @@
 import { ethers } from 'ethers';
-import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-
-const LOCK_STALE_MS = 5 * 60 * 1000;
+import { withFileLock } from '@origintrail-official/dkg-core';
 
 export interface PublisherWalletsConfig {
   wallets: Array<{
@@ -83,76 +82,5 @@ function validatePublisherWallets(config: PublisherWalletsConfig): PublisherWall
 
 async function withPublisherWalletLock<T>(dataDir: string, fn: () => Promise<T>): Promise<T> {
   await mkdir(dataDir, { recursive: true });
-  const lockPath = `${publisherWalletsPath(dataDir)}.lock`;
-  const handle = await acquireLock(lockPath);
-  try {
-    return await fn();
-  } finally {
-    await handle.close().catch(() => {});
-    await unlink(lockPath).catch(() => {});
-  }
-}
-
-async function acquireLock(lockPath: string) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    try {
-      const handle = await open(lockPath, 'wx', 0o600);
-      await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
-      return handle;
-    } catch (error: any) {
-      if (error?.code !== 'EEXIST') {
-        throw error;
-      }
-      if (await reapStaleLock(lockPath)) {
-        continue;
-      }
-      await sleep(25);
-    }
-  }
-  throw new Error(`Timed out waiting for publisher wallet lock: ${lockPath}`);
-}
-
-async function reapStaleLock(lockPath: string): Promise<boolean> {
-  try {
-    const raw = await readFile(lockPath, 'utf-8');
-    if (!raw.trim()) {
-      // Empty file — lock was just created but metadata not yet written.
-      // Check file age via mtime; treat as live if recent.
-      const st = await stat(lockPath).catch(() => null);
-      if (st && Date.now() - st.mtimeMs < 5000) return false;
-      await unlink(lockPath).catch(() => {});
-      return true;
-    }
-    const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number };
-    const createdAt = Number(parsed.createdAt);
-    const pid = Number(parsed.pid);
-    const pidDead = Number.isFinite(pid) ? !isProcessRunning(pid) : true;
-    const aged = Number.isFinite(createdAt) ? Date.now() - createdAt > LOCK_STALE_MS : true;
-    if (pidDead || (aged && !Number.isFinite(pid))) {
-      await unlink(lockPath).catch(() => {});
-      return true;
-    }
-    return false;
-  } catch {
-    // Parse failed — possibly partial write. Check file age before reaping.
-    const st = await stat(lockPath).catch(() => null);
-    if (st && Date.now() - st.mtimeMs < 5000) return false;
-    await unlink(lockPath).catch(() => {});
-    return true;
-  }
-}
-
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error: any) {
-    if (error?.code === 'EPERM') return true;
-    if (error?.code === 'ESRCH') return false;
-    return true;
-  }
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+  return withFileLock(`${publisherWalletsPath(dataDir)}.lock`, fn, { label: 'publisher wallet' });
 }

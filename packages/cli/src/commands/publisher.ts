@@ -20,7 +20,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, saveConfig, configExists, configPath,
+  loadConfig, updateConfigFile, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
@@ -173,19 +173,19 @@ publisherCmd
   .option('--max-retries <count>', 'Maximum async Lift retries per job', '10')
   .action(async (opts: ActionOpts) => {
     try {
-      const config = await loadConfig();
-      // Spread first so the keys this command does NOT manage survive — notably
-      // the GH#2270 retry knobs (autoRetryEnabled, retryJitterRatio,
-      // retryBackoffBaseMs/MaxMs), which a wholesale replace would erase on the
-      // next `dkg publisher enable`. Mirrors `publisher disable` below.
-      config.publisher = {
-        ...(config.publisher ?? {}),
+      const runtime = {
         enabled: true,
         pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval ?? '12000'), '--poll-interval'),
         errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff ?? '5000'), '--error-backoff'),
         maxRetries: parsePositiveIntegerOption(String(opts.maxRetries ?? '10'), '--max-retries'),
       };
-      await saveConfig(config);
+      // Spread first so the keys this command does NOT manage survive — notably
+      // the GH#2270 retry knobs (autoRetryEnabled, retryJitterRatio,
+      // retryBackoffBaseMs/MaxMs), which a wholesale replace would erase on the
+      // next `dkg publisher enable`. Mirrors `publisher disable` below.
+      await updateConfigFile((config) => {
+        config.publisher = { ...(config.publisher ?? {}), ...runtime };
+      });
       console.log('Async publisher enabled');
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -198,9 +198,9 @@ publisherCmd
   .description('Disable async publisher runtime')
   .action(async () => {
     try {
-      const config = await loadConfig();
-      config.publisher = { ...(config.publisher ?? {}), enabled: false };
-      await saveConfig(config);
+      await updateConfigFile((config) => {
+        config.publisher = { ...(config.publisher ?? {}), enabled: false };
+      });
       console.log('Async publisher disabled');
     } catch (err) {
       console.error(toErrorMessage(err));

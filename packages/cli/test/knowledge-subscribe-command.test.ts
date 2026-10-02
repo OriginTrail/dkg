@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 
+// `file` stands in for the on-disk config that each patch is applied to.
 const configMocks = vi.hoisted(() => ({
-  loadConfig: vi.fn(async () => ({ contextGraphs: [] as string[] })),
-  saveConfig: vi.fn(async () => undefined),
+  file: {} as { contextGraphs?: string[]; [key: string]: unknown },
+  updateConfigFile: vi.fn(),
   resolveContextGraphs: vi.fn((config: { contextGraphs?: string[] }) => config.contextGraphs ?? []),
 }));
 
 vi.mock('../src/config.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/config.js')>(),
-  loadConfig: configMocks.loadConfig,
-  saveConfig: configMocks.saveConfig,
+  updateConfigFile: configMocks.updateConfigFile,
   resolveContextGraphs: configMocks.resolveContextGraphs,
 }));
 
@@ -29,8 +29,11 @@ describe('knowledge subscribe CLI sync lifetime', () => {
 
   beforeEach(() => {
     logLines.length = 0;
-    configMocks.loadConfig.mockClear();
-    configMocks.saveConfig.mockClear();
+    configMocks.file = { name: 'node', contextGraphs: [] };
+    configMocks.updateConfigFile.mockReset();
+    configMocks.updateConfigFile.mockImplementation(async (patch: (config: typeof configMocks.file) => void) => {
+      patch(configMocks.file);
+    });
     configMocks.resolveContextGraphs.mockClear();
     vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
       logLines.push(args.map(String).join(' '));
@@ -54,7 +57,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'on-demand',
       forceCatchup: false,
     });
-    expect(configMocks.saveConfig).not.toHaveBeenCalled();
+    expect(configMocks.updateConfigFile).not.toHaveBeenCalled();
     expect(logLines.join('\n')).toContain('Synchronization mode: on demand');
   });
 
@@ -71,9 +74,8 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'always-on',
       forceCatchup: false,
     });
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphs: ['selected-cg'],
-    }));
+    expect(configMocks.updateConfigFile).toHaveBeenCalledTimes(1);
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['selected-cg'] });
     expect(logLines.join('\n')).toContain('Synchronization mode: always on');
   });
 
@@ -90,7 +92,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'on-demand',
       forceCatchup: false,
     });
-    expect(configMocks.saveConfig).not.toHaveBeenCalled();
+    expect(configMocks.updateConfigFile).not.toHaveBeenCalled();
     expect(logLines.join('\n')).toContain('Synchronization mode: always on');
     expect(logLines.join('\n')).not.toContain('Synchronization mode: on demand');
   });
@@ -130,7 +132,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     const output = logLines.join('\n');
     expect(output).toContain(`Subscribed to context graph: ${nameHash}`);
     expect(output).toContain(`Note: ${message}`);
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ contextGraphs: [nameHash] }));
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: [nameHash] });
   });
 
   // Gnosis-mainnet Context Graph #32 (2026-09-23): `dkg subscribe 32 --save`
@@ -138,7 +140,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
   const gnosisHash = '0xf6b06a3e98104aa0d565134e073c157ebc23fa39aad068c62f73d72551fed956';
 
   it('saves the graph an on-chain id resolved to, never the number, replacing only the spelling typed', async () => {
-    configMocks.loadConfig.mockResolvedValueOnce({ contextGraphs: ['32', '#32', 'other-cg'] });
+    configMocks.file = { name: 'node', contextGraphs: ['32', '#32', 'other-cg'] };
     const onChainMessage = 'On-chain Context Graph #32 is Context Graph 0xf6b06a3e…d956 (its on-chain name hash).';
     const identityMessage = 'Context Graph 0xf6b06a3e…d956 is known only by its on-chain name hash; '
       + 'waiting for a peer to reveal the cleartext id, or subscribe with the cleartext id.';
@@ -164,13 +166,11 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       'Note: config.contextGraphs also lists "32"; if it was saved for on-chain Context Graph #32, you can remove it.',
     );
     expect(output).toContain(`Saved ${gnosisHash} to config`);
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphs: ['32', 'other-cg', gnosisHash],
-    }));
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['32', 'other-cg', gnosisHash] });
   });
 
   it('replaces a saved number typed the same way, and leaves unrelated entries without a note', async () => {
-    configMocks.loadConfig.mockResolvedValueOnce({ contextGraphs: ['32', 'other-cg'] });
+    configMocks.file = { name: 'node', contextGraphs: ['32', 'other-cg'] };
     const subscribeToContextGraph = vi.fn().mockResolvedValue({
       subscribed: gnosisHash,
       syncMode: 'always-on',
@@ -183,9 +183,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     const output = logLines.join('\n');
     expect(output).toContain(`Replaced "32" in config.contextGraphs with ${gnosisHash}.`);
     expect(output).not.toContain('also lists');
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphs: ['other-cg', gnosisHash],
-    }));
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['other-cg', gnosisHash] });
   });
 
   it('saves the verified cleartext id when the node already knew the graph an on-chain id names', async () => {
@@ -202,9 +200,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     await commandProgram().parseAsync(['node', 'dkg', 'subscribe', '32', '--save']);
 
     expect(logLines.join('\n')).toContain('Subscribed to context graph: gnosis-fun-facts');
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphs: ['gnosis-fun-facts'],
-    }));
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['gnosis-fun-facts'] });
   });
 
   it('subscribes and saves the verified cleartext id when the daemon resolved the hash', async () => {
@@ -227,8 +223,6 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     const output = logLines.join('\n');
     expect(output).toContain('Subscribed to context graph: acme-fun-facts');
     expect(output).toContain('resolves to "acme-fun-facts"');
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphs: ['acme-fun-facts'],
-    }));
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['acme-fun-facts'] });
   });
 });

@@ -19,7 +19,7 @@ import {
   checkExternalStoreReachable,
   formatHealthCheckFailure,
 } from './daemon/store-health-check.js';
-import { loadConfig, saveConfig, type DkgConfig } from './config.js';
+import { updateConfigFile, type DkgConfigFilePatch } from './config.js';
 import {
   isDockerAvailable as defaultIsDockerAvailable,
   provisionBlazegraphDocker as defaultProvisionBlazegraphDocker,
@@ -68,7 +68,7 @@ export interface PromptStoreBackendOptions {
 export interface PromptStoreBackendResult {
   /**
    * Persisted store block. `null` means "use the local default" (caller
-   * should omit the field or set it to undefined; saveConfig drops
+   * should omit the field or set it to undefined; config writes drop
    * undefined keys).
    *
    * `managedByDkg: true` is set by the Docker provisioner branch only;
@@ -398,10 +398,8 @@ export async function promptStoreBackend(
 export interface ApplyStoreFlagsOptions {
   storeFlag?: string;
   storeUrlFlag?: string;
-  /** Mock for tests; defaults to the real `loadConfig` from config.ts. */
-  loadConfig?: () => Promise<DkgConfig>;
-  /** Mock for tests; defaults to the real `saveConfig` from config.ts. */
-  saveConfig?: (config: DkgConfig) => Promise<void>;
+  /** Mock for tests; defaults to the real `updateConfigFile` from config.ts. */
+  updateConfigFile?: (patch: DkgConfigFilePatch) => Promise<unknown>;
   /** Mock for tests; defaults to `globalThis.fetch` via the probe helper. */
   fetch?: typeof globalThis.fetch;
   log?: (msg: string) => void;
@@ -413,7 +411,7 @@ export interface ApplyStoreFlagsOptions {
  * run the init wizard — so the operator has no chance to type a URL.
  *
  * Validates via the shared boot-time health-check probe, then writes
- * the store block into `~/.dkg/config.json` after the action module
+ * the store block into the node's config file after the action module
  * has already created/updated the rest of the config.
  *
  * Returns silently when no flags are passed (default behaviour: leave
@@ -427,8 +425,7 @@ export async function applyStoreFlagsToConfig(
   const backend = opts.storeFlag;
   if (!backend) return;
 
-  const load = opts.loadConfig ?? loadConfig;
-  const save = opts.saveConfig ?? saveConfig;
+  const update = opts.updateConfigFile ?? updateConfigFile;
 
   // Operators who pass `--store oxigraph` may be trying to FORCE local
   // even though their existing config has a `store` block — honour
@@ -438,28 +435,29 @@ export async function applyStoreFlagsToConfig(
     backend === 'oxigraph-worker' ||
     backend === 'oxigraph-persistent'
   ) {
-    const existing = await load();
-    if (existing.store) {
-      log(`  Removing existing store block (--store ${backend} → local default).`);
-      const next = { ...existing };
-      delete next.store;
-      await save(next);
-    }
+    let removed = false;
+    await update((config) => {
+      if (!config.store) return;
+      delete config.store;
+      removed = true;
+    });
+    if (removed) log(`  Removed existing store block (--store ${backend} → local default).`);
     return;
   }
 
   // Daemon-managed local Oxigraph server: no URL to validate (the daemon
   // brings it up at boot). Write the block and return.
   if (backend === 'oxigraph-server') {
-    const existing = await load();
-    // Preserve any existing managed-server overrides (port/location/cacheDir)
-    // that planManagedOxigraph reads at boot — re-running setup with
-    // `--store oxigraph-server` must not silently reset them to defaults.
-    const prevOptions =
-      existing.store?.backend === 'oxigraph-server' && existing.store.options
-        ? existing.store.options
-        : {};
-    await save({ ...existing, store: { backend: 'oxigraph-server', options: prevOptions } });
+    await update((config) => {
+      // Preserve any existing managed-server overrides (port/location/cacheDir)
+      // that planManagedOxigraph reads at boot — re-running setup with
+      // `--store oxigraph-server` must not silently reset them to defaults.
+      const prevOptions =
+        config.store?.backend === 'oxigraph-server' && config.store.options
+          ? config.store.options
+          : {};
+      config.store = { backend: 'oxigraph-server', options: prevOptions };
+    });
     log('  Store configured: oxigraph-server (daemon-managed local server).');
     return;
   }
@@ -485,11 +483,8 @@ export async function applyStoreFlagsToConfig(
     throw new Error(`store URL validation failed:\n${formatHealthCheckFailure(health)}`);
   }
 
-  const existing = await load();
-  const next: DkgConfig = {
-    ...existing,
-    store: externalStoreBlock(backend, url, false),
-  };
-  await save(next);
+  await update((config) => {
+    config.store = externalStoreBlock(backend, url, false);
+  });
   log(`  Store configured: ${backend} (${url}) — verified reachable.`);
 }

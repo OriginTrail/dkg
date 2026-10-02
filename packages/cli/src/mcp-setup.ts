@@ -73,7 +73,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import yaml from 'js-yaml';
-import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
+import { homeConfigFilePath, resolveSetupNetworkName } from '@origintrail-official/dkg-core';
 import {
   assertSelectableNetwork,
   resolveKnownNetworkConfigName,
@@ -590,7 +590,8 @@ function mintFallbackAgentName(): string {
  *
  * Returns `undefined` on missing or corrupt files (both formats
  * tolerate parse failure — downstream uses pre-merge defaults
- * silently rather than crashing setup).
+ * silently rather than crashing setup). A config write, by contrast,
+ * refuses a file it cannot parse rather than overwrite it.
  */
 function readPersistedConfig(dkgDirPath: string): Record<string, unknown> | undefined {
   const jsonPath = join(dkgDirPath, 'config.json');
@@ -605,7 +606,7 @@ function readPersistedConfig(dkgDirPath: string): Record<string, unknown> | unde
     try {
       const raw = yaml.load(readFileSync(yamlPath, 'utf-8'));
       if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
-    } catch { /* corrupt YAML; let writeDkgConfig handle */ }
+    } catch { /* corrupt YAML; a config write refuses it */ }
   }
   return undefined;
 }
@@ -877,40 +878,46 @@ export async function mcpSetupAction(
     reconcileFromPersistedConfig();
   }
 
+  // The file a config write patches: config.json, else config.yaml (the
+  // daemon's `loadConfig` precedence), else a new config.json.
+  const configFilePath = homeConfigFilePath(dkgDirPath);
   if (configExists && opts.name == null && opts.port == null) {
-    console.log(`[setup] Node config exists (${tildify(existsSync(yamlPath) ? yamlPath : jsonPath)}); leaving untouched.`);
+    console.log(`[setup] Node config exists (${tildify(configFilePath)}); leaving untouched.`);
   } else if (dryRun) {
-    console.log(`[setup] [dry-run] Would write ${tildify(jsonPath)} (port ${effectivePort}, name "${effectiveAgentName}")`);
+    console.log(`[setup] [dry-run] Would write ${tildify(configFilePath)} (port ${effectivePort}, name "${effectiveAgentName}")`);
   } else {
+    let network: LoadedNetworkConfig;
     try {
-      const network = loadSetupNetworkConfig(setupNetworkConfigName);
-      // Codex Round-23 Fix 30: call the agent-agnostic
-      // ensureDkgNodeConfig directly. The caller-loads-existing
-      // contract means we pre-read the persisted config (yaml or
-      // json) here and pass it through; the helper merges with
-      // network defaults + overrides. No OpenClaw migration step
-      // — MCP-only configs never have the legacy openclawAdapter
-      // / openclawChannel keys this setup never wrote.
-      const existing = readPersistedConfig(dkgDirPath) ?? {};
-      deps.ensureDkgNodeConfig({
+      network = loadSetupNetworkConfig(setupNetworkConfigName);
+    } catch (err: any) {
+      console.error(`[setup] Failed to load network config: ${err?.message ?? err}`);
+      throw err;
+    }
+    // Codex Round-23 Fix 30: call the agent-agnostic
+    // ensureDkgNodeConfig directly. It re-reads the persisted config
+    // (json or yaml) under the config lock the daemon also takes and
+    // patches only the keys setup owns, in the file's own format. No
+    // OpenClaw migration step — MCP-only configs never have the legacy
+    // openclawAdapter / openclawChannel keys this setup never wrote.
+    try {
+      await deps.ensureDkgNodeConfig({
         agentName: effectiveAgentName,
         network,
         networkConfigName: setupNetworkConfigName,
         apiPort,
-        existing,
         overrides: {
           nameExplicit: opts.name != null,
           portExplicit: opts.port != null,
         },
       });
-      // Re-read after ensureDkgNodeConfig in case the helper's
-      // field-level merge changed `apiPort` / `name` (first-wins
-      // semantics on existing fields, explicit overrides on new).
-      reconcileFromPersistedConfig();
     } catch (err: any) {
-      console.error(`[setup] Failed to load network config: ${err?.message ?? err}`);
+      console.error(`[setup] Failed to write the node config: ${err?.message ?? err}`);
       throw err;
     }
+    // Re-read after ensureDkgNodeConfig in case the helper's
+    // field-level merge changed `apiPort` / `name` (first-wins
+    // semantics on existing fields, explicit overrides on new).
+    reconcileFromPersistedConfig();
   }
 
   // Ensure the node's wallets exist BEFORE starting the daemon — matching

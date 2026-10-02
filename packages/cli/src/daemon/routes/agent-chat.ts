@@ -83,7 +83,6 @@ const ROOTLESS_UPDATE_HTTP_STATUS = {
 } as const satisfies Record<RootlessUpdateErrorCode, number>;
 import {
   loadConfig,
-  saveConfig,
   loadNetworkConfig,
   resolveChainConfig,
   dkgDir,

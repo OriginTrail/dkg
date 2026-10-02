@@ -8,6 +8,7 @@ import {
   statSync,
 } from 'node:fs';
 import { chmod, open, stat } from 'node:fs/promises';
+import { directoryFsyncSupported } from '@origintrail-official/dkg-core';
 
 export const RFC64_SECURE_DIRECTORY_MODE_V1 = 0o700;
 export const RFC64_SECURE_FILE_MODE_V1 = 0o600;
@@ -157,9 +158,9 @@ function assertRfc64PosixOwnerOnlyPermissionsV1(
   }
 }
 
-/** Node cannot FlushFileBuffers on a Windows directory handle. */
+/** Node cannot FlushFileBuffers on a Windows directory handle (core's `directoryFsyncSupported`). */
 export async function fsyncRfc64DirectoryV1(path: string): Promise<void> {
-  if (rfc64UsesWindowsFilesystemPolicyV1()) return;
+  if (!directoryFsyncSupported()) return;
   const handle = await open(path, constants.O_RDONLY);
   try {
     const stat = await handle.stat();
@@ -174,7 +175,7 @@ export async function fsyncRfc64DirectoryV1(path: string): Promise<void> {
 
 /** Synchronous twin used by the SQLite inventory lifecycle. */
 export function fsyncRfc64DirectorySyncV1(path: string): void {
-  if (rfc64UsesWindowsFilesystemPolicyV1()) return;
+  if (!directoryFsyncSupported()) return;
   const descriptor = openSync(path, 'r');
   try {
     fsyncSync(descriptor);
