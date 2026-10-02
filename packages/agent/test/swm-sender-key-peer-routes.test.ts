@@ -99,8 +99,13 @@ interface CuratedSenderKeyInternals extends SenderKeyInternals {
   }): Promise<SendState>;
   drainPendingSenderKeyForRecipients(
     recipients: readonly WorkspaceAgentRecipient[],
-    ctx?: OperationContext,
-    scope?: { contextGraphId: string; subGraphName?: string },
+    ctx: OperationContext | undefined,
+    scope: {
+      contextGraphId: string;
+      subGraphName?: string;
+      senderAgentAddress: string;
+      epochId: string;
+    },
   ): Promise<number>;
   prunePendingSenderKeysForEpochRotation(input: {
     contextGraphId: string;

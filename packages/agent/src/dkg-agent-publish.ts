@@ -4118,6 +4118,8 @@ export class PublishMethods extends DKGAgentBase {
       await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx, {
         contextGraphId,
         subGraphName,
+        senderAgentAddress: state.senderAgentAddress,
+        epochId: state.epochId,
       });
     }
 

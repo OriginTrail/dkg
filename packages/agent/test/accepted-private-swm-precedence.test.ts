@@ -20,7 +20,7 @@ const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/accepted-pr
 const PROFILE_GRAPH = 'did:dkg:context-graph:agents';
 const CURATOR_PEER_ID = '12D3KooWAcceptedPrivateCurator';
 
-function signedKeyQuads(wallet: ethers.HDNodeWallet): Quad[] {
+function signedKeyQuads(wallet: ethers.HDNodeWallet, peerId?: string): Quad[] {
   const agentUri = `did:dkg:agent:${ethers.getAddress(wallet.address)}`;
   const key = generateWorkspaceRecipientEncryptionKey(
     agentUri,
@@ -53,6 +53,12 @@ function signedKeyQuads(wallet: ethers.HDNodeWallet): Quad[] {
       object: `"${proof}"`,
       graph: PROFILE_GRAPH,
     },
+    ...(peerId === undefined ? [] : [{
+      subject: agentUri,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      object: `"${peerId}"`,
+      graph: PROFILE_GRAPH,
+    }]),
   ];
 }
 
@@ -151,6 +157,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
     const host = {
       store,
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
       resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
       resolveRegisteredContextGraphAuthority,
       hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
@@ -192,6 +199,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
     const host = {
       store,
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
       resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
       resolveRegisteredContextGraphAuthority: vi.fn(async () => (
         approvedUnregisteredAuthority(owner.address)
@@ -207,7 +215,60 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         contextGraphId: CONTEXT_GRAPH_ID,
       })).rejects.toMatchObject({
         reason: 'chain-participant-authority-unavailable',
+      });
+  });
+
+  it('rejects private-roster peer routes removed during the final authority read', async () => {
+    const agentA = ethers.Wallet.createRandom();
+    const agentB = ethers.Wallet.createRandom();
+    const peerA = '12D3KooWAcceptedPrivatePeerA';
+    const peerB = '12D3KooWAcceptedPrivatePeerB';
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([
+      ...signedKeyQuads(agentA, peerA),
+      ...signedKeyQuads(agentB, peerB),
+    ]);
+
+    let metadataRevision = 7;
+    let allowedPeers = [peerA, peerB];
+    let transportReads = 0;
+    let finalReadEntered!: () => void;
+    let releaseFinalRead!: () => void;
+    const entered = new Promise<void>((resolve) => { finalReadEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseFinalRead = resolve; });
+    const participantAgents = [agentA.address, agentB.address];
+    const host = {
+      store,
+      contextGraphMetaProjection: {
+        get readAuthorityFactsRevision() { return metadataRevision; },
+      },
+      resolveSwmTransportAuthority: vi.fn(async () => {
+        transportReads += 1;
+        if (transportReads === 2) {
+          finalReadEntered();
+          await release;
+        }
+        return { kind: 'private-roster' as const, participantAgents };
+      }),
+      getContextGraphAllowedPeers: vi.fn(async () => [...allowedPeers]),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    const resolution = WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      });
+    await entered;
+    allowedPeers = [peerA];
+    metadataRevision += 1;
+    releaseFinalRead();
+
+    await expect(resolution).rejects.toMatchObject({
+      reason: 'chain-participant-authority-unavailable',
     });
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -227,6 +288,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       : { kind: nextKind, allowedPeers: [] as string[] };
     const host = {
       store,
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
       resolveSwmTransportAuthority: vi.fn()
         .mockResolvedValueOnce({
           kind: 'private-roster' as const,

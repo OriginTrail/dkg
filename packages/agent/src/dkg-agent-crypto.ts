@@ -716,6 +716,38 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
 }
 
+type PendingSenderKeyDrainAuthority = {
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  /** Connection-open authority covers every subgraph of one resolved CG. */
+  readonly allSubgraphs?: boolean;
+  readonly recipientAgentAddress: string;
+  readonly recipientKeyId: string;
+  readonly recipientPeerId: string;
+  /** Foreground publish additionally fences the exact local sender epoch. */
+  readonly senderAgentAddress?: string;
+  readonly epochId?: string;
+};
+
+function pendingSenderKeyEntryMatchesDrainAuthority(
+  entry: PendingSenderKeyEntry,
+  authority: PendingSenderKeyDrainAuthority,
+): boolean {
+  return entry.contextGraphId === authority.contextGraphId
+    && (
+      authority.allSubgraphs === true
+      || (entry.subGraphName ?? undefined) === (authority.subGraphName ?? undefined)
+    )
+    && entry.recipientAgentAddress === authority.recipientAgentAddress
+    && entry.recipientKeyId === authority.recipientKeyId
+    && entry.recipientPeerId === authority.recipientPeerId
+    && (
+      authority.senderAgentAddress === undefined
+      || entry.senderAgentAddress === authority.senderAgentAddress
+    )
+    && (authority.epochId === undefined || entry.epochId === authority.epochId);
+}
+
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -1785,6 +1817,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     )
       ? this.contextGraphMetaProjection.readAuthorityFactsRevision
       : null;
+    let privateRosterPeerAuthorityRevision: number | null = null;
     let resolveKeys: () => Promise<WorkspaceAgentRecipientResolution>;
     if (transport.kind === 'legacy-unregistered') {
       resolveKeys = () => resolveWorkspaceAgentRecipients(this.store, input);
@@ -1845,15 +1878,21 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         );
       }
 
-      const allowedPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
-      const allowedPeerSet = allowedPeers === null ? null : new Set(allowedPeers);
-
       // Resolve only the live chain-authorized addresses. Filtering a completed
       // local resolution afterward is too late: stale removed members can have
       // malformed/missing key metadata that makes the local resolver throw
       // before the chain intersection is reached, blocking every post-revoke
       // write until the local cleanup retry succeeds.
       resolveKeys = async () => {
+        // The registered/accepted private roster and the local peer gate are
+        // two conjunctive authorities. Capture the projection revision before
+        // each peer read so a phonebook-hydration retry owns a new snapshot,
+        // while the final transport recheck cannot validate only the unchanged
+        // agent roster and return a route removed meanwhile.
+        const peerAuthorityRevision =
+          this.contextGraphMetaProjection.readAuthorityFactsRevision;
+        const allowedPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
+        const allowedPeerSet = allowedPeers === null ? null : new Set(allowedPeers);
         const recipients: WorkspaceAgentRecipient[] = [];
         // Every member without a key is named at once, so one phonebook fetch
         // can cover them all (#2849). Any other key failure still stops here.
@@ -1888,6 +1927,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
             `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no chain-authorized DKG agent recipients`,
           );
         }
+        // Publish only the snapshot owned by the attempt that actually
+        // completed. A failed pre-hydration attempt must not pin its revision
+        // across the phonebook write and the successful retry.
+        privateRosterPeerAuthorityRevision = peerAuthorityRevision;
         return {
           requiresEncryption: true,
           recipients: [firstRecipient, ...remainingRecipients],
@@ -1943,6 +1986,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       const authorityStayedCurrent = transport.kind === 'private-roster'
         ? currentTransport.kind === 'private-roster'
           && resolution.requiresEncryption
+          && privateRosterPeerAuthorityRevision
+            === this.contextGraphMetaProjection.readAuthorityFactsRevision
           && hasExactRecipientAgentRoster(resolution, currentTransport.participantAgents)
         : transport.kind === 'approved-private-replica'
           ? currentTransport.kind === 'approved-private-replica'
@@ -2057,6 +2102,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx, {
         contextGraphId: input.contextGraphId,
         subGraphName: input.subGraphName,
+        senderAgentAddress: state.senderAgentAddress,
+        epochId: state.epochId,
       });
     }
 
@@ -2511,20 +2558,23 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   async drainPendingSenderKeyQueueForPeer(this: DKGAgent, input: {
-    peerId: string;
-    recipientAgentAddress: string;
+    authority: PendingSenderKeyDrainAuthority;
     ctx?: OperationContext;
   }): Promise<number> {
-    const recipientAgentAddress = input.recipientAgentAddress.toLowerCase();
+    const authority: PendingSenderKeyDrainAuthority = {
+      ...input.authority,
+      recipientAgentAddress: input.authority.recipientAgentAddress.toLowerCase(),
+      senderAgentAddress: input.authority.senderAgentAddress?.toLowerCase(),
+    };
+    const recipientAgentAddress = authority.recipientAgentAddress;
     const existingDrain = this.pendingSenderKeyDrainByAgent.get(recipientAgentAddress);
     if (existingDrain) {
       await existingDrain;
       if (!this.pendingSenderKeyByAgent.has(recipientAgentAddress)) return 0;
-      return this.drainPendingSenderKeyQueueForPeer(input);
+      return this.drainPendingSenderKeyQueueForPeer({ authority, ctx: input.ctx });
     }
     const drain = this.drainPendingSenderKeyQueueForPeerLocked({
-      peerId: input.peerId,
-      recipientAgentAddress,
+      authority,
       ctx: input.ctx,
     }).finally(() => {
       if (this.pendingSenderKeyDrainByAgent.get(recipientAgentAddress) === drain) {
@@ -2536,11 +2586,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   async drainPendingSenderKeyQueueForPeerLocked(this: DKGAgent, input: {
-    peerId: string;
-    recipientAgentAddress: string;
+    authority: PendingSenderKeyDrainAuthority;
     ctx?: OperationContext;
   }): Promise<number> {
-    const recipientAgentAddress = input.recipientAgentAddress;
+    const { authority } = input;
+    const recipientAgentAddress = authority.recipientAgentAddress;
     const queue = this.pendingSenderKeyByAgent.get(recipientAgentAddress);
     if (!queue || queue.length === 0) return 0;
 
@@ -2571,16 +2621,40 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     };
     for (let i = 0; i < queue.length; i += 1) {
       const entry = queue[i];
-      // A row may only be consumed by its exact peer route. Legacy/no-peer
-      // rows are expanded into independent peer-bound obligations from an
-      // authority-fenced recipient snapshot before reaching this drain.
-      if (entry.recipientPeerId !== input.peerId) {
+      // A row may only be consumed by the caller's exact current-authority
+      // route and graph scope. Legacy/no-peer rows are expanded into explicit
+      // peer-bound obligations before reaching this drain. Foreground callers
+      // additionally bind the current sender + epoch; connection-open callers
+      // explicitly authorize every subgraph for one resolved CG.
+      if (!pendingSenderKeyEntryMatchesDrainAuthority(entry, authority)) {
+        outcomes.set(entry, entry);
+        continue;
+      }
+      // Authority can change while this route waits for the per-agent drain
+      // lock, or while a preceding row is in flight. Re-resolve immediately
+      // before every send so a stale caller snapshot can never consume a row.
+      let routeStillCurrent = false;
+      try {
+        const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+          contextGraphId: entry.contextGraphId,
+        });
+        routeStillCurrent = resolution.requiresEncryption
+          && resolution.recipients.some((recipient) => (
+            recipient.agentAddress.toLowerCase() === entry.recipientAgentAddress
+            && recipient.recipientKeyId === entry.recipientKeyId
+            && recipient.peerId === entry.recipientPeerId
+          ));
+      } catch {
+        // Fail closed. The queued obligation remains available for a later
+        // current-authority retry.
+      }
+      if (!routeStillCurrent) {
         outcomes.set(entry, entry);
         continue;
       }
       try {
         const sendResult = await this.messenger.sendReliable(
-          input.peerId,
+          authority.recipientPeerId,
           PROTOCOL_SWM_SENDER_KEY,
           entry.packageBytes,
           { messageId: this.swmSenderKeyPendingMessageId(entry) },
@@ -2621,7 +2695,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           this.log.warn(
             input.ctx ?? SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
             `SWM sender-key pending retry for ${entry.recipientAgentAddress} keyId=${entry.recipientKeyId} ` +
-            `peerId=${input.peerId} contextGraph=${entry.contextGraphId}${entry.subGraphName ? `/${entry.subGraphName}` : ''} ` +
+            `peerId=${authority.recipientPeerId} contextGraph=${entry.contextGraphId}${entry.subGraphName ? `/${entry.subGraphName}` : ''} ` +
             `dropped after terminal rejection (${reasonCode}): ${reason}`,
           );
           // Terminal rejection: keep it out of the queue, but do not
@@ -2639,7 +2713,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         this.log.warn(
           input.ctx ?? SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
           `SWM sender-key pending retry for ${entry.recipientAgentAddress} keyId=${entry.recipientKeyId} ` +
-          `peerId=${input.peerId} contextGraph=${entry.contextGraphId}${entry.subGraphName ? `/${entry.subGraphName}` : ''} ` +
+          `peerId=${authority.recipientPeerId} contextGraph=${entry.contextGraphId}${entry.subGraphName ? `/${entry.subGraphName}` : ''} ` +
           `failed before the Messenger substrate queued a retry: ${message}`,
         );
         throw err;
@@ -2662,6 +2736,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string;
     subGraphName?: string;
     allSubgraphs?: boolean;
+    senderAgentAddress?: string;
+    epochId?: string;
   }): number {
     const peersByAgentAndKey = new Map<string, Set<string>>();
     for (const recipient of input.recipients) {
@@ -2681,6 +2757,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       entry.contextGraphId,
       entry.subGraphName ?? null,
     ]);
+    const senderAgentAddress = input.senderAgentAddress?.toLowerCase();
     let expanded = 0;
     for (const [recipientAgentAddress, queue] of this.pendingSenderKeyByAgent.entries()) {
       const existingBoundRoutes = new Set(
@@ -2694,14 +2771,16 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       for (const entry of queue) {
         const matchesScope = entry.contextGraphId === input.contextGraphId
           && (input.allSubgraphs
-            || (entry.subGraphName ?? undefined) === (input.subGraphName ?? undefined));
+            || (entry.subGraphName ?? undefined) === (input.subGraphName ?? undefined))
+          && (senderAgentAddress === undefined || entry.senderAgentAddress === senderAgentAddress)
+          && (input.epochId === undefined || entry.epochId === input.epochId);
         if (entry.recipientPeerId !== undefined || !matchesScope) {
           replacement.push(entry);
           continue;
         }
 
         const peers = peersByAgentAndKey.get(
-          `${recipientAgentAddress}\0${entry.recipientKeyId}`,
+          `${entry.recipientAgentAddress}\0${entry.recipientKeyId}`,
         );
         if (!peers || peers.size === 0) {
           replacement.push(entry);
@@ -2709,12 +2788,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
 
         changed = true;
+        expanded += 1;
         for (const peerId of peers) {
           const identity = boundRouteIdentity(entry, peerId);
           if (existingBoundRoutes.has(identity)) continue;
           replacement.push({ ...entry, recipientPeerId: peerId });
           existingBoundRoutes.add(identity);
-          expanded += 1;
         }
       }
       if (changed) {
@@ -2729,14 +2808,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
-   * Drain queued sender-key packages whose recipient agent is one of
-   * the agent addresses advertised by `peerId`. Returns the number of
-   * rows successfully delivered (acked) and removed.
+   * Drain queued sender-key packages whose exact current recipient route is
+   * the newly connected `peerId`. Returns the number of rows successfully
+   * delivered (acked) and removed.
    *
    * Fired from the `connection:open` listener — see line 2382 — so the
    * cost lives on the cold path of "we just connected to a new peer",
-   * not on every share. Route-bound rows can drain immediately. Legacy/no-peer
-   * rows are first expanded only from each pending context graph's current,
+   * not on every share. Every context graph represented by either a bound or
+   * legacy row is resolved first; bound rows never bypass that authority read.
+   * Legacy/no-peer rows are expanded only from that graph's current,
    * authority-fenced recipient snapshot. Each successful `sendReliable` with
    * `delivered=true && ack.accepted=true` deletes the row and counts as
    * drained; soft (`delivered=false`) and explicitly retryable delivered
@@ -2747,46 +2827,61 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     await this.loadSwmSenderKeyState();
     if (this.pendingSenderKeyByAgent.size === 0) return 0;
     let drained = 0;
-    let agentAddresses: string[] = [];
-    try {
-      const profile = await this.discovery.findAgentByPeerId(peerId);
-      if (profile?.agentAddress) {
-        agentAddresses = [profile.agentAddress.toLowerCase()];
-      }
-    } catch {
-      // Resolution failure is benign — we'll try again on the next
-      // connection:open burst. Don't propagate.
-    }
-    if (agentAddresses.length === 0) return 0;
+    const pendingContextGraphIds = new Set(
+      [...this.pendingSenderKeyByAgent.values()]
+        .flatMap((queue) => queue
+          .filter((entry) => entry.recipientPeerId === undefined || entry.recipientPeerId === peerId)
+          .map((entry) => entry.contextGraphId)),
+    );
+    let expandedRows = 0;
 
-    for (const recipientAgentAddress of agentAddresses) {
-      const pendingContextGraphIds = new Set(
-        (this.pendingSenderKeyByAgent.get(recipientAgentAddress) ?? [])
-          .filter((entry) => entry.recipientPeerId === undefined)
-          .map((entry) => entry.contextGraphId),
-      );
-      for (const contextGraphId of pendingContextGraphIds) {
-        try {
-          const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({
-            contextGraphId,
-          });
-          if (!resolution.requiresEncryption) continue;
-          this.expandUnboundPendingSenderKeyRoutes({
-            recipients: resolution.recipients,
-            contextGraphId,
-            allSubgraphs: true,
-          });
-        } catch {
-          // Authority/key resolution failure is benign on connection-open.
-          // Bound obligations can still drain; unbound rows remain queued for
-          // the next scoped resolution attempt.
-        }
+    for (const contextGraphId of pendingContextGraphIds) {
+      let resolution: WorkspaceAgentRecipientResolution;
+      try {
+        resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+          contextGraphId,
+        });
+      } catch {
+        // Authority/key resolution failure is benign on connection-open. No
+        // row for this CG — including already bound rows — may bypass it.
+        continue;
       }
-      drained += await this.drainPendingSenderKeyQueueForPeer({
-        peerId,
-        recipientAgentAddress,
-        ctx,
+      if (!resolution.requiresEncryption) continue;
+
+      expandedRows += this.expandUnboundPendingSenderKeyRoutes({
+        recipients: resolution.recipients,
+        contextGraphId,
+        allSubgraphs: true,
       });
+
+      const routes = new Map<string, PendingSenderKeyDrainAuthority>();
+      for (const recipient of resolution.recipients) {
+        if (recipient.peerId !== peerId) continue;
+        const recipientAgentAddress = recipient.agentAddress.toLowerCase();
+        const authority: PendingSenderKeyDrainAuthority = {
+          contextGraphId,
+          allSubgraphs: true,
+          recipientAgentAddress,
+          recipientKeyId: recipient.recipientKeyId,
+          recipientPeerId: peerId,
+        };
+        const queue = this.pendingSenderKeyByAgent.get(recipientAgentAddress);
+        if (!queue?.some((entry) => (
+          pendingSenderKeyEntryMatchesDrainAuthority(entry, authority)
+        ))) continue;
+        routes.set(
+          `${recipientAgentAddress}\0${recipient.recipientKeyId}\0${peerId}`,
+          authority,
+        );
+      }
+      for (const authority of routes.values()) {
+        drained += await this.drainPendingSenderKeyQueueForPeer({ authority, ctx });
+      }
+    }
+    if (expandedRows > 0) {
+      // A connection can teach us routes for another peer. Persist that legacy
+      // migration even when this peer had no exact authorized row to drain.
+      await this.saveSwmSenderKeyState();
     }
     return drained;
   }
@@ -2799,43 +2894,47 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    */
   async drainPendingSenderKeyForRecipients(this: DKGAgent,
     recipients: readonly WorkspaceAgentRecipient[],
-    ctx?: OperationContext,
-    scope?: { contextGraphId: string; subGraphName?: string },
+    ctx: OperationContext | undefined,
+    scope: {
+      contextGraphId: string;
+      subGraphName?: string;
+      senderAgentAddress: string;
+      epochId: string;
+    },
   ): Promise<number> {
     if (this.pendingSenderKeyByAgent.size === 0) return 0;
 
-    if (scope) {
-      this.expandUnboundPendingSenderKeyRoutes({
-        recipients,
-        contextGraphId: scope.contextGraphId,
-        subGraphName: scope.subGraphName,
-      });
-    }
+    const senderAgentAddress = scope.senderAgentAddress.toLowerCase();
+    this.expandUnboundPendingSenderKeyRoutes({
+      recipients,
+      contextGraphId: scope.contextGraphId,
+      subGraphName: scope.subGraphName,
+      senderAgentAddress,
+      epochId: scope.epochId,
+    });
 
-    const routes = new Map<string, {
-      recipientAgentAddress: string;
-      peerId: string;
-    }>();
+    const routes = new Map<string, PendingSenderKeyDrainAuthority>();
     for (const recipient of recipients) {
       if (!recipient.peerId) continue;
       const recipientAgentAddress = recipient.agentAddress.toLowerCase();
       if (!this.pendingSenderKeyByAgent.has(recipientAgentAddress)) continue;
-      const routeKey = `${recipientAgentAddress}\0${recipient.peerId}`;
-      const route = routes.get(routeKey) ?? {
+      const authority: PendingSenderKeyDrainAuthority = {
+        contextGraphId: scope.contextGraphId,
+        subGraphName: scope.subGraphName,
+        senderAgentAddress,
+        epochId: scope.epochId,
         recipientAgentAddress,
-        peerId: recipient.peerId,
+        recipientKeyId: recipient.recipientKeyId,
+        recipientPeerId: recipient.peerId,
       };
-      routes.set(routeKey, route);
+      const routeKey = `${recipientAgentAddress}\0${recipient.recipientKeyId}\0${recipient.peerId}`;
+      routes.set(routeKey, authority);
     }
     if (routes.size === 0) return 0;
 
     let drained = 0;
-    for (const { recipientAgentAddress, peerId } of routes.values()) {
-      drained += await this.drainPendingSenderKeyQueueForPeer({
-        peerId,
-        recipientAgentAddress,
-        ctx,
-      });
+    for (const authority of routes.values()) {
+      drained += await this.drainPendingSenderKeyQueueForPeer({ authority, ctx });
     }
     if (drained > 0 && ctx) {
       this.log.info(ctx, `SWM sender-key pending retry drained ${drained} queued package(s) during publish`);

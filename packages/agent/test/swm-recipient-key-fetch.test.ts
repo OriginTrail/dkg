@@ -161,7 +161,9 @@ describe('private share recipients with a missing member key (#2849)', () => {
       getContextGraphAllowedPeers: ReturnType<typeof vi.fn>;
     };
     expect(internals.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
-    expect(internals.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+    // Each resolution attempt owns its peer-gate snapshot, including the retry
+    // after phonebook hydration.
+    expect(internals.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
   });
 
   it('names every member still without a key when the fetch cannot find them', async () => {
