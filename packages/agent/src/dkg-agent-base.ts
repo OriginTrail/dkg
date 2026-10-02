@@ -41,6 +41,7 @@ import type { Rfc64CatalogShadowObservabilityRuntimeV1 } from
   './rfc64/catalog-shadow-observability-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from './context-graph-subscription-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SlotFactsIndex } from './context-graph-claim-proof.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
@@ -1424,6 +1425,15 @@ export class DKGAgentBase {
   protected readonly contextGraphMembershipPersistence = new ContextGraphMembershipPersistScheduler();
   protected contextGraphMembershipPersistenceShutdownBlocked = false;
   static readonly CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
+  /**
+   * Per-context-graph subscription store writes. Membership and subscription
+   * lanes stay separate instances of one scheduler type: a join approval
+   * enqueues a subscription write from inside a membership write, which needs
+   * the two to make progress independently.
+   */
+  protected readonly contextGraphSubscriptionPersistence = new ContextGraphSubscriptionPersistScheduler();
+  protected contextGraphSubscriptionPersistenceShutdownBlocked = false;
+  static readonly CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
   /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
@@ -1574,7 +1584,6 @@ export class DKGAgentBase {
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistPendingRevisions = new Map<string, Set<number>>();
-  protected readonly contextGraphSubscriptionPersistChains = new Map<string, Promise<void>>();
   protected readonly listContextGraphsCache = new Map<string, {
     expiresAt: number;
     rows: Array<Record<string, unknown>>;
