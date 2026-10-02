@@ -6,21 +6,29 @@ import {
   DKG_ONTOLOGY,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   computeWorkspaceAgentEncryptionKeyProofPayload,
+  computeWorkspaceAgentEncryptionKeyRevocationPayload,
   contextGraphDataUri,
   contextGraphMetaUri,
   encodeWorkspaceEncryptionKey,
   generateWorkspaceRecipientEncryptionKey,
+  workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 
+import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
+import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/accepted-private';
 const PROFILE_GRAPH = 'did:dkg:context-graph:agents';
 const CURATOR_PEER_ID = '12D3KooWAcceptedPrivateCurator';
 
-function signedKeyQuads(wallet: ethers.HDNodeWallet, peerId?: string): Quad[] {
+function signedKeyFixture(wallet: ethers.HDNodeWallet, peerId?: string): {
+  quads: Quad[];
+  publicKeyBytes: Uint8Array;
+  recipientKeyId: string;
+} {
   const agentUri = `did:dkg:agent:${ethers.getAddress(wallet.address)}`;
   const key = generateWorkspaceRecipientEncryptionKey(
     agentUri,
@@ -34,32 +42,40 @@ function signedKeyQuads(wallet: ethers.HDNodeWallet, peerId?: string): Quad[] {
       publicKeyBytes,
     }),
   )).serialized;
-  return [
-    {
-      subject: agentUri,
-      predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
-      object: `"${encodeWorkspaceEncryptionKey(publicKeyBytes)}"`,
-      graph: PROFILE_GRAPH,
-    },
-    {
-      subject: agentUri,
-      predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
-      object: `"${WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519}"`,
-      graph: PROFILE_GRAPH,
-    },
-    {
-      subject: agentUri,
-      predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
-      object: `"${proof}"`,
-      graph: PROFILE_GRAPH,
-    },
-    ...(peerId === undefined ? [] : [{
-      subject: agentUri,
-      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
-      object: `"${peerId}"`,
-      graph: PROFILE_GRAPH,
-    }]),
-  ];
+  return {
+    publicKeyBytes,
+    recipientKeyId: workspaceAgentEncryptionKeyId(wallet.address, publicKeyBytes),
+    quads: [
+      {
+        subject: agentUri,
+        predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
+        object: `"${encodeWorkspaceEncryptionKey(publicKeyBytes)}"`,
+        graph: PROFILE_GRAPH,
+      },
+      {
+        subject: agentUri,
+        predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
+        object: `"${WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519}"`,
+        graph: PROFILE_GRAPH,
+      },
+      {
+        subject: agentUri,
+        predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
+        object: `"${proof}"`,
+        graph: PROFILE_GRAPH,
+      },
+      ...(peerId === undefined ? [] : [{
+        subject: agentUri,
+        predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+        object: `"${peerId}"`,
+        graph: PROFILE_GRAPH,
+      }]),
+    ],
+  };
+}
+
+function signedKeyQuads(wallet: ethers.HDNodeWallet, peerId?: string): Quad[] {
+  return signedKeyFixture(wallet, peerId).quads;
 }
 
 function approvedUnregisteredAuthority(approvedAgentAddress: string) {
@@ -264,11 +280,237 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     metadataRevision += 1;
     releaseFinalRead();
 
+    await expect(resolution).rejects.toThrow(
+      /has no recipient key advertised by a peer in the context graph allowlist/,
+    );
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries an unchanged recipient snapshot after an unrelated authority revision moves', async () => {
+    const member = ethers.Wallet.createRandom();
+    const peerId = '12D3KooWAcceptedPrivateStableRetryPeer';
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(signedKeyQuads(member, peerId));
+
+    let metadataRevision = 19;
+    let transportReads = 0;
+    const host = {
+      store,
+      contextGraphMetaProjection: {
+        get readAuthorityFactsRevision() { return metadataRevision; },
+      },
+      resolveSwmTransportAuthority: vi.fn(async () => {
+        transportReads += 1;
+        if (transportReads === 2) metadataRevision += 1;
+        return {
+          kind: 'private-roster' as const,
+          participantAgents: [member.address],
+        };
+      }),
+      getContextGraphAllowedPeers: vi.fn(async () => [peerId]),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      })).resolves.toMatchObject({
+        requiresEncryption: true,
+        recipients: [expect.objectContaining({
+          agentAddress: ethers.getAddress(member.address),
+          peerId,
+        })],
+      });
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(3);
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries unchanged legacy plaintext after an unrelated authority revision moves', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+
+    let metadataRevision = 23;
+    let transportReads = 0;
+    const host = {
+      store,
+      contextGraphMetaProjection: {
+        get readAuthorityFactsRevision() { return metadataRevision; },
+      },
+      resolveSwmTransportAuthority: vi.fn(async () => {
+        transportReads += 1;
+        if (transportReads === 2) metadataRevision += 1;
+        return { kind: 'legacy-unregistered' as const };
+      }),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      })).resolves.toEqual({
+        requiresEncryption: false,
+        recipients: [],
+      });
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects a key revoked through the real store wrapper during the final authority read', async () => {
+    const member = ethers.Wallet.createRandom();
+    const peerId = '12D3KooWAcceptedPrivateRevokedKeyPeer';
+    const key = signedKeyFixture(member, peerId);
+    const innerStore = new OxigraphStore();
+    stores.push(innerStore);
+    let projection!: ContextGraphMetaProjection;
+    const store = createListContextGraphsCacheInvalidatingStore(
+      innerStore,
+      () => undefined,
+      (quads, targetGraph) => {
+        if (targetGraph !== undefined) {
+          projection.markDirtyForGraph(targetGraph);
+          if (quads) projection.markDirtyFromQuads(quads);
+        } else if (quads) projection.markDirtyFromQuads(quads);
+        else projection.markAllDirty();
+      },
+    );
+    projection = new ContextGraphMetaProjection(store);
+    await store.insert(key.quads);
+
+    let transportReads = 0;
+    let finalReadEntered!: () => void;
+    let releaseFinalRead!: () => void;
+    const entered = new Promise<void>((resolve) => { finalReadEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseFinalRead = resolve; });
+    const host = {
+      store,
+      contextGraphMetaProjection: projection,
+      resolveSwmTransportAuthority: vi.fn(async () => {
+        transportReads += 1;
+        if (transportReads === 2) {
+          finalReadEntered();
+          await release;
+        }
+        return {
+          kind: 'private-roster' as const,
+          participantAgents: [member.address],
+        };
+      }),
+      getContextGraphAllowedPeers: vi.fn(async () => [peerId]),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    const resolution = WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      });
+    await entered;
+    const beforeRevocation = projection.readAuthorityFactsRevision;
+    const revokedAt = new Date().toISOString();
+    const revocationProof = member.signingKey.sign(ethers.hashMessage(
+      computeWorkspaceAgentEncryptionKeyRevocationPayload({
+        agentAddress: member.address,
+        encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+        publicKeyBytes: key.publicKeyBytes,
+        revokedAt,
+      }),
+    )).serialized;
+    const agentUri = `did:dkg:agent:${ethers.getAddress(member.address)}`;
+    await store.insert([
+      {
+        subject: key.recipientKeyId,
+        predicate: DKG_ONTOLOGY.DKG_REVOKED_AT,
+        object: `"${revokedAt}"`,
+        graph: PROFILE_GRAPH,
+      },
+      {
+        subject: key.recipientKeyId,
+        predicate: DKG_ONTOLOGY.DKG_REVOKED_BY,
+        object: agentUri,
+        graph: PROFILE_GRAPH,
+      },
+      {
+        subject: key.recipientKeyId,
+        predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF,
+        object: `"${revocationProof}"`,
+        graph: PROFILE_GRAPH,
+      },
+    ]);
+    expect(projection.readAuthorityFactsRevision).toBeGreaterThan(beforeRevocation);
+    releaseFinalRead();
+
+    await expect(resolution).rejects.toThrow(/public encryption keys.*revoked/);
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a join-cache key route atomically replaced during the final authority read', async () => {
+    const member = ethers.Wallet.createRandom();
+    const oldKey = signedKeyFixture(member, '12D3KooWAcceptedPrivateOldJoinRoute');
+    const newKey = signedKeyFixture(member, '12D3KooWAcceptedPrivateNewJoinRoute');
+    const joinCacheGraph = 'urn:dkg:local:join-encryption-key-cache';
+    const inJoinCache = (quads: readonly Quad[]): Quad[] => quads.map((quad) => ({
+      ...quad,
+      graph: joinCacheGraph,
+    }));
+    const innerStore = new OxigraphStore();
+    stores.push(innerStore);
+    let projection!: ContextGraphMetaProjection;
+    const store = createListContextGraphsCacheInvalidatingStore(
+      innerStore,
+      () => undefined,
+      (quads, targetGraph) => {
+        if (targetGraph !== undefined) {
+          projection.markDirtyForGraph(targetGraph);
+          if (quads) projection.markDirtyFromQuads(quads);
+        } else if (quads) projection.markDirtyFromQuads(quads);
+        else projection.markAllDirty();
+      },
+    );
+    projection = new ContextGraphMetaProjection(store);
+    await store.insert(inJoinCache(oldKey.quads));
+
+    let transportReads = 0;
+    let finalReadEntered!: () => void;
+    let releaseFinalRead!: () => void;
+    const entered = new Promise<void>((resolve) => { finalReadEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseFinalRead = resolve; });
+    const host = {
+      store,
+      contextGraphMetaProjection: projection,
+      resolveSwmTransportAuthority: vi.fn(async () => {
+        transportReads += 1;
+        if (transportReads === 2) {
+          finalReadEntered();
+          await release;
+        }
+        return {
+          kind: 'private-roster' as const,
+          participantAgents: [member.address],
+        };
+      }),
+      getContextGraphAllowedPeers: vi.fn(async () => null),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    const resolution = WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      });
+    await entered;
+    const beforeReplacement = projection.readAuthorityFactsRevision;
+    const agentUri = `did:dkg:agent:${ethers.getAddress(member.address)}`;
+    await store.replaceSubject!(
+      joinCacheGraph,
+      agentUri,
+      inJoinCache(newKey.quads),
+    );
+    expect(projection.readAuthorityFactsRevision).toBeGreaterThan(beforeReplacement);
+    releaseFinalRead();
+
     await expect(resolution).rejects.toMatchObject({
       reason: 'chain-participant-authority-unavailable',
     });
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
   });
 
   it.each([

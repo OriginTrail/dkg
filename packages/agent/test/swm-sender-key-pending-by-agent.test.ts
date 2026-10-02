@@ -22,7 +22,7 @@
 //   3. enqueuing a newer epoch for the same (sender, recipient)
 //      evicts older epochs — they're superseded by definition.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,6 +64,40 @@ import {
 } from '../src/dkg-agent-swm-state.js';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+
+const senderKeyStateWriteBarrier = vi.hoisted(() => ({
+  targetDir: null as string | null,
+  targetPath: null as string | null,
+  writes: [] as string[],
+  onFirstWrite: null as (() => void) | null,
+  releaseFirstWrite: null as Promise<void> | null,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+      if (senderKeyStateWriteBarrier.targetDir === String(args[0])) return undefined;
+      return Reflect.apply(actual.mkdir, undefined, args);
+    },
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      if (senderKeyStateWriteBarrier.targetPath === String(args[0])) {
+        const contents = typeof args[1] === 'string'
+          ? args[1]
+          : Buffer.from(args[1] as Uint8Array).toString('utf8');
+        senderKeyStateWriteBarrier.writes.push(contents);
+        if (senderKeyStateWriteBarrier.writes.length === 1) {
+          senderKeyStateWriteBarrier.onFirstWrite?.();
+          if (senderKeyStateWriteBarrier.releaseFirstWrite) {
+            await senderKeyStateWriteBarrier.releaseFirstWrite;
+          }
+        }
+      }
+      return Reflect.apply(actual.writeFile, undefined, args);
+    },
+  };
+});
 
 type StubMessenger = {
   sendReliable: (
@@ -315,6 +349,11 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
   const tempDirs: string[] = [];
   afterEach(async () => {
     Logger.setSink(null);
+    senderKeyStateWriteBarrier.targetDir = null;
+    senderKeyStateWriteBarrier.targetPath = null;
+    senderKeyStateWriteBarrier.writes = [];
+    senderKeyStateWriteBarrier.onFirstWrite = null;
+    senderKeyStateWriteBarrier.releaseFirstWrite = null;
     if (agent) {
       await agent.stop().catch(() => undefined);
       agent = null;
@@ -441,6 +480,81 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     expect(queue![0].recipientKeyId).toBe(recipient.recipientKeyId);
     expect(queue![0].contextGraphId).toBe('test-cg/pending-persist');
     expect(queue![0].packageBytes.length).toBeGreaterThan(0);
+  });
+
+  it('serializes full-state saves so a delayed older write cannot overwrite a newer snapshot', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-swm-sender-save-queue-'));
+    tempDirs.push(dataDir);
+    const boot = await bootAgent({ dataDir });
+    agent = boot.agent;
+    const internals = boot.internals;
+    const path = join(dataDir, 'swm-sender-keys.json');
+
+    let markFirstWrite!: () => void;
+    const firstWriteStarted = new Promise<void>((resolve) => { markFirstWrite = resolve; });
+    let releaseFirstWrite!: () => void;
+    const firstWriteReleased = new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+    senderKeyStateWriteBarrier.targetDir = dataDir;
+    senderKeyStateWriteBarrier.targetPath = path;
+    senderKeyStateWriteBarrier.onFirstWrite = markFirstWrite;
+    senderKeyStateWriteBarrier.releaseFirstWrite = firstWriteReleased;
+
+    const recipient = makeFakeRecipient();
+    const recipientAgentAddress = recipient.agentAddress.toLowerCase();
+    const senderAgentAddress = ethers.Wallet.createRandom().address.toLowerCase();
+    const pending = (marker: number): PendingSenderKeyEntry => ({
+      senderAgentAddress,
+      recipientAgentAddress,
+      recipientKeyId: recipient.recipientKeyId,
+      epochId: `epoch-${marker}`,
+      contextGraphId: 'test-cg/save-queue',
+      packageBytes: new Uint8Array([marker]),
+      createdAtMs: marker,
+    });
+
+    internals.pendingSenderKeyByAgent.set(recipientAgentAddress, [pending(1)]);
+    const olderSave = internals.saveSwmSenderKeyState();
+    await firstWriteStarted;
+
+    internals.pendingSenderKeyByAgent.set(recipientAgentAddress, [pending(2)]);
+    const newerSave = internals.saveSwmSenderKeyState();
+    // The mocked mkdir is synchronous for this dataDir. One event-loop turn
+    // lets an unqueued second writer reach writeFile while the first is held.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const writesBeforeRelease = senderKeyStateWriteBarrier.writes.length;
+
+    releaseFirstWrite();
+    await Promise.all([olderSave, newerSave]);
+
+    expect(writesBeforeRelease).toBe(1);
+    expect(senderKeyStateWriteBarrier.writes).toHaveLength(2);
+    const state = JSON.parse(await readFile(path, 'utf-8')) as {
+      pending?: Array<{ epochId?: string; packageBytes?: string }>;
+    };
+    expect(state.pending).toEqual([expect.objectContaining({
+      epochId: 'epoch-2',
+      packageBytes: Buffer.from([2]).toString('base64'),
+    })]);
+  });
+
+  it('continues the sender-key save queue after a failed write', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-swm-sender-save-recovery-'));
+    tempDirs.push(dataDir);
+    const boot = await bootAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    const blockedParent = join(dataDir, 'not-a-directory');
+    await writeFile(blockedParent, 'blocked');
+    internals.config.dataDir = join(blockedParent, 'child');
+
+    await expect(internals.saveSwmSenderKeyState()).rejects.toThrow();
+
+    internals.config.dataDir = dataDir;
+    await expect(internals.saveSwmSenderKeyState()).resolves.toBeUndefined();
+    const state = JSON.parse(
+      await readFile(join(dataDir, 'swm-sender-keys.json'), 'utf-8'),
+    ) as { version?: number };
+    expect(state.version).toBe(1);
   });
 
   it('persists queued sender-key retries before throwing aggregated setup failures', async () => {

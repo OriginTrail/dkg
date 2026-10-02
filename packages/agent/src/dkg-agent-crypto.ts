@@ -425,6 +425,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
+const SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS = 3;
 
 function delegationIsCurrentlyActive(expiresAtValues: readonly string[], nowMs: number): boolean {
   if (expiresAtValues.length === 0) return true;
@@ -1811,29 +1812,32 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (transport.kind === 'plaintext') {
       return { requiresEncryption: false, recipients: [] };
     }
-    const unregisteredMetadataAuthorityRevision = (
-      transport.kind === 'approved-private-replica'
-      || transport.kind === 'legacy-unregistered'
-    )
-      ? this.contextGraphMetaProjection.readAuthorityFactsRevision
-      : null;
-    let privateRosterPeerAuthorityRevision: number | null = null;
+    let recipientAuthorityRevision: number | null = null;
     let resolveKeys: () => Promise<WorkspaceAgentRecipientResolution>;
     if (transport.kind === 'legacy-unregistered') {
-      resolveKeys = () => resolveWorkspaceAgentRecipients(this.store, input);
+      resolveKeys = async () => {
+        const attemptRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+        const resolution = await resolveWorkspaceAgentRecipients(this.store, input);
+        recipientAuthorityRevision = attemptRevision;
+        return resolution;
+      };
     } else if (transport.kind === 'approved-private-replica') {
       // Resolve the complete effective metadata roster first. Participant
       // approval authorizes this receiver; it is not a replacement roster.
       // The peer gate comes from the same source-qualified, revision-fenced
       // proof as the transport classification, never the merged projection.
       resolveKeys = async () => {
+        const attemptRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
         const resolution = await resolveWorkspaceAgentRecipients(this.store, input);
         if (!resolution.requiresEncryption) {
           throw new Error(
             `Approved private replica "${input.contextGraphId}" resolved a plaintext SWM roster`,
           );
         }
-        if (transport.allowedPeers.length === 0) return resolution;
+        if (transport.allowedPeers.length === 0) {
+          recipientAuthorityRevision = attemptRevision;
+          return resolution;
+        }
 
         const allowedPeerSet = new Set(transport.allowedPeers);
         const effectiveAgentAddresses = new Set(
@@ -1860,10 +1864,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
             `Approved private replica "${input.contextGraphId}" requires encrypted SWM gossip but has no allowed DKG agent recipients`,
           );
         }
-        return {
+        const authorizedResolution = {
           requiresEncryption: true,
           recipients: [firstRecipient, ...remainingRecipients],
-        };
+        } as const;
+        recipientAuthorityRevision = attemptRevision;
+        return authorizedResolution;
       };
     } else {
       if (transport.kind === 'unavailable') {
@@ -1884,12 +1890,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // before the chain intersection is reached, blocking every post-revoke
       // write until the local cleanup retry succeeds.
       resolveKeys = async () => {
-        // The registered/accepted private roster and the local peer gate are
-        // two conjunctive authorities. Capture the projection revision before
-        // each peer read so a phonebook-hydration retry owns a new snapshot,
-        // while the final transport recheck cannot validate only the unchanged
-        // agent roster and return a route removed meanwhile.
-        const peerAuthorityRevision =
+        // The registered/accepted private roster, local peer gate, and verified
+        // recipient-key routes are conjunctive authorities. Capture their shared
+        // revision before every attempt so a phonebook-hydration retry owns a new
+        // snapshot, while the final transport recheck cannot return a route
+        // removed or revoked meanwhile.
+        const attemptRevision =
           this.contextGraphMetaProjection.readAuthorityFactsRevision;
         const allowedPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
         const allowedPeerSet = allowedPeers === null ? null : new Set(allowedPeers);
@@ -1930,7 +1936,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         // Publish only the snapshot owned by the attempt that actually
         // completed. A failed pre-hydration attempt must not pin its revision
         // across the phonebook write and the successful retry.
-        privateRosterPeerAuthorityRevision = peerAuthorityRevision;
+        recipientAuthorityRevision = attemptRevision;
         return {
           requiresEncryption: true,
           recipients: [firstRecipient, ...remainingRecipients],
@@ -1942,7 +1948,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // every member whose key is missing, then the keys are resolved once more.
     // Every member still needs a key, so a share that cannot get one stays
     // closed.
-    const resolution = await (async (): Promise<WorkspaceAgentRecipientResolution> => {
+    const resolveWithPhonebookHydration = async (): Promise<WorkspaceAgentRecipientResolution> => {
       try {
         return await resolveKeys();
       } catch (error) {
@@ -1960,7 +1966,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       } catch (error) {
         throw isWorkspaceAgentEncryptionKeyMissingError(error) ? withMemberKeyHint(error) : error;
       }
-    })();
+    };
+    let resolution = await resolveWithPhonebookHydration();
 
     if (
       transport.kind === 'private-roster'
@@ -1970,41 +1977,67 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // Key and phonebook lookup are asynchronous. Re-read the paired
       // transport decision after them so an accepted-private (or registered)
       // roster rotation cannot return keys for a member removed meanwhile.
-      const currentTransport = await withRpcUsageSite(
-        CG_AUTH_RPC_SITES.recipients,
-        () => this.resolveSwmTransportAuthority(input.contextGraphId, {
-          authorityReadMode: 'finalized-index-or-live',
-          requireLiveRosterForPrivate: true,
-        }),
-      );
-      if (currentTransport.kind === 'unavailable') {
-        throw createContextGraphAuthorityError(
-          `Context graph "${input.contextGraphId}" recipient authority is unavailable (${currentTransport.reason})`,
-          currentTransport,
+      // The store revision is deliberately conservative because recipient
+      // facts can live in any named graph. Unrelated graph activity therefore
+      // triggers a bounded optimistic retry, but a retry is accepted only when
+      // both the exact (agent,key,peer) set and transport authority are stable.
+      for (
+        let attempt = 0;
+        attempt < SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS;
+        attempt += 1
+      ) {
+        const currentTransport = await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.recipients,
+          () => this.resolveSwmTransportAuthority(input.contextGraphId, {
+            authorityReadMode: 'finalized-index-or-live',
+            requireLiveRosterForPrivate: true,
+          }),
         );
-      }
-      const authorityStayedCurrent = transport.kind === 'private-roster'
-        ? currentTransport.kind === 'private-roster'
-          && resolution.requiresEncryption
-          && privateRosterPeerAuthorityRevision
-            === this.contextGraphMetaProjection.readAuthorityFactsRevision
-          && hasExactRecipientAgentRoster(resolution, currentTransport.participantAgents)
-        : transport.kind === 'approved-private-replica'
-          ? currentTransport.kind === 'approved-private-replica'
-            && unregisteredMetadataAuthorityRevision
-              === this.contextGraphMetaProjection.readAuthorityFactsRevision
-            && sameStringSet(transport.allowedPeers, currentTransport.allowedPeers)
-          : currentTransport.kind === 'legacy-unregistered'
-            && unregisteredMetadataAuthorityRevision
-              === this.contextGraphMetaProjection.readAuthorityFactsRevision;
-      if (!authorityStayedCurrent) {
-        throw createContextGraphAuthorityError(
-          `Context graph "${input.contextGraphId}" private authority changed while recipient keys were resolving`,
-          {
-            reason: 'chain-participant-authority-unavailable',
-            detail: 'retry recipient resolution against the current private authority',
-          },
-        );
+        if (currentTransport.kind === 'unavailable') {
+          throw createContextGraphAuthorityError(
+            `Context graph "${input.contextGraphId}" recipient authority is unavailable (${currentTransport.reason})`,
+            currentTransport,
+          );
+        }
+        const transportStayedCurrent = transport.kind === 'private-roster'
+          ? currentTransport.kind === 'private-roster'
+            && resolution.requiresEncryption
+            && hasExactRecipientAgentRoster(resolution, currentTransport.participantAgents)
+          : transport.kind === 'approved-private-replica'
+            ? currentTransport.kind === 'approved-private-replica'
+              && sameStringSet(transport.allowedPeers, currentTransport.allowedPeers)
+            : currentTransport.kind === 'legacy-unregistered';
+        const revisionStayedCurrent = recipientAuthorityRevision
+          === this.contextGraphMetaProjection.readAuthorityFactsRevision;
+        if (transportStayedCurrent && revisionStayedCurrent) break;
+
+        const hasAnotherAttempt =
+          attempt + 1 < SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS;
+        if (!transportStayedCurrent || !hasAnotherAttempt) {
+          throw createContextGraphAuthorityError(
+            `Context graph "${input.contextGraphId}" private authority changed while recipient keys were resolving`,
+            {
+              reason: 'chain-participant-authority-unavailable',
+              detail: 'retry recipient resolution against the current private authority',
+            },
+          );
+        }
+
+        const retriedResolution = await resolveWithPhonebookHydration();
+        const recipientSnapshotStayedCurrent = resolution.requiresEncryption
+          ? retriedResolution.requiresEncryption
+            && hasExactWorkspaceRecipientSet(resolution, retriedResolution)
+          : !retriedResolution.requiresEncryption;
+        if (!recipientSnapshotStayedCurrent) {
+          throw createContextGraphAuthorityError(
+            `Context graph "${input.contextGraphId}" private authority changed while recipient keys were resolving`,
+            {
+              reason: 'chain-participant-authority-unavailable',
+              detail: 'recipient routes changed while retrying against current private authority',
+            },
+          );
+        }
+        resolution = retriedResolution;
       }
     }
     return resolution;
@@ -3652,22 +3685,31 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async saveSwmSenderKeyState(this: DKGAgent): Promise<void> {
     const path = this.swmSenderKeyStatePath();
     if (!path) return;
-    const { mkdir, writeFile, chmod } = await import('node:fs/promises');
-    const { dirname } = await import('node:path');
-    await mkdir(dirname(path), { recursive: true });
-    const payload = {
-      version: 1,
-      send: [...this.swmSenderKeySendStates.values()].map(serializeSwmSenderSendState),
-      receive: [...this.swmSenderKeyReceiveStates.values()].map(serializeSwmSenderReceiveState),
-      pending: [...this.pendingSenderKeyByAgent.values()]
-        .flatMap((queue) => queue.map(serializePendingSenderKeyEntry)),
-    };
-    await writeFile(path, JSON.stringify(payload, null, 2), { mode: 0o600 });
-    try {
-      await chmod(path, 0o600);
-    } catch {
-      // Best-effort on platforms/filesystems that do not support chmod.
-    }
+    const save = this.swmSenderKeyStateSaveQueue.then(async () => {
+      const { mkdir, writeFile, chmod } = await import('node:fs/promises');
+      const { dirname } = await import('node:path');
+      await mkdir(dirname(path), { recursive: true });
+      // Capture inside the serialized section. A caller queued behind an
+      // in-flight write must persist the state current when its turn begins,
+      // not a stale snapshot captured while the older write was outstanding.
+      const payload = {
+        version: 1,
+        send: [...this.swmSenderKeySendStates.values()].map(serializeSwmSenderSendState),
+        receive: [...this.swmSenderKeyReceiveStates.values()].map(serializeSwmSenderReceiveState),
+        pending: [...this.pendingSenderKeyByAgent.values()]
+          .flatMap((queue) => queue.map(serializePendingSenderKeyEntry)),
+      };
+      await writeFile(path, JSON.stringify(payload, null, 2), { mode: 0o600 });
+      try {
+        await chmod(path, 0o600);
+      } catch {
+        // Best-effort on platforms/filesystems that do not support chmod.
+      }
+    });
+    // A failed save is still reported to its caller, but must not poison the
+    // queue and suppress every later persistence attempt.
+    this.swmSenderKeyStateSaveQueue = save.catch(() => undefined);
+    await save;
   }
 
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
