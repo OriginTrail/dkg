@@ -19,7 +19,7 @@ dkg publisher publish-async <context-graph-id> <name>
 
 ## Admission retries
 
-Before `POST /api/knowledge-assets/{name}/vm/publish-async` enqueues a job, it verifies the immutable SWM snapshot. Temporary store pressure or recovery returns `503` with `code: "STORE_SCHEDULER_BUSY"` or `"STORE_OPERATION_TIMEOUT"`, `retryable: true`, and `Retry-After: 1`. Retry the same request after the store recovers without re-sharing valid content. A genuine snapshot mismatch still returns `409 PUBLISH_INTENT_STALE`.
+Before `POST /api/knowledge-assets/{name}/vm/publish-async` enqueues a job, it verifies the immutable SWM snapshot. Temporary store pressure or recovery returns `503` with `code: "STORE_SCHEDULER_BUSY"` or `"STORE_OPERATION_TIMEOUT"`, `retryable: true`, and `Retry-After: 1`. Retry the same request after the store recovers without re-sharing valid content. A genuine snapshot mismatch still returns `409 PUBLISH_INTENT_STALE`; so does a finalized update that is not numbered one above the KA's latest confirmed version, which could never be published (see [Editing a published Knowledge Asset](knowledge-asset-lifecycle.md#editing-a-published-knowledge-asset)).
 
 These pre-enqueue failures include `jobCreated: false`: this request did not reach enqueue, although an earlier job may exist for the KA. The separate `outcome` describes the failed store operation (`not_started` or `indeterminate`); even an indeterminate read can reject before job creation. Once enqueue begins, a store failure omits `jobCreated` because a job may already have been persisted. Use the publisher job lookup before assuming that no job exists.
 
