@@ -353,7 +353,7 @@ Use adapters for OpenClaw, ElizaOS, Hermes, or your own Node.js / TypeScript pro
 
 ## Benchmarking
 
-Benchmarking docs live in [`BENCHMARKING.md`](BENCHMARKING.md). The current
+Benchmarking docs live in [`bench/README.md`](bench/README.md). The current
 suite covers DKG publish/get and memory-layer flows:
 
 - get/read retrieval

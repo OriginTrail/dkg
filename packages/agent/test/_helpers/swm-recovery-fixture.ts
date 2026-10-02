@@ -27,15 +27,10 @@ export const UAL = 'did:dkg:hardhat:31337/0x000000000000000000000000000000000000
 export const UAL_2 = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/8';
 
 export function recoveryPage(quads: Quad[], completed = true): SyncPageResult {
-  return {
-    quads,
-    bytesReceived: 0,
-    timedOut: false,
-    resumedFromOffset: 0,
-    nextOffset: quads.length,
-    checkpointKey: 'k',
-    completed,
-  };
+  const fields = { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k' };
+  return completed
+    ? { ...fields, completed: true, timedOut: false }
+    : { ...fields, completed: false, timedOut: false };
 }
 
 export async function recoveryStatusValues(store: OxigraphStore): Promise<string[]> {

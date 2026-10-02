@@ -19,6 +19,7 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  PublishReceiptReadOptions,
   FinalizedChainProofSnapshot,
   KAUpdateVerification,
   OnChainPublishResult,
@@ -594,7 +595,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async resolvePublishByTxHash(
     txHash: string,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     await this.init();
 
@@ -790,7 +791,7 @@ export class PublishMethods extends EVMChainAdapterBase {
    */
   private async readPublishReceipt(
     txHash: string,
-    options: ChainReadOptions,
+    options: PublishReceiptReadOptions,
     logLabel?: string,
   ): Promise<{
     receipt: ethers.TransactionReceipt | null;
@@ -886,9 +887,26 @@ export class PublishMethods extends EVMChainAdapterBase {
       : { status: 'rejected' };
   }
 
+  /**
+   * The receipt block's timestamp for a publish projection, whichever event format the
+   * receipt carries. When the caller already checked receipt finality, naming this exact hash
+   * reuses that header timestamp; direct parsers safely fall through to RPC. A caller that
+   * declared it never reads the timestamp (`skipBlockTimestamp`) skips the lookup and gets 0,
+   * the value already reported when the header is unavailable. The policy lives here once so
+   * the two format decoders stay free of caller-specific read rules.
+   */
+  private receiptBlockTimestamp(
+    receipt: Pick<ethers.TransactionReceipt, 'blockNumber' | 'blockHash'>,
+    options: PublishReceiptReadOptions,
+  ): Promise<number> {
+    return options.skipBlockTimestamp === true
+      ? Promise.resolve(0)
+      : this.getFinalizedBlockTimestamp(receipt.blockNumber, receipt.blockHash, options);
+  }
+
   async parseV10PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
@@ -933,13 +951,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    // When the caller already checked receipt finality, naming this exact hash
-    // reuses that header timestamp; direct parsers safely fall through to RPC.
-    const blockTimestamp = await this.getFinalizedBlockTimestamp(
-      receipt.blockNumber,
-      receipt.blockHash,
-      options,
-    );
+    const blockTimestamp = await this.receiptBlockTimestamp(receipt, options);
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -961,7 +973,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async parseV9PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     const storage = this.contracts.knowledgeAssetsStorage;
     if (!storage) return null;
@@ -999,13 +1011,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    // When the caller already checked receipt finality, naming this exact hash
-    // reuses that header timestamp; direct parsers safely fall through to RPC.
-    const blockTimestamp = await this.getFinalizedBlockTimestamp(
-      receipt.blockNumber,
-      receipt.blockHash,
-      options,
-    );
+    const blockTimestamp = await this.receiptBlockTimestamp(receipt, options);
 
     return {
       batchId,

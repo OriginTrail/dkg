@@ -6,7 +6,7 @@ import {
   getMetrics,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { supportsBoundedExactGraphExport, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
@@ -21,6 +21,8 @@ import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
   createResponderExactGraphPagePlanMemo,
+  createResponderPageOnlyExactDataSessionMemo,
+  createResponderExactDataSessionMemo,
   createResponderFreshSwmDataGraphPlanMemo,
   createResponderFreshSwmMetaPlanMemo,
   createResponderSyncRowListMemo,
@@ -28,7 +30,7 @@ import {
   createResponderSwmAdmissionMemo,
   DurableMetaPageFrameError,
   readCatalogPage,
-  readDurableDataPage,
+  readDurableDataPageWithLease,
   readDurableMetaPage,
   readSwmDataPage,
   readSwmMetaPage,
@@ -56,6 +58,8 @@ import {
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
 import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
+import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
+import { encodeNegotiatedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -73,6 +77,13 @@ type PreparedResponderSession = {
 type PreparedResponderStage =
   | { kind: 'respond'; bytes: Uint8Array }
   | { kind: 'authorized'; authDurationMs: number };
+
+export interface ExperimentalExactBatchResponderResources {
+  readonly exportCache: ExactAssetExportCache;
+  readonly snapshotBudget: import('./snapshot-budget.js').SyncResponderSnapshotBudget;
+  withPreAuthorizationAdmission<T>(peerId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
+  withAuthorizedResponseAdmission<T>(peerId: string, contextGraphId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
+}
 
 interface RegisterSyncHandlerParams {
   /**
@@ -101,6 +112,8 @@ interface RegisterSyncHandlerParams {
     remotePeerId: string,
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
+  /** Default absent. Experimental registrations reuse these exact owned resources. */
+  onExperimentalExactBatchResources?: (resources: ExperimentalExactBatchResponderResources) => void;
   /**
    * Injected policy predicate (#1233): return `true` to WITHHOLD the durable
    * `_meta` snapshot for `contextGraphId` — the responder then replies with an
@@ -467,10 +480,16 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // peers cannot stack uncharged plans, and global pressure evicts idle ones.
     responderSnapshotBudget,
   );
-  const durableDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+  const durableDataExactSessionMemo = createResponderExactDataSessionMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
   );
+  const pageOnlyExactDataSessionMemo = createResponderPageOnlyExactDataSessionMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+    responderSnapshotBudget,
+  );
+  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget });
   const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
@@ -484,6 +503,22 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   // compatibility no-op for responder scheduling.
   const prioritySchedulingEnabled = Object.values(contextGraphPriorities ?? {})
     .some((priority) => priority !== 0);
+  // The opt-in batch profile uses two separately bounded stages. Unlike the
+  // legacy runTwoStage path, it does not claim a reserved FIFO handoff between
+  // authorization and response. No admission remains held across that gap.
+  // Advertising the export-only transport requires a pre-parse bounded reader.
+  // Unsupported stores retain their existing ordinary bounded page handler.
+  if (params.onExperimentalExactBatchResources && supportsBoundedExactGraphExport(store)) params.onExperimentalExactBatchResources({
+    exportCache: exactAssetExportCache,
+    snapshotBudget: responderSnapshotBudget,
+    withPreAuthorizationAdmission: (remotePeerId, signal, work) => limiter.run(remotePeerId, signal,
+      { lane: 'pre_authorization', priority: 0, priorityClass: 'default' }, work),
+    withAuthorizedResponseAdmission: (remotePeerId, contextGraphId, signal, work) => {
+      const priority = prioritySchedulingEnabled ? contextGraphPriority(contextGraphPriorities, contextGraphId) : 0;
+      return limiter.run(remotePeerId, signal,
+        { contextGraphId, lane: 'responder', priority, priorityClass: syncPriorityClass(priority) }, work);
+    },
+  });
   let warnedPreDispatchCancellation = false;
 
   const pruneSyncSessionTokens = (now = Date.now()) => {
@@ -546,6 +581,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // recorded by its own .then/.catch (no double counting).
     try {
     const request = parseSyncRequest(data);
+    const exactExportLeases: ExactAssetExportLease[] = [];
     // A durable rootless snapshot can legitimately contain millions of rows.
     // Never clamp a valid cursor: doing so silently replays the row slice at
     // the clamp boundary forever while the requester keeps advancing its local
@@ -572,6 +608,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       pageMode: request.pageMode,
       pageRowsHint: request.pageRowsHint,
       hasExactAssetFilter: assetUals !== undefined,
+      responseEncoding: request.responseEncoding,
+      exactAssetCount: assetUals?.length,
     });
     const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
     // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
@@ -856,7 +894,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           request.syncSessionId,
           offset,
         );
-        const rows = await readDurableDataPage({
+        const page = await readDurableDataPageWithLease({
           store,
           graphMembership: await graphListMemo.get({
             refresh: session?.refreshRowList ?? offset === 0,
@@ -876,18 +914,29 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
-          exactGraphPlanMemo: durableDataExactGraphPlanMemo,
+          exactDataSessionMemo: durableDataPolicy.cacheMode === 'page-only'
+            ? pageOnlyExactDataSessionMemo
+            : durableDataExactSessionMemo,
+          exactGraphPlanCacheKey: durableDataPolicy.cacheMode === 'page-only'
+            ? session?.refreshGeneration
+            : undefined,
+          maxPageBytes: durableDataPolicy.cacheMode === 'page-only'
+            ? durableDataPolicy.maxPageBytes
+            : undefined,
           // A byte-bounded response may contain only a prefix of the row slice
           // loaded above. Do not release the immutable session snapshot merely
           // because that slice was short; the explicit empty request is EOF.
           releaseCacheOnShortPage: !usesByteBudgetPage,
           assetUals,
           exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
+          exactAssetExportCache: durableDataPolicy.usesExactAssetExport ? exactAssetExportCache : undefined,
         });
+        const rows = page.rows;
+        if (page.responseLease) exactExportLeases.push(page.responseLease);
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
         const serialized = usesByteBudgetPage
-          ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+          ? serializeResponderRowsWithinByteBudget(rows, durableDataPolicy.maxPageBytes)
           : serializeResponderRows(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
@@ -898,7 +947,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (totalDurationMs > 100) {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
-      return new TextEncoder().encode(nquads.join('\n'));
+      const bytes = await encodeNegotiatedExactSyncResponse(new TextEncoder().encode(nquads.join('\n')), { request, signal });
+      for (const lease of exactExportLeases) await lease.assertCurrent();
+      throwIfAborted(signal);
+      return bytes;
     };
 
     const preAuthorizationScheduling: SyncResponderScheduling = {
@@ -1001,6 +1053,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       }
       getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
       throw err;
+    }).finally(() => {
+      for (const lease of exactExportLeases) lease.release();
     });
     } catch (preLimiterErr) {
       // Malformed/unparseable request or a pre-limiter validation/abort throw —

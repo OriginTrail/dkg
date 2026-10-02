@@ -33,7 +33,7 @@ export const TEST_LANE_METADATA = Object.freeze({
   'image-contract': { layer: 'container contract', prerequisites: ['Docker', 'native ARM64 runner'] },
   'shell-fixture': { layer: 'system fixture', prerequisites: SYSTEM_PREREQUISITES },
   observability: { layer: 'system', prerequisites: ['Prometheus', 'Grafana'] },
-  'ccl-python-yaml': { layer: 'Python/YAML conformance', prerequisites: ['Python 3', 'ccl_v0_1/requirements.txt'] },
+  'ccl-python-yaml': { layer: 'Python/YAML conformance', prerequisites: ['Python 3', 'PyYAML'] },
 });
 
 /** Vitest groups per controller lane. Lanes without groups run bespoke jobs
