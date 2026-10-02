@@ -87,10 +87,9 @@ function unavailableStream(): ExactBatchStreamDriverOutcome {
 type DurableSyncAccumulator = ReturnType<typeof createDurableSyncAccumulator>;
 
 /** One exchange: the assets it applied, and why it stopped if it did not complete. */
-interface ExactBatchExchange {
-  readonly committedAssetUals: readonly string[];
-  readonly error?: unknown;
-}
+type ExactBatchExchange =
+  | Readonly<{ complete: true; committedAssetUals: readonly string[] }>
+  | Readonly<{ complete: false; committedAssetUals: readonly string[]; error: unknown }>;
 
 function isUnsupportedBeforeStart(error: unknown): boolean {
   const cause = error instanceof Error ? error.cause : undefined;
@@ -230,7 +229,7 @@ async function exchangeExactBatchOnce(
     });
     committedAssetUals = exchanged.committedAssetUals;
     streamComplete = true;
-    return { committedAssetUals };
+    return { complete: true, committedAssetUals };
   } catch (error) {
     // Core settles physical stream/decoder cleanup before rejection. Progress
     // reflects the guarded atomic callback, including a failed final close.
@@ -240,7 +239,7 @@ async function exchangeExactBatchOnce(
       assetCount: assetUals.length, committedAssets, lastStage,
       cancelled: signal?.aborted === true || options.isCurrent?.() === false,
     })));
-    return { committedAssetUals, error };
+    return { complete: false, committedAssetUals, error };
   } finally {
     // Encoded native payload totals exclude Noise/TCP overhead. Success also
     // requires Core's final close to settle; observations grant no authority.
@@ -294,14 +293,14 @@ export async function runExactBatchStreamDriver(
 
     const exchange = await exchangeExactBatchOnce(options, ports, selected.slice(committed.length), accumulator);
     committed.push(...exchange.committedAssetUals);
-    const { error } = exchange;
-    if (!('error' in exchange)) {
+    if (exchange.complete) {
       markDurableTerminalBoundary(accumulator, true, { countCompletedPhase: true });
       return { kind: 'settled', detailed: {
         result: finalizeDurableSyncCompletion(accumulator), exactFetchDisposition: 'found',
         committedExactAssetUals: Object.freeze([...committed]),
       } };
     }
+    const { error } = exchange;
 
     if (error instanceof ExactBatchPartialSyncError && error.refusalObservation !== undefined) {
       const observed = error.refusalObservation;

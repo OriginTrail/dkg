@@ -103,7 +103,7 @@ function fixture(assetCount = 2) {
   const selection = createUalOnlyExactAssetSelection(items.map(item => item.ual));
   const atomicStarted = vi.fn();
   const run = (exactAssetSelection = selection as typeof selection | ReturnType<typeof createChallengePinnedExactAssetSelection>, exactRecoveryTransportMode: ExactRecoveryTransportMode = 'stream-preferred',
-    handedOver: { registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence } = {}) => (
+    handedOver: { registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence; operationFetchDeadline?: number; signal?: AbortSignal } = {}) => (
     LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(host, ctx, 'fixture-source', CG, 1,
       { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, ...handedOver })
   );
@@ -213,6 +213,23 @@ function scriptExchanges(f: ReturnType<typeof fixture>, scripts: ReadonlyArray<{
       } as never);
     });
   }
+}
+
+/** The peer cannot be reached: its reconnection never settles, whatever happens to the signal it was given. */
+function unreachablePeer(f: ReturnType<typeof fixture>) {
+  let start!: (signal: AbortSignal) => void;
+  const reconnecting = new Promise<AbortSignal>(resolve => { start = resolve; });
+  f.host.ensurePeerConnected.mockImplementation((_peer: string, options: { signal: AbortSignal }) => {
+    start(options.signal);
+    return new Promise<void>(() => {});
+  });
+  return { reconnecting };
+}
+
+/** Freeze the clock the driver reads; it moves only when the test advances the timers. */
+async function withDriverClock(test: () => Promise<void>) {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  try { await test(); } finally { vi.useRealTimers(); }
 }
 
 function refusalLogs(f: ReturnType<typeof fixture>) {
@@ -799,28 +816,100 @@ describe('experimental exact batch actual host completion verdict', () => {
       expect(runDurableSyncDetailed).not.toHaveBeenCalled();
     });
 
-    it('settles incomplete without a second exchange when the peer does not come back in time', async () => {
+    it('asks once per poll while the peer is not connected, and settles incomplete when the reconnection window closes', async () => {
       const f = fixture(2);
       scriptExchanges(f, [
         { items: [], ending: 'read-rejects' },
         { items: [0, 1], ending: 'complete' },
       ]);
+      // Reachable, but not connected: every attempt answers at once.
       f.host.node.libp2p.getConnections.mockReturnValue([]);
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-      try {
-        const settled = f.run(f.selection, 'stream-required');
-        // Every pause of the reconnection window elapses; the peer never returns.
-        for (let pause = 0; pause <= EXACT_BATCH_STREAM_RETRY.reconnectWindowMs / EXACT_BATCH_STREAM_RETRY.reconnectPollMs; pause += 1) {
-          await vi.advanceTimersByTimeAsync(EXACT_BATCH_STREAM_RETRY.reconnectPollMs);
-        }
-        expect(await settled).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [],
+      let asked!: () => void;
+      const firstAttempt = new Promise<void>(resolve => { asked = resolve; });
+      f.host.ensurePeerConnected.mockImplementation(async () => { asked(); });
+      const { reconnectWindowMs, reconnectPollMs } = EXACT_BATCH_STREAM_RETRY;
+      await withDriverClock(async () => {
+        let settled = false;
+        const outcome = f.run(f.selection, 'stream-required').finally(() => { settled = true; });
+        await firstAttempt;
+        await vi.advanceTimersByTimeAsync(reconnectPollMs - 1);
+        expect(f.host.ensurePeerConnected).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(f.host.ensurePeerConnected).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(reconnectWindowMs - reconnectPollMs - 1);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [],
           result: { complete: false, failedPhases: 1 } });
-      } finally { vi.useRealTimers(); }
+      });
+      expect(f.host.ensurePeerConnected).toHaveBeenCalledTimes(reconnectWindowMs / reconnectPollMs);
       expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
-      expect(f.host.ensurePeerConnected.mock.calls.length).toBeGreaterThan(1);
-      expect(f.host.ensurePeerConnected.mock.calls.length).toBeLessThanOrEqual(
-        Math.ceil(EXACT_BATCH_STREAM_RETRY.reconnectWindowMs / EXACT_BATCH_STREAM_RETRY.reconnectPollMs),
-      );
+      expect(requesterLogs(f, 'retry')).toEqual([]);
+    });
+
+    it.each([
+      ['the reconnection window closes', undefined, EXACT_BATCH_STREAM_RETRY.reconnectWindowMs],
+      // Eight seconds of fetch time are left, and five of them are kept for the second exchange.
+      ['only the time kept for a second exchange is left of the fetch', 8_000, 8_000 - EXACT_BATCH_STREAM_RETRY.minRemainingMs],
+    ] as const)('cancels a reconnection that does not settle when %s, and settles incomplete', async (_case, fetchTimeLeftMs, waitMs) => {
+      const f = fixture(2);
+      scriptExchanges(f, [
+        { items: [], ending: 'read-rejects' },
+        { items: [0, 1], ending: 'complete' },
+      ]);
+      const { reconnecting } = unreachablePeer(f);
+      await withDriverClock(async () => {
+        let settled = false;
+        const outcome = f.run(f.selection, 'stream-required',
+          fetchTimeLeftMs === undefined ? {} : { operationFetchDeadline: Date.now() + fetchTimeLeftMs })
+          .finally(() => { settled = true; });
+        const reconnectSignal = await reconnecting;
+        await vi.advanceTimersByTimeAsync(waitMs - 1);
+        expect(reconnectSignal.aborted).toBe(false);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(reconnectSignal.aborted).toBe(true);
+        expect(await outcome).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [],
+          result: { complete: false, failedPhases: 1 } });
+      });
+      expect(f.host.ensurePeerConnected).toHaveBeenCalledOnce();
+      expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+      expect(requesterLogs(f, 'retry')).toEqual([]);
+    });
+
+    it('does not wait for the peer when no more fetch time is left than a second exchange needs', async () => {
+      const f = fixture(2);
+      scriptExchanges(f, [
+        { items: [], ending: 'read-rejects' },
+        { items: [0, 1], ending: 'complete' },
+      ]);
+      await withDriverClock(async () => {
+        const outcome = await f.run(f.selection, 'stream-required',
+          { operationFetchDeadline: Date.now() + EXACT_BATCH_STREAM_RETRY.minRemainingMs });
+        expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [] });
+      });
+      expect(f.host.ensurePeerConnected).not.toHaveBeenCalled();
+      expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+    });
+
+    it('cancels the reconnection at once when the fetch itself is cancelled', async () => {
+      const f = fixture(2);
+      scriptExchanges(f, [
+        { items: [], ending: 'read-rejects' },
+        { items: [0, 1], ending: 'complete' },
+      ]);
+      const { reconnecting } = unreachablePeer(f);
+      const owner = new AbortController();
+      const outcome = f.run(f.selection, 'stream-required', { signal: owner.signal })
+        .then(() => 'settled', () => 'rejected');
+      const reconnectSignal = await reconnecting;
+      expect(reconnectSignal.aborted).toBe(false);
+      owner.abort(new Error('Fixture cancellation'));
+      expect(reconnectSignal.aborted).toBe(true);
+      // Real timers: this resolves long before the reconnection window could close.
+      await outcome;
+      expect(f.host.ensurePeerConnected).toHaveBeenCalledOnce();
+      expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
       expect(requesterLogs(f, 'retry')).toEqual([]);
     });
 
@@ -836,6 +925,49 @@ describe('experimental exact batch actual host completion verdict', () => {
       expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [] });
       expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
       expect(f.host.ensurePeerConnected).not.toHaveBeenCalled();
+    });
+
+    describe('and cannot be opened again keeps what it applied, and the ordinary wire does not take the selection over', () => {
+      const appliedOneAssetThenBroke = (f: ReturnType<typeof fixture>) => scriptExchanges(f, [
+        { items: [0], ending: 'read-rejects', afterAcks: 1 },
+      ]);
+      const expectAppliedPrefixOnly = async (f: ReturnType<typeof fixture>, outcome: Awaited<ReturnType<typeof f.run>>) => {
+        expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [f.items[0]!.ual],
+          result: { complete: false, completedPhases: 0, failedPhases: 1, insertedDataTriples: 1 } });
+        expect(await storedRows(f.store, f.items[0]!.graph)).toBe(1);
+        expect(await storedRows(f.store, f.items[1]!.graph)).toBe(0);
+        expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+      };
+
+      it('when the peer answers the second START as unsupported', async () => {
+        const f = fixture(2);
+        appliedOneAssetThenBroke(f);
+        vi.mocked(exchangeExperimentalExactBatch).mockRejectedValueOnce(
+          new ExperimentalExactBatchUnsupportedError(new Error('Fixture unsupported negotiation after the break')));
+        // A stream-preferred fetch may use the ordinary wire, but only before its first START.
+        await expectAppliedPrefixOnly(f, await f.run(f.selection, 'stream-preferred'));
+        expect(exchangeExperimentalExactBatch).toHaveBeenCalledTimes(2);
+      });
+
+      it.each([
+        ['stream-preferred', 'the peer no longer advertises the stream'],
+        ['stream-preferred', 'the graph is no longer registered as public'],
+        ['stream-required', 'the peer no longer advertises the stream'],
+        ['stream-required', 'the graph is no longer registered as public'],
+      ] as const)('in a %s fetch when, after the break, %s', async (mode, change) => {
+        const f = fixture(2);
+        appliedOneAssetThenBroke(f);
+        if (change === 'the peer no longer advertises the stream') {
+          f.host.getPeerProtocols.mockResolvedValueOnce([EXACT_BATCH_STREAM_PROTOCOL]).mockResolvedValueOnce([]);
+        } else {
+          f.host.resolveRegisteredContextGraphAuthority
+            .mockResolvedValueOnce({ kind: 'public', onChainId: '14' })
+            .mockResolvedValueOnce({ kind: 'private', onChainId: '14' });
+        }
+        await expectAppliedPrefixOnly(f, await f.run(f.selection, mode));
+        expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+        expect(f.host.ensurePeerConnected).toHaveBeenCalledOnce();
+      });
     });
   });
 
