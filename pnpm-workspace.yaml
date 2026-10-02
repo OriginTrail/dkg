@@ -17,6 +17,7 @@ packages:
   - "devnet/rich-scenario"
   - "devnet/rpc-quiet-window"
   - "devnet/storage-ack-store-outage"
+  - "devnet/swm-digest-locale"
   - "devnet/v10-rs-prune"
   - "devnet/v10-rs-wallet-rotation"
   - "devnet/_bootstrap"

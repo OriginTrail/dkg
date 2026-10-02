@@ -106,6 +106,7 @@
     "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
     "test:devnet:rpc-quiet-window": "vitest run --config devnet/rpc-quiet-window/vitest.config.ts",
     "test:devnet:storage-ack-store-outage": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts",
+    "test:devnet:swm-digest-locale": "vitest run --config devnet/swm-digest-locale/vitest.config.ts",
     "test:devnet:status-store-outage": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts -t 'status reports a real managed-store outage and recovery'",
     "test:devnet:managed-oxigraph-caller-abort": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts -t 'a caller abort does not restart a healthy server'",
     "test:devnet:rfc64-evidence": "vitest run --config devnet/_bootstrap/vitest.evidence.config.ts",

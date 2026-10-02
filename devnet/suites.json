@@ -32,6 +32,7 @@
     "rich-scenario",
     "rpc-quiet-window",
     "storage-ack-store-outage",
+    "swm-digest-locale",
     "v10-core-flows",
     "v10-end-to-end",
     "v10-rs-prune",

@@ -19,6 +19,7 @@ import type { LocalStorageAckHeadExpectation } from '../src/storage-ack-handler.
 import { computeFlatKCMerkleLeafCountV10, computeFlatKCRootV10 } from '../src/merkle.js';
 import { resolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
 import { workspaceKnowledgeAssetHeadSubject, workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
+import { divergentObjectQuads, useAmbientCollation } from './_helpers/digest-locale.js';
 import {
   STORAGE_ACK_LEDGER_GRAPH,
   STORAGE_ACK_LEDGER_PREDICATES as LEDGER,
@@ -412,6 +413,55 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     expect(isStorageACKDecline(ack)).toBe(false);
     expect(await readHead(h)).toMatchObject({
       shareOperationIds: [ackCopyOperationId(1, content('direct'))],
+    });
+  });
+
+  describe('a head recorded under another accepted digest form is the same content', () => {
+    // The head was staged on a host whose collation put these rows in one
+    // order; this core now runs with a different locale (or after a digest
+    // ordering change), so the ACK copy's digest is a different string for
+    // byte-identical content. That is not a stale or conflicting head.
+    const divergent = divergentObjectQuads('urn:asset:self-ack');
+
+    it('keeps a queued publish share as the head for a local self-ACK', async () => {
+      const h = await harness();
+      await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1(shareInput(1, 'queued-publish-share', divergent));
+      const before = await readHead(h);
+      const restore = useAmbientCollation('da-DK');
+      try {
+        const ack = decodeStorageACK(await h.handler.localHandler(
+          publishIntent(divergent),
+          { toString: () => PUBLISHER_PEER },
+          undefined,
+          expectedHead(1, 'queued-publish-share'),
+        ));
+
+        expect(isStorageACKDecline(ack)).toBe(false);
+        expect(h.signMessage).toHaveBeenCalledOnce();
+        expect(await readHead(h)).toEqual(before);
+        expect(await swmValues(h, 1)).toHaveLength(divergent.length);
+      } finally {
+        restore();
+      }
+    });
+
+    it('takes a remote ACK of the same content as a replay, not a conflicting assertion', async () => {
+      const h = await harness();
+      await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1(shareInput(1, 'gossiped-share', divergent));
+      const restore = useAmbientCollation('da-DK');
+      try {
+        const ack = decodeStorageACK(await h.handler.handler(
+          publishIntent(divergent),
+          { toString: () => REMOTE_PEER },
+        ));
+
+        expect(isStorageACKDecline(ack)).toBe(false);
+        expect(await readHead(h)).toMatchObject({
+          shareOperationIds: [ackCopyOperationId(1, divergent)],
+        });
+      } finally {
+        restore();
+      }
     });
   });
 

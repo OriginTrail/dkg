@@ -11,6 +11,7 @@ import {
   canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,
   workspacePublicQuadsDigest,
+  workspacePublicQuadsDigestMatches,
   type WorkspaceOperationModel,
   type PublisherWorkspaceOperationSemantics,
   type WorkspaceOperationAccessEnvelope,
@@ -722,11 +723,11 @@ export async function materializeGraphScopedSwmRecoveryAsset(params: {
     throw new Error(`Graph-scoped SWM snapshot is missing for ${descriptor.kaUal}`);
   }
   const normalized = raw.map((quad) => ({ ...quad, graph: '' }));
-  const actualDigest = workspacePublicQuadsDigest(normalized);
   if (
     normalized.length !== descriptor.publicQuadsCount
-    || actualDigest !== descriptor.publicQuadsDigest
+    || !workspacePublicQuadsDigestMatches(normalized, descriptor.publicQuadsDigest)
   ) {
+    const actualDigest = workspacePublicQuadsDigest(normalized);
     throw new Error(
       `Graph-scoped SWM snapshot failed integrity for ${descriptor.kaUal}: ` +
       `expected ${descriptor.publicQuadsDigest}/${descriptor.publicQuadsCount}, ` +

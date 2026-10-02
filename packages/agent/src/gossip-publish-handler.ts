@@ -25,7 +25,7 @@ import {
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   generateGraphKnowledgeAssetMetadata,
   resolveKnowledgeAssetWorkspaceHead,
-  workspacePublicQuadsDigest,
+  workspacePublicQuadsDigestMatches,
   shouldApplyMaterialization,
   withMaterializationLock,
   writeMaterializedVersion,
@@ -545,16 +545,18 @@ export class GossipPublishHandler {
         const privateMerkleRoot = graphPublish.privateMerkleRoot
           ? ethers.hexlify(graphPublish.privateMerkleRoot).toLowerCase()
           : undefined;
-        const publicDigest = workspacePublicQuadsDigest(
-          normalized.map((quad) => ({ ...quad, graph: '' })),
-        );
         if (
           !workspaceHead
           || workspaceHead.assertionVersion !== graphPublish.scope.assertionVersion
           || workspaceHead.publicTripleCount !== graphPublish.publicTripleCount
-          || workspaceHead.publicQuadsDigest !== publicDigest
           || workspaceHead.privateTripleCount !== graphPublish.privateTripleCount
           || workspaceHead.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
+          // The durable head was written by this node's StorageACK path,
+          // possibly before an upgrade or a digest-ordering change.
+          || !workspacePublicQuadsDigestMatches(
+            normalized.map((quad) => ({ ...quad, graph: '' })),
+            workspaceHead.publicQuadsDigest,
+          )
         ) {
           this.log.warn(
             ctx,

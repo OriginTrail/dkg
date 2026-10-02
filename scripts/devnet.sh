@@ -36,6 +36,12 @@
 #                 Context graph used by /api/epcis/capture when publisher is enabled
 #   DEVNET_SWM_SYNC_ON_CONNECT=0
 #                 Skip peer-connect SWM catch-up, useful for bulk SWM benchmarks
+#   DEVNET_NODE_ENV_<N>
+#                 Extra environment for node N only, as space-separated
+#                 KEY=VALUE pairs (for example
+#                 DEVNET_NODE_ENV_3="LC_ALL=da_DK.UTF-8 DKG_SWM_DIGEST_ORDERING=code-unit").
+#                 Read on every launch, so `restart-node 3` with the variable
+#                 set relaunches that one node with it.
 #   DEVNET_SNAPSHOT_GC_{HARD_RESERVE,TRIGGER_FREE,TARGET_FREE}_BYTES
 #                 Local snapshot-store watermarks (defaults: 256 MiB, 512 MiB,
 #                 and 1 GiB) so devnet keeps capacity admission without
@@ -1036,7 +1042,16 @@ start_node() {
   # exits. Plain `start` returns after the daemon is ready and leaves a detached
   # supervisor behind. Store that supervisor pid in devnet.pid so stop/restart
   # still bounce the whole node process tree.
+  # Per-node extra environment (`DEVNET_NODE_ENV_<N>`, see the header): applied
+  # on start, addnode and restart-node, so a suite can give one node another
+  # host locale or feature gate without touching the others.
+  local -a node_env=()
+  local node_env_name="DEVNET_NODE_ENV_${node_num}"
+  if [ -n "${!node_env_name:-}" ]; then
+    read -r -a node_env <<< "${!node_env_name}"
+  fi
   if ! env DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
+    ${node_env[@]+"${node_env[@]}"} \
     node "$cli_entry" start \
     > "$node_dir/console.log" 2>&1 < /dev/null; then
     log "WARNING: Node $node_num start command returned non-zero (check $node_dir/console.log)"

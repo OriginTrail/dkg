@@ -58,6 +58,7 @@ import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { RecoveryExecutionGuard } from
   '../src/sync/requester/recovery-execution-guard.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
+import { divergentObjectQuads, referenceDigest, useAmbientCollation } from './_helpers/digest-locale.js';
 
 const CG = 'ws00-materializer-real-store';
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
@@ -744,6 +745,71 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       const again = await h.run();
       expect(again.failedPhases).toBe(0);
       expect(h.replaceCalls()).toBe(1);
+    });
+
+    describe('from a peer whose digests are in another accepted form', () => {
+      // The peer recorded and advertises the digest its own host produced (or
+      // the locale-independent one); this node's default collator would give
+      // a different string for the very same bytes. Catch-up must verify the
+      // snapshot, write it once, and then recognise the stored graph as
+      // materialized instead of rewriting it every round.
+      const divergent = divergentObjectQuads('urn:snap:divergent');
+
+      function divergentShare(form: 'en-US' | 'da-DK' | 'code-unit') {
+        const base = share(1, `op-divergent-${form}`, 'divergent', UAL, divergent.length);
+        const digest = referenceDigest(divergent, form);
+        const meta = base.meta.map((row) => (
+          row.predicate === `${DKG}publicQuadsDigest` || row.predicate === `${DKG}publicSnapshotRef`
+            ? { ...row, object: `"${digest}"` }
+            : row
+        ));
+        return { ...base, payload: divergent, digest, meta };
+      }
+
+      it.each([
+        ['en-US', 'da-DK', true],
+        ['en-US', 'da-DK', false],
+        ['code-unit', 'en-US', true],
+        ['code-unit', 'en-US', false],
+        ['code-unit', 'da-DK', false],
+        ['da-DK', 'da-DK', false],
+      ] as const)('catches up from a %s digest on a %s node (snapshot already cached: %s)', async (form, locale, cached) => {
+        const served = divergentShare(form);
+        const store = new OxigraphStore();
+        const h = realHarness(store, served, undefined, { preloadSnapshot: cached });
+        // en-US is this host's real default collator; only another one is simulated.
+        const restore = locale === 'da-DK' ? useAmbientCollation(locale) : undefined;
+        try {
+          const summary = await h.run();
+          expect(summary.failedPhases).toBe(0);
+          expect(h.replaceCalls()).toBe(1);
+          const { materializer } = materializerFor(store);
+          expect(await materializer.isGraphAssetMaterialized(descriptorFor(served))).toBe(true);
+          // A second round finds the stored graph intact: no rewrite.
+          const again = await h.run();
+          expect(again.failedPhases).toBe(0);
+          expect(h.replaceCalls()).toBe(1);
+        } finally {
+          restore?.();
+        }
+      });
+
+      it('still refuses a served snapshot that matches no accepted form', async () => {
+        const served = divergentShare('en-US');
+        const tampered = [...divergent.slice(1), { ...divergent[0]!, object: '"tampered"' }];
+        const store = new OxigraphStore();
+        const h = realHarness(store, { ...served, payload: tampered }, served.meta, { preloadSnapshot: false });
+        const restore = useAmbientCollation('da-DK');
+        try {
+          const summary = await h.run();
+          expect(summary.failedPhases).toBeGreaterThan(0);
+          expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 0, missingCount: 1 });
+        } finally {
+          restore();
+        }
+        expect(h.replaceCalls()).toBe(0);
+        expect(await store.countQuads(served.assertionGraph)).toBe(0);
+      });
     });
 
     it('recovers equivalent originator and storage-ACK heads and stores one current pointer', async () => {

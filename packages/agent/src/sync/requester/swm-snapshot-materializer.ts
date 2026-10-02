@@ -18,7 +18,7 @@ import {
   swmKaWriteLockKey,
   tryReplaceGraphWithDurableRootCompanionAtomically,
   withKeyedLocks,
-  workspacePublicQuadsDigest,
+  workspacePublicQuadsDigestMatches,
   type DurableRootAtomicCompanion,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
@@ -370,13 +370,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     }
     if (snapshotContent.type !== 'bindings') return false;
     if (snapshotContent.bindings.length !== descriptor.publicQuadsCount) return false;
-    const digest = workspacePublicQuadsDigest(snapshotContent.bindings.map((row) => ({
+    return workspacePublicQuadsDigestMatches(snapshotContent.bindings.map((row) => ({
       subject: row['s'] ?? '',
       predicate: row['p'] ?? '',
       object: row['o'] ?? '',
       graph: '',
-    })));
-    return digest === descriptor.publicQuadsDigest;
+    })), descriptor.publicQuadsDigest);
   };
 
   /**
@@ -689,7 +688,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       // Fail closed if an adapter violates that contract.
       if (contentResult.type !== 'quads') return false;
       const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
-      const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+      const matches = workspacePublicQuadsDigestMatches(stored, descriptor.publicQuadsDigest);
       if (matches && witnessUsable) {
         // Written HERE — from the branch that just computed the digest over
         // this node's own store content and matched it — and nowhere else.
@@ -730,7 +729,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       );
       if (contentResult.type !== 'quads') return null;
       const neutral = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
-      if (workspacePublicQuadsDigest(neutral) !== descriptor.publicQuadsDigest) return null;
+      if (!workspacePublicQuadsDigestMatches(neutral, descriptor.publicQuadsDigest)) return null;
       return neutral.map((quad) => ({ ...quad, graph: descriptor.assertionGraph }));
     },
 

@@ -28,6 +28,7 @@ import {
 } from '../shared-memory-completion.js';
 import {
   workspacePublicQuadsDigest,
+  workspacePublicQuadsDigestMatches,
   withSnapshotScope,
   snapshotOperation,
   type WorkspaceSnapshotScope,
@@ -1979,8 +1980,13 @@ export async function syncPublicSnapshotsInScope(params: {
         hasIndependentShortfall = true;
         continue;
       }
-      const actualDigest = workspacePublicQuadsDigest(snapshotQuads);
-      if (actualDigest !== snapshot.digest || snapshotQuads.length !== snapshot.count) {
+      // The advertised digest is the sender's own form: a legacy own-locale
+      // digest or a code-unit digest. Accept whichever this build recognises.
+      if (
+        snapshotQuads.length !== snapshot.count
+        || !workspacePublicQuadsDigestMatches(snapshotQuads, snapshot.digest)
+      ) {
+        const actualDigest = workspacePublicQuadsDigest(snapshotQuads);
         throw new Error(
           `Shared-memory public snapshot ${snapshot.ref} failed digest/count validation ` +
           `(expected ${snapshot.digest}/${snapshot.count}, got ${actualDigest}/${snapshotQuads.length})`,
@@ -2238,7 +2244,7 @@ async function hasValidSnapshot(
     return false;
   }
   if (!quads) return false;
-  return quads.length === snapshot.count && workspacePublicQuadsDigest(quads) === snapshot.digest;
+  return quads.length === snapshot.count && workspacePublicQuadsDigestMatches(quads, snapshot.digest);
 }
 
 function parseIntegerLiteral(value: string | undefined): number | undefined {
