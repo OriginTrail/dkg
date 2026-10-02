@@ -94,7 +94,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 4aca346d4818eb63e661c6028a4e2c1cbea2bd92
+          ref: dfb3460719c13d592e2bb4d7d3c29fe55567fbe3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -1580,7 +1580,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 4aca346d4818eb63e661c6028a4e2c1cbea2bd92
+          ref: dfb3460719c13d592e2bb4d7d3c29fe55567fbe3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |

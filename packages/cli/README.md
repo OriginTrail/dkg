@@ -525,8 +525,10 @@ records include operation, iteration, error message, root entity, marker, contex
 graph, and a reproduction command. Warmups are excluded from summaries.
 
 The repository-level ESBench workflow for this same benchmark feature is
-documented in `BENCHMARKING.md`. It uses a deterministic layered DKG client, not
-a live daemon, so the generated reports avoid auth tokens and local node paths.
+documented in the repository's
+[`bench/README.md`](../../bench/README.md).
+It uses a deterministic layered DKG client, not a live daemon, so the generated
+reports avoid auth tokens and local node paths.
 `pnpm bench:html` writes the combined ESBench report plus one focused HTML page
 for each benchmark flow and payload size. The full default matrix includes the
 `200mb` scene; set `DKG_ESBENCH_PAYLOAD_SIZES=10kb` or another comma-separated

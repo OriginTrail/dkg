@@ -1,3 +1,4 @@
+import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -722,7 +723,7 @@ export class DKGAgentBase {
   protected readonly lastHostCatchupSeqno: Map<string, Map<string, number>> = new Map();
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
-  protected readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
@@ -1065,6 +1066,8 @@ export class DKGAgentBase {
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   /** How long a clean legacy exact-filter miss suppresses one peer. */
   static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
+  /** Transport affinity is short-lived and never establishes asset coverage. */
+  static readonly VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS = 2 * 60_000;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
@@ -1351,6 +1354,8 @@ export class DKGAgentBase {
     connectionKey: string;
     expiresAt: number;
   }>();
+  /** Owns process-local Core ordering and reusable-holder transitions. */
+  protected vmReconcilePublicCoreTransportPreferencePolicy!: VmRecoveryCoreTransportPreferencePolicy;
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
   /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
