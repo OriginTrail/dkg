@@ -434,8 +434,8 @@ describe('local agent integration registry helpers', () => {
       { ok: false as const, error: 'bridge still starting' },
     ];
     const probeHealth = async () => probeResults[probeIdx++];
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
+    const persistCalls: unknown[][] = [];
+    const persistIntegration = async (...args: unknown[]) => { persistCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -450,7 +450,7 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },

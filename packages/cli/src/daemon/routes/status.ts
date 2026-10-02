@@ -87,7 +87,6 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
-  saveConfig,
   loadNetworkConfig,
   resolveChainConfig,
   dkgDir,
@@ -344,6 +343,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import { persistLocalAgentIntegration } from '../local-agent-config-store.js';
 
 import { actorFromRequestContext, type RequestContext } from './context.js';
 
@@ -1071,7 +1071,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
           ...(isPlainRecord(parsed.capabilities) ? parsed.capabilities : {}),
         },
       });
-      await saveConfig(config);
+      await persistLocalAgentIntegration(config, adapterId);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid JSON body' });

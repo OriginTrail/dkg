@@ -21,13 +21,14 @@
  *   - Validation failure throws so the CLI dispatch wrapper exits.
  *   - Unknown backend value throws with the allow-list error.
  *
- * No filesystem I/O — `loadConfig` / `saveConfig` are injected as
- * mocks. Real config wiring is exercised in the higher-level adapter-
- * setup integration tests.
+ * No filesystem I/O — `updateConfigFile` is injected as a mock. Real
+ * config wiring is exercised in the higher-level adapter-setup
+ * integration tests.
  */
 import { describe, it, expect } from 'vitest';
 import { applyStoreFlagsToConfig, promptStoreBackend } from '../src/store-wizard.js';
-import type { DkgConfig } from '../src/config.js';
+import type { DkgConfig, DkgConfigEdit } from '../src/config.js';
+import { applyConfigEdits } from '../src/home-config-file.js';
 
 function mockFetch(handler: (input: any, init?: any) => Response | Promise<Response>) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -591,10 +592,14 @@ function newMockConfig(initial: DkgConfig): MockConfigStore {
 
 function mockConfigIO(store: MockConfigStore) {
   return {
-    loadConfig: async () => ({ ...store.current }),
-    saveConfig: async (next: DkgConfig) => {
-      store.current = { ...next };
-      store.saved.push({ ...next });
+    // Mirrors updateConfigFile: edit the file's object, and write only when
+    // the edits changed it.
+    updateConfigFile: async (edits: readonly DkgConfigEdit[]) => {
+      const { after, changed } = applyConfigEdits(store.current as DkgConfig & Record<string, unknown>, edits);
+      if (!changed) return { path: 'config.json', changed: false };
+      store.current = after as unknown as DkgConfig;
+      store.saved.push(structuredClone(store.current));
+      return { path: 'config.json', changed: true };
     },
   };
 }
@@ -629,6 +634,7 @@ describe('applyStoreFlagsToConfig', () => {
       backend: 'blazegraph',
       options: { url: 'http://blaze.test/sparql', managedByDkg: false },
     });
+    expect(store.saved[0]).toMatchObject({ name: 'dkg-node', apiPort: 9200, listenPort: 4001 });
   });
 
   it('throws when --store blazegraph is passed without --store-url (no half-written config)', async () => {
@@ -687,12 +693,13 @@ describe('applyStoreFlagsToConfig', () => {
     } as DkgConfig);
     const io = mockConfigIO(store);
     await applyStoreFlagsToConfig({ ...io, storeFlag: 'oxigraph-server', log: () => {} });
-    expect(store.saved).toHaveLength(1);
-    // port/location overrides (read by planManagedOxigraph at boot) survive.
-    expect(store.saved[0].store).toEqual({
+    // port/location overrides (read by planManagedOxigraph at boot) survive,
+    // and the unchanged block is not rewritten.
+    expect(store.current.store).toEqual({
       backend: 'oxigraph-server',
       options: { port: 9999, location: '/data/oxi' },
     });
+    expect(store.saved).toEqual([]);
   });
 
   it('persists oxigraph-server with no URL required (daemon-managed)', async () => {

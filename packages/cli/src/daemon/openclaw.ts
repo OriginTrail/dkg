@@ -28,7 +28,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   dkgDir,
-  saveConfig,
   loadConfig,
   type DkgConfig,
   type LocalAgentIntegrationConfig,
@@ -470,7 +469,8 @@ export type OpenClawUiAttachDeps = {
     bridgeAuthToken: string | undefined,
     opts?: { ignoreBridgeCache?: boolean; timeoutMs?: number },
   ) => Promise<OpenClawChannelHealthReport>;
-  saveConfig?: (config: DkgConfig) => Promise<void>;
+  /** Writes the attached integration's record back to the config file. */
+  persistIntegration?: (config: DkgConfig, id: string) => Promise<void>;
   onAttachScheduled?: (id: string, job: Promise<void>) => void;
   verifyMemorySlot?: () => boolean;
 };

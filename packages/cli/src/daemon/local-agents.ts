@@ -17,7 +17,6 @@ import { createRequire } from 'node:module';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   loadConfig,
-  saveConfig,
   dkgDir,
   type DkgConfig,
   type LocalAgentIntegrationCapabilities,
@@ -359,8 +358,8 @@ export function getLocalAgentIntegration(config: DkgConfig, id: string): LocalAg
   return listLocalAgentIntegrations(config).find((integration) => integration.id === normalizedId) ?? null;
 }
 
-export function pruneLegacyOpenClawConfig(config: DkgConfig): void {
-  const mutable = config as DkgConfig & {
+export function pruneLegacyOpenClawConfig(config: Partial<DkgConfig>): void {
+  const mutable = config as Partial<DkgConfig> & {
     openclawAdapter?: boolean;
     openclawChannel?: { bridgeUrl?: string; gatewayUrl?: string };
   };
@@ -653,7 +652,7 @@ export async function connectLocalAgentIntegrationFromUi(
   if (requested.id === 'hermes') {
     const probeHermesHealth = deps.probeHermesHealth ?? probeHermesChannelHealth;
     const runSetup = deps.runHermesSetup ?? runHermesUiSetup;
-    const saveConfigState = deps.saveConfig;
+    const persistIntegration = deps.persistIntegration;
 
     const health = await probeHermesHealth(config, bridgeAuthToken, { timeoutMs: 3_000 });
     if (health.ok && hadStoredTransportBeforeConnect) {
@@ -681,8 +680,8 @@ export async function connectLocalAgentIntegrationFromUi(
         return null;
       }
       const integration = updateLocalAgentIntegration(config, requested.id, patch);
-      if (saveConfigState) {
-        await saveConfigState(config);
+      if (persistIntegration) {
+        await persistIntegration(config, requested.id);
       }
       return integration;
     };
@@ -781,7 +780,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const runSetup = deps.runSetup ?? runOpenClawUiSetup;
   const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
   const verifyMemorySlot = deps.verifyMemorySlot ?? isOpenClawMemorySlotElected;
-  const saveConfigState = deps.saveConfig;
+  const persistIntegration = deps.persistIntegration;
 
   let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
   if (health.ok && hadStoredTransportBeforeConnect) {
@@ -805,8 +804,8 @@ export async function connectLocalAgentIntegrationFromUi(
       return null;
     }
     const integration = updateLocalAgentIntegration(config, requested.id, patch);
-    if (saveConfigState) {
-      await saveConfigState(config);
+    if (persistIntegration) {
+      await persistIntegration(config, requested.id);
     }
     return integration;
   };

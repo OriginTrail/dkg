@@ -121,7 +121,6 @@ import {
 import {
   loadConfig,
   assertAuthorityIndexConfigPlacement,
-  saveConfig,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
   resolveChainConfig,
@@ -199,10 +198,12 @@ export {
 } from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
+import { createTelemetrySettings } from './telemetry-runtime.js';
 import {
-  createTelemetrySettings,
-  createTelemetryRuntime,
-} from './telemetry-runtime.js';
+  createDaemonTelemetryRuntime,
+  createLlmSettings,
+  createSharedMemoryTtlSetting,
+} from './runtime-settings.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
@@ -1587,13 +1588,13 @@ async function runDaemonInnerWithStartupOwnership(
 
   // Runtime store view for the managed Oxigraph server. We deliberately do
   // NOT mutate `config.store` to the loopback `sparql-http` shape: `config`
-  // is the persisted/operator-facing object, and every later
-  // `saveConfig(config)` would otherwise write the ephemeral loopback
-  // endpoints to disk (breaking the next boot, which would no longer spawn
-  // the managed server) and `/api/status` would report `sparql-http` instead
-  // of the configured `oxigraph-server`. Instead the boot steps that talk to
-  // the live store (validation, reachability, identity, chain-reset wipe, the
-  // agent) read these runtime values, while `config` keeps `oxigraph-server`.
+  // is the persisted/operator-facing object. The ephemeral loopback
+  // endpoints must never reach the config file (the next boot would no
+  // longer spawn the managed server), and `/api/status` would report
+  // `sparql-http` instead of the configured `oxigraph-server`. Instead the
+  // boot steps that talk to the live store (validation, reachability,
+  // identity, chain-reset wipe, the agent) read these runtime values, while
+  // `config` keeps `oxigraph-server`.
   // For the directory-backed blob/snapshot stores we use the managed
   // defaults (the rewritten sparql-http backend has no `options.path` to
   // infer a directory from, unlike the local Oxigraph backend).
@@ -3036,9 +3037,8 @@ async function runDaemonInnerWithStartupOwnership(
     log,
   });
 
-  const telemetryRuntime = createTelemetryRuntime({
+  const telemetryRuntime = createDaemonTelemetryRuntime({
     config,
-    persist: saveConfig,
     signals: telemetrySignals,
     onBootStartFailure: (error) => {
       // Boot remains best-effort per signal: a failed log shipper must not
@@ -3384,23 +3384,8 @@ async function runDaemonInnerWithStartupOwnership(
   if (config.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');
 
-  const llmSettings = {
-    getLlm: () => config.llm,
-    setLlm: async (
-      llm: { apiKey: string; model?: string; baseURL?: string } | null,
-    ) => {
-      if (llm) {
-        config.llm = llm;
-        memoryManager.updateConfig(llm);
-        log("LLM config updated via settings");
-      } else {
-        delete config.llm;
-        memoryManager.updateConfig({ apiKey: '' });
-        log('LLM config cleared via settings');
-      }
-      await saveConfig(config);
-    },
-  };
+  const llmSettings = createLlmSettings({ config, memoryManager, log });
+  const sharedMemoryTtl = createSharedMemoryTtlSetting({ config, agent });
 
   const telemetrySettings = createTelemetrySettings(telemetryRuntime);
 
@@ -3727,10 +3712,7 @@ async function runDaemonInnerWithStartupOwnership(
             });
           }
           const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
-          config.sharedMemoryTtlMs = ttlMs;
-          config.workspaceTtlMs = ttlMs;
-          agent.setSharedMemoryTtlMs(ttlMs);
-          await saveConfig(config);
+          await sharedMemoryTtl.set(ttlMs);
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;

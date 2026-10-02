@@ -17,7 +17,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, saveConfig, configExists, configPath,
+  loadConfig, configExists, configPath,
   readApiPort, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,

@@ -1,8 +1,7 @@
 import { ethers } from 'ethers';
-import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-
-const LOCK_STALE_MS = 5 * 60 * 1000;
+import { updateFileUnderLease, type LeasedFileChange } from './file-lock.js';
 
 export interface PublisherWalletsConfig {
   wallets: Array<{
@@ -30,7 +29,7 @@ export async function loadPublisherWallets(dataDir: string): Promise<PublisherWa
 }
 
 export async function addPublisherWallet(dataDir: string, privateKey: string): Promise<PublisherWalletsConfig> {
-  return withPublisherWalletLock(dataDir, async () => {
+  return updatePublisherWallets(dataDir, async () => {
     const normalizedKey = privateKey.trim();
     const wallet = new ethers.Wallet(normalizedKey);
     const existing = await loadPublisherWallets(dataDir);
@@ -38,36 +37,35 @@ export async function addPublisherWallet(dataDir: string, privateKey: string): P
       throw new Error(`Publisher wallet already exists: ${wallet.address}`);
     }
 
-    const config: PublisherWalletsConfig = {
+    return walletsChange(dataDir, {
       wallets: [...existing.wallets, { address: wallet.address, privateKey: wallet.privateKey }],
-    };
-    await savePublisherWallets(dataDir, config);
-    return config;
+    });
   });
 }
 
 export async function removePublisherWallet(dataDir: string, address: string): Promise<PublisherWalletsConfig> {
-  return withPublisherWalletLock(dataDir, async () => {
+  return updatePublisherWallets(dataDir, async () => {
     const normalized = address.trim().toLowerCase();
     const existing = await loadPublisherWallets(dataDir);
     const next = existing.wallets.filter((entry) => entry.address.toLowerCase() !== normalized);
     if (next.length === existing.wallets.length) {
       throw new Error(`Publisher wallet not found: ${address}`);
     }
-    const config: PublisherWalletsConfig = { wallets: next };
-    await savePublisherWallets(dataDir, config);
-    return config;
+    return walletsChange(dataDir, { wallets: next });
   });
 }
 
-async function savePublisherWallets(dataDir: string, config: PublisherWalletsConfig): Promise<void> {
-  await mkdir(dataDir, { recursive: true });
-  const filePath = publisherWalletsPath(dataDir);
-  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tempPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-  await chmod(tempPath, 0o600);
-  await rename(tempPath, filePath);
-  await chmod(filePath, 0o600);
+/**
+ * The wallets file's new content. It holds private keys, so it is written
+ * owner-only however it was found.
+ */
+function walletsChange(dataDir: string, config: PublisherWalletsConfig): LeasedFileChange<PublisherWalletsConfig> {
+  return {
+    result: config,
+    path: publisherWalletsPath(dataDir),
+    content: `${JSON.stringify(config, null, 2)}\n`,
+    mode: 0o600,
+  };
 }
 
 function validatePublisherWallets(config: PublisherWalletsConfig): PublisherWalletsConfig {
@@ -81,78 +79,16 @@ function validatePublisherWallets(config: PublisherWalletsConfig): PublisherWall
   return { wallets };
 }
 
-async function withPublisherWalletLock<T>(dataDir: string, fn: () => Promise<T>): Promise<T> {
+/**
+ * Read and change the wallets file under its lease. The change is published
+ * only while the lease is held, so a writer that was taken over after
+ * stalling past its lease cannot overwrite its successor's change.
+ */
+async function updatePublisherWallets(
+  dataDir: string,
+  prepare: () => Promise<LeasedFileChange<PublisherWalletsConfig>>,
+): Promise<PublisherWalletsConfig> {
   await mkdir(dataDir, { recursive: true });
-  const lockPath = `${publisherWalletsPath(dataDir)}.lock`;
-  const handle = await acquireLock(lockPath);
-  try {
-    return await fn();
-  } finally {
-    await handle.close().catch(() => {});
-    await unlink(lockPath).catch(() => {});
-  }
-}
-
-async function acquireLock(lockPath: string) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    try {
-      const handle = await open(lockPath, 'wx', 0o600);
-      await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
-      return handle;
-    } catch (error: any) {
-      if (error?.code !== 'EEXIST') {
-        throw error;
-      }
-      if (await reapStaleLock(lockPath)) {
-        continue;
-      }
-      await sleep(25);
-    }
-  }
-  throw new Error(`Timed out waiting for publisher wallet lock: ${lockPath}`);
-}
-
-async function reapStaleLock(lockPath: string): Promise<boolean> {
-  try {
-    const raw = await readFile(lockPath, 'utf-8');
-    if (!raw.trim()) {
-      // Empty file — lock was just created but metadata not yet written.
-      // Check file age via mtime; treat as live if recent.
-      const st = await stat(lockPath).catch(() => null);
-      if (st && Date.now() - st.mtimeMs < 5000) return false;
-      await unlink(lockPath).catch(() => {});
-      return true;
-    }
-    const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number };
-    const createdAt = Number(parsed.createdAt);
-    const pid = Number(parsed.pid);
-    const pidDead = Number.isFinite(pid) ? !isProcessRunning(pid) : true;
-    const aged = Number.isFinite(createdAt) ? Date.now() - createdAt > LOCK_STALE_MS : true;
-    if (pidDead || (aged && !Number.isFinite(pid))) {
-      await unlink(lockPath).catch(() => {});
-      return true;
-    }
-    return false;
-  } catch {
-    // Parse failed — possibly partial write. Check file age before reaping.
-    const st = await stat(lockPath).catch(() => null);
-    if (st && Date.now() - st.mtimeMs < 5000) return false;
-    await unlink(lockPath).catch(() => {});
-    return true;
-  }
-}
-
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error: any) {
-    if (error?.code === 'EPERM') return true;
-    if (error?.code === 'ESRCH') return false;
-    return true;
-  }
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+  const { result } = await updateFileUnderLease(`${publisherWalletsPath(dataDir)}.lock`, prepare, { label: 'publisher wallet' });
+  return result;
 }

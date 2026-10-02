@@ -23,7 +23,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, saveConfig, configExists, configPath,
+  loadConfig, updateConfigFile, configEdit, configValues, configExists,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, resolveKnownNetworkConfigName, resolveNetworkConfigName, validateNetworkConfigReadiness,
@@ -517,8 +517,10 @@ program
 
     rl.close();
 
-    const config = {
-      ...existing,
+    // The wizard writes exactly these keys, and auth.enabled. Every other key
+    // in the file, even one the daemon wrote while the prompts were open, is
+    // left as it is.
+    const answers = {
       name: name || 'dkg-node',
       // Persist the selected network explicitly (see resolveSetupNetworkName)
       // so the node never silently follows a change to the project.json
@@ -537,14 +539,17 @@ program
       // On a network switch, never fall back to the stale existing chain
       // block — let an empty chainSection inherit the new network's chain.
       chain: chainSection,
-      auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
       // Persist the chosen backend. `storeBlock === null` from the
       // wizard means "use the local default" — we explicitly clear any
       // existing block so re-running `dkg init` to switch from
       // blazegraph back to oxigraph actually applies.
       store: storeBlock ?? undefined,
     };
-    await saveConfig(config);
+    const { path: savedPath } = await updateConfigFile([
+      ...configValues(answers),
+      configEdit(['auth', 'enabled'], () => enableAuth),
+    ]);
+    const config = { ...existing, ...answers };
 
     // Generate wallets eagerly so they're available for faucet funding
     let walletAddresses: string[] = [];
@@ -557,7 +562,7 @@ program
       console.warn('Wallets will be auto-generated on first "dkg start".');
     }
 
-    console.log(`\nConfig saved to ${configPath()}`);
+    console.log(`\nConfig saved to ${savedPath}`);
     console.log(`  name:       ${config.name}`);
     console.log(`  role:       ${config.nodeRole}`);
     const relayDisplay = config.relay
