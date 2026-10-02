@@ -16,6 +16,7 @@ import type {
   LiftPublishSnapshotRequest,
 } from './lift-job.js';
 import type {
+  LiftJobRetryBlocker,
   LiftJobRetryProjection,
 } from './async-lift-retry-disposition.js';
 import type { DKGPublisher } from './dkg-publisher.js';
@@ -56,6 +57,11 @@ export class LiftJobPendingChainProofError extends Error {
     message: string,
     readonly existingJobId: string,
     readonly retryable: boolean,
+    /**
+     * GH#2942 - why THIS job is held, in the same vocabulary `retryState.blocker` uses. Optional
+     * and additive: a thrower that has no blocker to give (or an older one) keeps the generic text.
+     */
+    readonly blocker?: LiftJobRetryBlocker,
   ) {
     super(message);
     this.name = 'LiftJobPendingChainProofError';
@@ -97,6 +103,24 @@ export type ActiveLiftJobClaim = LiftJobClaimed & {
 };
 
 /**
+ * GH#2940 — facts the CALLER proved about a failed execution attempt, beyond the error value.
+ *
+ * The thrown error alone cannot say whether a transaction left this node: the pre-send write-ahead
+ * is the only witness, and it lives in the caller's recorder closure. This carries the witness to
+ * the one place that records the failure, so nothing is ever inferred from which record fields
+ * happen to be absent afterwards.
+ */
+export interface ExecutionFailureEvidence {
+  /**
+   * The write-ahead never durably recorded a transaction (`not-reached` or
+   * `rolled-back-pre-send`), so no PUBLISH transaction was signed-and-sent (a TRAC approval or a
+   * context-graph registration may have preceded it; neither is a publish). Absent or false means a
+   * publish transaction may be on the wire, and the failure keeps its chain-proof classification.
+   */
+  readonly neverDispatched?: boolean;
+}
+
+/**
  * The mutation authority for one acquired claim.
  *
  * Runtime workers retain this session rather than a bare job id. Every mutation is fenced by
@@ -110,7 +134,11 @@ export interface ActiveLiftJobClaimSession {
     publishResult: PublishResult,
     options?: { publicByteSize?: number },
   ): Promise<LiftJob>;
-  recordExecutionFailure(failedFromState: LiftJobState, error: unknown): Promise<LiftJob>;
+  recordExecutionFailure(
+    failedFromState: LiftJobState,
+    error: unknown,
+    evidence?: ExecutionFailureEvidence,
+  ): Promise<LiftJob>;
 }
 
 /** Explicit by-id compatibility surface for control-plane callers, never runtime workers. */
@@ -208,6 +236,12 @@ export interface AsyncLiftPublisher {
    * it. Same concurrency contract as {@link recover}.
    */
   reconcileTransactions?(): Promise<number>;
+  /**
+   * The latest re-check of this HELD job that did not settle it, when this process holds one for this
+   * exact incarnation (GH#2945). In memory only: absent before the first re-check and after a restart,
+   * and only the publisher that runs the chain-proof dispatcher has it. Older implementations can omit it.
+   */
+  lastChainProofCheck?(job: PersistedLiftJob): AsyncLiftLastChainCheck | undefined;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
   /**
@@ -613,7 +647,42 @@ export type AsyncLiftChainProofResolution =
    */
   | { status: 'not-found' }
   /** Publisher-only: nothing was established. Never absence, never proof. */
-  | { status: 'inconclusive' };
+  | { status: 'inconclusive'; reason?: AsyncLiftChainProofInconclusiveReason };
+
+/**
+ * Why a lookup established nothing, when the resolver KNOWS (GH#2945). Closed and optional: a resolver
+ * that cannot say omits it, and the publisher copies only these exact literals. Absent means "not
+ * classified" - never "the chain RPC was fine".
+ *  - `rpc-unavailable`: the chain RPC could not answer (every endpoint failed, a bounded request timed out,
+ *    or the local request governor was full).
+ *  - `absence-unproven`: the chain has no record of the transaction, but the proof that would let this node
+ *    release the job is not established (absence is never proof for an UPDATE; for a CREATE the signed nonce
+ *    is not provably spent, the pinned identity is minted or unreadable, or the snapshot could not be read).
+ */
+export type AsyncLiftChainProofInconclusiveReason = 'rpc-unavailable' | 'absence-unproven';
+
+/**
+ * What the most recent re-check of a held job found, as the publisher saw it (GH#2945): the chain's
+ * verdict status, or the resolver's reason when an `inconclusive` verdict carried one; `deadline` when
+ * the pass's time budget ended before an answer; `error` when the re-check threw (the lookup, the claim
+ * transaction or applying its answer). Codes only - provider text can carry RPC URLs or keys.
+ */
+export type AsyncLiftChainCheckOutcome =
+  | AsyncLiftChainProofResolution['status']
+  | AsyncLiftChainProofInconclusiveReason
+  | 'deadline'
+  | 'error';
+
+/** The latest NON-SETTLING re-check of one held job incarnation, in this process's memory only. */
+export interface AsyncLiftLastChainCheck {
+  readonly outcome: AsyncLiftChainCheckOutcome;
+  /**
+   * When this node recorded it - when the re-check finished, after its answer was applied or declined
+   * (the publisher's clock, epoch ms): the age of the observation. Not a liveness claim: a paused
+   * dispatcher, a pass that did not reach this job and the idle cadence all leave an older one in place.
+   */
+  readonly at: number;
+}
 
 /**
  * GH#2270 PR-3 — everything a chain-proof lookup needs, and nothing else.

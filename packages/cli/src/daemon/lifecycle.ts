@@ -1833,12 +1833,6 @@ async function runDaemonInnerWithStartupOwnership(
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
   const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
-  const publicSnapshotStore = createPublicSnapshotStore(
-    dkgDir(),
-    { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
-    snapshotPageIndexStore,
-    log,
-  );
   const chainCursorScope = chainBase?.type === 'mock'
     ? (chainBase.chainId ?? 'mock:31337')
     : chainBase?.hubAddress
@@ -2006,7 +2000,10 @@ async function runDaemonInnerWithStartupOwnership(
     storeConfig: agentStoreConfig,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
-    publicSnapshotStore,
+    publicSnapshotStoreFactory: store => createPublicSnapshotStore(
+      dkgDir(), { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
+      { pageIndexStore: snapshotPageIndexStore, log, store },
+    ),
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     syncReconcilerEnabled: config.syncReconcilerEnabled,
     vmReconcilerEnabled: config.vmReconcilerEnabled,
@@ -2279,6 +2276,7 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const agent = await DKGAgent.create(agentConfig);
+  const publicSnapshotStore = agent.publicSnapshotStore;
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   const publisherStartupController = new AbortController();

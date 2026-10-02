@@ -28,6 +28,9 @@ import {
 } from '../shared-memory-completion.js';
 import {
   workspacePublicQuadsDigest,
+  withSnapshotScope,
+  snapshotOperation,
+  type WorkspaceSnapshotScope,
   type DurableRootAtomicCompanionResolver,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
@@ -442,7 +445,7 @@ function storedVersionOutranksDescriptor(stored: string, descriptorVersion: stri
   }
 }
 
-export async function runSharedMemorySync(context: SharedMemorySyncContext): Promise<SharedMemorySyncSummary> {
+export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(async context => {
   const {
     ctx,
     remotePeerId,
@@ -1422,7 +1425,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const snapshotStartedAt = Date.now();
       recoveryBoundary.assertCurrent();
-      const snapshotSync = await syncPublicSnapshotsForMeta({
+      const snapshotSync = await syncPublicSnapshotsInScope({
         ctx,
         remotePeerId,
         contextGraphId: pid,
@@ -1718,7 +1721,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   }
 
   return summary;
-}
+});
 
 export interface PublicSnapshotMetadata {
   ref: string;
@@ -1730,14 +1733,23 @@ export interface PublicSnapshotMetadata {
   ualOrdinal?: bigint;
 }
 
-export async function syncPublicSnapshotsForMeta(params: {
+/** Compatibility boundary for callers that only fetch/verify snapshots. Metadata
+ * writers must use the enclosing operation scope and syncPublicSnapshotsInScope. */
+export function syncPublicSnapshotsForMeta(params: Omit<Parameters<typeof syncPublicSnapshotsInScope>[0], 'publicSnapshotStore' | keyof PublicSnapshotWalkSource> & {
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+} & PublicSnapshotWalkSource): ReturnType<typeof syncPublicSnapshotsInScope> {
+  return withSnapshotScope(params.publicSnapshotStore, scope =>
+    syncPublicSnapshotsInScope({ ...params, publicSnapshotStore: scope }));
+}
+
+export async function syncPublicSnapshotsInScope(params: {
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
   deadline: number;
   /** Shared operation admission; legacy callers use their existing deadline. */
   workAdmission?: SyncWorkAdmission;
-  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  publicSnapshotStore: WorkspaceSnapshotScope | undefined;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
@@ -1863,10 +1875,13 @@ export async function syncPublicSnapshotsForMeta(params: {
     // The owner decides which manifest-bound evidence this pass can reuse.
     // Avoid repeating blob and assertion validation when that owner has
     // already established it, leaving time for unresolved refs to advance.
-    if (reuse) {
+    if (reuse && (await params.publicSnapshotStore.retainExisting(snapshot.ref))) {
+      executionBoundary.assertCurrent();
       readySnapshots += 1;
       continue;
     }
+    // Collection may have won before the reuse lease. Missing bytes follow the
+    // normal validation/fetch path; never commit metadata pointing at that gap.
     // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
     // for this one. Both halves matter:
     //

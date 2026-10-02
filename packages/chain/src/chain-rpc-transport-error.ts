@@ -120,6 +120,36 @@ export function isRpcEndpointsExhaustedError(
 }
 
 /**
+ * GH#2942 — a TRANSIENT transport failure that names no transaction.
+ *
+ * The three codes are the ones a lookup, estimate or admission wait raises while a transaction is
+ * still being PREPARED: every endpoint failed over (`RPC_ENDPOINTS_EXHAUSTED`), the local request
+ * governor had no capacity (`RPC_REQUEST_GOVERNOR_QUEUE_FULL`), or a bounded request ran out of time
+ * (`RPC_TIMEOUT`). Each of them is also what a failure AFTER a send looks like — a broadcast that
+ * exhausted every endpoint, a receipt wait that timed out — and the field that tells the two apart
+ * is `txHash`: the broadcast and receipt emitters always stamp the hash they were handling, so an
+ * error that carries one is about a transaction and never qualifies. `RPC_RECEIPT_LOOKUP_FAILED` is
+ * excluded for the same reason (it is only ever raised for a transaction that was sent).
+ *
+ * This is a statement about the CAUSE, not a proof that nothing was sent: an absent `txHash` proves
+ * nothing, which is why the publisher accepts it only together with its own positional proof that
+ * the write-ahead hook never durably recorded a hash. Nothing is unwrapped: a re-wrapped error that
+ * lost its `code` simply does not qualify, and prose never does. Throw-safe, because it runs on the
+ * publisher's failure-recording path: a throwing accessor reads as "no".
+ */
+export function isTransientRpcTransportFailureWithoutTransaction(err: unknown): boolean {
+  try {
+    if (!isChainRpcTransportError(err)) return false;
+    if (err.txHash) return false;
+    return err.code === 'RPC_ENDPOINTS_EXHAUSTED'
+      || err.code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL'
+      || err.code === 'RPC_TIMEOUT';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Shared factory for the chain-RPC TIMEOUT transport error, so the chain-side
  * `withTimeout`, the receipt-wait deadline, and the CLI `cliWithTimeout` all emit
  * the SAME `RPC_TIMEOUT` (never the generic `TIMEOUT`) from ONE place — the
