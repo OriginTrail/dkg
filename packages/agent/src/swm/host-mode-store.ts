@@ -67,6 +67,21 @@
  * against each other; opening a fresh instance after the previous one is idle
  * (a restart) is safe, it re-derives everything from the files.
  *
+ * A load takes only a MISSING file as absent (no `.meta`: defaults; no `.log`:
+ * no frames). Any other read error on either file (EIO, EACCES, EMFILE, ...)
+ * rejects the load, and with it the mutation that needed it: nothing is
+ * cached, nothing is persisted, and the next access reads the files again.
+ * This holds for the cold load and for the re-load after a failed `.meta`
+ * write dropped the cache. Defaults built from a file the store could not
+ * read would be written back over that file, restarting the cursor (recycling
+ * acknowledged seqnos once retention has emptied the log) and clearing the
+ * persisted flags. The unlocked readers (`getLastSeqno`, `isRegistered`,
+ * `stats`, `listHostModeSubscribedCgs`) swallow the rejection and answer that
+ * one call as if the CG were unknown (cursor 0, not registered, not
+ * subscribed). A `.meta` that reads but does not parse is unusable rather than
+ * unreadable: it loads as defaults, and `init()` reaps it together with its
+ * log.
+ *
  * The store is intentionally simple: append-only writes, sequential
  * reads, periodic prune. No indexes, no compaction, no checkpoints.
  * The expected steady-state size is small (a few MB per active CG
@@ -839,15 +854,30 @@ export class SwmHostModeStore {
    * tail, reconcile, best-effort persist the reconciled cursor, install into
    * the cache. The cache is written only on success (and, by construction,
    * before the promise resolves, so a waiter never observes a cache miss).
+   *
+   * Only a missing `.meta` (ENOENT) is "no metadata yet" and yields the
+   * defaults. Any other read error rejects the load: the file may well be
+   * intact, and defaults cached in its place would be written back over it by
+   * the next mutation, which restarts the cursor (at 1 once retention has
+   * emptied the log) and drops the persisted flags. A `.meta` that reads but
+   * does not parse stays what it was before, unusable: defaults here, and
+   * `init()` reaps it together with its log.
    */
   private async initializeMeta(contextGraphId: string, cgKey: string): Promise<CgMetaState> {
     const metaPath = this.metaPath(contextGraphId);
-    let parsed: CgMetaState | undefined;
+    let txt: string | undefined;
     try {
-      const txt = await fs.readFile(metaPath, 'utf-8');
-      parsed = JSON.parse(txt) as CgMetaState;
-    } catch {
-      parsed = undefined;
+      txt = await fs.readFile(metaPath, 'utf-8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    let parsed: CgMetaState | undefined;
+    if (txt !== undefined) {
+      try {
+        parsed = JSON.parse(txt) as CgMetaState;
+      } catch {
+        parsed = undefined;
+      }
     }
     const logSeqno = await this.recoverLastSeqnoFromLog(contextGraphId);
     const state: CgMetaState = {
@@ -872,14 +902,18 @@ export class SwmHostModeStore {
    * this bounded — default 1 MiB unregistered, 64 MiB registered)
    * and walks frame-by-frame. Returns 0 if no log file exists or
    * the file is empty/corrupt at the head.
+   *
+   * "No log file" is ENOENT on the read and nothing else. Any other
+   * read error rejects (and the load with it): answering 0 would let
+   * a cursor that lags the log stand, and the next append would write
+   * a seqno that is already in the log.
    */
   private async recoverLastSeqnoFromLog(contextGraphId: string): Promise<number> {
-    const filePath = this.logPath(contextGraphId);
-    if (!(await fileExists(filePath))) return 0;
     let buf: Buffer;
     try {
-      buf = await fs.readFile(filePath);
-    } catch {
+      buf = await fs.readFile(this.logPath(contextGraphId));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       return 0;
     }
     return scanLogFrames(buf).lastSeqno;
@@ -900,6 +934,8 @@ export class SwmHostModeStore {
       // fsync after the rename, the new file IS what the next access reads;
       // `writeFileDurable` has then recorded it in `pendingDirSync`, and the
       // retry's idempotent early return completes that fsync (see `mutateMeta`).
+      // The re-read rejects when it cannot read the files; only a missing file
+      // loads as absent (see `initializeMeta`).
       if (this.metaCache.get(cgKey) === meta) this.metaCache.delete(cgKey);
       throw err;
     }

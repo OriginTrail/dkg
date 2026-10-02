@@ -800,8 +800,8 @@ describe('SwmHostModeStore durable writes', () => {
       const metaPath = await seedLaggingMeta(cg);
       const store = newStore(dir);
       await store.init();
-      // I/O errors are swallowed by the cold load by design (unchanged). Only an unexpected fault
-      // rejects it, so inject one: the log read yields a non-buffer, which the tail scan cannot parse.
+      // Any fault that rejects the cold load will do here (read errors have their own tests further
+      // down): the log read yields a non-buffer, which the tail scan cannot parse.
       const realReadFile = fsp.readFile.bind(fsp) as (...args: unknown[]) => Promise<unknown>;
       let failLogRead = true;
       vi.spyOn(fsp, 'readFile').mockImplementation((async (p: unknown, ...rest: unknown[]) => {
@@ -914,6 +914,171 @@ describe('SwmHostModeStore durable writes', () => {
       expect((await store.iterate(cg, 0)).map((e) => e.seqno)).toEqual([1, 2, 3]);
       expect(readCalls('.meta')).toBe(1);
       expect(await newStore(dir).getLastSeqno(cg)).toBe(3);
+    });
+  });
+
+  describe('a file the store could not read is not an absent file', () => {
+    /**
+     * Fail the next read of a `.meta` / `.log` file with an errno error, once; every other read is
+     * real. (The real function is the module-level import: `fsp.readFile` may already be a spy.)
+     */
+    function failNextRead(suffix: '.meta' | '.log', code: string): void {
+      const realReadFile = readFile as (...args: unknown[]) => Promise<unknown>;
+      let armed = true;
+      vi.spyOn(fsp, 'readFile').mockImplementation((async (p: unknown, ...rest: unknown[]) => {
+        if (armed && String(p).endsWith(suffix)) {
+          armed = false;
+          throw errnoError(code, `injected ${code} on the ${suffix} read`);
+        }
+        return realReadFile(p, ...rest);
+      }) as never);
+    }
+
+    /**
+     * Frame 2 is in the log, the meta still says 1, and the failed cursor write dropped the cache:
+     * only the log tail knows about seqno 2.
+     */
+    async function cursorBehindLog(cg: string) {
+      const store = newStore(dir);
+      expect(await store.append(cg, new Uint8Array([1]))).toBe(1);
+      vi.spyOn(fsp, 'rename').mockRejectedValueOnce(errnoError('EIO', 'injected cursor rename failure'));
+      await expect(store.append(cg, new Uint8Array([2]))).rejects.toThrow('injected cursor rename failure');
+      const logPath = path.join(dir, `${cgKey(cg)}.log`);
+      expect(parseFrames(await readFile(logPath)).seqnos).toEqual([1, 2]);
+      expect(JSON.parse(await readFile(path.join(dir, `${cgKey(cg)}.meta`), 'utf8')).seqno).toBe(1);
+      return { store, logPath };
+    }
+
+    it.each(['EIO', 'EACCES', 'EMFILE'])('after a prune-to-empty and a failed meta write, %s on the re-read rejects the append instead of restarting the cursor', async (code) => {
+      let nowMs = 1_000_000;
+      const expiring = { perCgByteCap: 1024 * 1024, ttlMs: 100 };
+      const store = newStore(dir, { unregisteredLimits: expiring, registeredLimits: expiring, now: () => nowMs });
+      const cg = `cg/unreadable-meta-${code}`;
+      const metaPath = path.join(dir, `${cgKey(cg)}.meta`);
+      const logPath = path.join(dir, `${cgKey(cg)}.log`);
+      await store.markHostModeSubscribed(cg);
+      for (let i = 1; i <= 5; i += 1) expect(await store.append(cg, new Uint8Array([i]))).toBe(i);
+      nowMs += 10_000;
+      await store.prune(); // every frame expired: the log is unlinked, the meta (cursor 5 and the flag) stays
+      await expect(stat(logPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const metaBefore = await readFile(metaPath, 'utf8');
+      expect(JSON.parse(metaBefore)).toEqual({ seqno: 5, registered: false, contextGraphId: cg, hostModeSubscribed: true });
+
+      // A failed meta write drops the warm cache (the failed-mutation rollback)...
+      vi.spyOn(fsp, 'rename').mockRejectedValueOnce(errnoError('EIO', 'injected rename failure'));
+      await expect(store.markRegistered(cg)).rejects.toThrow('injected rename failure');
+      // ...so the next access has to read the meta again, and that read fails. With no log left to
+      // recover from, taking the failure for "no meta" would hand out seqno 1 a second time.
+      failNextRead('.meta', code);
+      await expect(store.append(cg, new Uint8Array([6]))).rejects.toMatchObject({ code });
+      // Nothing was persisted from the failed load: no frame, and the meta is byte-identical.
+      await expect(stat(logPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(metaPath, 'utf8')).toBe(metaBefore);
+
+      // Reads work again: the same store continues after the acknowledged seqnos and keeps the flag.
+      expect(await store.append(cg, new Uint8Array([6]))).toBe(6);
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toEqual({ seqno: 6, registered: false, contextGraphId: cg, hostModeSubscribed: true });
+      // A requester that had caught up to 5 is served the new frame.
+      expect((await store.iterate(cg, 5)).map((e) => e.seqno)).toEqual([6]);
+      const restarted = newStore(dir);
+      expect(await restarted.listHostModeSubscribedCgs()).toEqual([cg]);
+      expect(await restarted.getLastSeqno(cg)).toBe(6);
+    });
+
+    it('control: a meta that is really missing (ENOENT) on the same route is still "no metadata yet": defaults, and the first append is seqno 1', async () => {
+      const store = newStore(dir);
+      const cg = 'cg/missing-meta';
+      const metaPath = path.join(dir, `${cgKey(cg)}.meta`);
+      // The very first meta write fails: nothing reaches the disk and the cache is dropped, as above.
+      vi.spyOn(fsp, 'rename').mockRejectedValueOnce(errnoError('EIO', 'injected rename failure'));
+      await expect(store.markHostModeSubscribed(cg)).rejects.toThrow('injected rename failure');
+      await expect(stat(metaPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      vi.spyOn(fsp, 'readFile');
+
+      // The re-read finds no file, the one failure that does mean "absent".
+      expect(await store.append(cg, new Uint8Array([1]))).toBe(1);
+      expect(readCalls('.meta')).toBe(1);
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toEqual({ seqno: 1, registered: false, contextGraphId: cg });
+      expect(await newStore(dir).listHostModeSubscribedCgs()).toEqual([]);
+    });
+
+    it('a transient read error is not cached: the next call on the same store reads again and sees the real state', async () => {
+      const cg = 'cg/unreadable-meta-once';
+      const metaPath = path.join(dir, `${cgKey(cg)}.meta`);
+      const first = newStore(dir);
+      await first.markHostModeSubscribed(cg);
+      for (let i = 1; i <= 3; i += 1) await first.append(cg, new Uint8Array([i]));
+      const metaBefore = await readFile(metaPath, 'utf8');
+      const store = newStore(dir); // cold: its first access has to read the meta
+      await store.init();
+      failNextRead('.meta', 'EMFILE');
+
+      // The mutation rejects and leaves the file alone, rather than writing its flag over defaults.
+      await expect(store.markRegistered(cg)).rejects.toMatchObject({ code: 'EMFILE' });
+      expect(await readFile(metaPath, 'utf8')).toBe(metaBefore);
+      expect(readCalls('.meta')).toBe(1);
+
+      // No restart and no new store: the very next call starts a fresh load, which succeeds.
+      await store.markRegistered(cg);
+      expect(readCalls('.meta')).toBe(2);
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toEqual({ seqno: 3, registered: true, contextGraphId: cg, hostModeSubscribed: true });
+      expect(await store.append(cg, new Uint8Array([4]))).toBe(4);
+      // Warm from here on: the load that succeeded is the one that was cached.
+      expect(readCalls('.meta')).toBe(2);
+    });
+
+    it('a reader that hits the error answers "unknown" for that call only: a registered CG is not pruned under the unregistered limits afterwards', async () => {
+      let nowMs = 1_000_000;
+      const options = {
+        unregisteredLimits: { perCgByteCap: 1024 * 1024, ttlMs: 100 },
+        registeredLimits: { perCgByteCap: 1024 * 1024, ttlMs: 1_000_000 },
+        now: () => nowMs,
+      };
+      const cg = 'cg/unreadable-meta-limits';
+      const logPath = path.join(dir, `${cgKey(cg)}.log`);
+      const first = newStore(dir, options);
+      await first.markRegistered(cg);
+      for (let i = 1; i <= 3; i += 1) await first.append(cg, new Uint8Array([i]));
+      nowMs += 10_000; // past the unregistered TTL, far inside the registered one
+      const store = newStore(dir, options);
+      await store.init();
+      failNextRead('.meta', 'EACCES');
+
+      expect(await store.isRegistered(cg)).toBe(false);
+      // The defaults behind that answer were not cached, so the sweep loads the real flag and keeps every frame.
+      expect(await store.prune()).toEqual({ bytesPruned: 0, cgsPruned: 0 });
+      expect(parseFrames(await readFile(logPath)).seqnos).toEqual([1, 2, 3]);
+      expect(await store.isRegistered(cg)).toBe(true);
+    });
+
+    it('the log tail follows the same rule: a failed log read rejects the load instead of letting a lagging cursor stand', async () => {
+      const cg = 'cg/unreadable-log';
+      const { store, logPath } = await cursorBehindLog(cg);
+      const logBefore = await readFile(logPath);
+      failNextRead('.log', 'EIO');
+
+      // Taking the failure for "no log" would keep the cursor at 1 and write seqno 2 a second time.
+      await expect(store.append(cg, new Uint8Array([3]))).rejects.toMatchObject({ code: 'EIO' });
+      expect((await readFile(logPath)).equals(logBefore)).toBe(true);
+
+      expect(await store.append(cg, new Uint8Array([3]))).toBe(3);
+      const log = await readFile(logPath);
+      expect(parseFrames(log)).toMatchObject({ seqnos: [1, 2, 3], validLength: log.length });
+      expect(await newStore(dir).getLastSeqno(cg)).toBe(3);
+    });
+
+    it('the log tail is recovered by the read alone: an existence probe that fails cannot hide the log', async () => {
+      const cg = 'cg/unreadable-log-probe';
+      const { store, logPath } = await cursorBehindLog(cg);
+      const realAccess = fsp.access.bind(fsp) as (...args: unknown[]) => Promise<void>;
+      vi.spyOn(fsp, 'access').mockImplementation((async (p: unknown, ...rest: unknown[]) => {
+        if (String(p).endsWith('.log')) throw errnoError('EIO', 'injected EIO on the .log probe');
+        return realAccess(p, ...rest);
+      }) as never);
+
+      expect(await store.append(cg, new Uint8Array([3]))).toBe(3);
+      const log = await readFile(logPath);
+      expect(parseFrames(log)).toMatchObject({ seqnos: [1, 2, 3], validLength: log.length });
     });
   });
 
