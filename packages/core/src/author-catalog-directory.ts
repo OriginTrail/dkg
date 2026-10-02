@@ -194,37 +194,52 @@ export function assertAuthorCatalogDirectoryNodeScopeBindingV1(
   }
 }
 
-/** Validate once and retain the level-specific entry model for path traversal. */
+/**
+ * Validate once and retain the level-specific entry model for path traversal.
+ *
+ * `entries` is the payload's own entry list under its level-specific type, not
+ * a copy: the verifier reads every entry fact from that one list.
+ */
 function normalizeAuthorCatalogDirectoryPathNode(
   value: unknown,
   scope: AuthorCatalogScopeV1,
 ): NormalizedAuthorCatalogDirectoryPathNode {
-  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(value as SignedControlEnvelopeV1, scope.bucketCount);
-  const envelope = value as SignedAuthorCatalogDirectoryNodeEnvelopeV1;
+  const envelope = value as SignedControlEnvelopeV1;
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(envelope, scope.bucketCount);
   assertAuthorCatalogDirectoryNodeScopeBindingV1(envelope.payload, scope);
   const payload = envelope.payload;
   const level = BigInt(payload.level);
   const firstBucketId = BigInt(payload.firstBucketId);
+  const entries = payload.entries;
   if (level === 0n) {
-    const entries: AuthorCatalogBucketDescriptorV1[] = [];
-    for (let index = 0; index < payload.entries.length; index += 1) {
-      const entry = payload.entries[index];
-      if (!('bucketDigest' in entry)) {
-        fail('catalog-directory-path', `leaf entry ${index} is not a bucket descriptor`);
-      }
-      entries[index] = entry;
-    }
+    assertBucketDescriptorEntries(entries);
     return { kind: 'leaf', envelope, payload, level: 0n, firstBucketId, entries };
   }
-  const entries: AuthorCatalogChildDescriptorV1[] = [];
-  for (let index = 0; index < payload.entries.length; index += 1) {
-    const entry = payload.entries[index];
-    if (!('childDigest' in entry)) {
+  assertChildDescriptorEntries(entries);
+  return { kind: 'branch', envelope, payload, level, firstBucketId, entries };
+}
+
+// The structure check has already admitted only bucket descriptors at level 0
+// and only child descriptors above it. These two guards carry that fact into
+// the type without a cast, and fail closed if the structure check ever changes.
+function assertBucketDescriptorEntries(
+  entries: readonly AuthorCatalogDirectoryEntryV1[],
+): asserts entries is readonly AuthorCatalogBucketDescriptorV1[] {
+  for (let index = 0; index < entries.length; index += 1) {
+    if (!('bucketDigest' in entries[index])) {
+      fail('catalog-directory-path', `leaf entry ${index} is not a bucket descriptor`);
+    }
+  }
+}
+
+function assertChildDescriptorEntries(
+  entries: readonly AuthorCatalogDirectoryEntryV1[],
+): asserts entries is readonly AuthorCatalogChildDescriptorV1[] {
+  for (let index = 0; index < entries.length; index += 1) {
+    if (!('childDigest' in entries[index])) {
       fail('catalog-directory-path', `branch entry ${index} is not a child descriptor`);
     }
-    entries[index] = entry;
   }
-  return { kind: 'branch', envelope, payload, level, firstBucketId, entries };
 }
 
 export function canonicalizeAuthorCatalogDirectoryNodePayloadBytesV1(
@@ -395,13 +410,15 @@ export function verifyAuthorCatalogDirectoryPathV1(
   if (root.firstBucketId !== 0n) {
     fail('catalog-directory-path', 'root directory node must start at bucket zero');
   }
-  if (sumEntryRows(root.payload.entries) !== BigInt(head.totalRows)) {
+  if (sumEntryRows(root.entries) !== BigInt(head.totalRows)) {
     fail('catalog-directory-path', 'root rowCount sum does not match head totalRows');
   }
 
   for (let pathIndex = 0; pathIndex + 1 < nodes.length; pathIndex += 1) {
     const current = nodes[pathIndex];
     const next = nodes[pathIndex + 1];
+    // The level check above already puts every node before the last above
+    // level 0; this narrows the type and fails closed.
     if (current.kind !== 'branch') {
       fail('catalog-directory-path', 'leaf directory node cannot precede another path node');
     }
@@ -429,12 +446,13 @@ export function verifyAuthorCatalogDirectoryPathV1(
     if (BigInt(nextPayloadBytes.byteLength) !== BigInt(selected.byteLength)) {
       fail('catalog-directory-path', 'selected child byteLength does not match the next path node');
     }
-    if (sumEntryRows(next.payload.entries) !== BigInt(selected.rowCount)) {
+    if (sumEntryRows(next.entries) !== BigInt(selected.rowCount)) {
       fail('catalog-directory-path', 'selected child rowCount does not match the next path node');
     }
   }
 
   const leaf = nodes[nodes.length - 1];
+  // Likewise pinned to level 0 by the level check; narrows the type.
   if (leaf.kind !== 'leaf') {
     fail('catalog-directory-path', 'directory path must terminate at a leaf node');
   }
