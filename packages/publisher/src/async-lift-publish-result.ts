@@ -239,6 +239,22 @@ const BROADCAST_FAILURE_RULES: readonly PublishFailureRule[] = [
   mapQuorumFailure,
 ];
 
+/**
+ * Rules run in order and stop at the first match. A later rule is never
+ * evaluated for an error an earlier one already owns: the quorum rule's
+ * `instanceof` can throw on a hostile value, and this is a failure-recording
+ * path.
+ */
+function firstBroadcastFailureCode(
+  facts: PublishFailureRuleFacts,
+): LiftJobFailureMetadata['code'] | undefined {
+  for (const rule of BROADCAST_FAILURE_RULES) {
+    const code = rule(facts);
+    if (code !== undefined) return code;
+  }
+  return undefined;
+}
+
 export function mapPublishExceptionToLiftJobFailure(
   input: AsyncLiftPublishFailureInput,
 ): LiftJobFailureMetadata {
@@ -249,9 +265,7 @@ export function mapPublishExceptionToLiftJobFailure(
     errorCode,
     lowerMessage,
   };
-  const code = BROADCAST_FAILURE_RULES
-    .map((rule) => rule(facts))
-    .find((candidate): candidate is LiftJobFailureMetadata['code'] => candidate !== undefined)
+  const code = firstBroadcastFailureCode(facts)
     ?? classifyPublishFailureCode(lowerMessage, input.failedFromState);
 
   return createLiftJobFailureMetadata({

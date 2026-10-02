@@ -192,6 +192,27 @@ describe('async lift publish result mapping', () => {
     expect(quorumFailure.code).toBe('quorum_unmet');
   });
 
+  it.each([
+    ['PUBLISH_AUTHOR_NOT_CUSTODIAL', 'authority_forbidden'],
+    ['NO_FUNDED_PUBLISHER_WALLET', 'insufficient_funds'],
+  ] as const)('records the terminal %s failure without evaluating a later rule that would throw', (code, expected) => {
+    // The quorum rule uses `instanceof`, which runs this trap. The rules stop
+    // at the first match, so an error the author or wallet rule already owns
+    // must still be recorded.
+    const hostile = new Proxy({ code }, {
+      getPrototypeOf() { throw new Error('boom'); },
+    });
+
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: hostile,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:hostile-prototype',
+    });
+
+    expect(failure.code).toBe(expected);
+    expect(failure.retryable).toBe(false);
+  });
+
   it('drops submit-timeout metadata from a quorum failure with legacy timeout text', () => {
     const failure = mapPublishExceptionToLiftJobFailure({
       error: new QuorumUnmetError({
