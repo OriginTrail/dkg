@@ -76,4 +76,9 @@ export class SqliteSnapshotPageIndexStore implements SnapshotPageIndexStore {
       record.checksum,
     );
   }
+
+  async delete(snapshotDigest: string): Promise<void> {
+    this.dashboard.db.prepare('DELETE FROM snapshot_page_indexes WHERE snapshot_digest = ?')
+      .run(snapshotDigest);
+  }
 }

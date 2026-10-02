@@ -38,4 +38,5 @@ packages:
   - "devnet/pr1384-preserve-agents-on-transfer"
   - "devnet/pr1370-admin-op-wallet"
   - "devnet/issue-2052-system-records"
+  - "devnet/node-store-persistence"
   - "devnet/swm-host-store-durability"

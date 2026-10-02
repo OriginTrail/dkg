@@ -353,7 +353,7 @@ Use adapters for OpenClaw, ElizaOS, Hermes, or your own Node.js / TypeScript pro
 
 ## Benchmarking
 
-Benchmarking docs live in [`BENCHMARKING.md`](BENCHMARKING.md). The current
+Benchmarking docs live in [`bench/README.md`](bench/README.md). The current
 suite covers DKG publish/get and memory-layer flows:
 
 - get/read retrieval
@@ -543,6 +543,7 @@ This is a pnpm + Turborepo monorepo.
 @origintrail-official/dkg-query              Query execution and retrieval
 @origintrail-official/dkg-agent              Identity, discovery, messaging, wallet keys
 @origintrail-official/dkg-node-ui            Web dashboard, chat memory, SPARQL explorer
+@origintrail-official/dkg-node-store         Daemon protocol persistence (outbox, sync checkpoints, cursors, KA numbers, chain log)
 @origintrail-official/dkg-graph-viz          RDF visualization
 @origintrail-official/dkg-evm-module         Solidity contracts and deployment assets
 @origintrail-official/dkg-network-sim        Multi-node simulation tooling

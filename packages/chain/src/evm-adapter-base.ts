@@ -76,6 +76,7 @@ import {
   withRpcUsageConsumer,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import {
@@ -1944,7 +1945,7 @@ export class EVMChainAdapterBase {
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
-        (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
+        (lastError ? ` (last RPC error: ${hostOnlyRpcText(errorMessage(lastError))})` : ''),
     });
   }
 
@@ -2150,9 +2151,12 @@ export class EVMChainAdapterBase {
         await onBroadcast?.({ txHash: preBroadcastTxHash, nonce });
         ctx.markProgress();
       } catch (hookErr) {
-        throw new Error(
+        // Same message as ever, with the hook's own error kept as `cause` (GH#2940): a caller
+        // that needs to know WHY its durable write-ahead failed must not have to parse text.
+        throw new ChainWriteAheadHookError(
           `chain:writeahead hook failed before ${label} broadcast: ` +
           `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+          hookErr,
         );
       }
       // The nonce-critical lane ends when an endpoint accepts these exact
@@ -3210,7 +3214,7 @@ export class EVMChainAdapterBase {
       // its original shape.
       if (classifyRpcRetryDisposition(err) === 'failover') {
         throw new RpcEndpointsExhaustedError(
-          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
+          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${hostOnlyRpcText(errorMessage(err))}`,
           { cause: err, rpcUrls: this.rpcUrls },
         );
       }
@@ -3980,7 +3984,7 @@ export class EVMChainAdapterBase {
     }
     throw new Error(
       `${operationLabel}: eth_getCode for ${contractLabel} ${address} at block ${block} ` +
-        `failed after 3 attempts: ${errorMessage(lastErr)}`,
+        `failed after 3 attempts: ${hostOnlyRpcText(errorMessage(lastErr))}`,
       { cause: lastErr },
     );
   }

@@ -140,3 +140,34 @@ ${requirements}${memberRequirements}
     }
   }`;
 }
+
+/**
+ * Build the source-qualified member proof as bindings so callers can carry
+ * its delegation deadline across subsequent asynchronous validation.
+ */
+export function buildAuthoritativePrivateMetaMemberProofQuery(
+  contextGraphId: string,
+  memberProof: AuthoritativePrivateMetaMemberProof,
+): string {
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const requirements = AUTHORITATIVE_PRIVATE_META_REQUIREMENTS
+    .map((requirement) => `      ${renderRequirement(contextGraphUri, requirement)}`)
+    .join('\n');
+  const memberRequirements = renderApprovedMemberProofSparql(
+    contextGraphId,
+    contextGraphUri,
+    memberProof,
+  );
+  const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+  return `PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+  SELECT DISTINCT ?approvedAgent ?delegationExpiresAt ?contextGraphOnChainId WHERE {
+    GRAPH <${assertSafeIri(metaGraph)}> {
+${requirements}
+${memberRequirements}
+      OPTIONAL {
+        <${assertSafeIri(contextGraphUri)}> <${assertSafeIri(onChainIdPredicate)}> ?contextGraphOnChainId .
+      }
+    }
+  }`;
+}

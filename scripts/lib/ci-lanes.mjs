@@ -33,7 +33,7 @@ export const TEST_LANE_METADATA = Object.freeze({
   'image-contract': { layer: 'container contract', prerequisites: ['Docker', 'native ARM64 runner'] },
   'shell-fixture': { layer: 'system fixture', prerequisites: SYSTEM_PREREQUISITES },
   observability: { layer: 'system', prerequisites: ['Prometheus', 'Grafana'] },
-  'ccl-python-yaml': { layer: 'Python/YAML conformance', prerequisites: ['Python 3', 'ccl_v0_1/requirements.txt'] },
+  'ccl-python-yaml': { layer: 'Python/YAML conformance', prerequisites: ['Python 3', 'PyYAML'] },
 });
 
 /** Vitest groups per controller lane. Lanes without groups run bespoke jobs
@@ -49,7 +49,7 @@ const LANE_GROUPS = {
   tornado_agent: [{ id: 'agent', packages: ['agent'], shards: AGENT_SHARD_POLICY.descriptors.length, runner: 'agent' }],
   bura_cli: [{ id: 'cli', packages: ['cli'], shards: 4, runner: 'weighted' }],
   bura_query: [{ id: 'query', packages: ['query'], shards: 1 }],
-  kosava_node_ui: [{ id: 'node-ui', packages: ['node-ui'], shards: 1 }],
+  kosava_node_ui: [{ id: 'node-ui', packages: ['node-ui', 'node-store'], shards: 1 }],
   kosava_supporting: [{
     id: 'supporting', shards: 1, concurrency: 3, maxWorkers: 2,
     packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
