@@ -60,18 +60,23 @@ import {
   readContextGraphStorageRangeV1,
 } from './evm-context-graph-storage-enumeration.js';
 
-type ContextGraphRegistryLiveScanMode =
-  | 'explicitFromBlock'
-  | 'listAll'
-  | 'incremental'
-  | 'seedFull'
-  | 'seedFromCursor'
-  | 'seedLiveTail';
+/** Only the cursor-backed modes that stop at a page budget may carry one. */
+type ContextGraphRegistryLiveScanPlan =
+  | { mode: 'explicitFromBlock' | 'listAll' | 'seedFull'; pageBudget?: undefined }
+  | { mode: 'incremental' | 'seedFromCursor' | 'seedLiveTail'; pageBudget?: number };
 
-type ContextGraphRegistryLiveScanPlan = {
-  mode: ContextGraphRegistryLiveScanMode;
-  pageBudget?: number;
-};
+type ContextGraphRegistryLiveScanMode = ContextGraphRegistryLiveScanPlan['mode'];
+
+interface ContextGraphRegistryLiveScanPolicy {
+  /** Start from the durable watermark when one exists. */
+  readonly resumesFromWatermark: boolean;
+  /** Own the watermark for the scan and advance it as pages are acknowledged. */
+  readonly persistsWatermark: boolean;
+  /** Save the watermark at head + 1 when the scan starts beyond the head. */
+  readonly seedsWatermarkAtEnd: boolean;
+  /** Report a page that fails after earlier pages as a partial scan carrying that prefix. */
+  readonly allowsPartialFailure: boolean;
+}
 
 type ContextGraphRegistryRepairScanPlan = {
   mode: 'repair';
@@ -102,26 +107,50 @@ function normalizePageBudget(value: number | undefined): number | undefined {
     : undefined;
 }
 
+const STATELESS_LIVE_SCAN_POLICY: ContextGraphRegistryLiveScanPolicy = {
+  resumesFromWatermark: false,
+  persistsWatermark: false,
+  seedsWatermarkAtEnd: false,
+  allowsPartialFailure: false,
+};
+
 /**
- * Mode-specific scan policy. Keeping these decisions behind named helpers
- * prevents the page loop from growing another matrix of loosely-related
- * booleans as new registry scan modes are added.
+ * The scan policy of every live mode, in one place, so the page loop reads
+ * named decisions instead of comparing modes. `Record` over the mode union
+ * makes a new mode a compile error until its policy is stated here: no mode
+ * picks up watermark persistence or partial-failure tolerance by default.
  */
-function resumesFromWatermark(mode: ContextGraphRegistryLiveScanMode): boolean {
-  return mode === 'incremental' || mode === 'seedFromCursor';
-}
-
-function persistsWatermark(mode: ContextGraphRegistryLiveScanMode): boolean {
-  return mode !== 'explicitFromBlock' && mode !== 'listAll';
-}
-
-function seedsWatermarkAtEnd(mode: ContextGraphRegistryLiveScanMode): boolean {
-  return mode === 'seedFull' || mode === 'seedFromCursor' || mode === 'seedLiveTail';
-}
-
-function allowsPartialFailure(mode: ContextGraphRegistryLiveScanMode): boolean {
-  return mode !== 'explicitFromBlock' && mode !== 'listAll';
-}
+const CONTEXT_GRAPH_REGISTRY_LIVE_SCAN_POLICY: Readonly<Record<
+  ContextGraphRegistryLiveScanMode,
+  ContextGraphRegistryLiveScanPolicy
+>> = {
+  explicitFromBlock: STATELESS_LIVE_SCAN_POLICY,
+  listAll: STATELESS_LIVE_SCAN_POLICY,
+  incremental: {
+    resumesFromWatermark: true,
+    persistsWatermark: true,
+    seedsWatermarkAtEnd: false,
+    allowsPartialFailure: true,
+  },
+  seedFull: {
+    resumesFromWatermark: false,
+    persistsWatermark: true,
+    seedsWatermarkAtEnd: true,
+    allowsPartialFailure: true,
+  },
+  seedFromCursor: {
+    resumesFromWatermark: true,
+    persistsWatermark: true,
+    seedsWatermarkAtEnd: true,
+    allowsPartialFailure: true,
+  },
+  seedLiveTail: {
+    resumesFromWatermark: false,
+    persistsWatermark: true,
+    seedsWatermarkAtEnd: true,
+    allowsPartialFailure: true,
+  },
+};
 
 function buildPublicContextGraphRegistryScanPlan(
   fromBlock: number | undefined,
@@ -378,18 +407,19 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     scanPlan: ContextGraphRegistryLiveScanPlan,
     signal?: AbortSignal,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
-    const watermarkOwner = persistsWatermark(scanPlan.mode)
+    const policy = CONTEXT_GRAPH_REGISTRY_LIVE_SCAN_POLICY[scanPlan.mode];
+    const watermarkOwner = policy.persistsWatermark
       ? this.contextGraphRegistryScanCursor.beginWatermarkScan(registryAddress)
       : undefined;
-    if (persistsWatermark(scanPlan.mode) && watermarkOwner === undefined) {
+    if (policy.persistsWatermark && watermarkOwner === undefined) {
       throw new Error('ContextGraphNameRegistry live scan already has an active cursor owner');
     }
     try {
       signal?.throwIfAborted();
-      const persistedWatermark = (resumesFromWatermark(scanPlan.mode) || seedsWatermarkAtEnd(scanPlan.mode))
+      const persistedWatermark = (policy.resumesFromWatermark || policy.seedsWatermarkAtEnd)
         ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
         : undefined;
-      const canResumeFromWatermark = resumesFromWatermark(scanPlan.mode) && persistedWatermark !== undefined;
+      const canResumeFromWatermark = policy.resumesFromWatermark && persistedWatermark !== undefined;
       const scan = fromBlock === undefined
         ? scanPlan.mode === 'seedLiveTail'
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
@@ -418,7 +448,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
 
       if (start > head) {
-        if (seedsWatermarkAtEnd(scanPlan.mode)) {
+        if (policy.seedsWatermarkAtEnd) {
           await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1, {
             owner: watermarkOwner,
             replace: replaceAheadWatermark,
@@ -469,12 +499,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         scanProviders,
         mode: scanPlan.mode === 'explicitFromBlock' ? 'listAll' : scanPlan.mode,
         pageBudget: scanPlan.pageBudget,
-        allowPartialFailure: allowsPartialFailure(scanPlan.mode),
+        allowPartialFailure: policy.allowsPartialFailure,
         rpcUsageConsumer: 'listContextGraphsFromChain',
         targetBlock: head,
         completesGeneration: () => false,
         signal,
-        acknowledge: persistsWatermark(scanPlan.mode)
+        acknowledge: policy.persistsWatermark
           ? (() => {
               let replace = replaceAheadWatermark;
               return async (_fromBlock: number, toBlock: number) => {
