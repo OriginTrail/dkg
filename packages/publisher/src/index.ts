@@ -459,6 +459,7 @@ export {
   getPromoteReplaySafeErrorDiagnostic,
   getPromoteFailureDisposition,
   isPromoteReplaySafeError,
+  isStoreOperationProvenNotStarted,
   type PromoteFailureDisposition,
   type PromoteReplaySafeErrorDiagnostic,
 } from './promote-replay-safety.js';

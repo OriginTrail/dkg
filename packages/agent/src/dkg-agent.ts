@@ -140,6 +140,7 @@ import {
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
   createPromotePostCommitFailure,
+  isStoreOperationProvenNotStarted,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -4086,7 +4087,15 @@ export class DKGAgent extends DKGAgentBase {
               ctx: createOperationContext('share'),
             });
           } catch (error) {
-            throw createPromotePostCommitFailure(error);
+            // The hook's only fallible step is the idempotent pointer stamp, which a
+            // replay of this same operation repairs. A storage failure PROVEN never to
+            // have started keeps its raw type, so the queue retries directly (and a
+            // synchronous caller gets the retryable 503) exactly like the publisher's
+            // own durable tail. Anything else fails closed as post-commit; the
+            // recovery sweep still replays it within the job's retry budget.
+            throw isStoreOperationProvenNotStarted(error)
+              ? error
+              : createPromotePostCommitFailure(error);
           }
         }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE

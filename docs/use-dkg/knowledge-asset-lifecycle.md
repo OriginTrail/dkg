@@ -52,6 +52,8 @@ If the worker cannot save or read a promotion failure, the `async_promote_failur
 
 Genuine fatal operation failures still become terminal, and a successfully saved retryable failure still uses normal automatic retry. A bookkeeping outage alone does not justify an immediate fatal asset verdict.
 
+If the share committed but the node then failed to record its `swmCurrentAssertion` lifecycle pointer, the job is never reported as `succeeded` and the asset keeps its share operation id. A store failure that is known not to have started is retried directly (`failed_retrying`). Any other failure is recorded as `failed` with `lastError.diagnosticCode` `PROMOTE_POST_COMMIT_FAILURE`; unlike other `failed` jobs, the daemon automatically requeues it (with the normal backoff and within the job's attempt limit) to repair the pointer, so do not `clear` such a job or submit another share while it recovers.
+
 ## Command Reference
 
 | Command | Purpose |

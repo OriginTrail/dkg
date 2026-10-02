@@ -6596,7 +6596,8 @@ export class PublishMethods extends DKGAgentBase {
    * the caller owns the classification: swallowing it here left a share that
    * reported success with a permanently missing root (GH#2901). The stamp is an
    * idempotent drop-then-set, so replaying the already-committed operation is
-   * the repair.
+   * the repair. The drop and the set are two store calls: until that replay, a
+   * failure between them leaves the committed share with no pointer.
    */
   async _stampSwmPointer(
     this: DKGAgent,

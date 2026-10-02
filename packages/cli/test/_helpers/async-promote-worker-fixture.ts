@@ -50,8 +50,10 @@ export function retryableSchedulerBusyFailure(): StoreSchedulerBusyError {
 export function createAsyncPromoteWorkerFixture(options: {
   maxRetries?: number;
   leaseMs?: number;
+  /** Inject a store (e.g. a fault-injecting subclass); defaults to a fresh in-memory one. */
+  store?: OxigraphStore;
 } = {}): AsyncPromoteWorkerFixture {
-  const store = new OxigraphStore();
+  const store = options.store ?? new OxigraphStore();
   const logs: string[] = [];
   let currentNow = 1_700_000_000_000;
   let idCounter = 0;

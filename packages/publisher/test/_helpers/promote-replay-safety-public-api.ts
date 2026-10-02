@@ -4,6 +4,7 @@ import {
   getPromoteFailureDisposition,
   getPromoteReplaySafeErrorDiagnostic,
   isPromoteReplaySafeError,
+  isStoreOperationProvenNotStarted,
   type PromoteFailureDisposition,
   type PromoteReplaySafeErrorDiagnostic,
 } from '@origintrail-official/dkg-publisher';
@@ -24,6 +25,9 @@ type PromoteFailureDispositionIsPublic = AssertTrue<
 >;
 type PromotePostCommitBoundaryIsPublic = AssertTrue<
   'createPromotePostCommitFailure' extends keyof PublisherApi ? true : false
+>;
+type StoreProvenNotStartedPredicateIsPublic = AssertTrue<
+  'isStoreOperationProvenNotStarted' extends keyof PublisherApi ? true : false
 >;
 type LegacyReplaySafeGuardRemainsPublic = AssertTrue<
   'isPromoteReplaySafeError' extends keyof PublisherApi ? true : false
@@ -70,6 +74,7 @@ void [
   getPromoteFailureDisposition,
   getPromoteReplaySafeErrorDiagnostic,
   isPromoteReplaySafeError,
+  isStoreOperationProvenNotStarted,
 ];
 type PublicPromoteFailureDisposition = PromoteFailureDisposition;
 type PublicPromoteReplaySafeErrorDiagnostic = PromoteReplaySafeErrorDiagnostic;
@@ -78,6 +83,7 @@ export type {
   ArbitraryRetryPolicyStaysAbsent,
   PromoteFailureDispositionIsPublic,
   PromotePostCommitBoundaryIsPublic,
+  StoreProvenNotStartedPredicateIsPublic,
   LegacyReplaySafeGuardRemainsPublic,
   LegacyReplaySafeDiagnosticRemainsPublic,
   GenericRetryableGuardStaysInternal,

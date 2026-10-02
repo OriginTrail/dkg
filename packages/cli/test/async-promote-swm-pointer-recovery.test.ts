@@ -1,10 +1,15 @@
 /**
  * GH#2901 — an async share whose `swmCurrentAssertion` stamp fails after the
- * durable SWM commit must NOT be reported as succeeded; the daemon's
- * post-commit recovery sweep must repair the SAME operation, including across
- * a process restart. Real worker (`runPromoteJob` + error classification),
- * real queue, real publisher, real `agent.assertion.promote` (only the store
- * call is faulted).
+ * durable SWM commit must NOT be reported as succeeded, and must be repaired as
+ * the SAME operation, including across a process restart. Real worker
+ * (`runPromoteJob` + error classification), real queue, real publisher, real
+ * `agent.assertion.promote`; only the pointer store call is faulted.
+ *
+ * Two recovery paths, both bounded by the job's own retry budget and backoff:
+ *  - a storage failure proven never to have started is retried directly
+ *    (`failed_retrying` + `nextRetryAt`, never a `failed` row);
+ *  - any other failure fails closed as a post-commit failure and the recovery
+ *    sweep requeues it.
  */
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
@@ -16,12 +21,13 @@ import {
   generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import { DKGPublisher, TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
-import {
-  StoreOperationTimeoutError,
-  StoreSchedulerBusyError,
-  type OxigraphStore,
-} from '@origintrail-official/dkg-storage';
+import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../../agent/src/dkg-agent.js';
+import {
+  SWM_POINTER_PRED,
+  SwmPointerFaultStore,
+  type SwmPointerFault,
+} from '../../agent/test/_helpers/swm-pointer-fault-store.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 import { runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
 import { createAsyncPromoteWorkerFixture } from './_helpers/async-promote-worker-fixture.js';
@@ -29,11 +35,11 @@ import { createAsyncPromoteWorkerFixture } from './_helpers/async-promote-worker
 const CG = 'swm-pointer-recovery-cg';
 const NAME = 'pointer-asset';
 const AGENT = `0x${'11'.repeat(20)}`;
-const SWM_PRED = 'http://dkg.io/ontology/swmCurrentAssertion';
 const OPERATION_PRED = 'http://dkg.io/ontology/shareOperationId';
+const BACKOFF_MS = 60_000;
 
 /** A "process": fresh agent + publisher objects over a durable store. */
-async function bootAgent(store: OxigraphStore) {
+async function bootAgent(store: SwmPointerFaultStore) {
   const publisher = new DKGPublisher({
     store,
     chain: new MockChainAdapter(),
@@ -60,24 +66,27 @@ async function bootAgent(store: OxigraphStore) {
 
 describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
   it.each([
-    [
-      'seal read (queue wait timeout)',
-      'query',
-      () => new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'agent.publish.swmPointerSeal', {
+    {
+      label: 'proven not started (seal read, queue wait timeout)',
+      fault: 'seal-read' as SwmPointerFault,
+      failure: () => new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'agent.publish.swmPointerSeal', {
         storeOperation: 'query',
       }),
-    ],
-    [
-      'pointer delete (resume-path shape)',
-      'deleteByPattern',
-      () => new StoreOperationTimeoutError({
-        backend: 'managed-oxigraph', operation: 'deleteByPattern', outcome: 'not_started',
+      path: 'direct-retry' as const,
+    },
+    {
+      label: 'indeterminate (pointer delete, outcome unknown)',
+      fault: 'pointer-delete' as SwmPointerFault,
+      failure: () => new StoreOperationTimeoutError({
+        backend: 'managed-oxigraph', operation: 'deleteByPattern', outcome: 'indeterminate',
       }),
-    ],
-  ] as const)(
-    'fails the job instead of succeeding on a failed %s, and the sweep repairs it after a restart',
-    async (_label, faultedMethod, makeFailure) => {
-      const { store, queue, clock, logs, makeRequest } = createAsyncPromoteWorkerFixture({ maxRetries: 5 });
+      path: 'sweep' as const,
+    },
+  ])(
+    'never succeeds on a $label failure and repairs the same operation after a restart',
+    async ({ fault, failure, path }) => {
+      const store = new SwmPointerFaultStore();
+      const { queue, clock, logs, makeRequest } = createAsyncPromoteWorkerFixture({ maxRetries: 5, store });
       const { agent, publisher } = await bootAgent(store);
       await publisher.assertionCreate(CG, NAME, AGENT);
       await publisher.assertionWrite(CG, NAME, AGENT, [{
@@ -86,11 +95,10 @@ describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
       const finalized = await finalizeRootlessAssertionForTest({
         publisher, store, contextGraphId: CG, name: NAME, agentAddress: AGENT,
       });
-      const metaGraph = contextGraphMetaUri(CG);
       const lifecycle = assertionLifecycleUri(CG, AGENT, NAME);
       const readLiteral = async (pred: string): Promise<string | undefined> => {
         const result = await store.query(
-          `SELECT ?o WHERE { GRAPH <${metaGraph}> { <${lifecycle}> <${pred}> ?o } } LIMIT 1`,
+          `SELECT ?o WHERE { GRAPH <${contextGraphMetaUri(CG)}> { <${lifecycle}> <${pred}> ?o } } LIMIT 1`,
         );
         const raw = result.type === 'bindings' ? result.bindings[0]?.['o'] : undefined;
         return raw?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
@@ -101,7 +109,7 @@ describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
       const jobId = await queue.enqueue(makeRequest({
         contextGraphId: CG, subGraphName: undefined, assertionName: NAME, agentAddress: AGENT,
       }));
-      const runAttempt = async (q: TripleStoreAsyncPromoteQueue | typeof queue, target: typeof agent) => {
+      const runAttempt = async (q: typeof queue, target: typeof agent) => {
         const job = await q.claimNext('pointer-worker');
         if (!job) throw new Error('Expected a claimable promotion');
         return runPromoteJob({
@@ -115,68 +123,61 @@ describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
       };
 
       // Attempt 1: SWM commits, then the pointer maintenance fails once.
-      const failure = makeFailure();
-      let injected = false;
-      const real = (store as any)[faultedMethod].bind(store);
-      const spy = vi.spyOn(store as any, faultedMethod).mockImplementation(async (...args: unknown[]) => {
-        const first = args[0] as { predicate?: string } | string;
-        const hitsPointer = faultedMethod === 'query'
-          ? (args[1] as { source?: string } | undefined)?.source === 'agent.publish.swmPointerSeal'
-          : typeof first === 'object' && first.predicate === SWM_PRED;
-        if (!injected && hitsPointer) {
-          injected = true;
-          throw failure;
-        }
-        return real(...args);
-      });
-      let first: Awaited<ReturnType<typeof runAttempt>>;
-      try {
-        first = await runAttempt(queue, agent);
-      } finally {
-        spy.mockRestore();
-      }
-      expect(injected).toBe(true);
+      store.arm(fault, failure());
+      const first = await runAttempt(queue, agent);
+      expect(store.trips).toEqual([fault]);
 
-      // Never "succeeded": a terminal post-commit failure of the existing job.
-      expect(first).toMatchObject({
-        outcome: 'failed_terminal',
-        error: { classification: 'fatal', retryable: false },
-      });
-      const failed = (await queue.getStatus(jobId))!;
-      expect(failed.state).toBe('failed');
-      expect(failed.commitMarker?.swmInserted).toBe(false);
-      expect(failed.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
-      expect(logs.some((line) => line.includes('"errorCode":"PROMOTE_POST_COMMIT_FAILURE"'))).toBe(true);
-      // The root-cause text is only in the stamp's own warn log.
+      // Never "succeeded"; the share IS committed and only the pointer is missing.
+      const afterFailure = (await queue.getStatus(jobId))!;
+      expect(afterFailure.commitMarker?.swmInserted).toBe(false);
       expect(agent.log.warn).toHaveBeenCalledWith(
         expect.anything(),
         expect.stringContaining('Failed to stamp swmCurrentAssertion'),
       );
-      // The share IS committed; only the pointer is missing.
       expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
-      expect(await readLiteral(SWM_PRED)).toBeUndefined();
+      expect(await readLiteral(SWM_POINTER_PRED)).toBeUndefined();
       const operationId = await readLiteral(OPERATION_PRED);
       expect(operationId).toBeTruthy();
 
       // "Restart": new queue instance + fresh agent/publisher over the durable store.
       const restartedQueue = new TripleStoreAsyncPromoteQueue(store, {
-        now: clock.now, backoff: () => 60_000, maxRetries: 5,
+        now: clock.now, backoff: () => BACKOFF_MS, maxRetries: 5,
       });
       const restarted = await bootAgent(store);
-      expect(await restartedQueue.recoverPostCommitFailures()).toEqual([{
-        jobId, action: 'requeued', attempt: 1, maxAttempts: 5, nextRetryAt: clock.now() + 60_000,
-      }]);
+
+      if (path === 'direct-retry') {
+        // No `failed` flash: the queue's ordinary bounded retry owns it from the first write.
+        expect(first).toMatchObject({
+          outcome: 'failed_retrying', error: { classification: 'transient', retryable: true },
+        });
+        expect(afterFailure.state).toBe('failed_retrying');
+        expect(afterFailure.attempt.nextRetryAt).toBe(clock.now() + BACKOFF_MS);
+        expect(afterFailure.attempt.lastError?.diagnosticCode).toBeUndefined();
+        expect(await restartedQueue.recoverPostCommitFailures()).toEqual([]);
+      } else {
+        // Fail closed as post-commit; the sweep requeues it with the same backoff.
+        expect(first).toMatchObject({
+          outcome: 'failed_terminal', error: { classification: 'fatal', retryable: false },
+        });
+        expect(afterFailure.state).toBe('failed');
+        expect(afterFailure.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+        expect(logs.some((line) => line.includes('"errorCode":"PROMOTE_POST_COMMIT_FAILURE"'))).toBe(true);
+        expect(await restartedQueue.recoverPostCommitFailures()).toEqual([{
+          jobId, action: 'requeued', attempt: 1, maxAttempts: 5, nextRetryAt: clock.now() + BACKOFF_MS,
+        }]);
+      }
+
       // Backoff, not a tight loop: nothing is claimable before the retry time.
       expect(await restartedQueue.claimNext('pointer-worker')).toBeNull();
-      expect(await readLiteral(SWM_PRED)).toBeUndefined();
+      expect(await readLiteral(SWM_POINTER_PRED)).toBeUndefined();
 
-      clock.advance(60_000);
+      clock.advance(BACKOFF_MS);
       expect(await runAttempt(restartedQueue, restarted.agent)).toMatchObject({ outcome: 'succeeded' });
       const repaired = (await restartedQueue.getStatus(jobId))!;
       expect(repaired.state).toBe('succeeded');
       expect(repaired.attempt.count).toBe(2);
       // Same operation, same exact SWM graph, and the descriptor now carries the sealed root.
-      expect(await readLiteral(SWM_PRED)).toBe(sealedRoot);
+      expect(await readLiteral(SWM_POINTER_PRED)).toBe(sealedRoot);
       expect(await readLiteral(OPERATION_PRED)).toBe(operationId);
       expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
       expect(await restartedQueue.recoverPostCommitFailures()).toEqual([]);
