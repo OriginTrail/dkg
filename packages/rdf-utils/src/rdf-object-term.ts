@@ -1,4 +1,5 @@
 import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+import { escapeRdfLiteral } from './rdf-literal-escape.js';
 import {
   isRdfBlankNodeTerm,
   isRdfLanguageTag,
@@ -7,7 +8,6 @@ import {
 import {
   decodeNTriplesIriEscapesStrict,
   decodeRdfLiteralBody,
-  escapeRdfLiteral,
   formatCanonicalRdfLiteralTerm,
   type RdfLiteralTerm,
   type RdfTerm,

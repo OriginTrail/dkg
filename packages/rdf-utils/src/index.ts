@@ -1,4 +1,6 @@
 export { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+export { isRdfBlankNodeLabel } from './blank-node-label.js';
+export { escapeRdfLiteral } from './rdf-literal-escape.js';
 
 export {
   canonicalizeRdfObjectTerm,
@@ -22,7 +24,6 @@ export {
   decodeNTriplesIriEscapesStrict,
   decodeNTriplesUcharEscapes,
   decodeRdfLiteralBody,
-  escapeRdfLiteral,
   formatCanonicalRdfLiteralTerm,
   formatCanonicalRdfTerm,
   XSD_STRING_DATATYPE,

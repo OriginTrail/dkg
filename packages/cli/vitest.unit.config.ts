@@ -149,6 +149,7 @@ export default defineConfig({
           'test/async-promote-worker.test.ts',
           'test/async-promote-error-classification.test.ts',
           'test/async-promote-publisher-recovery.test.ts',
+          'test/async-promote-swm-pointer-recovery.test.ts',
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
@@ -162,6 +163,10 @@ export default defineConfig({
           'test/rpc-usage-log.test.ts',
           'test/rpc-usage-snapshot-route.test.ts',
           'test/publisher-runner-rpc-usage.test.ts',
+          'test/publisher-startup-admission.test.ts',
+          'test/publisher-startup-lifecycle.test.ts',
+          'test/daemon-publisher-startup-cancellation.test.ts',
+          'test/publisher-availability.test.ts',
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
           'test/telemetry-runtime.test.ts',
@@ -183,6 +188,7 @@ export default defineConfig({
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
           'test/publisher-runtime-snapshot-store-injection.test.ts',
+          'test/publisher-default-snapshot-retirement.test.ts',
           'test/publisher-runtime-chain-config.test.ts',
           'test/publisher-ka-recovery.test.ts',
           // #2270 — the runner's chain lookup reports WHICH chain fact it found
@@ -213,6 +219,12 @@ export default defineConfig({
           // Public snapshot paging — one SQLite-indexed store must reach the
           // agent sync responder, admission publisher, and background runtime.
           'test/daemon-snapshot-page-index-wiring.test.ts',
+          // Protocol persistence stores (node-store): runDaemonInner composes
+          // every one over a seeded legacy node-ui.db; no hardhat, no network.
+          'test/daemon-protocol-store-wiring.test.ts',
+          // The typed composition seam behind that wiring: createProtocolStores
+          // over one shared connection, real DashboardDB.
+          'test/protocol-persistence.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           'test/snapshot-page-index-store.test.ts',

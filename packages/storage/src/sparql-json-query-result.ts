@@ -1,13 +1,11 @@
+import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import {
   isOrdinaryDataRecord,
   readOwnEnumerableDataProperty,
   snapshotDenseDataArray,
   snapshotExactOrdinaryDataRecord,
 } from './closed-data-snapshot.js';
-import {
-  SparqlSelectResultNormalizer,
-  type SparqlResultTerm,
-} from './sparql-select-result-normalizer.js';
+import { SparqlSelectResultNormalizer } from './sparql-select-result-normalizer.js';
 import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import type { AskResult, QueryResult, SelectResult } from './triple-store.js';
 
@@ -37,6 +35,11 @@ interface ResponseDataReader {
   exact: typeof snapshotExactOrdinaryDataRecord;
   array: typeof denseArray;
   keys: (input: Record<string, unknown>) => readonly PropertyKey[];
+  record: (
+    input: unknown,
+    label: string,
+    description: 'object' | 'plain object' | 'plain term object',
+  ) => Record<string, unknown>;
 }
 
 const closedDataReader: ResponseDataReader = {
@@ -44,12 +47,18 @@ const closedDataReader: ResponseDataReader = {
   exact: snapshotExactOrdinaryDataRecord,
   array: denseArray,
   keys: Reflect.ownKeys,
+  record(input, label, description) {
+    if (!isOrdinaryDataRecord(input)) {
+      malformed(`${label} must be ${description === 'object' ? 'an' : 'a'} ${description}`);
+    }
+    return input;
+  },
 };
 
-// Only used immediately after this module's JSON.parse, without a reviver.
-// Its fresh private records cannot contain accessors, symbols, class instances
-// or sparse/adorned arrays. Semantic shape checks are still shared with the
-// fully reflective decoder used for externally supplied object graphs.
+// Only used immediately after this module's captured JSON.parse, without a
+// reviver. The resulting private graph cannot contain accessors, symbols,
+// foreign prototypes, or sparse/adorned arrays. The semantic SELECT decoder
+// remains shared with the reflective untrusted-object entry point below.
 const parsedJsonReader: ResponseDataReader = {
   read(input, key, label) {
     if (input === null || typeof input !== 'object') malformed(`${label} must be an object`);
@@ -59,18 +68,26 @@ const parsedJsonReader: ResponseDataReader = {
     return (input as Record<string, unknown>)[key];
   },
   exact(input, keys, label) {
-    if (!isOrdinaryDataRecord(input)) malformed(`${label} must be a plain data object`);
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+      malformed(`${label} must be a plain data object`);
+    }
     const actual = Object.keys(input);
     if (actual.length !== keys.length || actual.some(key => !keys.includes(key))) {
       malformed(`${label} has unknown or missing fields`);
     }
-    return input;
+    return input as Record<string, unknown>;
   },
   array(input, label) {
     if (!Array.isArray(input)) malformed(`${label} must be an ordinary array`);
     return input;
   },
   keys: Object.keys,
+  record(input, label, description) {
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+      malformed(`${label} must be ${description === 'object' ? 'an' : 'a'} ${description}`);
+    }
+    return input as Record<string, unknown>;
+  },
 };
 
 export interface AdapterSparqlJsonSelectResponse {
@@ -178,10 +195,7 @@ function parseSelectResponse(
     malformed,
   );
   const bindings = rows.map((input, rowIndex) => {
-    if (!isOrdinaryDataRecord(input)) {
-      malformed(`SPARQL JSON binding ${rowIndex} must be a plain object`);
-    }
-    const row = input as Record<string, unknown>;
+    const row = reader.record(input, `SPARQL JSON binding ${rowIndex}`, 'plain object');
     for (const key of reader.keys(row)) {
       if (typeof key !== 'string' || !variables.includes(key)) {
         malformed(`SPARQL JSON binding ${rowIndex} contains an undeclared variable`);
@@ -192,11 +206,8 @@ function parseSelectResponse(
       const variable = variables[variableIndex];
       if (!Object.prototype.hasOwnProperty.call(row, variable)) continue;
       const term = reader.read(row, variable, `SPARQL JSON binding ${rowIndex}`);
-      const label = `SPARQL JSON binding ${rowIndex}.${variable}`;
-      const formatted = normalizer.format(
-        snapshotTerm(term, rowIndex, variable, reader),
-        variableIndex,
-        label,
+      const formatted = formatValidatedSparqlJsonTerm(
+        term, rowIndex, variable, variableIndex, reader, normalizer,
       );
       normalizer.set(binding, variable, formatted);
     }
@@ -207,10 +218,7 @@ function parseSelectResponse(
 
 function ownDataRecord(input: unknown, key: string, label: string, reader = closedDataReader): Record<string, unknown> {
   const value = reader.read(input, key, label);
-  if (!isOrdinaryDataRecord(value)) {
-    malformed(`${label}.${key} must be an object`);
-  }
-  return value as Record<string, unknown>;
+  return reader.record(value, `${label}.${key}`, 'object');
 }
 
 function denseStringArray(input: unknown, label: string, reader = closedDataReader): string[] {
@@ -225,10 +233,11 @@ function denseArray(input: unknown, label: string): unknown[] {
   return [...snapshotDenseDataArray(input, label, malformed)];
 }
 
-function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader): SparqlResultTerm {
+// Mirrors SparqlSelectResultNormalizer.format kind by kind, so JSON and TSV
+// rows stay identical, without building an intermediate term per binding.
+function formatValidatedSparqlJsonTerm(input: unknown, rowIndex: number, variable: string, column: number, reader: ResponseDataReader, normalizer: SparqlSelectResultNormalizer): string {
   const label = `SPARQL JSON binding ${rowIndex}.${variable}`;
-  if (!isOrdinaryDataRecord(input)) malformed(`${label} must be a plain term object`);
-  const term = input as Record<string, unknown>;
+  const term = reader.record(input, label, 'plain term object');
   const type = reader.read(term, 'type', label);
   const value = reader.read(term, 'value', label);
   if (typeof type !== 'string' || typeof value !== 'string') {
@@ -236,7 +245,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
   }
   if (type === 'uri') {
     reader.exact(term, ['type', 'value'], label, malformed);
-    return { kind: 'iri', value };
+    return normalizer.formatIri(value, column, label);
   }
   if (type === 'bnode') {
     reader.exact(term, ['type', 'value'], label, malformed);
@@ -246,7 +255,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
     ) {
       malformed(`${label} blank-node value must be an RDF blank-node label`);
     }
-    return { kind: 'blank-node', value };
+    return `_:${value}`;
   }
   if (type !== 'literal' && type !== 'typed-literal') {
     malformed(`${label} has an unsupported term type`);
@@ -271,16 +280,17 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
     if (typeof language !== 'string' || !SPARQL_JSON_LANGUAGE_TAG.test(language)) {
       malformed(`${label} language must be a valid language tag`);
     }
-    return { kind: 'literal', value: { kind: 'language', value, language } };
+    return formatCanonicalRdfLiteralTerm({ kind: 'language', value, language });
   }
   if (hasDatatype) {
     const datatype = reader.read(term, 'datatype', label);
     if (typeof datatype !== 'string') {
       malformed(`${label} datatype must be an absolute safe IRI`);
     }
-    return { kind: 'literal', value: { kind: 'typed', value, datatype } };
+    normalizer.assertDatatypeIri(datatype, column, label);
+    return formatCanonicalRdfLiteralTerm({ kind: 'typed', value, datatype });
   }
-  return { kind: 'literal', value: { kind: 'plain', value } };
+  return formatCanonicalRdfLiteralTerm({ kind: 'plain', value });
 }
 
 function ownDataValue(input: unknown, key: string, label: string): unknown {

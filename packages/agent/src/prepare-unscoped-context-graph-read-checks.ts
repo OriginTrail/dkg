@@ -63,6 +63,18 @@ async function prepareScalarRegistrationRead(
         return { authority: await live(), metadataAbsenceEligible: false };
       }
       if (prepared.kind === 'unregistered') {
+        // A local approved-replica proof is mutable authority, unlike plain
+        // finalized name absence. Re-read it at the point of use so a join
+        // rejection, generation replacement, local-agent removal, or expired
+        // delegation cannot survive scalar preparation.
+        if (prepared.approvedPrivateReplicaAuthority !== undefined) {
+          const current = await live();
+          readSignal.throwIfAborted();
+          return {
+            authority: current,
+            metadataAbsenceEligible: current.kind === 'unregistered',
+          };
+        }
         return { authority: prepared, metadataAbsenceEligible: true };
       }
       if (prepared.kind === 'unavailable') {

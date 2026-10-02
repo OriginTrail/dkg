@@ -1,18 +1,4 @@
-/** N-Triples ECHAR short forms, keyed by the raw character. */
-const RDF_LITERAL_SHORT_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
-  '\b': '\\b',
-  '\t': '\\t',
-  '\n': '\\n',
-  '\f': '\\f',
-  '\r': '\\r',
-  '"': '\\"',
-  '\\': '\\\\',
-});
-
-const RDF_LITERAL_ESCAPE_PATTERN = new RegExp(
-  String.raw`["\\\u0000-\u001F\u007F]`,
-  'g',
-);
+import { escapeRdfLiteral } from './rdf-literal-escape.js';
 
 const NTRIPLES_ECHAR_VALUES: Readonly<Record<string, string>> = Object.freeze({
   b: '\b',
@@ -94,15 +80,6 @@ export function decodeNTriplesIriEscapesPreservingLegacy(value: string): string 
   return decodeNTriplesUcharEscapes(value, {
     invalidEscape: 'preserve',
     surrogatePolicy: 'allow',
-  });
-}
-
-/** Escape a plain-text string for use as an RDF/N-Triples literal body. */
-export function escapeRdfLiteral(value: string): string {
-  return value.replace(RDF_LITERAL_ESCAPE_PATTERN, (character) => {
-    const shortEscape = RDF_LITERAL_SHORT_ESCAPES[character];
-    if (shortEscape !== undefined) return shortEscape;
-    return `\\u${character.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
   });
 }
 

@@ -2138,8 +2138,12 @@ describe('private read authorization uses the on-chain participant roster', () =
       allowSubscriptionFallback: true,
     })).resolves.toMatchObject({
       outcome: 'unavailable',
-      source: 'legacy-local',
-      reason: 'pending-authoritative-metadata',
+      // Legacy unregistered adapters now require the approved-private proof
+      // before they expose participant authority. With no metadata that proof
+      // fails closed, while remaining eligible for metadata bootstrap.
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+      metadataBootstrap: 'eligible',
     });
     await expect(agent.canReadContextGraph(contextGraphId)).resolves.toBe(false);
   });

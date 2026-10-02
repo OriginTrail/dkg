@@ -58,6 +58,7 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
+import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
 import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -75,6 +76,7 @@ import {
   withRpcUsageConsumer,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import {
@@ -157,6 +159,12 @@ type SerializedSignerWriteContext = {
 function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
   const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
   return createRpcReadDescriptor(label, consumer);
+}
+
+function rethrowInterruptedInitialization(error: unknown): void {
+  activeRpcRequestAbortSignal()?.throwIfAborted();
+  // Local refusal is not proof that an optional contract is absent.
+  if (isRpcRequestGovernorQueueFullError(error)) throw error;
 }
 
 /**
@@ -1937,7 +1945,7 @@ export class EVMChainAdapterBase {
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
-        (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
+        (lastError ? ` (last RPC error: ${hostOnlyRpcText(errorMessage(lastError))})` : ''),
     });
   }
 
@@ -2143,9 +2151,12 @@ export class EVMChainAdapterBase {
         await onBroadcast?.({ txHash: preBroadcastTxHash, nonce });
         ctx.markProgress();
       } catch (hookErr) {
-        throw new Error(
+        // Same message as ever, with the hook's own error kept as `cause` (GH#2940): a caller
+        // that needs to know WHY its durable write-ahead failed must not have to parse text.
+        throw new ChainWriteAheadHookError(
           `chain:writeahead hook failed before ${label} broadcast: ` +
           `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+          hookErr,
         );
       }
       // The nonce-critical lane ends when an endpoint accepts these exact
@@ -3203,7 +3214,7 @@ export class EVMChainAdapterBase {
       // its original shape.
       if (classifyRpcRetryDisposition(err) === 'failover') {
         throw new RpcEndpointsExhaustedError(
-          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
+          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${hostOnlyRpcText(errorMessage(err))}`,
           { cause: err, rpcUrls: this.rpcUrls },
         );
       }
@@ -3222,7 +3233,8 @@ export class EVMChainAdapterBase {
     // only to keep stale Hub bindings on older deploys resolving cleanly.
     try {
       this.contracts.staking = await this.resolveContract('Staking');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // V8 Staking not deployed on this Hub — V10 surface continues.
     }
 
@@ -3232,7 +3244,8 @@ export class EVMChainAdapterBase {
     // relay-registry methods will throw with a clear message at call time.
     try {
       this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // Older deployments without the relay registry surface.
     }
 
@@ -3249,44 +3262,51 @@ export class EVMChainAdapterBase {
     try {
       this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
       this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // V9 contracts not deployed — V9 publish/update surface unavailable.
     }
     try {
       this.contracts.askStorage = await this.resolveContract('AskStorage');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
     }
 
     try {
       this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
     try {
       this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
       this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // ContextGraphs not deployed — context graph operations unavailable
     }
 
     try {
       this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // Lifecycle not deployed — createKnowledgeAssets unavailable.
       // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
     }
 
     try {
       this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
     }
 
     try {
       this.contracts.chronos = await this.resolveContract('Chronos');
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // Chronos not deployed — update-path growth-cost sizing falls back to
       // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
       // Greenfield V10 deployments always have Chronos; this catch is for older
@@ -3295,7 +3315,8 @@ export class EVMChainAdapterBase {
 
     try {
       await this.resolveAndAssignRandomSamplingPair();
-    } catch {
+    } catch (error) {
+      rethrowInterruptedInitialization(error);
       // RandomSampling not deployed — proof submission unavailable
     }
 
@@ -3303,8 +3324,12 @@ export class EVMChainAdapterBase {
     // address array, and started WITHOUT an await so a cold backfill can never
     // delay a chain write. Only the adapter the composition root gave a store
     // does anything at all here.
-    this.startChainIndexRuntime();
-    await this.startHubRotationListener();
+    // Both starts spawn detached work. Its context must belong to the adapter,
+    // not to whichever transient caller happened to initialize it first.
+    await withOwnedRpcRequestContext({}, async () => {
+      this.startChainIndexRuntime();
+      await this.startHubRotationListener();
+    });
 
     const tokenAddress: string = this.tokenAddress ?? await this.readContract(
       this.contracts.hub,
@@ -3959,7 +3984,7 @@ export class EVMChainAdapterBase {
     }
     throw new Error(
       `${operationLabel}: eth_getCode for ${contractLabel} ${address} at block ${block} ` +
-        `failed after 3 attempts: ${errorMessage(lastErr)}`,
+        `failed after 3 attempts: ${hostOnlyRpcText(errorMessage(lastErr))}`,
       { cause: lastErr },
     );
   }
