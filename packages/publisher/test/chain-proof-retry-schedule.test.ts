@@ -306,3 +306,83 @@ describe('ChainProofRetrySchedule', () => {
     expect(h.schedule.retainedEntryCount()).toBe(1);
   });
 });
+
+describe('ChainProofRetrySchedule: the observation beside a deferral (GH#2945)', () => {
+  it('has none until a check earns a deferral, then returns it for the owning incarnation only', () => {
+    const h = harness();
+    expect(h.schedule.lastCheckOf('job', A)).toBeUndefined();
+    const turn = obs(h.schedule.beginPass(h.now()), 'job', A);
+    expect(h.schedule.lastCheckOf('job', A)).toBeUndefined(); // admitted, not yet checked
+    turn!.defer('default', 'pending-mempool');
+
+    expect(h.schedule.lastCheckOf('job', A)).toEqual({ outcome: 'pending-mempool', at: h.now() });
+    expect(h.schedule.lastCheckOf('job', B)).toBeUndefined(); // another incarnation of the same jobId
+    expect(h.schedule.lastCheckOf('other', A)).toBeUndefined();
+  });
+
+  it('never moves the ladder: the same deferrals with and without outcomes are due at the same instants', () => {
+    const withOutcomes = harness(() => 0.5);
+    const without = harness(() => 0.5);
+    for (const cadence of ['default', 'awaiting-confirmations', 'default', 'awaiting-confirmations'] as const) {
+      obs(withOutcomes.schedule.beginPass(withOutcomes.now()), 'job', A)!.defer(cadence, 'inconclusive');
+      obs(without.schedule.beginPass(without.now()), 'job', A)!.defer(cadence);
+      for (let step = 0; step < 40; step += 1) {
+        expect(withOutcomes.due('job', A)).toBe(without.due('job', A));
+        withOutcomes.advance(10_000);
+        without.advance(10_000);
+      }
+      // Bring both to the same instant of being due before the next deferral.
+      while (!withOutcomes.due('job', A)) { withOutcomes.advance(1_000); without.advance(1_000); }
+    }
+  });
+
+  it('reads the clock once per deferral, exactly as before', () => {
+    let reads = 0;
+    const schedule = new ChainProofRetrySchedule({ now: () => { reads += 1; return 1_000_000; }, rand: () => 0 });
+    const turn = obs(schedule.beginPass(1_000_000), 'job', A)!;
+    const before = reads;
+
+    turn.defer('default', 'error');
+
+    expect(reads - before).toBe(1);
+  });
+
+  it('a deferral that states no outcome leaves no stale one behind', () => {
+    const h = harness();
+    obs(h.schedule.beginPass(h.now()), 'job', A)!.defer('default', 'inconclusive');
+    expect(h.schedule.lastCheckOf('job', A)?.outcome).toBe('inconclusive');
+
+    h.advance(30_000);
+    obs(h.schedule.beginPass(h.now()), 'job', A)!.defer('default');
+
+    expect(h.schedule.lastCheckOf('job', A)).toBeUndefined();
+  });
+
+  it('is dropped by a settlement, by a replacing incarnation and by a sweep', () => {
+    const h = harness();
+    const settledTurn = obs(h.schedule.beginPass(h.now()), 'settled', A)!;
+    settledTurn.defer('default', 'pending-mempool');
+    settledTurn.settled();
+    expect(h.schedule.lastCheckOf('settled', A)).toBeUndefined();
+
+    obs(h.schedule.beginPass(h.now()), 'replaced', A)!.defer('default', 'pending-mempool');
+    obs(h.schedule.beginPass(h.now()), 'replaced', B); // a newer incarnation takes the slot
+    expect(h.schedule.lastCheckOf('replaced', A)).toBeUndefined();
+    expect(h.schedule.lastCheckOf('replaced', B)).toBeUndefined();
+
+    obs(h.schedule.beginPass(h.now()), 'swept', A)!.defer('default', 'pending-mempool');
+    h.schedule.beginPass(h.now()).observeSnapshot([]); // a newer snapshot that no longer holds the job
+    expect(h.schedule.lastCheckOf('swept', A)).toBeUndefined();
+  });
+
+  it('a superseded echo cannot write into the successor incarnation', () => {
+    const h = harness();
+    const staleTurn = obs(h.schedule.beginPass(h.now()), 'job', A)!;
+    obs(h.schedule.beginPass(h.now()), 'job', B); // B takes the slot after A's turn was admitted
+
+    staleTurn.defer('default', 'rpc-unavailable');
+
+    expect(h.schedule.lastCheckOf('job', A)).toBeUndefined();
+    expect(h.schedule.lastCheckOf('job', B)).toBeUndefined();
+  });
+});

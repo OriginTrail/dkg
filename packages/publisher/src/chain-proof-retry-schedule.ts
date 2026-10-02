@@ -36,6 +36,8 @@
  * true post-jitter ceiling. Growth and attempts are cadence-independent.
  */
 
+import type { AsyncLiftChainCheckOutcome, AsyncLiftLastChainCheck } from './async-lift-publisher-types.js';
+
 const CHAIN_PROOF_BACKOFF_BASE_MS = 30_000;
 const CHAIN_PROOF_BACKOFF_MAX_MS = 10 * 60_000;
 const CHAIN_PROOF_BACKOFF_JITTER = 0.25;
@@ -48,7 +50,12 @@ export type ChainProofRetryCadence = 'awaiting-confirmations' | 'default';
 
 /** The admitted turn for one due (jobId, incarnation) — the only mutation surface. */
 export interface ChainProofScheduleTurn {
-  defer(cadence: ChainProofRetryCadence): void;
+  /**
+   * Earn a backoff. `outcome` (GH#2945) is what the check that earned it found; it is kept on the entry
+   * as observability only — it never influences the cadence, the attempt count or ownership. A deferral
+   * that states none leaves the entry with no observation rather than a stale one.
+   */
+  defer(cadence: ChainProofRetryCadence, outcome?: AsyncLiftChainCheckOutcome): void;
   settled(): void;
 }
 
@@ -78,6 +85,8 @@ type ScheduleEntry =
       readonly observedToken: number;
       readonly dueAt: number;
       readonly attempts: number;
+      /** The check that earned this deferral (GH#2945): in memory, tied to this incarnation, never a scheduling input. */
+      readonly lastCheck?: AsyncLiftLastChainCheck;
     };
 
 export class ChainProofRetrySchedule {
@@ -115,7 +124,8 @@ export class ChainProofRetrySchedule {
         for (const { jobId, identity } of candidates) {
           if (!this.admitObservation(jobId, identity, atMs, token)) continue;
           turns.set(jobId, {
-            defer: (cadence: ChainProofRetryCadence) => this.deferTurn(jobId, identity, cadence, token),
+            defer: (cadence: ChainProofRetryCadence, outcome?: AsyncLiftChainCheckOutcome) =>
+              this.deferTurn(jobId, identity, cadence, token, outcome),
             settled: () => this.settleTurn(jobId, identity),
           });
         }
@@ -149,7 +159,24 @@ export class ChainProofRetrySchedule {
     return entry.dueAt <= atMs;
   }
 
-  private deferTurn(jobId: string, identity: string, cadence: ChainProofRetryCadence, token: number): void {
+  /**
+   * The latest non-settling check of THIS incarnation, if this process recorded one (GH#2945). The
+   * identity must match: a replaced incarnation, a settled slot, a sweep or a restart all read as none.
+   */
+  lastCheckOf(jobId: string, identity: string): AsyncLiftLastChainCheck | undefined {
+    const entry = this.entries.get(jobId);
+    return entry !== undefined && entry.identity === identity && entry.kind === 'deferred'
+      ? entry.lastCheck
+      : undefined;
+  }
+
+  private deferTurn(
+    jobId: string,
+    identity: string,
+    cadence: ChainProofRetryCadence,
+    token: number,
+    outcome: AsyncLiftChainCheckOutcome | undefined,
+  ): void {
     const entry = this.entries.get(jobId);
     // A missing entry here means the slot was SETTLED after this turn was admitted (admission
     // always installs an entry; only settlement deletes one). Deferring must not resurrect it.
@@ -159,12 +186,16 @@ export class ChainProofRetrySchedule {
       ? CHAIN_PROOF_AWAITING_CONFIRMATIONS_BASE_CAP_MS
       : CHAIN_PROOF_BACKOFF_MAX_MS;
     const backoffMs = Math.min(CHAIN_PROOF_BACKOFF_BASE_MS * 2 ** (attempts - 1), capMs);
+    // ONE clock read, shared by the due time and the observation stamp: an injected clock that advances
+    // per read must see exactly the reads it always saw.
+    const nowMs = this.deps.now();
     this.entries.set(jobId, {
       kind: 'deferred',
       identity,
       observedToken: Math.max(token, entry.observedToken),
-      dueAt: this.deps.now() + backoffMs + Math.floor(this.deps.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
+      dueAt: nowMs + backoffMs + Math.floor(this.deps.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
       attempts,
+      ...(outcome === undefined ? {} : { lastCheck: { outcome, at: nowMs } }),
     });
   }
 

@@ -40,7 +40,7 @@ import type {
 // Type-only, and erased at emit — the reverse edge (types importing `LiftJobRetryProjection`
 // from here) is type-only too, so nothing circular survives into the JavaScript. The verdict
 // vocabulary stays defined once, beside the resolver contract that produces it.
-import type { AsyncLiftChainProofResolution } from './async-lift-publisher-types.js';
+import type { AsyncLiftChainProofResolution, AsyncLiftLastChainCheck } from './async-lift-publisher-types.js';
 
 /**
  * Might a transaction have been submitted for this job? Keyed on persisted EVIDENCE, never on the
@@ -582,6 +582,12 @@ export interface LiftJobRetryBlocker {
   readonly summary: string;
   /** Held job with an incomplete record: EVERY gap, in the order the headline code was chosen. */
   readonly missing?: readonly HeldRecoveryGap[];
+  /**
+   * `chain_recheck_pending` only, and only when the publisher runtime that runs the re-checks holds an
+   * observation for this exact incarnation (GH#2945): the latest re-check that did not settle the job.
+   * Never derived from the record, so it is attached by the daemon, not by {@link describeHeldBlocker}.
+   */
+  readonly lastCheck?: AsyncLiftLastChainCheck;
 }
 
 /**
@@ -637,10 +643,11 @@ export const LIFT_JOB_RETRY_BLOCKER_SUMMARY: Record<LiftJobRetryBlockerCode, str
     'While the publisher runtime is running and not paused, chain recovery re-checks this job on a '
     + 'bounded backoff. It finalizes the same job if the transaction mined, and releases a CREATE for '
     + 'a re-run only once the transaction is proven never sent; an UPDATE whose transaction never '
-    + 'landed stays held, because absence is never proof for an UPDATE. The latest lookup outcome is '
-    + 'not retained here, so this cannot say whether the provider is unavailable, the transaction is '
-    + 'still pending, or the proof is inconclusive. Waiting is the safe move; no operator action '
-    + 'manufactures a safe retry.',
+    + 'landed stays held, because absence is never proof for an UPDATE. When the running publisher '
+    + 'holds an observation of the latest re-check it is reported beside this text as `lastCheck`; '
+    + 'without one (no re-check yet, a restart, or no running runtime) this cannot say whether the '
+    + 'provider is unavailable, the transaction is still pending, or the proof is inconclusive. '
+    + 'Waiting is the safe move; no operator action manufactures a safe retry.',
   not_auto_retryable:
     'This failure is not one the publisher retries by itself, and it persisted no transaction '
     + 'evidence. `POST /api/publisher/retry` or re-submitting the identical request re-runs it as '

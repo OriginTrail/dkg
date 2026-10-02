@@ -236,6 +236,12 @@ export interface AsyncLiftPublisher {
    * it. Same concurrency contract as {@link recover}.
    */
   reconcileTransactions?(): Promise<number>;
+  /**
+   * The latest re-check of this HELD job that did not settle it, when this process holds one for this
+   * exact incarnation (GH#2945). In memory only: absent before the first re-check and after a restart,
+   * and only the publisher that runs the chain-proof dispatcher has it. Older implementations can omit it.
+   */
+  lastChainProofCheck?(job: PersistedLiftJob): AsyncLiftLastChainCheck | undefined;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
   /**
@@ -641,7 +647,33 @@ export type AsyncLiftChainProofResolution =
    */
   | { status: 'not-found' }
   /** Publisher-only: nothing was established. Never absence, never proof. */
-  | { status: 'inconclusive' };
+  | { status: 'inconclusive'; reason?: AsyncLiftChainProofInconclusiveReason };
+
+/**
+ * Why a lookup established nothing, when the resolver KNOWS (GH#2945). Closed and optional: a resolver
+ * that cannot say omits it, and the publisher copies only this exact literal. Absent means "not
+ * classified" - never "the chain RPC was fine".
+ */
+export type AsyncLiftChainProofInconclusiveReason = 'rpc-unavailable';
+
+/**
+ * What the most recent re-check of a held job found, as the publisher saw it (GH#2945): the chain's
+ * verdict status; `rpc-unavailable` when the resolver reported that the chain RPC could not answer;
+ * `deadline` when the pass's time budget ended before an answer; `error` when the lookup threw inside
+ * the publisher. Codes only - provider text can carry RPC URLs or keys.
+ */
+export type AsyncLiftChainCheckOutcome =
+  | AsyncLiftChainProofResolution['status']
+  | 'rpc-unavailable'
+  | 'deadline'
+  | 'error';
+
+/** The latest NON-SETTLING re-check of one held job incarnation, in this process's memory only. */
+export interface AsyncLiftLastChainCheck {
+  readonly outcome: AsyncLiftChainCheckOutcome;
+  /** When this node recorded it (the publisher's clock, epoch ms): the age of the observation. */
+  readonly at: number;
+}
 
 /**
  * GH#2270 PR-3 — everything a chain-proof lookup needs, and nothing else.
