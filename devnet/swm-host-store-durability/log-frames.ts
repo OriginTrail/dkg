@@ -3,7 +3,8 @@
  * `SwmHostModeStore` log into frames, decide from a snapshot taken at the
  * kill whether the recovery preserved every complete frame and never reused a
  * seqno, decide whether the `.meta` cursor covers a log that has stopped
- * growing, and decide whether host catch-up served exactly the frames on disk.
+ * growing, decide whether host catch-up served exactly the frames on disk, and
+ * decide when a log has been quiet for long enough.
  * No devnet, no I/O: covered by `log-frames.test.ts`.
  *
  * On-disk frame (see `packages/agent/src/swm/host-mode-store.ts`):
@@ -216,3 +217,27 @@ export function checkServedFrames(input: {
   return violations;
 }
 
+/**
+ * Decide when a store has stopped changing: the returned probe is true only
+ * once the same observation has been made over at least `quietMs`. The first
+ * sight of an observation never counts as quiet and a change restarts the
+ * interval, so a probe taken straight after an earlier read cannot pass before
+ * any time has gone by.
+ *
+ * The observation is whatever the caller reads on each probe. The suite passes
+ * the log size together with the `.meta` cursor: a frame is durable before its
+ * cursor, so a log that has stopped growing can still have a cursor write on
+ * its way.
+ */
+export function quietPeriodGate(quietMs: number): (observed: string | number, nowMs: number) => boolean {
+  let last: string | number | undefined;
+  let since = 0;
+  return (observed, nowMs) => {
+    if (observed !== last) {
+      last = observed;
+      since = nowMs;
+      return false;
+    }
+    return nowMs - since >= quietMs;
+  };
+}

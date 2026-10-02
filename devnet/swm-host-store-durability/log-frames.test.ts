@@ -10,6 +10,7 @@ import {
   checkNoSeqnoReuse,
   checkServedFrames,
   parseLog,
+  quietPeriodGate,
   type LogFrame,
   type ServedEntry,
 } from './log-frames.js';
@@ -259,6 +260,51 @@ describe('checkServedFrames', () => {
     expect(checkServedFrames({ expected: log.slice(0, 2), served: serve(log) }).join('\n'))
       .toMatch(/served 4 envelopes but the log holds 2 frames/);
     expect(checkServedFrames({ expected: log, served: serve([log[1]!, log[0]!, log[2]!, log[3]!]) })).toHaveLength(2);
+  });
+});
+
+describe('quietPeriodGate', () => {
+  it('never passes on the first sight of a size, however the probe is timed', () => {
+    const quiet = quietPeriodGate(6_000);
+    expect(quiet(100, 0)).toBe(false);
+    // The old gate compared a read with the one taken just before it and passed here.
+    expect(quiet(100, 1)).toBe(false);
+  });
+
+  it('passes once the size has been unchanged for the whole interval', () => {
+    const quiet = quietPeriodGate(6_000);
+    expect(quiet(100, 0)).toBe(false);
+    expect(quiet(100, 5_999)).toBe(false);
+    expect(quiet(100, 6_000)).toBe(true);
+  });
+
+  it('REGRESSION (review of the suite): growth after the first probe restarts the interval', () => {
+    const quiet = quietPeriodGate(6_000);
+    expect(quiet(100, 0)).toBe(false);
+    expect(quiet(100, 4_000)).toBe(false);
+    // A pending delivery lands: the quiet time so far does not count.
+    expect(quiet(140, 5_000)).toBe(false);
+    expect(quiet(140, 10_999)).toBe(false);
+    expect(quiet(140, 11_000)).toBe(true);
+  });
+
+  it('restarts on any change of size, a rewrite that shrinks the log included', () => {
+    const quiet = quietPeriodGate(1_000);
+    expect(quiet(100, 0)).toBe(false);
+    expect(quiet(100, 1_000)).toBe(true);
+    expect(quiet(60, 1_500)).toBe(false);
+    expect(quiet(60, 2_500)).toBe(true);
+  });
+
+  it('REGRESSION (live run): a cursor written after its frame restarts the interval', () => {
+    // Observed as "log size:cursor". The third frame is on disk, its cursor is not yet.
+    const quiet = quietPeriodGate(6_000);
+    expect(quiet('300:2', 0)).toBe(false);
+    expect(quiet('300:2', 5_000)).toBe(false);
+    // The log did not grow, but the cursor write landed.
+    expect(quiet('300:3', 5_500)).toBe(false);
+    expect(quiet('300:3', 11_499)).toBe(false);
+    expect(quiet('300:3', 11_500)).toBe(true);
   });
 });
 

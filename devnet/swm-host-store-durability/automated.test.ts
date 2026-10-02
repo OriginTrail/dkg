@@ -81,6 +81,7 @@ import {
   checkNoSeqnoReuse,
   checkServedFrames,
   parseLog,
+  quietPeriodGate,
   type ParsedLog,
   type ServedEntry,
 } from './log-frames.js';
@@ -88,6 +89,8 @@ import {
 const HOST = 4; // core
 const CURATOR = 5; // edge: the only allowlisted agent, the writer, and the catch-up requester
 const KILL_CYCLES = Number(process.env.SWM_HOST_KILL_CYCLES ?? 5);
+// How long the host log and its cursor must stay unchanged before the quiescent-state checks read them.
+const LOG_QUIET_MS = 6_000;
 const STAMP = Date.now().toString(36);
 
 // ─────────────────────────── node + fs helpers ────────────────────────────
@@ -163,6 +166,18 @@ function readMetaSeqno(cgId: string): number | null {
   } catch {
     return null; // absent or torn
   }
+}
+
+/**
+ * Wait until neither the host log nor its `.meta` cursor has changed for `LOG_QUIET_MS`. A frame is
+ * durable before its cursor, so the cursor of the last frame can still be on its way when the log
+ * has stopped growing.
+ */
+async function waitForQuietHostStore(label: string): Promise<void> {
+  const quiet = quietPeriodGate(LOG_QUIET_MS);
+  await waitFor(label, 120_000, 1_000, async () =>
+    quiet(`${logSize(cgId)}:${readMetaSeqno(cgId)}`, Date.now()) ? true : null,
+  );
 }
 
 function tempFiles(): string[] {
@@ -381,6 +396,8 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
     await waitFor('host log has frames for the CG', 120_000, 1_000, async () =>
       readLog(cgId).seqnos.length >= 3 ? true : null,
     );
+    // No writer is running yet: once the three deliveries have settled, the cursor covers the log.
+    await waitForQuietHostStore('host store quiescent after the first shares');
     const log = readLog(cgId);
     expect(log.validLength).toBe(log.size);
     expect(log.seqnos).toEqual([...new Set(log.seqnos)].sort((a, b) => a - b));
@@ -488,14 +505,9 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
   }, 1_800_000);
 
   it('the curator edge pages the restarted host with strict-greater-than seqnos and reaches the end', async () => {
-    // Quiesce: the writer is stopped; wait for the log to stop growing.
-    let last = logSize(cgId);
-    await waitFor('host log quiescent', 120_000, 4_000, async () => {
-      const now = logSize(cgId);
-      const stable = now === last;
-      last = now;
-      return stable ? true : null;
-    });
+    // Quiesce: the writer is stopped, but a delivery may still be on its way. Wait until neither the
+    // log nor its cursor has changed for a measured interval, so nothing is in flight when they are read.
+    await waitForQuietHostStore('host store quiescent after the kill cycles');
     const log = readLog(cgId);
     expect(log.validLength).toBe(log.size);
     expect(log.seqnos.length).toBeGreaterThanOrEqual(KILL_CYCLES + 3);

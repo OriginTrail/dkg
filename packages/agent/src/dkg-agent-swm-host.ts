@@ -200,6 +200,7 @@ import {
   decodeSwmHostCatchupResponse,
   DEFAULT_MAX_BYTES as SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES,
   DEFAULT_MAX_ENTRIES as SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES,
+  normalizeCatchupMaxEntries,
   SWM_HOST_CATCHUP_WIRE_VERSION,
   type SwmHostCatchupResponseEntry,
 } from './swm/host-catchup-wire.js';
@@ -8702,7 +8703,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const ctx = createOperationContext('share');
     let sinceSeqno = options?.sinceSeqno ?? 0;
     const maxRounds = Math.max(1, options?.maxRounds ?? 8);
-    const maxEntries = options?.maxEntriesPerRound ?? SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES;
+    // Signed and sent as the same value: the digest binds `maxEntries`.
+    const maxEntries = normalizeCatchupMaxEntries(options?.maxEntriesPerRound);
     const maxBytes = SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES;
     // OT-RFC-38 LU-6 B1 — every catchup request is signed by the
     // requesting participant key so the host can authenticate via

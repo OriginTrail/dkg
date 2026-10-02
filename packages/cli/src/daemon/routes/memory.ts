@@ -1176,7 +1176,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
   // Body: { contextGraphId: string, peerId?: string, sinceSeqno?: number, maxRounds?: number,
   //         maxEntriesPerRound?: number, includeEntries?: boolean }
   //
-  // `maxEntriesPerRound` asks each host for smaller pages than its default.
+  // `maxEntriesPerRound` sets the page size asked of each host. The agent
+  // signs and sends the value capped at the protocol's limit of 1024 entries.
   // `includeEntries` adds, per peer, the seqno and SHA-256 of every envelope
   // that peer served, in order: the evidence of what a host holds.
   //
