@@ -2440,14 +2440,18 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
 
   async function subscribeWith(opts: {
     authority: 'allowed' | 'denied' | 'unavailable' | 'throw';
+    contextGraphId?: string;
+    onChainId?: bigint;
   }): Promise<{
     status: number;
     body: Record<string, unknown>;
     retryAfter: string | null;
     subscribeCalled: boolean;
+    subscribeOptions: Record<string, unknown> | undefined;
     catchupJobs: number;
   }> {
-    const contextGraphId = 'cg-1596-' + Math.random().toString(36).slice(2, 8);
+    const contextGraphId = opts.contextGraphId
+      ?? 'cg-1596-' + Math.random().toString(36).slice(2, 8);
     const catchupTracker = {
       jobs: new Map<string, any>(),
       latestByContextGraph: new Map<string, string>(),
@@ -2472,6 +2476,7 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
     } as any;
 
     let subscribeCalled = false;
+    let subscribeOptions: Record<string, unknown> | undefined;
     let observedReadOpts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
@@ -2501,12 +2506,14 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
               metadataBootstrap: opts.authority === 'denied'
                 ? 'forbidden' as const
                 : 'eligible' as const,
+              ...(opts.onChainId === undefined ? {} : { onChainId: opts.onChainId }),
             };
           },
           getDefaultAgentAddress: () => CALLER,
           getSubscribedContextGraphs: () => new Map(),
-          subscribeToContextGraph: () => {
+          subscribeToContextGraph: (_id: string, options: Record<string, unknown>) => {
             subscribeCalled = true;
+            subscribeOptions = options;
             return {
               subscribed: true,
               synced: false,
@@ -2576,6 +2583,7 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
         body: await response.json() as Record<string, unknown>,
         retryAfter: response.headers.get('retry-after'),
         subscribeCalled,
+        subscribeOptions,
         catchupJobs: catchupTracker.jobs.size,
       };
     } finally {
@@ -2594,6 +2602,19 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
     });
     expect(status).toBe(200);
     expect(subscribeCalled).toBe(true);
+  });
+
+  it('carries an admission-authorized numeric slot into the durable subscription boundary', async () => {
+    const result = await subscribeWith({
+      authority: 'allowed',
+      contextGraphId: '298',
+      onChainId: 298n,
+    });
+    expect(result.status).toBe(200);
+    expect(result.subscribeOptions).toEqual({
+      syncMode: 'always-on',
+      onChainId: '298',
+    });
   });
 
   it('403s a private non-member even when no local allowlist is available', async () => {

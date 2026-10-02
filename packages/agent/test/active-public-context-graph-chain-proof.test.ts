@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { createOperationContext } from '@origintrail-official/dkg-core';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { Rfc64AuthorityReadCoordinatorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import type { ContextGraphRegistrationBinding } from '../src/dkg-agent-cg-registry.js';
 import {
   memoizeActivePublicContextGraphChainProof,
   resolveActivePublicContextGraphChainProof,
@@ -10,8 +15,20 @@ import {
 
 interface ChainProofAgentFixtureInput {
   readonly chain: Record<string, unknown>;
-  readonly getContextGraphOnChainId: (contextGraphId: string) => Promise<string | null>;
+  readonly getContextGraphOnChainId: (
+    contextGraphId: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<string | null>;
   readonly contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
+  /**
+   * The finalized registration binding an indexed adapter's proof takes its
+   * identity from. By default it serves `getContextGraphOnChainId`'s answer,
+   * with a miss as finalized absence.
+   */
+  readonly resolveContextGraphRegistrationBinding?: (
+    contextGraphId: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<ContextGraphRegistrationBinding>;
 }
 
 function createChainProofAgentFixture(input: ChainProofAgentFixtureInput): DKGAgent {
@@ -19,6 +36,16 @@ function createChainProofAgentFixture(input: ChainProofAgentFixtureInput): DKGAg
   Object.assign(agent, {
     chain: input.chain,
     getContextGraphOnChainId: input.getContextGraphOnChainId,
+    resolveContextGraphRegistrationBinding: input.resolveContextGraphRegistrationBinding
+      ?? (async (
+        contextGraphId: string,
+        options?: { signal?: AbortSignal },
+      ): Promise<ContextGraphRegistrationBinding> => {
+        const onChainId = await input.getContextGraphOnChainId(contextGraphId, options);
+        return onChainId === null
+          ? { kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' }
+          : { kind: 'registered', onChainId: BigInt(onChainId), provenance: 'name-hash' };
+      }),
     contextGraphExists: input.contextGraphExists ?? (async () => false),
     subscribedContextGraphs: new Map(),
     wireIdToLocalCgId: new Map(),
@@ -108,6 +135,69 @@ describe('active-public Context Graph chain proof', () => {
     expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
   });
 
+  describe('indexed identity (#2827 follow-up)', () => {
+    const contextGraphId = 'indexed/member-cg';
+    const publicSnapshot = {
+      contextGraphId: '42',
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      active: true,
+      accessPolicy: 0,
+    };
+    // The current-state lookup falls back to a live registry range scan, which
+    // for a graph that was never registered covers the chain's whole history.
+    const liveLookup = async (): Promise<string | null> => {
+      throw new Error('the live name-hash lookup must not run on an indexed adapter');
+    };
+
+    function indexedAgent(binding: ContextGraphRegistrationBinding) {
+      const readBatchedSnapshot = vi.fn(async () => publicSnapshot);
+      const registrationBinding = vi.fn(async () => binding);
+      const agent = createChainProofAgentFixture({
+        chain: { contextGraphAuthorityIndexRevisionReader: {} },
+        getContextGraphOnChainId: vi.fn(liveLookup),
+        resolveContextGraphRegistrationBinding: registrationBinding,
+      });
+      Object.assign(agent, {
+        readRfc64BatchedFinalizedAuthoritySnapshotV1: readBatchedSnapshot,
+      });
+      return { agent, readBatchedSnapshot, registrationBinding };
+    }
+
+    it('takes a registered id from the finalized registration binding', async () => {
+      const { agent, readBatchedSnapshot, registrationBinding } = indexedAgent(
+        { kind: 'registered', onChainId: 42n, provenance: 'name-hash' },
+      );
+
+      await expect(resolveStrictPublicProof(agent, contextGraphId)).resolves.toEqual({
+        state: 'public',
+      });
+      expect(registrationBinding).toHaveBeenCalledWith(contextGraphId, { signal: undefined });
+      expect(readBatchedSnapshot).toHaveBeenCalledWith('42', undefined);
+      expect((agent as any).getContextGraphOnChainId).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['finalized absence', {
+        kind: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+      }, { state: 'not-public', reason: 'unregistered' }],
+      ['an unregistered answer', { kind: 'unregistered' }, {
+        state: 'not-public',
+        reason: 'unregistered',
+      }],
+      ['an unanswered read', { kind: 'unavailable', reason: 'authority-circuit-open' }, {
+        state: 'unknown',
+        reason: 'unprovable',
+      }],
+    ] as const)('answers %s without the live lookup', async (_label, binding, expected) => {
+      const { agent, readBatchedSnapshot } = indexedAgent(binding);
+
+      await expect(resolveStrictPublicProof(agent, contextGraphId)).resolves.toEqual(expected);
+      expect(readBatchedSnapshot).not.toHaveBeenCalled();
+      expect((agent as any).getContextGraphOnChainId).not.toHaveBeenCalled();
+    });
+  });
+
   it('reuses one finalized authority snapshot instead of point-reading identity and policy', async () => {
     const contextGraphId = 'indexed/public-cg';
     const getContextGraphNameHash = vi.fn(async () => {
@@ -141,7 +231,8 @@ describe('active-public Context Graph chain proof', () => {
     await expect(resolveStrictPublicProof(agent, contextGraphId)).resolves.toEqual({
       state: 'public',
     });
-    expect(readBatchedSnapshot).toHaveBeenCalledWith('42');
+    // No caller deadline here, so no signal reaches the shared read.
+    expect(readBatchedSnapshot).toHaveBeenCalledWith('42', undefined);
     expect(getContextGraphNameHash).not.toHaveBeenCalled();
     expect(isContextGraphActiveOnChain).not.toHaveBeenCalled();
     expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
@@ -320,5 +411,160 @@ describe('active-public Context Graph chain proof', () => {
     });
     expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
     expect(getContextGraphAccessPolicy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('caller deadline on the active-public chain proof', () => {
+  const contextGraphId = 'indexed/deadline-cg';
+  const publicSnapshot = {
+    contextGraphId: '42',
+    nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+    active: true,
+    accessPolicy: 0,
+  };
+
+  function deadlineFixture(getContextGraphOnChainId: (
+    id: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<string | null> = async () => '42') {
+    const onChainId = vi.fn(getContextGraphOnChainId);
+    const readBatchedSnapshot = vi.fn(async (_id: string, _signal?: AbortSignal) => publicSnapshot);
+    const agent = createChainProofAgentFixture({
+      chain: { contextGraphAuthorityIndexRevisionReader: {} },
+      getContextGraphOnChainId: onChainId,
+    });
+    Object.assign(agent, {
+      readRfc64BatchedFinalizedAuthoritySnapshotV1: readBatchedSnapshot,
+    });
+    return { agent, onChainId, readBatchedSnapshot };
+  }
+
+  it('forwards the caller signal to the id lookup and the finalized authority read', async () => {
+    const f = deadlineFixture();
+    const { signal } = new AbortController();
+
+    await expect(f.agent.resolveActivePublicContextGraphChainProof(
+      contextGraphId,
+      createOperationContext('sync'),
+      signal,
+    )).resolves.toEqual({ state: 'public' });
+
+    expect(f.onChainId).toHaveBeenCalledWith(contextGraphId, { signal });
+    expect(f.readBatchedSnapshot).toHaveBeenCalledWith('42', signal);
+  });
+
+  it('starts no chain read for a caller that has already given up', async () => {
+    const f = deadlineFixture();
+    const controller = new AbortController();
+    controller.abort(new Error('deadline passed'));
+
+    await expect(f.agent.resolveActivePublicContextGraphChainProof(
+      contextGraphId,
+      createOperationContext('sync'),
+      controller.signal,
+    )).resolves.toEqual({ state: 'unknown', reason: 'rpc-failure', detail: 'deadline passed' });
+
+    expect(f.onChainId).not.toHaveBeenCalled();
+    expect(f.readBatchedSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('does not queue the finalized authority read once the id lookup outlived the caller', async () => {
+    const controller = new AbortController();
+    const f = deadlineFixture(async () => {
+      controller.abort(new Error('deadline passed during id lookup'));
+      return '42';
+    });
+
+    await expect(f.agent.resolveActivePublicContextGraphChainProof(
+      contextGraphId,
+      createOperationContext('sync'),
+      controller.signal,
+    )).resolves.toMatchObject({ state: 'unknown', reason: 'rpc-failure' });
+
+    expect(f.readBatchedSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('threads the caller signal from metadata confirmation into the chain proof', async () => {
+    const resolveProof = vi.fn(async () => ({ state: 'unknown', reason: 'unprovable' } as const));
+    const agent = {
+      store: {
+        query: async () => ({ type: 'boolean', value: false }),
+      } as unknown as TripleStore,
+      localApprovedAgentByCG: new Map(),
+      subscribedContextGraphs: new Map(),
+      resolveActivePublicContextGraphChainProof: resolveProof,
+      isPrivateContextGraph: async () => true,
+    };
+    const { signal } = new AbortController();
+
+    await expect(LifecycleSyncMethods.prototype.hasConfirmedMetaState.call(
+      agent as never,
+      contextGraphId,
+      { signal },
+    )).resolves.toBe(false);
+
+    expect(resolveProof).toHaveBeenCalledWith(contextGraphId, expect.any(Object), signal);
+  });
+});
+
+describe('finalized authority read turn on the shared coordinator', () => {
+  function coordinatorFixture(
+    readSnapshots: (
+      targets: readonly string[],
+      options: { signal?: AbortSignal },
+    ) => Promise<ReadonlyMap<string, unknown>>,
+  ) {
+    const coordinator = new Rfc64AuthorityReadCoordinatorV1();
+    const chainRead = vi.fn(readSnapshots);
+    const agent = Object.create(DKGAgent.prototype) as DKGAgent;
+    Object.assign(agent, {
+      rfc64PublicCatalogOwnerV1: { authorityReads: coordinator },
+      chain: {
+        contextGraphAuthorityIndexRevisionReader: {
+          readContextGraphAuthorityIndexSnapshots: chainRead,
+          whenIdle: async () => undefined,
+        },
+      },
+    });
+    return { agent, coordinator, chainRead };
+  }
+
+  it('drops a queued read whose caller gave up before its turn', async () => {
+    const f = coordinatorFixture(async () => new Map());
+    let releaseBlocker!: () => void;
+    const blocker = f.coordinator.run(undefined, () => new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    }));
+    const caller = new AbortController();
+
+    const read = f.agent.readRfc64BatchedFinalizedAuthoritySnapshotV1('9', caller.signal);
+    caller.abort(new Error('deadline passed'));
+    await expect(read).rejects.toThrow('deadline passed');
+
+    releaseBlocker();
+    await blocker;
+    await expect(f.coordinator.run(undefined, async () => 'next read')).resolves.toBe('next read');
+    expect(f.chainRead).not.toHaveBeenCalled();
+  });
+
+  it('cancels an in-flight read whose caller gave up, releasing the turn', async () => {
+    const f = coordinatorFixture((_targets, options) => new Promise((_resolve, reject) => {
+      // A read that only ends when it is cancelled.
+      options.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+        once: true,
+      });
+    }));
+    const caller = new AbortController();
+
+    const read = f.agent.readRfc64BatchedFinalizedAuthoritySnapshotV1('9', caller.signal);
+    await vi.waitFor(() => expect(f.chainRead).toHaveBeenCalledOnce());
+    caller.abort(new Error('deadline passed'));
+    await expect(read).rejects.toThrow('deadline passed');
+
+    const next = f.coordinator.run(undefined, async () => 'next read');
+    await expect(Promise.race([
+      next,
+      new Promise((resolve) => setTimeout(() => resolve('turn still held'), 1_000)),
+    ])).resolves.toBe('next read');
   });
 });

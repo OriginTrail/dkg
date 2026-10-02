@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TypedEventBus,
@@ -179,6 +180,37 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
     expect(verdict.accepted).toBe(true);
   });
 
+  it('reads projected authority once across the agent and peer gates', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let metaLookups = 0;
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      contextGraphMetaOracle: async () => {
+        metaLookups += 1;
+        return {
+          allowedAgents: [allowed.address],
+          participantAgents: [],
+          revokedAgents: [],
+          allowedPeers: [PUBLISHER_PEER_ID],
+        };
+      },
+    });
+
+    const raw = workspaceMessage('Host Auth Projected Once', 'op-host-auth-projected-once');
+    const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+    const wire = await signWorkspaceMessage(allowed, encrypted);
+
+    const verdict = await handler.verifyHostModeEnvelopeAuthority(
+      wire,
+      CONTEXT_GRAPH_ID,
+      PUBLISHER_PEER_ID,
+    );
+
+    expect(verdict.accepted).toBe(true);
+    expect(metaLookups).toBe(1);
+  });
+
   it('accepts when there is no peer allowlist (agent gate is the only requirement)', async () => {
     // Curated CGs with an agent gate but no peer-gate are valid;
     // any libp2p peer may relay as long as the signing agent is
@@ -325,6 +357,55 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
 
       expect(verdict.accepted).toBe(true);
       expect(oracleCalls).toBe(1);
+    });
+
+    it('preserves the handler receiver when invoking the injected chain oracle', async () => {
+      const allowed = ethers.Wallet.createRandom();
+      const recipientKey = recipientKeyFor(allowed.address);
+      let receiverWasHandler = false;
+      let handler: SharedMemoryHandler;
+      const oracle = async function (this: unknown, cgId: string) {
+        receiverWasHandler = this === handler;
+        expect(cgId).toBe(CONTEXT_GRAPH_ID);
+        return [allowed.address];
+      };
+      const raw = workspaceMessage('Receiver-Safe Chain Fallback', 'op-host-auth-receiver');
+      const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+      const wire = await signWorkspaceMessage(allowed, encrypted);
+      handler = makeHandlerWithChainOracle(oracle);
+
+      const verdict = await handler.verifyHostModeEnvelopeAuthority(
+        wire,
+        CONTEXT_GRAPH_ID,
+        HOST_PEER_ID,
+      );
+
+      expect(verdict.accepted).toBe(true);
+      expect(receiverWasHandler).toBe(true);
+    });
+
+    it('attributes the host-envelope caller instead of its inner host-admission oracle', async () => {
+      const allowed = ethers.Wallet.createRandom();
+      const recipientKey = recipientKeyFor(allowed.address);
+      const tracker = new RpcUsageTracker(() => '31337');
+      const oracle = async () => withRpcUsageConsumer(
+        'cgStorage.getContextGraph',
+        () => {
+          tracker.record('eth_call');
+          return [allowed.address];
+        },
+      );
+      const raw = workspaceMessage('Attributed Host Admission', 'op-host-auth-attributed');
+      const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+      const wire = await signWorkspaceMessage(allowed, encrypted);
+
+      const verdict = await makeHandlerWithChainOracle(oracle)
+        .verifyHostModeEnvelopeAuthority(wire, CONTEXT_GRAPH_ID, HOST_PEER_ID);
+
+      expect(verdict.accepted).toBe(true);
+      expect(tracker.drainWindow().ethCallByConsumer).toEqual({
+        'cgStorage.getContextGraph:cgAuth.hostEnvelope': 1,
+      });
     });
 
     it('prefers the local store when allowlist triples are present (chain oracle not consulted)', async () => {

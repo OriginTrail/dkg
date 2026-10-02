@@ -130,11 +130,18 @@ describe('Workspace E2E (2 nodes)', () => {
   }, 5000);
 
   it('node A enshrines workspace to data graph', async () => {
-    const result = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, 'all');
+    // A 10.0.19 receiver refuses legacy (not graph-scoped) ACK requests, so
+    // the shared data is published as a graph-scoped assertion.
+    await nodeA.assertion.create(CONTEXT_GRAPH, 'workspace-draft');
+    await nodeA.assertion.write(CONTEXT_GRAPH, 'workspace-draft', [
+      { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Workspace Draft"' },
+      { subject: ENTITY, predicate: 'http://schema.org/description', object: '"Replicated via workspace topic"' },
+    ]);
+    await nodeA.assertion.promote(CONTEXT_GRAPH, 'workspace-draft');
+    const result = await nodeA.publishFromFinalizedAssertion(CONTEXT_GRAPH, 'workspace-draft');
     expect(result.status).toBe('confirmed');
-    expect(result.kaManifest.length).toBe(1);
-    expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
-  }, 15000);
+    expect(result.ual).toBeDefined();
+  }, 30000);
 
   it('node A sees enshrined data in data graph', async () => {
     const dataGraphResult = await nodeA.query(

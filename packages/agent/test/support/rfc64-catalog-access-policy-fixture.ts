@@ -8,7 +8,10 @@ import {
   type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
 
-import { Rfc64CatalogAccessPolicyRegistryV1 } from '../../src/rfc64/catalog-access-policy-v1.js';
+import {
+  Rfc64CatalogAccessPolicyRegistryV1,
+  type Rfc64CatalogLocalAuthorizationScopeV1,
+} from '../../src/rfc64/catalog-access-policy-v1.js';
 
 export function createRfc64CatalogAccessPolicyRegistryFixture(options: {
   readonly localAgentAddress: EvmAddressV1;
@@ -20,12 +23,23 @@ export function createRfc64CatalogAccessPolicyRegistryFixture(options: {
   readonly policyDigest: Digest32V1;
   readonly ownerAddress: EvmAddressV1;
   readonly curatorAddress: EvmAddressV1;
+  readonly resolveLocalAgentAddress?: (
+    contextGraphId: ContextGraphIdV1,
+    scope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
+  ) => Promise<EvmAddressV1 | null>;
 }): Rfc64CatalogAccessPolicyRegistryV1 {
   const networkId = options.networkId ?? 'otp:20430';
-  const registry = new Rfc64CatalogAccessPolicyRegistryV1({
-    localAgentAddress: options.localAgentAddress,
-    resolveRemoteAgentAddress: async () => options.remoteAgentAddress,
-  });
+  const registry = new Rfc64CatalogAccessPolicyRegistryV1(
+    options.resolveLocalAgentAddress === undefined
+      ? {
+        localAgentAddress: options.localAgentAddress,
+        resolveRemoteAgentAddress: async () => options.remoteAgentAddress,
+      }
+      : {
+        resolveLocalAgentAddress: options.resolveLocalAgentAddress,
+        resolveRemoteAgentAddress: async () => options.remoteAgentAddress,
+      },
+  );
   const policy = {
     networkId,
     contextGraphId: options.contextGraphId,

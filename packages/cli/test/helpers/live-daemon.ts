@@ -34,6 +34,24 @@ const CLI_ENTRY = join(__dirname, '..', '..', 'dist', 'cli.js');
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The same address in another letter case, so a guard has to compare it
+ * case-insensitively. Returns upper case, or lower case when the EIP-55
+ * checksum already has every hex letter in upper case (about 1 in 4,000
+ * addresses). These are the two spellings EIP-55 accepts without a checksum;
+ * inverting each letter's case instead gives a bad checksum, which
+ * `ethers.isAddress` rejects. Throws for an address with no hex letters,
+ * which has no other spelling.
+ */
+export function caseVariantAddress(address: string): string {
+  const upperCase = `0x${address.slice(2).toUpperCase()}`;
+  const variant = upperCase === address ? address.toLowerCase() : upperCase;
+  if (variant === address) {
+    throw new Error(`${address} has no hex letters, so it has no other letter case`);
+  }
+  return variant;
+}
+
 export interface LiveDaemon {
   home: string;
   apiPort: number;
@@ -80,7 +98,21 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
     ? { type: 'mock' as const }
     : (() => {
         const { rpcUrl, hubAddress } = getSharedContext();
-        return { type: 'evm' as const, rpcUrl, hubAddress, chainId: 'evm:31337' };
+        // The shipped default budget (10 rps, queue 256) exists to protect a
+        // SHARED, METERED public RPC. This harness points at a dedicated
+        // loopback Hardhat node with no such limit, so the default only makes
+        // the daemon throttle ITSELF. That matters because governor admission
+        // is awaited inside `request.getUrlFunc` (rpc-request-transport.ts),
+        // so queue wait is spent inside every RPC's own timeout window: a
+        // queued-but-healthy `eth_chainId` can burn its whole budget before it
+        // is ever dispatched. Same reasoning as status-route-rpc.test.ts.
+        return {
+          type: 'evm' as const,
+          rpcUrl,
+          hubAddress,
+          chainId: 'evm:31337',
+          rpcRequestBudget: { maxRequestsPerSecond: 1_000, burstRequests: 1_000 },
+        };
       })();
 
   await writeFile(
