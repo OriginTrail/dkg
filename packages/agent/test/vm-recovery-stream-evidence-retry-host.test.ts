@@ -63,7 +63,7 @@ afterEach(async () => {
 
 describe('registered-public observation gating the stream wire', () => {
   it('keeps the original single read per pass, and the legacy wire, when preparation is off', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness();
     h.authority.mockResolvedValueOnce(unavailable).mockResolvedValue(available);
     await h.run();
@@ -73,8 +73,8 @@ describe('registered-public observation gating the stream wire', () => {
   });
 
   it('asks once more at pass start, then uses the stream wire from the first provider', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const h = await harness({ retryIntervalMs: 40 });
     h.authority.mockResolvedValueOnce(unavailable).mockResolvedValue(available);
     await h.run();
@@ -85,8 +85,8 @@ describe('registered-public observation gating the stream wire', () => {
   });
 
   it('restores the stream wire for the later providers when the observation recovers during the pass', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const h = await harness({ retryIntervalMs: 30, olderDelayMs: 80 });
     // Both reads at pass start miss, the first provider (legacy only) takes longer than the
     // retry spacing, and the read made before the next provider answers.
@@ -107,8 +107,8 @@ describe('registered-public observation gating the stream wire', () => {
   });
 
   it('starts the next-batch sizing reads only after the first read of the observation', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const h = await harness({ retryIntervalMs: 40 });
     const events: string[] = [];
     h.authority.mockImplementation(async () => { events.push('authority'); return available; });
@@ -128,8 +128,8 @@ describe('registered-public observation gating the stream wire', () => {
   });
 
   it('never reads it more often than the spacing allows', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const h = await harness({ retryIntervalMs: 60 });
     h.authority.mockResolvedValue(unavailable);
     await h.run();
@@ -140,8 +140,8 @@ describe('registered-public observation gating the stream wire', () => {
   });
 
   it('stays bounded by the number of provider attempts when the observation never recovers', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const h = await harness({ retryIntervalMs: 0 });
     h.authority.mockResolvedValue(unavailable);
     await h.run();
@@ -150,8 +150,8 @@ describe('registered-public observation gating the stream wire', () => {
   });
 
   it('does not treat a private graph as a transient miss', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const h = await harness({ retryIntervalMs: 40 });
     h.authority.mockResolvedValue({ kind: 'private', onChainId: 1n } as never);
     await h.run();
@@ -164,8 +164,8 @@ describe('registered-public observation gating the stream wire', () => {
       cg, h.contextGraphId, h.targets.filter(item => !h.recovered.has(item.ordinal)), 100, () => true);
 
     it('hands each exchange its pass\'s fresh answer while it runs, and revokes it afterwards', async () => {
-      vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-      vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+      vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+      vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
       const h = await harness();
       h.authority.mockResolvedValue(available);
       await h.run();
@@ -179,7 +179,7 @@ describe('registered-public observation gating the stream wire', () => {
     });
 
     it('hands nothing when preparation is off', async () => {
-      vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+      vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
       const h = await harness();
       h.authority.mockResolvedValue(available);
       await h.run();
@@ -188,8 +188,8 @@ describe('registered-public observation gating the stream wire', () => {
     });
 
     it('never makes an unavailable or private answer usable', async () => {
-      vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-      vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+      vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+      vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
       for (const answer of [unavailable, { kind: 'private', onChainId: 1n } as never]) {
         const h = await harness({ retryIntervalMs: 40 });
         h.authority.mockResolvedValue(answer);
@@ -200,8 +200,8 @@ describe('registered-public observation gating the stream wire', () => {
     });
 
     it('gives the next pass its own answer: one that no longer sees a public graph gets nothing usable', async () => {
-      vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-      vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+      vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+      vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
       const h = await harness({ retryIntervalMs: 40 });
       h.authority.mockResolvedValue(available);
       await h.run();
@@ -215,14 +215,14 @@ describe('registered-public observation gating the stream wire', () => {
     });
 
     it('never carries an answer from one pass into a pass that reads nothing', async () => {
-      vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
-      vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+      vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+      vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
       const h = await harness({ retryIntervalMs: 40 });
       h.authority.mockResolvedValue(available);
       await h.run();
       const firstPass = h.handedOver.length;
       // The stream experiment is switched off, so the next pass makes no authority read at all.
-      vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
+      vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0');
       await nextPass(h);
       const secondPass = h.handedOver.slice(firstPass);
       expect(secondPass.length).toBeGreaterThan(0);

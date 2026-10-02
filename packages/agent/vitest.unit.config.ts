@@ -72,6 +72,7 @@ export default defineConfig({
       "test/vm-recovery-experimental-stream-host.test.ts",
       "test/exact-batch-stream-binding.test.ts",
       "test/exact-batch-stream-host-verdict.test.ts",
+      "test/exact-batch-stream-responder-switch.test.ts",
       "test/exact-graph-content-export.test.ts",
       "test/vm-recovery-local-admission.test.ts",
       "test/exact-asset-responder.test.ts",

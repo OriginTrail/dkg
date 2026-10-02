@@ -153,7 +153,7 @@ async function storedRows(store: OxigraphStore, graph: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+  vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
   vi.mocked(runDurableSyncDetailed).mockResolvedValue({ result: emptyResult(), exactFetchDisposition: 'incomplete' });
   vi.mocked(runChallengeExactAssetFetch).mockResolvedValue({ result: emptyResult(), disposition: 'incomplete', authenticatedAssets: [] });
 });
@@ -171,7 +171,7 @@ describe('experimental exact batch actual host completion verdict', () => {
     ['public authority absent', 'stream-preferred'],
   ] as const)('does not read requester identity when ordinary recovery is selected: %s', async (boundary, mode) => {
     const f = fixture();
-    if (boundary === 'opt-in absent') vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
+    if (boundary === 'opt-in absent') vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0');
     else if (boundary === 'protocol absent') f.host.getPeerProtocols.mockResolvedValue([]);
     else if (boundary === 'public authority absent') f.host.resolveRegisteredContextGraphAuthority.mockResolvedValue({ kind: 'private' });
     const peerIdRead = vi.fn(() => { throw new Error('An unstarted requester has no peer identity'); });
@@ -193,7 +193,7 @@ describe('experimental exact batch actual host completion verdict', () => {
 
   it('keeps a required stream pending when opt-in is absent without ordinary replay', async () => {
     const f = fixture();
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0');
     expect(await f.run(f.selection, 'stream-required')).toMatchObject({
       exactFetchDisposition: 'incomplete', result: { complete: false, failedPhases: 1, insertedTriples: 0 },
     });
@@ -654,7 +654,7 @@ describe('experimental exact batch actual host completion verdict', () => {
   });
 
   it.each([undefined, '0'])('keeps requester on legacy transport when opt-in is %s', async flag => {
-    const f = fixture(); vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', flag);
+    const f = fixture(); vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', flag);
     await f.run();
     expect(runDurableSyncDetailed).toHaveBeenCalledOnce();
     expect(exchangeExperimentalExactBatch).not.toHaveBeenCalled();

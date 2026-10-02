@@ -110,8 +110,8 @@ when they diverge after a future update?
 - The contract is explicit: Stream Registrations are public artefacts;
   Kafka auth gates the stream itself.
 - Forks needing private visibility are pointed at Path C (custom
-  RoutePlugin) — the same escape hatch ADR 0001 already advertises for
-  "I need something the plugin doesn't model" cases.
+  RoutePlugin) — the same escape hatch ADR 0001 (daemon route plugins)
+  already advertises for "I need something the plugin doesn't model" cases.
 
 ### Negative / accepted trade-offs
 
@@ -149,7 +149,7 @@ when they diverge after a future update?
   (the `{ public }` envelope wrap)
 - Regression guard: `packages/kafka-plugin/test/kafka-plugin-api.e2e.test.ts`
 - Glossary: `packages/kafka-plugin/CONTEXT.md` → **Stream Registration**
-- Sibling decisions: `docs/adr/0001-daemon-route-plugins.md`,
+- Sibling decisions: `docs/archive/internal/adr/0001-daemon-route-plugins.md`,
   `docs/adr/0002-kafka-plugin-extension-pattern.md`,
   `docs/adr/0003-dkg-streams-ontology-uri.md`,
   `docs/adr/0004-kafka-plugin-always-invariant-baseline.md`

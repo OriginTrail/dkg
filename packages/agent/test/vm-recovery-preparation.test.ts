@@ -413,17 +413,17 @@ describe('VM recovery preparation owner', () => {
   });
 });
 
-describe('typed experimental switch', () => {
+describe('typed opt-in switch', () => {
   afterEach(() => vi.unstubAllEnvs());
 
   it('is off by default and follows env then config', () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', undefined);
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', undefined);
     expect(resolveVmRecoveryPrefetchEnabled()).toBe(false);
     expect(resolveVmRecoveryPrefetchEnabled(true)).toBe(true);
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     expect(resolveVmRecoveryPrefetchEnabled()).toBe(true);
     expect(resolveVmRecoveryPrefetchEnabled(false)).toBe(true);
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '0');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '0');
     expect(resolveVmRecoveryPrefetchEnabled(true)).toBe(false);
   });
 });
