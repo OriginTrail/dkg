@@ -7,6 +7,8 @@ import {
 import {
   buildAuthoritativePrivateMetaMemberProofQuery,
 } from './context-graph-private-meta-proof.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+import { stripLiteral } from './dkg-agent-utils.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/u;
@@ -27,6 +29,52 @@ export interface ApprovedPrivateReplicaAuthority {
 }
 
 /**
+ * Result of the one source-qualified private-member proof.
+ *
+ * A canonical on-chain id in the exact private definition makes the proof
+ * ineligible for unregistered-replica authority, but legacy adapters still
+ * need to distinguish that fully proved registered-metadata shape from an
+ * invalid bare-name proof. Only the legacy compatibility route consumes the
+ * latter result; finalized absence never does.
+ */
+export type ApprovedPrivateReplicaAuthorityResolution =
+  | Readonly<{
+      kind: 'unregistered-private-replica';
+      authority: ApprovedPrivateReplicaAuthority;
+    }>
+  | Readonly<{
+      kind: 'confirmed-registered-meta';
+      onChainId: string;
+      authority: ApprovedPrivateReplicaAuthority;
+    }>;
+
+/**
+ * Classify the exact own-meta on-chain binding returned by the same proof.
+ * `null` means absent; `undefined` means malformed, ambiguous, or a mixed
+ * bound/unbound result and therefore fails closed.
+ */
+function parseRegisteredMetaOnChainId(
+  bindings: readonly Readonly<Record<string, string>>[],
+): string | null | undefined {
+  const values = new Set<string>();
+  let sawUnbound = false;
+  for (const binding of bindings) {
+    const raw = binding['contextGraphOnChainId'];
+    if (raw === undefined) {
+      sawUnbound = true;
+      continue;
+    }
+    const value = stripLiteral(raw);
+    if (!isCanonicalAuthoritativeContextGraphId(value)) return undefined;
+    values.add(value);
+    if (values.size > 1) return undefined;
+  }
+  if (values.size === 0) return null;
+  if (sawUnbound) return undefined;
+  return values.values().next().value;
+}
+
+/**
  * Resolve the current authority proved by a durable approved private join.
  *
  * This proves who approved the local replica and returns only the fresh,
@@ -40,7 +88,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
   approvalStillHolds: () => boolean,
   metadataStillCurrent: () => boolean,
   signal?: AbortSignal,
-): Promise<ApprovedPrivateReplicaAuthority | null> {
+): Promise<ApprovedPrivateReplicaAuthorityResolution | null> {
   const approved = approvedAgentAddress?.toLowerCase();
   const hasLocalAgent = () => agent.listLocalAgents().some(
     ({ agentAddress }) => agentAddress.toLowerCase() === approved,
@@ -64,6 +112,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
   const owners = new Set(meta.curators.map((did) => did
     .replace(/^did:dkg:agent:/u, '').toLowerCase()));
   const creators = new Set(meta.creators);
+  const registrationStatus = await agent.readLocalContextGraphRegistrationStatus(contextGraphId);
   if (
     meta.accessPolicy?.trim().toLowerCase() !== 'private'
     || owners.size !== 1
@@ -74,8 +123,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
     // member's delegation proves that this peer may act for the agent; it does
     // not override an explicit curator-maintained receiver allowlist.
     || (meta.allowedPeers.length > 0 && !meta.allowedPeers.includes(agent.peerId))
-    || meta.onChainId !== undefined
-    || await agent.readLocalContextGraphRegistrationStatus(contextGraphId) !== 'unregistered'
+    || registrationStatus === 'pending'
   ) return null;
 
   // Bind the same current membership and active delegation proof used by
@@ -88,12 +136,22 @@ export async function resolveApprovedPrivateReplicaAuthority(
   if (proof.type !== 'bindings') return null;
   const delegationExpiry = parseApprovedMemberDelegationExpiry(proof.bindings);
   if (delegationExpiry === undefined) return null;
+  const registeredMetaOnChainId = parseRegisteredMetaOnChainId(proof.bindings);
+  if (registeredMetaOnChainId === undefined) return null;
 
   // Approval and requester state are local mutable authority. Re-read their
   // complete generation binding after every metadata/store await so a
   // rejection, replacement request, or local-agent removal cannot race into a
   // successful result based on a stale snapshot.
-  if (await agent.readLocalContextGraphRegistrationStatus(contextGraphId) !== 'unregistered') {
+  const currentRegistrationStatus = await agent
+    .readLocalContextGraphRegistrationStatus(contextGraphId);
+  if (
+    currentRegistrationStatus === 'pending'
+    || (
+      registeredMetaOnChainId === null
+      && currentRegistrationStatus !== 'unregistered'
+    )
+  ) {
     return null;
   }
   const current = await agent.readRequesterJoinRequestState(contextGraphId, approved);
@@ -113,7 +171,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
   // flight and still authorize the replica.
   if (!isApprovedMemberDelegationExpiryActive(delegationExpiry)) return null;
 
-  return Object.freeze({
+  const authority = Object.freeze({
     approvedAgentAddress: approved,
     ownerAddress,
     requestGeneration: state.requestGeneration,
@@ -125,5 +183,16 @@ export async function resolveApprovedPrivateReplicaAuthority(
     // must not re-read the merged metadata projection, where source identity
     // has already been discarded.
     allowedPeers: Object.freeze([...meta.allowedPeers]),
+  });
+  if (registeredMetaOnChainId !== null) {
+    return Object.freeze({
+      kind: 'confirmed-registered-meta',
+      onChainId: registeredMetaOnChainId,
+      authority,
+    });
+  }
+  return Object.freeze({
+    kind: 'unregistered-private-replica',
+    authority,
   });
 }

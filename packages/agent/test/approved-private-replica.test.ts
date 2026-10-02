@@ -244,6 +244,8 @@ interface ApprovedReplicaFixtureOptions {
   readonly installSubscription?: boolean;
   readonly nonDefaultMember?: boolean;
   readonly selfSovereignMember?: boolean;
+  readonly legacyAdapter?: boolean;
+  readonly registeredMetaOnChainIds?: readonly string[];
 }
 
 async function approvedBareNameReplicaFixture(options: ApprovedReplicaFixtureOptions = {}) {
@@ -254,14 +256,16 @@ async function approvedBareNameReplicaFixture(options: ApprovedReplicaFixtureOpt
     if (options.indexError !== undefined) throw options.indexError;
     return new Map();
   });
-  const chain = Object.assign(new NoChainAdapter(), {
-    resolveContextGraphIdByNameHash: current,
-    contextGraphAuthorityIndexRevisionReader: {
-      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: finalized,
-      whenIdle: async () => undefined,
-      readContextGraphAuthorityIndexRevisions: async () => new Map(),
-    },
-  });
+  const chain = options.legacyAdapter === true
+    ? new NoChainAdapter()
+    : Object.assign(new NoChainAdapter(), {
+        resolveContextGraphIdByNameHash: current,
+        contextGraphAuthorityIndexRevisionReader: {
+          resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: finalized,
+          whenIdle: async () => undefined,
+          readContextGraphAuthorityIndexRevisions: async () => new Map(),
+        },
+      });
   const receiver = await h.startAgent({
     name: 'approved-private-bare-name-replica',
     config: {
@@ -317,6 +321,10 @@ async function approvedBareNameReplicaFixture(options: ApprovedReplicaFixtureOpt
     ...creators.map((peerId) => root(D.DKG_CREATOR, `did:dkg:agent:${peerId}`)),
     ...curators.map((address) => root(D.DKG_CURATOR, `did:dkg:agent:${address}`)),
     root(D.DKG_REGISTRATION_STATUS, JSON.stringify(options.registrationStatus ?? 'unregistered')),
+    ...(options.registeredMetaOnChainIds ?? []).map((onChainId) => root(
+      `${D.DKG_CONTEXT_GRAPH}OnChainId`,
+      JSON.stringify(onChainId),
+    )),
     ...allowedPeers.map((peerId) => root(D.DKG_ALLOWED_PEER, JSON.stringify(peerId))),
     ...[
       options.requesterOwner ?? OWNER,
@@ -415,6 +423,66 @@ function pauseSuccessfulApprovedPrivateProofOnce(
 }
 
 describe('approved private bare-name replica authorization', () => {
+  it('retains the proved private authority for a legacy adapter registered-metadata shape', async () => {
+    const fixture = await approvedBareNameReplicaFixture({
+      legacyAdapter: true,
+      installSubscription: false,
+      registeredMetaOnChainIds: ['106'],
+    });
+
+    await expect(fixture.receiver.resolveContextGraphReadAuthority(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: fixture.memberAddress,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'rfc64-private',
+      reason: 'rfc64-participant',
+    });
+  });
+
+  it('does not downgrade registered metadata before a finalized-capable adapter checks its name index', async () => {
+    const fixture = await approvedBareNameReplicaFixture({
+      registrationStatus: 'registered',
+      registeredMetaOnChainIds: ['106'],
+    });
+    Reflect.get(fixture.receiver, 'subscribedContextGraphs').set(CONTEXT_GRAPH_ID, {
+      subscribed: false,
+      coreHosted: false,
+      pendingMeta: true,
+      metaSynced: true,
+      synced: false,
+      syncMode: 'always-on',
+    });
+
+    await expect(fixture.receiver.resolveContextGraphReadAuthority(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: fixture.memberAddress,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    expect(fixture.finalized).toHaveBeenCalled();
+    expect(fixture.current).not.toHaveBeenCalled();
+  });
+
+  it('rejects ambiguous registered-metadata ids instead of taking the legacy compatibility lane', async () => {
+    const fixture = await approvedBareNameReplicaFixture({
+      legacyAdapter: true,
+      installSubscription: false,
+      registeredMetaOnChainIds: ['106', '107'],
+    });
+
+    await expect(fixture.receiver.resolveContextGraphReadAuthority(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: fixture.memberAddress,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+  });
+
   it('keeps a completed NoChainAdapter private join live for sender-key setup and encrypted SWM', async () => {
     const curator = await h.startAgent({
       name: 'legacy-private-join-curator',

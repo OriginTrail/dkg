@@ -13,6 +13,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   resolveApprovedPrivateReplicaAuthority,
   type ApprovedPrivateReplicaAuthority,
+  type ApprovedPrivateReplicaAuthorityResolution,
 } from './approved-private-replica.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -1235,15 +1236,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      * peer gate on the typed result is what keeps SWM consumers from either
      * widening through merged metadata or rejecting a valid approved join.
      */
-    const resolveApprovedPrivateReplicaUnregisteredBinding = async ():
+    const resolveApprovedPrivateReplicaUnregisteredBinding = async (
+      allowConfirmedRegisteredMetaFallback = false,
+    ):
       Promise<ContextGraphRegistrationBinding | null> => {
       if (options.allowApprovedPrivateReplicaFinalizedAbsence !== true) return null;
       const approved = this.localApprovedAgentByCG?.get(contextGraphId);
       if (approved === undefined) return null;
       const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
-      let privateAuthority: ApprovedPrivateReplicaAuthority | null = null;
+      let privateResolution: ApprovedPrivateReplicaAuthorityResolution | null = null;
       try {
-        privateAuthority = await runBoundedOperation(
+        privateResolution = await runBoundedOperation(
           (signal) => resolveApprovedPrivateReplicaAuthority(
             this,
             contextGraphId,
@@ -1268,7 +1271,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           dependency: contextGraphReadAuthorityDependencyOf(err),
         };
       }
-      if (privateAuthority === null) {
+      if (privateResolution === null) {
         // Approval removal while the proof was in flight restores ordinary
         // legacy behaviour. A still-present marker with no matching proof is
         // an authority failure and must not fall through to merged metadata.
@@ -1282,8 +1285,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
 
       options.signal?.throwIfAborted();
-      // Registration can start while the store-backed membership proof is in
-      // flight. Never publish the unregistered authority across that boundary.
+      // Registration can start while either store-backed proof is in flight.
+      // Never publish unregistered authority or the legacy registered-metadata
+      // compatibility result across that boundary.
       const bindingId = localTarget?.localId ?? contextGraphId;
       if (
         this.contextGraphRegistrationsInFlight?.has(contextGraphId)
@@ -1298,6 +1302,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           detail: 'Context Graph binding changed during private replica registration discovery',
         };
       }
+      if (privateResolution.kind === 'confirmed-registered-meta') {
+        return allowConfirmedRegisteredMetaFallback
+          ? {
+              kind: 'unregistered',
+              approvedPrivateReplicaAuthority: privateResolution.authority,
+            }
+          : {
+              kind: 'unavailable',
+              reason: 'finalized-name-absence-unaccepted',
+              detail: 'exact private metadata claims a registered Context Graph; finalized absence cannot authorize it as an unregistered replica',
+            };
+      }
+      const privateAuthority: ApprovedPrivateReplicaAuthority = privateResolution.authority;
       return {
         kind: 'unregistered',
         approvedPrivateReplicaAuthority: privateAuthority,
@@ -1311,7 +1328,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (options.allowAcceptedRfc64FinalizedAbsence === true) {
         return { kind: 'unregistered' };
       }
-      return (await resolveApprovedPrivateReplicaUnregisteredBinding())
+      return (await resolveApprovedPrivateReplicaUnregisteredBinding(true))
         ?? { kind: 'unregistered' };
     };
 
@@ -1348,12 +1365,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               signal: options.signal,
             },
           );
-          if (binding === null) return resolveLegacyUnregisteredBinding();
-          return {
-            kind: 'registered',
-            onChainId: BigInt(binding.onChainId),
-            provenance: binding.provenance,
-          };
+          if (binding !== null) {
+            return {
+              kind: 'registered',
+              onChainId: BigInt(binding.onChainId),
+              provenance: binding.provenance,
+            };
+          }
+          // A retained local row without an admitted binding is not proof
+          // that a graph is unregistered. Continue to the finalized capability
+          // discriminator below; only its explicit legacy-current result may
+          // reach the compatibility lane.
         } catch (err) {
           return {
             kind: 'unavailable',

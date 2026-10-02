@@ -159,11 +159,15 @@ export function buildAuthoritativePrivateMetaMemberProofQuery(
     contextGraphUri,
     memberProof,
   );
+  const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
   return `PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-  SELECT DISTINCT ?approvedAgent ?delegationExpiresAt WHERE {
+  SELECT DISTINCT ?approvedAgent ?delegationExpiresAt ?contextGraphOnChainId WHERE {
     GRAPH <${assertSafeIri(metaGraph)}> {
 ${requirements}
 ${memberRequirements}
+      OPTIONAL {
+        <${assertSafeIri(contextGraphUri)}> <${assertSafeIri(onChainIdPredicate)}> ?contextGraphOnChainId .
+      }
     }
   }`;
 }
