@@ -1240,7 +1240,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      * widening through merged metadata or rejecting a valid approved join.
      */
     const resolveApprovedPrivateReplicaUnregisteredBinding = async (
-      allowConfirmedRegisteredMetaFallback = false,
+      source: 'legacy-current' | 'finalized-absence',
     ):
       Promise<ContextGraphRegistrationBinding | null> => {
       if (options.allowApprovedPrivateReplicaFinalizedAbsence !== true) return null;
@@ -1306,7 +1306,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         };
       }
       if (privateResolution.kind === 'confirmed-registered-meta') {
-        return allowConfirmedRegisteredMetaFallback
+        return source === 'legacy-current'
           ? {
               kind: 'unregistered',
               approvedPrivateReplicaAuthority: privateResolution.authority,
@@ -1322,7 +1322,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         kind: 'unregistered',
         // The legacy adapter lane permits participant reads, but cannot prove
         // chain absence. Only the finalized lane may exempt VM catch-up.
-        ...(allowConfirmedRegisteredMetaFallback ? {} : {
+        ...(source === 'legacy-current' ? {} : {
           unregisteredEvidence: 'approved-private-replica-finalized-absence' as const,
         }),
         approvedPrivateReplicaAuthority: privateAuthority,
@@ -1336,7 +1336,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (options.allowAcceptedRfc64FinalizedAbsence === true) {
         return { kind: 'unregistered' };
       }
-      return (await resolveApprovedPrivateReplicaUnregisteredBinding(true))
+      return (await resolveApprovedPrivateReplicaUnregisteredBinding('legacy-current'))
         ?? { kind: 'unregistered' };
     };
 
@@ -1531,7 +1531,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               && options.allowApprovedPrivateReplicaFinalizedAbsence === true
             ) {
               const privateBinding =
-                await resolveApprovedPrivateReplicaUnregisteredBinding();
+                await resolveApprovedPrivateReplicaUnregisteredBinding('finalized-absence');
               if (privateBinding !== null) return privateBinding;
             }
             return {

@@ -2315,8 +2315,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         } else {
           const inspectReadiness = catchupResultHasCleanResponse(result);
           const hasConfirmedMeta = inspectReadiness
-            ? await agent.hasConfirmedMetaState(targetContextGraphId).catch(() => false)
-            : false;
+            ? await agent.hasConfirmedMetaState(targetContextGraphId).catch(() => undefined)
+            : undefined;
           const isPrivate = hasConfirmedMeta
             ? await agent.isPrivateContextGraph(targetContextGraphId).catch(() => true)
             : false;

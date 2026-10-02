@@ -179,6 +179,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     onCatchupRun?: () => void;
     authorityDecision?: TestAuthorityDecision;
     authorityAfterCatchup?: TestAuthorityDecision;
+    recoverAuthorityForRetry?: boolean;
+    metadataInspectionFailsAfterCatchup?: boolean;
     readiness?: {
       version: number;
       durableVerified: boolean;
@@ -203,6 +205,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     patches: Array<Record<string, unknown>>;
     readiness: Record<string, unknown> | undefined;
     statusResponse: any;
+    retryResponseStatus?: number;
   }> {
     const contextGraphId = `readiness-${Math.random().toString(36).slice(2, 8)}`;
     const state = new Map<string, Record<string, any>>();
@@ -213,6 +216,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       latestByContextGraph: new Map<string, string>(),
     };
     let runCalls = 0;
+    let retrying = false;
     let metadataBootstrapCalls = 0;
     const metadataBootstrapProofs: Array<unknown> = [];
     let metadataBootstrapCompleted = false;
@@ -240,7 +244,13 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
 
     const agent = {
       resolveContextGraphSubscriptionBootstrapAuthority: async () => (
-        runCalls > 0 ? opts.authorityAfterCatchup ?? opts.authorityDecision : opts.authorityDecision
+        retrying
+          // Model the legacy-local admission guard after the transient store
+          // outage recovers. A wrongly persisted pendingMeta poisons retries.
+          ? state.get(contextGraphId)?.pendingMeta === true
+            ? { outcome: 'unavailable', source: 'legacy-local', reason: 'pending-authoritative-metadata', metadataBootstrap: 'eligible' }
+            : opts.authorityDecision
+          : runCalls > 0 ? opts.authorityAfterCatchup ?? opts.authorityDecision : opts.authorityDecision
       ) ?? ({
         outcome: 'allowed' as const,
         source: 'legacy-local' as const,
@@ -285,6 +295,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         return 'no-accepted-public-policy';
       },
       hasConfirmedMetaState: async () => {
+        if (runCalls > 0 && opts.metadataInspectionFailsAfterCatchup) {
+          throw new Error('transient metadata store failure');
+        }
         return runCalls > 0
           ? opts.hasConfirmedMetaAfterCatchup ?? opts.hasConfirmedMeta
           : opts.hasConfirmedMeta;
@@ -375,6 +388,17 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       ).then((result) => result.json())
       : null;
 
+    let retryResponseStatus: number | undefined;
+    if (opts.recoverAuthorityForRetry) {
+      retrying = true;
+      const retry = await fetch(`http://127.0.0.1:${address.port}/api/context-graph/subscribe`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, includeSharedMemory: true }),
+      });
+      retryResponseStatus = retry.status;
+      await retry.json();
+    }
+
     return {
       response,
       responseStatus: httpResponse.status,
@@ -390,6 +414,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       patches,
       readiness,
       statusResponse,
+      retryResponseStatus,
     };
   }
 
@@ -1205,6 +1230,43 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
     expect(result.state.synced).toBe(false);
     expect(result.state.sharedMemorySynced).toBe(false);
+  });
+
+  it('preserves confirmed metadata after no response and transient completion-authority failure, so recovery admits a retry', async () => {
+    const noResponse = cleanEmptyResult();
+    noResponse.peersResponded = 0;
+    noResponse.peersSucceeded = 0;
+    noResponse.cleanPlaneCompletions = {
+      durable: { verifiedDataPeers: 0, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+    };
+    noResponse.diagnostics!.durable.emptyResponses = 0;
+    noResponse.diagnostics!.sharedMemory.emptyResponses = 0;
+    const result = await subscribe({
+      hasConfirmedMeta: true, isPrivate: true, forceCatchup: true,
+      initial: { subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false },
+      readiness: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+      authorityDecision: unregisteredAuthority,
+      authorityAfterCatchup: { outcome: 'unavailable', source: 'legacy-local', reason: 'store-failure', metadataBootstrap: 'eligible' },
+      result: noResponse, recoverAuthorityForRetry: true,
+    });
+    expect(result.job.status).toBe('unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false, metaSynced: true, pendingMeta: false });
+    expect(result.retryResponseStatus).toBe(200);
+  });
+
+  it('preserves metadata flags when a completion metadata inspection fails', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true, isPrivate: true, forceCatchup: true,
+      initial: { subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false },
+      readiness: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+      authorityDecision: unregisteredAuthority,
+      result: privateSharedMemoryOnlyResult(), metadataInspectionFailsAfterCatchup: true,
+    });
+    expect(result.job.status).toBe('unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false, metaSynced: true, pendingMeta: false });
   });
 
   it('only returns synthetic done when all ready flags include metaSynced=true', async () => {

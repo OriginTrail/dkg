@@ -212,8 +212,9 @@ export interface ContextGraphSubscriptionReadinessState {
 export interface ContextGraphSubscriptionStatePatch {
   synced: boolean;
   sharedMemorySynced: boolean;
-  metaSynced: boolean;
-  pendingMeta: boolean;
+  /** Omitted when metadata could not be inspected; preserve existing facts. */
+  metaSynced?: boolean;
+  pendingMeta?: boolean;
 }
 
 export interface ContextGraphReadinessPatch {
@@ -515,11 +516,12 @@ export function classifyNameHashOnlyCatchup(
 interface ContextGraphCatchupReadinessInput {
   result: CatchupJobResult;
   includeSharedMemory: boolean;
-  hasConfirmedMeta: boolean;
+  /** Undefined means unchecked/unavailable, not confirmed absence. */
+  hasConfirmedMeta: boolean | undefined;
   isPrivate: boolean;
   readinessBeforeCatchup: ContextGraphReadinessProvenance;
   /** Current bootstrap authority, never persisted or inferred from metadata. */
-  completionAuthority?: ContextGraphCatchupCompletionAuthority;
+  completionAuthority: ContextGraphCatchupCompletionAuthority;
 }
 
 /**
@@ -532,7 +534,7 @@ export function classifyContextGraphCatchupReadiness(
 ): ContextGraphCatchupReadinessClassification {
   return {
     ...classifyCatchupReadiness(input),
-    durablePlane: input.completionAuthority?.outcome === 'allowed'
+    durablePlane: input.completionAuthority.outcome === 'allowed'
       && input.completionAuthority.registration === 'unregistered'
       ? 'not-applicable' : 'required',
   };
@@ -541,7 +543,7 @@ export function classifyContextGraphCatchupReadiness(
 function classifyCatchupReadiness(
   input: ContextGraphCatchupReadinessInput,
 ): Omit<ContextGraphCatchupReadinessClassification, 'durablePlane'> {
-  if (input.completionAuthority && input.completionAuthority.outcome !== 'allowed') {
+  if (input.completionAuthority.outcome !== 'allowed') {
     return {
       jobStatus: input.completionAuthority.outcome === 'denied' ? 'denied' : 'unreachable',
       error: input.completionAuthority.outcome === 'denied'
@@ -549,12 +551,14 @@ function classifyCatchupReadiness(
         : 'Context-graph authority is unavailable at catch-up completion. Retry after authority recovers.',
       statePatch: {
         synced: false, sharedMemorySynced: false,
-        metaSynced: input.hasConfirmedMeta, pendingMeta: !input.hasConfirmedMeta,
+        ...(input.hasConfirmedMeta === undefined ? {} : {
+          metaSynced: input.hasConfirmedMeta, pendingMeta: !input.hasConfirmedMeta,
+        }),
       },
       readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
     };
   }
-  const registration = input.completionAuthority?.registration;
+  const registration = input.completionAuthority.registration;
   const { result } = input;
   const durableDataProgress = result.dataSynced > 0;
   const sharedMemoryProgress = result.sharedMemorySynced > 0;
@@ -576,6 +580,14 @@ function classifyCatchupReadiness(
   }
 
   if (catchupResultHasCleanResponse(result)) {
+    if (input.hasConfirmedMeta === undefined) {
+      return {
+        jobStatus: 'unreachable',
+        error: 'Authoritative context-graph metadata could not be inspected. Retry after local metadata recovers.',
+        statePatch: { synced: false, sharedMemorySynced: false },
+        readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+      };
+    }
     if (!input.hasConfirmedMeta) {
       const missingMetadata = missingMetadataReadinessPatches();
       return {
