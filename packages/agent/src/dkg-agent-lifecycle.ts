@@ -6067,7 +6067,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
-        totalTimeoutMs: options.totalTimeoutMs,
+        ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
