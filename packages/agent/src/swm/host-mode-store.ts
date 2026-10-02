@@ -647,17 +647,31 @@ export class SwmHostModeStore {
    * Sweep all known CGs for TTL-expired entries. Returns the total
    * bytes pruned across all CGs. Safe to call concurrently with
    * `append` — each per-CG prune takes the same inflight-write lock.
+   *
+   * A CG whose prune rejects (its files cannot be read, or its rewrite
+   * fails) is left for the next sweep and does not stop this one: the
+   * CGs after it are still pruned, and the first failure is rethrown
+   * once the sweep is done. Stopping at it would leave every later CG
+   * unpruned for as long as that one stays unreadable.
    */
   async prune(): Promise<{ bytesPruned: number; cgsPruned: number }> {
     await this.init();
     const cgs = await this.listKnownCgs();
     let bytesPruned = 0;
     let cgsPruned = 0;
+    let firstFailure: { error: unknown } | undefined;
     for (const cgInfo of cgs) {
-      const pruned = await this.pruneCg(cgInfo.contextGraphId);
+      let pruned: number;
+      try {
+        pruned = await this.pruneCg(cgInfo.contextGraphId);
+      } catch (error) {
+        firstFailure ??= { error };
+        continue;
+      }
       bytesPruned += pruned;
       if (pruned > 0) cgsPruned += 1;
     }
+    if (firstFailure) throw firstFailure.error;
     return { bytesPruned, cgsPruned };
   }
 

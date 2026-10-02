@@ -1080,6 +1080,32 @@ describe('SwmHostModeStore durable writes', () => {
       const log = await readFile(logPath);
       expect(parseFrames(log)).toMatchObject({ seqnos: [1, 2, 3], validLength: log.length });
     });
+
+    it('a CG whose files cannot be read does not stop the prune sweep: the others are pruned and the failure is still reported', async () => {
+      let nowMs = 1_000_000;
+      const expiring = { perCgByteCap: 1024 * 1024, ttlMs: 100 };
+      const options = { unregisteredLimits: expiring, registeredLimits: expiring, now: () => nowMs };
+      const cgs = ['cg/sweep-one', 'cg/sweep-two'];
+      const first = newStore(dir, options);
+      for (const cg of cgs) {
+        for (let i = 1; i <= 3; i += 1) await first.append(cg, new Uint8Array([i]));
+      }
+      nowMs += 10_000; // every frame of both CGs has expired
+      const logState = () => Promise.all(cgs.map((cg) =>
+        stat(path.join(dir, `${cgKey(cg)}.log`)).then(() => 'kept', () => 'pruned')));
+      const store = newStore(dir, options); // cold: the sweep has to load each CG
+      await store.init();
+      // Whichever CG the sweep reaches first cannot read its log.
+      failNextRead('.log', 'EIO');
+
+      await expect(store.prune()).rejects.toMatchObject({ code: 'EIO' });
+      // That CG was left alone, and the sweep went on to the other one.
+      expect((await logState()).sort()).toEqual(['kept', 'pruned']);
+
+      // The next sweep reaches the one that was skipped.
+      expect(await store.prune()).toMatchObject({ cgsPruned: 1 });
+      expect(await logState()).toEqual(['pruned', 'pruned']);
+    });
   });
 
   describe('a retry after a failed directory fsync completes durability before it acknowledges', () => {
