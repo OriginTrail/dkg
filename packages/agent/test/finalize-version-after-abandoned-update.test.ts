@@ -24,7 +24,7 @@ import {
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -284,7 +284,10 @@ describe('GH#2958 finalize numbers a draft of a published KA from the confirmed 
       expect((await editAndFinalize(agent, 'C')).assertionVersion).toBe('3');
     });
 
-    it('record not confirmed yet (an update in flight): last finalized + 1', async () => {
+    // The update path never writes a `tentative` record before its transaction, so this models a
+    // record that exists but is not confirmed (e.g. a sync-lane publish that has not confirmed),
+    // not an update still in flight; the in-flight overlap is the "below confirmed + 1" row below.
+    it('record not confirmed (status tentative): last finalized + 1', async () => {
       const { agent } = await publishedKa({ status: 'tentative' });
       expect((await editAndFinalize(agent, 'B')).assertionVersion).toBe('2');
       expect((await editAndFinalize(agent, 'C')).assertionVersion).toBe('3');
@@ -396,9 +399,11 @@ describe('GH#2958 enqueue refuses a seal that is not confirmed + 1 (typed, befor
 
   it('refuses a seal numbered below confirmed + 1 and points at the published version instead', async () => {
     const { agent, store, sealA } = await publishedKa();
-    await editAndFinalize(agent, 'C'); // numbered 2
+    await editAndFinalize(agent, 'C'); // numbered 2 (the record still said confirmed 1)
     await share(agent);
-    await setConfirmedRecord(store, sealA, { version: 2 }); // another update was published meanwhile
+    // The overlap: another update of the same KA was in flight when C was finalized, and landed
+    // first (or was synced from another node). C is now one number short.
+    await setConfirmedRecord(store, sealA, { version: 2 });
     const error = await enqueueIntent(agent).catch((err: unknown) => err) as Error & { code?: string };
     expect(error.code).toBe('PUBLISH_INTENT_STALE');
     expect(error.message).toMatch(/numbered 2/);
@@ -440,5 +445,55 @@ describe('GH#2958 enqueue refuses a seal that is not confirmed + 1 (typed, befor
     await share(agent);
     expect((await enqueueIntent(agent)).assertionVersion).toBe('2');
     expect(await lifecycleVersions(store)).toEqual(['2']);
+  });
+});
+
+// A reused number is also the key of the private partition (`.../assertions/{version}`), so a
+// replacement draft replaces the private payload sealed under it. Pinned here, with the limit
+// that follows from it, so a change to that layout (tracked in #2964) has to update this on purpose.
+describe('GH#2958 a replacement draft reuses its number and therefore its private partition (tracked in #2964)', () => {
+  const secret = (label: string) => q('urn:abandoned:asset', 'urn:secret', `"${label}"`);
+
+  /** B (public + private) finalized and shared at number 2, then re-opened from SWM and edited into C. */
+  async function sharedPrivateDraftThenEditedReplacement() {
+    const ka = await publishedKa();
+    await ka.agent.assertion.pullFrom(CG, NAME, 'vm', { onConflict: 'replace' });
+    await draft(ka.agent, 'B');
+    await ka.agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, [secret('private B')]);
+    expect((await finalize(ka.agent)).assertionVersion).toBe('2');
+    await share(ka.agent);
+    await ka.agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' });
+    await draft(ka.agent, 'C');
+    await ka.agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, [secret('private C')]);
+    return ka;
+  }
+
+  it('the replacement is sealed, shared and enqueued with its own private content', async () => {
+    const { agent, sealA } = await sharedPrivateDraftThenEditedReplacement();
+    const sealC = await finalize(agent);
+    expect(sealC.assertionVersion).toBe('2');
+    await share(agent);
+    const intent = await enqueueIntent(agent);
+    expect(intent.assertionVersion).toBe('2');
+    const privateStore = new PrivateContentStore(agent.store, new GraphManager(agent.store));
+    const sealed = (await privateStore.getKnowledgeAssetPrivateTriples(
+      CG,
+      createGraphKnowledgeAssetScope(sealC.kaUal, '2'),
+    )).map((quad) => quad.object);
+    expect(sealed).toContain('"private C"');
+    expect(intent.privateTripleCount).toBe(sealed.length);
+    // The confirmed version keeps its own (empty) private partition: it is a different number.
+    expect(await privateStore.getKnowledgeAssetPrivateTriples(
+      CG,
+      createGraphKnowledgeAssetScope(sealA.kaUal, '1'),
+    )).toEqual([]);
+  });
+
+  it('LIMIT: finalizing the replacement without sharing it replaces the shared draft\'s private payload; re-opening that draft fails closed', async () => {
+    const { agent } = await sharedPrivateDraftThenEditedReplacement();
+    expect((await finalize(agent)).assertionVersion).toBe('2');
+    // Nothing is corrupted or published wrongly - but B's private content is no longer recoverable.
+    await expect(agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' }))
+      .rejects.toThrow(/private triple-count mismatch/);
   });
 });

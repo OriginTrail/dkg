@@ -305,6 +305,7 @@ import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-ha
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
   throwIfRecoveryDeadlineReached,
@@ -4730,7 +4731,7 @@ export class PublishMethods extends DKGAgentBase {
       // confirmed record that cannot answer leaves the decision to `update()`.
       const sealScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
       const requiredVersion = await this._nextUpdateVersionOrUndefined(
-        (BigInt(sealScope.agentAddress) << 96n) | BigInt(sealScope.kaNumber),
+        packKnowledgeAssetIdFromIdentity(sealScope),
         contextGraphId,
         opts?.subGraphName,
       );
