@@ -259,6 +259,25 @@ describe('parseRdf', () => {
       }
     });
 
+    it('reports inline --triples and --subject/--predicate/--object input as legacy quads', async () => {
+      // `ka create` applies its JSON-LD named-graph rule by this provenance,
+      // so inline input must never be reported as a JSON-LD document.
+      const { loadRdfFromInput } = await import('../src/cli-helpers.js');
+
+      expect(await loadRdfFromInput({
+        triples: JSON.stringify([{ subject: 'urn:a', predicate: 'urn:p', object: '"val"' }]),
+      }, DEFAULT_GRAPH)).toEqual({
+        sourceKind: 'legacy-quads',
+        quads: [{ subject: 'urn:a', predicate: 'urn:p', object: '"val"', graph: DEFAULT_GRAPH }],
+      });
+      expect(await loadRdfFromInput({
+        subject: 'urn:a', predicate: 'urn:p', object: 'plain words',
+      }, DEFAULT_GRAPH)).toEqual({
+        sourceKind: 'legacy-quads',
+        quads: [{ subject: 'urn:a', predicate: 'urn:p', object: '"plain words"', graph: DEFAULT_GRAPH }],
+      });
+    });
+
     it.each([undefined, '', 'urn:named'])('keeps legacy JSON and JSON-LD graph handling identical (%s)', async (graph) => {
       const content = JSON.stringify([{ subject: 'urn:a', predicate: 'urn:p', object: '"val"', graph }]);
       const expected = [{ subject: 'urn:a', predicate: 'urn:p', object: '"val"', graph: graph || DEFAULT_GRAPH }];
