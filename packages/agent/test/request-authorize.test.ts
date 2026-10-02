@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { authorizePrivateSyncRequest } from '../src/sync/auth/request-authorize.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
@@ -106,6 +107,8 @@ interface AuthCallParams {
   allowedDelegateeKeys?: Map<string, string[]> | Record<string, string[]>;
   /** R9 — fresh `_meta`-only members-only recovery gate (used when envelope.recovery is set). */
   memberRecoveryGate?: string[] | null;
+  /** Observe the production sync-authorize wrapper around this chain funnel. */
+  onAgentGateRead?: () => void;
   verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
   signal?: AbortSignal;
 }
@@ -132,7 +135,10 @@ async function callAuth(params: AuthCallParams): Promise<{ allowed: boolean; log
     verifyIdentity: params.verifyIdentity ?? (async () => true),
     getParticipants: async () => params.participants ?? null,
     getAllowedPeers: async () => params.allowedPeers ?? null,
-    getAgentGateAddresses: async () => params.agentGateAddresses ?? null,
+    getAgentGateAddresses: async () => {
+      params.onAgentGateRead?.();
+      return params.agentGateAddresses ?? null;
+    },
     getAllowedDelegateePeers: async () => peersMap,
     getAllowedDelegateeKeys: async () => keysMap,
     getMemberRecoveryGate: async () => params.memberRecoveryGate ?? null,
@@ -284,6 +290,31 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
       allowedDelegateeKeys: [],
     });
     expect(allowed).toBe(true);
+  });
+
+  it('attributes the production sync-authorize chain read to its call site', async () => {
+    const agentWallet = ethers.Wallet.createRandom();
+    const tracker = new RpcUsageTracker(() => '31337');
+    const { envelope, remotePeerId } = await buildSignedEnvelope({
+      signer: agentWallet,
+      requesterAgentAddress: agentWallet.address,
+    });
+
+    const { allowed } = await callAuth({
+      envelope,
+      remotePeerId,
+      participants: [agentWallet.address],
+      agentGateAddresses: [agentWallet.address],
+      onAgentGateRead: () => withRpcUsageConsumer(
+        'cgStorage.getContextGraph',
+        () => tracker.record('eth_call'),
+      ),
+    });
+
+    expect(allowed).toBe(true);
+    expect(tracker.drainWindow().ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.syncAuthz': 1,
+    });
   });
 
   it('does NOT consider a key-only match valid when only delegateePeer list is consulted', async () => {

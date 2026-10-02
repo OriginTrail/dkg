@@ -8,6 +8,12 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import type { ChangelogReader, ChangeRecord, ChangeOp } from '@origintrail-official/dkg-storage';
 import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { readChangelogDeltaPage } from '../src/sync/responder/graph-plan.js';
+import {
+  decodeChangelogRequest,
+  decodeChangelogResponse,
+  encodeChangelogResponse,
+} from '../src/sync/changelog/wire.js';
+import { runChangelogSync, type ChangelogSyncDeps } from '../src/sync/requester/changelog-sync.js';
 
 const CG = 'delta-test';
 const cgPrefix = contextGraphDataUri(CG);           // did:dkg:context-graph:delta-test
@@ -22,6 +28,23 @@ class FakeReader implements ChangelogReader {
   async changelogHead() { return this.headV; }
   async readChanges(sinceSeq: number, limit: number) {
     return this.changes.filter((c) => c.seq > sinceSeq).slice(0, limit);
+  }
+}
+
+/**
+ * The head is 2 when a page starts and the read drains through 2; a local
+ * write then commits seq 3 while the page is being serialized.
+ */
+class LateWriteReader extends FakeReader {
+  head = { era: 'E1', seq: 2 };
+  visibleThrough = 2;
+  override async changelogHead() { return this.head; }
+  override async readChanges(sinceSeq: number, limit: number) {
+    const page = (await super.readChanges(sinceSeq, limit))
+      .filter((change) => change.seq <= this.visibleThrough);
+    this.visibleThrough = 3;
+    this.head = { era: 'E1', seq: 3 };
+    return page;
   }
 }
 
@@ -189,6 +212,77 @@ describe('readChangelogDeltaPage — delta serving', () => {
     await store.close();
   });
 
+  it('derives headSeq and nextSeq from the head after the read when readChanges adopts newer markers', async () => {
+    const store = await storeWith([['urn:s', 'urn:p', '"v"', G1], ['urn:s2', 'urn:p', '"v"', G2]]);
+    // The store's in-memory head lags the log (another writer appended) until
+    // the read adopts the markers it serves.
+    class AdoptingReader extends FakeReader {
+      head = { era: 'E1', seq: 0 };
+      override async changelogHead() { return this.head; }
+      override async readChanges(sinceSeq: number, limit: number) {
+        const page = await super.readChanges(sinceSeq, limit);
+        if (page.length > 0) this.head = { era: 'E1', seq: page[page.length - 1].seq };
+        return page;
+      }
+    }
+    const resp = await readChangelogDeltaPage({
+      reader: new AdoptingReader({ era: 'E1', seq: 0 }, [rec(1, G1, 'upsert'), rec(2, G2, 'upsert')]),
+      store, contextGraphId: CG, sinceSeq: 0, requesterEra: 'E1', limit: 100,
+    });
+    expect(resp.kind).toBe('delta');
+    if (resp.kind !== 'delta') return;
+    expect(resp.records.map((r) => r.seq)).toEqual([1, 2]);
+    expect(resp.headSeq).toBe(2);
+    expect(resp.nextSeq).toBe(2);
+    // The wire contract holds: nextSeq covers every emitted record and never exceeds headSeq.
+    expect(decodeChangelogResponse(encodeChangelogResponse(resp))).toEqual(resp);
+    await store.close();
+  });
+
+  it('never advances nextSeq past a marker committed after the read of a drained page', async () => {
+    const store = await storeWith([['urn:s', 'urn:p', '"v"', G1], ['urn:s2', 'urn:p', '"v"', G2]]);
+    const reader = new LateWriteReader({ era: 'E1', seq: 2 }, [
+      rec(1, G1, 'upsert'), rec(2, G2, 'upsert'), rec(3, G1, 'upsert'),
+    ]);
+    const first = await readChangelogDeltaPage({
+      reader, store, contextGraphId: CG, sinceSeq: 0, requesterEra: 'E1', limit: 100,
+    });
+    expect(first.kind).toBe('delta');
+    if (first.kind !== 'delta') return;
+    expect(first.records.map((r) => r.seq)).toEqual([1, 2]);
+    expect(first.headSeq).toBe(3);             // the head after the read covers every record
+    expect(first.nextSeq).toBe(2);             // scanned through 2, not the late marker
+    expect(decodeChangelogResponse(encodeChangelogResponse(first))).toEqual(first);
+    // The requester continues from nextSeq and receives the late marker.
+    const second = await readChangelogDeltaPage({
+      reader, store, contextGraphId: CG, sinceSeq: first.nextSeq, requesterEra: 'E1', limit: 100,
+    });
+    expect(second.kind).toBe('delta');
+    if (second.kind !== 'delta') return;
+    expect(second.records.map((r) => r.seq)).toEqual([3]);
+    expect(second.nextSeq).toBe(3);
+    await store.close();
+  });
+
+  it('hands the requester a resync when the era rotates underneath the read', async () => {
+    const store = await storeWith([['urn:s', 'urn:p', '"v"', G1]]);
+    class RotatingReader extends FakeReader {
+      head = { era: 'E1', seq: 1 };
+      override async changelogHead() { return this.head; }
+      override async readChanges(sinceSeq: number, limit: number) {
+        const page = await super.readChanges(sinceSeq, limit);
+        this.head = { era: 'E2', seq: 0 };
+        return page;
+      }
+    }
+    const resp = await readChangelogDeltaPage({
+      reader: new RotatingReader({ era: 'E1', seq: 1 }, [rec(1, G1, 'upsert')]),
+      store, contextGraphId: CG, sinceSeq: 0, requesterEra: 'E1', limit: 100,
+    });
+    expect(resp).toEqual({ kind: 'resync', era: 'E2', headSeq: 0 });
+    await store.close();
+  });
+
   it('byte-bounds a page: a tiny budget emits one graph and stops at its seq', async () => {
     const big = '"' + 'x'.repeat(500) + '"';
     const store = await storeWith([
@@ -218,6 +312,43 @@ describe('readChangelogDeltaPage — delta serving', () => {
     if (resp.kind !== 'delta') return;
     expect(resp.records).toHaveLength(0);
     expect(resp.nextSeq).toBe(7);
+    await store.close();
+  });
+});
+
+describe('changelog sync end to end — requester against the responder', () => {
+  it('delivers a marker the responder committed while it was building the previous page', async () => {
+    const store = await storeWith([['urn:s', 'urn:p', '"v"', G1], ['urn:s2', 'urn:p', '"v"', G2]]);
+    const reader = new LateWriteReader({ era: 'E1', seq: 2 }, [
+      rec(1, G1, 'upsert'), rec(2, G2, 'upsert'), rec(3, G1, 'upsert'),
+    ]);
+    let cursor: { era: string; seq: number } | undefined = { era: 'E1', seq: 0 };
+    const delivered: number[] = [];
+    const deps: ChangelogSyncDeps = {
+      contextGraphId: CG,
+      limit: 100,
+      getCursor: () => cursor,
+      setCursor: (era, seq) => { cursor = { era, seq }; },
+      // The real responder, over the real wire codec.
+      send: async (bytes) => {
+        const request = decodeChangelogRequest(bytes);
+        return encodeChangelogResponse(await readChangelogDeltaPage({
+          reader, store, contextGraphId: CG, sinceSeq: request.sinceSeq,
+          requesterEra: request.era, limit: request.limit,
+        }));
+      },
+      applyPage: async (page) => {
+        delivered.push(...page.records.map((record) => record.seq));
+        return { advanceTo: page.nextSeq, applied: page.records.length, deferred: false };
+      },
+      runResync: async () => ({ complete: true, insertedTriples: 0 }),
+      logWarn: () => {},
+    };
+    const outcome = await runChangelogSync(deps);
+    expect(outcome.kind).toBe('delta');
+    // The late marker is delivered in the same sync run instead of being skipped.
+    expect(delivered).toEqual([1, 2, 3]);
+    expect(cursor).toEqual({ era: 'E1', seq: 3 });
     await store.close();
   });
 });

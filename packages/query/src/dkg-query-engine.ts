@@ -29,6 +29,7 @@ import type {
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
   contextGraphLayerUriCandidates, contextGraphLayerPrefixCandidates,
+  contextGraphAssertionPrefixCandidates,
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
@@ -229,12 +230,35 @@ export function resolveViewGraphs(
       const seen = new Set<string>();
       for (const address of [opts.agentAddress, ...(opts.agentAddressAliases ?? [])]) {
         if (!address) continue;
-        for (const candidate of contextGraphLayerPrefixCandidates(
-          contextGraphId,
-          MemoryLayer.WorkingMemory,
-          address,
-          opts.subGraphName,
-        )) {
+        // Working memory lives in TWO graph families, and an unscoped read has
+        // to span both:
+        //
+        //   1. the uniform per-KA layout `…/_working_memory/{addr}/{number}`,
+        //   2. the name-keyed layout `…/assertion/{addr}/{name}`.
+        //
+        // (2) is not dead legacy. `DKGPublisher.wmGraphUri` falls back to
+        // `contextGraphAssertionUri` whenever `resolveKaGraphIdentity` returns
+        // null, so drafts still land there today — and this view's OWN
+        // by-name branch above reads exactly that shape via
+        // `contextGraphAssertionUri`. Scanning only (1) here made the
+        // prefix-scan branch strictly narrower than the by-name branch of the
+        // same view: `get` by assertion name found a draft that an unscoped
+        // working-memory query could not. Both families are keyed by the
+        // SAME address, so spanning them widens coverage without ever
+        // crossing an agent boundary.
+        for (const candidate of [
+          ...contextGraphLayerPrefixCandidates(
+            contextGraphId,
+            MemoryLayer.WorkingMemory,
+            address,
+            opts.subGraphName,
+          ),
+          ...contextGraphAssertionPrefixCandidates(
+            contextGraphId,
+            address,
+            opts.subGraphName,
+          ),
+        ]) {
           if (seen.has(candidate)) continue;
           seen.add(candidate);
           graphPrefixes.push(candidate);
@@ -418,18 +442,18 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       //   - `/_meta` — curator lookup, allowedAgent list, registration
       //     status (invite-flow `assert_curator_triple_landed` probe,
       //     CG Overview UI, downstream sync code)
-      //   - `/_shared_memory_meta` — workspaceOwner / promote-time
-      //     ownership metadata (devnet-test-swm-ownership-restart
-      //     `wait_for_owner_meta` probe, ACL enforcement on replicas).
+      //   - `/_shared_memory_meta` — SWM share metadata (operation
+      //     heads, digests, storage-ACK ledger) and legacy
+      //     root-keyed workspaceOwner rows. Graph-scoped KAs (10.0.7+)
+      //     keep ownership in the per-author SWM graph instead.
       //
       // Privacy fence: a caller that explicitly narrowed routing to
       // SWM-only via `graphSuffix: '_shared_memory'` does NOT gain
       // access to the CG-level `_meta` (curator / allowedAgent /
       // registrationStatus). They asked for SWM, they get SWM
-      // (including `_shared_memory_meta` for the workspaceOwner /
-      // ownership ACL probe). All other scoped routes expose both
-      // `_meta` and `_shared_memory_meta` for the legitimate metadata
-      // reads called out above.
+      // (including `_shared_memory_meta`). All other scoped routes
+      // expose both `_meta` and `_shared_memory_meta` for the
+      // legitimate metadata reads called out above.
       //
       // Sub-graph metadata uses `contextGraphSubGraphMetaUri`
       // (`/<sub>/_meta`) — the same path the storage layer

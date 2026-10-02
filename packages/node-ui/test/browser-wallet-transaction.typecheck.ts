@@ -5,7 +5,6 @@ import type {
   BrowserWalletRuntimeContext,
   BrowserWalletRuntimeDeps,
   BrowserWalletTransactionProgress,
-  BrowserWalletWriteRequest,
 } from '../src/ui/web3/browserWalletTransaction.js';
 import { submitBrowserWalletTransaction } from '../src/ui/web3/browserWalletTransaction.js';
 import { profileIdentityWalletAbi } from '../src/ui/web3/identityWalletActions.js';
@@ -30,21 +29,35 @@ void identityContext.bootstrap.nft;
 // @ts-expect-error PCA bootstraps do not expose Identity contracts.
 void context.bootstrap.profile;
 
-// @ts-expect-error addKey belongs to the Identity ABI, not the Profile ABI.
-type InvalidProfileFunction = BrowserWalletWriteRequest<typeof profileIdentityWalletAbi, 'addKey'>;
+void submitBrowserWalletTransaction(
+  context,
+  deps,
+  policy,
+  walletClient => walletClient.writeContract({
+    account: context.account,
+    chain: context.chain,
+    address: profile,
+    abi: profileIdentityWalletAbi,
+    functionName: 'addOperationalWallets',
+    args: [61n, [operational]],
+  }),
+  'action',
+  progress,
+);
 
 void submitBrowserWalletTransaction(
   context,
   deps,
   policy,
-  {
+  walletClient => walletClient.writeContract({
+    account: context.account,
+    chain: context.chain,
     address: profile,
     abi: profileIdentityWalletAbi,
-    functionName: 'addOperationalWallets',
+    // @ts-expect-error addKey belongs to the Identity ABI, not the Profile ABI.
+    functionName: 'addKey',
     args: [61n, [operational]],
-  },
+  }),
   'action',
   progress,
 );
-
-void (null as InvalidProfileFunction | null);

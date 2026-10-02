@@ -575,6 +575,93 @@ describe('durable graph-scoped KA materialization', () => {
     )).toEqual([expect.objectContaining({ object: '"0:0"' })]);
   });
 
+  it('verifies a receipt-backed first publish from the single receipt read without the unused header lookup', async () => {
+    const v1Data = dataQuad(1);
+    const root = computeFlatKCRootV10([v1Data], []);
+    const resolvePublishByTxHash = vi.fn(async (_hash: string, _options?: unknown) => ({
+      batchId: BigInt(packedKaId),
+      kaId: BigInt(packedKaId),
+      merkleRoot: root,
+      txHash: transactionHash(1),
+      blockNumber: 77,
+      txIndex: 3,
+      blockTimestamp: 0,
+      publisherAddress: '0x1111111111111111111111111111111111111111',
+    }));
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 1n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      resolvePublishByTxHash,
+    } as ChainAdapter;
+    const { signal } = new AbortController();
+
+    const authenticated = await authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+        contextGraphId,
+        ual,
+        assertionVersion: 1n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [v1Data],
+        metadataQuads: metadata(1, toHex(root)),
+      },
+      strictContextGraphBindingVerifier(chain),
+      new Date('2026-07-16T08:30:00.000Z'),
+      { signal },
+    );
+
+    expect(resolvePublishByTxHash).toHaveBeenCalledTimes(1);
+    expect(resolvePublishByTxHash).toHaveBeenCalledWith(
+      transactionHash(1),
+      { signal, skipBlockTimestamp: true },
+    );
+    expect(authenticated.asset.metadataQuads).toContainEqual(expect.objectContaining({
+      predicate: `${DKG}materializedVersion`,
+      object: '"77:3"',
+    }));
+  });
+
+  it('still rejects a receipt for a different root when the header lookup is skipped', async () => {
+    const v1Data = dataQuad(1);
+    const root = computeFlatKCRootV10([v1Data], []);
+    const wrongRoot = Uint8Array.from(root, (byte) => byte ^ 0xff);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 1n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      resolvePublishByTxHash: async () => ({
+        batchId: BigInt(packedKaId),
+        kaId: BigInt(packedKaId),
+        merkleRoot: wrongRoot,
+        txHash: transactionHash(1),
+        blockNumber: 77,
+        txIndex: 3,
+        blockTimestamp: 0,
+        publisherAddress: '0x1111111111111111111111111111111111111111',
+      }),
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+        contextGraphId,
+        ual,
+        assertionVersion: 1n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [v1Data],
+        metadataQuads: metadata(1, toHex(root)),
+      },
+      strictContextGraphBindingVerifier(chain),
+    )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+  });
+
   it('rejects receipt-backed graph metadata when its transaction claim is missing', async () => {
     const v2Data = dataQuad(2);
     const root = computeFlatKCRootV10([v2Data], []);
@@ -1604,6 +1691,97 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await values(store, 'allowedPeer')).toEqual(['"trusted-peer"']);
     expect(await values(store, 'publisherPeerId')).toEqual(['"owner-peer"']);
     expect(await values(store, 'materializedVersion')).toEqual([]);
+  });
+
+  it('keeps one trusted policy when a finalized replay disagrees with the local publisher', async () => {
+    const store = new OxigraphStore();
+    const root = ethers.getBytes(`0x${String(1).padStart(64, '0')}`);
+    const trustedMetadata: Quad[] = [
+      ['accessPolicy', '"public"'],
+      ['publisherPeerId', '"publisher-peer"'],
+    ].map(([predicate, object]) => ({
+      subject: ual,
+      predicate: `${DKG}${predicate}`,
+      object,
+      graph: metaGraph,
+    }));
+    await store.insert([dataQuad(1), ...metadata(1), ...trustedMetadata]);
+    await replaceLocallyTrustedKnowledgeAssetControls(
+      store,
+      ual,
+      [...metadata(1), ...trustedMetadata],
+    );
+    const finalized = finalizedMaterializationMetadata(1, root).map((quad) =>
+      quad.predicate === `${DKG}accessPolicy`
+        ? { ...quad, object: '"ownerOnly"' }
+        : quad,
+    );
+
+    await expect(materializeVerifiedGraphScopedAsset({
+      store,
+      asset: {
+        contextGraphId,
+        ual,
+        assertionVersion: 1n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(1)],
+        metadataQuads: finalized,
+      },
+    })).resolves.toBe('applied');
+
+    expect(await values(store, 'accessPolicy')).toEqual(['"public"']);
+    expect(await values(store, 'publisherPeerId')).toEqual(['"publisher-peer"']);
+  });
+
+  it('replaces an incoming allow-list peer with the trusted peer on finalized replay', async () => {
+    const store = new OxigraphStore();
+    const root = ethers.getBytes(`0x${String(1).padStart(64, '0')}`);
+    const trustedMetadata: Quad[] = [
+      ['accessPolicy', '"allowList"'],
+      ['allowedPeer', '"trusted-peer"'],
+      ['publisherPeerId', '"publisher-peer"'],
+    ].map(([predicate, object]) => ({
+      subject: ual,
+      predicate: `${DKG}${predicate}`,
+      object,
+      graph: metaGraph,
+    }));
+    await replaceLocallyTrustedKnowledgeAssetControls(
+      store,
+      ual,
+      [...metadata(1), ...trustedMetadata],
+    );
+    const finalized = [
+      ...finalizedMaterializationMetadata(1, root).map((quad) =>
+        quad.predicate === `${DKG}accessPolicy`
+          ? { ...quad, object: '"allowList"' }
+          : quad,
+      ),
+      {
+        subject: ual,
+        predicate: `${DKG}allowedPeer`,
+        object: '"attacker-peer"',
+        graph: metaGraph,
+      },
+    ];
+
+    await expect(materializeVerifiedGraphScopedAsset({
+      store,
+      asset: {
+        contextGraphId,
+        ual,
+        assertionVersion: 1n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(1)],
+        metadataQuads: finalized,
+      },
+    })).resolves.toBe('applied');
+
+    expect(await values(store, 'accessPolicy')).toEqual(['"allowList"']);
+    expect(await values(store, 'allowedPeer')).toEqual(['"trusted-peer"']);
+    expect(await values(store, 'publisherPeerId')).toEqual(['"publisher-peer"']);
   });
 
   it('fails closed instead of falling back past a corrupt newer local-control entry', async () => {

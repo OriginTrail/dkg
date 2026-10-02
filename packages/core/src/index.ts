@@ -1,7 +1,11 @@
 export * from './types.js';
+export { gzipBounded, gunzipBounded, BoundedGzipLimitError, BoundedGzipCapacityError, type BoundedGzipOptions } from './bounded-gzip.js';
 export * from './constants.js';
+export * from './storage-ack-protocols.js';
 export * from './context-graph-storage-uri.js';
 export * from './context-graph-snapshot-uri.js';
+export * from './context-graph-on-chain-binding.js';
+export * from './context-graph-metadata-placement.js';
 export * from './agent-identity.js';
 export * from './agents-list-wire.js';
 export * from './assertion-scoped-graphs.js';
@@ -18,6 +22,7 @@ export * from './sparql-operation.js';
 export * from './code-point-order.js';
 export { BoundedLruCache } from './bounded-lru-cache.js';
 export * from './coalescing-recurring-task.js';
+export { applyMixins } from './apply-mixins.js';
 export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
@@ -124,6 +129,7 @@ export {
   type KaLifecycleStage,
 } from './ka-lifecycle-logger.js';
 export { createLogRedactor, redactLogEntry, redactMessage, DEFAULT_SENSITIVE_KEYS, REDACTED } from './log-redaction.js';
+export { createBoundedKeyedLimiter, type BoundedKeyedLimiterOptions } from './bounded-denial-logger.js';
 export type { LogRedactor } from './log-redaction.js';
 export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,
@@ -169,6 +175,9 @@ export {
   isPublicLikeAddress,
   isLocalOrInternalHostname,
 } from './node.js';
+// Transport-level network isolation. `peerIdFromRelayAddress` is shared with
+// the CLI, which derives other-network relay ids from bundled network configs.
+export { peerIdFromRelayAddress } from './network-peer-dial-policy.js';
 // NOTE: `isFinitePositiveInteger`, `buildPeerStoreOverrides`, and
 // `buildKadDHTOptions` are intentionally NOT re-exported. They are
 // implementation details of `DKGNode.start()`; the wiring test in
@@ -217,6 +226,8 @@ export {
   ProtocolRouter,
   QuietRetryableHandlerError,
   type AdmissionCheckOptions,
+  type DuplexStreamOptions,
+  type DuplexStreamRequest,
   type ProtocolRegistrationOptions,
   type ProtocolRouterOptions,
   type SendOptions,
@@ -225,6 +236,25 @@ export {
   isRecoverableSendError,
   isProtocolUnsupportedError,
 } from './protocol-router.js';
+// Explicit experimental capability only; importing Core installs no handler.
+export {
+  EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
+  EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE,
+  exchangeExperimentalExactBatch,
+  registerExperimentalExactBatchResponder,
+  ExperimentalExactBatchUnsupportedError,
+  type ExactBatchTransportSession,
+  type ExactBatchTransportOptions,
+  type ExactBatchTransportEvent,
+  type ExactBatchResponderAuthorization,
+} from './experimental-exact-batch-stream.js';
+export {
+  EXACT_BATCH_STREAM_PROTOCOL, EXACT_BATCH_STREAM_WINDOW_SIZE, EXACT_BATCH_FRAME_KIND,
+  EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_FRAME_BYTES,
+  EXACT_BATCH_MAX_REQUEST_BYTES, EXACT_BATCH_MAX_ASSETS, EXACT_BATCH_MAX_CHUNKS_PER_ASSET,
+  EXACT_BATCH_REFUSALS, encodeExactBatchFrame, decodeExactBatchFrames, validateExactBatchFrame,
+  type ExactBatchFrame, type ExactBatchFrameKind, type ExactBatchRefusal,
+} from './experimental-exact-batch-wire.js';
 export {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
@@ -362,7 +392,17 @@ export {
   sparqlString,
   sparqlInt,
   assertSafeRdfTerm,
+  UnsafeSparqlValueError,
 } from './sparql-safe.js';
+export {
+  formatIriPrefix,
+  formatSparqlTerm,
+  SparqlTermValidationError,
+  unwrapIri,
+  type SparqlTermContext,
+  type SparqlTermKind,
+  type SparqlTermPosition,
+} from './sparql-terms.js';
 export {
   JAVA_WRITE_UTF_MAX_BYTES,
   DKG_RDF_LITERAL_SAFE_MUTF8_BYTES,

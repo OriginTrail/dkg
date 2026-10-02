@@ -16,8 +16,10 @@
 import { assertSafeIri, isSafeIri } from '@origintrail-official/dkg-core';
 import {
   swmKaWriteLockKey,
+  tryReplaceGraphWithDurableRootCompanionAtomically,
   withKeyedLocks,
   workspacePublicQuadsDigest,
+  type DurableRootAtomicCompanion,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
@@ -150,11 +152,25 @@ export interface SharedMemorySnapshotMaterializer {
    */
   isGraphAssetMaterialized(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
   /**
+   * Read and re-verify the exact stored graph bytes for a same-byte compound
+   * rewrite. Unlike the witness-backed boolean fast path, this always returns
+   * the bytes the atomic replacement will commit.
+   */
+  readExactMaterializedGraph(
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<Quad[] | null>;
+  /**
    * Atomic whole-graph replace. Replace, not insert: a KA graph is
    * all-or-nothing and digest-verified; union-insert risks partial or
    * duplicated state across retries.
    */
   replaceGraph(graphUri: string, quads: Quad[]): Promise<void>;
+  /** Atomic exact-graph replace plus one durable root-boundary subject. */
+  replaceGraphWithAtomicCompanion(
+    graphUri: string,
+    quads: Quad[],
+    companion: Readonly<DurableRootAtomicCompanion>,
+  ): Promise<void>;
   /**
    * Delete the KA's head rows and every share-operation subject its head
    * references (including the descriptor's own, which the caller re-inserts
@@ -695,6 +711,29 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       return matches;
     },
 
+    readExactMaterializedGraph: async (descriptor) => {
+      const expected = descriptor.publicQuadsCount;
+      if (!Number.isSafeInteger(expected) || expected < 0) return null;
+      const countResult = await deps.store.query(
+        `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
+        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.countExactGraph' },
+      );
+      if (countResult.type !== 'bindings' || countResult.bindings.length === 0) return null;
+      const present = Number.parseInt(literalValue(countResult.bindings[0]?.['n']) ?? '0', 10);
+      if (!Number.isFinite(present) || present !== expected) return null;
+      if (expected === 0 && !(await hasHealthyEmptyProjectionControlPlane(descriptor))) {
+        return null;
+      }
+      const contentResult = await deps.store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
+        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readExactGraph' },
+      );
+      if (contentResult.type !== 'quads') return null;
+      const neutral = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
+      if (workspacePublicQuadsDigest(neutral) !== descriptor.publicQuadsDigest) return null;
+      return neutral.map((quad) => ({ ...quad, graph: descriptor.assertionGraph }));
+    },
+
     replaceGraph: async (graphUri, quads) => {
       // Deliberately NOT routed through the sync lane's guarded union insert:
       // a KA graph is all-or-nothing and digest-verified, so it must land via
@@ -734,6 +773,30 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       await invalidateSwmMaterializationWitness(deps.store, graphUri, {
         priority: 'background',
         source: 'agent.sharedMemorySync.materializeSnapshot.witnessInvalidate',
+      }).catch(() => {});
+      deps.invalidateListContextGraphsCache();
+    },
+
+    replaceGraphWithAtomicCompanion: async (graphUri, quads, companion) => {
+      const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
+        deps.store,
+        graphUri,
+        quads,
+        companion,
+        {
+          priority: 'background',
+          source: 'agent.sharedMemorySync.materializeSnapshot.atomicRootCompanion',
+        },
+      );
+      if (!replaced) {
+        throw Object.assign(
+          new Error('root snapshot materialization requires atomic graph/subject replacement support'),
+          { code: 'SWM_ATOMIC_GRAPH_AND_SUBJECT_REPLACE_UNSUPPORTED' },
+        );
+      }
+      await invalidateSwmMaterializationWitness(deps.store, graphUri, {
+        priority: 'background',
+        source: 'agent.sharedMemorySync.materializeSnapshot.atomicRootCompanion.witnessInvalidate',
       }).catch(() => {});
       deps.invalidateListContextGraphsCache();
     },

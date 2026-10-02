@@ -63,6 +63,7 @@ type Gate1RolloutAgentOptions = Readonly<
     | 'onReplicationEvent'
     | 'rfc64PublicCatalogActivation'
     | 'syncReconcilerEnabled'
+    | 'vmReconcilerEnabled'
   >
   & Partial<Pick<DKGAgentConfig, 'chainAdapter'>>
 >;
@@ -166,6 +167,7 @@ export class Gate1RolloutAdapterFixture {
       onReplicationEvent: this.onReplicationEvent,
       rfc64PublicCatalogActivation: this.activation,
       syncReconcilerEnabled: vmChain !== undefined,
+      vmReconcilerEnabled: vmChain !== undefined,
       ...(vmChain === undefined ? {} : { chainAdapter: vmChain }),
     });
     this.#handlers = Object.freeze({
@@ -291,6 +293,20 @@ export class Gate1VmChainAdapter extends MockChainAdapter {
       accessPolicy: 0,
       publishPolicy: 1,
       nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+    });
+    const finalizedSnapshot = await chain.getContextGraphAuthoritySnapshot(
+      registered.contextGraphId,
+    );
+    Object.assign(chain, {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: async (
+          nameHashes: readonly string[],
+        ) => nameHashes.includes(finalizedSnapshot.nameHash)
+          ? new Map([[finalizedSnapshot.nameHash, finalizedSnapshot]])
+          : new Map(),
+        readContextGraphAuthorityIndexRevisions: async () => new Map(),
+        whenIdle: async () => undefined,
+      },
     });
     chain.__registerKC({
       kaId: BigInt(GATE1_KA_ID),

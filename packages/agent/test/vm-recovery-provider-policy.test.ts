@@ -12,6 +12,18 @@ function dispositions(
 }
 
 describe('VM recovery provider policy — adversarial transitions', () => {
+  it('spends a carried holder once without bypassing the considered-peer cap', () => {
+    const policy = new VmRecoveryProviderPolicy();
+    policy.seedProvenHolder('holder');
+    expect(policy.selectNextCandidate(['fresh', 'holder'], 1)).toBe('holder');
+    const reuse = policy.beginAttempt('holder')!;
+    expect(reuse.kind).toBe('proven-holder-reuse');
+    policy.finishAttempt(reuse, 'found', dispositions(['ual-0', 'found']));
+    policy.seedProvenHolder('holder');
+    expect(policy.beginAttempt('holder')).toBeUndefined();
+    expect(policy.selectNextCandidate(['fresh', 'holder'], 1)).toBeUndefined();
+  });
+
   it('revokes provider affinity on partial or incomplete per-UAL outcomes', () => {
     const peerId = '12D3KooWPolicyHolder';
     const policy = new VmRecoveryProviderPolicy();

@@ -6,6 +6,7 @@ import {
 } from '../../dkg-agent-constants.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
+import { EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from '../wire-compression.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -45,6 +46,8 @@ export interface SyncRequestEnvelope {
    */
   pageMode?: typeof SYNC_BYTE_BUDGET_PAGE_MODE;
   pageRowsHint?: number;
+  /** Unsigned response field, including signed envelopes; old peers keep plain pages. */
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
   /**
    * Phase C — optional, UNSIGNED delta-sync hint. When set, the responder
    * returns only Knowledge Assets whose KC `dkg:batchId` is strictly greater
@@ -185,6 +188,12 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
     : SYNC_PAGE_SIZE;
   const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
+  // Cold public recovery still uses an authenticated envelope. This hint is
+  // independent of needsAuth and is appended after the unchanged digest;
+  // responder authorization must succeed before any compression or export.
+  const responseEncoding = resolveExactSyncGzipProfile({
+    includeSharedMemory, phase, assetUals, responseEncoding: EXACT_SYNC_GZIP_ENCODING,
+  })?.responseEncoding;
   // Advertise byte-budget page mode for durable DATA and META (#1916/#1923).
   // Additive/rolling-upgrade safe both directions: an OLD responder ignores the
   // meta pageMode (its meta path is not byte-budget-gated → serves legacy meta),
@@ -219,6 +228,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
             ? '|data'
             : '';
     const tail = encodePipeSyncRequestTail({
+      responseEncoding,
       pageMode: useByteBudgetPage ? SYNC_BYTE_BUDGET_PAGE_MODE : undefined,
       pageRowsHint: useByteBudgetPage ? requestedLimit : undefined,
       syncSessionId,
@@ -278,6 +288,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   if (syncSessionId) request.syncSessionId = syncSessionId;
   if (sinceBatchId) request.sinceBatchId = sinceBatchId;
   if (assetUals) request.assetUals = assetUals;
+  if (responseEncoding) request.responseEncoding = responseEncoding;
   if (useByteBudgetPage) {
     request.pageMode = SYNC_BYTE_BUDGET_PAGE_MODE;
     request.pageRowsHint = requestedLimit;

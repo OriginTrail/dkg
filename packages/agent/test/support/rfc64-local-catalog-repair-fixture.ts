@@ -111,6 +111,7 @@ export async function startRepairAgentV1(
     store: new OxigraphStore(options.storePath),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
+    vmReconcilerEnabled: false,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
