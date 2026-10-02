@@ -2604,11 +2604,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.messenger.setOutboxResponseHandler(PROTOCOL_JOIN_REQUEST, async (result) => {
       await this.handleJoinRequestOutboxResponse(result);
     });
+    // Restart contract (see DKGAgentBase): the manager built here starts with
+    // no subscriptions and no handlers, so the registries that mirror the
+    // previous manager must not outlive it. A detached subscribe from the
+    // previous session can repopulate them after stop() returned, hence the
+    // reset lives at the manager swap and not only in stop().
+    this.resetGossipSessionState();
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
       chainId: this.config.networkIdentity?.chainId,
       isPeerAccepted: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
     });
+    const isRestart = ++this.gossipSessionCount > 1;
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphsFromDurableState();
@@ -3797,6 +3804,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const systemContextGraph of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
       this.subscribeToContextGraph(systemContextGraph, { syncMode: 'always-on' });
     }
+    // Same-instance restart: durable rows were replayed by rehydration above;
+    // give the live process-local subscriptions the wiring the new manager lacks.
+    if (isRestart) this.restoreLiveContextGraphGossipSubscriptions();
 
     // Connect to bootstrap peers
     if (this.config.bootstrapPeers) {
@@ -10669,6 +10679,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const store = this.config.contextGraphSubscriptionStore;
     this.contextGraphSubscriptionRehydrationSlotIds.clear();
     this.contextGraphSubscriptionRehydrationPendingIds.clear();
+    this.contextGraphSubscriptionRehydrationPassAccountedIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
@@ -11093,6 +11104,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       authorityBudget?.dispose();
+      // Freeze the accounting as this pass leaves it: rebuilt from the rows it
+      // read, or inherited when it failed. No await separates the rebuild from
+      // this copy, so a persistence completion cannot land in between.
+      for (const id of this.contextGraphSubscriptionRehydrationAccountedIds) {
+        this.contextGraphSubscriptionRehydrationPassAccountedIds.add(id);
+      }
     }
   }
 

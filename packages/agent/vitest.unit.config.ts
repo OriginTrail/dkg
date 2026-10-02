@@ -261,6 +261,7 @@ export default defineConfig({
       "test/storage-ack-endpoint.test.ts",
       "test/v10-ack-provider-wiring.test.ts",
       "test/storage-ack-lifecycle.test.ts",
+      "test/agent-restart-gossip-resubscribe.test.ts",
       "test/storage-ack-registration-runtime.test.ts",
       "test/direct-rootless-publish.test.ts",
       "test/rootless-update-boundary.test.ts",

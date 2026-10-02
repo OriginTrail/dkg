@@ -677,6 +677,45 @@ export function createListContextGraphsCacheInvalidatingStore(
   return wrapper;
 }
 
+/**
+ * Same-instance restart contract.
+ *
+ * `stop()` followed by `start()` on the SAME `DKGAgent` instance is a supported
+ * lifecycle: `start()` re-opens the runtimes `stop()` closed, and reuses
+ * `this.node` (whose `DKGNode.start()` creates a brand-new libp2p node every
+ * time). Every instance field is exactly one of three kinds:
+ *
+ * 1. Session-scoped, bound to the libp2p node and its `GossipSubManager`.
+ *    `start()` builds a new manager with zero subscriptions and zero handlers,
+ *    so anything that records "topic X is subscribed and handler Y is
+ *    installed on the manager" describes a dead object once the session ends.
+ *    The subscribe helpers short-circuit on these records, so a stale copy
+ *    makes a restarted node silently deaf: `gossipRegistered`,
+ *    `sharedMemoryGossipRegistered`, `swmHostModeSubscribed`,
+ *    `swmHostModeCurated` and `swmHostModeHandlers`. They are reset by
+ *    {@link resetGossipSessionState} (end of `stop()` and again right before
+ *    `start()` builds the replacement manager).
+ * 2. Session-scoped, owned by a lifecycle runtime that `stop()` closes and
+ *    `start()` re-opens or rebuilds: the router, messenger, peer resolver and
+ *    network admission, the peer-sync session, the chain and VM-reconcile
+ *    schedulers and their lifecycle generation, the RFC-64 dispatcher and
+ *    catalog runtimes, the membership-persistence scheduler, the StorageACK
+ *    registration runtime, random sampling, the host-mode store, and every
+ *    timer.
+ * 3. Durable across `stop()`/`start()` (everything else): subscription INTENT
+ *    (`subscribedContextGraphs`, `config.syncContextGraphs`), disconnect
+ *    history (`lastSyncDisconnectedAt`), local agents, the beacon registry,
+ *    and the process-lifetime caches and counters. They are keyed by durable
+ *    identifiers (context graph id, peer id, agent address) and are
+ *    reconciled lazily.
+ *
+ * `start()` re-derives kind 1 from kind 3, so that a restart ends in the state
+ * a fresh process would reach from the same durable stores, plus the
+ * process-local (on-demand, or store-less) subscriptions that were live:
+ * `rehydrateContextGraphsFromDurableState()` replays the durable rows behind
+ * their authority gate, and `restoreLiveContextGraphGossipSubscriptions()`
+ * re-arms the live process-local ones.
+ */
 export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
@@ -782,6 +821,12 @@ export class DKGAgentBase {
    * subscribed via beacon" from "restored on restart" should consult
    * the daemon log at subscribe time, not the live `subscriptionSource`
    * field.
+   *
+   * Session-scoped, together with {@link swmHostModeCurated} and
+   * {@link swmHostModeHandlers}: they describe handlers installed on the
+   * current `GossipSubManager` and are reset by {@link resetGossipSessionState}
+   * (restart contract on {@link DKGAgentBase}). The persisted host-mode
+   * markers in `swmHostModeStore` are the durable side.
    */
   protected readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
   /**
@@ -1483,6 +1528,11 @@ export class DKGAgentBase {
   /** Bounded process-local terminal receiver failures, keyed by announced head. */
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+  /**
+   * Subscription INTENT per context graph. Durable across `stop()`/`start()`
+   * (restart contract on {@link DKGAgentBase}): only the gossip wiring derived
+   * from it is session-scoped and re-established by `start()`.
+   */
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /**
    * Process-local fence for a registration operation whose durable marker has
@@ -1510,6 +1560,16 @@ export class DKGAgentBase {
   /** Non-hosted rows waiting behind the rolling rehydration cap. */
   protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  /**
+   * {@link contextGraphSubscriptionRehydrationAccountedIds} as the latest
+   * rehydration pass left it: the non-system rows that pass read, or the
+   * accounting it inherited when it failed. Only the pass writes it, and
+   * `start()` runs one pass per session, so the restart re-arm
+   * (`restoreLiveContextGraphGossipSubscriptions()`) decides on a fixed set.
+   * The live accounting keeps following persistence completions, including
+   * one from a retired session.
+   */
+  protected readonly contextGraphSubscriptionRehydrationPassAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
@@ -1577,8 +1637,38 @@ export class DKGAgentBase {
       this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
     }
   }
+  /**
+   * Session-scoped (see the restart contract on {@link DKGAgentBase}): the
+   * context graphs whose publish/app/update/finalization topics are subscribed
+   * on the CURRENT `GossipSubManager`. Cleared by
+   * {@link resetGossipSessionState} whenever that manager is retired.
+   */
   protected readonly gossipRegistered = new Set<string>();
+  /** Session-scoped, like {@link gossipRegistered}: member-mode SWM topics on the current manager. */
   protected readonly sharedMemoryGossipRegistered = new Set<string>();
+  /**
+   * How many `GossipSubManager`s `start()` has built for this instance. Above
+   * one, the running `start()` is a same-instance restart.
+   */
+  protected gossipSessionCount = 0;
+  /**
+   * Forget everything recorded about the retired `GossipSubManager`'s
+   * subscriptions and handlers: the five session-scoped registries of the
+   * restart contract on {@link DKGAgentBase}. This is a plain in-memory
+   * `clear()`. It must never go through `unsubscribeFromContextGraph` or
+   * `unwireSwmHostModeHandler`, which also change durable state (persisted
+   * subscription rows, host-mode markers, sync scope): a restart drops the
+   * wiring, not the intent behind it.
+   */
+  protected resetGossipSessionState(): void {
+    // Optional chaining, like the other registries `stop()` touches: partial
+    // hosts built on the prototype never ran these field initializers.
+    this.gossipRegistered?.clear();
+    this.sharedMemoryGossipRegistered?.clear();
+    this.swmHostModeSubscribed?.clear();
+    this.swmHostModeCurated?.clear();
+    this.swmHostModeHandlers?.clear();
+  }
   protected readonly seenOnChainIds = new Set<string>();
   /**
    * Chain-public facts per on-chain Context Graph id (decimal), merged from the
@@ -1951,7 +2041,9 @@ export class DKGAgentBase {
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a
-   * `lastSuccessfulSyncAt` value from before an offline gap.
+   * `lastSuccessfulSyncAt` value from before an offline gap. Durable across
+   * `stop()`/`start()` on purpose: `stop()` records every still-connected peer
+   * here, and the restarted session reads it on reconnect.
    */
   protected readonly lastSyncDisconnectedAt = new Map<string, number>();
   /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
