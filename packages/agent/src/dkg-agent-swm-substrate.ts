@@ -480,6 +480,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * left dormant (authority denied or unavailable, activation cap, the
    * rehydration kill-switch). The restricted `pendingMeta` bootstrap is skipped
    * for the same reason: it holds no live gossip until its authority resolves.
+   * What rehydration accounts for is fixed when its pass ends. A save still in
+   * flight when the previous session stopped can be accounted after the pass
+   * read the store; no durable row brought that graph back, so it is re-armed.
    * Subscriptions and sync scope are only re-wired, never re-persisted.
    */
   restoreLiveContextGraphGossipSubscriptions(this: DKGAgent): number {
@@ -494,7 +497,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         || subscription.pendingMeta === true
         || systemContextGraphs.has(contextGraphId)
         || this.gossipRegistered.has(contextGraphId)
-        || this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)
+        || this.contextGraphSubscriptionRehydrationPassAccountedIds.has(contextGraphId)
         || this.contextGraphSubscriptionDormancyById.has(contextGraphId)
       ) continue;
       try {

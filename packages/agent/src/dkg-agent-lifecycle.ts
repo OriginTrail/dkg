@@ -10503,6 +10503,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const store = this.config.contextGraphSubscriptionStore;
     this.contextGraphSubscriptionRehydrationSlotIds.clear();
     this.contextGraphSubscriptionRehydrationPendingIds.clear();
+    this.contextGraphSubscriptionRehydrationPassAccountedIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
@@ -10910,6 +10911,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       authorityBudget?.dispose();
+      // Freeze the accounting as this pass leaves it: rebuilt from the rows it
+      // read, or inherited when it failed. No await separates the rebuild from
+      // this copy, so a persistence completion cannot land in between.
+      for (const id of this.contextGraphSubscriptionRehydrationAccountedIds) {
+        this.contextGraphSubscriptionRehydrationPassAccountedIds.add(id);
+      }
     }
   }
 

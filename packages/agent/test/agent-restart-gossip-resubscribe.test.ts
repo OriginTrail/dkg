@@ -41,6 +41,8 @@ interface RestartInternals {
   contextGraphSubscriptionDormancyById: Map<string, string>;
   wireSwmHostModeHandler(contextGraphId: string, source?: string, curated?: boolean): void;
   gossipWireIdFor(contextGraphId: string): string;
+  markContextGraphSubscriptionState(contextGraphId: string, patch: { synced?: boolean }): void;
+  rehydrateContextGraphsFromDurableState(): Promise<void>;
 }
 
 function memberTopics(contextGraphId: string): string[] {
@@ -67,6 +69,39 @@ function createSubscriptionStore() {
       },
     },
   };
+}
+
+/**
+ * Hold every `save` the store receives from now on, as a slow durable store
+ * would, until `release()` lets them through. `held` lists the rows in flight.
+ */
+function holdSubscriptionSaves(store: ReturnType<typeof createSubscriptionStore>['store']) {
+  const held: string[] = [];
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const save = store.save;
+  store.save = async (record: SubscriptionRow) => {
+    held.push(record.id);
+    await released;
+    await save(record);
+  };
+  return { held, release };
+}
+
+/**
+ * Order the next `start()`: its rehydration pass reads the store first, then
+ * the held saves of the retired session land, then the rest of `start()` runs.
+ */
+function landHeldSavesAfterRehydration(internals: RestartInternals, saves: { release(): void }): void {
+  const rehydrate = internals.rehydrateContextGraphsFromDurableState.bind(internals);
+  vi.spyOn(internals, 'rehydrateContextGraphsFromDurableState').mockImplementation(async () => {
+    await rehydrate();
+    saves.release();
+    // One macrotask later every promise reaction of the released saves has run.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
 }
 
 async function createEdgeAgent(
@@ -363,6 +398,59 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
       expect(internals.gossipRegistered.has(CG)).toBe(false);
       for (const topic of memberTopics(CG)) expect(internals.gossip.subscribedTopics).not.toContain(topic);
       expect(durable.persisted.get(CG)?.subscribed).toBe(true);
+    }, 60_000);
+
+    it('re-arms a subscription whose save from the retired session lands after the restart rehydrated', async () => {
+      const durable = createSubscriptionStore();
+      const boot = await createEdgeAgent('RestartGossipLateSave', {
+        contextGraphSubscriptionStore: durable.store,
+      });
+      agent = boot.agent;
+      const { internals } = boot;
+      await agent.start();
+      const saves = holdSubscriptionSaves(durable.store);
+      agent.subscribeToContextGraph(CG);
+      // Live on the first manager, while its durable row is still being written.
+      await expect.poll(() => saves.held).toContain(CG);
+      expect(internals.gossipRegistered.has(CG)).toBe(true);
+
+      await agent.stop();
+      expect(durable.persisted.has(CG)).toBe(false);
+      landHeldSavesAfterRehydration(internals, saves);
+      await agent.start();
+
+      // The row became durable only after the restart had read the store, so
+      // no rehydration replayed it: the live intent is all that re-arms it.
+      expect(durable.persisted.get(CG)?.subscribed).toBe(true);
+      expect(internals.gossipRegistered.has(CG)).toBe(true);
+      for (const topic of memberTopics(CG)) expect(internals.gossip.subscribedTopics).toContain(topic);
+    }, 60_000);
+
+    it('keeps a row the restart left dormant when a save from the retired session lands after it rehydrated', async () => {
+      const durable = createSubscriptionStore();
+      const boot = await createEdgeAgent('RestartGossipLateSaveDormant', {
+        contextGraphSubscriptionStore: durable.store,
+        contextGraphSubscriptionRehydrationEnabled: false,
+      });
+      agent = boot.agent;
+      const { internals } = boot;
+      await agent.start();
+      agent.subscribeToContextGraph(CG);
+      await expect.poll(() => durable.persisted.get(CG)?.subscribed).toBe(true);
+      // The row is durable; a later write of it is in flight when the session stops.
+      const saves = holdSubscriptionSaves(durable.store);
+      internals.markContextGraphSubscriptionState(CG, { synced: true });
+      await expect.poll(() => saves.held).toContain(CG);
+
+      await agent.stop();
+      expect(durable.persisted.get(CG)?.synced).toBe(false);
+      landHeldSavesAfterRehydration(internals, saves);
+      await agent.start();
+
+      // The late save landed, and the kill-switch decision about the row stands.
+      expect(durable.persisted.get(CG)?.synced).toBe(true);
+      expect(internals.gossipRegistered.has(CG)).toBe(false);
+      for (const topic of memberTopics(CG)) expect(internals.gossip.subscribedTopics).not.toContain(topic);
     }, 60_000);
   });
 });

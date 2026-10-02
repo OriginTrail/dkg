@@ -1533,6 +1533,16 @@ export class DKGAgentBase {
   /** Non-hosted rows waiting behind the rolling rehydration cap. */
   protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  /**
+   * {@link contextGraphSubscriptionRehydrationAccountedIds} as the latest
+   * rehydration pass left it: the non-system rows that pass read, or the
+   * accounting it inherited when it failed. Only the pass writes it, and
+   * `start()` runs one pass per session, so the restart re-arm
+   * (`restoreLiveContextGraphGossipSubscriptions()`) decides on a fixed set.
+   * The live accounting keeps following persistence completions, including
+   * one from a retired session.
+   */
+  protected readonly contextGraphSubscriptionRehydrationPassAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
