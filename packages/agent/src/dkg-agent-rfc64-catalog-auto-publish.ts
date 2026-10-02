@@ -628,25 +628,31 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * One post-commit hook shared by every durable WM to SWM promotion path.
-   * Pointer maintenance retains its existing best-effort ordering; the RFC-64
-   * shadow observer is admitted to a bounded detached scheduler and therefore
-   * cannot delay an already-committed user operation.
+   * A pointer-maintenance failure propagates to the caller (which classifies it
+   * against the already-committed operation), but the RFC-64 shadow observer is
+   * scheduled regardless: it is admitted to a bounded detached scheduler, so it
+   * cannot delay an already-committed user operation, and it does not depend on
+   * the pointer.
    */
   async afterDurableSwmPromotionV1(
     this: DKGAgent,
     params: AfterDurableSwmPromotionParamsV1,
   ): Promise<void> {
-    await this._stampSwmPointer(
-      params.contextGraphId,
-      params.assertionCoordinate,
-      params.lifecycleAgentAddress,
-      params.subGraphName ?? undefined,
-    );
-    if (params.shareOperationId === null) return;
-    this.scheduleRfc64SwmInventoryObserverV1({
-      ...params,
-      shareOperationId: params.shareOperationId,
-    });
+    try {
+      await this._stampSwmPointer(
+        params.contextGraphId,
+        params.assertionCoordinate,
+        params.lifecycleAgentAddress,
+        params.subGraphName ?? undefined,
+      );
+    } finally {
+      if (params.shareOperationId !== null) {
+        this.scheduleRfc64SwmInventoryObserverV1({
+          ...params,
+          shareOperationId: params.shareOperationId,
+        });
+      }
+    }
   }
 
   /**

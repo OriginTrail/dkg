@@ -1706,14 +1706,24 @@ export class PublishMethods extends DKGAgentBase {
         promoted.shareOperationId,
       );
     }
-    await this.afterDurableSwmPromotionV1({
-      contextGraphId,
-      subGraphName: opts?.subGraphName,
-      assertionCoordinate: assertionName,
-      lifecycleAgentAddress,
-      shareOperationId: promoted.shareOperationId,
-      ctx,
-    });
+    try {
+      await this.afterDurableSwmPromotionV1({
+        contextGraphId,
+        subGraphName: opts?.subGraphName,
+        assertionCoordinate: assertionName,
+        lifecycleAgentAddress,
+        shareOperationId: promoted.shareOperationId,
+        ctx,
+      });
+    } catch {
+      // Deliberately best-effort here (the stamp already logged its cause).
+      // This entry point mints a fresh `async-<uuid>` assertion per call, so
+      // surfacing the error would hand the caller a failure for a name it
+      // cannot replay, inviting a re-publish under a NEW identity. The VM
+      // publish queued below stamps `vmCurrentAssertion`, and an absent swm
+      // pointer is then the valid divergence-only shape (swm == vm).
+      // Named-KA shares (`assertion.promote`) do surface and replay the failure.
+    }
 
     const intent = await this.resolveFinalizedAssertionVmPublishIntent(
       contextGraphId,
@@ -4888,10 +4898,10 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // `_stampSwmPointer` is explicitly a best-effort post-commit projection.
-    // A managed-store restart can therefore leave this optional lifecycle row
-    // absent even though the complete-share marker and immutable graph-scoped
-    // head both committed. Absence alone is not proof that the queued content
+    // The swm pointer is a divergence-only projection, and `publishAsync`
+    // keeps its stamp best-effort. The lifecycle row can therefore be absent
+    // even though the complete-share marker and immutable graph-scoped head
+    // both committed. Absence alone is not proof that the queued content
     // changed: the exact operation id, assertion version, access envelope and
     // queued WM root above are the durable authority. A present-but-different
     // SWM pointer remains terminally stale via the comparison above.
@@ -6578,10 +6588,15 @@ export class PublishMethods extends DKGAgentBase {
    * OT-RFC-43 A2 (decision 2) — stamp `dkg:swmCurrentAssertion` on the
    * lifecycle URN when an assertion is promoted/shared into SWM. The pointer
    * value is the assertion's sealed merkle root hex (read from the seal on the
-   * assertion-graph URI). Best-effort: a missing seal (a non-finalized
-   * promote) leaves the SWM pointer unset, which `deriveStatus` reads as "not
-   * yet wm-sealed for SWM". Never throws — the SWM share itself already
-   * committed.
+   * assertion-graph URI). A missing seal (a non-finalized promote) leaves the
+   * SWM pointer unset, which `deriveStatus` reads as "not yet wm-sealed for
+   * SWM".
+   *
+   * A store failure is logged and RETHROWN. The SWM share already committed, so
+   * the caller owns the classification: swallowing it here left a share that
+   * reported success with a permanently missing root (GH#2901). The stamp is an
+   * idempotent drop-then-set, so replaying the already-committed operation is
+   * the repair.
    */
   async _stampSwmPointer(
     this: DKGAgent,
@@ -6612,6 +6627,7 @@ export class PublishMethods extends DKGAgentBase {
         `Failed to stamp swmCurrentAssertion for "${name}" in "${contextGraphId}": ` +
           (err instanceof Error ? err.message : String(err)),
       );
+      throw err;
     }
   }
 
