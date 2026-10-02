@@ -29,6 +29,11 @@ import type { ExactBatchAgentSession } from '../src/sync/requester/exact-batch-s
 import * as exactBatchRequester from '../src/sync/requester/exact-batch-stream.js';
 import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
 import { runChallengeExactAssetFetch, runDurableSyncDetailed } from '../src/sync/requester/durable-sync.js';
+import {
+  VM_RECOVERY_REGISTERED_PUBLIC_MAX_AGE_MS,
+  VmRecoveryPassAuthority,
+  type VmRecoveryRegisteredPublicEvidence,
+} from '../src/vm-recovery-pass-authority.js';
 
 const CG = 'exact-batch-host-verdict';
 const ctx = { operationId: 'exact-batch-host-verdict', operationName: 'sync' } as OperationContext;
@@ -93,9 +98,10 @@ function fixture(assetCount = 2) {
   };
   const selection = createUalOnlyExactAssetSelection(items.map(item => item.ual));
   const atomicStarted = vi.fn();
-  const run = (exactAssetSelection = selection as typeof selection | ReturnType<typeof createChallengePinnedExactAssetSelection>, exactRecoveryTransportMode: ExactRecoveryTransportMode = 'stream-preferred') => (
+  const run = (exactAssetSelection = selection as typeof selection | ReturnType<typeof createChallengePinnedExactAssetSelection>, exactRecoveryTransportMode: ExactRecoveryTransportMode = 'stream-preferred',
+    handedOver: { registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence } = {}) => (
     LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(host, ctx, 'fixture-source', CG, 1,
-      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted })
+      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, ...handedOver })
   );
   const frames: ExactBatchFrame[] = items.flatMap((item, assetIndex) => [
     { kind: K.META, assetIndex, sequence: 0, payload: new TextEncoder().encode(item.meta.map(quadToNQuad).join('\n') + '\n') },
@@ -196,6 +202,93 @@ describe('experimental exact batch actual host completion verdict', () => {
     expect(f.host.resolveRegisteredContextGraphAuthority).not.toHaveBeenCalled();
     expect(exchangeExperimentalExactBatch).not.toHaveBeenCalled();
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+  });
+
+  describe('registered-public pre-flight', () => {
+    /** The pass that owns the exchange: it has read a public answer and hands over its handle. */
+    async function ownedPass(overrides: { graph?: string } = {}) {
+      const control = { now: 0, current: true, owner: new AbortController() };
+      const pass = new VmRecoveryPassAuthority(() => control.now);
+      await pass.read(async () => ({ kind: 'public', onChainId: 14n }));
+      const evidence = pass.evidence({
+        contextGraphId: overrides.graph ?? CG, signal: control.owner.signal, isCurrent: () => control.current,
+      });
+      return { pass, evidence, control };
+    }
+
+    it('reads the authority itself when no pass has handed it a fresh answer', async () => {
+      const f = fixture();
+      const outcome = await f.run(f.selection, 'stream-required');
+      expect(outcome).toMatchObject({ exactFetchDisposition: 'found' });
+      expect(f.host.resolveRegisteredContextGraphAuthority).toHaveBeenCalledOnce();
+    });
+
+    it('reuses the answer its own pass handed it instead of reading it a second time', async () => {
+      const f = fixture();
+      const { evidence } = await ownedPass();
+      expect(evidence.usableFor(CG)).toBe(true);
+      const outcome = await f.run(f.selection, 'stream-required', { registeredPublicEvidence: evidence });
+      expect(outcome).toMatchObject({ exactFetchDisposition: 'found', committedExactAssetUals: f.selection.assetUals });
+      expect(f.host.resolveRegisteredContextGraphAuthority).not.toHaveBeenCalled();
+      // Everything after the pre-flight is unchanged: the actual stream ran and every KA was verified.
+      expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+      for (const item of f.items) expect(await storedRows(f.store, item.graph)).toBe(1);
+      expect(f.host.chain.getLatestMerkleRoot).toHaveBeenCalledTimes(2);
+    });
+
+    // Each case starts from a handle that is confirmed usable and then changes exactly one thing,
+    // so a pass can only come from the check under test and never from a handle that was never valid.
+    it.each([
+      'the answer expires',
+      'the operation loses ownership',
+      'the operation is cancelled',
+      'the exchange it was handed to is over',
+      'the pass later reads an answer that is no longer public',
+    ] as const)('stops relying on it when %s', async (reason) => {
+      const f = fixture();
+      const { pass, evidence, control } = await ownedPass();
+      expect(evidence.usableFor(CG, new AbortController().signal)).toBe(true);
+      if (reason === 'the answer expires') control.now = VM_RECOVERY_REGISTERED_PUBLIC_MAX_AGE_MS + 1;
+      else if (reason === 'the operation loses ownership') control.current = false;
+      else if (reason === 'the operation is cancelled') control.owner.abort();
+      else if (reason === 'the exchange it was handed to is over') evidence.revoke();
+      else await pass.read(async () => ({ kind: 'unavailable', onChainId: 14n, reason: 'chain-access-policy-unavailable' }) as never);
+      expect(evidence.usableFor(CG, new AbortController().signal)).toBe(false);
+      await f.run(f.selection, 'stream-required', { registeredPublicEvidence: evidence });
+      expect(f.host.resolveRegisteredContextGraphAuthority).toHaveBeenCalledOnce();
+    });
+
+    it('does not rely on a handle that belongs to another graph', async () => {
+      const f = fixture();
+      const { evidence } = await ownedPass({ graph: 'another-graph' });
+      expect(evidence.usableFor('another-graph')).toBe(true);
+      await f.run(f.selection, 'stream-required', { registeredPublicEvidence: evidence });
+      expect(f.host.resolveRegisteredContextGraphAuthority).toHaveBeenCalledOnce();
+    });
+
+    it('does not let an independent fetch reuse what a finished pass obtained, and does not stream when authority is unavailable', async () => {
+      const f = fixture();
+      // A pass read a public answer, handed it to its exchange, and finished: the handle is revoked.
+      const { evidence } = await ownedPass();
+      evidence.revoke();
+      // The graph has since become unavailable; a fetch that was not handed anything must ask for itself.
+      f.host.resolveRegisteredContextGraphAuthority.mockResolvedValue({ kind: 'unavailable', onChainId: 14n,
+        reason: 'chain-access-policy-unavailable' });
+      expect(await f.run(f.selection, 'stream-required')).toMatchObject({
+        exactFetchDisposition: 'incomplete', result: { complete: false, failedPhases: 1 },
+      });
+      expect(f.host.resolveRegisteredContextGraphAuthority).toHaveBeenCalledOnce();
+      expect(exchangeExperimentalExactBatch).not.toHaveBeenCalled();
+    });
+
+    it('still requires public authority when the reused answer is absent and the live read says private', async () => {
+      const f = fixture();
+      f.host.resolveRegisteredContextGraphAuthority.mockResolvedValue({ kind: 'private' });
+      expect(await f.run(f.selection, 'stream-required')).toMatchObject({
+        exactFetchDisposition: 'incomplete', result: { complete: false, failedPhases: 1 },
+      });
+      expect(exchangeExperimentalExactBatch).not.toHaveBeenCalled();
+    });
   });
 
   it('returns found and complete with immediate per-KA progress only after normal atomic application', async () => {

@@ -396,6 +396,7 @@ import {
 } from './sync/responder/sync-handler.js';
 import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
 import { exactBatchTransportOptions } from './sync/requester/exact-batch-stream.js';
+import type { VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import {
   runSelectedSharedMemoryRetry,
@@ -1323,6 +1324,7 @@ function durableSyncSingleFlightKey(params: {
   hasCurrentFence: boolean;
   hasChallengePinnedSelection: boolean;
   hasForcedFreshExactSession: boolean;
+  hasRegisteredPublicEvidence: boolean;
   exactAssetUals?: readonly string[];
   settlementSliceTimeoutMs?: number;
   priority?: number;
@@ -1338,6 +1340,7 @@ function durableSyncSingleFlightKey(params: {
     || params.hasCurrentFence
     || params.hasChallengePinnedSelection
     || params.hasForcedFreshExactSession
+    || params.hasRegisteredPublicEvidence
   ) {
     return null;
   }
@@ -1695,6 +1698,11 @@ export type DurableSyncOptions = {
   forceFreshExactSession?: boolean;
   /** Internal transport decision; required streams never replay an enlarged selection. */
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+  /**
+   * The owning recovery pass's fresh positive registered-public answer, for the exact-batch
+   * stream pre-flight to rely on. Handed only to that pass's own exchange; absent otherwise.
+   */
+  registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1754,6 +1762,7 @@ type LegacyDurableContextGraphOptions = {
   isCurrent?: () => boolean;
   durableMetaContinuation?: DurableMetaContinuation;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+  registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
 };
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
@@ -5815,6 +5824,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 exactAssetSelection,
                 forceFreshExactSession: options?.forceFreshExactSession,
                 exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
+                registeredPublicEvidence: options?.registeredPublicEvidence,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5931,6 +5941,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasCurrentFence: Boolean(options?.isCurrent),
       hasChallengePinnedSelection: exactAssetSelection?.kind === 'challenge-pinned',
       hasForcedFreshExactSession: options?.forceFreshExactSession === true,
+      hasRegisteredPublicEvidence: options?.registeredPublicEvidence !== undefined,
       exactAssetUals,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
@@ -6007,6 +6018,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -6019,6 +6031,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -6031,6 +6044,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
@@ -6048,6 +6062,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         exactAssetSelection: selection,
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
+        registeredPublicEvidence: options.registeredPublicEvidence,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
@@ -6119,6 +6134,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       exactAssetSelection,
       forceFreshExactSession,
       exactRecoveryTransportMode = 'stream-preferred',
+      registeredPublicEvidence,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6499,9 +6515,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         captureRefusalScope: () => this.captureExperimentalExactBatchRefusalScope(contextGraphId),
         isChainEnabled: () => this.chain.chainId !== 'none',
         getPeerProtocols: () => this.getPeerProtocols(remotePeerId),
-        isRegisteredPublic: async () => (await this.resolveRegisteredContextGraphAuthority(contextGraphId, {
-          authorityReadMode: 'finalized-index-or-live', signal,
-        })).kind === 'public',
+        // The recovery pass that owns this exchange may have handed it its own fresh positive
+        // answer; every other fetch, and any doubt about that answer, reads the authority itself.
+        isRegisteredPublic: async () => registeredPublicEvidence?.usableFor(contextGraphId, signal) === true
+          || (await this.resolveRegisteredContextGraphAuthority(contextGraphId, {
+            authorityReadMode: 'finalized-index-or-live', signal,
+          })).kind === 'public',
         requestIdentity: () => ({
           requesterPeerId: this.peerId,
           computeSyncDigest: (...args) => this.computeSyncDigest(...args),

@@ -231,60 +231,74 @@ describe('native recovery sizing call profile', () => {
   });
 });
 
+/**
+ * One knowledge asset registered at ordinal 0 of a mock graph, with the verified asset a
+ * successful exact fetch would materialize and the host seams the recovery batch runs through.
+ */
+async function coldRecoveryFixture(name: string, localCgId: string) {
+  const chain = new MockChainAdapter();
+  const nameHash = ethers.keccak256(ethers.toUtf8Bytes(localCgId));
+  const { contextGraphId } = await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash });
+  const scope = createGraphKnowledgeAssetScope('did:dkg:mock:31337/0x1111111111111111111111111111111111111111/7', 1);
+  const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+  const publicQuads = body(4);
+  const root = computeFlatKCRootV10(publicQuads, []);
+  chain.__registerKC({ kaId, contextGraphId, merkleRootHex: ethers.hexlify(root), chunks: [], merkleLeafCount: 4, byteSize: 256n });
+  const agent = await DKGAgent.create({ name, chainAdapter: chain });
+  const internals = agent as any;
+  internals.node = { peerId: `12D3KooW${name}Local`, libp2p: { getConnections: () => [] } };
+  const assertionGraph = knowledgeAssetLayerGraphUri(localCgId, MemoryLayer.VerifiableMemory, scope);
+  const metadataQuads = generateGraphKnowledgeAssetMetadata({
+    contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1,
+    merkleRoot: root, publisherPeerId: 'rfc64-finalized-catalog-v1',
+    accessPolicy: 'public', allowedPeers: [], timestamp: new Date('2026-09-30T12:00:00Z'),
+    authorAddress: scope.agentAddress, publicTripleCount: 4, privateTripleCount: 0, assertionGraph,
+  }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+    batchId: kaId, materializedVersion: { blockNumber: 100, txIndex: 0 },
+  } } });
+  const asset = { contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1n, assertionGraph,
+    metaGraph: `did:dkg:context-graph:${localCgId}/_meta`,
+    dataQuads: publicQuads.map((quad) => ({ ...quad, graph: assertionGraph })), metadataQuads };
+  const targetOptions = { isTargetCurrent: () => true, revalidateTarget: async () => true, deferActiveFetch: true };
+  /** The exact fetch the batch runs: a verified, authenticated, atomically committed materialization. */
+  const installVerifiedFetch = () => {
+    internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+      const authenticated = await authenticateVerifiedGraphScopedAsset(chain, asset,
+        (localId, onChainId, signal) => internals.requireLocalCgMatchesOnChainSlot(localId, onChainId.toString(), undefined, { signal }));
+      expect(await materializeVerifiedGraphScopedAsset({ store: internals.store, asset: authenticated.asset })).toBe('applied');
+      return { disposition: 'found', result: { fetchedDataTriples: 4, fetchedMetaTriples: metadataQuads.length,
+        insertedTriples: 4 + metadataQuads.length, failedPeers: 0, failedPhases: 0, deferredBackpressure: 0 } };
+    };
+  };
+  const runBatch = (recovery: unknown) => internals.executeVmRecoveryBatch({ localCgId, onChainCgId: contextGraphId,
+    peerId: '12D3KooWNativeColdProfileSource', attempts: [{ entry: { index: 0, target: recovery,
+      prepared: { slotKey: 'test-profile', suppressed: false } }, installedRecord: undefined, candidatePeerIds: [] }],
+    unavailablePeerIds: [], headBlock: 100, isRecoveryCurrent: () => true,
+    revalidateTarget: targetOptions.revalidateTarget, ctx: createOperationContext('system') });
+  return { chain, agent, internals, localCgId, contextGraphId, kaId, targetOptions, installVerifiedFetch, runBatch };
+}
+
 describe('ordinary native cold recovery call profile', () => {
   it('retains all three KA authentication reads and avoids a coherent snapshot after a verified commit', async () => {
     // This counts logical adapter calls through production recovery/auth/store
     // methods. The mocked chain and transport do not measure physical RPC or
     // prove real-chain authority; no network or existing store is touched.
-    const chain = new MockChainAdapter();
-    const localCgId = 'native-cold-call-profile';
-    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(localCgId));
-    const { contextGraphId } = await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash });
-    const scope = createGraphKnowledgeAssetScope('did:dkg:mock:31337/0x1111111111111111111111111111111111111111/7', 1);
-    const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    const publicQuads = body(4);
-    const root = computeFlatKCRootV10(publicQuads, []);
-    chain.__registerKC({ kaId, contextGraphId, merkleRootHex: ethers.hexlify(root), chunks: [], merkleLeafCount: 4, byteSize: 256n });
-    const ordinal = vi.spyOn(chain, 'getContextGraphKCAt').mockResolvedValue(kaId);
+    const f = await coldRecoveryFixture('NativeColdCallProfile', 'native-cold-call-profile');
+    const { chain, internals } = f;
+    const ordinal = vi.spyOn(chain, 'getContextGraphKCAt').mockResolvedValue(f.kaId);
     const latestRoot = vi.spyOn(chain, 'getLatestMerkleRoot');
     const count = vi.spyOn(chain, 'getMerkleRootCount');
     const membership = vi.spyOn(chain, 'getKAContextGraphId');
     const committedName = vi.spyOn(chain, 'getContextGraphNameHash');
     const snapshot = vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot');
     const publisher = vi.spyOn(chain, 'getLatestMerkleRootPublisher');
-    const agent = await DKGAgent.create({ name: 'NativeColdCallProfile', chainAdapter: chain });
-    const internals = agent as any;
-    internals.node = { peerId: '12D3KooWNativeColdProfileLocal', libp2p: { getConnections: () => [] } };
-    const targetOptions = { isTargetCurrent: () => true, revalidateTarget: async () => true, deferActiveFetch: true };
     try {
-      const initial = await internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, 100, targetOptions);
+      const initial = await internals.reconcileChainOrdinal(f.localCgId, f.contextGraphId, 0, 100, f.targetOptions);
       expect(initial).toMatchObject({ status: 'pending', recovery: { reason: 'no-swm' } });
       expect(ordinal).toHaveBeenCalledTimes(1);
       expect(latestRoot).not.toHaveBeenCalled();
-      const assertionGraph = knowledgeAssetLayerGraphUri(localCgId, MemoryLayer.VerifiableMemory, scope);
-      const metadataQuads = generateGraphKnowledgeAssetMetadata({
-        contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1,
-        merkleRoot: root, publisherPeerId: 'rfc64-finalized-catalog-v1',
-        accessPolicy: 'public', allowedPeers: [], timestamp: new Date('2026-09-30T12:00:00Z'),
-        authorAddress: scope.agentAddress, publicTripleCount: 4, privateTripleCount: 0, assertionGraph,
-      }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
-        batchId: kaId, materializedVersion: { blockNumber: 100, txIndex: 0 },
-      } } });
-      const asset = { contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1n, assertionGraph,
-        metaGraph: `did:dkg:context-graph:${localCgId}/_meta`,
-        dataQuads: publicQuads.map((quad) => ({ ...quad, graph: assertionGraph })), metadataQuads };
-      internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => {
-        const authenticated = await authenticateVerifiedGraphScopedAsset(chain, asset,
-          (localId, onChainId, signal) => internals.requireLocalCgMatchesOnChainSlot(localId, onChainId.toString(), undefined, { signal }));
-        expect(await materializeVerifiedGraphScopedAsset({ store: internals.store, asset: authenticated.asset })).toBe('applied');
-        return { disposition: 'found', result: { fetchedDataTriples: 4, fetchedMetaTriples: metadataQuads.length,
-          insertedTriples: 4 + metadataQuads.length, failedPeers: 0, failedPhases: 0, deferredBackpressure: 0 } };
-      };
-      const result = await internals.executeVmRecoveryBatch({ localCgId, onChainCgId: contextGraphId,
-        peerId: '12D3KooWNativeColdProfileSource', attempts: [{ entry: { index: 0, target: initial.recovery,
-          prepared: { slotKey: 'test-profile', suppressed: false } }, installedRecord: undefined, candidatePeerIds: [] }],
-        unavailablePeerIds: [], headBlock: 100, isRecoveryCurrent: () => true,
-        revalidateTarget: targetOptions.revalidateTarget, ctx: createOperationContext('system') });
+      f.installVerifiedFetch();
+      const result = await f.runBatch(initial.recovery);
       expect(result.kind).toBe('completed');
       expect(result.outcomes).toEqual([[0, { status: 'already', blockNumber: 100 }]]);
       expect(ordinal).toHaveBeenCalledTimes(2);
@@ -295,7 +309,39 @@ describe('ordinary native cold recovery call profile', () => {
       expect(snapshot).not.toHaveBeenCalled();
       expect(publisher).not.toHaveBeenCalled();
     } finally {
-      await agent.stop();
+      await f.agent.stop();
+    }
+  });
+
+  it('revalidates the ordinal after the fetch, so an occupant change during it cannot be skipped', async () => {
+    // The scan saw knowledge asset A at ordinal 0 and queued its recovery. While A is fetched,
+    // a shallow reorg changes the inventory to [B, A]. A still belongs to the graph and
+    // materializes, but ordinal 0 now names B: reporting it complete would let the cursor
+    // absorb the ordinal and skip B for good. The post-fetch read must see B and keep it pending.
+    const f = await coldRecoveryFixture('NativeColdReorg', 'native-cold-reorg');
+    const { chain, internals } = f;
+    const kaIdB = f.kaId + 1n;
+    chain.__registerKC({ kaId: kaIdB, contextGraphId: f.contextGraphId,
+      merkleRootHex: ethers.hexlify(computeFlatKCRootV10(body(5), [])), chunks: [], merkleLeafCount: 5, byteSize: 320n });
+    const ordinal = vi.spyOn(chain, 'getContextGraphKCAt').mockResolvedValue(f.kaId);
+    try {
+      const initial = await internals.reconcileChainOrdinal(f.localCgId, f.contextGraphId, 0, 100, f.targetOptions);
+      expect(initial).toMatchObject({ status: 'pending', recovery: { kaId: f.kaId.toString() } });
+      f.installVerifiedFetch();
+      ordinal.mockResolvedValue(kaIdB);
+
+      const result = await f.runBatch(initial.recovery);
+
+      expect(result.kind).toBe('completed');
+      // Ordinal 0 is still owed: the outcome names B (not materialized), never the fetched A.
+      expect(result.outcomes).toEqual([[0, expect.objectContaining({
+        status: 'pending',
+        recovery: expect.objectContaining({ kaId: kaIdB.toString(), reason: 'no-swm' }),
+      })]]);
+      expect(result.outcomes[0]![1].recovery.ual).not.toBe(initial.recovery.ual);
+      expect(ordinal).toHaveBeenCalledTimes(2);
+    } finally {
+      await f.agent.stop();
     }
   });
 });

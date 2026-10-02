@@ -1430,6 +1430,19 @@ export interface ChainReadOptions {
   signal?: AbortSignal;
 }
 
+/** Read options for resolving one publish transaction's receipt. */
+export interface PublishReceiptReadOptions extends ChainReadOptions {
+  /**
+   * The caller never reads `blockTimestamp`. The adapter then skips the extra
+   * block-header lookup that only that field needs, which keeps the lookup at
+   * the single receipt round trip this surface documents, and reports the
+   * field as `0` ("not read"), the value it already reports when the header is
+   * unavailable. Receipt, block number, transaction index and every parsed
+   * publish fact are unchanged.
+   */
+  readonly skipBlockTimestamp?: boolean;
+}
+
 /**
  * One coherent finalized Knowledge Asset version and the immutable physical
  * evidence that produced it. The binding fields are optional only for legacy
@@ -1607,7 +1620,7 @@ export interface ChainAdapter {
    */
   resolvePublishByTxHash?(
     txHash: string,
-    options?: ChainReadOptions,
+    options?: PublishReceiptReadOptions,
   ): Promise<OnChainPublishResult | null>;
 
   /**

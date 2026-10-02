@@ -17,6 +17,7 @@ import type { ExactRecoveryTransportMode } from '../../src/sync/requester/exact-
 import type {
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
+import type { VmRecoveryRegisteredPublicEvidence } from '../../src/vm-recovery-pass-authority.js';
 
 interface TestPeerId {
   toString(): string;
@@ -97,7 +98,8 @@ export interface VmRecoveryHostInternals {
     contextGraphId: string,
     selection: readonly string[] | ExactAssetSelection,
     options?: { signal?: AbortSignal; isCurrent?: () => boolean; onWorkStarted?: () => void;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode },
+      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
     localCgId: string,
@@ -128,6 +130,7 @@ export interface VmRecoveryHostInternals {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
+    registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
   }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' | 'local-admission-deferred' }>;
   recoverVmReconcileBatch(
     localCgId: string,

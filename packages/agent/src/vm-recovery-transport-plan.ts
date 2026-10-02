@@ -5,8 +5,11 @@ import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery
 import {
   enrichVmRecoveryFootprints,
   type VmRecoveryFootprintBridge,
+  type VmRecoveryFootprintObservation,
   type VmRecoveryFootprintSizingReader,
+  type VmRecoveryPreparedHints,
 } from './vm-recovery-footprint.js';
+import type { VmRecoveryChainFootprint } from './vm-recovery-types.js';
 import { planVmRecoveryMicrobatch, type VmRecoveryMicrobatchPlan } from './vm-recovery-microbatch.js';
 import type { VmRecoveryProviderAttemptKind } from './vm-recovery-provider-policy.js';
 import { planVmRecoveryStreamMicrobatch } from './vm-recovery-stream-profile.js';
@@ -39,12 +42,30 @@ export interface VmRecoveryTransportPlanningOptions<T> {
   readonly registeredPublicAccess: boolean;
   readonly signal?: AbortSignal;
   readonly isCurrent: () => boolean;
+  /** Observation only: outcome counts of this plan's sizing, never consulted by a decision. */
+  readonly observeSizing?: (observation: VmRecoveryFootprintObservation) => void;
+  /** Bounds in-flight live sizing reads; omitted keeps every read concurrent. */
+  readonly sizingReadConcurrency?: number;
+  /** Deadline of one live sizing read; omitted keeps the sizing bridge's default. */
+  readonly sizingReadTimeoutMs?: number;
 }
 
 export interface VmRecoveryTransportPlanningPorts {
   readonly resolvePublicAccess: VmRecoveryFootprintBridge['resolvePublicAccess'];
   /** Ordinary probes do not inspect or invoke optional sizing ports. */
   readonly createSizingReader: () => VmRecoveryFootprintSizingReader | null;
+  /**
+   * Advisory sizing already prepared for this exact recovery operation. Consumed
+   * only when sizing a holder prefix; a probe sizes one asset to choose its wire.
+   */
+  readonly preparedHints?: VmRecoveryPreparedHints | null;
+}
+
+/** A sized candidate the plan left for a later batch, with the footprint already observed. */
+export interface VmRecoveryUnplannedCandidate<T> {
+  readonly attempt: T;
+  readonly kaId: string;
+  readonly recoveryFootprint?: VmRecoveryChainFootprint;
 }
 
 export interface VmRecoveryTransportPlan<T> {
@@ -53,6 +74,8 @@ export interface VmRecoveryTransportPlan<T> {
   /** Unobserved probes cannot create reusable public-holder credit. */
   readonly publicAccessEvidence: boolean | undefined;
   readonly packing: Readonly<Omit<VmRecoveryMicrobatchPlan<unknown>, 'targets'>> | undefined;
+  /** The sized candidates a holder plan did not select, in candidate order. */
+  readonly unplanned: readonly VmRecoveryUnplannedCandidate<T>[];
 }
 
 function freezePlan<T>(
@@ -60,12 +83,14 @@ function freezePlan<T>(
   transportMode: ExactRecoveryTransportMode,
   publicAccessEvidence: boolean | undefined,
   packing?: VmRecoveryTransportPlan<T>['packing'],
+  unplanned: readonly VmRecoveryUnplannedCandidate<T>[] = [],
 ): VmRecoveryTransportPlan<T> {
   // Attempt records remain owned by the host; only the planning decision and
   // its selected order are frozen, without freezing mutable rotation state.
   return Object.freeze({
     attempts: Object.freeze([...attempts]), transportMode, publicAccessEvidence,
     packing: packing === undefined ? undefined : Object.freeze({ ...packing }),
+    unplanned: Object.freeze([...unplanned]),
   });
 }
 
@@ -89,9 +114,13 @@ export async function planVmRecoveryTransport<T>(
       return allowed;
     },
     sizing: ports.createSizingReader(),
+    ...(!probe && ports.preparedHints ? { prepared: ports.preparedHints } : {}),
   }, {
     maxContextReads: probe ? 1 : MAX_EXACT_SYNC_ASSETS,
     signal: options.signal, isCurrent: options.isCurrent,
+    ...(options.observeSizing ? { observe: options.observeSizing } : {}),
+    ...(options.sizingReadConcurrency !== undefined ? { readConcurrency: options.sizingReadConcurrency } : {}),
+    ...(options.sizingReadTimeoutMs !== undefined ? { sizingReadTimeoutMs: options.sizingReadTimeoutMs } : {}),
   });
   if (options.signal?.aborted || !options.isCurrent()) publicAccessEvidence = undefined;
   const selectorBytesFor = (selected: readonly typeof sized[number][]) => Buffer.byteLength(
@@ -107,7 +136,13 @@ export async function planVmRecoveryTransport<T>(
   }
   const plan = streamPlan ?? planVmRecoveryMicrobatch(sized, VM_EXACT_MICROBATCH_LIMITS, selectorBytesFor);
   const { targets, ...packing } = plan;
+  const selected = new Set<unknown>(targets.map(({ attempt }) => attempt));
+  // The candidates after the selected prefix are the next batch's work; keep the
+  // footprints already observed for them so a later pass need not read them again.
+  const unplanned = sized.filter(({ attempt }) => !selected.has(attempt)).map(({ attempt, kaId, recoveryFootprint }) => ({
+    attempt, kaId, ...(recoveryFootprint ? { recoveryFootprint } : {}),
+  }));
   // Holder streaming retains required mode even for a one-KA sized prefix.
   return freezePlan(targets.map(({ attempt }) => attempt),
-    streamPlan === undefined ? 'legacy' : 'stream-required', publicAccessEvidence, packing);
+    streamPlan === undefined ? 'legacy' : 'stream-required', publicAccessEvidence, packing, unplanned);
 }
