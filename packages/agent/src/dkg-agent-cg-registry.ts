@@ -11,6 +11,10 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  resolveApprovedPrivateReplicaAuthority,
+  type ApprovedPrivateReplicaAuthority,
+} from './approved-private-replica.js';
+import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
@@ -416,7 +420,11 @@ const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
 export type ContextGraphRegistrationBinding =
-  | { kind: 'unregistered' }
+  | {
+      kind: 'unregistered';
+      /** Current participant-only authority for an approved private replica. */
+      approvedPrivateReplicaAuthority?: ApprovedPrivateReplicaAuthority;
+    }
   | {
       kind: 'registered';
       onChainId: bigint;
@@ -1120,6 +1128,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Read-authority-only proof that exact RFC-64 absence was accepted. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
+      /** Read/sync-only proof from this receiver's durable private approval. */
+      allowApprovedPrivateReplicaFinalizedAbsence?: boolean;
     } = {},
   ): Promise<ContextGraphRegistrationBinding> {
     const route = selectContextGraphRegistrationRoute(this, contextGraphId);
@@ -1379,7 +1389,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             signal: options.signal,
           },
         );
-        const finalizedBinding = ((): ContextGraphRegistrationBinding | null => {
+        const finalizedBinding = await (async (): Promise<ContextGraphRegistrationBinding | null> => {
           // An older reader object without any finalized name capability is
           // an explicitly legacy adapter and may use the compatibility path.
           if (resolution.kind === 'legacy-current') {
@@ -1392,14 +1402,85 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           }
           const target = resolution.targets.get(contextGraphId);
           if (target === undefined) {
-            return !strictFinalizedDurableBindingRepair
+            // An already accepted owner policy is stronger and may be public
+            // or carry a wider signed private roster. Preserve that canonical
+            // path instead of masking it with this receiver's local approval.
+            if (
+              !strictFinalizedDurableBindingRepair
               && options.allowAcceptedRfc64FinalizedAbsence === true
-              ? { kind: 'unregistered' } as const
-              : {
-                  kind: 'unavailable' as const,
-                  reason: 'finalized-name-absence-unaccepted' as const,
-                  detail: 'finalized name absence has no accepted owner-signed unregistered authority',
+            ) {
+              return { kind: 'unregistered' };
+            }
+            // A locally approved private replica may use exact finalized name
+            // absence only while its current approval, metadata, membership,
+            // and receiver delegation all still validate. This is participant
+            // read/sync authority, not a generic accepted owner policy.
+            if (
+              !strictFinalizedDurableBindingRepair
+              && !hasBindingCandidate
+              && options.allowApprovedPrivateReplicaFinalizedAbsence === true
+            ) {
+              const approved = this.localApprovedAgentByCG?.get(contextGraphId);
+              const metadataRevision = this.contextGraphMetaProjection
+                .readAuthorityFactsRevision;
+              let privateAuthority: ApprovedPrivateReplicaAuthority | null = null;
+              try {
+                privateAuthority = approved === undefined
+                  ? null
+                  : await runBoundedOperation(
+                    (signal) => resolveApprovedPrivateReplicaAuthority(
+                      this,
+                      contextGraphId,
+                      approved,
+                      () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+                        === approved.toLowerCase(),
+                      () => this.contextGraphMetaProjection.readAuthorityFactsRevision
+                        === metadataRevision,
+                      signal,
+                    ),
+                    {
+                      label: `resolveApprovedPrivateReplicaAuthority(${contextGraphId})`,
+                      timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+                      signal: options.signal,
+                    },
+                  );
+              } catch (err) {
+                return {
+                  kind: 'unavailable',
+                  reason: 'finalized-name-absence-unaccepted',
+                  detail: err instanceof Error ? err.message : String(err),
+                  dependency: contextGraphReadAuthorityDependencyOf(err),
                 };
+              }
+              if (privateAuthority !== null) {
+                options.signal?.throwIfAborted();
+                // Both the index read and the approval proof yield. A binding
+                // or registration acquired during either supersedes absence.
+                const bindingId = localTarget?.localId ?? contextGraphId;
+                if (
+                  this.contextGraphRegistrationsInFlight?.has(contextGraphId)
+                  || this.contextGraphBindingState.hasBindingCandidate(
+                    bindingId,
+                    this.subscribedContextGraphs.get(bindingId),
+                  )
+                ) {
+                  return {
+                    kind: 'unavailable',
+                    reason: 'finalized-name-absence-unaccepted',
+                    detail: 'Context Graph binding changed during private replica registration discovery',
+                  };
+                }
+                return {
+                  kind: 'unregistered',
+                  approvedPrivateReplicaAuthority: privateAuthority,
+                };
+              }
+            }
+            return {
+              kind: 'unavailable' as const,
+              reason: 'finalized-name-absence-unaccepted' as const,
+              detail: 'finalized name absence has no accepted unregistered authority',
+            };
           }
           if (
             target.expectedOnChainId <= 0n

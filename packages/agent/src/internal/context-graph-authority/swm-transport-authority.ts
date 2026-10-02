@@ -39,7 +39,10 @@ export interface SwmAuthorityHost {
   hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId: string): boolean;
   resolveRegisteredContextGraphAuthority(
     contextGraphId: string,
-    options: SwmRegisteredAuthorityReadOptions & { allowAcceptedRfc64FinalizedAbsence: boolean },
+    options: SwmRegisteredAuthorityReadOptions & {
+      allowAcceptedRfc64FinalizedAbsence: boolean;
+      allowApprovedPrivateReplicaFinalizedAbsence: boolean;
+    },
   ): Promise<RegisteredContextGraphAuthority>;
 }
 
@@ -62,6 +65,7 @@ async function readWithActiveAcceptedPolicy(
   const registered = await host.resolveRegisteredContextGraphAuthority(contextGraphId, {
     ...options,
     allowAcceptedRfc64FinalizedAbsence: activeAcceptedPublicPolicy,
+    allowApprovedPrivateReplicaFinalizedAbsence: true,
   });
   // An `unregistered` answer may rest on the accepted-absence allowance, which
   // holds only while the policy still governs transport. Catalog authority can
@@ -77,6 +81,7 @@ async function readWithActiveAcceptedPolicy(
       registered: await host.resolveRegisteredContextGraphAuthority(contextGraphId, {
         ...options,
         allowAcceptedRfc64FinalizedAbsence: false,
+        allowApprovedPrivateReplicaFinalizedAbsence: true,
       }),
       activeAcceptedPublicPolicy: false,
     };

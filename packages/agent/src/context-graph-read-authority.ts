@@ -193,12 +193,15 @@ export async function resolveContextGraphReadAuthorityDecision(
     return decision('allowed', 'registered-chain', 'chain-participant', registeredAuthority.onChainId);
   }
 
-  const rfc64Roster = input.resolveRfc64PrivateRoster();
+  const approvedPrivateReplica = registeredAuthority.approvedPrivateReplicaAuthority;
+  const rfc64Roster = approvedPrivateReplica?.memberAddresses
+    ?? input.resolveRfc64PrivateRoster();
   if (rfc64Roster !== undefined) {
     if (rfc64Roster === null) {
       return decision('denied', 'rfc64-private', 'invalid-private-policy-roster');
     }
     const effectiveCaller = input.callerAgentAddress
+      ?? approvedPrivateReplica?.approvedAgentAddress
       ?? input.rfc64LocalAgentAddress
       ?? input.defaultAgentAddress;
     return input.isAgentAllowed(effectiveCaller, rfc64Roster)
