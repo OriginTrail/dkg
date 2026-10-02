@@ -570,6 +570,19 @@ const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
   1_000,
   4_000,
 ]);
+/**
+ * Waits before an authority snapshot is composed again after local authority
+ * facts moved under the previous composition. The first retry is immediate;
+ * the later ones outlast the burst of local writes a join or a publish makes.
+ */
+export const RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1 = Object.freeze([
+  0,
+  50,
+  200,
+  500,
+  1_000,
+  2_000,
+]);
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
@@ -1286,6 +1299,23 @@ function isCurrentRfc64CatalogAuthorityRevisionV1(
   revision: number,
 ): boolean {
   return rfc64CatalogAuthorityRevisionsV1.get(agent)?.get(contextGraphId) === revision;
+}
+
+/**
+ * One authority composition that was discarded because a local authority fact
+ * moved while it was being read. Unlike a superseded composition, no newer one
+ * is running for this graph.
+ */
+class Rfc64AuthorityFactsMovedV1 {
+  constructor(readonly authorityRevision: number) {}
+}
+
+function waitForRfc64AuthorityFactsMovedRetryV1(
+  delayMs: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal !== undefined) return waitForRfc64ScheduledResponsibilityDelayV1(signal, delayMs);
+  return new Promise<void>((resolve) => { setTimeout(resolve, delayMs); });
 }
 
 type Rfc64CatalogAuthorityFailureCodeV1 =
@@ -3210,6 +3240,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * Rebuild and accept current RFC-64 authority from ordinary DKG state. A
    * supplied compatibility manifest remains an authority seed for its exact
    * graph; every other responsible graph takes this release-native path.
+   *
+   * `null` means a newer composition owns the outcome. A snapshot discarded
+   * because a local authority fact moved while it was being composed has no
+   * such successor, so it is composed again here. Returning `null` for it left
+   * the graph `resolving` until the next periodic refresh pass, and a curator
+   * that lost the refresh after a membership change kept refusing the new
+   * member's catalog replay for that long.
    */
   async reconcileRfc64CatalogAccessAuthorityV1(
     this: DKGAgent,
@@ -3217,6 +3254,38 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     signal?: AbortSignal,
     authorityRequest: Rfc64CatalogAuthorityRefreshRequestV1 = Object.freeze({ kind: 'auto' }),
   ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null> {
+    for (let retry = 0; ; retry += 1) {
+      const outcome = await this.composeRfc64CatalogAccessAuthorityV1(
+        contextGraphId,
+        signal,
+        authorityRequest,
+      );
+      if (!(outcome instanceof Rfc64AuthorityFactsMovedV1)) return outcome;
+      const retryDelayMs = RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1[retry];
+      if (retryDelayMs === undefined) {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 authority refresh for "${contextGraphId}" was discarded ${retry + 1} times because local authority facts kept changing; the next refresh pass retries it`,
+        );
+        return null;
+      }
+      await waitForRfc64AuthorityFactsMovedRetryV1(retryDelayMs, signal);
+      // A composition that started during the wait owns the outcome now.
+      if (!isCurrentRfc64CatalogAuthorityRevisionV1(
+        this,
+        contextGraphId,
+        outcome.authorityRevision,
+      )) return null;
+    }
+  }
+
+  /** One composition; see {@link reconcileRfc64CatalogAccessAuthorityV1}. */
+  private async composeRfc64CatalogAccessAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    signal: AbortSignal | undefined,
+    authorityRequest: Rfc64CatalogAuthorityRefreshRequestV1,
+  ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | Rfc64AuthorityFactsMovedV1 | null> {
     const service = this.rfc64PublicCatalogServiceV1;
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
       return null;
@@ -3547,7 +3616,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         metadataAuthorityRevision !== null
         && this.contextGraphMetaProjection.readAuthorityFactsRevision
           !== metadataAuthorityRevision
-      ) return null;
+      ) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
       // Finalized absence was exact when the refresh request was created, but
       // RDF evidence loading is asynchronous. Discovery may bind the graph to
       // a chain id during that await without starting a successor reconcile
