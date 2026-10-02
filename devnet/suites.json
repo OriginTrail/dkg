@@ -19,6 +19,7 @@
     "edge-update-flow",
     "greenfield-10min",
     "mixed-version",
+    "node-store-persistence",
     "pr1366-pca-deposit-waiver",
     "pr1369-folded-private-ack",
     "pr1370-admin-op-wallet",

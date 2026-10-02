@@ -15,6 +15,7 @@ export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,
+  type BoundedQueryResponseCapability,
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
@@ -31,6 +32,7 @@ export {
   isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  asBoundedQueryResponseCapability,
   deleteByPatternWithoutCount,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
@@ -162,14 +164,24 @@ export {
   type GraphWriteScope,
 } from './graph-write-gen.js';
 export {
+  EXACT_GRAPH_EXPORT_MAX_ROWS,
+  EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
   ExactGraphReadError,
   quadToNQuad,
   quadsToNQuads,
+  readBoundedGraphPayload,
+  readExactGraph,
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
+  supportsBoundedExactGraphExport,
   type ExactGraphReadErrorCode,
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,
+  type ReadExactGraphOptions,
+  type BoundedGraphPayloadProfile,
+  type ReadBoundedGraphPayloadOptions,
+  type BoundedGraphPayloadRefusalReason,
+  type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {
