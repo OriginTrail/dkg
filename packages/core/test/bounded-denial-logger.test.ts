@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createBoundedDenialLogger } from '../src/bounded-denial-logger.js';
+import { createBoundedDenialLogger, createBoundedKeyedLimiter } from '../src/bounded-denial-logger.js';
 
 function logger(overrides: { intervalMs?: number; cacheMax?: number } = {}) {
   let now = 0;
@@ -63,5 +63,49 @@ describe('createBoundedDenialLogger', () => {
     logDenial('c', () => 'c again');
 
     expect(lines).toEqual(['a', 'b', 'c', 'a again']);
+  });
+
+  it('keeps a synchronous logger failure out of the denial decision', () => {
+    const logDenial = createBoundedDenialLogger({
+      log: () => { throw new Error('logger unavailable'); },
+      now: () => 0,
+      intervalMs: 100,
+      cacheMax: 2,
+    });
+    expect(() => logDenial('peer', () => 'deny peer')).not.toThrow();
+  });
+});
+
+describe('createBoundedKeyedLimiter', () => {
+  it('caps high-cardinality decisions across key eviction', () => {
+    let now = 0;
+    const keyed = createBoundedKeyedLimiter({
+      now: () => now, intervalMs: 100, cacheMax: 2,
+      maxEmitsPerWindow: 3,
+    });
+    const admitted: Array<{ key: string; suppressed: number }> = [];
+    for (let cycle = 0; cycle < 2; cycle++) {
+      for (let key = 0; key < 5; key++) {
+        const suppressed = keyed(`op-${key}`);
+        if (suppressed !== undefined) admitted.push({ key: `op-${key}`, suppressed });
+      }
+    }
+    expect(admitted).toHaveLength(3);
+    now = 101;
+    expect(keyed('op-4')).toBeGreaterThanOrEqual(0);
+  });
+
+  it('does not start a per-key cooldown when the global window denies emission', () => {
+    let now = 0;
+    const keyed = createBoundedKeyedLimiter({
+      now: () => now, intervalMs: 100, windowMs: 100,
+      cacheMax: 2, maxEmitsPerWindow: 1,
+    });
+    expect(keyed('a')).toBe(0);
+    now = 99;
+    expect(keyed('b')).toBeUndefined();
+    now = 100;
+    expect(keyed('b')).toBe(1);
+    expect(keyed('b')).toBeUndefined();
   });
 });

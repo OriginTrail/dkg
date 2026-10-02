@@ -1025,6 +1025,8 @@ export class DKGAgentBase {
   static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
   /** Ledgered copies one audit pass examines (local reads only), keyset paged. */
   static readonly VM_PROMOTION_AUDIT_PAGE_SIZE = 1_000;
+  /** Max ledger rows checked for VM promotion in one graph-scoped store query. */
+  static readonly VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE = 64;
   /** Ledger namespaces one backfill pass pages through. */
   static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
   /** Per-asset VM reconciles one audit pass may run for landed copies. */
@@ -1088,6 +1090,11 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /** Maximum bound graphs one timer sweep admits before yielding to live work. */
+  static readonly VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE',
+    8,
+  );
   /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
   static readonly RS_HEAL_BATCH_MAX = 64;
   /**

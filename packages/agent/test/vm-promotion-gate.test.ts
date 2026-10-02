@@ -843,8 +843,13 @@ describe('core VM-promotion guarantees', () => {
         copies.push(await seedCopy(internals.store, { namespace: 'busy-cg', n: 300 + index, ageMs: 2 * HOUR + index * 60_000 }));
       }
 
+      const queries = vi.spyOn(internals.store, 'query');
       await internals.runVmPromotionAudit();
       expect(reads.calls).toHaveLength(2);
+      expect(queries.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
+      expect(queries.mock.calls.some(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promoted')).toBe(false);
 
       for (let pass = 0; pass < 12; pass += 1) await internals.runVmPromotionAudit();
       const examined = new Set(reads.calls.map(([id]) => id));
@@ -853,6 +858,7 @@ describe('core VM-promotion guarantees', () => {
         expect(examined.has(kaId(300 + index))).toBe(true);
       }
     });
+
   });
 
   describe('durable update path', () => {
