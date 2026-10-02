@@ -181,7 +181,9 @@ const MAPPING_ROWS: readonly MappingRow[] = [
     ['the ACK-precondition wrapper around a typed transient failure', () => precondition(exhaustedWithoutKeywords())],
   ] as const).map(([label, make]) =>
     row(`P lane: ${label}`, 'validated', 'broadcast', make, preSend, PROVEN)),
-  row('P lane with the same origin reported as validated', 'validated', 'validated', () => schedulerBusy(), preSend, PROVEN),
+  // A typed rejection whose words match no keyword: only the P lane can make this retryable, so the row
+  // discriminates it (with the same origin reported as validated, scheduler-busy's "timeout" would not).
+  row('P lane with the same origin reported as validated', 'validated', 'validated', typedStoreNotStarted, preSend, PROVEN),
 
   // --- E. each conjunct of P is independent --------------------------------------------------------------
   row('no proof supplied -> legacy broadcast classification', 'validated', 'broadcast',
@@ -337,6 +339,12 @@ describe('GH#2945 isKnowledgeAssetPublishPreconditionFailure: the pre-send routi
 
   it('routes a structured precondition code with none of those words', () => {
     expect(isKnowledgeAssetPublishPreconditionFailure(withCode('x', { code: 'PUBLISH_INTENT_STALE' }))).toBe(true);
+  });
+
+  it('reads a string throw and a non-Error object with a .message, in any case', () => {
+    expect(isKnowledgeAssetPublishPreconditionFailure('The assertion IS NOT FINALIZED')).toBe(true);
+    expect(isKnowledgeAssetPublishPreconditionFailure({ message: 'No quads in shared memory' })).toBe(true);
+    expect(isKnowledgeAssetPublishPreconditionFailure('transport exploded')).toBe(false);
   });
 
   it('does not route an unrelated failure or a null throw', () => {
