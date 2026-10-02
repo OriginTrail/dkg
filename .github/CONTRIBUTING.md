@@ -99,7 +99,7 @@ pnpm test                           # Test all packages
 pnpm --filter @origintrail-official/dkg-core test   # Test a specific package
 ```
 
-See the [README](README.md) for the full package map.
+See the [README](https://github.com/OriginTrail/dkg/blob/main/README.md) for the full package map.
 
 ## Reporting Bugs
 
@@ -112,12 +112,12 @@ Open a [GitHub Issue](https://github.com/OriginTrail/dkg-v9/issues/new) with:
 
 ## Security Vulnerabilities
 
-Please do **not** open public issues for security vulnerabilities. Instead, follow the [Security Policy](SECURITY.md).
+Please do **not** open public issues for security vulnerabilities. Instead, follow the [Security Policy](https://github.com/OriginTrail/dkg/security/policy).
 
 ## Code of Conduct
 
-By participating in this project, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
+By participating in this project, you agree to abide by the [Code of Conduct](https://github.com/OriginTrail/dkg/blob/main/.github/CODE_OF_CONDUCT.md).
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
+By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](https://github.com/OriginTrail/dkg/blob/main/LICENSE).
