@@ -12,6 +12,10 @@ function fakeRes() {
   };
   res.setHeader = (k: string, v: string) => { res.headers[k] = v; };
   res.end = (body: string) => { res.body = body; };
+  res.once = (_e: string, _fn: () => void) => res;
+  res.removeListener = (_e: string, _fn: () => void) => res;
+  res.off = (_e: string, _fn: () => void) => res;
+  res.destroyed = false;
   return res;
 }
 
@@ -19,6 +23,10 @@ function fakeReq(method: string, body: unknown) {
   return {
     method,
     headers: {},
+    once: (_e: string, _fn: () => void) => undefined,
+    removeListener: (_e: string, _fn: () => void) => undefined,
+    off: (_e: string, _fn: () => void) => undefined,
+    aborted: false,
     __dkgPrebufferedBody: Buffer.from(JSON.stringify(body)),
   } as any;
 }
@@ -27,11 +35,21 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
   const res = fakeRes();
   const url = new URL('http://127.0.0.1/api/memory/search');
   const agent = {
-    store: {
-      query: async (sparql: string) => {
-        captureSparql(sparql);
-        return { type: 'bindings' as const, bindings: [] };
-      },
+    // The route gates on read authority before either fan-out runs; these
+    // injection tests exercise the SPARQL builder, so grant it. The reason
+    // must be a CALLER-scoped one — node-scoped reasons are refused for
+    // agent principals (see memory-search-read-authority.test.ts).
+    resolveContextGraphReadAuthority: async () => ({
+      outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant',
+    }),
+    canUseSharedMemoryForContextGraph: async () => true,
+    listLocalAgents: () => [],
+    // The text search fans out per memory-layer view through the guarded
+    // `DKGAgent.query` path; the literal-escaping contract under test lives
+    // in the caller query either way.
+    query: async (sparql: string) => {
+      captureSparql(sparql);
+      return { bindings: [] };
     },
   };
   const ctx = {
@@ -102,8 +120,9 @@ describe('POST /api/memory/search — SPARQL injection regression (PR #849)', ()
 
     expect(res.statusCode).toBe(200);
 
-    // What the legacy buggy path would have produced.
-    const legacyBuggyOutput = breakoutPayload.toLowerCase().replace(/"/g, '\\"');
+    // Exact output from the removed quote-only sanitizer. Keep this as a fixed
+    // regression fixture instead of executing the known-incomplete sanitizer.
+    const legacyBuggyOutput = String.raw`safe\\"; drop graph <urn:victim> ; #`;
     // What the current safe path produces.
     const safeOutput = escapeSparqlLiteral(breakoutPayload.toLowerCase());
 

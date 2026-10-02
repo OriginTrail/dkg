@@ -312,10 +312,13 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       () => true,
     );
 
+    // Count and subject, not arity: the one-read live authority is now handed
+    // the caller's BOUNDED signal (caller abort + deadline), which the mock
+    // forwards to its own point reads, so these carry a second argument.
     expect(liveness).toHaveBeenCalledTimes(1);
-    expect(liveness).toHaveBeenCalledWith(1n);
+    expect(liveness.mock.calls[0]?.[0]).toBe(1n);
     expect(policy).toHaveBeenCalledTimes(1);
-    expect(policy).toHaveBeenCalledWith(1n);
+    expect(policy.mock.calls[0]?.[0]).toBe(1n);
     // The single-KA probe is already admitted before sizing. Only the
     // compatible non-prefix population (ordinals 1..7) spends bounded reads.
     expect(updateContext).toHaveBeenCalledTimes(7);

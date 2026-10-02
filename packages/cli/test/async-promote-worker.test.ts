@@ -21,6 +21,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
+  createPromotePostCommitFailure,
   type AsyncPromoteQueue,
   type PromoteRequest,
   type PromoteTerminalJobClearer,
@@ -642,6 +643,45 @@ describe('runPromoteJob', () => {
         log: () => {},
       }),
     ).rejects.toThrow(/active lease/);
+  });
+
+  it('persists the publisher diagnostic code of a post-commit failure for the recovery sweep', async () => {
+    const job = await enqueueAndClaim();
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromotePostCommitFailure(new Error('durable tail failed'));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    expect(result.outcome).toBe('failed_terminal');
+    expect((await queue.getStatus(job.jobId))?.attempt.lastError).toMatchObject({
+      classification: 'fatal',
+      retryable: false,
+      diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+    });
+
+    // An upstream error without a publisher disposition persists no code.
+    const untyped = await enqueueAndClaim(makeRequest({ assertionName: 'untyped' }));
+    await runPromoteJob({
+      job: untyped,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async () => {
+        throw new Error('assertion not found');
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    const untypedError = (await queue.getStatus(untyped.jobId))?.attempt.lastError;
+    expect(untypedError?.classification).toBe('fatal');
+    expect(untypedError).not.toHaveProperty('diagnosticCode');
   });
 });
 
@@ -1399,5 +1439,143 @@ describe('createPromoteWorkerSupervisor', () => {
     });
     await expect(sup.start()).rejects.toThrow(/recoverOnStartup failed: store offline/);
     expect(sup.getCounters().attempted).toBe(0);
+  });
+  describe('post-commit recovery sweep', () => {
+    const POST_COMMIT_MESSAGE = 'A promote post-commit step failed after Shared Memory was committed';
+
+    /**
+     * Seed through `target` so a running supervisor's enqueue wake cannot
+     * claim the row first (a second queue instance on the same store has no
+     * scheduler attached, mirroring durable rows written by another process).
+     */
+    async function seedPostCommitFailure(name: string, target: AsyncPromoteQueue = queue): Promise<string> {
+      const jobId = await target.enqueue(makeRequest(name));
+      const claimed = await target.claimNext('old-worker');
+      await target.fail(jobId, claimed!.lease!.claimToken, {
+        message: POST_COMMIT_MESSAGE,
+        retryable: false,
+        classification: 'fatal',
+        recordedAt: Date.now(),
+        diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+      });
+      expect((await target.getStatus(jobId))?.state).toBe('failed');
+      return jobId;
+    }
+
+    function recoveryEvents(): Array<Record<string, unknown>> {
+      return logs
+        .filter((line) => line.includes('"event":"async_promote_post_commit_recovery"'))
+        .map((line) => JSON.parse(line.slice(line.indexOf('{'))) as Record<string, unknown>);
+    }
+
+    async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+      const deadline = Date.now() + 2_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    it('requeues a terminal post-commit failure at startup and replays it to success', async () => {
+      const jobId = await seedPostCommitFailure('post-commit');
+      const sup = createPromoteWorkerSupervisor({
+        agent: makeAgentStub(async () => ({ promotedCount: 0 })),
+        workerConcurrency: 1,
+        pollIntervalMs: 1_000_000,
+        postCommitRecoveryIntervalMs: 0,
+        heartbeatIntervalMs: 0,
+        log: (m) => logs.push(m),
+        workerIdPrefix: 'test',
+      });
+      await sup.start();
+
+      const requeued = (await queue.getStatus(jobId))!;
+      expect(requeued.state).toBe('failed_retrying');
+      expect(requeued.attempt).toMatchObject({ count: 1, maxRetries: 2 });
+      expect(recoveryEvents()).toEqual([expect.objectContaining({
+        trigger: 'startup', jobId, action: 'requeued', attempt: 1, maxAttempts: 2, nextRetryAt: expect.any(Number),
+      })]);
+      expect(sup.getCounters().postCommitRequeued).toBe(1);
+
+      // The replay runs through the normal claim path once the backoff passes.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(await sup.tickOnce()).toBe(1);
+      await sup.stop();
+      expect((await queue.getStatus(jobId))?.state).toBe('succeeded');
+      expect(sup.getCounters().succeeded).toBe(1);
+    });
+
+    it('repeats the sweep on the configured interval and marks a spent budget exhausted', async () => {
+      const sup = createPromoteWorkerSupervisor({
+        agent: makeAgentStub(async () => ({ promotedCount: 0 })),
+        workerConcurrency: 1,
+        pollIntervalMs: 1_000_000,
+        postCommitRecoveryIntervalMs: 20,
+        heartbeatIntervalMs: 0,
+        log: (m) => logs.push(m),
+        workerIdPrefix: 'test',
+      });
+      await sup.start();
+      expect(recoveryEvents()).toEqual([]);
+
+      const externalQueue = new TripleStoreAsyncPromoteQueue(store, {
+        now: () => Date.now(),
+        backoff: () => 50,
+        maxRetries: 2,
+      });
+      const jobId = await seedPostCommitFailure('periodic', externalQueue);
+      await waitFor(() => recoveryEvents().some((e) => e.jobId === jobId), 'the periodic sweep');
+      expect(recoveryEvents()).toEqual([expect.objectContaining({
+        trigger: 'periodic', jobId, action: 'requeued', attempt: 1, maxAttempts: 2,
+      })]);
+      expect((await queue.getStatus(jobId))?.state).toBe('failed_retrying');
+
+      // A second post-commit failure on the replay spends the two-attempt budget.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const replay = await queue.claimNext('replay-worker');
+      expect(replay?.jobId).toBe(jobId);
+      expect(replay?.attempt.count).toBe(2);
+      await queue.fail(jobId, replay!.lease!.claimToken, {
+        message: POST_COMMIT_MESSAGE,
+        retryable: false,
+        classification: 'fatal',
+        recordedAt: Date.now(),
+        diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+      });
+      await waitFor(() => recoveryEvents().some((e) => e.action === 'exhausted'), 'the exhausted verdict');
+      await sup.stop();
+      expect(recoveryEvents().filter((e) => e.action === 'exhausted')).toEqual([expect.objectContaining({
+        trigger: 'periodic', jobId, action: 'exhausted', attempt: 2, maxAttempts: 2,
+      })]);
+      const exhausted = (await queue.getStatus(jobId))!;
+      expect(exhausted.state).toBe('failed');
+      expect(exhausted.reason).toContain('automatic post-commit recovery exhausted after 2 attempts');
+      expect(sup.getCounters()).toMatchObject({ postCommitRequeued: 1, postCommitExhausted: 1 });
+      // The manual route keeps working on the exhausted row.
+      await queue.recover(jobId);
+      expect((await queue.getStatus(jobId))?.state).toBe('queued');
+    });
+
+    it('logs a failing sweep without blocking startup or polling', async () => {
+      const brokenQueue = Object.create(queue) as AsyncPromoteQueue;
+      brokenQueue.recoverPostCommitFailures = async () => {
+        throw new Error('control graph unavailable');
+      };
+      await queue.enqueue(makeRequest('still-runs'));
+      const sup = createPromoteWorkerSupervisor({
+        agent: { ...makeAgentStub(async () => ({ promotedCount: 1 })), promoteQueue: brokenQueue },
+        workerConcurrency: 1,
+        pollIntervalMs: 1_000_000,
+        postCommitRecoveryIntervalMs: 0,
+        heartbeatIntervalMs: 0,
+        log: (m) => logs.push(m),
+        workerIdPrefix: 'test',
+      });
+      await sup.start();
+      expect(logs.some((m) => m.includes('post-commit recovery sweep failed (startup): control graph unavailable'))).toBe(true);
+      expect(await sup.tickOnce()).toBe(1);
+      await sup.stop();
+      expect((await queue.getStats()).succeeded).toBe(1);
+    });
   });
 });

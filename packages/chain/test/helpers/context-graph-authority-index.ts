@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { vi } from 'vitest';
+
 import type { ContextGraphAuthorityIndexStore } from
   '../../src/context-graph-authority-index-checkpoint.js';
 
@@ -32,6 +34,23 @@ export class MemoryAuthorityIndexStore implements ContextGraphAuthorityIndexStor
     this.invalidations.push(nextToken);
     return nextToken;
   }
+}
+
+/** Per-scope CAS store with spied methods: a trust-domain key and the plain scope stay distinct. */
+export class ScopedAuthorityIndexStore implements ContextGraphAuthorityIndexStore {
+  readonly records = new Map<string, { token: number; value: unknown | null }>();
+  load = vi.fn(async (scope: string) => this.records.get(scope));
+  compareAndSwap = vi.fn(async (scope: string, token: number | undefined, value: unknown) => {
+    if (this.records.get(scope)?.token !== token) return undefined;
+    const next = (token ?? 0) + 1;
+    this.records.set(scope, { token: next, value });
+    return next;
+  });
+  invalidate = vi.fn(async (scope: string, token: number) => {
+    if (this.records.get(scope)?.token !== token) return undefined;
+    this.records.set(scope, { token: token + 1, value: null });
+    return token + 1;
+  });
 }
 
 export interface AbortableTipReaderOptions {

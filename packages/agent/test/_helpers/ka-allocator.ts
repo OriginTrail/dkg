@@ -52,3 +52,12 @@ class InMemoryKaNumberStore implements KaNumberStore {
 export function makeTestKaNumberAllocator(): KaNumberAllocator {
   return new KaNumberAllocator(new InMemoryKaNumberStore());
 }
+
+/**
+ * A KA-number sequence that outlives one agent instance, like the daemon's
+ * SQLite store across a restart. Give each restarted agent a new
+ * `KaNumberAllocator` over the same store.
+ */
+export function makeTestKaNumberStore(): KaNumberStore {
+  return new InMemoryKaNumberStore();
+}

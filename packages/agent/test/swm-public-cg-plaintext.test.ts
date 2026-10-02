@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 // Hand-rolled call recorder: records every invocation's args and delegates to
@@ -119,6 +120,9 @@ function makeAgentLike(opts: {
     log,
     chain,
     store: { query: storeQuery },
+    contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+    swmSenderKeyStateLoaded: true,
+    loadSwmSenderKeyState: vi.fn(async () => {}),
     subscribedContextGraphs,
     wireIdToLocalCgId,
     onChainAccessPolicyCache: opts.cache ?? new Map<string, number>(),
@@ -162,6 +166,12 @@ function makeAgentLike(opts: {
   });
   agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority =
     (DKGAgent.prototype as any).resolveWorkspaceAgentRecipientsForCurrentAuthority;
+  // No graph here has an accepted owner-signed public policy (#2827), so the
+  // SWM paths keep the on-chain behaviour these tests pin.
+  agentLike.resolveSwmRegisteredAuthority = (DKGAgent.prototype as any).resolveSwmRegisteredAuthority;
+  agentLike.isContextGraphSwmPublic = (DKGAgent.prototype as any).isContextGraphSwmPublic;
+  agentLike.resolveSwmTransportAuthority = (DKGAgent.prototype as any).resolveSwmTransportAuthority;
+  agentLike.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1 = () => false;
   agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)._resolveCuratedChainKeyContext;
   return agentLike;
 }
@@ -170,6 +180,23 @@ const isPublic = (a: any, cgId = '0xCURATOR/experimental-music') =>
   (DKGAgent.prototype as any).isContextGraphPublicOnChain.call(a, cgId);
 
 describe('DKGAgent.isContextGraphPublicOnChain', () => {
+  it('attributes the production public-policy probe instead of the shared funnel', async () => {
+    const tracker = new RpcUsageTracker(() => '31337');
+    const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0 });
+    agentLike.resolveOnChainAccessPolicyState = async () => withRpcUsageConsumer(
+      'cgStorage.getContextGraph',
+      () => {
+        tracker.record('eth_call');
+        return 0;
+      },
+    );
+
+    await expect(isPublic(agentLike)).resolves.toBe(true);
+    expect(tracker.drainWindow().ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.publicProbe': 1,
+    });
+  });
+
   it('preserves the legacy strict binding option while retryable strict reads propagate transport errors', async () => {
     const cgId = '0xCURATOR/experimental-music';
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0 });

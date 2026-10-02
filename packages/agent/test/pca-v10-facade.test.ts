@@ -1,7 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+  NoChainAdapter,
+  PcaUnavailableError,
+} from '@origintrail-official/dkg-chain';
 
 async function makeAgent(chain: MockChainAdapter | NoChainAdapter): Promise<DKGAgent> {
   return DKGAgent.create({
@@ -126,6 +130,10 @@ describe('DKGAgent V10 PCA facade', () => {
     const legacyAgent = await makeAgent(legacyOnly);
     await expect(legacyAgent.requestBrowserWalletRpc('eth_blockNumber', [])).resolves.toBe('0xlegacy');
     expect(legacyRpc).toHaveBeenCalledWith('eth_blockNumber', []);
+
+    const unsupported = await makeAgent(new NoChainAdapter());
+    await expect(unsupported.requestPublishingConvictionRpc('eth_chainId', []))
+      .rejects.toBeInstanceOf(PcaUnavailableError);
   });
 
   it('getPublishingConvictionAgents delegates to the adapter (checksummed list)', async () => {

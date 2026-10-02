@@ -82,12 +82,17 @@ export class NetworkAdmissionService {
     this.setQuarantine(peerId, { kind: 'indefinite' });
   }
 
-  /** Apply the coordinator's bounded recovery cooldown using this service's clock. */
-  quarantinePeerForCooldown(peerId: string): void {
+  /**
+   * Apply the coordinator's bounded recovery cooldown using this service's
+   * clock. Returns the cooldown applied (ms), so transport-level refusal of the
+   * peer can mirror it exactly instead of keeping its own copy of the value.
+   */
+  quarantinePeerForCooldown(peerId: string): number {
     this.setQuarantine(peerId, {
       kind: 'cooldown',
       untilMs: this.now() + this.quarantineCooldownMs,
     });
+    return this.quarantineCooldownMs;
   }
 
   getRetryableProbeBackoff(peerId: string): NetworkAdmissionProbeBackoff | undefined {
@@ -102,6 +107,18 @@ export class NetworkAdmissionService {
   ): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
     this.probeRetry.recordFailure(canonicalPeerId, reason, kind);
+  }
+
+  /** Claim the short ACK-preflight lease owned by the active retry window. */
+  claimRetryablePreflightProbe(peerId: string): boolean {
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    return this.probeRetry.claimPreflightProbe(canonicalPeerId);
+  }
+
+  /** Briefly suppress another ACK-preflight probe after a failed attempt. */
+  markRetryablePreflightProbeAttempted(peerId: string): void {
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    this.probeRetry.markPreflightProbeAttempted(canonicalPeerId);
   }
 
   isAcceptedPeer(peerId: string): boolean {

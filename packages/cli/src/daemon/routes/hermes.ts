@@ -33,6 +33,10 @@ import {
   buildOpenClawAttachmentImportContextEntries,
 } from '../openclaw.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
+import {
+  isUndiciResponseTimeoutError,
+  localAgentChannelFetchInit,
+} from '../local-agent-channel-fetch.js';
 
 type HermesPersistRouteResult = {
   statusCode: number;
@@ -45,6 +49,7 @@ function isHermesBridgeTimeoutError(err: any): boolean {
   const message = String(err?.message ?? err ?? '');
   return err?.name === 'TimeoutError'
     || err?.cause?.name === 'TimeoutError'
+    || isUndiciResponseTimeoutError(err)
     || /agent response timeout|response timeout|aborted due to timeout/i.test(message);
 }
 
@@ -235,7 +240,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             'Content-Type': 'application/json',
           }, target.inboundUrl, apiServerKey),
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
+          ...localAgentChannelFetchInit(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
@@ -369,7 +374,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             Accept: 'text/event-stream',
           }, streamUrl, apiServerKey),
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
+          ...localAgentChannelFetchInit(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
 
         if (!transportRes.ok) {

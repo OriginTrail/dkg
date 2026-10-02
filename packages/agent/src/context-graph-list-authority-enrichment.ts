@@ -6,6 +6,51 @@ import type {
   FinalizedContextGraphAuthorityTargetsResolutionV1,
 } from './dkg-agent-cg-registry.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import type { OnChainContextGraphFacts } from './context-graph-storage-discovery.js';
+
+/**
+ * Chain-public facts attached to a `listContextGraphs` row. Every field is
+ * public on chain, including for private graphs; nothing here comes from the
+ * local store, so it never reveals a private graph's cleartext name.
+ */
+export interface ContextGraphListOnChainFacts {
+  /** Positive decimal ContextGraphStorage id. */
+  readonly id: string;
+  /** From the write-once on-chain access policy: 0 = public, 1 = private. */
+  readonly access: 'public' | 'private' | 'unknown';
+  /** 0 = curated (only the publish authority may publish), 1 = open; null until observed. */
+  readonly publishPolicy: 'curated' | 'open' | 'unknown' | null;
+  readonly publishAuthority: string | null;
+  /** Current ERC-721 owner (the creator unless ownership was transferred); null until observed. */
+  readonly owner: string | null;
+  /** ISO-8601 creation time from the on-chain timestamp; null until enumerated. */
+  readonly createdAt: string | null;
+  /** On-chain active flag; `false` once deactivated; null until enumerated. */
+  readonly active: boolean | null;
+  /** Curator-committed name hash; null when the curator opted out. */
+  readonly nameHash: string | null;
+  /** Block of the newest observation behind these facts. */
+  readonly observedAtBlock: number;
+}
+
+/** Project the node's merged on-chain facts onto the list row's `onChain` field. */
+export function toContextGraphListOnChainFacts(
+  facts: OnChainContextGraphFacts,
+): ContextGraphListOnChainFacts {
+  return Object.freeze({
+    id: facts.onChainId,
+    access: facts.accessPolicy === 0 ? 'public' : facts.accessPolicy === 1 ? 'private' : 'unknown',
+    publishPolicy: facts.publishPolicy === null
+      ? null
+      : facts.publishPolicy === 0 ? 'curated' : facts.publishPolicy === 1 ? 'open' : 'unknown',
+    publishAuthority: facts.publishAuthority,
+    owner: facts.owner,
+    createdAt: facts.createdAt === null ? null : new Date(facts.createdAt * 1_000).toISOString(),
+    active: facts.active,
+    nameHash: facts.nameHash,
+    observedAtBlock: facts.observedAtBlock,
+  });
+}
 
 export type ListContextGraphsRow = {
   id: string;
@@ -21,6 +66,14 @@ export type ListContextGraphsRow = {
   synced: boolean;
   onChainId?: string;
   callerInvolved?: boolean;
+  /**
+   * `false` when the node knows this graph only by its on-chain name hash:
+   * `id` and `name` are then that hash, never a guessed cleartext. Subscribing
+   * by the hash lets the node resolve and verify the cleartext id.
+   */
+  nameKnown?: boolean;
+  /** Chain-public ContextGraphStorage facts, when the node has observed them. */
+  onChain?: ContextGraphListOnChainFacts;
 };
 
 type ContextGraphListAuthorityAttemptV1<T> =

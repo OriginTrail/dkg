@@ -20,6 +20,7 @@ function adapter(
     getTransactionReceiptWithFailover: vi.fn(async () => null),
     getTransactionWithFailover: vi.fn(async () => null),
     getBlockTimestamp: vi.fn(async () => 1_234_567),
+    getFinalizedBlockTimestamp: vi.fn(async () => 1_234_567),
     parseV10PublishReceipt: vi.fn(async () => null),
     // PR #2300 r1 — `resolvePublishTransaction` gates every mined verdict on receipt-block
     // finality; these rows are about receipt PROJECTION, so the gate defaults to satisfied and
@@ -77,6 +78,46 @@ describe('canonical finalization receipt capability', () => {
       expectedBlockNumber: 123,
       expectedBlockHash: `0x${'ef'.repeat(32)}`,
     })).resolves.toEqual({ status: 'reorged' });
+  });
+
+  it('rejects a successful receipt with logs but no block hash', async () => {
+    const storageInterface = new ethers.Interface(loadAbi('DKGKnowledgeAssets'));
+    const storageAddress = '0x4444444444444444444444444444444444444444';
+    const encodedCreated = storageInterface.encodeEventLog(
+      storageInterface.getEvent('KnowledgeAssetCreated')!,
+      [
+        KA_ID,
+        AUTHOR,
+        'missing-block-hash',
+        ethers.hexlify(MERKLE_ROOT),
+        2048n,
+        1n,
+        2n,
+        100n,
+        false,
+      ],
+    );
+    const chain = adapter({
+      contracts: {
+        knowledgeAssetStorage: { interface: storageInterface, target: storageAddress },
+      },
+      getTransactionReceiptWithFailover: vi.fn(async () => ({
+        hash: TX_HASH,
+        status: 1,
+        blockNumber: 123,
+        index: 4,
+        from: AUTHOR,
+        logs: [{
+          address: storageAddress,
+          topics: encodedCreated.topics,
+          data: encodedCreated.data,
+        }],
+      })),
+    }, true);
+    delete (chain as any).getFinalizedBlockTimestamp;
+
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH))
+      .resolves.toEqual({ status: 'rejected' });
   });
 
   it('resolves canonical V10 evidence through the production receipt parser', async () => {
@@ -164,7 +205,9 @@ describe('canonical finalization receipt capability', () => {
         knowledgeAssetsContract: storageAddress,
       },
     });
-    expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, {});
+    // The parser names the block by the receipt's HASH so the timestamp can come from the
+    // header the finality check already fetched instead of a second by-number read.
+    expect((chain as any).getFinalizedBlockTimestamp).toHaveBeenCalledWith(123, BLOCK_HASH, {});
   });
 
   it('resolves canonical V9 evidence through the production receipt parser', async () => {
@@ -222,7 +265,7 @@ describe('canonical finalization receipt capability', () => {
       },
     });
     expect(chain.parseV10PublishReceipt).not.toHaveBeenCalled();
-    expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, {});
+    expect((chain as any).getFinalizedBlockTimestamp).toHaveBeenCalledWith(123, BLOCK_HASH, {});
   });
 
   it('resolvePublishTransaction projects the SAME read, V9 fallback included [GH#2270]', async () => {
@@ -257,6 +300,18 @@ describe('canonical finalization receipt capability', () => {
     expect(resolution.status).toBe('confirmed');
     expect(resolution.status).not.toBe('unrecognized');
     expect(resolution.status === 'confirmed' ? resolution.publish.batchId : null).toBe(legacyBatchId);
+    expect(resolution.status === 'confirmed' ? resolution.canonicalReceipt : null).toEqual({
+      txHash: TX_HASH,
+      blockNumber: 123,
+      blockHash: BLOCK_HASH,
+      txIndex: 4,
+      merkleRoot: MERKLE_ROOT,
+      publisherAddress: PUBLISHER,
+      batchId: legacyBatchId,
+      kaId: legacyBatchId,
+      startKAId: legacyBatchId,
+      endKAId: legacyBatchId,
+    });
     // And the cheaper legacy surface projects the same read to the same publish.
     expect(await chain.resolvePublishByTxHash(TX_HASH)).toMatchObject({ batchId: legacyBatchId });
   });

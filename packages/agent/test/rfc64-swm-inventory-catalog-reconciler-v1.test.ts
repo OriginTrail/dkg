@@ -54,6 +54,89 @@ const DEPLOYMENT = Object.freeze({
 }) as CatalogSealDeploymentProfileV1;
 
 describe('RFC-64 R1.1 signed SWM inventory to catalog target', () => {
+  it('stops dispatch and drains admitted siblings before reporting a failed repair', async () => {
+    const seals = await Promise.all(Array.from({ length: 10 }, (_, i) => authorSeal(BigInt(i + 1))));
+    const rows = seals.map((seal, i) => ({
+      ...inventoryRow(seal, PROJECTION), assertionCoordinate: `draft-${i}`, shareOperationId: `share-${i}`,
+    } as SwmAuthorInventoryRowV1));
+    const snapshot = await signedSnapshot(rows, AUTHOR_WALLET);
+    const failure = new Error('first read failed');
+    let failFirst!: () => void;
+    let releaseSiblings!: () => void;
+    const firstGate = new Promise<void>((resolve) => { failFirst = resolve; });
+    const siblingGate = new Promise<void>((resolve) => { releaseSiblings = resolve; });
+    let calls = 0;
+    const signals: AbortSignal[] = [];
+    let settled = false;
+    const task = prepareRfc64SwmInventoryCatalogTargetV1({
+      snapshot,
+      resolveAsset: async (row, signal) => {
+        const index = calls++;
+        signals.push(signal);
+        if (index === 0) {
+          await firstGate;
+          throw failure;
+        }
+        await siblingGate; // Deliberately non-cooperative: still physically owned.
+        return {
+          assertionCoordinate: row.assertionCoordinate,
+          projectionBytes: PROJECTION,
+          seal: seals.find((seal) => seal.kaUal === row.kaUal)!,
+        };
+      },
+    }).then(() => { settled = true; return null; }, (error: unknown) => {
+      settled = true;
+      return error;
+    });
+    try {
+      await vi.waitFor(() => expect(calls).toBe(8));
+      failFirst();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect.soft(settled).toBe(false);
+      expect.soft(calls).toBe(8);
+      expect.soft(signals.every((signal) => signal?.aborted)).toBe(true);
+    } finally {
+      failFirst();
+      releaseSiblings();
+    }
+    expect(await task).toMatchObject({ code: 'swm-catalog-reconcile-resolution', cause: failure });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toBe(8);
+  });
+
+  it('drains admitted reads on caller cancellation without dispatching another row', async () => {
+    const seals = await Promise.all(Array.from({ length: 10 }, (_, i) => authorSeal(BigInt(i + 1))));
+    const rows = seals.map((seal, i) => ({
+      ...inventoryRow(seal, PROJECTION), assertionCoordinate: `cancel-${i}`, shareOperationId: `cancel-share-${i}`,
+    } as SwmAuthorInventoryRowV1));
+    const snapshot = await signedSnapshot(rows, AUTHOR_WALLET);
+    const controller = new AbortController();
+    const reason = new Error('closing');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    let settled = false;
+    const task = prepareRfc64SwmInventoryCatalogTargetV1({
+      snapshot, signal: controller.signal,
+      resolveAsset: async (row, signal) => {
+        calls++;
+        await gate;
+        signal.throwIfAborted();
+        return { assertionCoordinate: row.assertionCoordinate, projectionBytes: PROJECTION, seal: seals[0]! };
+      },
+    }).then(() => { settled = true; return null; }, (error: unknown) => { settled = true; return error; });
+    try {
+      await vi.waitFor(() => expect(calls).toBe(8));
+      controller.abort(reason);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+    } finally {
+      release();
+    }
+    expect(await task).toBe(reason);
+    expect(calls).toBe(8);
+  });
+
   it('authenticates and detaches one complete target before catalog mutation', async () => {
     const seal = await authorSeal();
     const row = inventoryRow(seal, PROJECTION);
@@ -165,8 +248,7 @@ async function signedSnapshot(
   return Object.freeze({ head, rows: Object.freeze([...rows]) });
 }
 
-async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
-  const kaNumber = 7n;
+async function authorSeal(kaNumber = 7n): Promise<CanonicalGraphScopedAuthorSealV1> {
   const reservedKaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(DEPLOYMENT.assertedAtChainId),

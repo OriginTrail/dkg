@@ -1,3 +1,4 @@
+import { hostOnlyRpcText } from '@origintrail-official/dkg-chain';
 import type { LiftJobActiveState } from './lift-job-states.js';
 
 export const LIFT_JOB_FAILURE_PHASES = [
@@ -84,10 +85,23 @@ export interface LiftJobFailurePolicy {
    * (`isAutomaticallyRetryable` → `scheduleRetryIfEligible` + the claim-time sweep).
    *
    * QUALIFICATION — a code may set this only when ALL THREE hold:
-   *   1. NO transaction can have been accepted when the failure is recorded. For
+   *   1. NO PUBLICATION transaction can have been accepted when the failure is recorded. For
    *      `workspace_unavailable` this is STRUCTURAL: every state in
    *      `LIFT_JOB_FAILURE_ALLOWED_STATES` is pre-send and `createLiftJobFailureMetadata`
-   *      throws on the others, so the guarantee is enforced, not documented. For
+   *      throws on the others, so the guarantee is enforced, not documented. What is NOT
+   *      structural is which producers may claim it: a typed STORE rejection (GH#2940) or a
+   *      typed transient RPC TRANSPORT failure that names no transaction (GH#2942) is
+   *      position-agnostic — it can equally arise after a send — so it is recorded under this
+   *      code only when the failure writer holds the write-ahead's own proof that no PUBLISH
+   *      transaction left the node (`ExecutionFailureEvidence`) AND the persisted record still
+   *      reads 'validated'. (The one exception is a `claimed`-origin transport failure, where
+   *      nothing can have been dispatched at all.) "No publication transaction" is deliberate
+   *      wording: a TRAC approval or a context-graph registration may already have been sent by
+   *      the attempt, and the code says nothing about them; the `phase` of this code is
+   *      `validation` by registry shape, not because an RPC outage is a validation fact. That
+   *      proof assumes an executor that awaits
+   *      `PublishOptions.onBeforeBroadcast` before sending; an executor that does not is outside
+   *      it. For
    *      `quorum_unmet` it comes from the PRODUCER's position instead — its allowed state is
    *      'broadcast', but ACK quorum is collected before the publish tx is signed, so the
    *      error cannot follow a send. A code whose pre-send-ness rests on the producer must
@@ -169,14 +183,17 @@ export type BuiltInLiftJobFailurePolicy = LiftJobFailurePolicy & {
 
 export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJobFailurePolicy> = {
   // autoRetry: pre-send by allowed-states (enforced), transient by cause (a
-  // corrupt/unreadable SWM head that sync repair heals) — see the field doc.
+  // corrupt/unreadable SWM head that sync repair heals, or — GH#2940 — a typed store-scheduler
+  // rejection that provably preceded the publish transaction) — see the field doc.
   workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
   workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
-  // No production producer (dead-code sweep is a recorded follow-up); autoRetry
-  // stays off until a producer exists to witness it.
-  authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
+  // The production producer structurally admits only the agent's closed set of
+  // transient authority-unavailability reasons; terminal and unknown reasons
+  // map to authority_forbidden. The existing bounded budget/backoff owns
+  // liveness without turning a permanent authority refusal into a loop.
+  authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
   authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
   validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
@@ -189,6 +206,9 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJo
   // succeed when the base fee falls; an operator can also raise the configured cap.
   fee_cap_below_base_fee: { code: 'fee_cap_below_base_fee', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
   rpc_unavailable: { code: 'rpc_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
+  // GH#2940 — means a publish transaction MAY have been sent. A store-scheduler rejection that
+  // provably preceded the write-ahead is NOT this (it is `workspace_unavailable` from 'validated');
+  // an evidence-free record under this code has no transaction for the chain-proof lane to check.
   tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', provenIneffective: false, autoRetry: false },
   // provenIneffective: the receipt exists and reports failure — the transaction published nothing.
   tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: true, autoRetry: false },
@@ -276,6 +296,10 @@ export function createLiftJobFailureMetadata(
 
   return {
     ...params,
+    // Every persisted failure message is host-only: a provider's text carries the request URL (ethers
+    // embeds it), a configured URL can carry an API key, and the failure record is echoed by the job
+    // routes. Callers classify on the raw text and pass it here; the reduction lives at the one writer.
+    message: hostOnlyRpcText(params.message),
     phase: policy.phase,
     mode: policy.mode,
     retryable: policy.retryable,

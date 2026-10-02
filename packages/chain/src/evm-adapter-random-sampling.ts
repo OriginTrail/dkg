@@ -25,10 +25,51 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     try {
       await this.init();
       await this.getRandomSampling();
-      const member = await this.isShardingTableMember(identityId);
-      if (!this.isRandomSamplingReady()) {
-        throw new Error('RandomSampling bindings changed during eligibility lookup');
+      const contextReader = this.getRandomSamplingReadContextReader();
+      const bindingId = contextReader.getRandomSamplingBindingId();
+      const hubGeneration = this.hubBindingGeneration;
+      const shardingTableStorage = await this.resolveContract('ShardingTableStorage');
+      const shardingTableAddress = this.contractBindingAddress(shardingTableStorage);
+      if (
+        shardingTableAddress === undefined
+        || this.hubBindingGeneration !== hubGeneration
+      ) throw new Error('ShardingTableStorage binding changed during eligibility lookup');
+      const observed = this.randomSamplingEligibilityObservation;
+      if (
+        bindingId !== undefined
+        && observed?.identityId === identityId
+        && observed.bindingId === bindingId
+        && observed.shardingTableAddress === shardingTableAddress
+        && observed.hubGeneration === hubGeneration
+        && Date.now() - observed.checkedAtMs
+          < EVMChainAdapterBase.RANDOM_SAMPLING_ELIGIBILITY_MAX_REUSE_MS
+        && contextReader.isRandomSamplingBindingCurrent(bindingId)
+      ) {
+        return { kind: 'available', member: true };
       }
+      const member = await this.readRandomSamplingLifecycleMembership(
+        shardingTableStorage,
+        identityId,
+      );
+      const currentShardingTableStorage = await this.resolveContract('ShardingTableStorage');
+      if (
+        bindingId === undefined
+        || this.hubBindingGeneration !== hubGeneration
+        || this.contractBindingAddress(currentShardingTableStorage) !== shardingTableAddress
+        || !contextReader.isRandomSamplingBindingCurrent(bindingId)
+      ) {
+        this.randomSamplingEligibilityObservation = undefined;
+        throw new Error('Random Sampling eligibility bindings changed during lookup');
+      }
+      this.randomSamplingEligibilityObservation = member
+        ? Object.freeze({
+            bindingId,
+            identityId,
+            shardingTableAddress,
+            hubGeneration,
+            checkedAtMs: Date.now(),
+          })
+        : undefined;
       return { kind: 'available', member };
     } catch (error) {
       if (error instanceof RandomSamplingContractsUnavailableError

@@ -3,12 +3,19 @@ import test from 'node:test';
 import fs from 'node:fs';
 import { parse } from 'yaml';
 import { validateCiLaneWorkflow } from '../ci-lane-workflow.mjs';
-import { CI_LANE_TOPOLOGY, CI_MATRICES, COVERAGE_JOBS, TEST_LANE_METADATA, compileCiTopology } from '../ci-lanes.mjs';
+import { CI_LANE_TOPOLOGY, CI_MATRICES, COVERAGE_JOBS, TEST_LANE_METADATA, ciJobRow, compileCiTopology } from '../ci-lanes.mjs';
 import { validateReceipts } from '../coverage-artifacts.mjs';
 import { runVitestLanes, runVitestRow } from '../../ci/run-vitest-lanes.mjs';
 
 const workflow = () => parse(fs.readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
 test('the real workflow consumes emitted matrices and canonical row execution', () => validateCiLaneWorkflow(workflow()));
+test('topology keeps weighted runners, bounded supporting concurrency and utilities in the core row', () => {
+  assert.equal(ciJobRow('tornado-core', 1).runner, 'weighted');
+  assert.equal(ciJobRow('bura-cli', 0).runner, 'weighted');
+  assert.equal(ciJobRow('kosava-supporting').concurrency, 3);
+  assert.equal(COVERAGE_JOBS['tornado-core']['http-utils'], 1);
+  assert.equal(COVERAGE_JOBS['tornado-core']['rdf-utils'], 1);
+});
 test('every executable topology lane has explicit inventory semantics', () => {
   for (const { job } of Object.values(CI_LANE_TOPOLOGY)) {
     assert.equal(typeof TEST_LANE_METADATA[job]?.layer, 'string', job);

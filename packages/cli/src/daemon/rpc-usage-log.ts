@@ -53,7 +53,12 @@ export function formatRpcUsageLines(
     lines.push(`rpc_usage method=${safeToken(method, 'other')} count=${Math.floor(count)} window_s=${windowSeconds}${chain}`);
   }
   const attributionLines = new Map<string, {
-    method: 'eth_call' | 'eth_getLogs';
+    method:
+      | 'eth_call'
+      | 'eth_getLogs'
+      | 'eth_blockNumber'
+      | 'eth_getBlockByNumber'
+      | 'eth_getBlockByHash';
     consumer: string;
     endpointSlot?: string;
     count: number;

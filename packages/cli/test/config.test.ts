@@ -35,6 +35,7 @@ import {
   resolveAutoUpdateSource,
   resolveUpdatePreferences,
   resolveContextGraphSubscriptionRehydrationEnabled,
+  approvalPolicyMigrationWarning,
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
@@ -980,6 +981,46 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.relayServerCapacity).toBe(2048);
   });
 
+  it('round-trips explicitly trusted core authority index sources', async () => {
+    const authorityIndex = {
+      mode: 'core-snapshot' as const,
+      trustedCorePeers: ['/dns4/core.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+      maxTailBlocks: 2_000,
+      cacheEpoch: 1,
+    };
+    await saveConfig({
+      name: 'snapshot-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      authorityIndex,
+    });
+
+    expect((await loadConfig()).authorityIndex).toEqual(authorityIndex);
+  });
+
+  it.each(['json', 'yaml'])('rejects misplaced core.authorityIndex in persisted %s config', async (format) => {
+    const content = format === 'json'
+      ? JSON.stringify({ core: { authorityIndex: { mode: 'core-snapshot' } } })
+      : 'core:\n  authorityIndex:\n    mode: core-snapshot\n';
+    await writeFile(join(tempDir, `config.${format}`), content, 'utf8');
+    await expect(loadConfig()).rejects.toThrow(
+      'core.authorityIndex is not supported. Move authorityIndex to the top level',
+    );
+  });
+
+  it('keeps authority index snapshot trust absent for existing configs', async () => {
+    await saveConfig({
+      name: 'existing-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      relayPeers: ['/dns4/relay.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+    });
+
+    expect((await loadConfig()).authorityIndex).toBeUndefined();
+  });
+
   it('round-trips relayReservationCount through saveConfig/loadConfig (operator override)', async () => {
     // PR3 multi-reservation tuning: same contract as
     // relayServerCapacity above — operators should be able to
@@ -1025,6 +1066,19 @@ describe('localAgentIntegrations config round-trip', () => {
 
     const loaded = await loadConfig();
     expect(loaded.syncSystemContextGraphsOnConnect).toBe(true);
+  });
+
+  it('round-trips the on-demand agents phonebook kill switch', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      onDemandAgentsPhonebook: false,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.onDemandAgentsPhonebook).toBe(false);
   });
 
   it('round-trips sync snapshot limits and Context Graph priorities', async () => {
@@ -1460,6 +1514,61 @@ describe('resolveChainConfig (field-level merge)', () => {
         chain: { finalityConfirmations: finalityConfirmations as any },
       }, { chain: fullNetworkChain })).toThrow(
         /finalityConfirmations must be an integer >= 1/,
+      );
+    }
+  });
+
+  it('validates chain.indexTickMs as a positive integer with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.indexTickMs).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(12_000);
+    expect(resolveChainConfig({ chain: { indexTickMs: 3_000 } }, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(3_000);
+
+    for (const indexTickMs of [null, 0, -1, 1.5, Number.NaN, '6000']) {
+      expect(() => resolveChainConfig({
+        chain: { indexTickMs: indexTickMs as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        /chain\.indexTickMs must be a positive integer/,
+      );
+    }
+  });
+
+  it('resolves bounded authority reads only from an explicit boolean, with operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.boundedAuthorityReads).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(true);
+    expect(resolveChainConfig({ chain: { boundedAuthorityReads: false } }, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(false);
+
+    for (const invalid of [null, 'true', 1, {}, []]) {
+      expect(() => resolveChainConfig({
+        chain: { boundedAuthorityReads: invalid as never },
+      }, { chain: fullNetworkChain })).toThrow(/chain\.boundedAuthorityReads must be a boolean/);
+    }
+  });
+
+  it.each([
+    'authorityReadTimeoutMs',
+    'authorityColdResolutionTimeoutMs',
+  ] as const)('validates chain.%s as a positive integer with network fallback and operator precedence', (key) => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.[key]).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, [key]: 12_000 },
+    })?.[key]).toBe(12_000);
+    expect(resolveChainConfig({ chain: { [key]: 3_000 } }, {
+      chain: { ...fullNetworkChain, [key]: 12_000 },
+    })?.[key]).toBe(3_000);
+
+    for (const value of [null, 0, -1, 1.5, Number.NaN, '2500']) {
+      expect(() => resolveChainConfig({
+        chain: { [key]: value as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        new RegExp(`chain\\.${key} must be a positive integer`),
       );
     }
   });
@@ -2149,5 +2258,78 @@ describe('resolveApprovalPolicy (YAML/JSON config → runtime ApprovalPolicy)', 
         refillBelowFraction: Number.NaN,
       }),
     ).toThrow(/must be a finite number in \[0, 1\]/);
+  });
+
+  it('passes a valid targetAllowanceMultiple through', () => {
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 50 }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: undefined,
+      targetAllowanceMultiple: 50,
+      refillBelowFraction: undefined,
+    });
+    // 1 is the tightest legal multiple (ceiling == this publish's cost).
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 1 })
+        ?.targetAllowanceMultiple,
+    ).toBe(1);
+  });
+
+  it('rejects an out-of-contract targetAllowanceMultiple loudly', () => {
+    // Fail fast rather than clamp: a multiple < 1 would put the ceiling under
+    // the publish floor on every call, so the adapter's floor clamp would fire
+    // every time and `replenishing` would silently behave as `per-publish` —
+    // the operator's chosen mode cancelled, visible only on the gas bill.
+    // Same convention as `finalityConfirmations` and the two sibling fields.
+    for (const bad of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        () => resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: bad }),
+        `expected multiple ${bad} to be rejected`,
+      ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+    }
+    expect(() =>
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: '20' as any }),
+    ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+  });
+
+  it('carries both sizing fields through when the operator set both (adapter applies precedence)', () => {
+    // Resolution does not silently drop either field — precedence (absolute
+    // `targetAllowance` wins) is `computeApprovalAction`'s job, so the config
+    // layer stays a pure translator and the operator's file round-trips.
+    expect(
+      resolveApprovalPolicy({
+        mode: 'replenishing',
+        targetAllowance: '1000000000000000000000',
+        targetAllowanceMultiple: 5,
+      }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: 10n ** 21n,
+      targetAllowanceMultiple: 5,
+      refillBelowFraction: undefined,
+    });
+  });
+
+  it('warns only when replenishing relies on the changed implicit ceiling', () => {
+    const warning = approvalPolicyMigrationWarning({ mode: 'replenishing' });
+    expect(warning).toContain('20x the triggering publish cost');
+    expect(warning).toContain('legacy flat 1000 TRAC ceiling');
+    expect(warning).toContain('targetAllowance explicitly to retain a flat ceiling');
+    expect(warning).toContain('targetAllowanceMultiple to keep relative sizing');
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      refillBelowFraction: 0.25,
+    })).toBe(warning);
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowance: '1000000000000000000000',
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowanceMultiple: 20,
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({ mode: 'per-publish' })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning(undefined)).toBeUndefined();
   });
 });
