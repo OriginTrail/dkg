@@ -2,19 +2,28 @@
 
 import { join } from 'node:path';
 
+import { multiaddr } from '@multiformats/multiaddr';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY as D,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  PROTOCOL_SWM_SENDER_KEY,
+  PROTOCOL_SWM_UPDATE,
+  SWM_SENDER_KEY_MESSAGE_TYPE,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   computeGossipSigningPayload,
   computeSwmSenderKeyPackageAAD,
   computeWorkspaceAgentEncryptionKeyProofPayload,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
+  createOperationContext,
+  decodeGossipEnvelope,
+  decodeSwmSenderKeyMessage,
   decodeSwmSenderKeyPackageAck,
+  decodeWorkspacePublishRequest,
   encodeGossipEnvelope,
   encodeSwmSenderKeyPackage,
   encodeWorkspacePublishRequest,
@@ -32,6 +41,7 @@ import type {
   ContextGraphMembershipRecord,
   ContextGraphSubscriptionRecord,
 } from '../src/index.js';
+import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
 
@@ -378,13 +388,215 @@ function pauseApprovedPrivateProofOnce(
   return { entered, release: releaseProof };
 }
 
+function pauseSuccessfulApprovedPrivateProofOnce(
+  fixture: Awaited<ReturnType<typeof approvedBareNameReplicaFixture>>,
+) {
+  let releaseProof!: () => void;
+  let proofReturned!: () => void;
+  const release = new Promise<void>((resolve) => { releaseProof = resolve; });
+  const returned = new Promise<void>((resolve) => { proofReturned = resolve; });
+  const originalQuery = fixture.receiver.store.query.bind(fixture.receiver.store);
+  let paused = false;
+  vi.spyOn(fixture.receiver.store, 'query').mockImplementation(async (query, options) => {
+    const result = await originalQuery(query, options);
+    if (
+      !paused
+      && options?.source === 'agent.contextGraph.approvedPrivateReplica'
+      && result.type === 'bindings'
+      && result.bindings.length > 0
+    ) {
+      paused = true;
+      proofReturned();
+      await release;
+    }
+    return result;
+  });
+  return { returned, release: releaseProof };
+}
+
 describe('approved private bare-name replica authorization', () => {
+  it('keeps a completed NoChainAdapter private join live for sender-key setup and encrypted SWM', async () => {
+    const curator = await h.startAgent({
+      name: 'legacy-private-join-curator',
+      config: { ...TEST_SNAPSHOT_CONFIG, chainAdapter: new NoChainAdapter() },
+    });
+    const member = await h.startAgent({
+      name: 'legacy-private-join-member',
+      config: { ...TEST_SNAPSHOT_CONFIG, chainAdapter: new NoChainAdapter() },
+    });
+    for (const agent of [curator, member]) {
+      const admission = Reflect.get(agent, 'networkAdmissionCoordinator');
+      admission.isAcceptedPeer = () => true;
+      admission.isRejectedPeer = () => false;
+      admission.ensureAdmitted = async () => true;
+    }
+    const curatorAddress = curator.multiaddrs.find((address) => address.includes('/tcp/'));
+    if (curatorAddress === undefined) throw new Error('curator has no TCP multiaddr');
+    await member.node.libp2p.dial(multiaddr(curatorAddress));
+
+    const curatorAgent = await curator.registerAgent('legacy private curator');
+    const memberAgent = await member.registerAgent('legacy private member');
+    await curator.store.insert([{
+      subject: `did:dkg:agent:${curatorAgent.agentAddress}`,
+      predicate: D.DKG_PEER_ID,
+      object: JSON.stringify(curator.peerId),
+      graph: AGENT_PROFILE_GRAPH,
+    }]);
+    const contextGraphId = 'legacy-private-join';
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name: 'Legacy private join',
+      accessPolicy: 1,
+      allowedPeers: [member.peerId],
+      callerAgentAddress: curatorAgent.agentAddress,
+    });
+
+    const delegation = await member.signJoinRequest(contextGraphId, memberAgent.agentAddress);
+    const forwarded = await member.forwardJoinRequest(
+      contextGraphId,
+      delegation,
+      'legacy-private-member',
+      curator.peerId,
+    );
+    expect(forwarded.delivered).toBeGreaterThanOrEqual(1);
+    await vi.waitFor(async () => {
+      const pending = await curator.listPendingJoinRequests(
+        contextGraphId,
+        curatorAgent.agentAddress,
+      );
+      expect(pending.some(({ agentAddress }) => (
+        agentAddress.toLowerCase() === memberAgent.agentAddress.toLowerCase()
+      ))).toBe(true);
+    }, { timeout: 20_000, interval: 100 });
+    await curator.approveJoinRequest(
+      contextGraphId,
+      memberAgent.agentAddress,
+      curatorAgent.agentAddress,
+    );
+    await vi.waitFor(async () => {
+      await expect(member.getJoinRequestStatus(contextGraphId, memberAgent.agentAddress))
+        .resolves.toBe('approved');
+      const allowedAgents = (await member.getContextGraphAllowedAgents(contextGraphId))
+        .map((address) => address.toLowerCase());
+      expect(allowedAgents).toEqual(expect.arrayContaining([
+        curatorAgent.agentAddress.toLowerCase(),
+        memberAgent.agentAddress.toLowerCase(),
+      ]));
+    }, { timeout: 30_000, interval: 100 });
+
+    await expect(member.resolveSwmTransportAuthority(
+      contextGraphId,
+      { authorityReadMode: 'finalized-index-or-live' },
+    )).resolves.toEqual({
+      kind: 'approved-private-replica',
+      allowedPeers: expect.arrayContaining([curator.peerId, member.peerId]),
+    });
+
+    const sendReliable = vi.spyOn(
+      Reflect.get(curator, 'messenger'),
+      'sendReliable',
+    );
+    const decryptWorkspacePayloadWithSenderKey = vi.spyOn(
+      member,
+      'decryptWorkspacePayloadWithSenderKey',
+    );
+    const secret = 'legacy adapter private payload';
+    const subject = 'urn:test:legacy-private-join';
+    const shareOperationId = 'legacy-private-encrypted-swm';
+    const kaUal = `did:dkg:20430/${curatorAgent.agentAddress.toLowerCase()}/1`;
+    if (curatorAgent.privateKey === undefined) {
+      throw new Error('curator must have a local signing key');
+    }
+    const timestampMs = Date.now();
+    const plaintext = encodeWorkspacePublishRequest({
+      contextGraphId,
+      nquads: new TextEncoder().encode(
+        `<${subject}> <http://schema.org/name> ${JSON.stringify(secret)} <${contextGraphDataGraphUri(contextGraphId)}> .`,
+      ),
+      manifest: [],
+      publisherPeerId: curator.peerId,
+      shareOperationId,
+      timestampMs,
+      subGraphName: 'updates',
+      agentAddress: curatorAgent.agentAddress,
+      kaNumber: '1',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+    const resolution = await curator.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+      contextGraphId,
+    });
+    if (!resolution.requiresEncryption) {
+      throw new Error('approved private graph must require encrypted SWM');
+    }
+    const encryptedPayload = await curator.encryptWorkspacePayloadWithSenderKey({
+      contextGraphId,
+      subGraphName: 'updates',
+      plaintext,
+      senderAgentAddress: curatorAgent.agentAddress,
+      operationId: shareOperationId,
+      shareOperationId,
+      timestampMs,
+      publisherPeerId: curator.peerId,
+      resolution,
+    });
+    await curator.publishWorkspaceGossip(
+      contextGraphId,
+      encryptedPayload,
+      createOperationContext('share'),
+      { ...curatorAgent, privateKey: curatorAgent.privateKey },
+      shareOperationId,
+    );
+    await curator.awaitInFlightSubstrateFanOuts();
+
+    const senderKeyCallIndex = sendReliable.mock.calls.findIndex(([peerId, protocol]) => (
+      peerId === member.peerId && protocol === PROTOCOL_SWM_SENDER_KEY
+    ));
+    expect(senderKeyCallIndex).toBeGreaterThanOrEqual(0);
+    const senderKeyResult = await sendReliable.mock.results[senderKeyCallIndex]!.value;
+    expect(senderKeyResult.delivered).toBe(true);
+    if (!senderKeyResult.delivered) throw new Error('sender-key setup was not delivered');
+    expect(decodeSwmSenderKeyPackageAck(senderKeyResult.response)).toMatchObject({
+      accepted: true,
+    });
+
+    const updateCallIndex = sendReliable.mock.calls.findIndex(([peerId, protocol]) => (
+      peerId === member.peerId && protocol === PROTOCOL_SWM_UPDATE
+    ));
+    expect(updateCallIndex).toBeGreaterThanOrEqual(0);
+    const updateCall = sendReliable.mock.calls[updateCallIndex]!;
+    const envelope = decodeGossipEnvelope(updateCall[2] as Uint8Array);
+    const encrypted = decodeSwmSenderKeyMessage(envelope.payload);
+    expect(encrypted).toMatchObject({
+      type: SWM_SENDER_KEY_MESSAGE_TYPE,
+      contextGraphId,
+      senderAgentAddress: curatorAgent.agentAddress,
+    });
+    expect(Buffer.from(envelope.payload).toString('utf8')).not.toContain(secret);
+
+    expect(decryptWorkspacePayloadWithSenderKey).toHaveBeenCalledOnce();
+    const decrypted = await decryptWorkspacePayloadWithSenderKey.mock.results[0]!.value;
+    const request = decodeWorkspacePublishRequest(decrypted);
+    expect(new TextDecoder().decode(request.nquads)).toContain(secret);
+    const updateResult = await sendReliable.mock.results[updateCallIndex]!.value;
+    expect(updateResult).toMatchObject({
+      delivered: true,
+      response: new Uint8Array(),
+    });
+  }, 90_000);
+
   it('admits eu-open-calls after approval without the wallet-namespaced seed path', async () => {
     const fixture = await approvedBareNameReplicaFixture({
       // Participant approval must not promote the full RDF roster into a
       // generic owner policy. Only the curator and this approved local member
       // belong to the transaction-scoped replica authority.
       additionalAllowedAgents: [OUTSIDER],
+      delegationExpiresAt: Date.now() + 3_600_000,
     });
     const seedFetch = vi.spyOn(
       fixture.receiver,
@@ -1203,6 +1415,34 @@ describe('approved private bare-name replica authorization', () => {
     expect(fixture.current).not.toHaveBeenCalled();
   });
 
+  it('rejects a delegation that expires while its private proof read is in flight', async () => {
+    const proofStartedAt = 2_000_000_000_000;
+    const delegationExpiresAt = proofStartedAt + 1;
+    const fixture = await approvedBareNameReplicaFixture({
+      delegationIssuedAt: proofStartedAt - 1_000,
+      delegationExpiresAt,
+    });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(proofStartedAt);
+    const proof = pauseApprovedPrivateProofOnce(fixture);
+    const admission = fixture.receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      {
+        callerAgentAddress: fixture.memberAddress,
+        allowSubscriptionFallback: false,
+      },
+    );
+    await proof.entered;
+    now.mockReturnValue(delegationExpiresAt);
+    proof.release();
+
+    await expect(admission).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+  });
+
   it('rejects an approval generation replaced while the metadata proof is in flight', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     const proof = pauseApprovedPrivateProofOnce(fixture);
@@ -1267,6 +1507,40 @@ describe('approved private bare-name replica authorization', () => {
       });
     },
   );
+
+  it('rejects an exact delegation-issued-at delete after its private proof succeeds in flight', async () => {
+    const delegationIssuedAt = Date.now() - 1_000;
+    const fixture = await approvedBareNameReplicaFixture({ delegationIssuedAt });
+    const proof = pauseSuccessfulApprovedPrivateProofOnce(fixture);
+    const admission = fixture.receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      {
+        callerAgentAddress: fixture.memberAddress,
+        allowSubscriptionFallback: false,
+      },
+    );
+    await proof.returned;
+
+    const projection = Reflect.get(fixture.receiver, 'contextGraphMetaProjection') as {
+      readonly readAuthorityFactsRevision: number;
+    };
+    const revisionBeforeDelete = projection.readAuthorityFactsRevision;
+    await fixture.receiver.store.delete([{
+      graph: fixture.graph,
+      subject: fixture.delegationSubject,
+      predicate: D.DKG_DELEGATION_ISSUED_AT,
+      object: JSON.stringify(String(delegationIssuedAt)),
+    }]);
+    expect(projection.readAuthorityFactsRevision).toBeGreaterThan(revisionBeforeDelete);
+    proof.release();
+
+    await expect(admission).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+  });
 
   it('rejects registration that starts while the private proof is in flight', async () => {
     const fixture = await approvedBareNameReplicaFixture();

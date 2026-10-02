@@ -2545,17 +2545,12 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
 });
 
 // -----------------------------------------------------------------------------
-// PR #700 regression — drain must work with the agent's *real* DiscoveryClient,
-// not just the stubs used above. The original implementation was a silent
-// no-op in production because `DiscoveryClient.findAgentByPeerId` selected
-// every other column EXCEPT `?agentAddress`, while
-// `drainPendingSenderKeyForPeer` gates on exactly that field. The stub-based
-// tests above (`installStubDiscovery`) inject the field explicitly and so
-// masked the bug. This block exercises the path end-to-end against the
-// agent's actual store + discovery so we'd catch this kind of regression on
-// CI rather than on mainnet.
+// Reconnect regression — drain must use the agent's real store-backed
+// recipient resolver, not a fixture-supplied key-to-peer route. Exercise the
+// production lookup against the agent registry CG so a queued package remains
+// pending until its exact wallet-signed (agent, key, peer) route is published.
 // -----------------------------------------------------------------------------
-describe('drainPendingSenderKeyForPeer: real discovery + agent registry CG', () => {
+describe('drainPendingSenderKeyForPeer: real recipient lookup + agent registry CG', () => {
   let agent: DKGAgent | null = null;
   afterEach(async () => {
     if (agent) {
@@ -2564,7 +2559,7 @@ describe('drainPendingSenderKeyForPeer: real discovery + agent registry CG', () 
     }
   });
 
-  it("drains queued sender keys when the recipient's agent profile is published with peerId+agentAddress (no stubbed discovery)", async () => {
+  it('keeps a sender key queued until the recipient publishes its signed key-to-peer route, then drains it', async () => {
     const boot = await bootAgent();
     agent = boot.agent;
     const internals = boot.internals;
@@ -2579,61 +2574,69 @@ describe('drainPendingSenderKeyForPeer: real discovery + agent registry CG', () 
     // shape as production: publisher emits the encrypted package, the
     // fan-out can't find a peerId, the row lands in
     // `pendingSenderKeyByAgent` keyed by lowercased recipientAgentAddress.
+    const contextGraphId = 'test-cg/real-drain';
     const recipientPeerId = '12D3KooWRealDrainTestRecipient';
     const recipientWallet = ethers.Wallet.createRandom();
     const recipient = await insertVerifiedAgentEncryptionKey(
       internals.store,
       recipientWallet,
-      { peerId: recipientPeerId },
     );
+    await insertAgentGate(internals.store, contextGraphId, recipient.agentAddress);
+
+    // Only the synthetic graph's transport classification is stubbed. Recipient
+    // keys and peer routes must still come through the production store-backed
+    // resolver used by reconnect.
+    (internals as unknown as {
+      resolveSwmTransportAuthority(contextGraphId: string): Promise<{ kind: 'legacy-unregistered' }>;
+    }).resolveSwmTransportAuthority = async (resolvedContextGraphId) => {
+      expect(resolvedContextGraphId).toBe(contextGraphId);
+      return { kind: 'legacy-unregistered' };
+    };
     const sender = agentFromPrivateKey(
       ethers.Wallet.createRandom().privateKey,
       'sender',
     ) as AgentKeyRecord & { privateKey: string };
 
     await internals.createAndDistributeSwmSenderKeyEpoch({
-      contextGraphId: 'test-cg/real-drain',
+      contextGraphId,
       sender,
-      recipients: [{ ...recipient, peerId: undefined }],
+      recipients: [recipient],
       membershipHash: 'sha256:real-drain',
       ctx: { operationId: 'test-op', operationName: 'share' },
     });
     expect(sendCalls).toHaveLength(0);
     expect(internals.pendingSenderKeyByAgent.size).toBe(1);
 
-    // Now the recipient publishes its profile to the agent registry CG.
-    // In production this lands via gossip + `SyncManager` ingest from a
-    // remote agent's `publishProfile()`. The shape we care about for
-    // drain is identical either way: a `dkg:Agent` triple-bundle with
-    // `dkg:peerId`, `schema:name`, and crucially `dkg:agentAddress`.
+    // The signed key exists, but it is not yet bound to this reconnecting peer.
+    // The production resolver must therefore leave the durable row untouched.
+    expect(await internals.drainPendingSenderKeyForPeer(recipientPeerId)).toBe(0);
+    expect(sendCalls).toHaveLength(0);
+    expect(internals.pendingSenderKeyByAgent.size).toBe(1);
+
+    // Now publish the recipient's wallet-signed encryption key in the same
+    // profile graph as its peer metadata. This is the exact route shape the
+    // production resolver joins before reconnect may drain the package.
+    const publicEncryptionKey = encodeWorkspaceEncryptionKey(recipient.publicKeyBytes);
+    const proofPayload = computeWorkspaceAgentEncryptionKeyProofPayload({
+      agentAddress: recipientWallet.address,
+      encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+      publicKeyBytes: recipient.publicKeyBytes,
+    });
+    const encryptionKeyProof = recipientWallet.signingKey
+      .sign(ethers.hashMessage(proofPayload)).serialized;
     const { quads } = buildAgentProfile({
       peerId: recipientPeerId,
       name: 'RealDrainRecipient',
       agentAddress: recipient.agentAddress,
+      publicEncryptionKey,
+      encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+      encryptionKeyProof,
       skills: [],
     });
     await internals.store.insert(quads);
 
-    // This regression targets real discovery. Supply the separate current-CG
-    // authority result explicitly: the synthetic test graph has no chain
-    // registration from which production could derive its private roster.
-    internals.resolveWorkspaceAgentRecipientsForCurrentAuthority = async (input) => {
-      expect(input.contextGraphId).toBe('test-cg/real-drain');
-      return {
-        requiresEncryption: true,
-        recipients: [recipient],
-      };
-    };
-
-    // No `installStubDiscovery` call — the agent's real `DiscoveryClient`
-    // (built in `DKGAgent.create` at `dkg-agent.ts:1054`) resolves the
-    // profile from the freshly-inserted triples.
     const drained = await internals.drainPendingSenderKeyForPeer(recipientPeerId);
 
-    // The bug we're regression-testing was: `agentAddress` came back
-    // `undefined`, drain early-returned 0, queue was never emptied, no
-    // messenger send ever happened. With the fix in place all three
-    // observables flip:
     expect(drained).toBe(1);
     expect(sendCalls).toHaveLength(1);
     expect(sendCalls[0].peerId).toBe(recipientPeerId);

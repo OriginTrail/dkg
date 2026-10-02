@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
+import {
+  isApprovedMemberDelegationExpiryActive,
+  parseApprovedMemberDelegationExpiry,
+} from './context-graph-member-proof.js';
+import {
+  buildAuthoritativePrivateMetaMemberProofQuery,
+} from './context-graph-private-meta-proof.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/u;
@@ -40,7 +46,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
     ({ agentAddress }) => agentAddress.toLowerCase() === approved,
   );
   if (!approved || !hasLocalAgent()) return null;
-  // Own-meta reads and the proof ASK are separate store operations. Fence the
+  // Own-meta reads and the proof query are separate store operations. Fence the
   // projection revision so a root/member/delegation mutation between them
   // cannot authorize from a mixed generation.
   const state = await agent.readRequesterJoinRequestState(contextGraphId, approved);
@@ -74,12 +80,14 @@ export async function resolveApprovedPrivateReplicaAuthority(
 
   // Bind the same current membership and active delegation proof used by
   // private metadata bootstrap to this physical receiver's peer identity.
-  const proof = await agent.store.query(buildAuthoritativePrivateMetaAskQuery(
+  const proof = await agent.store.query(buildAuthoritativePrivateMetaMemberProofQuery(
     contextGraphId,
     { approvedAgentAddress: approved, expectedDelegateePeerId: agent.peerId },
   ), { signal, source: 'agent.contextGraph.approvedPrivateReplica' });
   signal?.throwIfAborted();
-  if (proof.type !== 'boolean' || !proof.value) return null;
+  if (proof.type !== 'bindings') return null;
+  const delegationExpiry = parseApprovedMemberDelegationExpiry(proof.bindings);
+  if (delegationExpiry === undefined) return null;
 
   // Approval and requester state are local mutable authority. Re-read their
   // complete generation binding after every metadata/store await so a
@@ -99,6 +107,11 @@ export async function resolveApprovedPrivateReplicaAuthority(
     || current.curatorAuthorityEra !== '0'
     || !metadataStillCurrent()
   ) return null;
+
+  // The proof query embeds its start time. Recheck the deadline it proved
+  // after every await so a delegation cannot expire while the read is in
+  // flight and still authorize the replica.
+  if (!isApprovedMemberDelegationExpiryActive(delegationExpiry)) return null;
 
   return Object.freeze({
     approvedAgentAddress: approved,
