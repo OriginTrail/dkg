@@ -734,4 +734,5 @@ for the design rationale, threat model, and stability guarantees.
 - `@origintrail-official/dkg-publisher` — publish pipeline (SWM → VM)
 - `@origintrail-official/dkg-storage` — triple-store adapters
 - `@origintrail-official/dkg-chain` — blockchain abstraction
+- `@origintrail-official/dkg-node-store` — durable protocol state (outbox, sync checkpoints, cursors, KA numbers, chain log) the daemon composes
 - `@origintrail-official/dkg-node-ui` — web dashboard serving

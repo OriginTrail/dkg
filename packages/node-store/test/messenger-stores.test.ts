@@ -3,12 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RESPONSE_CACHE_BYTES } from '@origintrail-official/dkg-core';
-import {
-  DashboardDB,
-  SCHEMA_VERSION,
-  SqliteMessageIdempotencyStore,
-  SqliteProtocolOutboxStore,
-} from '../src/db.js';
+import { SqliteMessageIdempotencyStore, SqliteProtocolOutboxStore } from '../src/index.js';
+import { DashboardDB, SCHEMA_VERSION } from './helpers/dashboard-db.js';
 
 const PEER_A = '12D3KooWMilesPlaceholder';
 const PEER_B = '12D3KooWLexPlaceholder';

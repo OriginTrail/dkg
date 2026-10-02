@@ -2558,4 +2558,79 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(String(res.body.error)).toMatch(/could not be auto-registered on-chain/i);
     });
   });
+
+  // GH#2958 — a finalized update whose number is not the next publishable version is a caller
+  // precondition (the draft is stale), not a server failure: 409 with its own code on the sync
+  // lane too (it used to fall through to a bare 500 that invites a blind retry).
+  describe('GH#2958 stale finalized update', () => {
+    const STALE = 'Cannot publish the update of did:dkg:test/1/45: this finalized version is numbered 3, '
+      + 'but the next publishable version is 2 (the confirmed version is 1).';
+    const finalizeResult = {
+      assertionUri: 'did:dkg:assertion:numbered',
+      merkleRoot: new Uint8Array(32),
+      authorAddress: `0x${'cd'.repeat(20)}`,
+      schemeVersion: 1,
+      chainId: 1n,
+      kav10Address: `0x${'ef'.repeat(20)}`,
+      eip712Digest: `0x${'12'.repeat(32)}`,
+    };
+
+    it('vm/publish maps PUBLISH_INTENT_STALE to 409 with its own code', async () => {
+      await startWith({}, {
+        publishFromFinalizedAssertion: async () => {
+          throw Object.assign(new Error(STALE), { code: 'PUBLISH_INTENT_STALE' });
+        },
+      });
+      const res = await post('vm/publish', { contextGraphId: CG_ID });
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ code: 'PUBLISH_INTENT_STALE', error: STALE });
+    });
+
+    it.each([
+      [Object.assign(new Error('not a complete full share'), { code: 'PUBLISH_NOT_FULL_SHARE' }), 'PUBLISH_NOT_FULL_SHARE'],
+      [new Error('assertion "x" is not finalized'), 'VM_PUBLISH_PRECONDITION'],
+      // a regex-matched precondition that happens to carry an unrelated code is NOT relabelled
+      [Object.assign(new Error('No quads in shared memory'), { code: 'SOMETHING_ELSE' }), 'VM_PUBLISH_PRECONDITION'],
+    ])('vm/publish keeps the existing 409 body for %s', async (error, code) => {
+      await startWith({}, { publishFromFinalizedAssertion: async () => { throw error; } });
+      const res = await post('vm/publish', { contextGraphId: CG_ID });
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ code, error: error.message });
+    });
+
+    it('wm/finalize returns the number the draft was sealed with, and the KA it belongs to', async () => {
+      await startWith({
+        finalize: async () => ({ ...finalizeResult, assertionVersion: '2', kaUal: 'did:dkg:test/1/45' }),
+      });
+      const res = await post('wm/finalize', { contextGraphId: CG_ID });
+      expect(res.status).toBe(200);
+      expect(res.body.assertionVersion).toBe('2');
+      expect(res.body.kaUal).toBe('did:dkg:test/1/45');
+    });
+
+    it('wm/finalize omits both keys when the engine does not report them', async () => {
+      await startWith({ finalize: async () => finalizeResult });
+      const res = await post('wm/finalize', { contextGraphId: CG_ID });
+      expect(res.status).toBe(200);
+      expect(Object.keys(res.body)).not.toContain('assertionVersion');
+      expect(Object.keys(res.body)).not.toContain('kaUal');
+    });
+
+    it('the one-shot create+finalize returns them as well', async () => {
+      await startWith({
+        create: async () => 'did:dkg:assertion:one-shot',
+        write: async () => undefined,
+        finalize: async () => ({ ...finalizeResult, assertionVersion: '1', kaUal: 'did:dkg:test/1/46' }),
+      });
+      const res = await postRoot({
+        contextGraphId: CG_ID,
+        name: 'one-shot-numbered',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+        finalize: true,
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.assertionVersion).toBe('1');
+      expect(res.body.kaUal).toBe('did:dkg:test/1/46');
+    });
+  });
 });

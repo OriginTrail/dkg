@@ -10859,7 +10859,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const approvedAgentAddress = row.subscribed
           ? this.localApprovedAgentByCG.get(row.id)
           : undefined;
-        const hasJoinApproval = approvedAgentAddress !== undefined;
+        let hasJoinApproval = approvedAgentAddress !== undefined;
+        // The membership row is the restart hint, not the current requester
+        // decision. A later explicit pending/rejected decision must retire a
+        // stale join-approved hint instead of resurrecting its subscription in
+        // restricted pending-metadata mode. Missing decision state remains the
+        // compatibility shape for legacy persisted membership rows.
+        if (approvedAgentAddress !== undefined) {
+          try {
+            const requesterState = await this.readRequesterJoinRequestState(
+              row.id,
+              approvedAgentAddress,
+            );
+            hasJoinApproval = requesterState === null
+              || requesterState.status === 'approved';
+          } catch {
+            hasJoinApproval = false;
+          }
+        }
         // A join-approved row keeps the synchronous path: only it can restore
         // the restricted pending-metadata bootstrap, which background
         // authority recovery does not offer.
@@ -11274,8 +11291,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * plaintext: registered public, or unregistered under an active accepted
    * owner-signed public policy (see classifySwmTransportAuthority). A retained
    * snapshot therefore never outvotes a registration the index shows. Private,
-   * legacy-unregistered or unavailable authority, or an unreadable chain, is
-   * `unproven`, which admits only the complete private definition.
+   * approved-private-replica, legacy-unregistered or unavailable authority, or
+   * an unreadable chain, is `unproven`, which admits only the complete private
+   * definition.
    */
   async resolveApprovedMemberAcceptance(this: DKGAgent,
     contextGraphId: string,

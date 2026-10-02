@@ -42,9 +42,11 @@ export default defineConfig({
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
+      "test/finalize-version-after-abandoned-update.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
+      "test/promote-swm-pointer-post-commit.test.ts",
       "test/clear-promote-async-facade.test.ts",
       "test/query-min-trust-alias.test.ts",
       "test/query-source-labels.test.ts",
@@ -293,9 +295,11 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-sender-key-stale-target.test.ts",
+      "test/swm-sender-key-peer-routes.test.ts",
       // #2827 — SWM authority and plaintext decisions for a joined member of a
       // public, unregistered context graph.
       "test/public-unregistered-member-swm.test.ts",
+      "test/approved-private-replica.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count

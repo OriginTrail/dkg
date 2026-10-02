@@ -29,7 +29,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1 } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
 import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
@@ -368,6 +368,9 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
         : { accessPolicy: 'ownerOnly' });
       const newerIntent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
       expect(newerIntent.shareOperationId).not.toBe(intent.shareOperationId);
+      // GH#2958 — the superseded draft was finalized but never published; it must not burn its
+      // number: the next draft is still confirmed + 1, the number `update()` will accept.
+      expect(newerIntent.assertionVersion).toBe(intent.assertionVersion);
       const newerWorkspace = await fixture.readWorkspace(newerIntent);
       if (change === 'content') expect(newerIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
       else expect(newerWorkspace.head).toMatchObject({
@@ -391,6 +394,125 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect((await fixture.readWorkspace()).operation).toEqual(fixture.originalWorkspace.operation);
     });
   }, 180_000);
+
+  // GH#2958 — the whole issue on a real chain: a finalized update that is abandoned (superseded by
+  // a newer edit) must not make the KA unpublishable. The superseded job is refused terminally,
+  // and the newer draft - numbered confirmed + 1 again - publishes as an update.
+  it('publishes the newer draft after a superseded update was abandoned [GH#2958]', async () => {
+    await withUpdateFixture({ label: 'abandoned-then-newer', accessPolicy: 'ownerOnly' }, async (fixture) => {
+      const { agent, cg, name, root, queue, jobId, intent, dispatch } = fixture;
+      await agent.assertion.pullFrom(cg, name, 'swm', { onConflict: 'replace' });
+      await agent.assertion.write(cg, name, [
+        { subject: root, predicate: 'http://schema.org/name', object: '"newer than the abandoned draft"' },
+      ]);
+      const sealed = await agent.assertion.finalize(cg, name);
+      expect(sealed.assertionVersion).toBe('2');
+      await agent.assertion.promote(cg, name, { accessPolicy: 'ownerOnly' });
+      const newerIntent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
+      expect(newerIntent.assertionVersion).toBe(intent.assertionVersion);
+
+      // The abandoned draft's job ends terminally ...
+      expect(await queue.retryDetailed({ jobId })).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+      expect(await queue.processNext('wallet-1')).toMatchObject({
+        jobId,
+        status: 'failed',
+        failure: { code: 'publish_intent_stale', retryable: false },
+      });
+      expect(dispatch).not.toHaveBeenCalled();
+
+      // ... and does not hold the KA: the newer draft is admitted and published as version 2.
+      const newerJobId = await queue.enqueueKnowledgeAssetVmPublish(newerIntent);
+      const finalized = await queue.processNext('wallet-1');
+      expect(finalized?.jobId).toBe(newerJobId);
+      expect(finalized?.status, JSON.stringify(finalized?.failure)).toBe('finalized');
+      expect(finalized?.broadcast).toMatchObject({ operationKind: 'update', txHash: expect.any(String) });
+      expect(dispatch).toHaveBeenCalledOnce();
+      const scope = createGraphKnowledgeAssetScope(newerIntent.kaUal!, newerIntent.assertionVersion!);
+      const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+      expect(await (agent as any).chain.getMerkleRootCount(kaId)).toBe(2n);
+    });
+  }, 240_000);
+
+  // GH#2958 — the update() backstop through the real queue. The queued intent still matches the
+  // live pointers and head (so the preflight lets it through), but the confirmed version moved on
+  // after it was queued (another update landed or was synced). The job must end terminally, before
+  // anything is staged or sent, instead of looping as a retryable `rpc_unavailable`.
+  it('a queued update whose number went stale after enqueue fails terminally before anything is staged or sent [GH#2958]', async () => {
+    await withUpdateFixture({ label: 'stale-number-after-enqueue', accessPolicy: 'ownerOnly' }, async (fixture) => {
+      const { agent, cg, queue, jobId, intent, dispatch, writeAhead, readWorkspace, originalWorkspace } = fixture;
+      const metaGraph = contextGraphMetaUri(cg);
+      const assertionVersionPredicate = 'http://dkg.io/ontology/assertionVersion';
+      await deleteByPatternWithoutCount(agent.store, {
+        graph: metaGraph, subject: intent.kaUal!, predicate: assertionVersionPredicate,
+      });
+      await agent.store.insert([{
+        subject: intent.kaUal!,
+        predicate: assertionVersionPredicate,
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: metaGraph,
+      }]);
+
+      expect(await queue.retryDetailed({ jobId })).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+      const refused = await queue.processNext('wallet-1');
+      expect(refused).toMatchObject({
+        jobId,
+        status: 'failed',
+        failure: { code: 'publish_intent_stale', retryable: false, failedFromState: 'validated' },
+      });
+      expect(refused?.failure?.message).toMatch(/numbered 2, but the next publishable version is 3/);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(writeAhead).not.toHaveBeenCalled();
+      expect(await readWorkspace()).toEqual(originalWorkspace);
+    });
+  }, 180_000);
+
+  // GH#2958 — a replacement draft reuses the abandoned draft's number, and with it the private
+  // partition. The replacement must be shared, published and re-opened with ITS OWN private
+  // content, and the confirmed version must stay intact until the replacement is confirmed.
+  it('publishes a replacement draft with its own private payload and keeps the confirmed version intact until then [GH#2958]', async () => {
+    await withUpdateFixture({ label: 'private-replacement', accessPolicy: 'ownerOnly', privatePayload: true }, async (fixture) => {
+      const { agent, cg, name, root, queue, jobId, intent, dispatch } = fixture;
+      const author = agent.defaultAgentAddress ?? agent.peerId;
+      // The queued draft B carries "private v2". Re-open it and replace BOTH partitions with C's.
+      await agent.assertion.pullFrom(cg, name, 'swm', { onConflict: 'replace' });
+      await agent.assertion.discard(cg, name);
+      await agent.assertion.create(cg, name);
+      await agent.assertion.write(cg, name, [
+        { subject: root, predicate: 'http://schema.org/name', object: '"public C"' },
+      ]);
+      await agent.publisher.assertionWritePrivate(cg, name, author, [
+        { subject: root, predicate: 'urn:private:note', object: '"private C"', graph: '' },
+      ]);
+      expect((await agent.assertion.finalize(cg, name)).assertionVersion).toBe('2');
+      await agent.assertion.promote(cg, name, { accessPolicy: 'ownerOnly' });
+      const newerIntent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
+      expect(newerIntent).toMatchObject({ assertionVersion: intent.assertionVersion, privateTripleCount: 1 });
+
+      // Until the replacement is confirmed the published version still serves v1 ...
+      const v1 = createGraphKnowledgeAssetScope(newerIntent.kaUal!, '1');
+      const vmObjects = async () => {
+        const rows = await agent.store.query(
+          `SELECT ?o WHERE { GRAPH <${knowledgeAssetLayerGraphUri(cg, MemoryLayer.VerifiableMemory, v1)}> { ?s <http://schema.org/name> ?o } }`,
+        );
+        return rows.type === 'bindings' ? rows.bindings.map((row) => String(row['o'])) : [];
+      };
+      expect(await vmObjects()).toEqual(['"v1"']);
+
+      // ... the superseded job is refused, the replacement is published.
+      expect(await queue.retryDetailed({ jobId })).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+      expect(await queue.processNext('wallet-1')).toMatchObject({ jobId, failure: { code: 'publish_intent_stale' } });
+      await queue.enqueueKnowledgeAssetVmPublish(newerIntent);
+      const finalized = await queue.processNext('wallet-1');
+      expect(finalized?.status, JSON.stringify(finalized?.failure)).toBe('finalized');
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(await vmObjects()).toEqual(['"public C"']);
+
+      // Re-opening the published version yields the replacement's private payload only.
+      await agent.assertion.pullFrom(cg, name, 'vm', { onConflict: 'replace' });
+      const reopened = (await agent.assertion.queryPrivate(cg, name)).map((quad) => quad.object);
+      expect(reopened).toEqual(['"private C"']);
+    });
+  }, 240_000);
 });
 
 describe('Memory layer isolation (single agent)', () => {

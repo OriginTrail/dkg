@@ -139,7 +139,6 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
-  createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -1594,10 +1593,11 @@ export class DKGAgent extends DKGAgentBase {
       (quads, targetGraph) => {
         if (!agentRef) return;
         // #1863 — a single-graph destructive mutation (replaceSubject) passes its
-        // TARGET GRAPH so the projection is dirtied by graph (covers deleted meta
-        // rows the inserted quads wouldn't reveal); no-op for non-CG graphs.
+        // TARGET GRAPH so deleted facts are fenced, while replacement quads
+        // cover inserted authority facts.
         if (targetGraph !== undefined) {
           agentRef.contextGraphMetaProjection.markDirtyForGraph(targetGraph);
+          if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
           return;
         }
         if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
@@ -4075,19 +4075,18 @@ export class DKGAgent extends DKGAgentBase {
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
         // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
+        // The hook classifies its own pointer stamp (canonical durable-finalization
+        // boundary): a failure never reports success, and a replay of this same
+        // committed operation repairs it.
         if (promotedAllRoots) {
-          try {
-            await agent.afterDurableSwmPromotionV1({
-              contextGraphId,
-              subGraphName: opts?.subGraphName,
-              assertionCoordinate: name,
-              lifecycleAgentAddress: promoteAgentAddress,
-              shareOperationId: shareOperationId ?? null,
-              ctx: createOperationContext('share'),
-            });
-          } catch (error) {
-            throw createPromotePostCommitFailure(error);
-          }
+          await agent.afterDurableSwmPromotionV1({
+            contextGraphId,
+            subGraphName: opts?.subGraphName,
+            assertionCoordinate: name,
+            lifecycleAgentAddress: promoteAgentAddress,
+            shareOperationId: shareOperationId ?? null,
+            ctx: createOperationContext('share'),
+          });
         }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the
@@ -4161,6 +4160,10 @@ export class DKGAgent extends DKGAgentBase {
         chainId: bigint;
         kav10Address: string;
         eip712Digest: string;
+        /** The KA this draft belongs to. */
+        kaUal: string;
+        /** The number this draft will be published as (GH#2958: one above the confirmed version). */
+        assertionVersion: string;
       }> {
         const finalizeAgentAddress = opts?.agentAddress ?? agentAddress;
         if (opts?.layer === 'swm') {
