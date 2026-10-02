@@ -45,6 +45,41 @@ export const MAX_PROBE_AGE_MS = 30_000;
 export const RPC_READ_STALL_TIMEOUT_MS = 4_000;
 
 /**
+ * Per-endpoint cap for a live Context Graph authority read performed under the
+ * agent's 2.5s fail-closed security deadline. The ordinary 4s point-read cap
+ * cannot fail over before that caller deadline aborts the whole read, so a
+ * stalled preferred endpoint would prevent every configured fallback from
+ * being tried. Keep this comfortably below the outer deadline; single-RPC
+ * nodes remain governed by that outer boundary rather than this transport cap.
+ */
+export const RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS = 1_000;
+
+/**
+ * Per-attempt deadline for the configured-chainId identity gate
+ * (`ensureConfiguredStaticChainIdValidated`) and its caller-side wrappers.
+ *
+ * Deliberately ALWAYS capped: unlike the `pointRead` policy this does NOT
+ * relax to uncapped on a single-RPC node (`resolveCapMs`,
+ * rpc-failover-client.ts). The gate is a chain-IDENTITY probe running on a
+ * SHARED single-flight, so #894's "do not truncate a legitimately long read"
+ * trade does not transfer: uncapping it would leave the shared promise bounded
+ * only by ethers' 300s FetchRequest expiry, with every concurrent caller
+ * coalesced onto it and none able to cancel or start a fresh probe.
+ *
+ * Sized well above RPC_READ_STALL_TIMEOUT_MS because 4s was never measuring
+ * chain latency. `admitAndObserveRpcAttempt` awaits `acquireActiveRequest()`
+ * INSIDE `request.getUrlFunc` (rpc-request-transport.ts), so local governor
+ * admission is spent inside this same window. Under
+ * DEFAULT_RPC_REQUEST_GOVERNOR_POLICY a foreground request can queue for
+ * maxQueueSize / maxRequestsPerSecond = 256 / 10 = 25.6s, and a background one
+ * is additionally gated by startupJitterMs = 30s, so any cap at or below 30s
+ * can fire on a perfectly healthy chain. 45s exceeds both, and stays below
+ * CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS (60s) so that caller's
+ * surfaced error label stays deterministic.
+ */
+export const CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS = 45_000;
+
+/**
  * Preserve the legacy Context Graph registry scan span while using smaller,
  * RPC-safe pages. Kept outside the adapter base so the dedicated reverse-name
  * resolver can consume the budget without introducing a base/resolver module
@@ -77,18 +112,22 @@ export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
 export const STICKY_PREFERRED_TTL_MS = 30_000;
 
 /**
- * Per-attempt deadline for WIDE `eth_getLogs` reads (the `evm-adapter-events.ts`
- * `queryFilter` scans, which run over `[fromBlock ?? 0, toBlock]` — up to the
- * event poller's 9,000-block window, and the full chain on a cold-start
- * backfill). These legitimately take tens of seconds on a busy/slow chain, so
- * the 4s `RPC_READ_STALL_TIMEOUT_MS` point-read cap would abort a healthy scan
- * and fail it over across every endpoint → spurious `RPC_ENDPOINTS_EXHAUSTED`
+ * Deadline for one physical WIDE `eth_getLogs` request (the
+ * `evm-adapter-events.ts` `queryFilter` scans, which run over
+ * `[fromBlock ?? 0, toBlock]` — up to the event poller's 9,000-block window,
+ * fitted per provider to its eth_getLogs span cap by `readAdaptiveEvmLogRange`).
+ * These legitimately take tens of seconds on a busy/slow chain, so the 4s
+ * `RPC_READ_STALL_TIMEOUT_MS` point-read cap would abort a healthy scan and
+ * fail it over across every endpoint → spurious `RPC_ENDPOINTS_EXHAUSTED`
  * (which, in the poller, escapes before the cursor advances → a permanent
  * stall). 30s still hard-bounds a genuinely hung backend on a multi-RPC node;
- * it is consumed via the `wideLogScan` ReadPolicy in `resolveCapMs`
- * (rpc-failover-client.ts), so single-RPC stays uncapped (#894).
- * Larger than `KA_HIGH_WATER_PAGE_TIMEOUT_MS` (15s) because that bounds smaller
- * 2,000-block pages, whereas this covers the wider 9,000-block poller window.
+ * the events scan resolves it via the `wideLogScan` ReadPolicy in
+ * `resolveCapMs` (rpc-failover-client.ts), so single-RPC stays uncapped (#894).
+ * The background watchdog scans (the chain-index tick and Hub rotation poll)
+ * apply it to every physical request on every node, so a hung backend cannot
+ * wedge a one-RPC node either. Larger than `KA_HIGH_WATER_PAGE_TIMEOUT_MS`
+ * (15s) because that bounds smaller 2,000-block pages, whereas this covers the
+ * wider 9,000-block poller window on a provider without a span cap.
  */
 export const RPC_LOG_SCAN_TIMEOUT_MS = 30_000;
 
@@ -105,11 +144,28 @@ export const MIN_RPC_RECEIPT_TIMEOUT_MS = 1_000;
 export const DEFAULT_FINALITY_CONFIRMATIONS = 1;
 
 /**
- * Normalize an operator-selected mined-receipt confirmation depth.
+ * Blocks below the chain tip that this node treats as reorg-safe.
+ *
+ * Lives here, in the leaf constants module, because BOTH the Context Graph
+ * registry scan and the authority index's durable cursor need it, and the
+ * authority-index reader cannot import it from `evm-adapter-base` — that module
+ * imports the reader.
+ */
+export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+
+/**
+ * Normalize the operator-selected finality depth — the node's SINGLE definition
+ * of chain finality, not a write-side knob.
  *
  * Standard EVM semantics apply: the receipt's own canonical block is
  * confirmation 1, so a value of 1 makes the receipt eligible immediately
  * after inclusion. An omitted value defaults to 1.
+ *
+ * Besides mined-receipt finality and recovery proof snapshots, this same depth
+ * selects the anchor for the Context Graph authority index, named-CG
+ * resolution and the RFC-64 precommits (see evm-finality-anchor.ts). Raising it
+ * therefore buys reorg resistance on the write side AND delays how quickly a
+ * newly registered Context Graph becomes authoritative on this node.
  */
 export function resolveFinalityConfirmations(value: unknown): number {
   if (value === undefined) return DEFAULT_FINALITY_CONFIRMATIONS;

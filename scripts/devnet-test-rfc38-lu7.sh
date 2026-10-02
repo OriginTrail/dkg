@@ -221,7 +221,7 @@ log "member catchup response: $CATCHUP_CUR"
 # allowed=true` for this CG with the member's address as the signer.
 sleep 1
 CURATOR_NEW_MEMCATCH=$(tail -n "+$((CURATOR_LOG_BASE_MEMCATCH + 1))" "$(node_log "$CURATOR_NODE")")
-if printf '%s' "$CURATOR_NEW_MEMCATCH" | grep -qE "Private sync auth for \"$CUR_CG\".*signer=$MEMBER_AGENT.*allowed=true"; then
+if grep -qE "Private sync auth for \"$CUR_CG\".*signer=$MEMBER_AGENT.*allowed=true" <<<"$CURATOR_NEW_MEMCATCH"; then
   log "✓ curator authorised the member's curated catchup (Private sync auth allowed=true)"
 else
   warn "expected 'Private sync auth ... allowed=true' on curator for member's curated catchup; not found"
@@ -287,7 +287,7 @@ log "Waiting up to 45s for curator's denial log line for outsider..."
 DENIAL_FOUND=0
 for _ in $(seq 1 45); do
   CURATOR_NEW=$(tail -n "+$((CURATOR_LOG_BASE2 + 1))" "$(node_log "$CURATOR_NODE")")
-  if printf '%s' "$CURATOR_NEW" | grep -qE "(Denied sync request for \"$CUR_CG\".*from peer $CURATOR_PEER|Denied sync request for \"$CUR_CG\"|Private sync auth for \"$CUR_CG\".*signer=$OUTSIDER_AGENT.*allowed=false)"; then
+  if grep -qE "(Denied sync request for \"$CUR_CG\".*from peer $CURATOR_PEER|Denied sync request for \"$CUR_CG\"|Private sync auth for \"$CUR_CG\".*signer=$OUTSIDER_AGENT.*allowed=false)" <<<"$CURATOR_NEW"; then
     DENIAL_FOUND=1
     break
   fi

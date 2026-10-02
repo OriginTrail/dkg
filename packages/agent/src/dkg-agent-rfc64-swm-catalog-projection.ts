@@ -329,14 +329,15 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       throwIfAbortedV1(params.signal);
       const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
         snapshot,
-        resolveAsset: (row) => resolveRfc64InventoryWorkspaceCatalogAssetV1({
+        signal: params.signal,
+        resolveAsset: (row, signal) => resolveRfc64InventoryWorkspaceCatalogAssetV1({
           store: this.store,
           publicSnapshotStore: this.publicSnapshotStore,
           contextGraphId: params.contextGraphId,
           authorAddress: params.authorAddress,
           laneKind: lane.kind,
           row,
-          signal: params.signal,
+          signal,
         }),
       });
       throwIfAbortedV1(params.signal);

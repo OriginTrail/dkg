@@ -52,6 +52,26 @@ export class ContextGraphAssetFetchConflictError extends Error {
   }
 }
 
+/**
+ * The coherent chain view an exact fetch read is older than the block its
+ * caller requires, so it cannot show the version the caller is after. Retry
+ * once the chain view has caught up.
+ */
+export class ExactAssetVersionBehindError extends Error {
+  readonly code = 'ExactAssetVersionBehind';
+
+  constructor(
+    readonly ual: string,
+    readonly viewBlock: number,
+    readonly minVersionBlock: number,
+  ) {
+    super(
+      `the chain view of ${ual} at block ${viewBlock} is behind block ${minVersionBlock}`,
+    );
+    this.name = 'ExactAssetVersionBehindError';
+  }
+}
+
 export class ExactAssetFetchLifecycleClosedError extends Error {
   constructor() {
     super('Exact asset fetch lifecycle is closed');
@@ -60,11 +80,15 @@ export class ExactAssetFetchLifecycleClosedError extends Error {
 }
 
 export interface ExactAssetChainSnapshot {
+  knowledgeAssetId?: bigint;
   latestRoot: string;
   rootCount: bigint;
   latestAuthor: string;
   latestPublisher: string;
   blockNumber: number;
+  blockHash?: string;
+  knowledgeAssetStorageAddress?: string;
+  knowledgeAssetStorageGeneration?: number;
 }
 
 export interface ExactAssetFetchEvidence {
@@ -78,6 +102,8 @@ export interface ExactAssetFetchEvidence {
   authorAddress: string;
   publisherAddress: string;
   versionBlock: number;
+  /** Original coherent snapshot, retained only for this exact-fetch operation. */
+  versionSnapshot: ExactAssetChainSnapshot;
 }
 
 export type ExactAssetLocalState = 'present' | 'materialized' | 'missing';
@@ -196,6 +222,7 @@ function requireOrderedAssetRequests(
 async function resolveEvidence(
   request: ExactAssetRequest,
   deps: ExactAssetFetchDependencies,
+  minVersionBlock: number | undefined,
 ): Promise<ExactAssetFetchEvidence> {
   requireCurrent(deps);
   const { ual, kaId } = request;
@@ -227,6 +254,9 @@ async function resolveEvidence(
       `Knowledge Asset ${ual} has an invalid version block`,
     );
   }
+  if (minVersionBlock !== undefined && snapshot.blockNumber < minVersionBlock) {
+    throw new ExactAssetVersionBehindError(ual, snapshot.blockNumber, minVersionBlock);
+  }
   if (typeof snapshot.latestPublisher !== 'string' || snapshot.latestPublisher.length === 0) {
     throw new ContextGraphAssetFetchConflictError(
       `Knowledge Asset ${ual} has no latest publisher on-chain`,
@@ -249,7 +279,15 @@ async function resolveEvidence(
     authorAddress: snapshot.latestAuthor,
     publisherAddress: snapshot.latestPublisher,
     versionBlock: snapshot.blockNumber,
+    versionSnapshot: Object.freeze({ ...snapshot }),
   };
+}
+
+/** Peers one run tries: `maxPeers`, capped at {@link MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS}. */
+export function exactAssetFetchPeerWindow(maxPeers: number | undefined): number {
+  return maxPeers === undefined || !Number.isFinite(maxPeers)
+    ? MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS
+    : Math.min(MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS, Math.max(1, Math.floor(maxPeers)));
 }
 
 /**
@@ -263,6 +301,14 @@ export async function runExactAssetFetch(
     requestedUals: readonly string[];
     peerIds?: readonly string[];
     expectedOnChainId?: string;
+    /** Peers one run may try, capped at {@link MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS}. */
+    maxPeers?: number;
+    /**
+     * Refuse chain evidence older than this block with
+     * {@link ExactAssetVersionBehindError}: a caller that follows an update
+     * event must not settle on a view that has not seen the update.
+     */
+    minVersionBlock?: number;
   },
   deps: ExactAssetFetchDependencies,
 ): Promise<ContextGraphAssetFetchResult> {
@@ -273,7 +319,9 @@ export async function runExactAssetFetch(
 
   // Promise.all preserves request order while allowing all bounded evidence
   // reads to overlap. The request limit is ten assets.
-  const evidence = await Promise.all(requests.map((request) => resolveEvidence(request, deps)));
+  const evidence = await Promise.all(
+    requests.map((request) => resolveEvidence(request, deps, input.minVersionBlock)),
+  );
   requireCurrent(deps);
   const onChainId = evidence[0]!.onChainCgId;
   if (evidence.some((item) => item.onChainCgId !== onChainId)) {
@@ -323,7 +371,7 @@ export async function runExactAssetFetch(
   requireCurrent(deps);
   const traversal = await runBoundedPreparedPeerTraversal({
     candidatePeerIds: candidates,
-    maxPeers: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+    maxPeers: exactAssetFetchPeerWindow(input.maxPeers),
     operationLabel: 'Exact asset fetch from',
     assertCurrent: () => requireCurrent(deps),
     preparePeer: deps.preparePeer,

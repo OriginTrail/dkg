@@ -20,11 +20,16 @@ import {
   META_REFRESH_COOLDOWN_MS,
   SYNC_TOTAL_TIMEOUT_MS,
 } from './dkg-agent-constants.js';
+import { hasAuthoritativePrivateMetaDefinition } from './context-graph-private-meta-proof.js';
+import type { ApprovedMemberProof } from './context-graph-member-proof.js';
 import {
-  hasAuthoritativePrivateMetaDefinition,
-  type AuthoritativePrivateMetaMemberProof,
-} from './context-graph-private-meta-proof.js';
-import { hasAuthoritativePublicMetaDefinition } from './context-graph-public-meta-proof.js';
+  unprovenApprovedMemberAcceptance,
+  type ApprovedMemberAcceptance,
+} from './internal/context-graph-authority/approved-member-acceptance.js';
+import {
+  hasAuthoritativePublicMetaDefinition,
+  hasAuthoritativePublicMetaDefinitionForApprovedMember,
+} from './context-graph-public-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import {
   hasSyncAdmissionSource,
@@ -36,6 +41,8 @@ import type {
 } from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { stripLiteral } from './dkg-agent-utils.js';
+import { isCanonicalAuthoritativeContextGraphId } from
+  './context-graph-binding-state.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -47,14 +54,25 @@ export interface CuratorMetaRefreshOptions {
   trustedCuratorPeerId?: string;
   /** Bypass the normal auth-probe cooldown for an explicit recovery event. */
   force?: boolean;
-  /** Require the fetched snapshot to make this approved local member usable. */
-  memberProof?: AuthoritativePrivateMetaMemberProof;
+  /**
+   * Require the fetched snapshot to make this approved local member usable,
+   * judged under the authenticated access policy the caller resolved: a
+   * public member snapshot is accepted only when that policy is `public`.
+   */
+  approvedMember?: ApprovedMemberAcceptance;
+  /**
+   * @deprecated Use `approvedMember`. Kept so an older caller keeps its
+   * member requirement: an old-style proof has no authenticated policy, so it
+   * keeps its former private-only, fail-closed meaning (an `unproven`
+   * acceptance) and never admits a public definition.
+   */
+  memberProof?: ApprovedMemberProof;
   /**
    * Accept only an unambiguous PUBLIC root definition. Set by the RFC-64
    * replica metadata bootstrap, whose accepted owner-signed policy is already
    * known to be public: a peer-served private definition must then be
    * rejected instead of installed, so an arbitrary connected peer cannot flip
-   * the local graph private. Mutually exclusive with `memberProof`.
+   * the local graph private. Mutually exclusive with `approvedMember`.
    */
   requirePublicDefinition?: boolean;
   /**
@@ -163,6 +181,11 @@ interface CuratorMetaRefreshState {
 interface AuthoritativeMetaSnapshot {
   checkpointKey: string;
   quads: Quad[];
+  /**
+   * The acceptance an approved member's snapshot was admitted under. The
+   * replacement asks it again right before its first projection write.
+   */
+  approvedMember?: ApprovedMemberAcceptance;
 }
 
 const CURATOR_AGENT_DID_PREFIX = 'did:dkg:agent:';
@@ -242,15 +265,16 @@ function applyCuratorRegistrationBinding(
   const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
   let onChainId: string | undefined;
   let onChainHash: string | undefined;
+  let invalidOnChainId = false;
 
   for (const quad of snapshot) {
     if (quad.graph !== metaGraph || quad.subject !== contextGraphUri) continue;
     const value = stripLiteral(quad.object);
-    if (quad.predicate === onChainIdPredicate && /^\d+$/.test(value)) {
-      try {
-        if (BigInt(value) > 0n) onChainId = value;
-      } catch {
-        // Ignore malformed or out-of-domain curator metadata fail-closed.
+    if (quad.predicate === onChainIdPredicate) {
+      if (isCanonicalAuthoritativeContextGraphId(value)) {
+        onChainId = value;
+      } else {
+        invalidOnChainId = true;
       }
     } else if (
       quad.predicate === onChainHashPredicate
@@ -259,6 +283,11 @@ function applyCuratorRegistrationBinding(
       onChainHash = value.toLowerCase();
     }
   }
+
+  // Treat the numeric slot and commitment as one registration claim. A
+  // malformed or out-of-uint256 slot must not leave behind a hash-only durable
+  // binding or turn untrusted metadata into a strict-writer exception.
+  if (invalidOnChainId) return;
 
   let changed = false;
   if (onChainId && sub.onChainId !== onChainId) {
@@ -495,24 +524,40 @@ async function fetchAuthoritativeMetaSnapshot(
     agent.syncCheckpoints.delete(result.checkpointKey);
     return undefined;
   }
-  const hasAuthoritativePublicDefinition = hasAuthoritativePublicMetaDefinition(
-    contextGraphId,
-    controlMetaQuads,
-  );
-  // Supplying memberProof selects the fail-closed private post-approval
-  // contract. A public-only snapshot must not satisfy that request: public
-  // subscriptions reach this refresh without a member proof.
-  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
-    && hasAuthoritativePublicDefinition;
+  // The proof layer owns each snapshot contract; this refresh only picks one.
+  // Public subscriptions reach it without an approved member. A join-approved
+  // member is judged by its acceptance (#2827, #2831 review), which admits
+  // exactly one definition: a public acceptance only the public definition,
+  // and only while its authority still holds after the fetch; an unproven one
+  // only the complete private definition. A peer can then neither downgrade a
+  // private graph nor leave a public graph stored as private.
+  const approvedMember = options.approvedMember
+    ?? (options.memberProof === undefined
+      ? undefined
+      : unprovenApprovedMemberAcceptance(options.memberProof));
+  const acceptsAuthoritativePublicDefinition = approvedMember === undefined
+    ? hasAuthoritativePublicMetaDefinition(contextGraphId, controlMetaQuads)
+    : approvedMember.admittedDefinition === 'public'
+      && hasAuthoritativePublicMetaDefinitionForApprovedMember(
+        contextGraphId,
+        controlMetaQuads,
+        approvedMember.proof,
+      );
   // A public-only bootstrap never installs a private definition, however
   // complete: the caller's accepted policy already says the graph is public.
   const hasAuthoritativePrivateDefinition = options.requirePublicDefinition !== true
+    && (approvedMember === undefined || approvedMember.admittedDefinition === 'private')
     && hasAuthoritativePrivateMetaDefinition(
       contextGraphId,
       controlMetaQuads,
-      options.memberProof,
+      approvedMember?.proof,
     );
-  if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
+  // The fetch is the long await, so a member whose authority already changed
+  // stops here, before any store work. The replacement asks again right
+  // before its first projection write.
+  const admitted = (acceptsAuthoritativePublicDefinition || hasAuthoritativePrivateDefinition)
+    && (approvedMember === undefined || await approvedMember.stillHolds());
+  if (!admitted) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
     agent.log.warn(
@@ -539,7 +584,11 @@ async function fetchAuthoritativeMetaSnapshot(
   const quads = options.ignoreRegistrationBinding === true
     ? stripRelayedRegistrationBindingQuads(contextGraphId, controlMetaQuads)
     : controlMetaQuads;
-  return { checkpointKey: result.checkpointKey, quads };
+  return {
+    checkpointKey: result.checkpointKey,
+    quads,
+    ...(approvedMember === undefined ? {} : { approvedMember }),
+  };
 }
 
 /**
@@ -581,12 +630,24 @@ function replaceCuratorMetaProjectionSparql(
   }`;
 }
 
+/**
+ * Install `authoritative` as the graph's curator projection. Returns false,
+ * leaving the projection exactly as it was, when the approved member's
+ * acceptance no longer holds right before the projection's first write
+ * (#2831 review): registration or catalog authority can change during the
+ * store work that precedes it.
+ */
 async function atomicallyReplaceCuratorMetaSnapshot(
   agent: CuratorMetaRefreshAgent,
   contextGraphId: string,
-  snapshot: readonly Quad[],
+  authoritative: AuthoritativeMetaSnapshot,
   ctx: OperationContext,
-): Promise<void> {
+): Promise<boolean> {
+  const snapshot = authoritative.quads;
+  const activationHolds = async (): Promise<boolean> => (
+    authoritative.approvedMember === undefined
+    || await authoritative.approvedMember.stillHolds()
+  );
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
   const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
@@ -665,6 +726,11 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         )),
     );
 
+    // Each subject below is its own commit, and a delegation for an agent the
+    // current root already allows takes effect as soon as it lands. So the
+    // acceptance is asked before the first of them: a refusal must leave the
+    // projection exactly as it was, and no store API commits them together.
+    if (!(await activationHolds())) return false;
     invalidateTargetProjections();
     try {
       const replaceSubject = async (subject: string, quads: Quad[]): Promise<void> => {
@@ -690,7 +756,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     } finally {
       invalidateTargetProjections();
     }
-    return;
+    return true;
   }
 
   const stagingGraph = `urn:dkg:curator-meta-refresh:${randomUUID()}`;
@@ -709,6 +775,9 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         `Refusing partial curator metadata replacement: staged ${staged.length}/${snapshot.length} triples`,
       );
     }
+    // Staged rows sit in a scratch graph until the update below activates the
+    // whole projection at once, so the acceptance is asked right before it.
+    if (!(await activationHolds())) return false;
 
     // A decorated store can commit its inner UPDATE and then throw while
     // appending a changelog marker. Invalidate before and after the attempt so
@@ -728,6 +797,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     if (!replaced) {
       throw new Error('Triple store does not support atomic curator metadata replacement');
     }
+    return true;
   } finally {
     try {
       await agent.store.dropGraph(stagingGraph, { source: 'agent.metaRefresh.cleanup' });
@@ -769,7 +839,14 @@ async function executeCuratorMetaRefresh(
       ctx,
     );
     if (!snapshot) return false;
-    await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot.quads, ctx);
+    if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx))) {
+      agent.syncCheckpoints.delete(snapshot.checkpointKey);
+      agent.log.warn(
+        ctx,
+        `Rejected curator metadata snapshot for "${contextGraphId}": the approved member's authority changed before it was installed`,
+      );
+      return false;
+    }
     // The relayed snapshot carries no binding claims any more (stripped above);
     // skipping the binding step keeps the subscription row untouched even if a
     // future field slipped past the strip list. Chain bindings for such a

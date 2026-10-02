@@ -119,7 +119,13 @@ describe('finalized Context Graph authority target bounds', () => {
       });
 
     expect(reader.resolveFinalizedContextGraphIdsByNameHashes)
-      .toHaveBeenCalledWith([NAME_HASH], { signal: expect.any(AbortSignal) });
+      .toHaveBeenCalledWith([NAME_HASH], {
+        signal: expect.any(AbortSignal),
+        // Registration discovery is a governed lane, so the adapter reports
+        // whether a projection answered: a cache-served binding must not be
+        // credited to the provider pool as recovery evidence.
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
     // The physical index fence still runs, so the reported detail is the
     // guard's own message and not a teardown failure.
     expect(reader.whenIdle).toHaveBeenCalledOnce();
@@ -170,7 +176,13 @@ describe('finalized Context Graph authority target bounds', () => {
       });
 
     expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
-      .toHaveBeenCalledWith([NAME_HASH], { signal: expect.any(AbortSignal) });
+      .toHaveBeenCalledWith([NAME_HASH], {
+        signal: expect.any(AbortSignal),
+        // Registration discovery is a governed lane, so the adapter reports
+        // whether a projection answered: a cache-served binding must not be
+        // credited to the provider pool as recovery evidence.
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
     expect(reader.whenIdle).toHaveBeenCalledOnce();
     // The finalized index owned the answer; the current-state resolver, which
     // returns the same id, was never consulted.
@@ -192,7 +204,13 @@ describe('finalized Context Graph authority target bounds', () => {
       });
 
     expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
-      .toHaveBeenCalledWith([NAME_HASH], { signal: expect.any(AbortSignal) });
+      .toHaveBeenCalledWith([NAME_HASH], {
+        signal: expect.any(AbortSignal),
+        // Registration discovery is a governed lane, so the adapter reports
+        // whether a projection answered: a cache-served binding must not be
+        // credited to the provider pool as recovery evidence.
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 

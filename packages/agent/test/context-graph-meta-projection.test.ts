@@ -235,6 +235,43 @@ describe('ContextGraphMetaProjection', () => {
     expect((await projection.get(id)).accessPolicy).toBe('private');
   });
 
+  it('advances the authority revision for every workspace recipient fact', () => {
+    const projection = new ContextGraphMetaProjection({} as TripleStore);
+    const predicates = [
+      DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+      DKG_ONTOLOGY.DKG_REVOKED_AGENT,
+      DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
+      DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
+      DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
+      DKG_ONTOLOGY.DKG_PEER_ID,
+      DKG_ONTOLOGY.DKG_REVOKED_AT,
+      DKG_ONTOLOGY.DKG_REVOKED_BY,
+      DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF,
+    ];
+
+    for (const predicate of predicates) {
+      const before = projection.readAuthorityFactsRevision;
+      expect(projection.markDirtyFromQuads([{
+        subject: 'did:dkg:agent:recipient-revision',
+        predicate,
+        object: '"value"',
+        graph: 'did:dkg:context-graph:agents',
+      }])).toEqual([]);
+      expect(projection.readAuthorityFactsRevision).toBe(before + 1);
+    }
+  });
+
+  it('advances the authority revision for an opaque non-CG subject replacement target', () => {
+    const projection = new ContextGraphMetaProjection({} as TripleStore);
+    const before = projection.readAuthorityFactsRevision;
+
+    projection.markDirtyForGraph('urn:dkg:local:join-encryption-key-cache');
+
+    expect(projection.readAuthorityFactsRevision).toBe(before + 1);
+  });
+
   it('rebuilds for callers that arrive after invalidation during an in-flight rebuild', async () => {
     let releaseFirstQuery!: () => void;
     const firstQuery = new Promise<void>((resolve) => { releaseFirstQuery = resolve; });

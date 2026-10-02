@@ -1,12 +1,32 @@
 export * from './chain-adapter.js';
+export {
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TAIL_BLOCKS,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS,
+  ContextGraphAuthorityIndexSnapshotExportError,
+  ContextGraphAuthorityIndexBootstrapUnavailableError,
+  decodeContextGraphAuthorityIndexSnapshot,
+  normalizeContextGraphAuthorityIndexSnapshot,
+  type ContextGraphAuthorityIndexSnapshotRequest,
+  type ContextGraphAuthorityIndexSnapshot,
+  type ContextGraphAuthorityIndexBootstrap,
+  type ContextGraphAuthorityIndexSnapshots,
+} from './context-graph-authority-index-snapshot.js';
 export { assertContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
+export {
+  resolveContextGraphAuthorityIndexTickMs,
+  type ContextGraphAuthorityProjectionServedEvidence,
+} from './context-graph-authority-index-projection.js';
 export {
   type ContextGraphAuthorityHistoryCheckpointV1,
   type ContextGraphAuthorityHistoryState,
   type ContextGraphAuthorityHistoryStore,
 } from './context-graph-authority-history.js';
 export {
+  createContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexStore,
 } from './context-graph-authority-index-checkpoint.js';
 export {
@@ -19,6 +39,7 @@ export {
   type PublicFinalizedMaterializationAuthorityRequest,
   type PublicFinalizedMaterializationAuthorityResult,
   type PublicFinalizedMaterializationAuthorityUnavailableReason,
+  type PublicFinalizedMaterializationVersionSnapshot,
 } from './public-finalized-materialization-authority.js';
 export {
   CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
@@ -139,16 +160,57 @@ export {
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
   RPC_ENDPOINT_SLOT_LABELS,
+  RPC_USAGE_ADAPTER_ROLES,
+  RPC_USAGE_SNAPSHOT_CONSUMERS,
+  RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
   normalizeRpcUsageWindow,
+  normalizeRpcUsageAdapterRole,
   normalizeRpcEndpointSlotLabel,
+  boundedRpcUsageSnapshotConsumerLabel,
   rpcUsageWindowTotal,
+  snapshotProcessRpcUsage,
+  RpcUsageTracker,
+  RpcUsageCumulativeAccumulator,
+  // Call-site attribution: splits a funnel read (`cgStorage.getContextGraph`)
+  // by the caller that wanted it. See `withRpcUsageSite`.
+  withRpcUsageSite,
+  withRpcUsageConsumer,
+  withRpcUsageAdapterRole,
   type RpcEndpointSlotLabel,
+  type RpcUsageAdapterRole,
   type RpcUsageAttribution,
+  type RpcUsageCumulativeSnapshot,
+  type RpcUsageSnapshotClock,
+  type RpcUsageSnapshotCompleteness,
+  type RpcUsageSnapshotSourcePopulation,
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
   type RpcUsageRecorder,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+// Observation-only split of physical RPC attempts into local admission wait and
+// endpoint latency. Process-cumulative, bounded and secret-free; consumers diff
+// two non-draining snapshots.
+export {
+  RPC_TIMING_BUCKET_UPPER_MS,
+  diffRpcRequestTiming,
+  snapshotRpcRequestTiming,
+  type RpcRequestTimingClassSnapshot,
+  type RpcRequestTimingSnapshot,
+  type RpcTimingDistribution,
+  type RpcTimingRequestClass,
+} from './rpc-request-timing.js';
+// The bounded census of call sites that reach `cgStorage.getContextGraph`.
+export {
+  CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
+  type ContextGraphAuthorityRpcSite,
+} from './context-graph-authority-rpc-sites.js';
+export {
+  type RandomSamplingReadContext,
+  type RandomSamplingBlockContext,
+  type RandomSamplingReadContextReader,
+} from './random-sampling-read-context.js';
 export {
   activeRpcRequestContext,
   activeRpcRequestAbortSignal,
@@ -158,6 +220,7 @@ export {
   withOwnedRpcRequestContext,
   withRpcRequestContext,
   withRpcRequestTimeout,
+  type RpcRequestAdmissionPriority,
   type RpcRequestClass,
   type RpcRequestAdmission,
   type RpcRequestContext,
@@ -207,12 +270,25 @@ export {
   RpcEndpointsExhaustedError,
   isChainRpcTransportError,
   isRpcEndpointsExhaustedError,
+  isTransientRpcTransportFailureWithoutTransaction,
   createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
   type RpcEndpointExhaustionKind,
   type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
+export {
+  CHAIN_WRITE_AHEAD_HOOK_FAILED_CODE,
+  ChainWriteAheadHookError,
+  getChainWriteAheadHookCause,
+  isChainWriteAheadHookError,
+  type ChainWriteAheadHookErrorLike,
+} from './write-ahead-hook-error.js';
+export {
+  classifyContextGraphRegistrationFailure,
+  markContextGraphRegistrationNotSubmitted,
+  type ContextGraphRegistrationFailureDisposition,
+} from './context-graph-registration-error.js';
 export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.
   // Test-only hook exported so cross-package route tests can reset the exact
@@ -225,6 +301,9 @@ export {
   noteRpcExhaustion,
   notePreferredEndpoint,
   noteRpcServed,
+  // GH#2942 — the publisher persists a transport failure's message and must reduce any URL in
+  // it (a configured RPC URL can carry an API key) to its host first.
+  hostOnlyRpcText,
 } from './rpc-failover-log.js';
 export {
   HubResolutionCache,
@@ -251,3 +330,28 @@ export {
   type RandomSamplingAvailabilityResolver,
   type LegacyRandomSamplingAvailabilityReader,
 } from './random-sampling-availability.js';
+
+/** Store contract supplied by the daemon to the one-log runtime. */
+export type { ChainEventLogStore } from './chain-index/chain-event-log.js';
+
+/**
+ * How the process hands that log DOWN to each adapter. There is one log per
+ * node and many adapters, so this is a binding, never a construction.
+ */
+export type {
+  ChainEventLogBinding,
+  ChainEventLogBindingSource,
+  ChainEventLogEventScanIdentity,
+  ChainEventLogEventScanLease,
+  ChainEventLogIndexedEventType,
+  ChainEventLogHubRotation,
+  ChainEventLogHubRotationWindow,
+} from './chain-event-log-binding.js';
+
+/** The ONE construction of that log. Exactly one adapter per process owns it. */
+export {
+  createEvmChainIndexRuntime,
+  type EvmChainIndexContract,
+  type EvmChainIndexRuntime,
+  type EvmChainIndexRuntimeOptions,
+} from './evm-chain-index-runtime.js';

@@ -11,6 +11,7 @@
 // handler wiring, not Node's (documented) 'exit'-on-terminate behaviour.
 import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED } from '@origintrail-official/dkg-core';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -64,6 +65,13 @@ vi.mock('node:worker_threads', async (importOriginal) => ({
 }));
 
 const { createCatchupRunner } = await import('../src/catchup-runner.js');
+// The real admission predicate, so bridge doubles select through the agent's
+// own filter rather than a test copy of it.
+const { DKGAgent: RealDKGAgent } = await import('@origintrail-official/dkg-agent');
+// The error the agent's selected-lane recovery lease throws when it is refused.
+const { Rfc64SwmRecoveryTargetRevokedErrorV1 } = await import(
+  '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-swm-recovery-runtime.js'
+);
 
 const stubAgent = {} as unknown as DKGAgent;
 
@@ -181,6 +189,8 @@ describe('WorkerCatchupRunner agent bridge', () => {
       ensurePeerConnected: async () => {},
       primeCatchupConnections: async () => {},
       selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+      listAdmittedConnectedPeers: RealDKGAgent.prototype.listAdmittedConnectedPeers,
+      ensurePeerAdmittedForRecovery: async () => true,
       node: { libp2p: { getConnections: () => [] } },
       syncFromPeerDetailed: async (...args: unknown[]) => {
         calls.durable.push(args);
@@ -410,6 +420,78 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-a', 'peer-swm']);
   });
 
+  it('selects catch-up peers only from network-admitted connections', async () => {
+    // 2026-09-23 Base mainnet: a subscribe fanned shared-memory sync out to
+    // every live connection, including testnet relays that had failed the
+    // network-identity proof. The bridge runs the agent's own predicate — the
+    // real method, not a copy — which the in-process catch-up also selects from.
+    const admissionChecks: string[] = [];
+    const selectCalls: unknown[][] = [];
+    const { agent } = bridgeAgent({
+      listAdmittedConnectedPeers: RealDKGAgent.prototype.listAdmittedConnectedPeers,
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
+      // Even a prioritized SWM-provider slot must not smuggle it back in.
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-other-network'],
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-curator', 'peer-other-network', 'peer-a', 'peer-curator'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      ensurePeerAdmittedForRecovery: async (peerId: string, _ctx: unknown, label: string) => {
+        admissionChecks.push(`${label}:${peerId}`);
+        return peerId !== 'peer-other-network';
+      },
+      selectCatchupPeers: (...args: unknown[]) => {
+        selectCalls.push(args);
+        return args[0] as Array<{ toString(): string }>;
+      },
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-admission', true]);
+
+    expect(admissionChecks).toEqual([
+      'Connected catchup peer:peer-curator',
+      'Connected catchup peer:peer-other-network',
+      'Connected catchup peer:peer-a',
+    ]);
+    expect((selectCalls[0]![0] as Array<{ toString(): string }>).map(String))
+      .toEqual(['peer-curator', 'peer-a']);
+    expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-a']);
+    expect(posted.result.connectedPeers).toBe(2);
+  });
+
+  it('fails the preparation for an agent without the admission predicate', async () => {
+    // No fallback filter lives in the bridge, so there is one admission rule.
+    // An agent that cannot answer it must not get every live connection
+    // selected unfiltered, including another network's peer.
+    const selectCalls: unknown[][] = [];
+    const { agent } = bridgeAgent({
+      listAdmittedConnectedPeers: undefined,
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-a', 'peer-other-network'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      selectCatchupPeers: (...args: unknown[]) => {
+        selectCalls.push(args);
+        return args[0] as Array<{ toString(): string }>;
+      },
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-no-predicate', true]);
+
+    expect(posted.result).toBeUndefined();
+    expect(posted.error).toMatch(/listAdmittedConnectedPeers/);
+    expect(selectCalls).toEqual([]);
+  });
+
   it('forwards the admission source into both detailed sync calls', async () => {
     const { agent, calls } = bridgeAgent();
 
@@ -472,6 +554,309 @@ describe('WorkerCatchupRunner agent bridge', () => {
     });
   });
 
+  it('runs the selected SWM lane only while an accepted public policy is active', async () => {
+    // The same rule the agent's recovery lease applies when the lane runs.
+    const notAttempted = { kind: 'catchup-plane-not-attempted', reason: 'selected-lane-refused' };
+    const runsSelectedLane = async (authority: unknown): Promise<boolean> => {
+      const { agent, calls } = bridgeAgent({
+        resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => authority,
+      });
+      const posted = await invokeThroughBridge(
+        agent,
+        'syncSharedMemory',
+        ['peer-a', 'cg-lane', 2000, 'catchup-foreground', true],
+      );
+      if (calls.selectedShared.length === 0) expect(posted.result).toEqual(notAttempted);
+      return calls.selectedShared.length === 1;
+    };
+
+    expect(await runsSelectedLane({ lane: 'selected-public', active: true })).toBe(true);
+    expect(await runsSelectedLane({ lane: 'selected-public', active: false })).toBe(false);
+    expect(await runsSelectedLane({ lane: 'ordinary-private', active: true })).toBe(false);
+    expect(await runsSelectedLane({ lane: null, active: false })).toBe(false);
+
+    // The ordinary lane (private curator recovery) never consults it.
+    const { agent: privateAgent, calls: privateCalls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
+    });
+    await invokeThroughBridge(
+      privateAgent,
+      'syncSharedMemory',
+      ['peer-a', 'cg-private', 2000, 'catchup-foreground'],
+    );
+    expect(privateCalls.shared).toHaveLength(1);
+
+    // An agent without the resolver leaves the decision to the lease.
+    const { agent: withoutResolver, calls: withoutResolverCalls } = bridgeAgent();
+    await invokeThroughBridge(
+      withoutResolver,
+      'syncSharedMemory',
+      ['peer-a', 'cg-lane', 2000, 'catchup-foreground', true],
+    );
+    expect(withoutResolverCalls.selectedShared).toHaveLength(1);
+  });
+
+  it('falls back to legacy SWM catch-up when the kill switch restores legacy transfer', async () => {
+    const rawReceiverAuthority = vi.fn(() => ({ legacySyncAllowed: false }));
+    const { agent, calls } = bridgeAgent({
+      config: { rfc64CatalogExecutionPlan: { killSwitchActive: true } },
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
+      resolveRfc64CatalogReceiverAuthorityV1: rawReceiverAuthority,
+      rfc64LegacySwmGossipAllowedForContextGraph:
+        RealDKGAgent.prototype.rfc64LegacySwmGossipAllowedForContextGraph,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-curator', 'cg-public-legacy', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.error).toBeUndefined();
+    expect(posted.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
+    expect(calls.selectedShared).toEqual([]);
+    expect(rawReceiverAuthority).not.toHaveBeenCalled();
+    expect(calls.shared).toHaveLength(1);
+    expect(calls.shared[0]).toEqual([
+      'peer-curator',
+      ['cg-public-legacy'],
+      { priority: 2000, source: 'catchup-foreground' },
+    ]);
+  });
+
+  it('does not fall back to legacy SWM when catalog authority forbids it', async () => {
+    const legacyAdmission = vi.fn((_contextGraphId: string) => false);
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
+      rfc64LegacySwmGossipAllowedForContextGraph: legacyAdmission,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-curator', 'cg-catalog-only', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.result).toEqual({
+      kind: 'catchup-plane-not-attempted', reason: 'selected-lane-refused',
+    });
+    expect(calls.selectedShared).toEqual([]);
+    expect(calls.shared).toEqual([]);
+    expect(legacyAdmission).toHaveBeenCalledWith('cg-catalog-only');
+  });
+
+  it('decides the selected SWM lane on every call, not once per job', async () => {
+    // A first subscribe commits the graph's RFC-64 policy in the background
+    // while the job prepares, so one call can find the lane inactive and the
+    // next find it active.
+    let authority: { lane: string | null; active: boolean } = { lane: null, active: false };
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => authority,
+    });
+    const args = ['peer-a', 'cg-commits', 2000, 'catchup-foreground', true];
+
+    const first = await invokeThroughBridge(agent, 'syncSharedMemory', args);
+    expect(first.result).toEqual({
+      kind: 'catchup-plane-not-attempted',
+      reason: 'selected-lane-refused',
+    });
+    expect(calls.selectedShared).toHaveLength(0);
+
+    authority = { lane: 'selected-public', active: true };
+    const second = await invokeThroughBridge(agent, 'syncSharedMemory', args);
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(second.result).toMatchObject({ kind: 'selected-shared-memory', scopeComplete: true });
+  });
+
+  it('reports a selected SWM lane refused by its recovery lease as not attempted', async () => {
+    // Active when the call started, revoked before the lane ran.
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: 'selected-public', active: true }),
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-refused');
+      },
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-a', 'cg-refused', 2000, 'catchup-foreground', true],
+    );
+
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(posted.error).toBeUndefined();
+    expect(posted.result).toEqual({
+      kind: 'catchup-plane-not-attempted',
+      reason: 'selected-lane-refused',
+    });
+  });
+
+  it('uses legacy SWM if the kill switch revokes a selected-lane lease mid-call', async () => {
+    let selectedActive = true;
+    const selectedAuthority = vi.fn(() => ({
+      lane: selectedActive ? 'selected-public' : null,
+      active: selectedActive,
+    }));
+    const legacyAdmission = vi.fn((_contextGraphId: string) => true);
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: selectedAuthority,
+      rfc64LegacySwmGossipAllowedForContextGraph: legacyAdmission,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        selectedActive = false;
+        throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-transition');
+      },
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-a', 'cg-transition', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.error).toBeUndefined();
+    expect(posted.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(calls.shared).toHaveLength(1);
+    expect(selectedAuthority).toHaveBeenCalledTimes(2);
+    expect(legacyAdmission).toHaveBeenCalledWith('cg-transition');
+  });
+
+  it('keeps a stale selected lease closed while selected authority remains active', async () => {
+    const selectedAuthority = vi.fn(() => ({ lane: 'selected-public', active: true }));
+    const legacyAdmission = vi.fn((_contextGraphId: string) => true);
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: selectedAuthority,
+      rfc64LegacySwmGossipAllowedForContextGraph: legacyAdmission,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-refreshed');
+      },
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-a', 'cg-refreshed', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.result).toEqual({
+      kind: 'catchup-plane-not-attempted',
+      reason: 'selected-lane-refused',
+    });
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(calls.shared).toEqual([]);
+    expect(selectedAuthority).toHaveBeenCalledTimes(2);
+    expect(legacyAdmission).not.toHaveBeenCalled();
+  });
+
+  it('keeps a selected SWM transport error a failure', async () => {
+    const { agent } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: 'selected-public', active: true }),
+      syncSelectedSharedMemoryFromPeerDetailed: async () => {
+        throw new Error('stream reset by peer');
+      },
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-a', 'cg-transport', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.result).toBeUndefined();
+    expect(posted.error).toBe('stream reset by peer');
+  });
+
+  it('does not run legacy durable sync for a catalog-authoritative graph', async () => {
+    const recoveryCalls: unknown[][] = [];
+    const legacySyncAllowed = new Map([['cg-catalog', false], ['cg-legacy', true]]);
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64CatalogReceiverAuthorityV1: (contextGraphId: string) => ({
+        contextGraphId,
+        legacySyncAllowed: legacySyncAllowed.get(contextGraphId),
+      }),
+      syncDurableRecoveryContextGraph: async (...args: unknown[]) => {
+        recoveryCalls.push(args);
+        return { result: { insertedTriples: 3 } };
+      },
+    });
+
+    const notAttempted = { kind: 'catchup-plane-not-attempted', reason: 'catalog-authoritative' };
+    expect((await invokeThroughBridge(agent, 'syncDurable', ['peer-a', 'cg-catalog'])).result)
+      .toEqual(notAttempted);
+    expect((await invokeThroughBridge(agent, 'syncDurableRecovery', ['peer-a', 'cg-catalog'])).result)
+      .toEqual(notAttempted);
+    expect(calls.durable).toEqual([]);
+    expect(recoveryCalls).toEqual([]);
+
+    await invokeThroughBridge(agent, 'syncDurable', ['peer-a', 'cg-legacy']);
+    const recovered = await invokeThroughBridge(agent, 'syncDurableRecovery', ['peer-a', 'cg-legacy']);
+    expect(calls.durable).toHaveLength(1);
+    expect(recoveryCalls).toHaveLength(1);
+    expect(recovered.result).toEqual({ insertedTriples: 3 });
+  });
+
+  it('runs both durable bridge paths for an approved private member on the legacy lane', async () => {
+    const privateMember = vi.fn(async (id: string) => id === 'cg-private-member');
+    const recoveryCalls: unknown[][] = [];
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: false }),
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+      syncDurableRecoveryContextGraph: async (...args: unknown[]) => {
+        recoveryCalls.push(args);
+        return { result: { insertedTriples: 2 } };
+      },
+    });
+
+    await invokeThroughBridge(agent, 'syncDurable', ['peer-curator', 'cg-private-member']);
+    const recovered = await invokeThroughBridge(
+      agent, 'syncDurableRecovery', ['peer-curator', 'cg-private-member'],
+    );
+    expect(calls.durable).toHaveLength(1);
+    expect(recoveryCalls).toHaveLength(1);
+    expect(recovered.result).toEqual({ insertedTriples: 2 });
+
+    const outsider = await invokeThroughBridge(agent, 'syncDurable', ['peer-curator', 'cg-outsider']);
+    expect(outsider.result).toEqual({ kind: 'catchup-plane-not-attempted', reason: 'catalog-authoritative' });
+    expect(calls.durable).toHaveLength(1);
+    expect(privateMember).toHaveBeenCalledWith('cg-outsider');
+  });
+
+  it('uses the agent-owned durable admission decision for both worker paths', async () => {
+    const admission = vi.fn(async (id: string) => id === 'cg-approved');
+    const recovery = vi.fn(async () => ({ result: { insertedTriples: 2 } }));
+    const { agent, calls } = bridgeAgent({
+      canUseLegacyDurableSyncForContextGraphV1: admission,
+      // A stale bridge-side projection would allow both graphs. The agent's
+      // current authenticated decision must win for both worker operations.
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      syncDurableRecoveryContextGraph: recovery,
+    });
+
+    const refused = await invokeThroughBridge(agent, 'syncDurable', ['peer', 'cg-refused']);
+    const refusedRecovery = await invokeThroughBridge(agent, 'syncDurableRecovery', ['peer', 'cg-refused']);
+    expect(refused.result).toEqual({ kind: 'catchup-plane-not-attempted', reason: 'catalog-authoritative' });
+    expect(refusedRecovery.result).toEqual(refused.result);
+    expect(calls.durable).toEqual([]);
+    expect(recovery).not.toHaveBeenCalled();
+
+    await invokeThroughBridge(agent, 'syncDurable', ['peer', 'cg-approved']);
+    await invokeThroughBridge(agent, 'syncDurableRecovery', ['peer', 'cg-approved']);
+    expect(calls.durable).toHaveLength(1);
+    expect(recovery).toHaveBeenCalledOnce();
+    expect(admission).toHaveBeenCalledTimes(4);
+  });
+
   it('emits worker pass diagnostics through the parent logger bridge', async () => {
     const info = vi.fn();
     const { agent } = bridgeAgent({ log: { info } });
@@ -486,5 +871,16 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result).toBeNull();
     expect(info).toHaveBeenCalledTimes(1);
     expect(info.mock.calls[0]?.[1]).toBe('Catch-up SWM pass 2: 2 -> 3');
+  });
+
+  it('reports a peer that advertises only the pooled sync id as sync-capable (#2822)', async () => {
+    const { agent } = bridgeAgent({
+      // Stale identify: the peer's later pooled pulls merged only the pooled id.
+      getPeerProtocols: async () => [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED],
+    });
+
+    const posted = await invokeThroughBridge(agent, 'waitForSyncProtocol', ['peer-pooled-only']);
+
+    expect(posted).toMatchObject({ type: 'invoke-result', invokeId: 1, result: true });
   });
 });

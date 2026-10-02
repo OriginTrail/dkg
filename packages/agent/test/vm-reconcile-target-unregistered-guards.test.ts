@@ -89,6 +89,10 @@ function createTargetFixture(options: {
     roster: null,
   }));
   Reflect.set(agent, 'rfc64PublicCatalogOwnerV1', {
+    // Keep the harness-owned governor; only the policy service is scenario state.
+    authorityReads: (agent as unknown as {
+      rfc64PublicCatalogOwnerV1: { authorityReads: unknown };
+    }).rfc64PublicCatalogOwnerV1.authorityReads,
     service: { acceptedPolicySnapshot },
   });
   Object.assign(agent.config as Record<string, unknown>, {

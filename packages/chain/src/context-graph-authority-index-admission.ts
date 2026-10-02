@@ -11,12 +11,32 @@ import { ContextGraphAuthorityIndexRetryableError } from
 
 const MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS = 3;
 
+/**
+ * How far a durable cursor may sit ABOVE this endpoint's anchor and still be
+ * explained by ordinary head skew.
+ *
+ * Anchored at the operator's depth rather than at the endpoint's `finalized`
+ * tag, the anchor is the HEAD by default, and public RPC pools disagree about
+ * the head by tens of blocks routinely. A cursor a little above this endpoint's
+ * anchor therefore means "ask a different endpoint" — retryable, and the caller
+ * fails over. A cursor FAR above one cannot be skew: it is a cursor recorded on
+ * a chain view that no longer exists (a deep reorg, or a restored/copied store).
+ * Retrying that forever wedges every authority read for the Context Graph and
+ * fences exactly the catalog traffic this anchoring change exists to admit, so
+ * past this distance the checkpoint is rebuilt instead. Matches
+ * `CG_REGISTRY_REORG_BUFFER_BLOCKS`, the depth the Context Graph registry scan
+ * already treats as reorg-safe.
+ */
+const MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_CURSOR_SKEW_BLOCKS = 50;
+
 export interface ContextGraphAuthorityIndexAdmissionInput {
   readonly repository: ContextGraphAuthorityIndexScopedRepository;
   readonly initial: ContextGraphAuthorityIndexRepositoryRecord;
   readonly deploymentBlockNumber: number;
   readonly finalized: Readonly<{ number: number; hash: string }>;
   readonly lifecycleSignal: AbortSignal;
+  /** Evict remotely servable observations as soon as a durable row is rejected. */
+  readonly onRejectedCheckpoint?: () => void;
   readonly readBlockHash: (
     blockNumber: number,
     lifecycleSignal: AbortSignal,
@@ -44,34 +64,43 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
     if (record.kind === 'checkpoint') {
       const checkpoint = record.checkpoint;
       if (checkpoint.cursor.deploymentBlockNumber === input.deploymentBlockNumber) {
-        if (checkpoint.cursor.throughBlockNumber > input.finalized.number) {
+        const cursorSkew = checkpoint.cursor.throughBlockNumber - input.finalized.number;
+        if (cursorSkew > MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_CURSOR_SKEW_BLOCKS) {
+          // Unreachable by skew: fall through to invalidation and rebuild
+          // rather than retrying a cursor no endpoint will ever catch up to.
+          // The cursor only ever moves FORWARD (`commitOrReloadWinner` has no
+          // lowering path), so without this the wedge is permanent.
+        } else if (cursorSkew > 0) {
           throw new ContextGraphAuthorityIndexRetryableError(
             `Context Graph authority index finalized head ${input.finalized.number} is behind `
             + `durable cursor ${checkpoint.cursor.throughBlockNumber}`,
           );
+        } else {
+          const anchorHash = checkpoint.cursor.throughBlockNumber === input.finalized.number
+            ? input.finalized.hash
+            : normalizeHash(await input.readBlockHash(
+                checkpoint.cursor.throughBlockNumber,
+                input.lifecycleSignal,
+              ));
+          input.lifecycleSignal.throwIfAborted();
+          if (anchorHash === undefined) {
+            throw new ContextGraphAuthorityIndexRetryableError(
+              `Context Graph authority index anchor ${checkpoint.cursor.throughBlockNumber} `
+              + 'is unavailable',
+            );
+          }
+          if (anchorHash === checkpoint.cursor.throughBlockHash) return record;
         }
-        const anchorHash = checkpoint.cursor.throughBlockNumber === input.finalized.number
-          ? input.finalized.hash
-          : normalizeHash(await input.readBlockHash(
-              checkpoint.cursor.throughBlockNumber,
-              input.lifecycleSignal,
-            ));
-        if (anchorHash === undefined) {
-          throw new ContextGraphAuthorityIndexRetryableError(
-            `Context Graph authority index anchor ${checkpoint.cursor.throughBlockNumber} `
-            + 'is unavailable',
-          );
-        }
-        if (anchorHash === checkpoint.cursor.throughBlockHash) return record;
       }
     }
 
+    input.onRejectedCheckpoint?.();
     if (lostInvalidations >= MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS) {
       throw new ContextGraphAuthorityIndexRetryableError(
         'Context Graph authority index changed repeatedly during checkpoint recovery',
       );
     }
-    const recovery = await input.repository.invalidateOrReloadWinner(record);
+    const recovery = await input.repository.invalidateOrReloadWinner(record, input.lifecycleSignal);
     if (recovery.kind === 'invalidated') return recovery.record;
     lostInvalidations += 1;
     record = recovery.record;

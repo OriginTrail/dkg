@@ -17,9 +17,16 @@ export interface ConfirmedGraphScopedVmResolutionInput {
   subGraphName?: string;
 }
 
+/**
+ * Why a stored confirmed copy does not answer the request. `not-current` is
+ * the one expected in normal operation: the copy is intact and names the same
+ * KA, but at another version or root than the one asked for (typically an
+ * older version after an on-chain update).
+ */
 export type ConfirmedGraphScopedVmInvalidReason =
   | 'metadata'
   | 'identity'
+  | 'not-current'
   | 'content-count'
   | 'content-merkle';
 
@@ -48,6 +55,27 @@ export async function resolveConfirmedGraphScopedVm(
   store: TripleStore,
   input: ConfirmedGraphScopedVmResolutionInput,
 ): Promise<ConfirmedGraphScopedVmResolution> {
+  return resolveConfirmedGraphScopedVmAgainst(store, input, input.merkleRoot);
+}
+
+/**
+ * The same recognition without a chain read: the stored content must still
+ * verify against the root its own confirmed metadata recorded. The chain-driven
+ * sweep uses this to settle an ordinal whose VM copy is already confirmed
+ * locally, trusting the root that copy was confirmed at.
+ */
+export async function resolveLocallyConfirmedGraphScopedVm(
+  store: TripleStore,
+  input: Omit<ConfirmedGraphScopedVmResolutionInput, 'merkleRoot'>,
+): Promise<ConfirmedGraphScopedVmResolution> {
+  return resolveConfirmedGraphScopedVmAgainst(store, input, undefined);
+}
+
+async function resolveConfirmedGraphScopedVmAgainst(
+  store: TripleStore,
+  input: Omit<ConfirmedGraphScopedVmResolutionInput, 'merkleRoot'>,
+  chainMerkleRoot: Uint8Array | undefined,
+): Promise<ConfirmedGraphScopedVmResolution> {
   const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
     contextGraphId: input.contextGraphId,
     ual: input.ual,
@@ -69,12 +97,16 @@ export async function resolveConfirmedGraphScopedVm(
     scope.ual !== input.ual
     || packedKaId !== input.kaId
     || envelope.batchId !== input.batchId
-    || (input.assertionVersion !== undefined
-      && BigInt(envelope.assertionVersion) !== input.assertionVersion)
-    || !equalBytes(envelope.merkleRoot, input.merkleRoot)
     || input.subGraphName !== envelope.subGraphName
   ) {
     return { status: 'invalid', reason: 'identity' };
+  }
+  if (
+    (input.assertionVersion !== undefined
+      && BigInt(envelope.assertionVersion) !== input.assertionVersion)
+    || (chainMerkleRoot !== undefined && !equalBytes(envelope.merkleRoot, chainMerkleRoot))
+  ) {
+    return { status: 'invalid', reason: 'not-current' };
   }
 
   const content = await verifyExactGraphContent(store, {
@@ -83,7 +115,7 @@ export async function resolveConfirmedGraphScopedVm(
     ...(envelope.privateMerkleRoot
       ? { privateMerkleRoot: envelope.privateMerkleRoot }
       : {}),
-    expectedMerkleRoot: input.merkleRoot,
+    expectedMerkleRoot: chainMerkleRoot ?? envelope.merkleRoot,
     source: 'agent.finalization.resolveConfirmedGraphScopedVm',
   });
   if (content.status === 'count-mismatch') {

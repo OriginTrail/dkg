@@ -23,12 +23,12 @@ const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 //     reads `connectedPeers` from — reports exactly N-1 connected peers.
 // scripts/devnet.sh pins `minimumRequiredSignatures = 3` (the real mainnet
 // 3-of-N StorageACK quorum — DO NOT lower it). A publisher collects ACKs from
-// its PEERS only (it does not self-sign quorum), so a VM publish needs minSig
-// OTHER reachable core nodes — i.e. >= minSig + 1 = 4 nodes total. With only 3
-// the publish aborts `QuorumUnmetError: need 3 ACKs but only 2 core peers
-// connected`. We therefore boot FOUR nodes: node1 sees 3 peers (still a real
-// multi-peer topology, satisfies `peer-connectivity.spec.ts` ">1 peer"), and a
-// VM publish can collect its 3 ACKs. Override with PLAYWRIGHT_DEVNET_NUM_NODES.
+// Core nodes only; a publishing Core also counts its own StorageACK, so a Core
+// publish needs minSig - 1 OTHER reachable cores and an Edge publish needs
+// minSig. We boot FOUR nodes: node1 sees 3 peers (still a real multi-peer
+// topology, satisfies `peer-connectivity.spec.ts` ">1 peer"), and a VM publish
+// collects its 3 ACKs with a spare core. Override with
+// PLAYWRIGHT_DEVNET_NUM_NODES.
 const NUM_NODES = process.env.PLAYWRIGHT_DEVNET_NUM_NODES || '4';
 
 // Mesh-settle budget for the chained `bootstrap-devnet.ts` (it reads this via

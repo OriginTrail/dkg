@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED } from '@origintrail-official/dkg-core';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import {
@@ -209,6 +209,52 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       errorCode: 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS',
       durableComplete: false,
       peersAttempted: 0,
+    });
+  });
+
+  it('keeps an implicitly enumerated durable peer that advertises only the pooled sync id (#2822)', async () => {
+    const cgId = 'implicit-pooled-durable-cg';
+    const peerId = 'peer-pooled-only';
+    const syncFromPeerDetailed = vi.fn(async () => detailedDurableResult({
+      insertedTriples: 4,
+      insertedDataTriples: 4,
+      complete: true,
+    }));
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{
+            remotePeer: { toString: () => peerId },
+          }],
+        },
+      },
+      // Stale identify: the peer's later pooled pulls merged only the pooled id.
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(agent.getPeerProtocols).toHaveBeenCalledWith(peerId);
+    expect(syncFromPeerDetailed).toHaveBeenCalledOnce();
+    expect(syncFromPeerDetailed.mock.calls[0]?.[0]).toBe(peerId);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      durableComplete: true,
+      peersAttempted: 1,
+      totalDurableInsertedTriples: 4,
     });
   });
 

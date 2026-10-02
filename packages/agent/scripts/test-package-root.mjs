@@ -20,6 +20,9 @@ const legacySharedMemorySync = await import(
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
+const chainAuthorityReadBudgets = await import(
+  '@origintrail-official/dkg-agent/chain-authority-read-budgets'
+);
 const registeredAuthorityContract = await import(
   '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
 );
@@ -214,6 +217,12 @@ if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !
   throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
 }
 if (
+  typeof chainAuthorityReadBudgets.resolveChainAuthorityTimeoutMs !== 'function'
+  || typeof chainAuthorityReadBudgets.resolveChainAuthorityReadBudgets !== 'function'
+) {
+  throw new Error('chain authority read budgets subpath did not expose its resolvers');
+}
+if (
   typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationChainIdentityV1
   !== 'function'
 ) {
@@ -253,6 +262,8 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-repair-diagnostics-v1.js',
+  'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
@@ -334,8 +345,10 @@ const blockedRfc64Modules = [
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',
   'catalog-replay-connection-runtime-v1.js',
+  'catalog-replay-generation-v1.js',
   'catalog-replay-recovery-runtime-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
+  'catalog-operational-applied-heads-v1.js',
   'catalog-runtime-v1.js',
   'background-work-dispatcher-v1.js',
   'supervisor-status-v1.js',

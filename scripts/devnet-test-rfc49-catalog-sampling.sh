@@ -105,12 +105,85 @@ hardhat_mine() {
     "http://127.0.0.1:${HARDHAT_PORT}" > /dev/null
 }
 
-# Parse a COUNT(*) result from /api/query. The binding value is a typed literal
-# like `"0"^^<http://www.w3.org/2001/XMLSchema#integer>` — take ONLY the value
+# Parse the COUNT(*) row of a SPARQL JSON answer (a store's `.results`, or the
+# daemon's `.result`). The binding value is a typed literal like
+# `"0"^^<http://www.w3.org/2001/XMLSchema#integer>` — take ONLY the value
 # before `^^` (stripping the type IRI, whose `w3`/`2001` digits would otherwise
-# corrupt the count, e.g. "0" → 0, not 32001).
+# corrupt the count, e.g. "0" → 0, not 32001). An answer without a count row
+# (an error body, a denied query) fails; it is never a 0.
 _count_from_query() {
-  node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);const b=j?.result?.bindings??j?.bindings??j?.results?.bindings??[];let v=b[0]?.c?.value??b[0]?.c??"0";v=String(v).split("^^")[0].replace(/"/g,"").trim();console.log(Number.isFinite(parseInt(v,10))?parseInt(v,10):-1)}catch(e){console.log(-1)}})'
+  node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d);
+        const cell = (j?.results?.bindings ?? j?.result?.bindings)?.[0]?.c;
+        const v = String((cell !== null && typeof cell === "object" ? cell.value : cell) ?? "")
+          .split("^^")[0].replace(/"/g, "").trim();
+        if (!/^\d+$/.test(v)) throw new Error("no count row");
+        console.log(Number(v));
+      } catch (e) {
+        console.error(`unreadable COUNT answer (${e.message}): ${d.slice(0, 300)}`);
+        process.exit(1);
+      }
+    });
+  '
+}
+
+# Query endpoint of node $1's backing store, from its config.json. Since v10.0.17
+# the daemon answers an unscoped /api/query only on stores with all-writer
+# consistency coverage, and a scoped query cannot see `_catalog` or the
+# ciphertext-chunk graphs, so custody is read from the store itself. In-process
+# Oxigraph has no endpoint but declares that coverage: "api" means /api/query.
+store_query_endpoint() {
+  CFG="$(node_dir "$1")/config.json" node -e '
+    let store;
+    try {
+      store = JSON.parse(require("fs").readFileSync(process.env.CFG, "utf8")).store ?? {};
+    } catch (e) {
+      console.error(`cannot read ${process.env.CFG}: ${e.message}`);
+      process.exit(1);
+    }
+    const options = store.options ?? {};
+    const endpoint = {
+      "oxigraph-server": `http://127.0.0.1:${options.port ?? 7878}/query`,
+      blazegraph: options.url ?? store.url,
+      "sparql-http": options.queryEndpoint,
+      oxigraph: "api",
+      "oxigraph-persistent": "api",
+      "oxigraph-worker": "api",
+    }[store.backend ?? "oxigraph-worker"];
+    if (!endpoint) {
+      console.error(`no query endpoint for store backend ${store.backend} in ${process.env.CFG}`);
+      process.exit(1);
+    }
+    console.log(endpoint);
+  '
+}
+
+# COUNT(*) of a SPARQL SELECT on node $1's backing store. Prints the count, or
+# fails with the reason on stderr: an HTTP error or an unreadable answer is
+# never a count of 0.
+store_count() {
+  local node="$1" sparql="$2" endpoint out code body
+  endpoint=$(store_query_endpoint "$node") || return 1
+  if [ "$endpoint" = "api" ]; then
+    body=$(api_call "$node" POST /api/query "$(SPARQL="$sparql" node -e 'console.log(JSON.stringify({ sparql: process.env.SPARQL }))')") || return 1
+  else
+    out=$(curl -sS --max-time 60 -X POST -H 'Accept: application/sparql-results+json' \
+      --data-urlencode "query=${sparql}" -w $'\n%{http_code}' "$endpoint") || {
+      echo "node $node store $endpoint is unreachable" >&2
+      return 1
+    }
+    code="${out##*$'\n'}"
+    body="${out%$'\n'*}"
+    if [ "$code" != "200" ]; then
+      echo "node $node store $endpoint answered HTTP $code: ${body:0:300}" >&2
+      return 1
+    fi
+  fi
+  printf '%s' "$body" | _count_from_query
 }
 
 # COUNT(*) of rows for THIS publish's ciphertext batch under any
@@ -121,27 +194,15 @@ _count_from_query() {
 # ciphertext count would falsely fail this suite. The LU-11 subject embeds the
 # current publish batch id (`.../<batchId>/<chunkIndex>`), which is the V10 KC
 # merkleRoot returned by wm/finalize; scope to that subject prefix.
-# NOTE: NO contextGraphId — that applies a memory-layer VIEW that breaks the
-# graph-scoped COUNT (returns the whole store). Raw SPARQL scopes correctly.
 ciphertext_count() {
-  local body batch_id
-  batch_id="${BATCH_ID:-}"
-  [ -n "$batch_id" ] || { echo "-1"; return; }
-  body=$(BATCH_ID="$batch_id" node -e '
-    const subjectPrefix = `urn:dkg:swm:v10-publish-ciphertext-chunk/${process.env.BATCH_ID}/`;
-    console.log(JSON.stringify({
-      sparql: `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o . FILTER(STRSTARTS(STR(?g), "urn:dkg:swm:ciphertext-chunks/") && STRSTARTS(STR(?s), "${subjectPrefix}")) } }`,
-    }));
-  ')
-  api_call "$1" POST /api/query "$body" | _count_from_query
+  [ -n "${BATCH_ID:-}" ] || { echo "BATCH_ID is not set" >&2; return 1; }
+  store_count "$1" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o . FILTER(STRSTARTS(STR(?g), \"urn:dkg:swm:ciphertext-chunks/\") && STRSTARTS(STR(?s), \"urn:dkg:swm:v10-publish-ciphertext-chunk/${BATCH_ID}/\")) } }"
 }
 
 # COUNT(*) of triples in the public <cg>/_catalog graph (keyed by the NUMERIC
 # on-chain CG id, e.g. did:dkg:context-graph:5/_catalog — NOT the local name).
 catalog_count() {
-  local body
-  body=$(OID="$ONCHAIN_ID" node -e 'console.log(JSON.stringify({sparql:`SELECT (COUNT(*) AS ?c) WHERE { GRAPH <did:dkg:context-graph:${process.env.OID}/_catalog> { ?s ?p ?o } }`}))')
-  api_call "$1" POST /api/query "$body" | _count_from_query
+  store_count "$1" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <did:dkg:context-graph:${ONCHAIN_ID}/_catalog> { ?s ?p ?o } }"
 }
 
 rs_submitted() {
@@ -165,13 +226,37 @@ CFG="$(node_dir "$BASELINE_CORE")/config.json"
 # suite (and leave the devnet mutated after a passing run).
 CFG_BAK="$(mktemp "${TMPDIR:-/tmp}/rfc49-cfg-XXXXXX")"
 cp "$CFG" "$CFG_BAK"
-restore_baseline_core() {
-  [ -f "$CFG_BAK" ] || return 0
-  cp "$CFG_BAK" "$CFG" 2>/dev/null || true
-  "$SCRIPT_DIR/devnet.sh" restart-node "$BASELINE_CORE" >/dev/null 2>&1 || true
-  rm -f "$CFG_BAK"
+MEMBER_NEEDS_RESTORE=0
+wait_member_up() {
+  local i
+  for i in $(seq 1 90); do
+    if curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
-trap restore_baseline_core EXIT INT TERM
+cleanup_devnet() {
+  local result=$?
+  trap - EXIT INT TERM
+  if [ "$MEMBER_NEEDS_RESTORE" -eq 1 ]; then
+    "$SCRIPT_DIR/devnet.sh" restart-node "$EDGE_MEMBER" >/dev/null 2>&1 \
+      || { warn "cleanup could not restart member edge$EDGE_MEMBER"; result=1; }
+    wait_member_up || { warn "cleanup could not health-check member edge$EDGE_MEMBER"; result=1; }
+  fi
+  if [ -f "$CFG_BAK" ]; then
+    cp "$CFG_BAK" "$CFG" 2>/dev/null \
+      || { warn "cleanup could not restore baseline core $BASELINE_CORE config"; result=1; }
+    "$SCRIPT_DIR/devnet.sh" restart-node "$BASELINE_CORE" >/dev/null 2>&1 \
+      || { warn "cleanup could not restart baseline core $BASELINE_CORE"; result=1; }
+    rm -f "$CFG_BAK"
+  fi
+  exit "$result"
+}
+trap cleanup_devnet EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 node -e '
 const fs=require("fs");const f=process.argv[1];const c=JSON.parse(fs.readFileSync(f,"utf8"));
 c.swmHostMode=Object.assign({},c.swmHostMode,{enabled:true,stripCiphertext:false});
@@ -194,7 +279,7 @@ MEMBER_AGENT=$(api_call "$EDGE_MEMBER"  GET /api/agent/identity | jq_field ".age
 log "curator(edge$EDGE_CURATOR)=$CURATOR_AGENT  member(edge$EDGE_MEMBER)=$MEMBER_AGENT"
 
 # ---------------------------------------------------------------------------
-# 2. Create the private CG with BOTH edges on the allowlist; member subscribes
+# 2. Create the private CG with BOTH edges on the allowlist; member joins + subscribes
 # ---------------------------------------------------------------------------
 CREATE_RESP=$(api_call_agent "$EDGE_CURATOR" POST /api/context-graph/create "$(cat <<EOF
 {
@@ -212,8 +297,60 @@ ONCHAIN_ID=$(printf '%s' "$CREATE_RESP" | jq_field ".onChainId")
 [ -n "$ONCHAIN_ID" ] || fail "create did not return onChainId (catalog graph is keyed by it)"
 log "on-chain CG id = $ONCHAIN_ID (catalog graph: did:dkg:context-graph:${ONCHAIN_ID}/_catalog)"
 [ "$(printf '%s' "$CREATE_RESP" | jq_field ".registered")" = "true" ] || warn "CG not reported registered (continuing)"
-sleep 4
-api_call_agent "$EDGE_MEMBER" POST /api/subscribe "{\"contextGraphId\":\"${CG_ID}\",\"includeSharedMemory\":true}" >/dev/null 2>&1
+# The member joins through the supported flow: a signed join request, which the
+# curator auto-approves for an allowlisted agent and answers with the CG
+# metadata. Allowlisting by address alone gives the member no metadata, so it
+# would refuse the CG's shared memory. Do not pre-create the CG on the member:
+# for a plain (not wallet-scoped) id that makes the member its own curator.
+CG_ENC=$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$CG_ID")
+CURATOR_PEER=$(api_call_agent "$EDGE_CURATOR" GET /api/agent/identity | jq_field ".peerId")
+[ -n "$CURATOR_PEER" ] || fail "could not read the curator peer id"
+# Edges usually know each other only through relayed addresses. Dial the
+# curator directly first, as an invitee holding the curator's address would,
+# so the join request's identity probe does not depend on a relay circuit.
+CURATOR_ADDR=$(cat "$(node_dir "$EDGE_CURATOR")/multiaddr" 2>/dev/null || true)
+if [ -n "$CURATOR_ADDR" ]; then
+  log "member edge$EDGE_MEMBER connects to the curator: $(api_call_agent "$EDGE_MEMBER" POST /api/connect "{\"multiaddr\":\"${CURATOR_ADDR}\"}")"
+fi
+SIGNED_JOIN=$(api_call_agent "$EDGE_MEMBER" POST "/api/context-graph/${CG_ENC}/sign-join" '{}')
+JOIN_BODY=$(SIGNED_JOIN="$SIGNED_JOIN" CURATOR_PEER="$CURATOR_PEER" node -e '
+  const signed = JSON.parse(process.env.SIGNED_JOIN);
+  if (!signed.delegation) process.exit(1);
+  console.log(JSON.stringify({ delegation: signed.delegation, curatorPeerId: process.env.CURATOR_PEER, agentName: "rfc49-member" }));
+') || fail "member sign-join returned no delegation: $SIGNED_JOIN"
+# Few, spaced attempts: the curator admits at most 6 join requests per agent a
+# minute, and an undelivered request stays queued and may still arrive later.
+JOIN_RESP=""
+for attempt in 1 2 3 4; do
+  JOIN_RESP=$(api_call_agent "$EDGE_MEMBER" POST "/api/context-graph/${CG_ENC}/request-join" "$JOIN_BODY")
+  JOIN_STATUS=$(printf '%s' "$JOIN_RESP" | jq_field ".status")
+  JOIN_DELIVERED=$(printf '%s' "$JOIN_RESP" | jq_field ".delivered")
+  if { [ "$JOIN_DELIVERED" = "1" ] || [ "$JOIN_DELIVERED" = "local" ]; } \
+    && { [ "$JOIN_STATUS" = "approved" ] || [ "$JOIN_STATUS" = "already-member" ]; }; then
+    break
+  fi
+  log "  member join not approved yet (attempt $attempt): ${JOIN_RESP:0:200}"
+  sleep 20
+done
+[ "$JOIN_STATUS" = "approved" ] || [ "$JOIN_STATUS" = "already-member" ] \
+  || fail "member edge$EDGE_MEMBER's join was not approved: $JOIN_RESP"
+{ [ "$JOIN_DELIVERED" = "1" ] || [ "$JOIN_DELIVERED" = "local" ]; } \
+  || fail "member edge$EDGE_MEMBER's approved join was not delivered: $JOIN_RESP"
+log "member edge$EDGE_MEMBER join request: $JOIN_RESP"
+# Wait for the approval notification to install the curator's own _meta on
+# the member. Delivery of the request alone is not proof of local membership.
+MEMBER_META_COUNT=0
+for i in $(seq 1 60); do
+  MEMBER_META_COUNT=$(store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${CG_URI}/_meta> { <${CG_URI}> <https://dkg.network/ontology#allowedAgent> ?agent . FILTER(LCASE(STR(?agent)) = LCASE(\"${MEMBER_AGENT}\")) } }" 2>/dev/null) || MEMBER_META_COUNT=0
+  [ "$MEMBER_META_COUNT" -ge 1 ] && break
+  sleep 2
+done
+[ "$MEMBER_META_COUNT" -ge 1 ] \
+  || fail "member edge$EDGE_MEMBER did not receive approved _meta for ${CG_ID}"
+SUBSCRIBE_RESP=$(api_call_agent "$EDGE_MEMBER" POST /api/subscribe "{\"contextGraphId\":\"${CG_ID}\",\"includeSharedMemory\":true}") \
+  || fail "member edge$EDGE_MEMBER's subscribe request failed"
+[ "$(printf '%s' "$SUBSCRIBE_RESP" | jq_field ".subscribed")" = "$CG_ID" ] \
+  || fail "member edge$EDGE_MEMBER's subscribe was not accepted: $SUBSCRIBE_RESP"
 log "member edge$EDGE_MEMBER subscribed to ${CG_ID}"
 # Give the strip-OFF baseline core time to host-mode-discover the new curated CG
 # (via the create beacon) and subscribe to its SWM topic BEFORE the publish
@@ -261,6 +398,16 @@ PUB_STATUS=$(printf '%s' "$PUBLISH_RESP" | jq_field ".status")
 KA_ID=$(printf '%s' "$PUBLISH_RESP" | jq_field ".kaId")
 [ -z "$KA_ID" ] && KA_ID=$(printf '%s' "$PUBLISH_RESP" | jq_field ".knowledgeAssetId")
 [ -z "$KA_ID" ] && KA_ID=$(printf '%s' "$PUBLISH_RESP" | jq_field ".result.kaId")
+VM_ID=$(printf '%s' "$PUBLISH_RESP" | node -e '
+  let d=""; process.stdin.on("data", c => d += c); process.stdin.on("end", () => {
+    try {
+      const ual = JSON.parse(d).ual;
+      const match = /^did:dkg:evm:[^/]+\/(0x[0-9a-fA-F]{40})\/(\d+)$/.exec(ual);
+      if (!match) throw new Error("publish response has no owner/token UAL");
+      console.log(`${match[1].toLowerCase()}/${match[2]}`);
+    } catch (error) { console.error(error.message); process.exit(1); }
+  });
+') || fail "publish response has no valid UAL for the per-KA VM graph"
 [ "$PUB_STATUS" = "confirmed" ] || fail "publish status=$PUB_STATUS (expected confirmed): $PUBLISH_RESP"
 [ -n "$KA_ID" ] && [ "$KA_ID" != "0" ] || fail "publish returned no kaId: $PUBLISH_RESP"
 pass "curated publish confirmed: kaId=$KA_ID"
@@ -295,30 +442,38 @@ pass "on-chain catalog commitment set (root non-zero, leafCount=$CAT_COUNT)"
 # 5. Non-vacuousness: the publisher DID emit private ciphertext chunks
 # ---------------------------------------------------------------------------
 EDGE_NEW=$(tail -n "+$((EDGE_LOG_BASE + 1))" "$(node_log "$EDGE_CURATOR")" 2>/dev/null)
-if printf '%s' "$EDGE_NEW" | grep -qE 'LU-11.*emitted [1-9].*ciphertext chunk|emitted [1-9][0-9]* ciphertext chunk'; then
+if grep -qE 'LU-11.*emitted [1-9].*ciphertext chunk|emitted [1-9][0-9]* ciphertext chunk' <<<"$EDGE_NEW"; then
   CHUNKS=$(printf '%s' "$EDGE_NEW" | grep -oE 'emitted [0-9]+ ciphertext chunk' | grep -oE '[0-9]+' | head -1)
   pass "publisher emitted $CHUNKS private ciphertext chunk(s) — ciphertext genuinely exists"
 else
   warn "no LU-11 ciphertext-chunk emit line on the curator edge (publisher may have used a single-blob path; strip assertions below are then weaker)"
 fi
+# The zero ciphertext reads on the stripped cores (section 7) mean something only
+# if the same reader and filter find this batch's chunks where they exist: the
+# curator persists every chunk it emits before gossiping it.
+CURATOR_CT=$(ciphertext_count "$EDGE_CURATOR") \
+  || fail "curator edge$EDGE_CURATOR: cannot read ciphertext rows from its store"
+[ "$CURATOR_CT" -ge 1 ] \
+  || fail "curator edge$EDGE_CURATOR holds no ciphertext rows for batch $BATCH_ID; the ciphertext reader or filter would read zero on every core"
+pass "curator edge$EDGE_CURATOR holds $CURATOR_CT ciphertext row(s) for this batch — the ciphertext reader sees chunks where they exist"
 
 # ---------------------------------------------------------------------------
 # 6. Member edge holds the private data (member-side) — the data lives on the
 #    members, NOT the cores. Member SWM sync lags the publish, so poll.
 # ---------------------------------------------------------------------------
 member_priv_count() {
-  api_call "$EDGE_MEMBER" POST /api/query "$(S="$PRIV_SUBJ" node -e 'console.log(JSON.stringify({sparql:`SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${process.env.S}> ?p ?o } }`}))')" | _count_from_query
+  store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${PRIV_SUBJ}> ?p ?o } }"
 }
 MEMBER_PRIV=0
 for i in $(seq 1 45); do
-  MEMBER_PRIV=$(member_priv_count)
+  MEMBER_PRIV=$(member_priv_count) || MEMBER_PRIV="unreadable"
   [ "${MEMBER_PRIV:-0}" -ge 1 ] 2>/dev/null && break
   sleep 2
 done
 if [ "${MEMBER_PRIV:-0}" -ge 1 ] 2>/dev/null; then
   pass "member edge$EDGE_MEMBER holds the private data ($MEMBER_PRIV triple(s) for the secret subject) — private data lives member-side, off the cores"
 else
-  warn "member edge$EDGE_MEMBER did not sync the private data in-window (sync timing? — not a strip gate)"
+  warn "member edge$EDGE_MEMBER did not sync the private data in-window (last count: $MEMBER_PRIV; sync timing? — not a strip gate)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -330,7 +485,10 @@ fi
 log "waiting for the public _catalog to propagate to the stripped cores (up to 3 min)…"
 for i in $(seq 1 60); do
   holders=0
-  for n in "${STRIPPED_CORES[@]}"; do c=$(catalog_count "$n"); [ "${c:-0}" -ge 1 ] 2>/dev/null && holders=$((holders+1)); done
+  for n in "${STRIPPED_CORES[@]}"; do
+    c=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
+    [ "$c" -ge 1 ] && holders=$((holders+1))
+  done
   [ "$holders" -ge "${#STRIPPED_CORES[@]}" ] && { log "  catalog present on all $holders/${#STRIPPED_CORES[@]} stripped cores"; break; }
   [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ] && log "  …catalog on $holders/${#STRIPPED_CORES[@]} cores after $((i*3))s"
   sleep 3
@@ -339,7 +497,8 @@ done
 log "checking ciphertext + catalog custody per core…"
 STRIP_OK=1
 for n in "${STRIPPED_CORES[@]}"; do
-  ct=$(ciphertext_count "$n"); cat=$(catalog_count "$n")
+  ct=$(ciphertext_count "$n") || fail "core$n: cannot read ciphertext rows from its store"
+  cat=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
   log "  core$n: ciphertext_rows=$ct  catalog_triples=$cat"
   if [ "$ct" != "0" ]; then STRIP_OK=0; warn "core$n holds $ct ciphertext rows (expected 0 — STRIP LEAK)"; fi
 done
@@ -349,7 +508,8 @@ pass "all stripped cores (${STRIPPED_CORES[*]}) hold ZERO private ciphertext"
 # at least one stripped core must hold the catalog (so it can serve + prove it)
 CATALOG_HOLDERS=0
 for n in "${STRIPPED_CORES[@]}"; do
-  cat=$(catalog_count "$n"); [ "${cat:-0}" -ge 1 ] 2>/dev/null && CATALOG_HOLDERS=$((CATALOG_HOLDERS+1))
+  cat=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
+  [ "$cat" -ge 1 ] && CATALOG_HOLDERS=$((CATALOG_HOLDERS+1))
 done
 [ "$CATALOG_HOLDERS" -ge 1 ] || fail "no stripped core holds the public _catalog — cannot prove it"
 pass "$CATALOG_HOLDERS/${#STRIPPED_CORES[@]} stripped cores hold the public _catalog"
@@ -360,15 +520,19 @@ pass "$CATALOG_HOLDERS/${#STRIPPED_CORES[@]} stripped cores hold the public _cat
 log "waiting for the strip-OFF baseline core $BASELINE_CORE to host-mode-ingest ciphertext…"
 BASE_CT=0
 for i in $(seq 1 30); do
-  BASE_CT=$(ciphertext_count "$BASELINE_CORE")
-  [ "${BASE_CT:-0}" -ge 1 ] 2>/dev/null && break
+  BASE_CT=$(ciphertext_count "$BASELINE_CORE") \
+    || fail "core$BASELINE_CORE: cannot read ciphertext rows from its store"
+  [ "$BASE_CT" -ge 1 ] && break
   sleep 2
 done
-if [ "${BASE_CT:-0}" -ge 1 ] 2>/dev/null; then
+if [ "$BASE_CT" -ge 1 ]; then
   BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: holds $BASE_CT ciphertext row(s) (discriminator — strip is non-vacuous)"
   pass "DISCRIMINATOR: $BASELINE_SUMMARY → the strip on cores ${STRIPPED_CORES[*]} is demonstrably effective"
 else
-  BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: 0 ciphertext (host-mode discovery did not engage in-window; non-vacuousness rests on the emitted-chunks check)"
+  # A warning, not a failure: under the default RFC-64 catalog authority, host
+  # mode does not engage for this CG on any core, so this core reads 0 too and
+  # the zero on the stripped cores is not attributable to the strip.
+  BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: 0 ciphertext (its host mode did not engage; the zero on cores ${STRIPPED_CORES[*]} is not attributable to the strip)"
   warn "$BASELINE_SUMMARY"
 fi
 
@@ -399,20 +563,22 @@ done
 #     data and prove the catalog stays committed + re-hosted + provable.
 #
 #   A curated UPDATE re-commits the deterministic public `_catalog` floor: the
-#   producer's update() re-injects the floor, ships it inline, the cores rebuild
-#   + REPLACE-persist `<cg>/_catalog`, and the on-chain catalog commitment is set
-#   so the update CONFIRMS (before this feature a curated update shipped a ZERO
-#   catalog root and REVERTED with CuratedCGRequiresCatalogCommitment). The
-#   catalog is the STABLE public floor — the update RE-COMMITS THE SAME ROOT, it
-#   does NOT rotate — so we assert root non-zero AND == the publish baseline.
+#   producer's update() regenerates the floor as a separate catalog commitment
+#   (since v10.0.7 it is not part of the KA payload or its Merkle root), ships
+#   it inline, the cores rebuild + REPLACE-persist `<cg>/_catalog`, and the
+#   on-chain catalog commitment is set so the update CONFIRMS (before this
+#   feature a curated update shipped a ZERO catalog root and REVERTED with
+#   CuratedCGRequiresCatalogCommitment). The catalog is the STABLE public
+#   floor — the update RE-COMMITS THE SAME ROOT, it does NOT rotate — so we
+#   assert root non-zero AND == the publish baseline.
 #
 #   Driven via POST /api/update with an owner-sealed precomputedUpdateAttestation
-#   (build_update_body --curated). Re-finalize is NOT usable: the seal is keyed
+#   (build_update_body). Re-finalize is NOT usable: the seal is keyed
 #   by the assertion URI and neither discard nor re-create clears it, so a 2nd
 #   wm/finalize of changed content hits "already finalized with a different
 #   merkleRoot". /api/update is the on-chain UPDATE primitive the daemon exposes.
 # ---------------------------------------------------------------------------
-log "── CURATED UPDATE path (POST /api/update, owner-sealed, floor re-injected) ──"
+log "── CURATED UPDATE path (POST /api/update, owner-sealed, catalog floor re-committed) ──"
 UPD_QUADS=$(STAMP="$STAMP" PRIV_SUBJ="$PRIV_SUBJ" node -e '
 const stamp=process.env.STAMP, subj=process.env.PRIV_SUBJ;
 console.log(JSON.stringify([
@@ -422,10 +588,10 @@ console.log(JSON.stringify([
   { subject: subj, predicate: "http://schema.org/jobTitle", object: "\"Lead (added on update)\"", graph: "" }
 ]))')
 
-# build_update_body resolves the KA owner key (ownerOf), injects the curated
-# `_catalog` floor (6th arg = LOCAL cg id), seals, and emits the /api/update body.
+# build_update_body resolves the KA owner key (ownerOf), seals the root the
+# daemon recomputes from UPD_QUADS, and emits the /api/update body.
 UPD_BODY=$(REPO_ROOT="$REPO_ROOT" DEVNET_DIR="$DEVNET_DIR" NUM_NODES="$NUM_NODES" \
-  build_update_body "$EDGE_CURATOR" "$KA_ID" "$CG_ID" "$UPD_QUADS" "[]" "$CG_ID") \
+  build_update_body "$EDGE_CURATOR" "$KA_ID" "$CG_ID" "$UPD_QUADS") \
   || fail "could not build curated update body (seal/owner-key resolution failed)"
 UPD_RESP=$(api_call_agent "$EDGE_CURATOR" POST /api/update "$UPD_BODY")
 log "POST /api/update: $UPD_RESP"
@@ -463,13 +629,19 @@ pass "curated update RE-COMMITTED the stable catalog floor (root non-zero, == ba
 log "waiting for the updated _catalog to (re-)propagate to the stripped cores (up to 3 min)…"
 for i in $(seq 1 60); do
   holders=0
-  for n in "${STRIPPED_CORES[@]}"; do c=$(catalog_count "$n"); [ "${c:-0}" -ge 1 ] 2>/dev/null && holders=$((holders+1)); done
+  for n in "${STRIPPED_CORES[@]}"; do
+    c=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
+    [ "$c" -ge 1 ] && holders=$((holders+1))
+  done
   [ "$holders" -ge 1 ] && { log "  updated catalog present on $holders/${#STRIPPED_CORES[@]} stripped cores"; break; }
   [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ] && log "  …updated catalog on $holders/${#STRIPPED_CORES[@]} cores after $((i*3))s"
   sleep 3
 done
 UPD_CAT_HOLDERS=0
-for n in "${STRIPPED_CORES[@]}"; do cat=$(catalog_count "$n"); [ "${cat:-0}" -ge 1 ] 2>/dev/null && UPD_CAT_HOLDERS=$((UPD_CAT_HOLDERS+1)); done
+for n in "${STRIPPED_CORES[@]}"; do
+  cat=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
+  [ "$cat" -ge 1 ] && UPD_CAT_HOLDERS=$((UPD_CAT_HOLDERS+1))
+done
 [ "$UPD_CAT_HOLDERS" -ge 1 ] || fail "no stripped core re-hosts the updated public _catalog after the update"
 pass "$UPD_CAT_HOLDERS/${#STRIPPED_CORES[@]} stripped cores re-host the updated public _catalog"
 
@@ -492,28 +664,114 @@ for round in $(seq 1 12); do
 done
 [ "$RSU_OK" -eq 1 ] || fail "no core submitted a random-sampling proof against the updated catalog within the window"
 
-# ── MEMBER converges to the UPDATED private payload (OT-RFC-49 member distribution). ──
-# The curated update now DISTRIBUTES the updated payload: the producer emits the
-# LU-11 ciphertext chunk and the curator persists it (vs the OLD encrypt-then-
-# discard, which delivered NOTHING and left members permanently stale). This is
-# the NON-VACUOUS proof: unlike the catalog re-host (the floor is stable, so cores
-# already held it from publish), the member must end up holding the UPDATED value.
-# NOTE: a live gossip-push to an ALREADY-CONNECTED member is the known M2-a
-# converge race (issue #1205 — affects ALL SWM updates, not curated-update-
-# specific); the SUPPORTED catch-up is converge-on-reconnect. So restart the
-# member to exercise the converge path, then assert it holds the UPDATED value.
-log "restarting member edge$EDGE_MEMBER to exercise SWM converge to the UPDATED payload…"
-"$REPO_ROOT/scripts/devnet.sh" restart-node "$EDGE_MEMBER" >/dev/null 2>&1 || true
-for _ in $(seq 1 90); do curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null && break; sleep 1; done
-MEMBER_GOT_UPDATE=0
-for i in $(seq 1 40); do
-  got=$(api_call "$EDGE_MEMBER" POST /api/query "$(S="$PRIV_SUBJ" node -e 'console.log(JSON.stringify({sparql:`SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${process.env.S}> ?p ?o . FILTER(CONTAINS(STR(?o), "UPDATED")) } }`}))')" | _count_from_query)
-  [ "${got:-0}" -ge 1 ] 2>/dev/null && { MEMBER_GOT_UPDATE=1; break; }
-  { [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; } && log "  …member converging — still on pre-update value after $((i*3))s"
-  sleep 3
+# ── MEMBER's Verifiable Memory converges to each update (#2858). ──
+# The member holds the KA's first version in VM (chain-driven exact fetch at
+# publish). An update keeps the KA id and moves its on-chain root; the member's
+# VM copy is refreshed from the chain's KnowledgeAssetUpdated event. SWM delivery
+# alone would satisfy an any-graph check, so these checks read only the member's
+# VM graphs. Two cases: the member online during the update, and the member
+# stopped during a second update.
+VM_GRAPH="did:dkg:context-graph:${CG_ID}/_verifiable_memory/${VM_ID}"
+member_vm_count() { # <optional triple filter>
+  store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${VM_GRAPH}> { <${PRIV_SUBJ}> ?p ?o . ${1:-} } }"
+}
+member_vm_exact_version() { # <UPDATED|SECONDUPDATE>; this one KA's current VM graph only
+  local version="$1" expected_total name_fragment job_title expected_role total names emails jobs roles old_names
+  if [ "$version" = "UPDATED" ]; then
+    expected_total=4
+    name_fragment="UPDATED value"
+    job_title="Lead (added on update)"
+    expected_role=1
+  else
+    expected_total=3
+    name_fragment="SECONDUPDATE value"
+    job_title="Lead (second update)"
+    expected_role=0
+  fi
+  total=$(member_vm_count) || return 1
+  [ "$total" = "$expected_total" ] || return 1
+  names=$(member_vm_count "FILTER(?p = <http://schema.org/name> && CONTAINS(STR(?o), \"${name_fragment}\"))") || return 1
+  emails=$(member_vm_count "FILTER(?p = <http://schema.org/email> && STR(?o) = \"alice-${STAMP}@example.org\")") || return 1
+  jobs=$(member_vm_count "FILTER(?p = <http://schema.org/jobTitle> && STR(?o) = \"${job_title}\")") || return 1
+  roles=$(member_vm_count 'FILTER(?p = <http://schema.org/role>)') || return 1
+  [ "$names" = 1 ] && [ "$emails" = 1 ] && [ "$jobs" = 1 ] && [ "$roles" = "$expected_role" ] || return 1
+  if [ "$version" = "UPDATED" ]; then
+    [ "$(member_vm_count 'FILTER(?p = <http://schema.org/role> && CONTAINS(STR(?o), "UPDATED"))')" = 1 ] || return 1
+  else
+    # The first update's name and role must be gone, not merely followed by
+    # an appended second version. The exact total above also excludes any
+    # leftover baseline triples in this KA's current VM graph.
+    old_names=$(member_vm_count 'FILTER(?p = <http://schema.org/name> && CONTAINS(STR(?o), "UPDATED value"))') || return 1
+    [ "$old_names" = 0 ] || return 1
+  fi
+}
+wait_member_vm() { # <version> <case label> [seconds, default 180]; tolerates a store read error while the member restarts
+  local i
+  for i in $(seq 1 $(( ${3:-180} / 3 ))); do
+    member_vm_exact_version "$1" && return 0
+    { [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; } && log "  …member VM is not an exact $1 replacement yet after $((i*3))s ($2)"
+    sleep 3
+  done
+  return 1
+}
+
+log "member edge$EDGE_MEMBER was online during the update: waiting for its Verifiable Memory to hold the UPDATED payload…"
+wait_member_vm "UPDATED" "online during the update" \
+  || fail "member edge$EDGE_MEMBER's Verifiable Memory did NOT converge to the UPDATED private payload while online (#2858)"
+pass "member edge$EDGE_MEMBER's Verifiable Memory exactly holds the UPDATED private payload (online during the update)"
+
+log "stopping member edge$EDGE_MEMBER, then a second update while it is offline…"
+MEMBER_NEEDS_RESTORE=1
+"$REPO_ROOT/scripts/devnet.sh" stop-node "$EDGE_MEMBER" >/dev/null 2>&1 \
+  || fail "stop-node $EDGE_MEMBER returned non-zero"
+MEMBER_DOWN=0
+for i in $(seq 1 30); do
+  if curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null; then
+    MEMBER_DOWN=0
+  else
+    MEMBER_DOWN=$((MEMBER_DOWN + 1))
+    [ "$MEMBER_DOWN" -ge 2 ] && break
+  fi
+  sleep 1
 done
-[ "$MEMBER_GOT_UPDATE" -ge 1 ] || fail "member edge$EDGE_MEMBER did NOT converge to the UPDATED private payload after reconnect — the curated update did not DISTRIBUTE to members (Option B regression)"
-pass "member edge$EDGE_MEMBER converged to the UPDATED private payload — the curated update DISTRIBUTES to members (producer emit + curator-held + converge-on-reconnect)"
+[ "$MEMBER_DOWN" -ge 2 ] \
+  || fail "member edge$EDGE_MEMBER remained reachable after stop-node"
+UPD2_QUADS=$(STAMP="$STAMP" PRIV_SUBJ="$PRIV_SUBJ" node -e '
+const stamp=process.env.STAMP, subj=process.env.PRIV_SUBJ;
+console.log(JSON.stringify([
+  { subject: subj, predicate: "http://schema.org/name", object: `"Alice Private ${stamp} — SECONDUPDATE value, padded out to keep the encrypted member payload chunking through the LU-11 ciphertext substrate on this devnet update"`, graph: "" },
+  { subject: subj, predicate: "http://schema.org/email", object: `"alice-${stamp}@example.org"`, graph: "" },
+  { subject: subj, predicate: "http://schema.org/jobTitle", object: "\"Lead (second update)\"", graph: "" }
+]))')
+UPD2_BODY=$(REPO_ROOT="$REPO_ROOT" DEVNET_DIR="$DEVNET_DIR" NUM_NODES="$NUM_NODES" \
+  build_update_body "$EDGE_CURATOR" "$KA_ID" "$CG_ID" "$UPD2_QUADS") \
+  || fail "could not build the second curated update body"
+UPD2_RESP=$(api_call_agent "$EDGE_CURATOR" POST /api/update "$UPD2_BODY")
+log "second POST /api/update: $UPD2_RESP"
+[ "$(printf '%s' "$UPD2_RESP" | jq_field ".status")" = "confirmed" ] \
+  || fail "second curated update did not confirm: $UPD2_RESP"
+log "starting member edge$EDGE_MEMBER again…"
+"$REPO_ROOT/scripts/devnet.sh" restart-node "$EDGE_MEMBER" >/dev/null 2>&1 \
+  || fail "restart-node $EDGE_MEMBER returned non-zero"
+wait_member_up || fail "member edge$EDGE_MEMBER did not become healthy after restart"
+MEMBER_NEEDS_RESTORE=0
+# A restarted edge reconnects to the cores but does not find its curator edge
+# again on its own (#2865); dial it, as a member holding the curator's address
+# would.
+if [ -n "${CURATOR_ADDR:-}" ]; then
+  for _ in 1 2 3; do
+    CONNECT_RESP=$(api_call_agent "$EDGE_MEMBER" POST /api/connect "{\"multiaddr\":\"${CURATOR_ADDR}\"}")
+    [ "$(printf '%s' "$CONNECT_RESP" | jq_field ".connected")" = "true" ] && break
+    sleep 5
+  done
+  log "member edge$EDGE_MEMBER reconnects to the curator after restarting: $CONNECT_RESP"
+fi
+# After a restart the member recovers the curator's shared memory, which stages
+# the update; the refresh then waits its staged-version delay and the next
+# reconcile sweep, so allow more time than the online case.
+wait_member_vm "SECONDUPDATE" "offline during the update" 300 \
+  || fail "member edge$EDGE_MEMBER's Verifiable Memory did NOT converge to the second update after restarting (#2858)"
+pass "member edge$EDGE_MEMBER's Verifiable Memory exactly replaced the first update's payload after restart"
 
 # ---------------------------------------------------------------------------
 echo ""

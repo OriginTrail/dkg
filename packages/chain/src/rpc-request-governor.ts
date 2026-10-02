@@ -6,6 +6,14 @@ import {
   throwRpcRequestAbortReason,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
+import type { RpcRequestAdmissionPriority } from './rpc-request-transport.js';
+
+/**
+ * Internal authority reads may enter a saturated ordinary queue, but remain
+ * bounded independently so a bug cannot create an unbounded priority lane.
+ * Four slots match the default async-promote worker concurrency.
+ */
+const AUTHORITY_PRIORITY_QUEUE_RESERVE = 4;
 
 export interface RpcRequestGovernorPolicyInput {
   /** Total node-process RPC request rate. Defaults to 10 requests/second. */
@@ -192,6 +200,7 @@ const systemGovernorClock: RpcRequestGovernorClock = {
 
 interface RpcRequestWaiter {
   readonly requestClass: RpcRequestClass;
+  readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly enqueuedAtMs: number;
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
@@ -276,7 +285,8 @@ export class RpcRequestGovernor {
   }
 
   async acquireActiveRequest(signal = activeRpcRequestContext().signal): Promise<void> {
-    return this.acquire(activeRpcRequestContext().requestClass, signal);
+    const context = activeRpcRequestContext();
+    return this.acquire(context.requestClass, signal, context.admissionPriority);
   }
 
   /**
@@ -327,6 +337,7 @@ export class RpcRequestGovernor {
   async acquire(
     requestClass: RpcRequestClass,
     signal?: AbortSignal,
+    admissionPriority?: RpcRequestAdmissionPriority,
   ): Promise<void> {
     if (signal?.aborted) throwRpcRequestAbortReason(signal);
     this.#refill();
@@ -335,8 +346,11 @@ export class RpcRequestGovernor {
       return;
     }
     const queueSize = this.#foregroundQueue.length + this.#backgroundQueue.length;
+    const authorityPriority = requestClass === 'foreground'
+      && admissionPriority === 'authority';
     if (
       queueSize >= this.#policy.maxQueueSize
+        + (authorityPriority ? AUTHORITY_PRIORITY_QUEUE_RESERVE : 0)
       || (requestClass === 'background' && queueSize >= this.#backgroundQueueLimit)
     ) {
       this.#window.rejected += 1;
@@ -346,6 +360,7 @@ export class RpcRequestGovernor {
     await new Promise<void>((resolve, reject) => {
       const waiter: RpcRequestWaiter = {
         requestClass,
+        ...(authorityPriority ? { admissionPriority } : {}),
         enqueuedAtMs: this.#clock.now(),
         resolve,
         reject,
@@ -364,7 +379,15 @@ export class RpcRequestGovernor {
       };
       if (waiter.onAbort) signal!.addEventListener('abort', waiter.onAbort, { once: true });
       const queue = requestClass === 'foreground' ? this.#foregroundQueue : this.#backgroundQueue;
-      queue.push(waiter);
+      if (authorityPriority) {
+        const firstOrdinary = queue.findIndex(
+          (queued) => queued.admissionPriority !== 'authority',
+        );
+        if (firstOrdinary < 0) queue.push(waiter);
+        else queue.splice(firstOrdinary, 0, waiter);
+      } else {
+        queue.push(waiter);
+      }
       if (requestClass === 'foreground') this.#cancelScheduledWakeup();
       this.#schedule();
     });
@@ -458,7 +481,11 @@ export class RpcRequestGovernor {
     // At most one aged background request jumps the foreground queue per
     // scheduling turn. Its own bucket keeps this within the background share;
     // the single admission keeps foreground latency bounded.
-    if (this.#foregroundQueue.length > 0 && agedBackgroundHasCapacity) {
+    if (
+      this.#foregroundQueue.length > 0
+      && this.#foregroundQueue[0]?.admissionPriority !== 'authority'
+      && agedBackgroundHasCapacity
+    ) {
       this.#resolveHead(this.#backgroundQueue);
     }
     while (this.#foregroundQueue.length > 0 && this.#availableTokens >= 1) {

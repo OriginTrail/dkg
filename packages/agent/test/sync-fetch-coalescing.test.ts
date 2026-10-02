@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createOperationContext,
   PROTOCOL_SYNC,
+  SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -208,6 +209,53 @@ describe('exact VM recovery lifecycle', () => {
       await agent.stop().catch(() => {});
     }
   });
+
+  it.each(['configured-store', 'storeless'] as const)(
+    'awaits strict membership reconciliation and propagates failure with a %s',
+    async (storeCase) => {
+      const membershipUpsert = vi.fn(async () => undefined);
+      const agent = await createAgentWithSend(
+        async () => new Uint8Array(0),
+        undefined,
+        storeCase === 'configured-store'
+          ? {
+              loadAll: async () => [],
+              upsert: membershipUpsert,
+              delete: async () => undefined,
+            }
+          : undefined,
+      );
+      const reconciliation = deferred<void>();
+      const reconciliationFailure = new Error('responsibility reconciliation failed');
+      const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1')
+        .mockReturnValue(reconciliation.promise);
+      try {
+        let settled = false;
+        const strictWrite = agent.upsertContextGraphMember({
+          contextGraphId: `strict-membership-${storeCase}`,
+          principalType: 'node',
+          principalId: PEER_A,
+          status: 'active',
+        }, { strict: true });
+        const failure = strictWrite.then(
+          () => { settled = true; return undefined; },
+          (error: unknown) => { settled = true; return error; },
+        );
+
+        await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
+        expect(membershipUpsert).toHaveBeenCalledTimes(
+          storeCase === 'configured-store' ? 1 : 0,
+        );
+        expect(settled).toBe(false);
+
+        reconciliation.reject(reconciliationFailure);
+        expect(await failure).toBe(reconciliationFailure);
+      } finally {
+        reconciliation.resolve();
+        await agent.stop().catch(() => {});
+      }
+    },
+  );
 
   it('quarantines a physically active reconcile until shutdown is retried', async () => {
     const timeoutDescriptor = Object.getOwnPropertyDescriptor(
@@ -886,6 +934,57 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(fetchCalls).toBe(2);
       expect(forward).toBe(reverse.result);
       expect(reverse.disposition).toBe('clean-absent');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('runs a forced-fresh exact fetch after an identical in-flight fetch and forwards freshness to both pages', async () => {
+    const firstMetaFetch = deferred<SyncPageResult>();
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean }> = [];
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession }) => {
+      fetchCalls.push({ phase, forceFreshSession });
+      if (fetchCalls.length === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      const ordinary = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        exactSelection(EXACT_UAL_7),
+      );
+      await waitFor(() => fetchCalls.length === 1);
+      const forced = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        exactSelection(EXACT_UAL_7),
+        { forceFreshExactSession: true },
+      );
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+
+      const [ordinaryResult, forcedResult] = await Promise.all([ordinary, forced]);
+      expect(ordinaryResult.result).not.toBe(forcedResult.result);
+      expect(fetchCalls).toHaveLength(4);
+      expect(fetchCalls.slice(0, 2).map(({ forceFreshSession }) => forceFreshSession))
+        .toEqual([false, false]);
+      expect(fetchCalls.slice(2)).toEqual([
+        { phase: 'meta', forceFreshSession: true },
+        { phase: 'data', forceFreshSession: true },
+      ]);
     } finally {
       await agent.stop().catch(() => {});
     }

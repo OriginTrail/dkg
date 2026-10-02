@@ -51,7 +51,14 @@ import {
   sleep,
 } from './evm-adapter-rpc.js';
 import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
-import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
+import {
+  hostOnlyRpcText,
+  noteRpcFailover,
+  noteRpcExhaustion,
+  notePreferredEndpoint,
+  noteRpcServed,
+  rpcHost,
+} from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import {
   ChainRpcTransportError,
@@ -67,6 +74,7 @@ import {
 } from './rpc-request-transport.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
+  RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
@@ -100,6 +108,8 @@ export interface RpcEndpoint {
  *     one-RPC node.
  *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
  *     stall selection (capped on EVERY attempt, including single-RPC).
+ *   - `securityGatePointRead` — a live authorization read whose multi-RPC
+ *     attempts must fail over inside the caller's 2.5s fail-closed deadline.
  */
 export type ReadPolicy =
   | 'pointRead'
@@ -107,7 +117,8 @@ export type ReadPolicy =
   | 'durablePagedLogScan'
   | 'watchdogPointRead'
   | 'watchdogWideLogScan'
-  | 'failOpenFundingRead';
+  | 'failOpenFundingRead'
+  | 'securityGatePointRead';
 
 /**
  * The human-facing label and the low-cardinality telemetry owner for one RPC
@@ -282,6 +293,7 @@ export function isContractViewRetryable(err: unknown): boolean {
  *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
  *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
+ *   | securityGatePointRead | SECURITY_GATE (1s)     | uncapped                |
  *
  * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
  * to; #894). The watchdog policies are for background reads that must clear
@@ -295,6 +307,7 @@ export function resolveCapMs(policy: ReadPolicy, providerCount: number): number 
   }
   if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
   if (providerCount <= 1) return undefined;
+  if (policy === 'securityGatePointRead') return RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS;
   return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
 }
 
@@ -572,6 +585,19 @@ export class RpcFailoverClient {
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
           } catch (estErr) {
+            // A CALL_EXCEPTION is the contract's deterministic answer to THIS exact call. Running
+            // `signer.populateTransaction(populated)` after that answer asks for the same gas
+            // estimate again (and fetches a nonce that can never be used) before surfacing the
+            // same revert. RandomSampling's expected NoEligibleContextGraph result is the dominant
+            // idle-path example. Preserve the original error for the feature boundary to translate;
+            // no nonce is allocated, nothing is signed, and nothing is broadcast.
+            //
+            // Keep every other estimate failure on the established policy below: local governor
+            // pressure retries later, endpoint failures fail over where possible, and the final
+            // endpoint may still use ethers' unbuffered population fallback.
+            if (errorCode(estErr) === 'CALL_EXCEPTION') {
+              throw estErr;
+            }
             // Local governor pressure is caller-level backpressure, not an
             // endpoint defect and not permission to drop the requested OOG
             // headroom. Preserve the original retry-later error unchanged:
@@ -593,7 +619,7 @@ export class RpcFailoverClient {
             console.warn(
               `[chain] ${label}: buffered gas estimation failed; falling back to ` +
               `ethers' unbuffered estimate (no OOG headroom applied): ` +
-              `${estErr instanceof Error ? estErr.message : String(estErr)}`,
+              `${hostOnlyRpcText(estErr instanceof Error ? estErr.message : String(estErr))}`,
             );
           }
         }
@@ -618,16 +644,17 @@ export class RpcFailoverClient {
       }
     }
     if (lastRetryable) noteRpcExhaustion(`${label} preparation`, canonical.map((e) => e.rpcUrl));
-    // Single provider → carry the code on a new error but keep the message
-    // byte-identical (no second endpoint, so the raw message reads cleaner and
-    // any message-inspecting caller keeps seeing it). Multiple providers → the
-    // HOST-ONLY aggregate (never full URLs — a configured rpcUrl may carry an API
-    // key and this message reaches HTTP clients via response paths that echo
-    // err.message, e.g. the create+publish 207 tail).
+    // Single provider → carry the code on a new error with the provider's own
+    // text (no second endpoint to name, so the message reads cleaner). Multiple
+    // providers → a host list plus that text. EITHER WAY the text passes through
+    // `hostOnlyRpcText`: ethers embeds the request URL in an HTTP-level error and
+    // a configured rpcUrl may carry an API key, while this message reaches HTTP
+    // clients (e.g. the create+publish 207 tail), logs and the publisher's
+    // persisted failure records. The original error stays reachable as `cause`.
     const message = canonical.length <= 1
-      ? errorMessage(lastRetryable)
+      ? hostOnlyRpcText(errorMessage(lastRetryable))
       : `${label} transaction preparation failed on all configured RPC endpoints ` +
-        `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
+        `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${hostOnlyRpcText(errorMessage(lastRetryable))}`;
     // Populate+sign exhausted every endpoint. This is the PREPARE phase
     // (populateTransaction / eth_estimateGas), NOT the broadcast — label it
     // eth_estimateGas so it doesn't collide with the genuine
@@ -701,7 +728,7 @@ export class RpcFailoverClient {
                   // outcome at the HTTP boundary.
                   throw new ChainRpcTransportError(
                     'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
-                    errorMessage(err),
+                    hostOnlyRpcText(errorMessage(err)),
                     { cause: err, txHash },
                   );
                 }
@@ -726,7 +753,7 @@ export class RpcFailoverClient {
           // the HTTP boundary, not a generic 500 — an exhaustion after a provider
           // populated/signed would otherwise surface code-less.
           throw new RpcEndpointsExhaustedError(
-            `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
+            `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${hostOnlyRpcText(errorMessage(lastRetryable))}`,
             { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash },
           );
         } finally {
@@ -801,7 +828,7 @@ export class RpcFailoverClient {
             });
             throw new ChainRpcTransportError(
               'RPC_RECEIPT_LOOKUP_FAILED',
-              `Receipt lookup for transaction ${txHash} failed on all configured RPC endpoints: ${errorMessage(cause)}`,
+              `Receipt lookup for transaction ${txHash} failed on all configured RPC endpoints: ${hostOnlyRpcText(errorMessage(cause))}`,
               { cause, txHash },
             );
           }
@@ -921,18 +948,21 @@ export class RpcFailoverClient {
     // peer failure, matching their long-standing saw-non-error contract.
     if (lastRetryable && !(sawEmpty && options.emptyResultPolicy === 'any-empty')) {
       // Single provider → carry the typed code but keep the original message
-      // byte-identical (there is no second endpoint, so the raw message reads
-      // cleaner and any message-inspecting caller keeps seeing it). Multiple
-      // providers → the host-only "all endpoints" aggregate (never full URLs —
-      // a configured rpcUrl may carry an API key and this message can reach HTTP
-      // clients via response paths that echo err.message). Mirrors the write
-      // preparation loop's single-vs-multi message handling. Built from CANONICAL
-      // order so the error's `rpcUrls` stays a stable configured-order contract
+      // (there is no second endpoint, so the raw message reads cleaner and any
+      // message-inspecting caller keeps seeing it). Multiple providers → the
+      // host-only "all endpoints" aggregate. Either way every URL in the
+      // provider's message is reduced to its host: ethers quotes the full
+      // request URL in the message of an HTTP-level error, a configured rpcUrl
+      // may carry an API key, and this message reaches logs and HTTP clients via
+      // response paths that echo err.message. Mirrors the write preparation
+      // loop's single-vs-multi message handling. Built from CANONICAL order so
+      // the error's `rpcUrls` stays a stable configured-order contract
       // regardless of the per-op reorder.
+      const detail = hostOnlyRpcText(errorMessage(lastRetryable));
       const message = canonical.length <= 1
-        ? errorMessage(lastRetryable)
+        ? detail
         : `${label} read failed on all configured RPC endpoints ` +
-          `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
+          `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${detail}`;
       throw new ProviderSetExhaustedError(message, allEndpointsThrottled ? 'all-throttled' : 'mixed', {
         cause: lastRetryable,
         rpcUrls: canonical.map((e) => e.rpcUrl),
