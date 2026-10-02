@@ -139,11 +139,22 @@ async function seedPublished(
     packedKaId: seal.reservedKaId,
   });
   if (opts.record === false) return;
+  await seedConfirmedRecord(store, seal, opts);
+}
+
+/** The confirmed KA record `update()` validates: every row, so it can really answer. */
+async function seedConfirmedRecord(
+  store: OxigraphStore,
+  seal: Seal,
+  opts: { subGraphName?: string; status?: string; version?: number | string } = {},
+): Promise<void> {
   const metaGraph = contextGraphMetaUri(CG);
+  const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+  const vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope, opts.subGraphName);
   await store.insert([
     q(seal.kaUal, `${DKG}contentScopeVersion`, int(GRAPH_KA_CONTENT_SCOPE_VERSION), metaGraph),
     q(seal.kaUal, `${DKG}kaUal`, seal.kaUal, metaGraph),
-    q(seal.kaUal, `${DKG}assertionVersion`, int(seal.assertionVersion), metaGraph),
+    q(seal.kaUal, `${DKG}assertionVersion`, int(opts.version ?? seal.assertionVersion), metaGraph),
     q(seal.kaUal, `${DKG}batchId`, int(seal.reservedKaId), metaGraph),
     q(seal.kaUal, `${DKG}status`, `"${opts.status ?? 'confirmed'}"`, metaGraph),
     q(seal.kaUal, `${DKG}contextGraph`, contextGraphDataUri(CG), metaGraph),
@@ -414,10 +425,8 @@ describe('GH#2958 enqueue refuses a seal that is not confirmed + 1 (typed, befor
     await agent.assertion.create(CG, NAME);
     await draft(agent, 'first');
     const seal = await finalize(agent);
-    await store.insert([
-      q(seal.kaUal, `${DKG}assertionVersion`, int(5), contextGraphMetaUri(CG)),
-      q(seal.kaUal, `${DKG}status`, '"confirmed"', contextGraphMetaUri(CG)),
-    ]);
+    // A record complete enough to answer (confirmed v5), with no VM pointer: a mint is not judged.
+    await seedConfirmedRecord(store, seal, { version: 5 });
     await share(agent);
     expect((await enqueueIntent(agent)).assertionVersion).toBe('1');
   });
