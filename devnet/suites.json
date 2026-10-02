@@ -19,6 +19,7 @@
     "edge-update-flow",
     "greenfield-10min",
     "mixed-version",
+    "node-store-persistence",
     "openclaw-persist-turn",
     "pr1366-pca-deposit-waiver",
     "pr1369-folded-private-ack",

@@ -198,7 +198,7 @@ export interface ResolveAssertionAuthorOptions {
   /** GH#1786 — selects among authors already resident at this coordinate. */
   selectedAuthorAgentAddress?: string;
 }
-import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
+import { RootlessUpdateError, isRootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -305,6 +305,7 @@ import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-ha
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
   throwIfRecoveryDeadlineReached,
@@ -442,6 +443,7 @@ import {
 } from './dkg-agent-helpers.js';
 import { reconcileAndAllocateKaNumber, readMaxKaNumberWithRetry, isTransientChainError } from './allocator.js';
 import {
+  computeSwmSenderKeyRecipientRouteHash,
   swmSenderStateKey,
   swmReceiverStateKey,
   serializeSwmSenderSendState,
@@ -618,6 +620,30 @@ function updateAttestationNotCustodialError(authorAddress: string): Error {
 
 function rootlessUpdateError(code: RootlessUpdateErrorCode, message: string): Error {
   return new RootlessUpdateError(code, message);
+}
+
+/**
+ * GH#2958 — a finalized update numbered anything but `confirmed + 1` can never be published: the
+ * publisher, the StorageACK handler, peers and the chain all require exactly that number. Coded
+ * `PUBLISH_INTENT_STALE` (the draft no longer matches what can be published) so the async lane
+ * records a terminal pre-send failure instead of the retryable `rpc_unavailable` an untyped
+ * error falls into, and both publish routes answer 409. The recovery depends on which way the
+ * number is off: a draft numbered too high keeps its shared content, a draft numbered too low
+ * means the published version moved on, so it is re-based on that.
+ */
+function versionGapError(kaUal: string, sealVersion: bigint | string | number, requiredVersion: bigint): Error {
+  const sealed = BigInt(sealVersion);
+  const recovery = sealed > requiredVersion
+    ? 'Re-open the draft with wm/pull-from (layer "swm" keeps the shared content), then finalize and share it again.'
+    : 'The published version has moved on since this draft was finalized: re-base it with wm/pull-from '
+      + '(layer "vm"), re-apply your edits, then finalize and share it again.';
+  return Object.assign(
+    new Error(
+      `Cannot publish the update of ${kaUal}: this finalized version is numbered ${sealed}, but the next `
+        + `publishable version is ${requiredVersion} (the confirmed version is ${requiredVersion - 1n}). ${recovery}`,
+    ),
+    { code: 'PUBLISH_INTENT_STALE' as const },
+  );
 }
 
 function latestShareOperationId(history: {
@@ -1706,14 +1732,24 @@ export class PublishMethods extends DKGAgentBase {
         promoted.shareOperationId,
       );
     }
-    await this.afterDurableSwmPromotionV1({
-      contextGraphId,
-      subGraphName: opts?.subGraphName,
-      assertionCoordinate: assertionName,
-      lifecycleAgentAddress,
-      shareOperationId: promoted.shareOperationId,
-      ctx,
-    });
+    try {
+      await this.afterDurableSwmPromotionV1({
+        contextGraphId,
+        subGraphName: opts?.subGraphName,
+        assertionCoordinate: assertionName,
+        lifecycleAgentAddress,
+        shareOperationId: promoted.shareOperationId,
+        ctx,
+      });
+    } catch {
+      // Deliberately best-effort here (the stamp already logged its cause).
+      // This entry point mints a fresh `async-<uuid>` assertion per call, so
+      // surfacing the error would hand the caller a failure for a name it
+      // cannot replay, inviting a re-publish under a NEW identity. The VM
+      // publish queued below stamps `vmCurrentAssertion`, and an absent swm
+      // pointer is then the valid divergence-only shape (swm == vm).
+      // Named-KA shares (`assertion.promote`) do surface and replay the failure.
+    }
 
     const intent = await this.resolveFinalizedAssertionVmPublishIntent(
       contextGraphId,
@@ -2202,10 +2238,7 @@ export class PublishMethods extends DKGAgentBase {
       opts.assertionVersion !== undefined
       && BigInt(opts.assertionVersion) !== BigInt(nextAssertionVersion)
     ) {
-      throw new Error(
-        `Graph-scoped update assertionVersion ${String(opts.assertionVersion)} must advance ` +
-          `the durable current version to ${nextAssertionVersion}`,
-      );
+      throw versionGapError(updateScope.ual, opts.assertionVersion, BigInt(nextAssertionVersion));
     }
     if (
       opts.publicTripleCount !== undefined
@@ -3426,6 +3459,23 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    // GH#2958 — a draft of a PUBLISHED KA is numbered from the confirmed record `update()` will
+    // validate, not from the lifecycle counter. That counter is "last FINALIZED": it only ever
+    // grows, so every finalized update that is abandoned before it is published (superseded,
+    // discarded, replaced by pull-from) would push the next draft one number too high, past
+    // what `update()`, the publisher and the chain accept, and the KA could never be updated
+    // again. An abandoned draft instead shares its number with its successor, as an
+    // unpublished mint already does. The lifecycle counter above stays the fallback for a
+    // record that cannot answer. The number is not signed (the attestation binds merkleRoot,
+    // author, reservedKaId and scheme), so deriving it here changes no signature.
+    if (hasConfirmedVm) {
+      assertionVersion = await this._nextUpdateVersionOrUndefined(
+        reservedKaId,
+        contextGraphId,
+        opts?.subGraphName,
+      ) ?? assertionVersion;
+    }
+
     // 8. Build EIP-712 typed data (binds reservedKaId — OT-RFC-43 §F2).
     const typedData = buildAuthorAttestationTypedData({
       chainId,
@@ -4067,13 +4117,24 @@ export class PublishMethods extends DKGAgentBase {
         recipientKeyId: r.recipientKeyId,
       })),
     });
+    const recipientRouteHash = computeSwmSenderKeyRecipientRouteHash({
+      contextGraphId,
+      subGraphName,
+      recipients: resolution.recipients,
+    });
 
     const stateKey = swmSenderStateKey(contextGraphId, subGraphName, senderAddress);
     let state = this.swmSenderKeySendStates.get(stateKey);
-    if (!state || state.membershipHash !== membershipHash) {
+    if (
+      !state
+      || state.membershipHash !== membershipHash
+      || state.recipientRouteHash !== recipientRouteHash
+    ) {
       const reason = !state
         ? 'no persisted state'
-        : `membership changed (was=${state.membershipHash} now=${membershipHash})`;
+        : state.membershipHash !== membershipHash
+          ? `membership changed (was=${state.membershipHash} now=${membershipHash})`
+          : `recipient routes changed (was=${state.recipientRouteHash ?? 'legacy-untracked'} now=${recipientRouteHash})`;
       this.log.info(
         ctx,
         `${logPrefix}: bootstrapping/rotating swm-sender-key epoch for curated CG ${contextGraphId} ` +
@@ -4103,7 +4164,12 @@ export class PublishMethods extends DKGAgentBase {
       this.swmSenderKeySendStates.set(stateKey, state);
       await this.saveSwmSenderKeyState();
     } else {
-      await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx);
+      await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx, {
+        contextGraphId,
+        subGraphName,
+        senderAgentAddress: state.senderAgentAddress,
+        epochId: state.epochId,
+      });
     }
 
     return {
@@ -4685,6 +4751,21 @@ export class PublishMethods extends DKGAgentBase {
         { code: 'PUBLISH_INTENT_STALE' },
       );
     }
+    if (operationPlan.kind === 'update') {
+      // GH#2958 — refuse a finalized update `update()` is going to refuse, here, before a job
+      // exists, so the client learns it at the moment it can act. Last, so every recovery this
+      // error recommends (re-open from the shared copy) is possible whenever it is raised. A
+      // confirmed record that cannot answer leaves the decision to `update()`.
+      const sealScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+      const requiredVersion = await this._nextUpdateVersionOrUndefined(
+        packKnowledgeAssetIdFromIdentity(sealScope),
+        contextGraphId,
+        opts?.subGraphName,
+      );
+      if (requiredVersion !== undefined && requiredVersion !== BigInt(seal.assertionVersion)) {
+        throw versionGapError(seal.kaUal, seal.assertionVersion, requiredVersion);
+      }
+    }
     const sealMerkleRoot = (merkleBare.startsWith('0x') ? merkleBare : `0x${merkleBare}`) as `0x${string}`;
     const queuedSeal: LiftRequestAuthorSeal = {
       merkleRoot: ethers.hexlify(seal.merkleRoot) as `0x${string}`,
@@ -4744,6 +4825,38 @@ export class PublishMethods extends DKGAgentBase {
       ...request,
       intentKey: createKnowledgeAssetVmPublishIntentKey(request),
     };
+  }
+
+  /**
+   * GH#2958 — the version a finalized update of this KA must carry, read from the SAME confirmed
+   * record `update()` validates, so the number a draft is sealed with and the number `update()`
+   * demands cannot disagree. `undefined` when that record cannot answer (not materialized here,
+   * not confirmed yet, corrupt or legacy): the caller then falls back to its own rule. Anything
+   * else (a store failure) propagates - a transient read error must never silently pick a number.
+   */
+  async _nextUpdateVersionOrUndefined(
+    this: DKGAgent,
+    kaId: bigint,
+    contextGraphId: string,
+    subGraphName?: string,
+  ): Promise<bigint | undefined> {
+    try {
+      const scope = await resolveDirectRootlessUpdateScope(
+        this,
+        this.chain.chainId,
+        kaId,
+        contextGraphId,
+        subGraphName,
+      );
+      return BigInt(scope.assertionVersion);
+    } catch (err) {
+      if (!isRootlessUpdateError(err) && !(err instanceof LegacyKnowledgeAssetReadOnlyError)) throw err;
+      this.log.debug(
+        createOperationContext('publish'),
+        `The confirmed record of KA ${kaId} cannot number its next update (${(err as { code?: string }).code}); using the lifecycle counter`,
+      );
+      return undefined;
+    }
   }
 
   async preflightKnowledgeAssetVmPublishSnapshot(
@@ -4888,10 +5001,10 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // `_stampSwmPointer` is explicitly a best-effort post-commit projection.
-    // A managed-store restart can therefore leave this optional lifecycle row
-    // absent even though the complete-share marker and immutable graph-scoped
-    // head both committed. Absence alone is not proof that the queued content
+    // The swm pointer is a divergence-only projection, and `publishAsync`
+    // keeps its stamp best-effort. The lifecycle row can therefore be absent
+    // even though the complete-share marker and immutable graph-scoped head
+    // both committed. Absence alone is not proof that the queued content
     // changed: the exact operation id, assertion version, access envelope and
     // queued WM root above are the durable authority. A present-but-different
     // SWM pointer remains terminally stale via the comparison above.
@@ -6578,10 +6691,16 @@ export class PublishMethods extends DKGAgentBase {
    * OT-RFC-43 A2 (decision 2) — stamp `dkg:swmCurrentAssertion` on the
    * lifecycle URN when an assertion is promoted/shared into SWM. The pointer
    * value is the assertion's sealed merkle root hex (read from the seal on the
-   * assertion-graph URI). Best-effort: a missing seal (a non-finalized
-   * promote) leaves the SWM pointer unset, which `deriveStatus` reads as "not
-   * yet wm-sealed for SWM". Never throws — the SWM share itself already
-   * committed.
+   * assertion-graph URI). A missing seal (a non-finalized promote) leaves the
+   * SWM pointer unset, which `deriveStatus` reads as "not yet wm-sealed for
+   * SWM".
+   *
+   * A store failure is logged and RETHROWN. The SWM share already committed, so
+   * the caller owns the classification: swallowing it here left a share that
+   * reported success with a permanently missing root (GH#2901). The stamp is an
+   * idempotent drop-then-set, so replaying the already-committed operation is
+   * the repair. The drop and the set are two store calls: until that replay, a
+   * failure between them leaves the committed share with no pointer.
    */
   async _stampSwmPointer(
     this: DKGAgent,
@@ -6612,6 +6731,7 @@ export class PublishMethods extends DKGAgentBase {
         `Failed to stamp swmCurrentAssertion for "${name}" in "${contextGraphId}": ` +
           (err instanceof Error ? err.message : String(err)),
       );
+      throw err;
     }
   }
 

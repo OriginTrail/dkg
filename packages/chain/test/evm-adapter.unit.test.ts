@@ -1625,7 +1625,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     // single-endpoint case must NOT, however, rewrite the message into the
     // multi-endpoint "failed on all configured RPC endpoints (…)" aggregate —
     // there is no second endpoint, so the original message reads cleaner and
-    // message-inspecting callers keep seeing it unchanged.
+    // message-inspecting callers keep seeing it unchanged (a URL inside it is
+    // still reduced to its host - GH#2945; this text has none).
     const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
     const onlyProvider = { name: 'only' } as any;
     const signer = new ethers.Wallet(DEPLOYER_PK, onlyProvider);

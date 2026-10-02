@@ -57,6 +57,12 @@ export class VmRecoveryProviderPolicy {
     this.#state(peerId).phase = { kind: 'unavailable' };
   }
 
+  /** The host must prove a current carried holder; one reuse still spends it. */
+  seedProvenHolder(peerId: string): void {
+    const state = this.#state(peerId);
+    if (state.phase.kind === 'fresh') state.phase = { kind: 'holder-reusable' };
+  }
+
   beginAttempt(peerId: string): VmRecoveryProviderAttempt | undefined {
     const state = this.#state(peerId);
     if (!this.#canAttempt(peerId)) return undefined;
