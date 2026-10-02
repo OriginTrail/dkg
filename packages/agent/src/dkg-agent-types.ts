@@ -202,6 +202,7 @@ export type ACKSignerResolution = {
 };
 
 export interface SyncRequestEnvelope {
+  responseEncoding?: 'gzip-nquads-v1';
   contextGraphId: string;
   offset: number;
   limit: number;
@@ -905,6 +906,15 @@ export interface VmReconcileNegativeRecord {
   peerTopology?: VmReconcilePeerTopology;
   /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
   cleanMissPeerIds?: string[];
+}
+
+/** Fences for experimental transport reuse; never asset or absence authority. */
+export interface VmReconcilePublicCoreHolderCredit {
+  readonly deploymentId: string;
+  readonly lifecycleGeneration: number;
+  readonly bindingGeneration: number;
+  readonly selectedBindingGeneration: number | undefined;
+  readonly candidatePeerIds: readonly string[];
 }
 
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */

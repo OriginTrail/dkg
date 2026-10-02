@@ -892,6 +892,7 @@ export class DKGAgent extends DKGAgentBase {
       writeLocks,
       publicSnapshotStore,
     );
+    this.initializeVmReconcilePublicCoreTransportPreferencePolicy();
     this.configureSwmTargetExecutorSessionsV1({
       privateRecoveryBudgetMs: resolvePrivateSwmRecoveryBudgetMs(),
       store: this.store,

@@ -210,6 +210,7 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
+import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
 import {
   normalizeExactAssetUals,
   requireExactAssetUals,
@@ -1368,6 +1369,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
         authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
         ...normalizeByteBudgetPageHint(parsed.pageMode, parsed.pageRowsHint),
+        responseEncoding: normalizeExactSyncResponseEncoding(parsed.responseEncoding),
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,
