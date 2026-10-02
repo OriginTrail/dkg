@@ -293,6 +293,35 @@ describe('OpenClaw persist-turn over real HTTP into a real store', () => {
     });
   });
 
+  it('carries a completing transition in the graph delta of its turn', async () => {
+    const sessionId = newSessionId();
+    const turnId = newTurnId();
+
+    await persistTurn(turn(sessionId, turnId, { assistantReply: 'working on it', persistenceState: 'pending' }));
+    const before = await memoryManager.getSessionGraphDelta(sessionId, turnId);
+    await persistTurn(turn(sessionId, turnId, { assistantReply: 'the final answer', persistenceState: 'stored' }));
+    const delta = await memoryManager.getSessionGraphDelta(sessionId, turnId);
+
+    expect(delta.mode).toBe('delta');
+    const turnSubject = delta.triples.find((triple) =>
+      triple.predicate === 'http://dkg.io/ontology/hasAssistantMessage')?.subject;
+    expect(turnSubject).toMatch(/^urn:dkg:chat:session-turn:[0-9a-f]{64}$/);
+    const transitions = delta.triples
+      .filter((triple) => triple.predicate === 'http://dkg.io/ontology/updatesTurn' && triple.object === turnSubject)
+      .map((triple) => triple.subject);
+    expect(transitions).toHaveLength(1);
+    const ofTransition = (predicate: string) => delta.triples
+      .filter((triple) => triple.subject === transitions[0] && triple.predicate === predicate)
+      .map((triple) => triple.object);
+    expect(ofTransition('http://dkg.io/ontology/persistenceState')).toEqual(['stored']);
+    expect(ofTransition('http://dkg.io/ontology/assistantReply')).toEqual(['the final answer']);
+    // The completion is the only addition: the turn is still one exchange.
+    expect(before.triples.some((triple) => triple.predicate === 'http://dkg.io/ontology/updatesTurn')).toBe(false);
+    const withoutTransition = delta.triples.filter((triple) => triple.subject !== transitions[0]);
+    expect(withoutTransition).toHaveLength(before.triples.length);
+    expect(delta.triples.filter((triple) => triple.predicate === 'http://dkg.io/ontology/hasAssistantMessage')).toHaveLength(1);
+  });
+
   it('records a failed turn recovering as a transition and never downgrades a stored turn', async () => {
     const sessionId = newSessionId();
     const turnId = newTurnId();

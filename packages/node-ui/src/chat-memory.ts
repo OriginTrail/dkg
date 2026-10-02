@@ -1551,12 +1551,19 @@ export class ChatMemoryManager {
       };
     }
 
+    // The turn's transitions are part of it: a turn that completes after it was
+    // first written keeps its messages and records the new state and the final
+    // reply on a transition (`recordChatTurnPersistenceTransition`).
     const relatedSubjectsResult = await this.tools.query(
       `SELECT DISTINCT ?s WHERE {
         VALUES ?msg { <${userMsgUri}> <${assistantMsgUri}> }
         { BIND(<${sessionUri}> AS ?s) }
         UNION { BIND(<${turnUri}> AS ?s) }
         UNION { BIND(?msg AS ?s) }
+        UNION {
+          ?s <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+          ?s <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> <${turnUri}> .
+        }
         UNION { <${assistantMsgUri}> <${DKG_ONT}usedTool> ?s }
         UNION { ?s <${DKG_ONT}mentionedIn> ?msg }
         UNION {
