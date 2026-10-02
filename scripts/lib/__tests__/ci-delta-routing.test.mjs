@@ -258,6 +258,7 @@ test('the browser suite follows the UI surface and the packages its harness comp
     'packages/publisher',
     'packages/query',
     'packages/random-sampling',
+    'packages/semantic-runtime',
     'packages/storage',
   ]);
   for (const workspace of deferred) {
@@ -407,6 +408,10 @@ const UNFOLLOWED_LOADS = new Map([
     'a handler module named in the source-worker configuration'],
   ['packages/cli/test/blazegraph-image-metadata.test.ts: parserPath', "the CLI's own blazegraph-image-metadata.cjs"],
   ['packages/mcp-dkg/src/adapters.ts: pkg', 'a third-party adapter package named at run time; ADAPTER_MAP names no workspace'],
+  ['packages/semantic-runtime/src/component-worker.ts: pathToFileURL(artifacts.componentJsPath).href',
+    'integrity-verified generated component glue inside semantic-runtime, covered by its workspace routes'],
+  ['packages/semantic-runtime/src/worker.ts: artifacts.gluePath',
+    'integrity-verified generated Wasm glue inside semantic-runtime, covered by its workspace routes'],
   ['packages/adapter-openclaw/test/openclaw-entry.test.ts: href', 'a module the test writes to a temporary directory'],
 ]);
 
