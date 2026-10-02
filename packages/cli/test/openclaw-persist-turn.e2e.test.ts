@@ -811,6 +811,40 @@ describe('turns stored under the legacy turn subject, against the real store', (
     ]);
     expect(await footprint(newSession, turnId)).toEqual(ONE_STORED_TURN);
   });
+
+  it('a legacy subject that two sessions share is not trusted for the duplicate check: a completion is written, not dropped', async () => {
+    const [sessionA, sessionB] = [newSessionId(), newSessionId()];
+    const turnId = newTurnId();
+    // The previous code wrote both sessions' turn under the one subject named
+    // after the id, so that subject carries A's stored state and B's pending one.
+    await writeLegacyTurn(sessionA, turnId, { persistenceState: 'stored', userText: 'question a', assistantText: 'answer a' });
+    await writeLegacyTurn(sessionB, turnId, { persistenceState: 'pending', userText: 'question b', assistantText: 'working on b' });
+    expect(await turnSubjects(sessionA, turnId)).toEqual([legacySubject(turnId)]);
+    expect(await turnSubjects(sessionB, turnId)).toEqual([legacySubject(turnId)]);
+    const sharedBefore = await select(`SELECT ?p ?o WHERE { <${legacySubject(turnId)}> ?p ?o }`);
+
+    const finalB = { userMessage: 'question b', assistantReply: 'final answer b', persistenceState: 'stored' };
+    const completedB = await persistTurn(turn(sessionB, turnId, finalB));
+    const resendB = await persistTurn(turn(sessionB, turnId, finalB));
+
+    // A's stored state did not make B's completion a duplicate: it was written, once.
+    expect(completedB.body).toEqual({ ok: true, turnId });
+    expect(resendB.body).toEqual({ ok: true, duplicate: true, turnId });
+    // A still has only the shared subject, and its state cannot be read off it.
+    expect(await memoryManager.getChatTurnPersistenceState(sessionA, turnId)).toBeNull();
+    // B now has a subject of its own next to the shared one, which nothing touched.
+    const subjectsB = await turnSubjects(sessionB, turnId);
+    expect(subjectsB).toHaveLength(2);
+    expect(subjectsB).toContain(legacySubject(turnId));
+    expect(subjectsB.find((subject) => subject !== legacySubject(turnId))).toMatch(/^urn:dkg:chat:session-turn:[0-9a-f]{64}$/);
+    expect(await select(`SELECT ?p ?o WHERE { <${legacySubject(turnId)}> ?p ?o }`)).toHaveLength(sharedBefore.length);
+    expect(await transitionTargets(turnId)).toEqual([]);
+    expect(await turnSubjects(sessionA, turnId)).toEqual([legacySubject(turnId)]);
+    // From here on B's state is read from its own subject, and its history has the final reply.
+    expect(await memoryManager.getChatTurnPersistenceState(sessionB, turnId)).toBe('stored');
+    expect((await single(sessionB)).map((message) => message.text)).toContain('final answer b');
+    expect((await single(sessionA)).map((message) => message.text)).not.toContain('final answer b');
+  });
 });
 
 /**

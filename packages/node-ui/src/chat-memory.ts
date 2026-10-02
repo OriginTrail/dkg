@@ -193,6 +193,13 @@ const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
  * than the subject's name, so both shapes are found, and a transition is
  * attached to whichever subject the turn already has (`resolveChatTurnUri`).
  *
+ * One legacy shape is not trusted: a subject that more than one session is
+ * linked to. Its state cannot be attributed to either session, so
+ * `getChatTurnPersistenceState` reports nothing for it and the session's next
+ * report is written as a new turn under the session's own subject, the way it
+ * was written before turns were deduplicated. The shared subject stays as it
+ * is. From then on the session's state is read from its own subject.
+ *
  * The suffix is a hash of the JSON form of the pair, so the subject is
  * injective in `(sessionId, turnId)` whatever characters either holds (a `:`
  * in a Hermes id, a lone surrogate in a free-form OpenClaw session id), stays
@@ -770,10 +777,11 @@ export class ChatMemoryManager {
     if (!trimmedTurnId) return null;
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
-      `SELECT ?persistenceState ?transitionState WHERE {
+      `SELECT ?turn ?linkedSession ?persistenceState ?transitionState WHERE {
         ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
         ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
         ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        ?turn <${SCHEMA}isPartOf> ?linkedSession .
         OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
         OPTIONAL {
           ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
@@ -783,8 +791,21 @@ export class ChatMemoryManager {
       }`,
       this.wmReadOpts(),
     );
-    const states = (result.bindings ?? [])
-      .flatMap((binding: Record<string, string>) => [
+    const bindings: Array<Record<string, string>> = result.bindings ?? [];
+    // A legacy `turn:<turnId>` subject that two sessions reused carries the
+    // states and transitions of both, and nothing on it says whose is whose.
+    // What it holds is no evidence about this session's turn, so it is left
+    // out: the caller then writes the report instead of dropping it as a
+    // duplicate of the other session's turn (see `chatTurnUri`).
+    const iri = (value: string | undefined): string => String(value ?? '').replace(/[<>]/g, '');
+    const sharedTurns = new Set(
+      bindings
+        .filter((binding) => binding.linkedSession !== undefined && iri(binding.linkedSession) !== sessionUri)
+        .map((binding) => iri(binding.turn)),
+    );
+    const states = bindings
+      .filter((binding) => !sharedTurns.has(iri(binding.turn)))
+      .flatMap((binding) => [
         stripRdfLiteral(binding.transitionState ?? '').trim(),
         stripRdfLiteral(binding.persistenceState ?? '').trim(),
       ]);
@@ -799,7 +820,9 @@ export class ChatMemoryManager {
    * session link and `turnId` literal, so a turn written under the legacy
    * `turn:<turnId>` subject keeps receiving its transitions there, and a turn
    * of another session that reuses the id is never touched. When the turn does
-   * not exist yet, the subject it would be created under.
+   * not exist yet, the subject it would be created under. A session that has
+   * both a subject of its own and a legacy one gets its own: `session-turn:`
+   * sorts before `turn:`.
    */
   private async resolveChatTurnUri(sessionId: string, turnId: string): Promise<string> {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;

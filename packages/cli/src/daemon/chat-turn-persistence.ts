@@ -35,7 +35,10 @@ export type DurableChatTurnOutcome = {
  * `getChatTurnPersistenceState` reports and the turn a
  * `recordChatTurnPersistenceTransition` completes, because this owner decides
  * duplicate / transition / create from that state alone. `ChatMemoryManager`
- * does, by writing each new turn under a subject scoped to its session.
+ * does, by writing each new turn under a subject scoped to its session, and by
+ * reporting no state for a turn subject written before that scheme which two
+ * sessions share: a report for such a turn is created, never dropped as a
+ * duplicate of the other session's.
  */
 export type DurableChatTurnStore = Pick<
   ChatMemoryManager,

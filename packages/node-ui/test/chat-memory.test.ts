@@ -1260,6 +1260,47 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
     });
   });
 
+  describe('getChatTurnPersistenceState', () => {
+    const SESSION = `${CHAT}session:session-1`;
+    const OTHER_SESSION = `${CHAT}session:session-2`;
+    const LEGACY = `${LEGACY_TURN_PREFIX}turn-1`;
+    const SCOPED = `${SCOPED_TURN_PREFIX}${'ab'.repeat(32)}`;
+
+    /** The state the manager reports for `(session-1, turn-1)` when the store answers `rows`. */
+    async function stateFor(rows: Array<Record<string, string>>) {
+      mockQuery.returns.push({ bindings: [] }, { bindings: rows });
+      return createManager().getChatTurnPersistenceState('session-1', 'turn-1');
+    }
+
+    it('asks which sessions the turn subject is linked to', async () => {
+      await stateFor([]);
+
+      expect(String(mockQuery.calls.at(-1)![0])).toContain(`?turn <${SCHEMA_ORG}isPartOf> ?linkedSession`);
+    });
+
+    it('reports the state of a subject only this session is linked to, legacy or session-scoped', async () => {
+      expect(await stateFor([{ turn: LEGACY, linkedSession: SESSION, persistenceState: '"pending"' }])).toBe('pending');
+      expect(await stateFor([{ turn: `<${SCOPED}>`, linkedSession: `<${SESSION}>`, persistenceState: '"failed"', transitionState: '"stored"' }]))
+        .toBe('stored');
+    });
+
+    it('reports nothing for a legacy subject another session is linked to as well', async () => {
+      // One row per (linked session, state): the subject holds both sessions' states.
+      const shared = [SESSION, OTHER_SESSION].flatMap((linkedSession) =>
+        ['"stored"', '"pending"'].map((persistenceState) => ({ turn: LEGACY, linkedSession, persistenceState })));
+
+      expect(await stateFor(shared)).toBeNull();
+    });
+
+    it('reads the session-scoped subject and ignores the shared legacy one beside it', async () => {
+      expect(await stateFor([
+        { turn: LEGACY, linkedSession: SESSION, persistenceState: '"stored"' },
+        { turn: LEGACY, linkedSession: OTHER_SESSION, persistenceState: '"stored"' },
+        { turn: SCOPED, linkedSession: SESSION, persistenceState: '"pending"' },
+      ])).toBe('pending');
+    });
+  });
+
   describe('recordChatTurnPersistenceTransition', () => {
     const transitionTarget = (): string =>
       lastWrittenQuads().find((quad) => quad.predicate === `${DKG}updatesTurn`)!.object;
@@ -1364,15 +1405,21 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
       expect(queries[8]).toContain(`<${subject}>`);
     });
 
-    it('asks for a full refresh when the store names no usable subject for the turn', async () => {
-      for (const subject of [undefined, 'not an iri<']) {
-        mockQuery.calls.length = 0;
-        pushDeltaAnswers(subject);
+    // One case per test: `beforeEach` gives each a fresh mock, so the lookup a
+    // case reads is the one it queued, not an answer an earlier case left over.
+    it.each([
+      ['no subject', undefined],
+      ['a subject that is not an IRI', 'not an iri<'],
+    ])('asks for a full refresh when the store names no usable subject for the turn: %s', async (_label, subject) => {
+      pushDeltaAnswers(subject);
 
-        const delta = await createManager().getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+      const delta = await createManager().getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
 
-        expect(delta).toMatchObject({ mode: 'full_refresh_required', reason: 'turn_not_found', triples: [] });
-      }
+      expect(delta).toMatchObject({ mode: 'full_refresh_required', reason: 'turn_not_found', triples: [] });
+      // The lookup did find turn t2, so the refresh comes from the subject it
+      // named: nothing was read through that subject.
+      expect(String(mockQuery.calls[2]![0])).toContain(`<${DKG}turnId> "t2"`);
+      expect(mockQuery.calls).toHaveLength(4);
     });
   });
 });
