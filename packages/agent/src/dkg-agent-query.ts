@@ -387,6 +387,7 @@ import {
   ContextGraphReadAuthorityUnavailableError,
   contextGraphReadAuthorityDependencyOf,
   resolveContextGraphReadAuthorityDecision,
+  resolveContextGraphReadAuthorityResolution,
   unavailableContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -866,15 +867,8 @@ export class QueryMethods extends DKGAgentBase {
             // that authorizes this caller. A nullable id or local RDF marker
             // cannot substitute for it. Do not persist this absence: the next
             // admission/catch-up completion must resolve it afresh.
-            let unregistered = false;
-            const authority = await resolveContextGraphReadAuthorityDecision({
-              ...input,
-              getRegisteredAuthority: async () => {
-                const registered = await input.getRegisteredAuthority();
-                unregistered = registered.kind === 'unregistered';
-                return registered;
-              },
-            });
+            const resolution = await resolveContextGraphReadAuthorityResolution(input);
+            const authority = resolution.decision;
             // A remote graph can be visible before its new chain binding is
             // indexed and before its local definition arrives. During that
             // interval the legacy fallback can mistake absent local policy
@@ -897,8 +891,8 @@ export class QueryMethods extends DKGAgentBase {
                 'local-state',
               );
             }
-            return authority.outcome === 'allowed' && unregistered
-              ? { ...authority, registration: 'unregistered' as const }
+            return authority.outcome === 'allowed' && resolution.registration !== undefined
+              ? { ...authority, registration: resolution.registration }
               : authority;
           };
           const initial = await resolve();

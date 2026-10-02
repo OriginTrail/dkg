@@ -65,7 +65,6 @@ export interface FinalizedAuthorityColdResolutionOptions {
 export class FinalizedAuthorityColdResolutionV1 {
   readonly #flights = new Map<string, ColdResolutionFlight>();
   readonly #drains = new Set<Promise<unknown>>();
-  readonly #sharedDrains = new Map<object, Promise<unknown>>();
   readonly #coldTimeoutMs: () => number;
   readonly #now: () => number;
   #closed = false;
@@ -112,24 +111,12 @@ export class FinalizedAuthorityColdResolutionV1 {
   }
 
   /**
-   * Retain physical teardown work separately from the result a caller needs.
-   * A shared index drain may include unrelated bulk activity: it belongs to
-   * shutdown ownership, not to a successfully completed authority read's SLA.
-   * No authority result is cached while the drain is retained.
+   * Retain this owner's physical start promises beyond their bounded waits.
+   * Shared reader activity belongs to the agent lifecycle, not to a flight.
    */
   retainDrain(drain: Promise<unknown>): void {
     this.#drains.add(drain);
     const retire = () => { this.#drains.delete(drain); };
-    drain.then(retire, retire);
-  }
-
-  /** One global drain per reader, even while foreground traffic stays busy. */
-  retainSharedDrain(owner: object, start: () => Promise<unknown>): void {
-    if (this.#sharedDrains.has(owner)) return;
-    const drain = start();
-    this.#sharedDrains.set(owner, drain);
-    this.retainDrain(drain);
-    const retire = () => { this.#sharedDrains.delete(owner); };
     drain.then(retire, retire);
   }
 

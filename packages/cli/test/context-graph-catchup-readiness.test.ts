@@ -64,6 +64,48 @@ describe('context graph catch-up readiness classification', () => {
     updatedAt: 1,
   };
 
+  const swmOnlyResult = () => catchupReadinessResult({
+    connectedPeers: 1, peersResponded: 1, peersSucceeded: 1, sharedMemorySynced: 29,
+    cleanPlaneCompletions: {
+      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 1, emptyPeers: 0 },
+    },
+  });
+
+  it.each(['denied', 'unavailable'] as const)(
+    'invalidates all readiness when completion authority is %s despite peer data and prior proof',
+    (outcome) => {
+      const classification = classifyContextGraphCatchupReadiness({
+        result: swmOnlyResult(), includeSharedMemory: true, hasConfirmedMeta: true, isPrivate: true,
+        completionAuthority: { outcome },
+        readinessBeforeCatchup: { ...swmVerifiedReadinessBeforeCatchup, durableVerified: true },
+      });
+      expect(classification).toMatchObject({
+        jobStatus: outcome === 'denied' ? 'denied' : 'unreachable', durablePlane: 'required',
+        readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+        statePatch: { synced: false, sharedMemorySynced: false, metaSynced: true, pendingMeta: false },
+      });
+      expect(classification.eventPayload).toBeUndefined();
+    },
+  );
+
+  it('classifies current qualified absence and a subsequent registration without manufacturing VM proof', () => {
+    const input = {
+      result: swmOnlyResult(), includeSharedMemory: true, hasConfirmedMeta: true, isPrivate: true,
+      readinessBeforeCatchup,
+    };
+    const unregistered = classifyContextGraphCatchupReadiness({
+      ...input, completionAuthority: { outcome: 'allowed', registration: 'unregistered' },
+    });
+    expect(unregistered).toMatchObject({ jobStatus: 'done', durablePlane: 'not-applicable' });
+    expect(unregistered.readinessPatch).toEqual({ durableVerified: false, sharedMemoryVerified: true });
+    const registered = classifyContextGraphCatchupReadiness({
+      ...input, completionAuthority: { outcome: 'allowed' },
+    });
+    expect(registered).toMatchObject({ jobStatus: 'unreachable', durablePlane: 'required' });
+    expect(registered.readinessPatch).toEqual(unregistered.readinessPatch);
+  });
+
   it('uses a clean per-peer completion even when aggregate diagnostics contain denial and timeout', () => {
     const classification = classifyContextGraphCatchupReadiness({
       result: mixedPeerResult(1),

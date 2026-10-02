@@ -114,6 +114,23 @@ function privateSharedMemoryOnlyResult(): CatchupJobResult {
   return result;
 }
 
+function privateSharedMemoryMetaOnlyResult(): CatchupJobResult {
+  const result = cleanEmptyResult();
+  if (!result.diagnostics || !result.cleanPlaneCompletions) {
+    throw new Error('catch-up evidence missing');
+  }
+  // No VM proof and no payload on either plane. The required SWM plane did
+  // deliver metadata, but metadata is not positive synchronization proof.
+  result.diagnostics.durable.emptyResponses = 0;
+  result.diagnostics.sharedMemory.emptyResponses = 0;
+  result.diagnostics.sharedMemory.fetchedMetaTriples = 7;
+  result.diagnostics.sharedMemory.insertedMetaTriples = 1;
+  result.diagnostics.sharedMemory.bytesReceived = 90;
+  result.cleanPlaneCompletions.durable = { verifiedDataPeers: 0, emptyPeers: 0 };
+  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 0, emptyPeers: 0 };
+  return result;
+}
+
 function publicDurableAndSharedMemoryResult(): CatchupJobResult {
   const result = cleanEmptyResult();
   if (!result.diagnostics?.durable || !result.diagnostics.sharedMemory) {
@@ -1130,6 +1147,21 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.readiness?.durableVerified).toBe(false);
   });
 
+  it('keeps VM required for a legacy registered-metadata participant fallback, including the ready shortcut', async () => {
+    const { registration: _registration, ...legacyReadFallback } = unregisteredAuthority;
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: legacyReadFallback,
+      readiness: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+      initial: { subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true },
+      result: privateSharedMemoryOnlyResult(),
+    });
+    expect(result.runCalls).toBe(1);
+    expect(result.job).toMatchObject({ status: 'unreachable', durablePlane: 'required' });
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: true });
+  });
+
   it('requires VM when the graph registers during catch-up', async () => {
     const result = await subscribe({
       hasConfirmedMeta: true,
@@ -1160,15 +1192,19 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.state.synced).toBe(false);
   });
 
-  it('does not turn metadata-only private SWM into readiness even when VM is inapplicable', async () => {
+  it.each([true, false])('does not turn metadata-only private SWM into readiness even when VM is inapplicable (typed completions=%s)', async (typedCompletions) => {
+    const metadataOnly = privateSharedMemoryMetaOnlyResult();
+    if (!typedCompletions) delete metadataOnly.cleanPlaneCompletions;
     const result = await subscribe({
       hasConfirmedMeta: true,
       isPrivate: true,
       authorityDecision: unregisteredAuthority,
-      result: privateMetaOnlyResult(),
+      result: metadataOnly,
     });
-    expect(result.job.status).toBe('unreachable');
+    expect(result.job).toMatchObject({ status: 'unreachable', durablePlane: 'not-applicable' });
     expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state.synced).toBe(false);
+    expect(result.state.sharedMemorySynced).toBe(false);
   });
 
   it('only returns synthetic done when all ready flags include metaSynced=true', async () => {

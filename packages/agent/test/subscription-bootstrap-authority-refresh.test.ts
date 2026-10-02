@@ -97,7 +97,9 @@ const resolveBootstrap = (agent: DKGAgent) => (
 describe('subscription bootstrap finalized-generation refresh', () => {
   it('carries explicit unregistered applicability only from the canonical allowed authority read', async () => {
     const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
-    registeredAuthority.mockResolvedValue({ kind: 'unregistered' });
+    registeredAuthority.mockResolvedValue({
+      kind: 'unregistered', unregisteredEvidence: 'accepted-rfc64-finalized-absence',
+    });
     Reflect.set(agent, 'hasAcceptedRfc64PublicUnregisteredAuthorityV1', () => true);
     const decision = await resolveBootstrap(agent);
     expect(decision).toMatchObject({
@@ -106,9 +108,21 @@ describe('subscription bootstrap finalized-generation refresh', () => {
     expect(registeredAuthority).toHaveBeenCalledOnce();
   });
 
-  it('does not attach unregistered applicability to a private non-member denial', async () => {
+  it('does not turn a legacy unregistered read fallback into VM non-applicability', async () => {
     const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
     registeredAuthority.mockResolvedValue({ kind: 'unregistered' });
+    Reflect.set(agent, 'hasAcceptedRfc64PublicUnregisteredAuthorityV1', () => true);
+    const decision = await resolveBootstrap(agent);
+    expect(decision).toMatchObject({ outcome: 'allowed', source: 'rfc64-public' });
+    expect(decision).not.toHaveProperty('registration');
+    expect(registeredAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('does not attach unregistered applicability to a private non-member denial', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({
+      kind: 'unregistered', unregisteredEvidence: 'approved-private-replica-finalized-absence',
+    });
     Reflect.set(agent, 'resolveRfc64PrivateReadRosterV1', () => []);
     const decision = await resolveBootstrap(agent);
     expect(decision.outcome).toBe('denied');

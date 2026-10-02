@@ -402,6 +402,7 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphUnregisteredEvidence } from './registered-context-graph-authority.js';
 import {
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
@@ -423,6 +424,8 @@ const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 export type ContextGraphRegistrationBinding =
   | {
       kind: 'unregistered';
+      /** Explicit VM non-applicability; never set by legacy lookup fallbacks. */
+      unregisteredEvidence?: ContextGraphUnregisteredEvidence;
       /** Current participant-only authority for an approved private replica. */
       approvedPrivateReplicaAuthority?: ApprovedPrivateReplicaAuthority;
     }
@@ -1198,7 +1201,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ) {
       try {
         if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
-          return { kind: 'unregistered' };
+          return { kind: 'unregistered', unregisteredEvidence: 'local-create' };
         }
       } catch (err) {
         return {
@@ -1317,6 +1320,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       const privateAuthority: ApprovedPrivateReplicaAuthority = privateResolution.authority;
       return {
         kind: 'unregistered',
+        // The legacy adapter lane permits participant reads, but cannot prove
+        // chain absence. Only the finalized lane may exempt VM catch-up.
+        ...(allowConfirmedRegisteredMetaFallback ? {} : {
+          unregisteredEvidence: 'approved-private-replica-finalized-absence' as const,
+        }),
         approvedPrivateReplicaAuthority: privateAuthority,
       };
     };
@@ -1472,28 +1480,16 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         const coldResolution = finalizedAuthorityColdResolutionOf(this);
         const resolution = await coldResolution.read(
           flightKey,
-          async (flightSignal) => {
-            try {
-              return await this.rfc64AuthorityReadCoordinatorV1.runForeground(
-                flightSignal,
-                (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
-                  [contextGraphId],
-                  {
-                    ...evidence.agentResolverReadOptions(readSignal),
-                    ...repairHints,
-                  },
-                ),
-              );
-            } finally {
-              // This GLOBAL drain includes unrelated bulk catalog activity.
-              // Neither the foreground permit nor a completed read's result
-              // may wait for it. Retain it under the cold owner's shutdown
-              // fence instead; stop still drains physical index work before
-              // tearing down the store, without turning valid bindings into
-              // request-deadline failures. No result is memoized by this owner.
-              coldResolution.retainSharedDrain(indexReader, () => indexReader.whenIdle());
-            }
-          },
+          (flightSignal) => this.rfc64AuthorityReadCoordinatorV1.runForeground(
+            flightSignal,
+            (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+              [contextGraphId],
+              {
+                ...evidence.agentResolverReadOptions(readSignal),
+                ...repairHints,
+              },
+            ),
+          ),
           {
             label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
             requestTimeoutMs: registrationResolutionTimeoutMs,
@@ -1520,7 +1516,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               !strictFinalizedDurableBindingRepair
               && options.allowAcceptedRfc64FinalizedAbsence === true
             ) {
-              return { kind: 'unregistered' };
+              return {
+                kind: 'unregistered',
+                unregisteredEvidence: 'accepted-rfc64-finalized-absence',
+              };
             }
             // A locally approved private replica may use exact finalized name
             // absence only while its current approval, metadata, membership,

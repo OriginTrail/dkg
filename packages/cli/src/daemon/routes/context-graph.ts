@@ -133,7 +133,6 @@ import {
   classifyNameHashOnlyCatchup,
   readContextGraphReadiness,
   writeContextGraphReadiness,
-  type ContextGraphCatchupReadinessClassification,
 } from '../../context-graph-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -2330,33 +2329,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
               allowSubscriptionFallback: false,
             }).catch(() => ({ outcome: 'unavailable' as const, registration: undefined }))
             : readAuthority;
-          job.durablePlane = completionAuthority.outcome === 'allowed'
-            && completionAuthority.registration === 'unregistered'
-            ? 'not-applicable' : 'required';
-          const classification: ContextGraphCatchupReadinessClassification =
-            completionAuthority.outcome !== 'allowed'
-            ? {
-              jobStatus: completionAuthority.outcome === 'denied' ? 'denied' : 'unreachable',
-              error: completionAuthority.outcome === 'denied'
-                ? 'Context-graph authority denied access at catch-up completion.'
-                : 'Context-graph authority is unavailable at catch-up completion. Retry after authority recovers.',
-              statePatch: {
-                synced: false, sharedMemorySynced: false,
-                metaSynced: hasConfirmedMeta, pendingMeta: !hasConfirmedMeta,
-              },
-              readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
-            }
-            : classifyContextGraphCatchupReadiness({
-              result,
-              includeSharedMemory: shouldSyncSharedMemory,
-              hasConfirmedMeta,
-              isPrivate,
-              registration: completionAuthority.registration,
-              readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
-                ? readinessBeforeCatchup
-                : readContextGraphReadiness(dashDb, targetContextGraphId),
-            });
+          const classification = classifyContextGraphCatchupReadiness({
+            result,
+            includeSharedMemory: shouldSyncSharedMemory,
+            hasConfirmedMeta,
+            isPrivate,
+            completionAuthority,
+            readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
+              ? readinessBeforeCatchup
+              : readContextGraphReadiness(dashDb, targetContextGraphId),
+          });
 
+          job.durablePlane = classification.durablePlane;
           job.status = classification.jobStatus;
           job.error = classification.error;
           if (classification.readinessPatch) {

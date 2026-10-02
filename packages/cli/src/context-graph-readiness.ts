@@ -478,6 +478,7 @@ function catchupPlaneReadinessThisRun(input: {
 }
 
 export interface ContextGraphCatchupReadinessClassification {
+  durablePlane: 'required' | 'not-applicable';
   jobStatus: 'done' | 'failed' | 'denied' | 'partial' | 'unreachable';
   error?: string;
   statePatch?: ContextGraphSubscriptionStatePatch;
@@ -488,6 +489,11 @@ export interface ContextGraphCatchupReadinessClassification {
     verifiedPrivateOnlyResponses: number;
   };
 }
+
+/** Live completion authority takes precedence over peer progress or old proof. */
+export type ContextGraphCatchupCompletionAuthority =
+  | { outcome: 'allowed'; registration?: 'unregistered' }
+  | { outcome: 'denied' | 'unavailable' };
 
 /**
  * A subscription known only by its on-chain name hash cannot sync anything
@@ -506,20 +512,49 @@ export function classifyNameHashOnlyCatchup(
   return { jobStatus: 'unreachable', error: identity.message };
 }
 
-/**
- * Canonical policy for converting one catch-up result into externally visible
- * subscription readiness. The HTTP route gathers live metadata and applies
- * the returned patches; all readiness decisions remain in this pure function.
- */
-export function classifyContextGraphCatchupReadiness(input: {
+interface ContextGraphCatchupReadinessInput {
   result: CatchupJobResult;
   includeSharedMemory: boolean;
   hasConfirmedMeta: boolean;
   isPrivate: boolean;
   readinessBeforeCatchup: ContextGraphReadinessProvenance;
-  /** Current allowed bootstrap authority, never persisted or inferred from metadata. */
-  registration?: 'unregistered';
-}): ContextGraphCatchupReadinessClassification {
+  /** Current bootstrap authority, never persisted or inferred from metadata. */
+  completionAuthority?: ContextGraphCatchupCompletionAuthority;
+}
+
+/**
+ * Canonical policy for converting one catch-up result into externally visible
+ * subscription readiness. The HTTP route gathers live metadata and applies
+ * the returned patches; all readiness decisions remain in this pure function.
+ */
+export function classifyContextGraphCatchupReadiness(
+  input: ContextGraphCatchupReadinessInput,
+): ContextGraphCatchupReadinessClassification {
+  return {
+    ...classifyCatchupReadiness(input),
+    durablePlane: input.completionAuthority?.outcome === 'allowed'
+      && input.completionAuthority.registration === 'unregistered'
+      ? 'not-applicable' : 'required',
+  };
+}
+
+function classifyCatchupReadiness(
+  input: ContextGraphCatchupReadinessInput,
+): Omit<ContextGraphCatchupReadinessClassification, 'durablePlane'> {
+  if (input.completionAuthority && input.completionAuthority.outcome !== 'allowed') {
+    return {
+      jobStatus: input.completionAuthority.outcome === 'denied' ? 'denied' : 'unreachable',
+      error: input.completionAuthority.outcome === 'denied'
+        ? 'Context-graph authority denied access at catch-up completion.'
+        : 'Context-graph authority is unavailable at catch-up completion. Retry after authority recovers.',
+      statePatch: {
+        synced: false, sharedMemorySynced: false,
+        metaSynced: input.hasConfirmedMeta, pendingMeta: !input.hasConfirmedMeta,
+      },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+    };
+  }
+  const registration = input.completionAuthority?.registration;
   const { result } = input;
   const durableDataProgress = result.dataSynced > 0;
   const sharedMemoryProgress = result.sharedMemorySynced > 0;
@@ -590,7 +625,7 @@ export function classifyContextGraphCatchupReadiness(input: {
       durableVerified: durableVerifiedPersisted,
       sharedMemoryVerified: sharedMemoryVerifiedPersisted,
       includeSharedMemory: input.includeSharedMemory,
-      registration: input.registration,
+      registration,
     });
     // Both paths use current authoritative applicability. Exempting an
     // unregistered graph never manufactures durableVerified provenance.
@@ -598,7 +633,7 @@ export function classifyContextGraphCatchupReadiness(input: {
       durableVerified,
       sharedMemoryVerified,
       includeSharedMemory: input.includeSharedMemory,
-      registration: input.registration,
+      registration,
     });
     const {
       missingRequestedDurable,
@@ -628,7 +663,7 @@ export function classifyContextGraphCatchupReadiness(input: {
       } else if (input.isPrivate && missingRequestedDurable) {
         error = 'Shared-memory context-graph data synchronized, but durable VM catch-up did not complete. Retry to finish finalized VM synchronization.';
       } else if (input.isPrivate) {
-        error = input.registration === 'unregistered'
+        error = registration === 'unregistered'
           ? 'Durable VM is not applicable to this unregistered context graph, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.'
           : 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
       } else {

@@ -438,6 +438,14 @@ describe('approved private bare-name replica authorization', () => {
       source: 'rfc64-private',
       reason: 'rfc64-participant',
     });
+    // The compatibility read fallback is allowed even though authenticated
+    // metadata says registered. It is NOT evidence that VM is inapplicable.
+    const bootstrap = await fixture.receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      { callerAgentAddress: fixture.memberAddress, allowSubscriptionFallback: false },
+    );
+    expect(bootstrap).toMatchObject({ outcome: 'allowed', source: 'rfc64-private' });
+    expect(bootstrap).not.toHaveProperty('registration');
   });
 
   it('does not downgrade registered metadata before a finalized-capable adapter checks its name index', async () => {

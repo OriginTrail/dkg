@@ -322,7 +322,7 @@ describe('implicit SWM context graph metadata', () => {
       'resolveContextGraphIdByNameHash',
     ).mockRejectedValue(new Error('registry RPC unavailable'));
     await expect(agent.resolveContextGraphRegistrationBinding(contextGraphId))
-      .resolves.toEqual({ kind: 'unregistered' });
+      .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
     expect(registryResolve).not.toHaveBeenCalled();
   }, 15000);
 
@@ -417,7 +417,7 @@ describe('implicit SWM context graph metadata', () => {
       await restarted.start();
 
       await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
-        .resolves.toEqual({ kind: 'unregistered' });
+        .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
       await expect(restarted.getContextGraphOnChainPolicy(contextGraphId))
         .resolves.toEqual({});
       expect(registryResolve).not.toHaveBeenCalled();
