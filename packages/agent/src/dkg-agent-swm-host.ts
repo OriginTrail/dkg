@@ -8671,7 +8671,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async catchupSwmFromHost(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
-    options?: { sinceSeqno?: number; maxRounds?: number; maxEntriesPerRound?: number },
+    options?: { sinceSeqno?: number; maxRounds?: number; maxEntriesPerRound?: number; reportEntries?: boolean },
   ): Promise<{
     rounds: number;
     fetched: number;
@@ -8692,6 +8692,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     skipped: number;
     nextSeqno: number;
     denied?: string;
+    /**
+     * With `reportEntries`: every envelope the host served, in the order it
+     * served them, as its seqno and the SHA-256 (hex) of its bytes. It is the
+     * evidence of what a host holds, whether or not the replay applied it.
+     */
+    entries?: Array<{ seqno: number; envelopeSha256: string }>;
   }> {
     const ctx = createOperationContext('share');
     let sinceSeqno = options?.sinceSeqno ?? 0;
@@ -8723,6 +8729,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let appliedTriples = 0;
     let skipped = 0;
     let lastDenied: string | undefined;
+    const reported: Array<{ seqno: number; envelopeSha256: string }> | undefined = options?.reportEntries ? [] : undefined;
     while (rounds < maxRounds) {
       rounds += 1;
       const signedReq = await mintSignedCatchupRequest({
@@ -8801,6 +8808,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       for (const entry of resp.entries) {
         fetched += 1;
         const envelope = Buffer.from(entry.envelopeB64, 'base64');
+        reported?.push({ seqno: entry.seqno, envelopeSha256: createHash('sha256').update(envelope).digest('hex') });
         try {
           const outcome = await handler.handle(
             new Uint8Array(envelope),
@@ -8831,7 +8839,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       sinceSeqno = resp.nextSeqno;
       if (!resp.truncated) break;
     }
-    return { rounds, fetched, applied, appliedTriples, skipped, nextSeqno: sinceSeqno, ...(lastDenied ? { denied: lastDenied } : {}) };
+    return {
+      rounds, fetched, applied, appliedTriples, skipped, nextSeqno: sinceSeqno,
+      ...(lastDenied ? { denied: lastDenied } : {}),
+      ...(reported ? { entries: reported } : {}),
+    };
   }
 
   /**
@@ -8844,7 +8856,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   async catchupSwmFromConnectedHosts(this: DKGAgent,
     contextGraphId: string,
-    options?: { sinceSeqno?: number; maxRounds?: number; maxEntriesPerRound?: number; peers?: string[] },
+    options?: { sinceSeqno?: number; maxRounds?: number; maxEntriesPerRound?: number; reportEntries?: boolean; peers?: string[] },
   ): Promise<Array<{
     peerId: string;
     rounds: number;
@@ -8855,6 +8867,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     nextSeqno: number;
     denied?: string;
     error?: string;
+    entries?: Array<{ seqno: number; envelopeSha256: string }>;
   }>> {
     const ctx = createOperationContext('share');
     const explicitPeers = options?.peers;
@@ -8888,6 +8901,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       nextSeqno: number;
       denied?: string;
       error?: string;
+      entries?: Array<{ seqno: number; envelopeSha256: string }>;
     }> = [];
     for (const peerId of candidates) {
       try {
@@ -8907,6 +8921,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           sinceSeqno: resumeSeqno,
           maxRounds: options?.maxRounds,
           maxEntriesPerRound: options?.maxEntriesPerRound,
+          reportEntries: options?.reportEntries,
         });
         if (r.nextSeqno > 0) {
           let perPeer = this.lastHostCatchupSeqno.get(contextGraphId);
