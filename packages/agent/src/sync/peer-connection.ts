@@ -47,11 +47,12 @@ export async function syncOpenedPeerConnection(
       admitted = await session.step(() => ports.ensureAdmitted(remotePeer, ctx, signal));
     } catch (err: unknown) {
       signal.throwIfAborted();
-      // NetworkAdmissionCoordinator already emits the retryable probe failure
-      // with the peer-specific reason. Repeating it here on every connection
-      // callback doubled the hottest network-churn warning without adding
-      // information. Keep this wrapper warning for unexpected failures whose
-      // owner cannot provide its own diagnostic.
+      // The coordinator logs a failed probe itself, once, with the reason and
+      // the backoff it starts (see NetworkAdmissionProbeError). Logging the
+      // error again here ran once per connection callback, including every
+      // reconnect skipped inside that backoff, which made this the hottest
+      // network-churn warning (GH#1578). Any other failure has no owner that
+      // reports it, so it is still logged here.
       if (!(err instanceof NetworkAdmissionProbeError)) {
         const message = err instanceof Error ? err.message : String(err);
         log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
