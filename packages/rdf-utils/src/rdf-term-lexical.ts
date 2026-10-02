@@ -16,9 +16,25 @@ export function isRdfLanguageTag(value: string): boolean {
   return RDF_LANGUAGE_TAG_PATTERN.test(value);
 }
 
-/** Split the canonical double-quoted RDF literal lexical form. */
+/**
+ * Split the canonical double-quoted RDF literal lexical form.
+ *
+ * This accepts exactly the terms of the pattern it replaced, and splits them
+ * the same way:
+ *
+ *   /^"((?:[^"\\]|\\.)*)"(?:@([A-Za-z0-9-]+)|\^\^(?:<([^>]+)>|([^<].*)))?$/
+ *
+ * Hash canonicalization keeps a term rejected here verbatim and re-serializes
+ * an accepted one, so moving this boundary in either direction changes the
+ * hash of the terms that cross it.
+ */
 export function parseRdfLiteralLexicalTerm(term: string): RdfLiteralLexicalTerm | null {
   return parseRdfLiteralLexicalTermWith(term, false);
+}
+
+/** The characters `.` does not match in a pattern without the `s` flag. */
+function isLineTerminator(code: number): boolean {
+  return code === 0x0a || code === 0x0d || code === 0x2028 || code === 0x2029;
 }
 
 /** One lexical scanner shared by canonical RDF and SPARQL TSV short strings. */
@@ -33,7 +49,9 @@ export function parseRdfLiteralLexicalTermWith(
     const character = term[index];
     if (character === '\\') {
       index += 1;
-      if (index >= term.length) return null;
+      // `\\.` in the replaced pattern: a backslash needs a character after
+      // it, and that character is not a line terminator.
+      if (index >= term.length || isLineTerminator(term.charCodeAt(index))) return null;
       continue;
     }
     if (character === delimiter) {
@@ -61,6 +79,11 @@ export function parseRdfLiteralLexicalTermWith(
     return { body, suffix: { kind: 'datatype', datatype: bracketed, syntax: 'bracketed' } };
   }
   if (datatype.length === 0) return null;
+  // `[^<].*` in the replaced pattern: any first character, then none that is
+  // a line terminator.
+  for (let index = 1; index < datatype.length; index += 1) {
+    if (isLineTerminator(datatype.charCodeAt(index))) return null;
+  }
   return { body, suffix: { kind: 'datatype', datatype, syntax: 'bare' } };
 }
 
