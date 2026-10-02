@@ -6535,6 +6535,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           authenticationDeadline: contextGraphBudget.createGraphScopedAuthenticationDeadline,
           storeGraphScopedAsset: durableContext.storeGraphScopedAsset!,
         },
+        reconnect: async (reconnectSignal) => {
+          try {
+            await this.ensurePeerConnected(remotePeerId, { signal: reconnectSignal });
+          } catch {
+            // Unreachable for now, or connected but no longer admitted.
+            return false;
+          }
+          return this.node.libp2p.getConnections()
+            .some((connection) => connection.remotePeer.toString() === remotePeerId);
+        },
         logInfo: message => this.log.info(ctx, message),
       });
       switch (outcome.kind) {

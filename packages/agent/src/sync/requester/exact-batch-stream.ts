@@ -62,20 +62,28 @@ class ExactBatchRefusalError extends Error {
 export class ExactBatchPartialSyncError extends Error {
   readonly code = 'EXACT_BATCH_PARTIAL';
   constructor(readonly committedAssetUals: readonly string[], cause: unknown,
-    readonly refusalObservation?: ExactBatchRefusalObservation) {
+    readonly refusalObservation?: ExactBatchRefusalObservation,
+    /**
+     * The stream itself failed or ended before completion, and no local
+     * cancellation caused it. False for a refusal, for an asset this node
+     * rejected or could not store, and for a frame the receive window refused.
+     */
+    readonly streamInterrupted = false) {
     super('Exact batch stopped before verified completion', { cause });
   }
 }
 interface ExactBatchProgress {
   readonly committedAssetUals: string[];
   refusalObservation?: ExactBatchRefusalObservation;
+  streamInterrupted?: boolean;
 }
 function committedPrefix(progress: ExactBatchProgress): readonly string[] {
   return Object.freeze([...progress.committedAssetUals]);
 }
 function partialSyncError(progress: ExactBatchProgress, cause: unknown, signal?: AbortSignal): ExactBatchPartialSyncError {
   return new ExactBatchPartialSyncError(committedPrefix(progress), cause,
-    cause instanceof ExactBatchRefusalError && !signal?.aborted ? progress.refusalObservation : undefined);
+    cause instanceof ExactBatchRefusalError && !signal?.aborted ? progress.refusalObservation : undefined,
+    progress.streamInterrupted === true && !signal?.aborted);
 }
 const META_GRAPH_SUFFIX = '/_meta';
 const MAX_PARSED_HEAP = 32 * 1024 * 1024;
@@ -168,11 +176,22 @@ async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, op
   let stopped = false, batchEnded = false, acknowledgedAssets = 0;
   let wake: (() => void) | undefined;
   const notify = () => { const waiting = wake; wake = undefined; waiting?.(); };
+  // The first failure of the stream itself: a read or a send that rejected, or
+  // an end before BATCH_END. What the verifier, the store or the receive
+  // window reject is not recorded here.
+  let streamFailed = false, streamFailure: unknown;
+  const failStream = (cause: unknown): unknown => {
+    if (!streamFailed) { streamFailed = true; streamFailure = cause; }
+    return cause;
+  };
+  const onStream = async <T>(io: () => Promise<T>): Promise<T> => {
+    try { return await io(); } catch (cause) { throw failStream(cause); }
+  };
   const reader = (async () => {
     while (!stopped) {
-      const incoming = await session.next();
+      const incoming = await onStream(() => session.next());
       if (stopped) return;
-      if (!incoming) throw new Error('Exact batch ended without explicit completion');
+      if (!incoming) throw failStream(new Error('Exact batch ended without explicit completion'));
       window.accept(incoming); notify();
       if (incoming.kind === K.REFUSE) throw new ExactBatchRefusalError(window.refusal!, window.startedCount, window.atAssetBoundary);
       if (incoming.kind === K.BATCH_END) { batchEnded = true; notify(); return; }
@@ -184,7 +203,7 @@ async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, op
       const asset = window.takeReady();
       if (!asset) { await new Promise<void>(resolve => { wake = resolve; }); continue; }
       const acknowledged = await window.commitAsset(asset, commit, { signal });
-      await session.send(acknowledged);
+      await onStream(() => session.send(acknowledged));
       acknowledgedAssets += 1;
     }
   })();
@@ -194,6 +213,10 @@ async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, op
     return Object.freeze({ complete: true, committedAssetUals: committedPrefix(progress) });
   } catch (cause) {
     stopped = true; cancellation.abort(cause); notify();
+    // Decided now: a read left pending rejects later, once the stream is torn
+    // down, and that is a consequence of this failure, not its origin. A
+    // cancelled session never counts (see `partialSyncError`).
+    progress.streamInterrupted = streamFailed && cause === streamFailure;
     await window.close();
     const prefix = progress.committedAssetUals;
     progress.refusalObservation = cause instanceof ExactBatchRefusalError && !session.signal.aborted
