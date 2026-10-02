@@ -27,6 +27,7 @@
     "bench:analysis": "node --experimental-strip-types bench/analyze-publish-async-get.ts",
     "bench:profile": "node bench/profile-publish-async-get.mjs",
     "bench:store-read": "pnpm --filter @origintrail-official/dkg-storage build && esbench --config esbench.config.mjs --file store-read-latency",
+    "bench:storage-amplification": "pnpm --filter @origintrail-official/dkg-storage build && node bench/storage-amplification.mjs",
     "bench:swm-large-payload": "pnpm --filter @origintrail-official/dkg benchmark:swm-large-payload --",
     "bench:swm-triple-volume": "pnpm --filter @origintrail-official/dkg benchmark:swm-triple-volume --",
     "bench:baseline": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config esbench.config.mjs",
