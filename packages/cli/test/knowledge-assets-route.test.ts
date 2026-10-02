@@ -358,8 +358,32 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(discarded.body.code).toBe('KA_WM_LIFECYCLE_REQUIRED');
       expect(String(discarded.body.error)).toMatch(/active Working Memory draft/i);
 
+      // The rejected discard must leave the shared asset as it was.
       const descriptor = await getJson(daemon, `/api/knowledge-assets/${name}?contextGraphId=${REG}`);
       expect(descriptor.status).toBe(200);
+      expect(descriptor.body.status).toBe('swm-shared');
+    });
+
+    it('returns the same typed conflict for wm/write on a shared KA and does not reopen it', async () => {
+      const name = 'shared-write-guard';
+      await createKa(REG, name);
+      await write(REG, name, [{ subject: 'ex:shared', predicate: 'ex:p', object: '"x"' }]);
+      const finalized = await postJson(daemon, `/api/knowledge-assets/${name}/wm/finalize`, { contextGraphId: REG });
+      expect(finalized.status, `finalize: ${JSON.stringify(finalized.body)}`).toBe(200);
+      const shared = await postJson(daemon, `/api/knowledge-assets/${name}/swm/share`, { contextGraphId: REG });
+      expect(shared.status, `share: ${JSON.stringify(shared.body)}`).toBe(200);
+
+      // The mapping sits in the shared WM error handler, so it covers this verb too.
+      const rejected = await write(REG, name, [{ subject: 'ex:late', predicate: 'ex:p', object: '"y"' }]);
+      expect(rejected.status, `write: ${JSON.stringify(rejected.body)}`).toBe(409);
+      expect(rejected.body.code).toBe('KA_WM_LIFECYCLE_REQUIRED');
+
+      // wm/write creates a missing or discarded KA before appending. A shared
+      // one must not be turned back into a fresh draft by the rejected write.
+      const descriptor = await getJson(daemon, `/api/knowledge-assets/${name}?contextGraphId=${REG}`);
+      expect(descriptor.status).toBe(200);
+      expect(descriptor.body.status).toBe('swm-shared');
+      expect(JSON.stringify((await wmQuads(REG, name)).body)).not.toContain('ex:late');
     });
   });
 
