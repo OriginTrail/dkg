@@ -159,7 +159,7 @@ function defaultBestEffortStore(input: Readonly<{
       if (sparql.includes('SELECT ?predicate ?object')) {
         return { type: 'bindings', bindings: input.cacheRows ?? [] };
       }
-      if (sparql.includes('SELECT ?key ?algorithm ?proof ?peerId')) {
+      if (sparql.includes('SELECT DISTINCT ?key ?algorithm ?proof ?peerId')) {
         expect(sparql).toContain(
           'FILTER (?g NOT IN (<urn:dkg:local:join-encryption-key-cache>))',
         );
