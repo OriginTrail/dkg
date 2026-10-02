@@ -1081,12 +1081,8 @@ export class DKGAgentBase {
   );
   /** Maximum peers connected/probed/transported by one exact-recovery pass. */
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
-  /**
-   * A legacy probe competing with an advertised stream Core must not spend the
-   * stream recovery window walking a whole graph through small durable pages.
-   * Proven holders and periodic compatibility probes retain the ordinary budget.
-   */
-  static readonly VM_RECONCILE_MIXED_LEGACY_ATTEMPT_TIMEOUT_MS = 120_000;
+  /** Bounded process-local transport cadence, separate from absence-proof rotation. */
+  static readonly VM_RECONCILE_PHYSICAL_ATTEMPT_HISTORY_MAX = 16_384;
   /** How long a clean legacy exact-filter miss suppresses one peer. */
   static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
   /** Transport affinity is short-lived and never establishes asset coverage. */
@@ -1350,6 +1346,7 @@ export class DKGAgentBase {
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  protected readonly vmReconcilePhysicalAttemptOrdinals = new Map<string, number>();
   /**
    * #2858 — confirmed VM copies behind an on-chain update, queued by the
    * `KnowledgeAssetUpdated` nudge and worked off by a refresh worker each

@@ -27,6 +27,9 @@ export const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
   maxSelectorBytes: 16 * 1024,
 });
 
+/** One competing legacy probe shares this window with any full-scan fallback. */
+export const VM_MIXED_LEGACY_ATTEMPT_TIMEOUT_MS = 120_000;
+
 export interface VmRecoveryTransportCandidate<T> {
   readonly attempt: T;
   readonly kaId: string;
@@ -40,6 +43,10 @@ export interface VmRecoveryTransportPlanningOptions<T> {
   readonly onChainCgId: bigint;
   readonly streamEligible: boolean;
   readonly registeredPublicAccess: boolean;
+  /** A different connected Core advertises exact-batch streaming for this graph. */
+  readonly competingStreamAvailable?: boolean;
+  /** Physical attempts of this KA against this peer, modulo four; no absence proof implied. */
+  readonly physicalAttemptOrdinal?: number;
   readonly signal?: AbortSignal;
   readonly isCurrent: () => boolean;
   /** Observation only: outcome counts of this plan's sizing, never consulted by a decision. */
@@ -71,6 +78,7 @@ export interface VmRecoveryUnplannedCandidate<T> {
 export interface VmRecoveryTransportPlan<T> {
   readonly attempts: readonly T[];
   readonly transportMode: ExactRecoveryTransportMode;
+  readonly legacyAttemptTimeoutMs?: number;
   /** Unobserved probes cannot create reusable public-holder credit. */
   readonly publicAccessEvidence: boolean | undefined;
   readonly packing: Readonly<Omit<VmRecoveryMicrobatchPlan<unknown>, 'targets'>> | undefined;
@@ -84,11 +92,13 @@ function freezePlan<T>(
   publicAccessEvidence: boolean | undefined,
   packing?: VmRecoveryTransportPlan<T>['packing'],
   unplanned: readonly VmRecoveryUnplannedCandidate<T>[] = [],
+  legacyAttemptTimeoutMs?: number,
 ): VmRecoveryTransportPlan<T> {
   // Attempt records remain owned by the host; only the planning decision and
   // its selected order are frozen, without freezing mutable rotation state.
   return Object.freeze({
     attempts: Object.freeze([...attempts]), transportMode, publicAccessEvidence,
+    ...(legacyAttemptTimeoutMs === undefined ? {} : { legacyAttemptTimeoutMs }),
     packing: packing === undefined ? undefined : Object.freeze({ ...packing }),
     unplanned: Object.freeze([...unplanned]),
   });
@@ -102,7 +112,11 @@ export async function planVmRecoveryTransport<T>(
   const probe = options.providerAttemptKind === 'probe';
   const candidates = probe ? options.candidates.slice(0, 1) : options.candidates;
   if (probe && !options.streamEligible) {
-    return freezePlan(candidates.map(({ attempt }) => attempt), 'legacy', undefined);
+    const boundedLegacyProbe = options.registeredPublicAccess
+      && options.competingStreamAvailable === true
+      && (options.physicalAttemptOrdinal ?? 0) % 4 !== 3;
+    return freezePlan(candidates.map(({ attempt }) => attempt), 'legacy', undefined,
+      undefined, [], boundedLegacyProbe ? VM_MIXED_LEGACY_ATTEMPT_TIMEOUT_MS : undefined);
   }
 
   let publicAccessEvidence: boolean | undefined;

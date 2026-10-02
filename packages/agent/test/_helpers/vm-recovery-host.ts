@@ -67,6 +67,9 @@ export interface VmRecoveryHostInternals {
   openVmReconcileRotationState(): void;
   clearNetworkRejectedPeerState(peerId: string): void;
   vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
+  vmReconcileRotationAdmissionCursorByCg: Map<string, number>;
+  vmReconcilePhysicalAttemptOrdinal(target: OrdinalRecoveryTarget, peerId: string): number;
+  recordVmReconcilePhysicalAttempt(target: OrdinalRecoveryTarget, peerId: string): void;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;

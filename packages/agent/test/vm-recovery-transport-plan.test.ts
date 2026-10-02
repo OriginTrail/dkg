@@ -36,6 +36,27 @@ describe('VM recovery transport planning pipeline', () => {
     expect(f.readUpdateContext).not.toHaveBeenCalled();
   });
 
+  it('periodically leaves a competing legacy probe unbounded without using absence-proof state', async () => {
+    const f = fixture();
+    for (const ordinal of [0, 1, 2, 3, 4]) {
+      const plan = await planVmRecoveryTransport({
+        ...f.options,
+        providerAttemptKind: 'probe',
+        registeredPublicAccess: true,
+        competingStreamAvailable: true,
+        physicalAttemptOrdinal: ordinal,
+      }, f.ports);
+      expect(plan.transportMode).toBe('legacy');
+      expect(plan.legacyAttemptTimeoutMs).toBe(ordinal === 3 ? undefined : 120_000);
+    }
+    expect((await planVmRecoveryTransport({ ...f.options, providerAttemptKind: 'probe',
+      competingStreamAvailable: true }, f.ports)).legacyAttemptTimeoutMs).toBeUndefined();
+    expect((await planVmRecoveryTransport({ ...f.options, providerAttemptKind: 'probe',
+      registeredPublicAccess: true }, f.ports)).legacyAttemptTimeoutMs).toBeUndefined();
+    expect((await planVmRecoveryTransport({ ...f.options, registeredPublicAccess: true,
+      competingStreamAvailable: true }, f.ports)).legacyAttemptTimeoutMs).toBeUndefined();
+  });
+
   it('uses one sizing read for a streaming probe without granting holder evidence', async () => {
     const f = fixture();
     const plan = await planVmRecoveryTransport({ ...f.options, providerAttemptKind: 'probe',
