@@ -9,6 +9,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { stubNodeEventStream } from './helpers/fake-event-stream.js';
 
 const fetchCurrentAgentMock = vi.fn();
 const fetchLocalAgentIntegrationsMock = vi.fn();
@@ -60,6 +61,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
       container.remove();
     }
+    vi.unstubAllGlobals();
   });
 
   beforeEach(() => {
@@ -67,20 +69,9 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
-    // useNodeEvents (used by PanelLeft) opens an EventSource on mount.
-    // happy-dom doesn't ship EventSource; stub it so the hook can no-op
-    // without throwing in the test container.
-    (globalThis as any).EventSource = class StubEventSource {
-      url: string;
-      readyState = 0;
-      onopen: ((e: any) => void) | null = null;
-      onmessage: ((e: any) => void) | null = null;
-      onerror: ((e: any) => void) | null = null;
-      constructor(url: string) { this.url = url; }
-      addEventListener() {}
-      removeEventListener() {}
-      close() {}
-    };
+    // useNodeEvents (used by PanelLeft) opens the node's event stream on
+    // mount; answer it with a quiet fake.
+    stubNodeEventStream();
 
     fetchCurrentAgentMock.mockResolvedValue({
       agentAddress: 'agent-self',

@@ -3,6 +3,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { stubNodeEventStream } from './helpers/fake-event-stream.js';
 
 const {
   fetchContextGraphsMock,
@@ -53,15 +54,7 @@ describe('JoinProjectModal public subscription interaction', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
-    (globalThis as any).EventSource = class {
-      constructor(_url: string) {}
-      addEventListener() {}
-      removeEventListener() {}
-      close() {}
-      onopen = null;
-      onmessage = null;
-      onerror = null;
-    };
+    stubNodeEventStream();
 
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
@@ -104,6 +97,7 @@ describe('JoinProjectModal public subscription interaction', () => {
       act(() => { root.unmount(); });
       container.remove();
     }
+    vi.unstubAllGlobals();
   });
 
   async function renderModal(initialContextGraphId: string) {

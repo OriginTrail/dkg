@@ -35,8 +35,8 @@ vi.mock('../src/ui/api.js', async (importOriginal) => {
 
 // SSE-driven auto-refresh path (`PendingJoinRequestsSection` now
 // subscribes via `useNodeEvents`). Capture the registered handler
-// so tests can drive a fake `join_request` event without standing
-// up an EventSource.
+// so tests can drive a fake `join_request` event without opening
+// the node's event stream.
 const nodeEventsMock = vi.hoisted(() => {
   const handlers = new Set<(event: { type: string; data: Record<string, unknown> }) => void>();
   return {

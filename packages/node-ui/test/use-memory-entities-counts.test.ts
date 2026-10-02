@@ -1,25 +1,14 @@
 // @vitest-environment happy-dom
 
 import React, { act } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { stubNodeEventStream, type FetchFallback } from './helpers/fake-event-stream.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const MENTIONS = 'http://schema.org/mentions';
 const PROFILE_QUERY_CATALOG = 'http://dkg.io/ontology/profile/QueryCatalog';
-
-class MockEventSource {
-  static instances: MockEventSource[] = [];
-  readonly listeners = new Map<string, Array<(e: MessageEvent) => void>>();
-  constructor(readonly url: string) { MockEventSource.instances.push(this); }
-  addEventListener(t: string, l: (e: MessageEvent) => void) {
-    const a = this.listeners.get(t) ?? [];
-    a.push(l);
-    this.listeners.set(t, a);
-  }
-  close() {}
-}
 
 function typeBinding(subject: string, graph: string) {
   return {
@@ -62,16 +51,15 @@ async function flush() {
 describe('useMemoryEntities canonical layer counts', () => {
   let container: HTMLDivElement;
   let root: Root;
+  let queryFetch: Mock<FetchFallback>;
 
   beforeEach(() => {
-    MockEventSource.instances = [];
-    (globalThis as any).EventSource = MockEventSource;
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
 
-    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+    queryFetch = vi.fn<FetchFallback>(async (_input, init) => {
       const { sparql = '', contextGraphId = 'cg' } =
         JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
       const isVm = sparql.includes('_verifiable_memory_meta');
@@ -108,7 +96,8 @@ describe('useMemoryEntities canonical layer counts', () => {
         ok: true,
         json: async () => ({ result: { bindings } }),
       } as Response;
-    }));
+    });
+    stubNodeEventStream(queryFetch);
   });
 
   afterEach(() => {
@@ -133,12 +122,12 @@ describe('useMemoryEntities canonical layer counts', () => {
     expect(el.getAttribute('data-current-layers')).toContain('urn:test:full-pipeline:verified');
     expect(el.getAttribute('data-current-layers')).not.toContain('urn:test:object-only');
 
-    const queryBodies = vi.mocked(fetch).mock.calls
+    const queryBodies = queryFetch.mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; includeContextGraphPartitions?: boolean });
     expect(queryBodies).toHaveLength(3);
     expect(queryBodies.every(body => body.includeContextGraphPartitions === true)).toBe(true);
 
-    const vmRequest = vi.mocked(fetch).mock.calls
+    const vmRequest = queryFetch.mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
       .find(body => body.sparql?.includes('_verifiable_memory_meta'));
     expect(vmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
@@ -152,14 +141,14 @@ describe('useMemoryEntities canonical layer counts', () => {
     // upstream filter here they also leak into `memory.entityList`,
     // becoming "root entities" in every consumer downstream (the
     // GH #806 family root cause).
-    const wmRequest = vi.mocked(fetch).mock.calls
+    const wmRequest = queryFetch.mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
       .find(body => body.sparql?.includes('CONTAINS(STR(?g), "/assertion/")'));
     expect(wmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
     expect(wmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
     expect(wmRequest?.sparql).toContain('!STRENDS(STR(?g), "/_meta")');
 
-    const swmRequest = vi.mocked(fetch).mock.calls
+    const swmRequest = queryFetch.mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
       .find(body => body.sparql?.includes('STRENDS(STR(?g), "/_shared_memory")'));
     expect(swmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta/_shared_memory"');
@@ -174,7 +163,7 @@ describe('useMemoryEntities canonical layer counts', () => {
 
     let el = container.querySelector('#probe')!;
     expect(el.getAttribute('data-current-layers')).not.toContain('urn:test:query-catalog');
-    expect(vi.mocked(fetch).mock.calls.some(([, init]) =>
+    expect(queryFetch.mock.calls.some(([, init]) =>
       String(init?.body ?? '').includes(PROFILE_QUERY_CATALOG))).toBe(false);
 
     await act(async () => {
@@ -187,7 +176,7 @@ describe('useMemoryEntities canonical layer counts', () => {
 
     el = container.querySelector('#probe')!;
     expect(el.getAttribute('data-current-layers')).toContain('urn:test:query-catalog:shared');
-    const catalogRequests = vi.mocked(fetch).mock.calls
+    const catalogRequests = queryFetch.mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
       .filter(body => body.sparql?.includes(PROFILE_QUERY_CATALOG));
     expect(catalogRequests).toHaveLength(2);

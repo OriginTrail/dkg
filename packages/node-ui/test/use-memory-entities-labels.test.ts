@@ -1,20 +1,14 @@
 // @vitest-environment happy-dom
 
 import React, { act } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { buildMemoryEntities, useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { stubNodeEventStream, type FetchFallback } from './helpers/fake-event-stream.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'http://schema.org/name';
 const MENTIONS = 'http://schema.org/mentions';
-
-class MockEventSource {
-  static instances: MockEventSource[] = [];
-  constructor(readonly url: string) { MockEventSource.instances.push(this); }
-  addEventListener() {}
-  close() {}
-}
 
 function binding(subject: string, predicate: string, object: string, graph: string) {
   return {
@@ -49,16 +43,15 @@ async function flush() {
 describe('useMemoryEntities readable labels', () => {
   let container: HTMLDivElement;
   let root: Root;
+  let queryFetch: Mock<FetchFallback>;
 
   beforeEach(() => {
-    MockEventSource.instances = [];
-    (globalThis as any).EventSource = MockEventSource;
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
 
-    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+    queryFetch = vi.fn<FetchFallback>(async (_input, init) => {
       const { sparql = '', contextGraphId = 'cg' } =
         JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
       const isVm = sparql.includes('_verifiable_memory_meta');
@@ -83,7 +76,8 @@ describe('useMemoryEntities readable labels', () => {
         ok: true,
         json: async () => ({ result: { bindings } }),
       } as Response;
-    }));
+    });
+    stubNodeEventStream(queryFetch);
   });
 
   afterEach(() => {

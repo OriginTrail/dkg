@@ -3,14 +3,14 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { stubNodeEventStream } from './helpers/fake-event-stream.js';
 
 // ─────────────────────────────────────────────────────────────────────
 // Header mounts <NotificationsBell/> — the bell + dropdown were EXTRACTED
 // out of Header in the notifications-pane redesign. NotificationsBell drives
 // useNotificationsFeed → api.fetchNotificationsFeed (the scoped feed) +
-// useNodeEvents (EventSource) + useVisibilityPolling. We mock the scoped feed
-// so the bell renders deterministically and stub EventSource (happy-dom lacks
-// one).
+// useNodeEvents (the node's event stream) + useVisibilityPolling. We mock the
+// scoped feed so the bell renders deterministically and stub the event stream.
 //
 // The dropdown's INTERNAL behaviour (sort, empty-state copy, inline
 // approve/deny, the read model — incl. that opening the bell no longer
@@ -88,18 +88,8 @@ describe('Header — notifications bell + status wiring', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
-    // EventSource stub for useNodeEvents — happy-dom doesn't provide one.
-    (globalThis as any).EventSource = class StubEventSource {
-      url: string;
-      readyState = 0;
-      onopen: ((e: any) => void) | null = null;
-      onmessage: ((e: any) => void) | null = null;
-      onerror: ((e: any) => void) | null = null;
-      constructor(url: string) { this.url = url; }
-      addEventListener() {}
-      removeEventListener() {}
-      close() {}
-    };
+    // useNodeEvents reads the node's event stream; answer it with a quiet fake.
+    stubNodeEventStream();
     fetchCurrentAgentMock.mockResolvedValue({
       agentAddress: '0xabcd00000000000000000000000000000000abcd',
       agentDid: 'did:dkg:agent:0xabcd',
@@ -123,6 +113,7 @@ describe('Header — notifications bell + status wiring', () => {
       container.remove();
     }
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it('Header mounts the notifications bell with a Notifications aria-label/tooltip (BUG-002 a11y wiring)', async () => {
