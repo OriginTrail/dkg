@@ -655,9 +655,9 @@ export type AsyncLiftChainProofResolution =
  * classified" - never "the chain RPC was fine".
  *  - `rpc-unavailable`: the chain RPC could not answer (every endpoint failed, a bounded request timed out,
  *    or the local request governor was full).
- *  - `absence-unproven`: the chain has no record of the transaction, but this node could not prove it will
- *    never mine (absence is never proof for an UPDATE; for a CREATE the signed nonce is not provably spent,
- *    or the pinned snapshot could not be read), so nothing is released.
+ *  - `absence-unproven`: the chain has no record of the transaction, but the proof that would let this node
+ *    release the job is not established (absence is never proof for an UPDATE; for a CREATE the signed nonce
+ *    is not provably spent, the pinned identity is minted or unreadable, or the snapshot could not be read).
  */
 export type AsyncLiftChainProofInconclusiveReason = 'rpc-unavailable' | 'absence-unproven';
 

@@ -169,7 +169,7 @@ describe('GH#2942 derived retry blocker', () => {
   // B. The held-job blocker.
   // ---------------------------------------------------------------------------------------------
   describe('B. a job held for chain proof', () => {
-    it('says the chain is re-checked, and that the latest lookup outcome is not retained, for a complete record this node can settle', async () => {
+    it('says the chain is re-checked, and that a latest-check observation is not part of this derivation, for a complete record this node can settle', async () => {
       const job = await completeCreate();
 
       const projection = describeRetryProjection(job, OPTIONS_CAPABLE);

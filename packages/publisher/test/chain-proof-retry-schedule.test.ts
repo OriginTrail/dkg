@@ -320,12 +320,14 @@ describe('ChainProofRetrySchedule: the observation beside a deferral (GH#2945)',
     expect(h.schedule.lastCheckOf('other', A)).toBeUndefined();
   });
 
-  it('never moves the ladder: the same deferrals with different outcomes are due at the same instants', () => {
+  it.each([
+    'pending-mempool', 'pending-awaiting-confirmation', 'unrecognized', 'rpc-unavailable', 'absence-unproven', 'deadline', 'error',
+  ] as const)('never moves the ladder: deferrals stating %s are due at the same instants as ones stating inconclusive', (outcome) => {
     const withOutcomes = harness(() => 0.5);
     const without = harness(() => 0.5);
     for (const cadence of ['default', 'awaiting-confirmations', 'default', 'awaiting-confirmations'] as const) {
-      obs(withOutcomes.schedule.beginPass(withOutcomes.now()), 'job', A)!.defer(cadence, 'inconclusive');
-      obs(without.schedule.beginPass(without.now()), 'job', A)!.defer(cadence, 'pending-mempool');
+      obs(withOutcomes.schedule.beginPass(withOutcomes.now()), 'job', A)!.defer(cadence, outcome);
+      obs(without.schedule.beginPass(without.now()), 'job', A)!.defer(cadence, 'inconclusive');
       for (let step = 0; step < 40; step += 1) {
         expect(withOutcomes.due('job', A)).toBe(without.due('job', A));
         withOutcomes.advance(10_000);

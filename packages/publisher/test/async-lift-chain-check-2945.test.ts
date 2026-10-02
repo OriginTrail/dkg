@@ -111,6 +111,7 @@ describe('GH#2945 a held job reports what its latest chain re-check found', () =
     });
     await publisher.recover();
     const first = publisher.lastChainProofCheck(job);
+    expect(first).toEqual({ outcome: 'inconclusive', at: expect.any(Number) });
 
     // Inside the backoff nothing is asked and nothing changes.
     h.advance(1_000);

@@ -191,7 +191,8 @@ export function createChainProofResolver(
       return await isPublishProvenAbsent(lookup, adapters, options)
         ? { status: 'not-found' }
         // GH#2945 - the chain said "no record" but the proof of absence is not established (nonce not
-        // provably spent, the snapshot unreadable, or evidence missing): say so, change nothing else.
+        // provably spent, the pinned identity already minted or unreadable, no identity pinned, or the
+        // snapshot unreadable): say so, change nothing else.
         : { status: 'inconclusive', reason: 'absence-unproven' };
     }
     if (resolution.status !== 'confirmed') return resolution;
@@ -439,9 +440,18 @@ async function resolvePublishTransactionState(
     // typed transport failure says no endpoint could answer, say so (GH#2945): it is the one collapse
     // here whose cause is known. Any other throw stays unclassified, and so does every other
     // `inconclusive` in this module — "no reason" never means "the RPC was fine".
-    return isChainRpcTransportError(error)
+    return isTypedRpcTransportFailure(error)
       ? { status: 'inconclusive', reason: 'rpc-unavailable' }
       : { status: 'inconclusive' };
+  }
+}
+
+/** Throw-safe: this runs inside a catch, so a hostile `code` accessor reads as "not classified", never as a rejection. */
+function isTypedRpcTransportFailure(error: unknown): boolean {
+  try {
+    return isChainRpcTransportError(error);
+  } catch {
+    return false;
   }
 }
 

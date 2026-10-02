@@ -564,6 +564,16 @@ describe('GH#2270 runner chain-proof resolution', () => {
         .toEqual({ status: 'inconclusive', reason: 'rpc-unavailable' });
     });
 
+    it('a throw whose code cannot even be read is unclassified, never a rejection of the resolver', async () => {
+      const hostile = Object.defineProperty(new Error('hostile'), 'code', { get() { throw new Error('getter exploded'); } });
+      const publishers = publishersWith({
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(async () => { throw hostile; }),
+      });
+
+      expect(await createChainProofResolver(publishers)(lookup)).toEqual({ status: 'inconclusive' });
+    });
+
     it('does not claim the RPC was down for a throw that is not the typed transport failure', async () => {
       const lookingLikeOne = Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' });
       const publishers = publishersWith({

@@ -54,11 +54,12 @@ For a `chain_recheck_pending` job, the job-detail routes (`GET /api/publisher/jo
 | `pending-mempool` | The chain has the transaction in its mempool. |
 | `pending-awaiting-confirmation` | The transaction is mined but not yet confirmed to the configured depth. |
 | `rpc-unavailable` | The chain RPC could not answer: every endpoint failed, a bounded request timed out, or the local request governor was full. It does not by itself mean the provider is down. |
-| `absence-unproven` | The chain has no record of the transaction, but this node cannot prove it will never mine (absence is never proof for an UPDATE; for a CREATE the signed nonce is not provably spent, or the pinned snapshot could not be read), so nothing is released. |
+| `absence-unproven` | The chain has no record of the transaction, but the proof that would let this node release the job is not established, so nothing is released. For an UPDATE absence is never proof; for a CREATE it is any of: the signed nonce is not provably spent, the pinned identity is already minted (a replacement transaction may have published) or its state could not be read, no identity is pinned, or the pinned snapshot could not be read. Do not assume it is only an RPC problem. |
 | `inconclusive` | Nothing was established and the cause is not classified (an adapter that cannot answer, a confirmation this node cannot map to evidence, another failure). It never means the provider is fine. |
-| `unrecognized` | A mined transaction carries no publish this node can parse. |
-| `recovered` | The chain confirmed the transaction but this node did not apply it (yet): the record lacks claim or validation data, finalization declined, or the pass ran out of time. |
-| `not-found`, `reverted` | The chain answered, but the publisher holds anyway: an UPDATE is never released by absence, and a revert of an earlier attempt's transaction does not release it either. |
+| `unrecognized` | A mined CREATE transaction carries no publish this node can parse (an UPDATE is verified against its intended root instead). |
+| `recovered` | The chain confirmed the transaction but this node did not apply it (yet): finalization declined, or the pass ran out of time between the answer and applying it. |
+| `reverted` | A job holding an earlier attempt's hash on an UPDATE: a revert proves that transaction had no effect, but an UPDATE is never re-run from it (a replay could write a stale root over newer state), so it stays held. |
+| `not-found` | Only a third-party resolver reports it for an UPDATE (the built-in resolver reports `absence-unproven` instead); an UPDATE is never released by absence. |
 | `deadline` | The pass's time budget ended before the lookup answered. |
 | `error` | The re-check threw: the lookup, the claim transaction or applying its answer. |
 
