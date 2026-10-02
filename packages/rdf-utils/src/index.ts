@@ -1,19 +1,8 @@
 import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+import { escapeRdfLiteral } from './rdf-literal-escape.js';
 
 export { isAbsoluteRfc3987IriV1 };
-
-/** N-Triples ECHAR short forms, keyed by the raw character. */
-const RDF_LITERAL_SHORT_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
-  '\b': '\\b',
-  '\t': '\\t',
-  '\n': '\\n',
-  '\f': '\\f',
-  '\r': '\\r',
-  '"': '\\"',
-  '\\': '\\\\',
-});
-
-const RDF_LITERAL_ESCAPE_PATTERN = /["\\\u0000-\u001F\u007F]/g;
+export { escapeRdfLiteral };
 
 const NTRIPLES_ECHAR_VALUES: Readonly<Record<string, string>> = Object.freeze({
   b: '\b',
@@ -89,18 +78,6 @@ export function decodeNTriplesIriEscapesPreservingLegacy(value: string): string 
   return decodeNTriplesUcharEscapes(value, {
     invalidEscape: 'preserve',
     surrogatePolicy: 'allow',
-  });
-}
-
-/**
- * Escape a plain-text string for use as an RDF/N-Triples literal body.
- * Returns only the escaped body; callers add the surrounding quotes.
- */
-export function escapeRdfLiteral(value: string): string {
-  return value.replace(RDF_LITERAL_ESCAPE_PATTERN, (character) => {
-    const shortEscape = RDF_LITERAL_SHORT_ESCAPES[character];
-    if (shortEscape !== undefined) return shortEscape;
-    return `\\u${character.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
   });
 }
 
@@ -455,3 +432,5 @@ export function normalizeRdfObject(value: unknown): string {
   const raw = String(value ?? '');
   return isRdfTerm(raw) ? raw : `"${escapeRdfLiteral(raw)}"`;
 }
+
+export { isRdfBlankNodeLabel } from './blank-node-label.js';

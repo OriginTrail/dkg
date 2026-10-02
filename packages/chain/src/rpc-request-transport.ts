@@ -25,6 +25,7 @@ import {
   type RpcUsageIssuerContext,
 } from './rpc-usage.js';
 import { chainRpcFetch } from './rpc-http1-dispatcher.js';
+import { recordRpcAdmissionWait, recordRpcEndpointLatency } from './rpc-request-timing.js';
 
 export type RpcRequestClass = 'foreground' | 'background';
 
@@ -391,8 +392,11 @@ async function admitAndObserveRpcAttempt(
   const progress = activeRpcRequestContext().attemptProgress;
   if (transport.admission !== undefined) {
     noteAttemptProgress(progress, (attempt) => { attempt.waitingForAdmission += 1; });
+    const waitStartedAt = performance.now();
     try {
       for (const _method of methods) await transport.admission.acquireActiveRequest();
+      // Observation only: a refused or cancelled wait is not an admitted attempt.
+      recordRpcAdmissionWait(activeRpcRequestContext().requestClass, performance.now() - waitStartedAt);
     } finally {
       noteAttemptProgress(progress, (attempt) => { attempt.waitingForAdmission -= 1; });
     }
@@ -424,7 +428,18 @@ function createRpcProviderRequest(
       );
     }
     await admitAndObserveRpcAttempt(methods, config);
-    return cancellableRpcGetUrl(attemptRequest, signal);
+    // Observation only: time the endpoint round trip separately from the local
+    // admission wait above so a slow answer is never mistaken for a throttled one.
+    const requestClass = activeRpcRequestContext().requestClass;
+    const sentAt = performance.now();
+    let answered = false;
+    try {
+      const response = await cancellableRpcGetUrl(attemptRequest, signal);
+      answered = response.statusCode >= 200 && response.statusCode < 300;
+      return response;
+    } finally {
+      recordRpcEndpointLatency(requestClass, performance.now() - sentAt, answered);
+    }
   };
   return request;
 }

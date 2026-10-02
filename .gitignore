@@ -35,11 +35,9 @@ devnet/**/turns/
 # started without --data-dir against a testnet. Runtime state only.
 .dkg-testnet-node/
 
-# Agent scratch (project memory across orchestrator runs). Local only,
-# except checked-in ADRs that preserve durable engineering decisions.
-.ai/*
-!.ai/adr/
-!.ai/adr/*.md
+# Agent scratch (project memory across orchestrator runs). Local only;
+# checked-in ADRs live in docs/adr/.
+.ai/
 .scratch/
 
 # WM persistence regression repro (Phase 1 of fix/graphify-import-issues).
@@ -54,7 +52,7 @@ devnet/**/turns/
 packages/evm-module/deployments/hardhat_contracts.json
 packages/evm-module/deployments/localhost_contracts.json
 packages/evm-module/deployments/localhost/
-snapshots/_cache_phase1_neuroweb_epoch16.json
+misc/snapshots/_cache_phase1_*.json
 .claude/
 .orchestrator/
 .worktrees/

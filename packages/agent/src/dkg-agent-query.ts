@@ -1042,6 +1042,7 @@ export class QueryMethods extends DKGAgentBase {
               : { durableSubscriptionBinding: opts.durableSubscriptionBinding }),
             allowAcceptedRfc64FinalizedAbsence:
               this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
+            allowApprovedPrivateReplicaFinalizedAbsence: true,
             authorityReadMode,
             // READ authorization, and therefore correctable by the next read.
             // A roster this node has not caught up on denies a member who was

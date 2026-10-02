@@ -1272,7 +1272,28 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
-        contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
+        contextGraphMetaOracle: async (cgId: string) => {
+          // The approved-private proof authorizes this receiver only. Another
+          // member can be revoked after the metadata snapshot but before that
+          // proof finishes without invalidating the receiver's proof. Retry
+          // one changed snapshot so the ordinary revoke race does not drop an
+          // otherwise valid envelope, then fail closed under continued churn.
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+            const meta = await this.getCgMeta(cgId);
+            const allowedPeers =
+              await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
+            if (
+              this.contextGraphMetaProjection.readAuthorityFactsRevision
+                === metadataRevision
+            ) {
+              return allowedPeers === undefined ? meta : { ...meta, allowedPeers };
+            }
+          }
+          throw new Error(
+            `Context graph "${cgId}" metadata authority kept changing while resolving its SWM gate`,
+          );
+        },
         // Same predicate the SENDER uses to decide plaintext vs encrypted SWM
         // (`resolveWorkspaceRecipientsGated`), so both sides of the wire stay
         // on one authority. Without it the receiver judged from local
@@ -1492,7 +1513,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   getOrCreateCGMemberEnumerator(this: DKGAgent): CGMemberEnumerator {
     if (!this.cgMemberEnumerator) {
       this.cgMemberEnumerator = createCGMemberEnumerator({
-        getContextGraphAllowedPeers: (cgId) => this.getContextGraphAllowedPeers(cgId),
+        getContextGraphAllowedPeers: (cgId) =>
+          this.resolveSwmAllowedPeersForCurrentAuthority(cgId),
         getContextGraphAllowedAgentPeers: (cgId) => this.resolvePrivateSwmAgentPeerRoster(cgId),
         isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),

@@ -1,14 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { assertSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, formatSparqlTerm, unwrapIri } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   assertReplacementPayload,
   assertSubjectReplacementPayload,
   formatGraphBlock,
-  formatObject,
   isAtomicGraphReplaceStagingGraph,
-  unwrapIri,
 } from './atomic-graph-replace.js';
 import {
   decodeRfc64AuthorCommitPlanV1,
@@ -961,7 +959,7 @@ function formatControlObject(value: string, label: string): string {
   if (value.startsWith('_:')) {
     throw new Error(`RFC-64 author commit ${label} cannot be a blank node`);
   }
-  return formatObject(value);
+  return formatSparqlTerm(value, { position: 'object' });
 }
 
 function assertNonInternalGraph(value: string, label: string): string {

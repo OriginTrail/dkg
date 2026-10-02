@@ -56,6 +56,11 @@ export interface VmReconcileDispatcherOptions {
   maxForegroundBurst?: number;
 }
 
+export interface VmReconcileSchedulingOptions extends VmReconcileDispatcherOptions {
+  discoveryBatchSize?: number;
+  periodicBoundBatchSize?: number;
+}
+
 function vmReconcileSourceRank(source: VmReconcileSource): number {
   if (source === 'manual') return 2;
   if (source === 'live') return 1;
@@ -85,6 +90,8 @@ export class VmReconcileDispatcher<T> {
   private readonly concurrency: number;
   private readonly maxPending: number;
   private readonly maxForegroundBurst: number;
+  private timerBoundOutstanding = 0;
+  private readonly timerBoundOutstandingLimit: number;
   constructor(
     private readonly run: (key: string, source: VmReconcileSource) => Promise<T>,
     private readonly onFailure: (key: string, error: unknown) => void,
@@ -107,6 +114,7 @@ export class VmReconcileDispatcher<T> {
     this.concurrency = concurrency;
     this.maxPending = maxPending;
     this.maxForegroundBurst = maxForegroundBurst;
+    this.timerBoundOutstandingLimit = 2 * concurrency;
   }
 
   /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
@@ -148,6 +156,26 @@ export class VmReconcileDispatcher<T> {
   protected tryDispatchPeriodic(key: string): Promise<T> | undefined {
     const outcome = this.admit(key, 'periodic');
     if (!('completion' in outcome)) return undefined;
+    void outcome.completion.catch(() => undefined);
+    return outcome.completion;
+  }
+
+  /** Count only newly admitted timer work; coalesced calls create no backlog. */
+  protected tryDispatchPeriodicBoundTimer(key: string): Promise<T> | undefined {
+    if (this.timerBoundOutstanding >= this.timerBoundOutstandingLimit) {
+      const state = this.states.get(key);
+      // Pending/trailing work can coalesce without creating another task.
+      if (!state?.pending && !state?.trailing) return undefined;
+    }
+    const outcome = this.admit(key, 'periodic');
+    if (!('completion' in outcome)) return undefined;
+    if (outcome.kind === 'admitted') {
+      this.timerBoundOutstanding += 1;
+      void outcome.completion.then(
+        () => { this.timerBoundOutstanding -= 1; },
+        () => { this.timerBoundOutstanding -= 1; },
+      );
+    }
     void outcome.completion.catch(() => undefined);
     return outcome.completion;
   }
@@ -469,6 +497,7 @@ class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
     super(run, onFailure, options);
     installSweepAdmission(Object.freeze({
       tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
+      tryAdmitBoundTimer: (key: string) => this.tryDispatchPeriodicBoundTimer(key),
       waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
       isClosed: () => this.closed,
       retainCapacity: (signal: AbortSignal) => this.retainPeriodicCapacity(signal),
@@ -487,13 +516,16 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly dispatcher: VmReconcileRuntimeDispatcher<T>;
   private readonly planner: VmReconcileSweepPlanner;
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
+  private readonly localAdmissionRetries = new Map<string, () => void>();
+  private readonly maxLocalAdmissionRetries: number;
+  private closed = false;
 
   constructor(
     run: (key: string, source: VmReconcileSource) => Promise<T>,
     onFailure: (key: string, error: unknown) => void,
-    options: VmReconcileDispatcherOptions = {},
-    discoveryBatchSize = 8,
+    options: VmReconcileSchedulingOptions = {},
   ) {
+    this.maxLocalAdmissionRetries = options.maxPending ?? 256;
     let sweepAdmission!: VmReconcileSweepAdmission<T>;
     this.dispatcher = new VmReconcileRuntimeDispatcher(
       run,
@@ -501,11 +533,43 @@ export class VmReconcileSchedulingRuntime<T> {
       options,
       (admission) => { sweepAdmission = admission; },
     );
-    this.planner = new VmReconcileSweepPlanner(discoveryBatchSize, sweepAdmission.retainCapacity);
+    this.planner = new VmReconcileSweepPlanner({
+      discoveryBatchSize: options.discoveryBatchSize ?? 8,
+      periodicBoundBatchSize: options.periodicBoundBatchSize ?? 8,
+    }, sweepAdmission.retainCapacity);
     this.sweepAdmission = sweepAdmission;
   }
 
   triggerLive(key: string): void { this.dispatcher.triggerLive(key); }
+  /**
+   * Local sync pressure earns one bounded retry, rather than peer backoff.
+   * The timer owns no sync lease or VM worker; its nudge re-enters the ordinary
+   * bounded dispatcher, including foreground-burst and periodic fairness.
+   */
+  retryLocalAdmission(key: string, options: {
+    signal?: AbortSignal;
+    isCurrent: () => boolean;
+  }): void {
+    if (this.closed || options.signal?.aborted || !options.isCurrent()) return;
+    this.localAdmissionRetries.get(key)?.();
+    if (this.localAdmissionRetries.size >= this.maxLocalAdmissionRetries) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', cancel);
+      if (this.localAdmissionRetries.get(key) === cancel) this.localAdmissionRetries.delete(key);
+    };
+    this.localAdmissionRetries.set(key, cancel);
+    options.signal?.addEventListener('abort', cancel, { once: true });
+    timer = setTimeout(() => {
+      cancel();
+      if (!this.closed && !options.signal?.aborted && options.isCurrent()) {
+        this.dispatcher.triggerLive(key);
+      }
+    }, 2_500);
+    timer.unref?.();
+    if (options.signal?.aborted) cancel();
+  }
   releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
   tryTriggerPeriodic(key: string): boolean { return this.dispatcher.tryTriggerPeriodic(key); }
@@ -530,7 +594,11 @@ export class VmReconcileSchedulingRuntime<T> {
     this.planner.admit(
       boundKeys,
       unboundKeys,
-      key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
+      {
+        tryAdmit: key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
+        tryAdmitBoundTimer: key => isCurrent()
+          ? this.sweepAdmission.tryAdmitBoundTimer(key) : undefined,
+      },
     );
   }
 
@@ -552,6 +620,8 @@ export class VmReconcileSchedulingRuntime<T> {
   resetSweep(): void { this.planner.reset(); }
 
   close(): Promise<void> {
+    this.closed = true;
+    for (const cancel of this.localAdmissionRetries.values()) cancel();
     this.planner.reset();
     return this.dispatcher.close();
   }

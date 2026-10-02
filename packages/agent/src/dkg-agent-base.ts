@@ -1,3 +1,4 @@
+import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -141,7 +142,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -473,19 +474,35 @@ export function createListContextGraphsCacheInvalidatingStore(
   invalidate: () => void,
   // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
   // dirty the projection by graph rather than by inserted quads (covers deletes).
-  markProjectionDirty?: (quads?: readonly Quad[], targetGraph?: string) => void,
+  markProjectionDirty?: (
+    quads?: readonly Quad[],
+    targetGraph?: string,
+    targetSubject?: string,
+  ) => void,
 ): TripleStore & Partial<SortedGraphSetSource> {
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
     changed: (result: T) => boolean,
-    markDirty?: (result: T) => void,
+    markDirty?: () => void,
+    operation?: StoreOperation,
   ): Promise<T> => {
-    const result = await work();
-    if (changed(result)) {
-      invalidate();
-      markDirty?.(result);
+    try {
+      const result = await work();
+      if (changed(result)) {
+        invalidate();
+        markDirty?.();
+      }
+      return result;
+    } catch (error) {
+      // A mutation may have committed before its response was lost. Only an
+      // outcome-tagged pre-dispatch refusal proves cache/authority state did
+      // not change; every indeterminate outcome must invalidate fail-closed.
+      if (operation !== undefined && !isStoreOperationNotStarted(error, operation)) {
+        invalidate();
+        markDirty?.();
+      }
+      throw error;
     }
-    return result;
   };
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
     === 'function'
@@ -506,13 +523,15 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.insert(quads, options),
         () => quads.length > 0,
         () => markProjectionDirty?.(quads),
+        'insert',
       );
     },
     delete(quads, options) {
       return invalidateAfterMutation(
         () => innerStore.delete(quads, options),
         () => quads.length > 0,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(quads),
+        'delete',
       );
     },
     deleteByPattern(pattern, options) {
@@ -520,6 +539,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
+        'deleteByPattern',
       );
     },
     deleteByPatternWithoutCount(pattern, options) {
@@ -527,6 +547,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => deleteByPatternWithoutCount(innerStore, pattern, options),
         () => true,
         () => markProjectionDirty?.(),
+        'deleteByPattern',
       );
     },
     query(sparql, options) {
@@ -534,6 +555,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.query(sparql, options),
         () => isSparqlUpdateOperation(sparql),
         () => markProjectionDirty?.(),
+        isSparqlUpdateOperation(sparql) ? 'query' : undefined,
       );
     },
     hasGraph(graphUri, options) {
@@ -547,6 +569,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.dropGraph(graphUri, options),
         () => true,
         () => markProjectionDirty?.(),
+        'dropGraph',
       );
     },
     replaceGraph: innerStore.replaceGraph
@@ -554,6 +577,7 @@ export function createListContextGraphsCacheInvalidatingStore(
           () => innerStore.replaceGraph!(graphUri, quads, options),
           () => true,
           () => markProjectionDirty?.(),
+          'replaceGraph',
         )
       : undefined,
     // Rootless KA materialization replaces the assertion graph and its UAL
@@ -572,7 +596,10 @@ export function createListContextGraphsCacheInvalidatingStore(
               options,
             ),
             () => true,
-            () => markProjectionDirty?.([...graphQuads, ...metadataQuads]),
+            // A complete replacement can delete recipient facts not present in
+            // the replacement payload. Treat it as opaque authority mutation.
+            () => markProjectionDirty?.(),
+            'replaceGraphAndSubject',
           )
       : undefined,
     // #1863 — the async-lift publisher persists a job transition via this atomic
@@ -585,12 +612,11 @@ export function createListContextGraphsCacheInvalidatingStore(
           invalidateAfterMutation(
             () => innerStore.replaceSubject!(graphUri, subject, quads, options),
             () => true,
-            // Dirty the projection by the TARGET GRAPH, not the inserted quads:
-            // a subject replace can DELETE projection-relevant metadata (or insert
-            // non-relevant/empty rows), which quad-keyed dirtying would miss. The
-            // target graph covers both delete and insert (#1863). No-op for a
-            // non-CG graph (e.g. the control-plane graph), so no hot-path churn.
-            () => markProjectionDirty?.(undefined, graphUri),
+            // The target graph covers deleted facts; the replacement quads
+            // cover inserted recipient facts. The subject lets downstream
+            // invalidation distinguish exact atomic replacement paths.
+            () => markProjectionDirty?.(quads, graphUri, subject),
+            'replaceSubject',
           )
       : undefined,
     // RFC-64 author publication moves a complete public-SWM projection and
@@ -598,24 +624,12 @@ export function createListContextGraphsCacheInvalidatingStore(
     // capability through this cache-invalidation decorator and invalidate only
     // after a proven commit; a clean guard conflict changes nothing.
     rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
-      ? async (input, options) => {
-          try {
-            return await invalidateAfterMutation(
-              () => innerStore.rfc64AuthorCommitCasV1!(input, options),
-              result => result === 'committed',
-              () => markProjectionDirty?.(),
-            );
-          } catch (error) {
-            // A rejected CAS may have committed before its response was lost.
-            // Only an outcome-tagged pre-dispatch refusal proves caches remain
-            // valid; every indeterminate failure dirties both cache layers.
-            if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
-              invalidate();
-              markProjectionDirty?.();
-            }
-            throw error;
-          }
-        }
+      ? (input, options) => invalidateAfterMutation(
+          () => innerStore.rfc64AuthorCommitCasV1!(input, options),
+          result => result === 'committed',
+          () => markProjectionDirty?.(),
+          'rfc64AuthorCommitCasV1',
+        )
       : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
@@ -636,6 +650,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.deleteBySubjectPrefix(graphUri, prefix, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
+        'deleteBySubjectPrefix',
       );
     },
     countQuads(graphUri, options) {
@@ -651,6 +666,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.update!(sparql, options),
         () => true,
         () => markProjectionDirty?.(),
+        'update',
       )
       : undefined,
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
@@ -722,7 +738,7 @@ export class DKGAgentBase {
   protected readonly lastHostCatchupSeqno: Map<string, Map<string, number>> = new Map();
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
-  protected readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
@@ -1015,6 +1031,8 @@ export class DKGAgentBase {
   static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
   /** Ledgered copies one audit pass examines (local reads only), keyset paged. */
   static readonly VM_PROMOTION_AUDIT_PAGE_SIZE = 1_000;
+  /** Max ledger rows checked for VM promotion in one graph-scoped store query. */
+  static readonly VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE = 64;
   /** Ledger namespaces one backfill pass pages through. */
   static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
   /** Per-asset VM reconciles one audit pass may run for landed copies. */
@@ -1065,6 +1083,8 @@ export class DKGAgentBase {
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   /** How long a clean legacy exact-filter miss suppresses one peer. */
   static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
+  /** Transport affinity is short-lived and never establishes asset coverage. */
+  static readonly VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS = 2 * 60_000;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
@@ -1076,6 +1096,11 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /** Maximum bound graphs one timer sweep admits before yielding to live work. */
+  static readonly VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE',
+    8,
+  );
   /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
   static readonly RS_HEAL_BATCH_MAX = 64;
   /**
@@ -1346,6 +1371,8 @@ export class DKGAgentBase {
     connectionKey: string;
     expiresAt: number;
   }>();
+  /** Owns process-local Core ordering and reusable-holder transitions. */
+  protected vmReconcilePublicCoreTransportPreferencePolicy!: VmRecoveryCoreTransportPreferencePolicy;
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
   /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
@@ -1992,6 +2019,8 @@ export class DKGAgentBase {
   */
   protected readonly pendingSenderKeyByAgent = new Map<string, PendingSenderKeyEntry[]>();
   protected readonly pendingSenderKeyDrainByAgent = new Map<string, Promise<number>>();
+  /** Agent-wide serialization for the single SWM sender-key state file. */
+  protected swmSenderKeyStateSaveQueue: Promise<void> = Promise.resolve();
   /** Per-CG serialized host-mode persistence queue (moved here from the host-mode cluster during the mixin split). */
   protected readonly hostModePersistenceQueues = new Map<string, Promise<void>>();
   /** System graph holding agent-registry triples (moved here so holder classes can reference it). */

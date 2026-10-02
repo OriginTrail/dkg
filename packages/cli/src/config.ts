@@ -1,3 +1,4 @@
+import type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
 import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
@@ -490,19 +491,7 @@ export interface LargeLiteralStorageConfig {
   directory?: string;
 }
 
-export interface SharedMemoryPublicSnapshotStorageConfig {
-  enabled?: boolean;
-  directory?: string;
-  gc?: {
-    enabled?: boolean;
-    intervalMs?: number;
-    triggerFreeBytes?: number;
-    targetFreeBytes?: number;
-    hardReserveBytes?: number;
-    minAgeMs?: number;
-    staleTempAgeMs?: number;
-  };
-}
+export type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
 export interface LlmConfig {
