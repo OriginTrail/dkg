@@ -551,7 +551,7 @@ import type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
-import { resolveVmReconcilerEnabled } from './sync/backpressure.js';
+import { resolveExactBatchStreamEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
 import { finalizedContextGraphSnapshotMismatchV1 } from
   './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
@@ -5928,7 +5928,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       now: () => this.vmReconcileRotationNow(),
       connectionKey: peerId => this.getSyncReconcilerConnectionKey(peerId),
       supportsCore: peerId => this.peerCapabilityRegistry.supportsCore(peerId),
-      holderReuseEnabled: () => process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1',
+      holderReuseEnabled: resolveExactBatchStreamEnabled,
       captureScope: (localCgId, candidatePeerIds) => typeof this.chain.deploymentId === 'string' ? {
         deploymentId: this.chain.deploymentId,
         lifecycleGeneration: this.vmReconcileLifecycleGeneration,
@@ -7043,10 +7043,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && this.vmReconcileLifecycleGeneration === rotationGeneration
       && isTargetCurrent();
     const ctx = createOperationContext('system');
-    // Advisory sizing preparation (experimental, default off). Created lazily and
+    // Advisory sizing preparation (opt-in, default off). Created lazily and
     // owned by this host; every hint is bound to this exact recovery operation.
     const readUpdateContextForPreparation = this.chain.getKnowledgeAssetUpdateContext;
-    const preparation = resolveVmRecoveryPrefetchEnabled(this.config.experimentalVmRecoveryPrefetch)
+    const preparation = resolveVmRecoveryPrefetchEnabled(this.config.vmRecoveryPrefetchEnabled)
       ? vmRecoveryPreparationFor(
         this,
         typeof readUpdateContextForPreparation === 'function'
@@ -7381,7 +7381,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         .slice(1)
         .map((candidate) => ({ kaId: candidate.kaId })));
     };
-    if (process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1') {
+    if (resolveExactBatchStreamEnabled()) {
       const transportInterval = phases.begin();
       const advertised = await Promise.all(orderedPeerIds
         .filter((peerId) => connectedByPeerId.has(peerId)
