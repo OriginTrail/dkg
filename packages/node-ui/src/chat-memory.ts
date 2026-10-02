@@ -1306,6 +1306,12 @@ export class ChatMemoryManager {
       // to its transitions through its own session link, so a turn of another
       // session that reuses the id never contributes.
       //
+      // A legacy turn subject that two sessions share links the assistant
+      // Message of both, and a transition on it does not say whose completion
+      // it is. Such a subject contributes no completion here, so the list keeps
+      // each session's reply as it was written and never shows one session the
+      // other's (see `chatTurnUri`).
+      //
       // The completed turns are an independent subquery over the listed
       // sessions' turns, joined to the messages on the assistant Message. The
       // query must not use a UNION: a read of the working-memory view can span
@@ -1335,6 +1341,10 @@ export class ChatMemoryManager {
                 ?transition <${DKG_ONT}assistantReply> ?transitionAssistantReply .
                 ?turn <${DKG_ONT}hasAssistantMessage> ?m .
                 OPTIONAL { ?transition <${SCHEMA}dateCreated> ?transitionTs }
+                FILTER NOT EXISTS {
+                  ?turn <${SCHEMA}isPartOf> ?otherSession .
+                  FILTER(?otherSession != ?turnSession)
+                }
               }
             }
           }

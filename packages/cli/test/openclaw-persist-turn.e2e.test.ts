@@ -845,6 +845,41 @@ describe('turns stored under the legacy turn subject, against the real store', (
     expect((await single(sessionB)).map((message) => message.text)).toContain('final answer b');
     expect((await single(sessionA)).map((message) => message.text)).not.toContain('final answer b');
   });
+
+  /** A completion as the previous code attached it: a `stored` transition on the legacy subject. */
+  async function writeLegacyTransition(turnId: string, assistantReply: string): Promise<void> {
+    const transition = `${CHAT}turn-transition:legacy-${randomUUID().slice(0, 8)}`;
+    const quad = (subject: string, predicate: string, object: string) => ({ subject, predicate, object, graph: '' });
+    await agent.assertion.write(AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, [
+      quad(transition, RDF_TYPE_IRI, `${DKG}ChatTurnPersistenceTransition`),
+      quad(transition, `${DKG}updatesTurn`, legacySubject(turnId)),
+      quad(transition, `${DKG}turnId`, JSON.stringify(turnId)),
+      quad(transition, `${DKG}persistenceState`, JSON.stringify('stored')),
+      quad(transition, `${SCHEMA_ORG}dateCreated`, `"${new Date().toISOString()}"^^<${XSD_DATETIME_IRI}>`),
+      quad(transition, `${DKG}assistantReply`, JSON.stringify(assistantReply)),
+    ], { agentAddress });
+  }
+
+  it('a completion on a legacy subject that two sessions share is not listed as either session\'s reply', async () => {
+    const [sessionA, sessionB] = [newSessionId(), newSessionId()];
+    const turnId = newTurnId();
+    await writeLegacyTurn(sessionA, turnId, { persistenceState: 'pending', userText: 'question a', assistantText: 'working on a' });
+    await writeLegacyTurn(sessionB, turnId, { persistenceState: 'pending', userText: 'question b', assistantText: 'working on b' });
+    // Session A completed, and the transition went onto the subject both sessions share.
+    await writeLegacyTransition(turnId, 'final answer a');
+
+    // The shared subject links both assistant messages, and nothing on the
+    // transition says whose completion it is: the list shows neither session
+    // the other's answer and keeps each reply as it was written.
+    expect(await listed(sessionB)).toEqual([
+      { author: 'user', text: 'question b' },
+      { author: 'agent', text: 'working on b' },
+    ]);
+    expect(await listed(sessionA)).toEqual([
+      { author: 'user', text: 'question a' },
+      { author: 'agent', text: 'working on a' },
+    ]);
+  });
 });
 
 /**
