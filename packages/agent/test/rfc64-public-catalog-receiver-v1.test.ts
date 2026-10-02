@@ -68,6 +68,37 @@ function reconciler(
   return { isHeadSatisfied, reconcileHead };
 }
 
+const OTHER_CONTEXT_GRAPH_ID = '0x3333333333333333333333333333333333333333/other' as
+  Rfc64PublicCatalogHeadAnnouncementV1['contextGraphId'];
+
+/**
+ * A wake-up that never comes would otherwise hang until the suite timeout and
+ * report nothing; fail in seconds, by expectation, instead.
+ */
+async function resolvesPromptly(wait: Promise<void>, withinMs = 2_000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<'still parked'>((resolve) => {
+    timer = setTimeout(() => resolve('still parked'), withinMs);
+  });
+  try {
+    expect(await Promise.race([wait.then(() => 'released' as const), timedOut]))
+      .toBe('released');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A reconcile that honours cancellation, even one that landed before it started. */
+function settleOnAbort(signal: AbortSignal): Promise<Rfc64PublicCatalogReconcileResultV1> {
+  return new Promise<Rfc64PublicCatalogReconcileResultV1>((resolve) => {
+    if (signal.aborted) {
+      resolve('not-found');
+      return;
+    }
+    signal.addEventListener('abort', () => resolve('not-found'), { once: true });
+  });
+}
+
 /** Small deterministic script for multi-provider scheduler scenarios. */
 function scriptedReconciler(peerIds: readonly string[]) {
   const steps: Array<{
@@ -139,6 +170,310 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(onHeadApplied).toHaveBeenCalledTimes(1);
     expect(onCompletion).toHaveBeenCalledExactlyOnceWith(head, 'applied');
     expect(receiver.stats()).toMatchObject({ scheduled: 1, applied: 1, notFound: 0, failed: 0 });
+  });
+
+  it('a scoped idle wait wakes while another context graph is still busy', async () => {
+    const busy = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      if (head.contextGraphId === OTHER_CONTEXT_GRAPH_ID) return busy.promise;
+      return 'applied';
+    }), { retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ contextGraphId: OTHER_CONTEXT_GRAPH_ID }), 'peerOther');
+    receiver.schedule(announcement(), 'peerMine');
+
+    // The node is NOT idle — the other graph is still in flight — but this
+    // graph's own work has drained, which is the whole point of the scope.
+    await resolvesPromptly(receiver.whenIdleForContextGraph(announcement().contextGraphId));
+
+    let globalIdle = false;
+    void receiver.whenIdle().then(() => { globalIdle = true; });
+    await Promise.resolve();
+    expect(globalIdle).toBe(false);
+
+    busy.resolve('applied');
+    await receiver.whenIdle();
+    expect(globalIdle).toBe(true);
+  });
+
+  it('a scoped idle wait does not wake while its own context graph is busy', async () => {
+    const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => gate.promise),
+      { retryBackoffMs: 0 },
+    );
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
+
+    let woke = false;
+    void receiver.whenIdleForContextGraph(head.contextGraphId).then(() => { woke = true; });
+    await Promise.resolve();
+    // Fail-closed: a graph with work in flight must keep its waiter parked, or
+    // a replay pass would declare completion before admissions land.
+    expect(woke).toBe(false);
+
+    gate.resolve('applied');
+    await receiver.whenIdle();
+    expect(woke).toBe(true);
+  });
+
+  it('another context graph draining does not wake a scoped waiter whose own graph is busy', async () => {
+    const mine = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const other = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async (_peerId, head) => (
+        head.contextGraphId === OTHER_CONTEXT_GRAPH_ID ? other.promise : mine.promise
+      )),
+      { retryBackoffMs: 0 },
+    );
+    const head = announcement();
+    receiver.schedule(announcement({ contextGraphId: OTHER_CONTEXT_GRAPH_ID }), 'peerOther');
+    receiver.schedule(head, 'peerMine');
+
+    let woke = false;
+    void receiver.whenIdleForContextGraph(head.contextGraphId).then(() => { woke = true; });
+
+    // The test above never runs a settlement while its waiter is parked, so it
+    // only pins the registration fast path. Here a settlement DOES fire, for
+    // another graph, and it must evaluate this waiter against its own scope:
+    // waking it would let a replay pass read parity before its own admissions
+    // land.
+    other.resolve('applied');
+    await resolvesPromptly(receiver.whenIdleForContextGraph(OTHER_CONTEXT_GRAPH_ID));
+    expect(woke).toBe(false);
+
+    mine.resolve('applied');
+    await receiver.whenIdle();
+    expect(woke).toBe(true);
+  });
+
+  it('close releases a scoped waiter whose task is running, through the aborted run', async () => {
+    const entered = deferred<void>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      // Honour the abort the way a real reconciler does; a task that ignores
+      // it keeps close() itself waiting, which is separate behaviour.
+      reconciler((_peerId, _head, signal) => {
+        entered.resolve();
+        return settleOnAbort(signal);
+      }),
+      { retryBackoffMs: 0 },
+    );
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
+    await entered.promise;
+    const scoped = receiver.whenIdleForContextGraph(head.contextGraphId);
+
+    let woke = false;
+    void scoped.then(() => { woke = true; });
+    await Promise.resolve();
+    expect(woke).toBe(false);
+
+    // The graceful-close fence awaits this same wait: a waiter stranded here
+    // would park the replay pass forever and hang shutdown.
+    await receiver.close();
+    await resolvesPromptly(scoped);
+  });
+
+  it('close releases a scoped waiter whose only task is deferred, with no run to do it', async () => {
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => { throw new Error('finalized chain lane busy'); }),
+      {
+        retryBackoffMs: 0,
+        admissionDeferralMs: 60_000,
+        isDeferrableError: (error) =>
+          error instanceof Error && error.message === 'finalized chain lane busy',
+      },
+    );
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
+    await vi.waitFor(() => {
+      expect(receiver.stats()).toMatchObject({ deferred: 1, inFlight: 0, queued: 0 });
+    });
+
+    const scoped = receiver.whenIdleForContextGraph(head.contextGraphId);
+    const global = receiver.whenIdle();
+    let woke = false;
+    void scoped.then(() => { woke = true; });
+    await Promise.resolve();
+    expect(woke).toBe(false);
+
+    // Nothing is in flight, so no run's `.finally` can release these waiters:
+    // only close()'s own settlement can.
+    await receiver.close();
+    await resolvesPromptly(scoped);
+    await resolvesPromptly(global);
+    expect(receiver.stats()).toMatchObject({ deferred: 0, inFlight: 0, queued: 0 });
+  });
+
+  it('close still releases every waiter when it lands between a run deferring its task and finishing', async () => {
+    let receiver!: Rfc64PublicCatalogReceiverV1;
+    let closed: Promise<void> | undefined;
+    const onCompletion = vi.fn();
+    receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => { throw new Error('finalized chain lane busy'); }),
+      {
+        retryBackoffMs: 0,
+        admissionDeferralMs: 60_000,
+        onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion),
+        isDeferrableError: () => {
+          // Two hops later the run's `.then` has deferred the task but its
+          // `.finally` has not yet cleared `running`: the task is deferred AND
+          // in flight, so close()'s first finalize pass has to skip it.
+          queueMicrotask(() => queueMicrotask(() => {
+            expect(receiver.stats()).toMatchObject({ deferred: 1, inFlight: 1 });
+            closed = receiver.close();
+          }));
+          return true;
+        },
+      },
+    );
+    const head = announcement();
+    const completion = receiver.scheduleManyAndWait([{ announcement: head, remotePeerId: 'peerA' }]);
+    const scoped = receiver.whenIdleForContextGraph(head.contextGraphId);
+    const global = receiver.whenIdle();
+
+    await vi.waitFor(() => { expect(closed).toBeDefined(); });
+    await closed;
+
+    // Without the post-drain sweep the task stays deferred forever: its timer
+    // is cleared and a closed receiver never pumps, so neither waiter nor the
+    // task's own completion would ever settle.
+    await expect(completion).resolves.toMatchObject({ outcome: 'closed' });
+    await resolvesPromptly(scoped);
+    await resolvesPromptly(global);
+    expect(receiver.stats()).toMatchObject({ deferred: 0, inFlight: 0, queued: 0 });
+    expect(onCompletion).toHaveBeenCalledExactlyOnceWith(head, 'closed');
+  });
+
+  it('cancelContextGraph releases a scoped waiter whose task is running, through the aborted run', async () => {
+    const entered = deferred<void>();
+    const busy = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler((_peerId, head, signal) => {
+        if (head.contextGraphId === OTHER_CONTEXT_GRAPH_ID) return busy.promise;
+        entered.resolve();
+        return settleOnAbort(signal);
+      }),
+      { retryBackoffMs: 0 },
+    );
+
+    const head = announcement();
+    receiver.schedule(announcement({ contextGraphId: OTHER_CONTEXT_GRAPH_ID }), 'peerOther');
+    receiver.schedule(head, 'peerA');
+    await entered.promise;
+    const scoped = receiver.whenIdleForContextGraph(head.contextGraphId);
+    let woke = false;
+    void scoped.then(() => { woke = true; });
+    await Promise.resolve();
+    expect(woke).toBe(false);
+
+    // Released even though the node is still busy with the other graph.
+    receiver.cancelContextGraph(head.contextGraphId);
+    await resolvesPromptly(scoped);
+
+    busy.resolve('applied');
+    await receiver.close();
+  });
+
+  it('cancelContextGraph releases a scoped waiter whose only task is queued, with no run to do it', async () => {
+    const busy = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => busy.promise),
+      { retryBackoffMs: 0, maxConcurrent: 1 },
+    );
+
+    const head = announcement();
+    // The other graph takes the only slot, so this graph's task never starts.
+    receiver.schedule(announcement({ contextGraphId: OTHER_CONTEXT_GRAPH_ID }), 'peerOther');
+    receiver.schedule(head, 'peerA');
+    expect(receiver.stats()).toMatchObject({ inFlight: 1, queued: 1 });
+
+    const scoped = receiver.whenIdleForContextGraph(head.contextGraphId);
+    let woke = false;
+    void scoped.then(() => { woke = true; });
+    await Promise.resolve();
+    expect(woke).toBe(false);
+
+    // A queued task is finalized synchronously and no run ever existed for it,
+    // so cancelContextGraph's own settlement is the only thing that can release
+    // the waiter while the other graph keeps the node busy.
+    receiver.cancelContextGraph(head.contextGraphId);
+    await resolvesPromptly(scoped);
+    expect(receiver.stats()).toMatchObject({ inFlight: 1, queued: 0 });
+
+    busy.resolve('applied');
+    await receiver.close();
+  });
+
+  it('a queue-full eviction releases the scoped waiter of the graph whose last task it removed', async () => {
+    const wedged = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => wedged.promise),
+      { retryBackoffMs: 0, maxConcurrent: 1, maxQueue: 1 },
+    );
+
+    const head = announcement();
+    receiver.schedule(announcement({ contextGraphId: OTHER_CONTEXT_GRAPH_ID }), 'peerOther');
+    receiver.schedule(head, 'peerMine');
+    expect(receiver.stats()).toMatchObject({ inFlight: 1, queued: 1 });
+
+    const scoped = receiver.whenIdleForContextGraph(head.contextGraphId);
+    let woke = false;
+    void scoped.then(() => { woke = true; });
+    await Promise.resolve();
+    expect(woke).toBe(false);
+
+    // A verified current head for ANOTHER scope arrives at capacity and evicts
+    // the one queued ambient task, which is this graph's last. The other graph
+    // stays wedged, so no run's `.finally` will ever rescue the waiter.
+    const verified = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      remotePeerId: 'peerVerified',
+      announcement: announcement({
+        contextGraphId: OTHER_CONTEXT_GRAPH_ID,
+        authorAddress: '0x4444444444444444444444444444444444444444',
+        catalogVersion: '2',
+      }),
+    }]);
+    expect(receiver.stats()).toMatchObject({ inFlight: 1, queued: 1, droppedQueueFull: 1 });
+    await resolvesPromptly(scoped);
+
+    wedged.resolve('applied');
+    await expect(verified).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.close();
+  });
+
+  it('an eviction that admits work for the SAME context graph keeps its scoped waiter parked', async () => {
+    const wedged = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => wedged.promise),
+      { retryBackoffMs: 0, maxConcurrent: 1, maxQueue: 1 },
+    );
+
+    const head = announcement();
+    receiver.schedule(announcement({ contextGraphId: OTHER_CONTEXT_GRAPH_ID }), 'peerOther');
+    receiver.schedule(head, 'peerMine');
+
+    let woke = false;
+    void receiver.whenIdleForContextGraph(head.contextGraphId).then(() => { woke = true; });
+
+    // Same graph, different scope: the eviction empties this graph for an
+    // instant, but the verified head is admitted in the same turn, so the
+    // settlement must run after the admission, never in the gap.
+    const verified = receiver.scheduleVerifiedCurrentHeadAndWait([{
+      remotePeerId: 'peerVerified',
+      announcement: announcement({
+        authorAddress: '0x4444444444444444444444444444444444444444',
+        catalogVersion: '2',
+      }),
+    }]);
+    expect(receiver.stats()).toMatchObject({ inFlight: 1, queued: 1, droppedQueueFull: 1 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(woke).toBe(false);
+
+    wedged.resolve('applied');
+    await expect(verified).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(woke).toBe(true);
   });
 
   it('schedule returns synchronously without awaiting reconciliation', () => {
@@ -245,9 +580,13 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await expect(current).resolves.toMatchObject({ outcome: 'applied' });
     await receiver.whenIdle();
     expect(versions).toEqual(['1', '100']);
+    // The strictly older ACTIVE ambient head is preempted (aborted -> closed)
+    // so the verified head does not wait behind it; the older QUEUED heads
+    // are retired only after the verified head became durable.
     expect(receiver.stats()).toMatchObject({
       applied: 1,
-      failed: 1,
+      failed: 0,
+      preemptedActive: 1,
       supersededQueued: 2,
       queued: 0,
       inFlight: 0,
@@ -256,7 +595,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       head.catalogVersion,
       outcome,
     ]).sort()).toEqual([
-      ['1', 'failed'],
+      ['1', 'closed'],
       ['100', 'applied'],
       ['2', 'closed'],
       ['3', 'closed'],
@@ -362,10 +701,14 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
     await expect(current).resolves.toMatchObject({ outcome: 'failed' });
     await receiver.whenIdle();
+    // The queued history (v2) survives the failed jump untouched. Only the
+    // strictly older ACTIVE ambient head (v1) was preempted for the verified
+    // head, so it settles as closed rather than running to its own failure.
     expect(versions).toEqual(['1', '3', '2']);
     expect(receiver.stats()).toMatchObject({
       applied: 1,
-      failed: 2,
+      failed: 1,
+      preemptedActive: 1,
       supersededQueued: 0,
     });
   });
@@ -1228,6 +1571,34 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ notFound: 1, failed: 1 });
     expect(notFound).toMatchObject({ outcome: 'not-found', error: null });
     expect(failed).toMatchObject({ outcome: 'failed', error: terminalFailure });
+  });
+
+  it('reports the not-found terminal through onNotFound with the provider tally', async () => {
+    const onNotFound = vi.fn();
+    const onError = vi.fn();
+    const onCompletion = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => 'not-found'),
+      {
+        maxAttempts: 1,
+        retryBackoffMs: 0,
+        onNotFound,
+        onError,
+        onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion),
+      },
+    );
+    const head = announcement();
+
+    receiver.schedule(head, 'peerA');
+    receiver.schedule(head, 'peerB');
+    await receiver.whenIdle();
+
+    // Every retained provider denied the head: no thrown error exists on this
+    // path, so the dedicated observer is the only operator-visible signal.
+    expect(onNotFound).toHaveBeenCalledExactlyOnceWith(head, 2, 2);
+    expect(onError).not.toHaveBeenCalled();
+    expect(onCompletion).toHaveBeenCalledExactlyOnceWith(head, 'not-found');
+    expect(receiver.stats()).toMatchObject({ notFound: 1, applied: 0, failed: 0 });
   });
 
   it('serializes different heads in one catalog scope', async () => {

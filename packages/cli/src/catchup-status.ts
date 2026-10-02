@@ -44,6 +44,31 @@ export interface CatchupStatusResponse {
   readonly result?: CatchupJobResult;
   readonly error?: string;
   readonly graphSync?: Rfc64SelectedSwmGraphSyncStatus;
+  /**
+   * Set when the job was requested for an on-chain name hash that resolved to
+   * its verified cleartext id while it ran; the job continued under that id.
+   */
+  readonly resolvedContextGraphId?: string;
+  /** Present when the requested id is (or was) known only by its name hash. */
+  readonly identity?: CatchupContextGraphIdentity;
+}
+
+/** Operator-facing identity of a name-hash subscription (additive field). */
+export interface CatchupContextGraphIdentity {
+  readonly state: 'name-hash-only' | 'name-hash-only-private' | 'resolved';
+  readonly nameHash: string;
+  readonly onChainId?: string;
+  readonly contextGraphId?: string;
+  readonly message: string;
+}
+
+/**
+ * Present on a subscribe response when the request named an on-chain numeric
+ * id (`32`, `#32`); `subscribed` carries the graph it named (additive field).
+ */
+export interface ContextGraphOnChainReferenceNote {
+  readonly onChainId: string;
+  readonly message: string;
 }
 
 /** Older daemons can omit newer aliases; the client normalizes them at the boundary. */

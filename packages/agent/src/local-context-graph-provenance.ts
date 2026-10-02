@@ -3,9 +3,7 @@
 import type {
   ContextGraphMembershipRecord,
   ContextGraphMembershipSource,
-  ContextGraphMembershipStore,
   LocalContextGraphOriginRecord,
-  LocalContextGraphOriginPersistence,
   LocalContextGraphOriginSource,
 } from './dkg-agent-types.js';
 
@@ -34,27 +32,6 @@ export function isLocalContextGraphOriginSource(
   source: ContextGraphMembershipSource | undefined,
 ): source is LocalContextGraphOriginSource {
   return source === 'local-create' || source === 'implicit-swm-write';
-}
-
-/**
- * Normalize the optional graph-level journal into an all-or-nothing boundary.
- * A one-sided custom-store implementation must use the membership
- * compatibility path for both persistence and restoration.
- */
-export function normalizeLocalContextGraphOriginPersistence(
-  store: ContextGraphMembershipStore | undefined,
-): LocalContextGraphOriginPersistence | undefined {
-  if (
-    store === undefined
-    || typeof store.loadLocalOrigins !== 'function'
-    || typeof store.recordLocalOrigin !== 'function'
-  ) {
-    return undefined;
-  }
-  return {
-    loadLocalOrigins: store.loadLocalOrigins.bind(store),
-    recordLocalOrigin: store.recordLocalOrigin.bind(store),
-  };
 }
 
 /**

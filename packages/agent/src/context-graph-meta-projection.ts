@@ -102,6 +102,25 @@ const DIRECT_META_PREDICATES = new Set([
   `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
 ]);
 
+// Recipient resolution scans these facts across every named graph. They do
+// not populate ContextGraphMetaRecord, but a concurrent insert can still
+// change the exact (agent, key, peer) transport set while a private roster is
+// being rechecked. Share the authority revision with the metadata projection
+// so callers can fence both halves of that decision across awaited reads.
+const WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES: ReadonlySet<string> = new Set([
+  DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+  DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+  DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+  DKG_ONTOLOGY.DKG_REVOKED_AGENT,
+  DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
+  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
+  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
+  DKG_ONTOLOGY.DKG_PEER_ID,
+  DKG_ONTOLOGY.DKG_REVOKED_AT,
+  DKG_ONTOLOGY.DKG_REVOKED_BY,
+  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF,
+]);
+
 const SUB_GRAPH_META_PREDICATES = new Set([
   DKG_ONTOLOGY.RDF_TYPE,
   DKG_ONTOLOGY.SCHEMA_NAME,
@@ -120,6 +139,7 @@ const SUB_GRAPH_META_PREDICATES = new Set([
 
 const DELEGATION_META_PREDICATES = new Set<string>([
   DKG_ONTOLOGY.DKG_DELEGATION_AGENT,
+  DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT,
   DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
   DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY,
   DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT,
@@ -310,8 +330,9 @@ export class ContextGraphMetaProjection {
    * keying off the inserted quads alone (`markDirtyFromQuads`) misses the delete.
    * Keying off an own meta/catalog graph covers both insert and delete. Shared
    * AGENTS/ONTOLOGY sources invalidate every record because the callback does
-   * not supply the affected subject. Other graphs (e.g. publisher control-plane
-   * jobs) do not dirty the projection.
+   * not supply the affected subject. Other graphs do not dirty projection cache
+   * entries, but still advance the recipient-authority fence because key lookup
+   * scans all named graphs.
    */
   markDirtyForGraph(graphUri: string): void {
     const graph = stripTerm(graphUri);
@@ -327,7 +348,16 @@ export class ContextGraphMetaProjection {
     }
     const contextGraphId =
       contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
-    if (contextGraphId) this.markDirty(contextGraphId);
+    if (contextGraphId) {
+      this.markDirty(contextGraphId);
+      return;
+    }
+    // Recipient-key resolution deliberately scans every named graph, including
+    // the durable join-key cache. An atomic subject replacement can delete an
+    // old key/peer route while inserting no authority predicate, so even an
+    // otherwise non-CG target graph must advance the request-local fence. It
+    // does not dirty projection cache entries.
+    this.authorityFactsRevision += 1;
   }
 
   markAllDirty(): void {
@@ -340,12 +370,21 @@ export class ContextGraphMetaProjection {
 
   markDirtyFromQuads(quads: readonly Quad[]): string[] {
     const touched = new Set<string>();
+    let recipientAuthorityTouched = false;
     for (const quad of quads) {
+      if (WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES.has(strip(quad.predicate))) {
+        recipientAuthorityTouched = true;
+      }
       const contextGraphId = this.contextGraphIdTouchedByQuad(quad);
       if (!contextGraphId) continue;
       touched.add(contextGraphId);
       this.markDirty(contextGraphId);
     }
+    // Inserts are the generic store mutation for which the decorator can
+    // classify exact quads. Generic delete/update and complete-graph replace
+    // paths already call markAllDirty(), so one conservative bump here closes
+    // the recipient-key/profile insertion race without dirtying every CG cache.
+    if (recipientAuthorityTouched) this.authorityFactsRevision += 1;
     return [...touched];
   }
 

@@ -40,6 +40,22 @@ describe('Oxigraph parent watchdog', () => {
     });
   });
 
+  it('launches a direct child without setpriv on Linux', () => {
+    // A direct child stays in the daemon's own cgroup. Requiring util-linux
+    // there would stop musl hosts, which run a PATH Oxigraph, from starting.
+    expect(buildOxigraphWatchdogLaunchPlan(
+      'linux',
+      42,
+      '/opt/oxigraph',
+      ['serve', '--location', '/data'],
+      'direct',
+    )).toEqual({
+      command: '/opt/oxigraph',
+      args: ['serve', '--location', '/data'],
+      protectedByParentDeathSignal: false,
+    });
+  });
+
   it.each(['parent-loss', 'shutdown'] as const)('kills a TERM-resistant child after %s grace expires', async (mode) => {
     let parentAlive = true;
     const handle = startOxigraphParentWatchdog({
@@ -165,14 +181,20 @@ describe('Oxigraph parent watchdog', () => {
 
   it('parses a typed parent/command boundary', () => {
     expect(parseOxigraphParentWatchdogArgs(['42', '/opt/oxigraph', 'serve']))
-      .toEqual({ parentPid: 42, command: '/opt/oxigraph', args: ['serve'] });
+      .toEqual({ parentPid: 42, command: '/opt/oxigraph', args: ['serve'], launchMode: 'systemd-scope' });
+    expect(parseOxigraphParentWatchdogArgs(['--direct', '42', '/opt/oxigraph', 'serve']))
+      .toEqual({ parentPid: 42, command: '/opt/oxigraph', args: ['serve'], launchMode: 'direct' });
     expect(() => parseOxigraphParentWatchdogArgs(['nope', '/opt/oxigraph']))
+      .toThrow(/Usage/);
+    expect(() => parseOxigraphParentWatchdogArgs(['--direct', '/opt/oxigraph', 'serve']))
       .toThrow(/Usage/);
   });
 
   it('maps an unforwarded catchable child signal to a non-zero wrapper exit', () => {
     expect(conventionalSignalExitCode('SIGTERM')).toBe(143);
     expect(conventionalSignalExitCode('SIGINT')).toBe(130);
+    // The daemon reads 137 as a SIGKILL-compatible exit for OOM attribution.
+    expect(conventionalSignalExitCode('SIGKILL')).toBe(137);
   });
 
   it('terminates the child when the daemon parent disappears', async () => {
@@ -218,6 +240,60 @@ describe('Oxigraph parent watchdog', () => {
     expect(result.parentLost).toBe(false);
     expect(result.signal).toBe('SIGTERM');
     expect(conventionalSignalExitCode(result.signal!)).toBe(143);
+  });
+
+  it('leaves OOM attribution to the daemon for a direct child in its own cgroup', async () => {
+    const readOomSnapshot = vi.fn(() => ({ dir: '/sys/fs/cgroup/dkg-daemon', oomKill: 4 }));
+    const handle = startOxigraphParentWatchdog({
+      parentPid: process.pid,
+      command: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      launchMode: 'direct',
+      pollIntervalMs: 5,
+      readParentPid: () => process.pid,
+      readOomSnapshot,
+      readOomKill: () => 5,
+    });
+    handle.child.kill('SIGKILL');
+
+    const result = await handle.result;
+    expect(result.signal).toBe('SIGKILL');
+    expect(result.oomKilled).toBe(false);
+    expect(readOomSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('treats a direct watchdog\'s reparenting as parent loss even while the old parent PID answers', async () => {
+    // The daemon died and its PID was recycled: kill(pid, 0) still succeeds,
+    // but the watchdog has been adopted by another process.
+    const handle = startOxigraphParentWatchdog({
+      parentPid: 4242,
+      command: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      launchMode: 'direct',
+      pollIntervalMs: 5,
+      isProcessAlive: () => true,
+      readParentPid: () => 1,
+    });
+
+    const result = await handle.result;
+    expect(result.parentLost).toBe(true);
+    expect(result.signal).toBe('SIGTERM');
+  });
+
+  it('does not use reparenting for a scoped watchdog, which systemd-run starts', async () => {
+    const handle = startOxigraphParentWatchdog({
+      parentPid: 4242,
+      command: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      pollIntervalMs: 5,
+      isProcessAlive: () => true,
+      readParentPid: () => 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    handle.stop('SIGTERM');
+
+    const result = await handle.result;
+    expect(result.parentLost).toBe(false);
   });
 
   it('captures scoped OOM evidence before the watchdog cgroup can disappear', async () => {

@@ -15,6 +15,11 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { SignerTxSerializer } from '../src/signer-tx-serializer.js';
+import {
+  ChainWriteAheadHookError,
+  getChainWriteAheadHookCause,
+  isChainWriteAheadHookError,
+} from '../src/write-ahead-hook-error.js';
 import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -354,6 +359,29 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       ),
     ).rejects.toThrow('chain:writeahead hook failed before publish broadcast: WAL disk full');
     expect(send.calls).toEqual([]);
+  });
+
+  it('keeps the hook error as the cause of the write-ahead wrapper, message unchanged (GH#2940)', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async () => undefined);
+    const hookError = Object.assign(new Error('WAL disk full'), { code: 'STORE_SCHEDULER_BUSY' });
+
+    const thrown = await (a as any).dispatchSerializedV10Write(
+      signer,
+      'publish',
+      async () => { throw hookError; },
+      async () => ({ signedTx: 'tx', txHash: '0xpre' }),
+      neverNull,
+    ).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(ChainWriteAheadHookError);
+    expect(isChainWriteAheadHookError(thrown)).toBe(true);
+    // Byte-for-byte the text callers and operators already see.
+    expect((thrown as Error).message).toBe('chain:writeahead hook failed before publish broadcast: WAL disk full');
+    // The original error — identity, so its own typed contract survives — rides as `cause`.
+    expect((thrown as Error).cause).toBe(hookError);
+    expect(getChainWriteAheadHookCause(thrown)).toBe(hookError);
   });
 
   it('a failed write does not wedge the wallet — the next same-wallet write still runs', async () => {

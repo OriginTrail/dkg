@@ -206,6 +206,68 @@ describe('workspacePublicQuadsDigest compatibility', () => {
   });
 });
 
+describe('workspacePublicQuadsDigest is byte-exact', () => {
+  // Nodes persist these fingerprints and compare them across versions, so the
+  // function hashes every term exactly as given and never normalizes it. A
+  // received copy is rewritten to the store's form before it is fingerprinted
+  // (acceptIncomingPublicQuads), not here. The pinned values are the 10.0.19
+  // digests.
+  it.each([
+    {
+      name: 'escaped literal',
+      object: '"Women\\u2019s Europeans"',
+      digest: 'sha256:e5394b738df3e75c3d3b2d19cd7a7e8850f82bcac4ff2b716730faf036e1f142',
+    },
+    {
+      name: 'decoded literal',
+      object: '"Women\u2019s Europeans"',
+      digest: 'sha256:5f6892d4102b587fbc30de64d20cf7b34f9ddf026540e6f932f366e5c63fcd4b',
+    },
+    {
+      name: 'UTF-16 escape pair',
+      object: '"\\uD83D\\uDDD3 12 October"',
+      digest: 'sha256:83824e4f982dc9d2ec84b155909c75c59712bdaf4c99c89f365b381b4b1d7233',
+    },
+    {
+      name: 'decoded emoji',
+      object: '"\u{1F5D3} 12 October"',
+      digest: 'sha256:8dbd87c3c8b46454869fd228ba29a972f46c54c249f6849829ae863c25357cdd',
+    },
+    {
+      name: 'escaped backslash before u with an xsd:string suffix',
+      object: '"C:\\\\users"^^<http://www.w3.org/2001/XMLSchema#string>',
+      digest: 'sha256:7fd2c3a82888fda21a1b10645a951392fc0845829629e162f875009f255083f8',
+    },
+  ])('keeps the 10.0.19 digest of the $name', ({ object, digest }) => {
+    const quads = [digestQuad('urn:s', undefined, object)];
+    expect(workspacePublicQuadsDigest(quads)).toBe(digest);
+    expect(oldWorkspacePublicQuadsDigest(quads)).toBe(digest);
+  });
+
+  it('still validates a snapshot of escaped text stored under its 10.0.19 digest', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-escaped-'));
+    const store = new FileWorkspacePublicSnapshotStore(directory, new MemoryPageIndexStore());
+    const quads = [
+      digestQuad(
+        'urn:article',
+        'http://schema.org/headline',
+        '"Women\\u2019s Europeans \\uD83D\\uDDD3"',
+        '',
+      ),
+      digestQuad('urn:article', 'http://schema.org/text', '"line one\\nline two"', ''),
+    ];
+    const digest = oldWorkspacePublicQuadsDigest(quads);
+
+    try {
+      const { ref } = await store.putSnapshot({ digest, quads });
+      await expect(store.validateSnapshot(ref, digest, quads.length)).resolves.toBe(true);
+      await expect(store.getSnapshot(ref)).resolves.toEqual(quads);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('FileWorkspacePublicSnapshotStore paging', () => {
   it('persists one binary page index for a new snapshot without creating an idx file', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-page-'));

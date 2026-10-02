@@ -22,8 +22,9 @@
  * a resend of a transaction that may be in flight.
  */
 import { ethers } from 'ethers';
-import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
+import { buildKnowledgeAssetUal, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import type {
+  CanonicalFinalizationReceipt,
   ChainAdapter,
   FinalizedChainProofSnapshot,
   OnChainPublishResult,
@@ -33,6 +34,7 @@ import type {
   AsyncLiftUpdateChainProofLookup,
   AsyncLiftChainProofResolution,
   AsyncLiftPublisherRecoveryResult,
+  CanonicalCreateEvidence,
   LiftJobHex,
 } from '@origintrail-official/dkg-publisher';
 /**
@@ -171,8 +173,9 @@ export function createChainProofResolver(
       // and a LATER third-party update superseded it" (nor from "still in flight"). Releasing on
       // it re-signs and re-applies a STALE root over newer state — the ABA hazard. An update whose
       // transaction cannot be proven canonical therefore stays held, with the operator's by-id
-      // clear as the exit.
-      return { status: 'inconclusive' };
+      // clear as the exit. (GH#2945 - the chain DID answer "no record", so say that: the reason is
+      // observability only and changes no disposition.)
+      return { status: 'inconclusive', reason: 'absence-unproven' };
     }
     if (resolution.status === 'not-found') {
       // TWO independent proofs, and both must hold. Nonce consumption settles that the recorded
@@ -187,10 +190,18 @@ export function createChainProofResolver(
       // adapter reports atomically-observed facts; policy decides what they establish.
       return await isPublishProvenAbsent(lookup, adapters, options)
         ? { status: 'not-found' }
-        : { status: 'inconclusive' };
+        // GH#2945 - the chain said "no record" but the proof of absence is not established (nonce not
+        // provably spent, the pinned identity already minted or unreadable, no identity pinned, or the
+        // snapshot unreadable): say so, change nothing else.
+        : { status: 'inconclusive', reason: 'absence-unproven' };
     }
     if (resolution.status !== 'confirmed') return resolution;
-    const recovery = await mapConfirmedPublishToLiftRecovery(resolution.publish, resolution.chain);
+    const recovery = await mapConfirmedPublishToLiftRecovery(
+      lookup,
+      resolution.publish,
+      resolution.canonicalReceipt,
+      resolution.chain,
+    );
     // The chain confirmed a publish this node cannot turn into recovery evidence
     // (no knowledge-assets contract, or fields the mapper rejects). That is a
     // gap in what we can USE, not a fact about the chain: it must not read as
@@ -388,7 +399,12 @@ async function resolvePublishTransactionState(
   adapters: PublisherChainAdapters,
   options?: { readonly signal?: AbortSignal },
 ): Promise<
-  | { status: 'confirmed'; publish: OnChainPublishResult; chain: ChainAdapter }
+  | {
+      status: 'confirmed';
+      publish: OnChainPublishResult;
+      canonicalReceipt?: CanonicalFinalizationReceipt;
+      chain: ChainAdapter;
+    }
   | Exclude<AsyncLiftChainProofResolution, { status: 'recovered' }>
 > {
   const chain = adapters.get(lookup.walletId);
@@ -398,7 +414,14 @@ async function resolvePublishTransactionState(
     if (chain.resolvePublishTransaction) {
       const resolution = await chain.resolvePublishTransaction(lookup.txHash, options);
       return resolution.status === 'confirmed'
-        ? { status: 'confirmed', publish: resolution.publish, chain }
+        ? {
+            status: 'confirmed',
+            publish: resolution.publish,
+            ...(resolution.canonicalReceipt
+              ? { canonicalReceipt: resolution.canonicalReceipt }
+              : {}),
+            chain,
+          }
         : resolution;
     }
     // r17 (3814893074) — the legacy receipt-only lookup cannot support a confirmation here. Unlike
@@ -411,16 +434,32 @@ async function resolvePublishTransactionState(
     // its jobs and the operator's by-id clear remains; adapters that implement the tri-state lookup
     // are unaffected.
     return { status: 'inconclusive' };
-  } catch {
+  } catch (error) {
     // Transient RPC/provider errors establish nothing — report that rather than
-    // crashing the daemon, so the recovery timeout mechanism handles it.
-    return { status: 'inconclusive' };
+    // crashing the daemon, so the recovery timeout mechanism handles it. When the chain package's own
+    // typed transport failure says no endpoint could answer, say so (GH#2945): it is the one collapse
+    // here whose cause is known. Any other throw stays unclassified, and so does every other
+    // `inconclusive` in this module — "no reason" never means "the RPC was fine".
+    return isTypedRpcTransportFailure(error)
+      ? { status: 'inconclusive', reason: 'rpc-unavailable' }
+      : { status: 'inconclusive' };
+  }
+}
+
+/** Throw-safe: this runs inside a catch, so a hostile `code` accessor reads as "not classified", never as a rejection. */
+function isTypedRpcTransportFailure(error: unknown): boolean {
+  try {
+    return isChainRpcTransportError(error);
+  } catch {
+    return false;
   }
 }
 
 /** The confirmed publish, mapped to lift recovery evidence, or `null` if this node cannot. */
 async function mapConfirmedPublishToLiftRecovery(
+  lookup: AsyncLiftChainProofLookup,
   publish: OnChainPublishResult,
+  canonicalReceipt: CanonicalFinalizationReceipt | undefined,
   chain: ChainAdapter,
   options?: { readonly signal?: AbortSignal },
 ): Promise<AsyncLiftPublisherRecoveryResult | null> {
@@ -433,7 +472,102 @@ async function mapConfirmedPublishToLiftRecovery(
     }
   }
   if (!knowledgeAssetsContract) return null;
-  return mapOnChainPublishResultToLiftRecovery(publish, chain.chainId, knowledgeAssetsContract);
+  const recovery = mapOnChainPublishResultToLiftRecovery(
+    publish,
+    chain.chainId,
+    knowledgeAssetsContract,
+  );
+  if (!recovery) return null;
+  if (lookup.operationKind !== 'create' || !canonicalReceipt) return recovery;
+  const canonicalCreate = projectCanonicalCreateEvidence(
+    lookup,
+    publish,
+    canonicalReceipt,
+    chain.chainId,
+    knowledgeAssetsContract,
+  );
+  return canonicalCreate
+    ? {
+        ...recovery,
+        inclusion: { ...recovery.inclusion, blockHash: canonicalCreate.blockHash },
+        canonicalCreate,
+      }
+    : recovery;
+}
+
+/**
+ * Bind a carried CREATE receipt to the exact generic verdict that earned it. A third-party
+ * adapter may implement the optional carrier, so every duplicate fact is compared rather than
+ * trusting that the two objects came from the same parser. Any inconsistency simply withholds the
+ * optimization; the named resolver then performs its established live canonical read.
+ */
+function projectCanonicalCreateEvidence(
+  lookup: AsyncLiftChainProofLookup,
+  publish: OnChainPublishResult,
+  receipt: CanonicalFinalizationReceipt,
+  chainId: string,
+  knowledgeAssetsContract: string,
+): CanonicalCreateEvidence | null {
+  const txHash = asLiftJobHex(receipt.txHash);
+  const blockHash = asLiftJobHex(receipt.blockHash);
+  const merkleRoot = asLiftJobHex(ethers.hexlify(receipt.merkleRoot));
+  const publisherAddress = asLiftJobHex(receipt.publisherAddress);
+  const authorAddress = receipt.authorAddress ? asLiftJobHex(receipt.authorAddress) : null;
+  const contract = asLiftJobHex(knowledgeAssetsContract);
+  const publishMerkleRoot = publish.merkleRoot
+    ? asLiftJobHex(ethers.hexlify(publish.merkleRoot))
+    : null;
+  const sameHex = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+  if (
+    !txHash
+    || !blockHash
+    || !merkleRoot
+    || !publisherAddress
+    || !authorAddress
+    || !contract
+    || !publishMerkleRoot
+    || !ethers.isHexString(txHash, 32)
+    || !ethers.isHexString(blockHash, 32)
+    || !ethers.isHexString(merkleRoot, 32)
+    || !ethers.isAddress(publisherAddress)
+    || !ethers.isAddress(authorAddress)
+    || !ethers.isAddress(contract)
+    || !Number.isSafeInteger(receipt.blockNumber)
+    || receipt.blockNumber < 0
+    || !Number.isSafeInteger(receipt.txIndex)
+    || receipt.txIndex < 0
+    || !sameHex(txHash, lookup.txHash)
+    || !sameHex(txHash, publish.txHash)
+    || receipt.blockNumber !== publish.blockNumber
+    || (publish.txIndex !== undefined && receipt.txIndex !== publish.txIndex)
+    || !sameHex(merkleRoot, publishMerkleRoot)
+    || !sameHex(publisherAddress, publish.publisherAddress)
+    || !publish.authorAddress
+    || !sameHex(authorAddress, publish.authorAddress)
+    || receipt.batchId !== publish.batchId
+    || receipt.kaId !== (publish.kaId ?? publish.batchId)
+    || receipt.startKAId !== (publish.startKAId ?? publish.kaId ?? publish.batchId)
+    || receipt.endKAId !== (publish.endKAId ?? publish.kaId ?? publish.batchId)
+    || (receipt.knowledgeAssetsContract !== undefined
+      && !sameHex(receipt.knowledgeAssetsContract, knowledgeAssetsContract))
+    || (publish.knowledgeAssetsContract !== undefined
+      && !sameHex(publish.knowledgeAssetsContract, knowledgeAssetsContract))
+  ) return null;
+  return {
+    txHash,
+    blockNumber: receipt.blockNumber,
+    blockHash,
+    txIndex: receipt.txIndex,
+    merkleRoot,
+    publisherAddress,
+    authorAddress,
+    batchId: receipt.batchId.toString() as `${bigint}`,
+    kaId: receipt.kaId.toString() as `${bigint}`,
+    startKAId: receipt.startKAId.toString() as `${bigint}`,
+    endKAId: receipt.endKAId.toString() as `${bigint}`,
+    knowledgeAssetsContract: contract,
+    chainId,
+  };
 }
 
 /** Shared with the runner's canonical-receipt mapper; both narrow the same persisted hex shape. */

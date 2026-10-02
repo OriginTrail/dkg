@@ -9,8 +9,17 @@
  * the distinction between an authoritative denial and unavailable authority.
  */
 
-import type { RegisteredContextGraphAuthority } from
-  './registered-context-graph-authority.js';
+import {
+  contextGraphReadAuthorityDependencyOf,
+  registeredContextGraphAuthorityUnavailableDependency,
+  type ContextGraphReadAuthorityDependency,
+} from './context-graph-authority-dependency.js';
+import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
+
+export {
+  contextGraphReadAuthorityDependencyOf,
+  type ContextGraphReadAuthorityDependency,
+} from './context-graph-authority-dependency.js';
 
 export type ContextGraphReadAuthorityOutcome = 'allowed' | 'denied' | 'unavailable';
 
@@ -21,12 +30,59 @@ export type ContextGraphReadAuthoritySource =
   | 'rfc64-public'
   | 'legacy-local';
 
-export interface ContextGraphReadAuthorityDecision {
-  outcome: ContextGraphReadAuthorityOutcome;
+interface ContextGraphReadAuthorityDecisionFields {
   source: ContextGraphReadAuthoritySource;
   reason: string;
   metadataBootstrap: 'eligible' | 'forbidden';
   onChainId?: bigint;
+}
+
+/** An authoritative answer: the read is allowed or denied. */
+export interface SettledContextGraphReadAuthorityDecision extends ContextGraphReadAuthorityDecisionFields {
+  outcome: 'allowed' | 'denied';
+}
+
+/** No authority source could answer; `dependency` says which one could not. */
+export interface UnavailableContextGraphReadAuthorityDecision extends ContextGraphReadAuthorityDecisionFields {
+  outcome: 'unavailable';
+  dependency: ContextGraphReadAuthorityDependency;
+}
+
+export type ContextGraphReadAuthorityDecision =
+  | SettledContextGraphReadAuthorityDecision
+  | UnavailableContextGraphReadAuthorityDecision;
+
+export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' as const;
+
+/**
+ * Scoped queries must preserve the distinction between an authoritative deny
+ * and an authority source that could not answer. The daemon recognizes the
+ * stable code structurally so this internal error does not become part of the
+ * public agent package surface.
+ */
+export class ContextGraphReadAuthorityUnavailableError extends Error {
+  readonly code = CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE;
+  readonly retryable = true;
+  readonly contextGraphId: string;
+  readonly source: ContextGraphReadAuthoritySource;
+  readonly reason: string;
+  readonly dependency: ContextGraphReadAuthorityDependency;
+
+  constructor(
+    contextGraphId: string,
+    decision: Pick<UnavailableContextGraphReadAuthorityDecision, 'source' | 'reason' | 'dependency'>,
+  ) {
+    super(
+      `Context Graph read authority is unavailable for "${contextGraphId}" `
+      + `(${decision.source}/${decision.reason}/${decision.dependency})`,
+    );
+    this.name = 'ContextGraphReadAuthorityUnavailableError';
+    this.contextGraphId = contextGraphId;
+    this.source = decision.source;
+    this.reason = decision.reason;
+    this.dependency = decision.dependency;
+  }
 }
 
 export interface ContextGraphReadAuthorityInput {
@@ -52,18 +108,37 @@ export interface ContextGraphReadAuthorityInput {
 }
 
 const decision = (
-  outcome: ContextGraphReadAuthorityOutcome,
+  outcome: SettledContextGraphReadAuthorityDecision['outcome'],
   source: ContextGraphReadAuthoritySource,
   reason: string,
   onChainId?: bigint,
   metadataBootstrap: 'eligible' | 'forbidden' = outcome === 'denied' ? 'forbidden' : 'eligible',
-): ContextGraphReadAuthorityDecision => ({
+): SettledContextGraphReadAuthorityDecision => ({
   outcome,
   source,
   reason,
   metadataBootstrap,
   ...(onChainId === undefined ? {} : { onChainId }),
 });
+
+/** The one way to build an unavailable decision, so every one names its dependency. */
+export function unavailableContextGraphReadAuthorityDecision(
+  source: ContextGraphReadAuthoritySource,
+  reason: string,
+  dependency: ContextGraphReadAuthorityDependency,
+  onChainId?: bigint,
+): UnavailableContextGraphReadAuthorityDecision {
+  return {
+    outcome: 'unavailable',
+    source,
+    reason,
+    metadataBootstrap: 'eligible',
+    ...(onChainId === undefined ? {} : { onChainId }),
+    dependency,
+  };
+}
+
+const unavailable = unavailableContextGraphReadAuthorityDecision;
 
 export async function resolveContextGraphReadAuthorityDecision(
   input: ContextGraphReadAuthorityInput,
@@ -75,14 +150,18 @@ export async function resolveContextGraphReadAuthorityDecision(
   let registeredAuthority: RegisteredContextGraphAuthority;
   try {
     registeredAuthority = await input.getRegisteredAuthority();
-  } catch {
-    return decision('unavailable', 'registered-chain', 'registered-authority-error');
+  } catch (error) {
+    return unavailable(
+      'registered-chain',
+      'registered-authority-error',
+      contextGraphReadAuthorityDependencyOf(error),
+    );
   }
   if (registeredAuthority.kind === 'unavailable') {
-    return decision(
-      'unavailable',
+    return unavailable(
       'registered-chain',
       registeredAuthority.reason,
+      registeredContextGraphAuthorityUnavailableDependency(registeredAuthority),
       registeredAuthority.onChainId,
     );
   }
@@ -100,8 +179,13 @@ export async function resolveContextGraphReadAuthorityDecision(
     let allowedPeers: string[] | null;
     try {
       allowedPeers = await input.getAllowedPeers();
-    } catch {
-      return decision('unavailable', 'registered-chain', 'peer-authority-unavailable', registeredAuthority.onChainId);
+    } catch (error) {
+      return unavailable(
+        'registered-chain',
+        'peer-authority-unavailable',
+        contextGraphReadAuthorityDependencyOf(error),
+        registeredAuthority.onChainId,
+      );
     }
     if (allowedPeers !== null && !allowedPeers.includes(input.getPeerId())) {
       return decision('denied', 'registered-chain', 'local-peer-not-allowed', registeredAuthority.onChainId);
@@ -109,12 +193,15 @@ export async function resolveContextGraphReadAuthorityDecision(
     return decision('allowed', 'registered-chain', 'chain-participant', registeredAuthority.onChainId);
   }
 
-  const rfc64Roster = input.resolveRfc64PrivateRoster();
+  const approvedPrivateReplica = registeredAuthority.approvedPrivateReplicaAuthority;
+  const rfc64Roster = approvedPrivateReplica?.memberAddresses
+    ?? input.resolveRfc64PrivateRoster();
   if (rfc64Roster !== undefined) {
     if (rfc64Roster === null) {
       return decision('denied', 'rfc64-private', 'invalid-private-policy-roster');
     }
     const effectiveCaller = input.callerAgentAddress
+      ?? approvedPrivateReplica?.approvedAgentAddress
       ?? input.rfc64LocalAgentAddress
       ?? input.defaultAgentAddress;
     return input.isAgentAllowed(effectiveCaller, rfc64Roster)
@@ -130,29 +217,29 @@ export async function resolveContextGraphReadAuthorityDecision(
   // proof the graph is public, so the legacy local-public fallback must remain
   // closed during this bootstrap window.
   if (input.isPendingMetadata) {
-    return decision('unavailable', 'legacy-local', 'pending-authoritative-metadata');
+    return unavailable('legacy-local', 'pending-authoritative-metadata', 'local-state');
   }
 
   let isPrivate: boolean;
   try {
     isPrivate = await input.isPrivateLocalGraph();
-  } catch {
-    return decision('unavailable', 'legacy-local', 'local-access-policy-unavailable');
+  } catch (error) {
+    return unavailable('legacy-local', 'local-access-policy-unavailable', contextGraphReadAuthorityDependencyOf(error));
   }
   if (!isPrivate) return decision('allowed', 'legacy-local', 'local-public');
 
   let allowedPeers: string[] | null;
   try {
     allowedPeers = await input.getAllowedPeers();
-  } catch {
-    return decision('unavailable', 'legacy-local', 'peer-authority-unavailable');
+  } catch (error) {
+    return unavailable('legacy-local', 'peer-authority-unavailable', contextGraphReadAuthorityDependencyOf(error));
   }
 
   let agentGateAddresses: string[] | null;
   try {
     agentGateAddresses = await input.getLocalAgentGate();
-  } catch {
-    return decision('unavailable', 'legacy-local', 'local-agent-authority-unavailable');
+  } catch (error) {
+    return unavailable('legacy-local', 'local-agent-authority-unavailable', contextGraphReadAuthorityDependencyOf(error));
   }
   const agentGateAllowed = agentGateAddresses === null
     ? false
@@ -174,8 +261,12 @@ export async function resolveContextGraphReadAuthorityDecision(
   let participants: string[] | null;
   try {
     participants = await input.getLegacyParticipants();
-  } catch {
-    return decision('unavailable', 'legacy-local', 'legacy-participant-authority-unavailable');
+  } catch (error) {
+    return unavailable(
+      'legacy-local',
+      'legacy-participant-authority-unavailable',
+      contextGraphReadAuthorityDependencyOf(error),
+    );
   }
   if ((!participants || participants.length === 0) && allowedPeers !== null) {
     return allowedPeers.includes(input.getPeerId())
