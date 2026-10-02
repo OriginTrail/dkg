@@ -1,7 +1,7 @@
 /**
  * GH#2945 / #2943 item 1 - characterization of the decision `recordExecutionFailure` makes.
  *
- * `applyExecutionFailureTransition` chooses the failed-from state, the failure code, the message and the
+ * `recordExecutionFailure` chooses the failed-from state, the failure code, the message and the
  * timeout metadata of every job that fails while a publish is being executed, on the double-publish safety
  * lane (#2940 / #2942): a typed pre-send failure is recorded from 'validated' and retried as the SAME job; a
  * failure that may have left a transaction on the wire stays a held broadcast failure. This table pins the
@@ -24,6 +24,7 @@ import {
   type LiftJobFailureCode,
   type LiftJobState,
 } from '../src/index.js';
+import { mapExecutionFailure } from '../src/async-lift-execution-failure.js';
 import {
   TX_HASH,
   corruptHeadError,
@@ -243,6 +244,12 @@ const MAPPING_ROWS: readonly MappingRow[] = [
       'cause',
       { get() { throw new Error('getter exploded'); } },
     ), to('broadcast', 'rpc_unavailable'), PROVEN),
+  // The two branches read a non-Error throw differently: the legacy claimed/validated path reads
+  // `String(error)`, the publish mapper prefers a string `.message`. Pinned, not endorsed.
+  row('a non-Error throw with a .message: the publish mapper classifies on .message and persists it', 'broadcast', 'broadcast',
+    () => ({ message: 'insufficient funds for gas' }), to('broadcast', 'insufficient_funds', { message: 'insufficient funds for gas' })),
+  row('a non-Error throw whose .message names a timeout rejects: the legacy text builds no timeout metadata', 'broadcast', 'broadcast',
+    () => ({ message: 'RPC submit timed out' }), { rejects: /Timeout metadata is required/ }),
 ];
 
 describe('GH#2945 recordExecutionFailure: the failure decision, characterized through the real publisher', () => {
@@ -306,5 +313,112 @@ describe('GH#2945 recordExecutionFailure: the failure decision, characterized th
     await expect(session.recordExecutionFailure('claimed', nullPrototypeThrow())).rejects.toThrow();
 
     expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+  });
+});
+
+describe('GH#2945 mapExecutionFailure: the same decision as a pure function', () => {
+  // The legacy text the mapper tests for timeout wording (NOT the publish mapper's own extraction).
+  const legacyText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  const namesTimeout = (text: string) => /timeout|timed out/i.test(text);
+
+  function countingClock() {
+    const clock = { calls: 0, now: () => { clock.calls += 1; return 5_000 + clock.calls; } };
+    return clock;
+  }
+
+  it.each(MAPPING_ROWS)('$name', (r) => {
+    const clock = countingClock();
+    const error = r.error();
+    const input = {
+      jobId: 'job-9',
+      currentStatus: r.persisted,
+      requestedOrigin: r.requested,
+      error,
+      evidence: r.evidence,
+      now: clock.now,
+    };
+
+    if ('rejects' in r.expected) {
+      expect(() => mapExecutionFailure(input)).toThrow(r.expected.rejects);
+      return;
+    }
+
+    const failure = mapExecutionFailure(input);
+    const policy = getLiftJobFailurePolicy(r.expected.code);
+
+    expect(failure.failedFromState).toBe(r.expected.origin);
+    expect(failure.code).toBe(r.expected.code);
+    expect(failure.phase).toBe(policy.phase);
+    expect(failure.mode).toBe(policy.mode);
+    expect(failure.retryable).toBe(policy.retryable);
+    expect(failure.resolution).toBe(policy.resolution);
+    expect(failure.errorPayloadRef).toBe('urn:dkg:publisher:error:job-9');
+    expect(failure.message).toBe(r.expected.message ?? hostOnlyRpcText(legacyText(error)));
+    if (r.expected.timeout) {
+      expect(failure.timeout).toEqual({ timeoutMs: 0, timeoutAt: 5_001, handling: 'check_chain_then_finalize_or_reset' });
+    } else {
+      expect(failure.timeout).toBeUndefined();
+    }
+    // The clock is read once, and only when a non-pre-send origin's legacy text names a timeout - even when
+    // the publish mapper then drops the metadata (a permanent author refusal beats the timeout wording).
+    const preSendOrigin = failure.failedFromState === 'claimed' || failure.failedFromState === 'validated';
+    expect(clock.calls).toBe(!preSendOrigin && namesTimeout(legacyText(error)) ? 1 : 0);
+  });
+
+  it('reads the clock exactly once for a timeout wording whose metadata the publish mapper drops', () => {
+    const clock = countingClock();
+
+    const failure = mapExecutionFailure({
+      jobId: 'job-9',
+      currentStatus: 'broadcast',
+      requestedOrigin: 'broadcast',
+      error: withCode('timeout while selecting the author', { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE }),
+      now: clock.now,
+    });
+
+    expect(failure.code).toBe('authority_forbidden');
+    expect(failure.timeout).toBeUndefined();
+    expect(clock.calls).toBe(1);
+  });
+
+  describe('origins production never reports (pinned as the current collapse)', () => {
+    it('an included origin keeps its own state and its finality timeout', () => {
+      const clock = countingClock();
+
+      const failure = mapExecutionFailure({
+        jobId: 'job-9',
+        currentStatus: 'included',
+        requestedOrigin: 'included',
+        error: new Error('finality wait timed out'),
+        now: clock.now,
+      });
+
+      expect(failure).toMatchObject({ failedFromState: 'included', code: 'finality_timeout' });
+      expect(failure.timeout).toEqual({ timeoutMs: 0, timeoutAt: 5_001, handling: 'check_chain_then_finalize_or_reset' });
+    });
+
+    it('an included origin with no timeout wording is a confirmation mismatch', () => {
+      const failure = mapExecutionFailure({
+        jobId: 'job-9',
+        currentStatus: 'included',
+        requestedOrigin: 'included',
+        error: new Error('receipt is odd'),
+        now: countingClock().now,
+      });
+
+      expect(failure).toMatchObject({ failedFromState: 'included', code: 'confirmation_mismatch' });
+    });
+
+    it.each(['accepted', 'finalized', 'failed'] as const)('a reported %s origin is recorded as a broadcast failure', (requested) => {
+      const failure = mapExecutionFailure({
+        jobId: 'job-9',
+        currentStatus: 'broadcast',
+        requestedOrigin: requested,
+        error: new Error('transport exploded'),
+        now: countingClock().now,
+      });
+
+      expect(failure).toMatchObject({ failedFromState: 'broadcast', code: 'rpc_unavailable' });
+    });
   });
 });
