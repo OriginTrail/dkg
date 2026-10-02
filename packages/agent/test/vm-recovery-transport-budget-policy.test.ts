@@ -70,4 +70,26 @@ describe('VM recovery transport budget policy', () => {
     expect(policy.attemptOrdinal(second, peerId)).toBe(0);
     expect(policy.attemptOrdinal(third, peerId)).toBe(1);
   });
+
+  it('gives evicted cyclic targets a full budget when the working set exceeds capacity', () => {
+    const policy = new VmRecoveryTransportBudgetPolicy();
+    const targets = Array.from({ length: 16_385 }, (_, index) => ({ ...target, ordinal: index }));
+    const budget = (candidate: typeof target) => policy.timeoutFor({
+      target: candidate, peerId, providerAttemptKind: 'probe', registeredPublicAccess: true,
+      competingStreamAvailable: true, streamEligible: false,
+    });
+
+    for (const candidate of targets) {
+      expect(budget(candidate)).toBe(120_000);
+      policy.recordAdmitted(candidate, peerId);
+    }
+    let fullBudgetCount = 0;
+    for (const candidate of targets) {
+      if (budget(candidate) === undefined) fullBudgetCount += 1;
+      policy.recordAdmitted(candidate, peerId);
+    }
+    expect(fullBudgetCount).toBe(targets.length);
+    policy.clear();
+    expect(budget(targets[0]!)).toBe(120_000);
+  });
 });

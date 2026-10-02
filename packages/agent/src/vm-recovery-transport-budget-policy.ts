@@ -27,6 +27,8 @@ interface BudgetSelection {
 /** Process-local physical-attempt history; it never creates asset or absence evidence. */
 export class VmRecoveryTransportBudgetPolicy {
   private readonly attempts = new Map<string, number>();
+  /** Once a counter was evicted, missing history cannot justify a shortened probe. */
+  private historyEvicted = false;
 
   constructor(private readonly maxEntries = MAX_HISTORY_ENTRIES) {}
 
@@ -37,7 +39,8 @@ export class VmRecoveryTransportBudgetPolicy {
   timeoutFor(selection: BudgetSelection): number | undefined {
     if (selection.providerAttemptKind !== 'probe' || !selection.registeredPublicAccess
       || !selection.competingStreamAvailable || selection.streamEligible) return undefined;
-    return this.attemptOrdinal(selection.target, selection.peerId) === FULL_BUDGET_EVERY - 1
+    const ordinal = this.attempts.get(this.key(selection.target, selection.peerId));
+    return (ordinal === undefined && this.historyEvicted) || ordinal === FULL_BUDGET_EVERY - 1
       ? undefined : MIXED_LEGACY_TIMEOUT_MS;
   }
 
@@ -48,7 +51,10 @@ export class VmRecoveryTransportBudgetPolicy {
     this.attempts.set(key, next % FULL_BUDGET_EVERY);
     if (this.attempts.size > this.maxEntries) {
       const oldest = this.attempts.keys().next().value;
-      if (oldest !== undefined) this.attempts.delete(oldest);
+      if (oldest !== undefined) {
+        this.attempts.delete(oldest);
+        this.historyEvicted = true;
+      }
     }
   }
 
@@ -61,6 +67,7 @@ export class VmRecoveryTransportBudgetPolicy {
 
   clear(): void {
     this.attempts.clear();
+    this.historyEvicted = false;
   }
 
   private key(target: VmRecoveryTransportBudgetTarget, peerId: string): string {
