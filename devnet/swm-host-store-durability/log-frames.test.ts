@@ -4,7 +4,15 @@
  * cycles are allowed to accept.
  */
 import { describe, expect, it } from 'vitest';
-import { HEADER_BYTES, checkNoSeqnoReuse, parseLog, type LogFrame } from './log-frames.js';
+import {
+  HEADER_BYTES,
+  checkCursorCoversLog,
+  checkNoSeqnoReuse,
+  checkServedFrames,
+  parseLog,
+  type LogFrame,
+  type ServedEntry,
+} from './log-frames.js';
 
 /** A frame as the store lays it out on disk: header (timestamp, seqno, length) then the ciphertext. */
 function frameBytes(seqno: number, fill: number, timestampMs = 1_700_000_000_000 + seqno, length = 8): Buffer {
@@ -183,3 +191,74 @@ describe('checkNoSeqnoReuse', () => {
     expect(result.violations).toHaveLength(2);
   });
 });
+
+describe('checkCursorCoversLog', () => {
+  it('accepts a cursor at the last complete frame, and one ahead of it', () => {
+    expect(checkCursorCoversLog({ frames: framesOf([1, 2, 3]), metaSeqno: 3 })).toEqual([]);
+    expect(checkCursorCoversLog({ frames: framesOf([1, 2, 3]), metaSeqno: 5 })).toEqual([]);
+  });
+
+  it('REGRESSION (review of the suite): a cursor that stays one frame behind a quiescent log fails', () => {
+    // The kill cycles allow the cursor to trail by the frame being appended.
+    // That allowance accepts this log forever; the quiescent check does not.
+    const seqnos = Array.from({ length: 10 }, (_, i) => i + 1);
+    expect(9, 'the in-flight allowance accepts it').toBeGreaterThanOrEqual(seqnos.at(-1)! - 1);
+    expect(checkCursorCoversLog({ frames: framesOf(seqnos), metaSeqno: 9 }).join('\n'))
+      .toMatch(/cursor is 9 but the last complete frame is seqno 10/);
+  });
+
+  it('fails when the cursor cannot be read', () => {
+    expect(checkCursorCoversLog({ frames: framesOf([1, 2]), metaSeqno: null }).join('\n'))
+      .toMatch(/absent or unreadable while the log holds 2 frames up to seqno 2/);
+  });
+
+  it('has nothing to cover in an empty log', () => {
+    expect(checkCursorCoversLog({ frames: [], metaSeqno: null })).toEqual([]);
+  });
+});
+
+describe('checkServedFrames', () => {
+  const log = framesOf([1, 2, 3, 4]);
+  const serve = (frames: readonly LogFrame[]): ServedEntry[] =>
+    frames.map(({ seqno, envelopeSha256 }) => ({ seqno, envelopeSha256 }));
+
+  it('accepts exactly the frames after the cursor, in order', () => {
+    expect(checkServedFrames({ expected: log, served: serve(log) })).toEqual([]);
+    expect(checkServedFrames({ expected: log.slice(2), served: serve(log.slice(2)) })).toEqual([]);
+    expect(checkServedFrames({ expected: [], served: [] })).toEqual([]);
+  });
+
+  it('the envelope digest is of the ciphertext alone, not of the frame header', () => {
+    const [sameCiphertext] = parseLog(frameBytes(1, 1, 42)).frames;
+    expect(sameCiphertext!.envelopeSha256).toBe(log[0]!.envelopeSha256);
+    expect(sameCiphertext!.digest).not.toBe(log[0]!.digest);
+  });
+
+  it('REGRESSION (review of the suite): [1, 1, 3, 4] has the right count and last seqno, and fails', () => {
+    const served = serve([log[0]!, log[0]!, log[2]!, log[3]!]);
+    expect(served).toHaveLength(log.length);
+    expect(served.at(-1)!.seqno).toBe(log.at(-1)!.seqno);
+    expect(checkServedFrames({ expected: log, served }).join('\n'))
+      .toMatch(/served envelope #2 is seqno 1 but frame #2 after the cursor is seqno 2/);
+  });
+
+  it('fails when a frame is omitted', () => {
+    const violations = checkServedFrames({ expected: log, served: serve([log[0]!, log[2]!, log[3]!]) }).join('\n');
+    expect(violations).toMatch(/served 3 envelopes but the log holds 4 frames/);
+    expect(violations).toMatch(/served envelope #2 is seqno 3 but frame #2 after the cursor is seqno 2/);
+  });
+
+  it('fails when an envelope is not the stored ciphertext', () => {
+    const served = serve(log).map((entry) => (entry.seqno === 3 ? { ...entry, envelopeSha256: 'f'.repeat(64) } : entry));
+    expect(checkServedFrames({ expected: log, served })).toEqual([
+      'served envelope seqno 3 is not the ciphertext stored for that frame',
+    ]);
+  });
+
+  it('fails when catch-up serves more than the log holds, or serves it out of order', () => {
+    expect(checkServedFrames({ expected: log.slice(0, 2), served: serve(log) }).join('\n'))
+      .toMatch(/served 4 envelopes but the log holds 2 frames/);
+    expect(checkServedFrames({ expected: log, served: serve([log[1]!, log[0]!, log[2]!, log[3]!]) })).toHaveLength(2);
+  });
+});
+

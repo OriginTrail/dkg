@@ -27,12 +27,15 @@
  *          without a devnet),
  *        - the `.meta` cursor is never below the log's last seqno,
  *        - the host re-engages host mode from its persisted flag.
- *   3. The curator edge pages the hosting core with
- *      `POST /api/shared-memory/host-catchup`, one round per call, resuming
- *      from the returned cursor until the host has nothing more, from several
- *      starting cursors: the core serves exactly the frames with seqno > the
- *      starting cursor across the pages and the final cursor is the true last
- *      seqno (catch-up "pages to completion").
+ *   3. With ingestion stopped, the `.meta` cursor covers the whole log (no
+ *      in-flight allowance), and the curator edge pages the hosting core with
+ *      `POST /api/shared-memory/host-catchup`, one round per call and a page
+ *      smaller than the log, resuming from the returned cursor until the host
+ *      has nothing more, from several starting cursors. Paging from 0 crosses
+ *      at least two page boundaries. The envelopes served across the pages
+ *      are, in order, exactly the frames with seqno > the starting cursor, each
+ *      byte-identical to its stored ciphertext (`checkServedFrames`), and the
+ *      final cursor is the true last seqno (catch-up "pages to completion").
  *
  * Why the setup looks the way it does (this release):
  *   - The RFC-64 kill switch is on for node4 and node5: in catalog mode the
@@ -73,7 +76,14 @@ import {
   type DevnetNode,
 } from '../_bootstrap/harness';
 import * as lifecycle from '../_bootstrap/node-lifecycle';
-import { checkNoSeqnoReuse, parseLog, type ParsedLog } from './log-frames.js';
+import {
+  checkCursorCoversLog,
+  checkNoSeqnoReuse,
+  checkServedFrames,
+  parseLog,
+  type ParsedLog,
+  type ServedEntry,
+} from './log-frames.js';
 
 const HOST = 4; // core
 const CURATOR = 5; // edge: the only allowlisted agent, the writer, and the catch-up requester
@@ -489,15 +499,25 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
     const log = readLog(cgId);
     expect(log.validLength).toBe(log.size);
     expect(log.seqnos.length).toBeGreaterThanOrEqual(KILL_CYCLES + 3);
+    // Nothing is in flight any more, so the one-frame allowance of the kill cycles does not apply:
+    // the cursor must cover the whole log.
+    expect(
+      checkCursorCoversLog({ frames: log.frames, metaSeqno: readMetaSeqno(cgId) }),
+      'the .meta cursor does not cover the quiescent log',
+    ).toEqual([]);
     const lastSeqno = log.seqnos.at(-1)!;
     const mid = log.seqnos[Math.floor(log.seqnos.length / 2)]!;
+    // A page smaller than the log, so reaching the end from 0 takes at least three non-empty pages
+    // and every continuation resumes from a truncated one.
+    const pageSize = Math.max(1, Math.floor(log.seqnos.length / 3));
 
     // Page like a real requester: one round per call, resuming from the returned cursor until the
     // host has nothing more, from several starting cursors.
     for (const start of [0, mid, lastSeqno - 1, lastSeqno]) {
-      const expectedTotal = log.seqnos.filter((s) => s > start).length;
+      const expected = log.frames.filter((frame) => frame.seqno > start);
+      const served: ServedEntry[] = [];
       let since = start;
-      let fetchedTotal = 0;
+      let nonEmptyPages = 0;
       let calls = 0;
       for (;;) {
         calls += 1;
@@ -507,22 +527,32 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
           peerId: hostPeerId,
           sinceSeqno: since,
           maxRounds: 1,
+          maxEntriesPerRound: pageSize,
+          includeEntries: true,
         });
         expect(res.status, `host-catchup since=${since}: ${JSON.stringify(res.json)}`).toBe(200);
         const peer = res.json.peers?.[0];
         expect(peer, `host-catchup since=${since} reached no peer: ${JSON.stringify(res.json)}`).toBeTruthy();
         expect(peer.denied, `host denied catch-up: ${JSON.stringify(peer)}`).toBeUndefined();
         expect(peer.error, `host-catchup error: ${JSON.stringify(peer)}`).toBeUndefined();
+        expect(peer.entries, `start=${start}: the page lists what the host served`).toHaveLength(peer.fetched);
         if (peer.fetched === 0) {
           expect(peer.nextSeqno, `start=${start}: empty page must not move the cursor`).toBe(since);
           break;
         }
+        expect(peer.fetched, `start=${start}: a page holds at most ${pageSize} frames`).toBeLessThanOrEqual(pageSize);
         expect(peer.nextSeqno, `start=${start}: cursor must advance`).toBeGreaterThan(since);
-        fetchedTotal += peer.fetched;
+        nonEmptyPages += 1;
+        served.push(...peer.entries);
         since = peer.nextSeqno;
       }
-      expect(fetchedTotal, `start=${start}: frames served across all pages`).toBe(expectedTotal);
-      expect(since, `start=${start}: final cursor`).toBe(expectedTotal > 0 ? lastSeqno : start);
+      // The served envelopes, across the pages and in order, are exactly the frames on disk after
+      // the cursor: none missing, repeated or reordered, each byte-identical to its ciphertext.
+      expect(checkServedFrames({ expected, served }), `start=${start}: catch-up did not serve the log suffix`).toEqual([]);
+      expect(nonEmptyPages, `start=${start}: non-empty pages`).toBe(Math.ceil(expected.length / pageSize));
+      if (start === 0) expect(nonEmptyPages, 'paging from 0 must cross a page boundary').toBeGreaterThanOrEqual(3);
+      expect(served.length, `start=${start}: frames served across all pages`).toBe(expected.length);
+      expect(since, `start=${start}: final cursor`).toBe(expected.length > 0 ? lastSeqno : start);
     }
   }, 600_000);
 });

@@ -1,8 +1,10 @@
 /**
  * Pure helpers for the swm-host-store-durability devnet suite: parse a
- * `SwmHostModeStore` log into frames, and decide from a snapshot taken at the
+ * `SwmHostModeStore` log into frames, decide from a snapshot taken at the
  * kill whether the recovery preserved every complete frame and never reused a
- * seqno. No devnet, no I/O: covered by `log-frames.test.ts`.
+ * seqno, decide whether the `.meta` cursor covers a log that has stopped
+ * growing, and decide whether host catch-up served exactly the frames on disk.
+ * No devnet, no I/O: covered by `log-frames.test.ts`.
  *
  * On-disk frame (see `packages/agent/src/swm/host-mode-store.ts`):
  *   [8-byte BE timestampMs] [8-byte BE seqno] [4-byte BE len] [len bytes]
@@ -15,6 +17,8 @@ export interface LogFrame {
   seqno: number;
   /** sha256 (hex) of the whole frame as stored: header (timestamp, seqno, length) and ciphertext. */
   digest: string;
+  /** sha256 (hex) of the ciphertext alone: what host catch-up serves as the envelope. */
+  envelopeSha256: string;
 }
 
 export interface ParsedLog {
@@ -37,6 +41,7 @@ export function parseLog(buf: Buffer): ParsedLog {
     frames.push({
       seqno: Number(buf.readBigUInt64BE(offset + 8)),
       digest: createHash('sha256').update(buf.subarray(offset, end)).digest('hex'),
+      envelopeSha256: createHash('sha256').update(buf.subarray(offset + HEADER_BYTES, end)).digest('hex'),
     });
     offset = end;
   }
@@ -132,3 +137,82 @@ export function checkNoSeqnoReuse(input: RecoveryCheckInput): RecoveryCheckResul
 
   return { highWater, newFrames, violations };
 }
+
+export interface CursorCoverageInput {
+  /** The complete frames of the log once ingestion has stopped and the log no longer grows. */
+  frames: readonly LogFrame[];
+  /** The `.meta` cursor read at the same moment (`null` when the meta is absent or torn). */
+  metaSeqno: number | null;
+}
+
+/**
+ * Check that the `.meta` cursor covers a quiescent log.
+ *
+ * While frames are still arriving the cursor may trail the log by the frame
+ * being appended (a frame is durable before its cursor), so a check made during
+ * ingestion can only allow that one frame, and that allowance also accepts a
+ * cursor that is never persisted. With ingestion stopped nothing is in flight:
+ * the cursor must be readable and at or above the last complete frame. A cursor
+ * above it is fine (a frame lost before its cursor leaves a gap, never a reuse).
+ *
+ * Returns human-readable failures; empty means the cursor covers the log.
+ */
+export function checkCursorCoversLog(input: CursorCoverageInput): string[] {
+  const { frames, metaSeqno } = input;
+  if (frames.length === 0) return [];
+  let lastComplete = 0;
+  for (const frame of frames) lastComplete = Math.max(lastComplete, frame.seqno);
+  if (metaSeqno === null) {
+    return [`the .meta cursor is absent or unreadable while the log holds ${frames.length} frames up to seqno ${lastComplete}`];
+  }
+  if (metaSeqno < lastComplete) {
+    return [
+      `the .meta cursor is ${metaSeqno} but the last complete frame is seqno ${lastComplete} and nothing is being appended: ` +
+        'the cursor of a finished append was not persisted',
+    ];
+  }
+  return [];
+}
+
+/** One envelope a host served during catch-up, as the daemon reports it with `includeEntries`. */
+export interface ServedEntry {
+  seqno: number;
+  envelopeSha256: string;
+}
+
+/**
+ * Check what host catch-up served, across all its pages and in the order it
+ * arrived, against the frames the log holds after the starting cursor.
+ *
+ * Counts and a final cursor cannot show this: [1, 1, 3, 4] served for a log of
+ * [1, 2, 3, 4] has the right count and the right last seqno. The served
+ * sequence must be the expected frames exactly: none missing, none repeated,
+ * none out of order, and each envelope byte-identical to the stored ciphertext.
+ *
+ * Returns human-readable failures; empty means catch-up served the log suffix.
+ */
+export function checkServedFrames(input: {
+  expected: readonly LogFrame[];
+  served: readonly ServedEntry[];
+}): string[] {
+  const { expected, served } = input;
+  const violations: string[] = [];
+  if (served.length !== expected.length) {
+    violations.push(`catch-up served ${served.length} envelopes but the log holds ${expected.length} frames after the cursor`);
+  }
+  const shared = Math.min(served.length, expected.length);
+  for (let i = 0; i < shared; i += 1) {
+    const want = expected[i]!;
+    const got = served[i]!;
+    if (got.seqno !== want.seqno) {
+      violations.push(
+        `served envelope #${i + 1} is seqno ${got.seqno} but frame #${i + 1} after the cursor is seqno ${want.seqno} ` +
+          '(a frame was skipped, repeated or reordered)',
+      );
+    } else if (got.envelopeSha256 !== want.envelopeSha256) {
+      violations.push(`served envelope seqno ${got.seqno} is not the ciphertext stored for that frame`);
+    }
+  }
+  return violations;
+}
+
