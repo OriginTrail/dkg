@@ -39,10 +39,14 @@ interface RestartInternals {
   subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: string; pendingMeta?: boolean }>;
   config: { syncContextGraphs?: string[] };
   contextGraphSubscriptionDormancyById: Map<string, string>;
+  contextGraphSubscriptionRehydrationAccountedIds: Set<string>;
   wireSwmHostModeHandler(contextGraphId: string, source?: string, curated?: boolean): void;
   gossipWireIdFor(contextGraphId: string): string;
-  markContextGraphSubscriptionState(contextGraphId: string, patch: { synced?: boolean }): void;
   rehydrateContextGraphsFromDurableState(): Promise<void>;
+  updateContextGraphSubscriptionRehydrationStatusAfterPersist(
+    contextGraphId: string,
+    next?: { subscribed: boolean; coreHosted?: boolean },
+  ): void;
 }
 
 function memberTopics(contextGraphId: string): string[] {
@@ -72,35 +76,16 @@ function createSubscriptionStore() {
 }
 
 /**
- * Hold every `save` the store receives from now on, as a slow durable store
- * would, until `release()` lets them through. `held` lists the rows in flight.
+ * Order the next `start()`: its rehydration pass ends, then `contextGraphId`
+ * is accounted the way the completion of a subscription save accounts it, then
+ * the rest of `start()` runs. The accounting is delivered directly, so the
+ * order holds whether or not `stop()` waits for the saves still in flight.
  */
-function holdSubscriptionSaves(store: ReturnType<typeof createSubscriptionStore>['store']) {
-  const held: string[] = [];
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const save = store.save;
-  store.save = async (record: SubscriptionRow) => {
-    held.push(record.id);
-    await released;
-    await save(record);
-  };
-  return { held, release };
-}
-
-/**
- * Order the next `start()`: its rehydration pass reads the store first, then
- * the held saves of the retired session land, then the rest of `start()` runs.
- */
-function landHeldSavesAfterRehydration(internals: RestartInternals, saves: { release(): void }): void {
+function accountSaveAfterRehydration(internals: RestartInternals, contextGraphId: string): void {
   const rehydrate = internals.rehydrateContextGraphsFromDurableState.bind(internals);
   vi.spyOn(internals, 'rehydrateContextGraphsFromDurableState').mockImplementation(async () => {
     await rehydrate();
-    saves.release();
-    // One macrotask later every promise reaction of the released saves has run.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    internals.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, { subscribed: true });
   });
 }
 
@@ -408,20 +393,18 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
       agent = boot.agent;
       const { internals } = boot;
       await agent.start();
-      const saves = holdSubscriptionSaves(durable.store);
-      agent.subscribeToContextGraph(CG);
-      // Live on the first manager, while its durable row is still being written.
-      await expect.poll(() => saves.held).toContain(CG);
+      // Live on the first manager, with no durable row behind it.
+      agent.subscribeToContextGraph(CG, { persist: false });
       expect(internals.gossipRegistered.has(CG)).toBe(true);
 
       await agent.stop();
       expect(durable.persisted.has(CG)).toBe(false);
-      landHeldSavesAfterRehydration(internals, saves);
+      accountSaveAfterRehydration(internals, CG);
       await agent.start();
 
-      // The row became durable only after the restart had read the store, so
-      // no rehydration replayed it: the live intent is all that re-arms it.
-      expect(durable.persisted.get(CG)?.subscribed).toBe(true);
+      // Accounted only after the pass had read a store without the row, so no
+      // rehydration replayed the graph: the live intent is all that re-arms it.
+      expect(internals.contextGraphSubscriptionRehydrationAccountedIds.has(CG)).toBe(true);
       expect(internals.gossipRegistered.has(CG)).toBe(true);
       for (const topic of memberTopics(CG)) expect(internals.gossip.subscribedTopics).toContain(topic);
     }, 60_000);
@@ -437,18 +420,14 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
       await agent.start();
       agent.subscribeToContextGraph(CG);
       await expect.poll(() => durable.persisted.get(CG)?.subscribed).toBe(true);
-      // The row is durable; a later write of it is in flight when the session stops.
-      const saves = holdSubscriptionSaves(durable.store);
-      internals.markContextGraphSubscriptionState(CG, { synced: true });
-      await expect.poll(() => saves.held).toContain(CG);
 
       await agent.stop();
-      expect(durable.persisted.get(CG)?.synced).toBe(false);
-      landHeldSavesAfterRehydration(internals, saves);
+      accountSaveAfterRehydration(internals, CG);
       await agent.start();
 
-      // The late save landed, and the kill-switch decision about the row stands.
-      expect(durable.persisted.get(CG)?.synced).toBe(true);
+      // Accounting the row again cleared the dormancy the pass had recorded for
+      // it, and the kill-switch decision about the row still stands.
+      expect(internals.contextGraphSubscriptionDormancyById.has(CG)).toBe(false);
       expect(internals.gossipRegistered.has(CG)).toBe(false);
       for (const topic of memberTopics(CG)) expect(internals.gossip.subscribedTopics).not.toContain(topic);
     }, 60_000);
