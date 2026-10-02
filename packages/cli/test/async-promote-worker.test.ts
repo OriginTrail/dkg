@@ -574,6 +574,39 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.stop();
   });
 
+  it('logs a job run that crashes and keeps the supervisor running', async () => {
+    // A claimed job without a lease makes the runner throw before any promote.
+    // The supervisor has to report that and carry on; with no lease there is
+    // nothing to park, so the row is left to startup recovery.
+    const crashLogs: string[] = [];
+    const leaseless = Object.create(queue) as AsyncPromoteQueue;
+    leaseless.claimNext = async (workerId) => {
+      const claimed = await queue.claimNext(workerId);
+      return claimed ? { ...claimed, lease: undefined } : claimed;
+    };
+    await queue.enqueue(makeRequest('crashing'));
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: leaseless,
+        assertion: { promote: async () => ({ promotedCount: 1 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 1_000_000,
+      heartbeatIntervalMs: 0,
+      log: (message) => { crashLogs.push(message); },
+      workerIdPrefix: 'test',
+    });
+
+    await sup.start();
+    await sup.tickOnce();
+    await sup.stop();
+
+    expect(crashLogs.filter((line) => line.includes('crashed processing'))).toEqual([
+      expect.stringMatching(/^Worker test-slot-0 crashed processing \S+: .*active lease/),
+    ]);
+    expect(await sup.tickOnce()).toBe(0);
+  });
+
   it('wakes immediately on enqueue while retaining a slow durable fallback poll', async () => {
     const promoted = deferred();
     const sup = createPromoteWorkerSupervisor({

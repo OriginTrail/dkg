@@ -242,6 +242,57 @@ describe('runPromoteJob diagnostics', () => {
     }
   });
 
+  it('logs a failing memoryGraphChanged emit and still reports the promote as succeeded', async () => {
+    const job = await enqueueAndClaim();
+
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        return { promotedCount: 2 };
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => { logs.push(message); },
+      emitMemoryGraphChanged: () => {
+        throw new Error('event stream closed');
+      },
+    });
+
+    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(logs).toContain(`memoryGraphChanged emit failed for ${job.jobId}: event stream closed`);
+  });
+
+  it('logs a heartbeat that fails for a reason other than a cleared lease', async () => {
+    const job = await enqueueAndClaim();
+    const heartbeatFailed = deferred();
+    const failingQueue = Object.create(queue) as AsyncPromoteQueue;
+    failingQueue.heartbeat = async () => {
+      heartbeatFailed.resolve();
+      throw new Error('store unavailable');
+    };
+
+    const result = await runPromoteJob({
+      job,
+      queue: failingQueue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        // Hold the promote open until one heartbeat has failed.
+        await heartbeatFailed.promise;
+        return { promotedCount: 1 };
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 1,
+      log: (message) => { logs.push(message); },
+    });
+
+    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(logs).toContain(`Heartbeat error for ${job.jobId}: store unavailable`);
+  });
+
 });
 
 // Worker code calls the normalized logger directly, so this function is the
@@ -268,6 +319,17 @@ describe('normalizePromoteWorkerLogger', () => {
       expect(unhandledRejections).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+
+  it('writes to console.warn when no sink is configured', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      normalizePromoteWorkerLogger(undefined)('diagnostic');
+
+      expect(warn).toHaveBeenCalledWith('[promote-worker] diagnostic');
+    } finally {
+      warn.mockRestore();
     }
   });
 
