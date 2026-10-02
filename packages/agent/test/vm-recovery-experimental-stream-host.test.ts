@@ -48,7 +48,7 @@ afterEach(async () => {
 
 describe('experimental public Core streaming recovery host', () => {
   it('probes the supported Core first then streams ten large KAs without changing the proof roster', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness();
     const sizing = vi.spyOn(h.chainAdapter, 'getKnowledgeAssetUpdateContext');
     const result = await h.run();
@@ -68,8 +68,17 @@ describe('experimental public Core streaming recovery host', () => {
     }
   });
 
+  it('streams when only the name the switch was first deployed under is set', async () => {
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', undefined);
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    const h = await harness();
+    await h.run();
+    expect(h.fetched.map(({ peerId, uals }) => [peerId, uals.length])).toEqual([[core, 1], [core, 10]]);
+    expect(h.transportModes).toEqual(['stream-preferred', 'stream-required']);
+  });
+
   it.each(['unset', '0', 'private', 'unknown-authority', 'no-protocol', 'not-core'] as const)('retains ordinary ordering/large-KA singleton limits when %s', async guard => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', guard === 'unset' ? undefined : guard === '0' ? '0' : '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', guard === 'unset' ? undefined : guard === '0' ? '0' : '1');
     const h = await harness({ public: guard !== 'private', core: guard !== 'not-core', advertised: guard !== 'no-protocol' });
     if (guard === 'unknown-authority') h.authority.mockResolvedValue({ kind: 'unknown' } as never);
     await h.run();
@@ -80,7 +89,7 @@ describe('experimental public Core streaming recovery host', () => {
   });
 
   it.each(['unknown', 'oversize'] as const)('retains legacy singleton wire for %s footprints even on a public supported Core', async footprint => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness({ unknown: footprint === 'unknown', oversize: footprint === 'oversize' });
     await h.run();
     expect(h.fetched.map(({ peerId, uals }) => [peerId, uals.length])).toEqual([[core, 1], [core, 1]]);
@@ -88,7 +97,7 @@ describe('experimental public Core streaming recovery host', () => {
   });
 
   it('plans bounded ordinary recovery from the sole Core after a scoped resource refusal', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness({ soleCore: true });
     // This fixture owns scheduling, while scope capture/settlement and the real
     // embedded responder are exercised separately by the lifecycle suites.
@@ -107,7 +116,7 @@ describe('experimental public Core streaming recovery host', () => {
   });
 
   it('leaves a stale unsupported advertisement eligible only for the ordinary smaller plan', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness();
     const connectionKey = h.internals.getSyncReconcilerConnectionKey(core);
     rememberExactBatchStreamUnsupported(h.agent, core, connectionKey, connectionKey, Date.now());

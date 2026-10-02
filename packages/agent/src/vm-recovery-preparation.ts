@@ -150,9 +150,9 @@ function entryBytes(kaId: string, footprint: VmRecoveryChainFootprint | undefine
   return 96 + 2 * kaId.length + 2 * scalars;
 }
 
-/** Typed experimental switch: env `DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH`, then config, default off. */
+/** Typed opt-in switch: env `DKG_VM_RECOVERY_PREFETCH_ENABLED`, then config, default off. */
 export function resolveVmRecoveryPrefetchEnabled(configValue?: boolean): boolean {
-  return resolveBooleanSwitch(configValue, 'DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', false);
+  return resolveBooleanSwitch(configValue, 'DKG_VM_RECOVERY_PREFETCH_ENABLED', false);
 }
 
 export class VmRecoveryPreparation {

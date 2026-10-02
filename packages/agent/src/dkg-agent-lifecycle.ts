@@ -469,6 +469,7 @@ import {
   getSyncBackpressureBusyError,
   resolveNonNegativeIntegerSwitch,
   resolveBooleanSwitch,
+  resolveExactBatchStreamEnabled,
   resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
   withGlobalSyncBackpressure,
@@ -3276,7 +3277,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
-      onExperimentalExactBatchResources: process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1'
+      onExperimentalExactBatchResources: resolveExactBatchStreamEnabled()
         && this.config.nodeRole === 'core'
         ? (resources) => {
             const binding = createExactBatchResponderBinding({
@@ -6507,7 +6508,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const outcome = await runExactBatchStreamDriver({
         contextGraphId, remotePeerId,
         selection: exactAssetSelection, transportMode: exactRecoveryTransportMode,
-        streamEnabled: process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1',
+        streamEnabled: resolveExactBatchStreamEnabled(),
         fetchDeadline: contextGraphBudget.fetchDeadline, signal, isCurrent,
       }, {
         router: this.router, capabilityOwner: this,

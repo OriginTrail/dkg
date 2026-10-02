@@ -1,4 +1,4 @@
-/** Experimental next-batch sizing preparation, exercised through the real recovery pass. */
+/** Opt-in next-batch sizing preparation, exercised through the real recovery pass. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '../src/index.js';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
@@ -96,7 +96,7 @@ describe('VM recovery next-batch sizing preparation', () => {
   });
 
   it('carries resolved hints for the unplanned remainder into the next pass instead of re-reading them', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const { harness, readsByKa } = await scenario('PreparedOn', { unsizedReads: { 5: 2 } });
     agents.push(harness.agent);
     const { first, second } = await twoPasses(harness);
@@ -118,7 +118,7 @@ describe('VM recovery next-batch sizing preparation', () => {
     agents.push(off.harness.agent);
     await twoPasses(off.harness);
 
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const on = await scenario('PreparedParityOn', { unsizedReads: { 5: 2 } });
     agents.push(on.harness.agent);
     await twoPasses(on.harness);
@@ -127,7 +127,7 @@ describe('VM recovery next-batch sizing preparation', () => {
   });
 
   it('does not prepare or hand out hints once recovery ownership is lost', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const { harness, readsByKa } = await scenario('PreparedStale', { unsizedReads: { 5: 2 } });
     agents.push(harness.agent);
     await harness.run();
@@ -148,7 +148,7 @@ describe('VM recovery next-batch sizing preparation', () => {
     agents.push(off.harness.agent);
     await off.harness.run();
 
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const on = await scenario('PreparedEntryOn');
     agents.push(on.harness.agent);
     await on.harness.run();
@@ -171,7 +171,7 @@ describe('VM recovery next-batch sizing preparation', () => {
   });
 
   it('agent shutdown cancels an outstanding speculative read and waits for it to settle before closing the store', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_VM_RECOVERY_PREFETCH', '1');
+    vi.stubEnv('DKG_VM_RECOVERY_PREFETCH_ENABLED', '1');
     const { harness } = await scenario('PreparedShutdown');
     agents.push(harness.agent);
 

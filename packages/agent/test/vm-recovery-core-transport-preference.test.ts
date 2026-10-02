@@ -58,7 +58,7 @@ function transportScope(h: Harness) {
 }
 
 async function carriedHarness(behavior?: Parameters<typeof harness>[1], peers = [older, core, third]) {
-  vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+  vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
   const h = await harness(0, behavior, peers, { targetCount: 35, knownSizing: true });
   // Exercise ordinary exact transport under the experimental holder flag;
   // advertising streaming support is not what earns the holder proof.
@@ -69,7 +69,7 @@ async function carriedHarness(behavior?: Parameters<typeof harness>[1], peers = 
 }
 
 async function affinityHarness(behavior?: Parameters<typeof harness>[1]) {
-  vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+  vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
   const h = await harness(0, behavior, [older, core, third], { targetCount: 12, knownSizing: true });
   vi.spyOn(h.agent, 'getPeerProtocols').mockImplementation(async peer => peer === core ? [EXACT_BATCH_STREAM_PROTOCOL] : []);
   vi.spyOn(h.agent, 'resolveRegisteredContextGraphAuthority').mockRejectedValue(new Error('authority unavailable'));
@@ -413,7 +413,7 @@ describe('experimental Core ordering without holder credit', () => {
     if (change === 'roster') h.internals.node.libp2p.getConnections = () => [older, core, third, '12D3KooWNewRoster']
       .map(peerId => ({ remotePeer: { toString: () => peerId } }));
     if (change === 'graph-clear') h.internals.clearVmReconcileRotationStateForContextGraph(cg);
-    if (change === 'flag-off') vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
+    if (change === 'flag-off') vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0');
     expect(h.internals.vmReconcilePublicCoreTransportPreferencePolicy.preferredPeer(cg, '1', [older, core, third])).toBeUndefined();
     expect(preferenceEntries(h).has(cg)).toBe(false);
     await h.internals.recoverVmReconcileBatch(cg, 1n, h.targets.slice(3), 100, () => true);
@@ -481,7 +481,7 @@ describe('experimental Core ordering without holder credit', () => {
 
 describe('experimental carried public Core holder', () => {
   it('retains ordering after verified unknown-hint reuse without credit and finishes through fresh probes', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness(0, undefined, [older, core, third]);
     vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
     vi.spyOn(h.agent, 'readLiveOnChainAccessPolicy').mockRejectedValue(new Error('policy unavailable'));
@@ -514,7 +514,7 @@ describe('experimental carried public Core holder', () => {
   });
 
   it.each(['clean-absent', 'incomplete', 'unverified', 'throw'] as const)('does not yield after unknown-hint reuse returns %s', async failure => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness(0, (peer, ordinal) => {
       if (peer === core && ordinal === 2) {
         if (failure === 'throw') throw new Error('transport failure');
@@ -534,7 +534,7 @@ describe('experimental carried public Core holder', () => {
   });
 
   it('does not grant credit when renewal refuses a verified batch, and probes again next slice', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness(0, undefined, [older, core, third], { targetCount: 35, knownSizing: true });
     vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
     vi.spyOn(h.internals.vmReconcilePublicCoreTransportPreferencePolicy, 'remember').mockReturnValue(false);
@@ -550,7 +550,7 @@ describe('experimental carried public Core holder', () => {
   });
 
   it('keeps ordinary fallback for a verified peer without Core capability', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness(0, undefined, [older, core, third]);
     h.internals.peerCapabilityRegistry.forget(core);
     vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
@@ -585,7 +585,7 @@ describe('experimental carried public Core holder', () => {
 
   it('restores the singleton probe when the experimental flag is disabled', async () => {
     const h = await carriedHarness();
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0');
     await next(h);
     expect(h.fetched.slice(3).map(({ uals }) => uals.length)).toEqual([1, 8]);
   });
@@ -598,7 +598,7 @@ describe('experimental carried public Core holder', () => {
   });
 
   it('does not promote an ordering hint or Identify role into carried credit', async () => {
-    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '1');
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const h = await harness(0, undefined, [older, core, third], { targetCount: 35, knownSizing: true });
     vi.spyOn(h.agent, 'getPeerProtocols').mockResolvedValue([]);
     expect(remember(h)).toBe(true);
