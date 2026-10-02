@@ -7,6 +7,7 @@ import {
 import {
   getSyncBackpressureSnapshot,
   resolveBooleanSwitch,
+  resolveExactBatchStreamEnabled,
   resolveNonNegativeIntegerSwitch,
   resolveSyncGlobalBackpressure,
   resolveSyncReconcilerEnabled,
@@ -1457,6 +1458,42 @@ describe('sync global backpressure', () => {
       else process.env.DKG_VM_RECONCILER_ENABLED = oldVm;
       if (oldSync === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
       else process.env.DKG_SYNC_RECONCILER_ENABLED = oldSync;
+    }
+  });
+
+  it('resolves the exact-batch stream switch from its current name, then the name it was first deployed under', () => {
+    const oldCurrent = process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+    const oldFirst = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+    try {
+      delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // A node configured before the rename keeps its setting.
+      delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // Once the current name is set it decides, in either direction.
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '0';
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = 'on';
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '0';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // An unrecognised value is not a decision; the earlier name still applies.
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = 'maybe';
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+    } finally {
+      if (oldCurrent === undefined) delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      else process.env.DKG_EXACT_BATCH_STREAM_ENABLED = oldCurrent;
+      if (oldFirst === undefined) delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+      else process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = oldFirst;
     }
   });
 

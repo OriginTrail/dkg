@@ -6,6 +6,13 @@ import { parse } from 'yaml';
 import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+// The trusted CI controller commit that the workflows' four trusted checkouts
+// pin; a rotation changes it here and in those four `ref:` lines, nowhere
+// else. It must already be on protected testnet-canary or main history: the
+// test 'the pinned controller is already on protected branch history' checks
+// that against the branches the build job fetches, and the scheduled
+// inspect-ci-policy report flags it after merge.
+export const TRUSTED_CI_CONTROLLER_SHA = 'dfb3460719c13d592e2bb4d7d3c29fe55567fbe3';
 export const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 // The jobs selected lanes run: each lane's own job, and the Windows lifecycle
 // job, which runs with the agent lane.

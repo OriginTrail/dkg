@@ -20,6 +20,10 @@ import {
   type StoreOperation,
   type StoreOperationOutcomeTagged,
 } from './store-operation-outcome.js';
+import {
+  createRateLimitedStoreTimeoutDiagnosticReporter,
+  type StoreSchedulerTimeoutDiagnostic,
+} from './store-scheduler-timeout-diagnostics.js';
 
 const defaultStoreWorkPriority = new AsyncLocalStorage<StoreWorkPriority>();
 
@@ -87,10 +91,9 @@ export class StoreSchedulerBusyError extends Error implements StoreOperationOutc
     readonly operation: string,
     options?: StoreSchedulerBusyErrorOptions,
   ) {
-    super(
-      `Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`,
-      options,
-    );
+    // Error.message reaches public HTTP responses. Cross-request active work
+    // belongs only in the structured diagnostic, never in this message.
+    super(`Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`, options);
     this.name = 'StoreSchedulerBusyError';
     this.storeOperation = options?.storeOperation;
   }
@@ -98,6 +101,8 @@ export class StoreSchedulerBusyError extends Error implements StoreOperationOutc
 
 export interface StoreSchedulerBusyErrorLike extends StoreOperationOutcomeTagged {
   readonly code: 'STORE_SCHEDULER_BUSY';
+  /** Optional because copying an Error can omit its non-enumerable message. */
+  readonly message?: string;
   readonly retryable: true;
   readonly outcome: 'not_started';
   readonly reason: StoreSchedulerBusyReason;
@@ -112,6 +117,7 @@ export function isStoreSchedulerBusyError(
   if (!error || typeof error !== 'object') return false;
   const shaped = error as Partial<StoreSchedulerBusyErrorLike>;
   return shaped.code === 'STORE_SCHEDULER_BUSY'
+    && (shaped.message === undefined || typeof shaped.message === 'string')
     && shaped.retryable === true
     && shaped.outcome === 'not_started'
     && shaped.storeOperationOutcomeTag === STORE_OPERATION_OUTCOME_TAG
@@ -132,6 +138,8 @@ export interface StorePrioritySchedulerOptions {
   queueLimits?: number | Partial<StorePriorityQueueLimits>;
   queueWaitTimeoutMs?: number;
   now?: () => number;
+  /** Observability only. Failures here cannot alter admission outcomes. */
+  timeoutDiagnosticSink?: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void | Promise<void>;
 }
 
 interface QueueEntry<T> {
@@ -323,6 +331,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private readonly healthReservedSlots: number;
   private readonly queueWaitTimeoutMs: number;
   private readonly now: () => number;
+  private readonly reportTimeout?: ReturnType<typeof createRateLimitedStoreTimeoutDiagnosticReporter>;
   private readonly queueLimits: StorePriorityQueueLimits;
   private readonly nonAckLanePolicy: NonAckLanePolicy;
 
@@ -399,6 +408,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
     );
     this.queueWaitTimeoutMs = resolvedQueueWaitTimeoutMs;
     this.now = resolvedNow;
+    this.reportTimeout = options.timeoutDiagnosticSink
+      ? createRateLimitedStoreTimeoutDiagnosticReporter({ emit: options.timeoutDiagnosticSink })
+      : undefined;
     this.queueLimits = normalizeQueueLimits(options.queueLimits ?? resolveQueueLimitsFromEnv());
     const nonAckLimit = Math.max(1, this.maxConcurrent - this.ackReservedSlots);
     this.updatePressureCapacity({
@@ -510,9 +522,11 @@ export class StorePriorityScheduler extends ObservableScheduler {
           'queue_wait_timeout',
           normalizedPriority,
           operation,
-          entry.storeOperation === undefined
-            ? undefined
-            : { storeOperation: entry.storeOperation },
+          entry.storeOperation === undefined ? undefined : { storeOperation: entry.storeOperation },
+        );
+        this.reportTimeout?.(
+          { priority: normalizedPriority, operation },
+          () => this.getBackpressureSnapshot(),
         );
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error);
@@ -674,7 +688,10 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 }
 
-export const externalStorePriorityScheduler = new StorePriorityScheduler();
+export const externalStorePriorityScheduler = new StorePriorityScheduler({
+  timeoutDiagnosticSink: (diagnostic) =>
+    console.warn('[store scheduler] queue wait timeout', diagnostic),
+});
 backpressureRegistry.register(externalStorePriorityScheduler);
 
 export function getExternalStorePrioritySchedulerSnapshot(): StorePrioritySchedulerSnapshot {

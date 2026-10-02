@@ -1,19 +1,8 @@
 import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+import { escapeRdfLiteral } from './rdf-literal-escape.js';
 
 export { isAbsoluteRfc3987IriV1 };
-
-/** N-Triples ECHAR short forms, keyed by the raw character. */
-const RDF_LITERAL_SHORT_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
-  '\b': '\\b',
-  '\t': '\\t',
-  '\n': '\\n',
-  '\f': '\\f',
-  '\r': '\\r',
-  '"': '\\"',
-  '\\': '\\\\',
-});
-
-const RDF_LITERAL_ESCAPE_PATTERN = /["\\\u0000-\u001F\u007F]/g;
+export { escapeRdfLiteral };
 
 const NTRIPLES_ECHAR_VALUES: Readonly<Record<string, string>> = Object.freeze({
   b: '\b',
@@ -89,18 +78,6 @@ export function decodeNTriplesIriEscapesPreservingLegacy(value: string): string 
   return decodeNTriplesUcharEscapes(value, {
     invalidEscape: 'preserve',
     surrogatePolicy: 'allow',
-  });
-}
-
-/**
- * Escape a plain-text string for use as an RDF/N-Triples literal body.
- * Returns only the escaped body; callers add the surrounding quotes.
- */
-export function escapeRdfLiteral(value: string): string {
-  return value.replace(RDF_LITERAL_ESCAPE_PATTERN, (character) => {
-    const shortEscape = RDF_LITERAL_SHORT_ESCAPES[character];
-    if (shortEscape !== undefined) return shortEscape;
-    return `\\u${character.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
   });
 }
 
@@ -198,6 +175,13 @@ export interface DecodeRdfLiteralBodyOptions {
   invalidEscape?: 'reject' | 'preserve';
   /** Permit UTF-16 surrogate code points for compatibility with legacy hash canonicalization. */
   allowSurrogateCodePoints?: boolean;
+  /**
+   * Decode two adjacent short escapes that form a UTF-16 surrogate pair
+   * (`\uD83D\uDE00`, as Blazegraph and UTF-16 N-Triples writers emit a
+   * character above U+FFFF) to that character. An unpaired surrogate escape is
+   * still rejected.
+   */
+  combineSurrogatePairs?: boolean;
 }
 
 /**
@@ -220,7 +204,9 @@ export function decodeRdfLiteralBody(
 
   const preserveInvalid = options.invalidEscape === 'preserve';
   let result = '';
-  const surrogatePolicy = options.allowSurrogateCodePoints === true ? 'allow' : 'reject';
+  const surrogatePolicy = options.allowSurrogateCodePoints === true
+    ? 'allow'
+    : options.combineSurrogatePairs === true ? 'combine' : 'reject';
   for (let index = 0; index < value.length;) {
     const character = value[index];
     if (character !== '\\') {
@@ -329,10 +315,13 @@ const WRITABLE_RDF_LITERAL_GRAMMAR: RdfLiteralGrammar = {
 function parseRdfLiteralTermWith(
   term: string,
   grammar: RdfLiteralGrammar,
+  options: ParseRdfLiteralTermOptions = {},
 ): RdfLiteralTerm | null {
   const lexical = parseRdfLiteralLexicalTerm(term);
   if (!lexical || !grammar.body.test(lexical.body)) return null;
-  const value = decodeRdfLiteralBody(lexical.body);
+  const value = decodeRdfLiteralBody(lexical.body, {
+    combineSurrogatePairs: options.combineSurrogatePairs === true,
+  });
   if (value === null) return null;
   if (lexical.suffix.kind === 'language') {
     if (!RDF_LANGUAGE_TAG_PATTERN.test(lexical.suffix.language)) return null;
@@ -345,9 +334,40 @@ function parseRdfLiteralTermWith(
   return { kind: 'plain', value };
 }
 
+export interface ParseRdfLiteralTermOptions {
+  /** See {@link DecodeRdfLiteralBodyOptions.combineSurrogatePairs}. */
+  combineSurrogatePairs?: boolean;
+}
+
 /** Parse the N-Triples-style literal term emitted by {@link formatCanonicalRdfLiteralTerm}. */
-export function parseRdfLiteralTerm(term: string): RdfLiteralTerm | null {
-  return parseRdfLiteralTermWith(term, CANONICAL_RDF_LITERAL_GRAMMAR);
+export function parseRdfLiteralTerm(
+  term: string,
+  options: ParseRdfLiteralTermOptions = {},
+): RdfLiteralTerm | null {
+  return parseRdfLiteralTermWith(term, CANONICAL_RDF_LITERAL_GRAMMAR, options);
+}
+
+/**
+ * Rewrite an N-Quads object term into the form the triple store returns it in.
+ *
+ * A literal's escapes are decoded, including a UTF-16 surrogate pair of short
+ * escapes, and the literal is re-serialized with
+ * {@link formatCanonicalRdfLiteralTerm}, the formatter the store adapters use
+ * for query results. A datatype IRI carrying `\u` or `\U` escapes is decoded
+ * too, when the result is still an absolute IRI. IRIs and blank nodes are
+ * returned unchanged, and so is a literal that does not parse exactly: nothing
+ * is guessed.
+ */
+export function canonicalizeRdfObjectTerm(object: string): string {
+  if (!object.startsWith('"')) return object;
+  const literal = parseRdfLiteralTerm(object, { combineSurrogatePairs: true });
+  if (!literal) return object;
+  if (literal.kind !== 'typed' || !literal.datatype.includes('\\')) {
+    return formatCanonicalRdfLiteralTerm(literal);
+  }
+  const datatype = decodeNTriplesIriEscapesStrict(literal.datatype);
+  if (datatype === null || !isAbsoluteRfc3987IriV1(datatype)) return object;
+  return formatCanonicalRdfLiteralTerm({ ...literal, datatype });
 }
 
 // SPARQL 1.1 BLANK_NODE_LABEL, which N-Triples and N-Quads share.
@@ -412,3 +432,5 @@ export function normalizeRdfObject(value: unknown): string {
   const raw = String(value ?? '');
   return isRdfTerm(raw) ? raw : `"${escapeRdfLiteral(raw)}"`;
 }
+
+export { isRdfBlankNodeLabel } from './blank-node-label.js';

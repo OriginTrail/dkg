@@ -35,6 +35,19 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   };
   return Object.assign(fn, { calls });
 }
+
+/** Model admitted exact (argument four) or legacy (argument seven) work explicitly.
+ * Uncalled readiness/cancellation sentinels remain outside this boundary. */
+function admittedRecoveryWork<Args extends unknown[], Result extends object>(
+  work: (...args: Args) => Promise<Result>,
+  optionsIndex: 3 | 6 = 3,
+) {
+  return async (...args: Args) => {
+    const options = args[optionsIndex] as { onWorkStarted?: () => void } | undefined;
+    options?.onWorkStarted?.();
+    return { ...await work(...args), admission: 'work-started' as const };
+  };
+}
 import {
   KnowledgeAssetWorkspaceHeadCorruptError,
   computeFlatKCRootV10,
@@ -3231,7 +3244,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       return true;
     };
     const fetches: Array<{ peerId: string; uals: string[] }> = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
       peerId: string,
       _cg: string,
       uals: string[],
@@ -3248,7 +3261,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'found',
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'reconciled',
       blockNumber: 100,
@@ -3300,7 +3313,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const fetches: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       fetches.push(peerId);
       return {
         result: {
@@ -3309,7 +3322,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'found',
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'reconciled', blockNumber: 100,
     });
@@ -3344,7 +3357,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const attempts: string[] = [];
     let lastPeerId: string | undefined;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       attempts.push(peerId);
       lastPeerId = peerId;
       const found = peerId === curators[3];
@@ -3357,7 +3370,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: found ? 'found' : 'clean-absent',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, 'fourth-holder');
     (internals as any).reconcileChainOrdinal = async () => (
       lastPeerId === curators[3]
@@ -3446,7 +3459,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       // leave the owner querying a synthetic cursor after the final peer.
       const holderPeerId = overflowPeers[0]!;
       let lastPeerId: string | undefined;
-      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
         fetches.push(peerId);
         lastPeerId = peerId;
         const found = peerId === holderPeerId && resolutions === 6;
@@ -3459,7 +3472,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           },
           disposition: found ? 'found' as const : 'clean-absent' as const,
         };
-      };
+      });
       (internals as any).reconcileChainOrdinal = async () => (
         lastPeerId === holderPeerId && resolutions === 6
           ? { status: 'reconciled', blockNumber: 100 }
@@ -3550,7 +3563,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const target = vmRecoveryTarget(localCgId, 0, 'roster-cycle');
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async () => {
       const found = resolutionCalls === 3;
       return {
         result: {
@@ -3561,7 +3574,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: found ? 'found' as const : 'clean-absent' as const,
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = async () => (
       resolutionCalls === 3
         ? { status: 'reconciled', blockNumber: 100 }
@@ -3616,7 +3629,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const fetches: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       fetches.push(peerId);
       return {
         result: {
@@ -3627,7 +3640,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: peerId === fallbackPeer ? 'found' : 'clean-absent',
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'reconciled', blockNumber: 100,
     });
@@ -3661,7 +3674,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const exactFetches: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
       _peerId: string,
       contextGraphId: string,
     ) => {
@@ -3674,9 +3687,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         disposition: 'incomplete',
         responderCapability: 'legacy-filter-unsupported',
       };
-    };
+    });
     const fallbacks: unknown[][] = [];
-    (internals as any).runLegacyDurableSyncDetailed = async (...args: unknown[]) => {
+    (internals as any).runLegacyDurableSyncDetailed = admittedRecoveryWork(async (...args: unknown[]) => {
       fallbacks.push(args);
       return {
         result: {
@@ -3684,7 +3697,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
         },
       };
-    };
+    }, 6);
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'reconciled', blockNumber: 100,
     });
@@ -3740,7 +3753,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).readLiveOnChainAccessPolicy = async () => 0;
 
     const fetches: string[][] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
       _peerId: string,
       _contextGraphId: string,
       uals: string[],
@@ -3757,9 +3770,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         disposition: probe ? 'found' : 'incomplete',
         ...(probe ? {} : { responderCapability: 'legacy-filter-unsupported' }),
       };
-    };
+    });
     let fallbackRan = false;
-    (internals as any).runLegacyDurableSyncDetailed = async () => {
+    (internals as any).runLegacyDurableSyncDetailed = admittedRecoveryWork(async () => {
       fallbackRan = true;
       return {
         result: {
@@ -3767,7 +3780,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
         },
       };
-    };
+    }, 6);
     (internals as any).reconcileChainOrdinal = async (
       _lcg: string,
       _ocg: bigint,
@@ -3888,13 +3901,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).selectCatchupPeers = () => [connectedPeer];
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => ({
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async () => ({
       result: {
         fetchedDataTriples: 1, fetchedMetaTriples: 8, insertedTriples: 9,
         failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
       },
       disposition: 'found',
-    });
+    }));
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'reconciled', blockNumber: 100,
     });
@@ -3927,7 +3940,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const fetches: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       fetches.push(peerId);
       return {
         result: {
@@ -3936,7 +3949,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'found',
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'reconciled', blockNumber: 100,
     });
@@ -3972,7 +3985,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
     (internals as any).waitForSyncProtocol = async () => true;
     const fetches: Array<{ peerId: string; uals: string[] }> = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
       peerId: string,
       _cg: string,
       uals: string[],
@@ -3985,7 +3998,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'incomplete',
       };
-    };
+    });
     const revalidated: number[] = [];
     (internals as any).reconcileChainOrdinal = async (
       _lcg: string, _ocg: bigint, ordinal: number,
@@ -4079,7 +4092,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
     (internals as any).waitForSyncProtocol = async () => true;
     const fetchedUals: string[][] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
       _peerId: string,
       _cgId: string,
       uals: string[],
@@ -4092,7 +4105,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'incomplete',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, '7');
     const deferredTarget = vmRecoveryTarget(localCgId, 1, '8');
     (internals as any).reconcileChainOrdinal = async (
@@ -4154,7 +4167,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     const networkAttempts: number[] = [];
     const targets = [0, 1].map((ordinal) => vmRecoveryTarget(localCgId, ordinal));
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
       _peerId: string,
       _cgId: string,
       uals: string[],
@@ -4167,7 +4180,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'incomplete',
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = async (
       _lcg: string,
       _ocg: bigint,
@@ -4231,7 +4244,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const networkAttempts: string[] = [];
     let lastPeerId: string | undefined;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       networkAttempts.push(peerId);
       lastPeerId = peerId;
       return {
@@ -4245,7 +4258,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: peerId === peerB ? 'found' : 'clean-absent',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, '7');
     (internals as any).reconcileChainOrdinal = async () => (
       lastPeerId === peerB
@@ -4294,7 +4307,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     };
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const fetchAttempts: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       fetchAttempts.push(peerId);
       return {
         result: {
@@ -4303,7 +4316,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'found',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, '7');
     (internals as any).reconcileChainOrdinal = async () => (
       fetchAttempts.length > 0
@@ -4350,7 +4363,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const attemptsByUal = new Map<string, string[]>();
     let lastDisposition: 'found' | 'incomplete' = 'incomplete';
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
       peerId: string,
       _cgId: string,
       requestedUals: string[],
@@ -4377,7 +4390,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: lastDisposition,
       };
-    };
+    });
     let activeTarget = vmRecoveryTarget(localCgId, 0, '76');
     (internals as any).reconcileChainOrdinal = async () => (
       activeTarget.ual.endsWith('/76') && lastDisposition === 'found'
@@ -4452,7 +4465,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     let now = 100;
     (internals as any).vmReconcileRotationNow = () => now;
     const networkAttempts: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       networkAttempts.push(peerId);
       return {
         result: {
@@ -4461,7 +4474,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'clean-absent',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, '71');
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'pending',
@@ -4521,7 +4534,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).ensurePeerAdmittedForRecovery = async (peerId: string) =>
       peerId !== rejectedPeer;
     const networkAttempts: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       networkAttempts.push(peerId);
       return {
         result: {
@@ -4530,7 +4543,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'incomplete',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, 'scheduling');
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'pending', recovery: target,
@@ -4638,7 +4651,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const networkAttempts: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       networkAttempts.push(peerId);
       return {
         result: {
@@ -4647,7 +4660,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'clean-absent',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, '75');
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'pending', recovery: target,
@@ -4699,7 +4712,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const attempts: string[] = [];
     let lastPeerId: string | undefined;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       attempts.push(peerId);
       lastPeerId = peerId;
       const found = peerId === holderPeerId;
@@ -4712,7 +4725,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: found ? 'found' : 'clean-absent',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, 'later-holder');
     (internals as any).reconcileChainOrdinal = async () => (
       lastPeerId === holderPeerId
@@ -4758,7 +4771,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const attempts: string[] = [];
     let lastPeerId: string | undefined;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       attempts.push(peerId);
       lastPeerId = peerId;
       return {
@@ -4770,7 +4783,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: peerId === curatorPeerId ? 'found' : 'clean-absent',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, '80');
     (internals as any).reconcileChainOrdinal = async () => (
       lastPeerId === curatorPeerId
@@ -4811,7 +4824,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const networkAttempts: string[] = [];
     let peerAFetches = 0;
     let lastDisposition: 'found' | 'clean-absent' | 'incomplete' = 'incomplete';
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       networkAttempts.push(peerId);
       if (peerId === peerA) peerAFetches += 1;
       lastDisposition = peerId === peerA && peerAFetches > 1
@@ -4832,7 +4845,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: lastDisposition,
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, '74');
     (internals as any).reconcileChainOrdinal = async () => (
       lastDisposition === 'found'
@@ -4901,7 +4914,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       (internals as any).waitForSyncProtocol = async () => true;
       (internals as any).ensurePeerAdmittedForRecovery = async () => true;
       const attemptsByUal = new Map<string, string[]>();
-      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
         peerId: string,
         _cgId: string,
         requestedUals: string[],
@@ -4917,7 +4930,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           },
           disposition: 'clean-absent',
         };
-      };
+      });
       const first = vmRecoveryTarget(localCgId, 0, '78');
       const overflow = vmRecoveryTarget(localCgId, 1, '79');
       const secondOverflow = vmRecoveryTarget(localCgId, 2, '80');
@@ -5616,7 +5629,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     let fetches = 0;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async () => {
       fetches += 1;
       return {
         result: {
@@ -5625,7 +5638,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'incomplete',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, 'unconfirmed-incomplete');
     (internals as any).reconcileChainOrdinal = async () => ({ status: 'pending', recovery: target });
 
@@ -5677,7 +5690,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
     const fetches: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       fetches.push(peerId);
       const found = peerId === curatorPeer;
       return {
@@ -5689,7 +5702,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: found ? 'found' : 'clean-absent',
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = vi.fn()
       .mockResolvedValueOnce({ status: 'pending' })
       .mockResolvedValue({ status: 'reconciled', blockNumber: 100 });
@@ -5970,7 +5983,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     let markFetchStarted!: () => void;
     const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
     const fetchRelease = new Promise<void>((resolve) => { releaseFetch = resolve; });
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async () => {
       markFetchStarted();
       await fetchRelease;
       return {
@@ -5980,7 +5993,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'clean-absent',
       };
-    };
+    });
     const reconcile = vi.fn();
     (internals as any).reconcileChainOrdinal = reconcile;
     let current = true;
@@ -6020,7 +6033,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     let markFetchStarted!: () => void;
     const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
     const fetchRelease = new Promise<void>((resolve) => { releaseFetch = resolve; });
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async () => {
       markFetchStarted();
       await fetchRelease;
       return {
@@ -6030,7 +6043,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'clean-absent',
       };
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, '73');
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'pending', recovery: target,
@@ -6068,7 +6081,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
     (internals as any).waitForSyncProtocol = async () => true;
     let fetchCount = 0;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async () => {
       fetchCount += 1;
       return {
         result: {
@@ -6077,7 +6090,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'found',
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'reconciled',
       blockNumber: 100,
@@ -6119,7 +6132,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       ensureAdmitted: async () => false,
     };
     const fetches: string[] = [];
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (peerId: string) => {
       fetches.push(peerId);
       return {
         result: {
@@ -6128,7 +6141,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
         disposition: 'found',
       };
-    };
+    });
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'reconciled',
       blockNumber: 100,
@@ -6170,7 +6183,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     let markEntered!: () => void;
     const entered = new Promise<void>((resolve) => { markEntered = resolve; });
     let receivedSignal: AbortSignal | undefined;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = admittedRecoveryWork(async (
       _peerId: string,
       _cgId: string,
       _uals: string[],
@@ -6184,7 +6197,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         else options.signal?.addEventListener('abort', onAbort, { once: true });
       });
       throw new Error('unreachable');
-    };
+    });
     const target = vmRecoveryTarget(localCgId, 0, 'exact-abort');
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'pending', recovery: target,
@@ -6356,7 +6369,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     const durabilityOrder: string[] = [];
     internals.store.flush = async () => { durabilityOrder.push('flush'); };
-    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+    (internals as any).persistContextGraphSyncStateStrict = async () => {
       durabilityOrder.push('save');
     };
 
@@ -6387,7 +6400,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const flush = vi.fn(async () => undefined);
     internals.store.flush = flush;
     const persistStrict = vi.fn(async () => undefined);
-    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+    (internals as any).persistContextGraphSyncStateStrict = persistStrict;
 
     await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
       .resolves.toMatchObject({ watermarkAfter: 0, reconciledOrdinals: 1 });
@@ -6415,7 +6428,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     internals.store.flush = async () => { throw new Error('triple-store flush failed'); };
     const persistStrict = vi.fn(async () => undefined);
-    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+    (internals as any).persistContextGraphSyncStateStrict = persistStrict;
 
     await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
       .rejects.toThrow('triple-store flush failed');
@@ -6446,7 +6459,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
     let releaseSave!: () => void;
     const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
-    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+    (internals as any).persistContextGraphSyncStateStrict = async () => {
       markSaveStarted();
       await saveGate;
     };
@@ -6767,5 +6780,247 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     for (const [ordinal, count] of visits) {
       expect({ ordinal, count }).toEqual({ ordinal, count: ordinal === 3 ? 2 : 1 });
     }
+  });
+});
+
+describe('VM reconcile cursor follows the subscription lifetime', () => {
+  // Shape of the Base mainnet stall (2026-09-24): `dkg subscribe` without
+  // `--save` got 19/25 KAs from the curator and left ordinals 6-11 for the
+  // reconciler, whose first cursor advance then failed on every sweep.
+  const HEAD = 25;
+  const MISSING = [6, 7, 8, 9, 10, 11];
+  let agent: DKGAgent | null = null;
+
+  afterEach(async () => {
+    if (agent) {
+      await agent.stop().catch(() => undefined);
+      agent = null;
+    }
+  });
+
+  function memorySubscriptionStore() {
+    const rows = new Map<string, ContextGraphSubscriptionRecord>();
+    const saves: ContextGraphSubscriptionRecord[] = [];
+    const store: ContextGraphSubscriptionStore = {
+      loadAll: async () => [...rows.values()].map((row) => ({ ...row })),
+      save: async (record) => {
+        saves.push({ ...record });
+        rows.set(record.id, { ...record });
+      },
+      delete: async (contextGraphId) => { rows.delete(contextGraphId); },
+    };
+    return { rows, saves, store };
+  }
+
+  async function boot(
+    name: string,
+    store: ContextGraphSubscriptionStore,
+    nodeRole: 'edge' | 'core' = 'edge',
+  ): Promise<AgentInternals> {
+    const chain = new MockChainAdapter();
+    chain.getContextGraphKCCount = async () => BigInt(HEAD);
+    agent = await DKGAgent.create({
+      name,
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: store,
+      nodeRole,
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    return internals;
+  }
+
+  /**
+   * Every ordinal except `MISSING` is already local, and recovery fetches the
+   * rest. Returns the ordinals recovery fetched.
+   */
+  function stageStalledGraph(internals: AgentInternals): number[] {
+    const local = new Set(
+      Array.from({ length: HEAD }, (_, ordinal) => ordinal)
+        .filter((ordinal) => !MISSING.includes(ordinal)),
+    );
+    const fetched: number[] = [];
+    (internals as any).reconcileChainOrdinal = async (
+      localCgId: string,
+      _onChainCgId: bigint,
+      ordinal: number,
+    ): Promise<OrdinalOutcome> => (local.has(ordinal)
+      ? { status: 'reconciled', blockNumber: 100 }
+      : { status: 'pending', recovery: vmRecoveryTarget(localCgId, ordinal) });
+    (internals as any).recoverVmReconcileBatch = async (
+      _localCgId: string,
+      _onChainCgId: bigint,
+      targets: readonly OrdinalRecoveryTarget[],
+    ): Promise<PendingOrdinalRecoveryResult> => {
+      const outcomes = new Map<number, OrdinalOutcome>();
+      for (const { ordinal } of targets) {
+        local.add(ordinal);
+        fetched.push(ordinal);
+        outcomes.set(ordinal, { status: 'reconciled', blockNumber: 100 });
+      }
+      return {
+        outcomes,
+        attemptedOrdinals: targets.map(({ ordinal }) => ordinal),
+        continuationOrdinal: undefined,
+        hasImmediateRecoveryWork: false,
+      };
+    };
+    return fetched;
+  }
+
+  /** Run periodic passes for one graph until it reports `current`. */
+  async function sweepUntilCurrent(
+    internals: AgentInternals,
+    localCgId: string,
+  ): Promise<ContextGraphReconcileResult[]> {
+    const passes: ContextGraphReconcileResult[] = [];
+    while (passes.length < 10) {
+      const pass = await internals.executeVmReconcileForCg(localCgId, 'periodic');
+      passes.push(pass);
+      if (pass.status === 'current') return passes;
+    }
+    throw new Error(`"${localCgId}" is not current after ${passes.length} passes`);
+  }
+
+  const watermarkSteps = (passes: ContextGraphReconcileResult[]) =>
+    passes.map((pass) => [pass.watermarkBefore, pass.watermarkAfter]);
+
+  it('advances an on-demand subscription through its pending ordinals without a durable write', async () => {
+    const { rows, saves, store } = memorySubscriptionStore();
+    const internals = await boot('OnDemandCursorAdvance', store);
+    const localCgId = 'on-demand-pending';
+    const subscription = {
+      subscribed: true,
+      syncMode: 'on-demand' as const,
+      onChainId: '33',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    const fetched = stageStalledGraph(internals);
+
+    const passes = await sweepUntilCurrent(internals, localCgId);
+
+    // The same three advances the live node made once `--save` unblocked it.
+    expect(watermarkSteps(passes)).toEqual([[0, 3], [3, 6], [6, HEAD]]);
+    expect([...fetched].sort((a, b) => a - b)).toEqual(MISSING);
+    expect((internals as any).reconcileCursors.get(localCgId)?.watermark).toBe(HEAD);
+    expect(subscription.lastReconciledOrdinal).toBe(HEAD);
+    expect(saves).toEqual([]);
+    expect(rows.size).toBe(0);
+  });
+
+  it('still saves each cursor advance of an always-on subscription', async () => {
+    const { rows, saves, store } = memorySubscriptionStore();
+    const internals = await boot('AlwaysOnCursorAdvance', store);
+    const localCgId = 'always-on-pending';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true,
+      syncMode: 'always-on',
+      onChainId: '34',
+      lastReconciledOrdinal: 0,
+    });
+    stageStalledGraph(internals);
+
+    const passes = await sweepUntilCurrent(internals, localCgId);
+
+    expect(watermarkSteps(passes)).toEqual([[0, 3], [3, 6], [6, HEAD]]);
+    expect(saves.map((row) => row.lastReconciledOrdinal)).toEqual([3, 6, HEAD]);
+    expect(rows.get(localCgId)).toMatchObject({
+      id: localCgId,
+      subscribed: true,
+      onChainId: '34',
+      lastReconciledOrdinal: HEAD,
+    });
+  });
+
+  it('saves a Core host-only cursor without persisting on-demand member intent', async () => {
+    const { rows, saves, store } = memorySubscriptionStore();
+    const internals = await boot('OnDemandCoreHostCursor', store, 'core');
+    const localCgId = 'on-demand-core-hosted';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true,
+      syncMode: 'on-demand',
+      coreHosted: true,
+      onChainId: '35',
+      lastReconciledOrdinal: 0,
+    });
+    stageStalledGraph(internals);
+
+    const passes = await sweepUntilCurrent(internals, localCgId);
+
+    // A Core keeps strict oldest-first order: 10-ordinal historical slices.
+    expect(watermarkSteps(passes)).toEqual([[0, 10], [10, 20], [20, HEAD]]);
+    expect(saves.map((row) => row.lastReconciledOrdinal)).toEqual([10, 20, HEAD]);
+    expect(saves.every((row) => row.subscribed === false && row.coreHosted === true)).toBe(true);
+    expect(rows.get(localCgId)).toMatchObject({
+      id: localCgId,
+      subscribed: false,
+      synced: false,
+      coreHosted: true,
+      onChainId: '35',
+      lastReconciledOrdinal: HEAD,
+    });
+  });
+
+  it('forgets on-demand progress across a restart while a saved cursor resumes', async () => {
+    const { rows, store } = memorySubscriptionStore();
+    const onDemandId = 'restart-on-demand';
+    const savedId = 'restart-always-on';
+    const internals = await boot('CursorLifetimeBeforeRestart', store);
+    internals.subscribedContextGraphs.set(onDemandId, {
+      subscribed: true,
+      syncMode: 'on-demand',
+      onChainId: '36',
+      lastReconciledOrdinal: 0,
+    });
+    internals.subscribedContextGraphs.set(savedId, {
+      subscribed: true,
+      syncMode: 'always-on',
+      onChainId: '37',
+      lastReconciledOrdinal: 0,
+    });
+    stageStalledGraph(internals);
+    await sweepUntilCurrent(internals, onDemandId);
+    await sweepUntilCurrent(internals, savedId);
+    expect([...rows.keys()]).toEqual([savedId]);
+
+    await agent!.stop();
+    agent = null;
+    const restarted = await boot('CursorLifetimeAfterRestart', store);
+    Object.assign(restarted as any, {
+      gossip: { subscribe: () => undefined, onMessage: () => undefined },
+    });
+    const authority = recorder(async (contextGraphId: string) => ({
+      outcome: 'allowed' as const,
+      source: 'registered-chain' as const,
+      reason: 'test',
+      metadataBootstrap: 'forbidden' as const,
+      onChainId: contextGraphId === savedId ? 37n : 36n,
+    }));
+    (restarted as any).resolveContextGraphSubscriptionBootstrapAuthority = authority;
+    const reconciledOrdinals = recorder(async (): Promise<OrdinalOutcome> => ({
+      status: 'reconciled',
+      blockNumber: 100,
+    }));
+    (restarted as any).reconcileChainOrdinal = reconciledOrdinals;
+
+    await agent!.rehydrateContextGraphSubscriptions(null);
+
+    expect(authority.calls.map(([contextGraphId]) => contextGraphId)).toEqual([savedId]);
+    expect(restarted.subscribedContextGraphs.has(onDemandId)).toBe(false);
+    expect((restarted as any).reconcileCursors.has(onDemandId)).toBe(false);
+    expect([...rows.keys()]).toEqual([savedId]);
+    expect(restarted.subscribedContextGraphs.get(savedId)).toMatchObject({
+      subscribed: true,
+      onChainId: '37',
+      lastReconciledOrdinal: HEAD,
+    });
+    await expect(restarted.executeVmReconcileForCg(savedId, 'periodic')).resolves.toMatchObject({
+      status: 'current',
+      watermarkBefore: HEAD,
+      watermarkAfter: HEAD,
+    });
+    expect(reconciledOrdinals.calls).toHaveLength(0);
   });
 });

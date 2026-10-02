@@ -18,7 +18,10 @@ import {
   type CompareAndSwapAppliedCatalogHeadInputV1,
   type Rfc64InventoryV1Foundation,
 } from '../src/rfc64/inventory-v1/index.js';
-import { CandidateInventoryV1 } from '../src/rfc64/inventory-v1/candidate.js';
+import {
+  CandidateInventoryV1,
+  createAppliedCatalogHeadsSnapshotV1,
+} from '../src/rfc64/inventory-v1/candidate.js';
 
 const SCOPE = `0x${'11'.repeat(32)}` as const;
 const AUTHOR = `0x${'22'.repeat(20)}` as const;
@@ -135,23 +138,31 @@ describe('RFC-64 SQL-1 durable applied-head CAS', () => {
   });
 });
 
-describe('RFC-64 applied-head inventory revision', () => {
-  it('moves on every applied-head write attempt and never on a read', async () => {
+describe('RFC-64 applied-head inventory snapshot', () => {
+  it('lists again after every applied-head write attempt and never after a read', async () => {
     const directory = temporaryDirectory();
     const inventory = await openInventoryV1(directory);
     foundations.push(inventory);
-    const seen = new Set<number>();
-    let revision = inventory.readAppliedCatalogHeadsRevisionV1();
-    seen.add(revision);
-    const expectMoved = () => {
-      const next = inventory.readAppliedCatalogHeadsRevisionV1();
-      expect(seen.has(next)).toBe(false);
-      seen.add(next);
-      revision = next;
+    let snapshot = inventory.readAppliedCatalogHeadsSnapshotV1();
+    expect(snapshot.heads).toEqual([]);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.heads)).toBe(true);
+    // A fresh listing, and its token names exactly the rows now in the table.
+    const expectRelisted = (heads: readonly ReturnType<typeof expectedSnapshot>[]) => {
+      const next = inventory.readAppliedCatalogHeadsSnapshotV1();
+      expect(next).not.toBe(snapshot);
+      expect(next.heads).toEqual(heads);
+      expect(next.heads).toEqual(inventory.listAppliedCatalogHeadsV1());
+      expect(next.token === snapshot.token).toBe(
+        JSON.stringify(next.heads) === JSON.stringify(snapshot.heads),
+      );
+      snapshot = next;
     };
     const expectUnchanged = () => {
-      expect(inventory.readAppliedCatalogHeadsRevisionV1()).toBe(revision);
+      expect(inventory.readAppliedCatalogHeadsSnapshotV1()).toBe(snapshot);
     };
+    const genesisRow = expectedSnapshot(GENESIS, GENESIS_INVENTORY, '0', '0');
+    const successorRow = expectedSnapshot(SUCCESSOR, SUCCESSOR_INVENTORY, '1', '1');
 
     inventory.readAppliedCatalogHeadV1(SCOPE, AUTHOR);
     inventory.listAppliedCatalogHeadsV1();
@@ -163,48 +174,80 @@ describe('RFC-64 applied-head inventory revision', () => {
 
     const genesis = input(null, GENESIS, GENESIS_INVENTORY, '0', '0');
     expect(inventory.compareAndSwapAppliedCatalogHeadV1(genesis).status).toBe('applied');
-    expectMoved();
+    expectRelisted([genesisRow]);
+    expectUnchanged();
     expect(inventory.compareAndSwapAppliedCatalogHeadV1(genesis).status).toBe('existing');
-    expectMoved();
+    expectRelisted([genesisRow]);
     expect(inventory.compareAndSwapAppliedCatalogHeadV1(
       input(GENESIS, SUCCESSOR, SUCCESSOR_INVENTORY, '1', '1'),
     ).status).toBe('applied');
-    expectMoved();
+    expectRelisted([successorRow]);
     expect(() => inventory.compareAndSwapAppliedCatalogHeadV1(
       input(GENESIS, LOSING_HEAD, `0x${'88'.repeat(32)}`, '1', '1'),
     )).toThrowError(expect.objectContaining({ code: 'applied-head-cas-conflict' }));
-    expectMoved();
+    expectRelisted([successorRow]);
     expect(() => inventory.deleteAppliedCatalogHeadV1({
       catalogScopeDigest: SCOPE,
       authorAddress: AUTHOR,
       expectedCurrentCatalogHeadDigest: LOSING_HEAD,
     })).toThrowError(expect.objectContaining({ code: 'applied-head-cas-conflict' }));
-    expectMoved();
+    expectRelisted([successorRow]);
     inventory.deleteAppliedCatalogHeadsV1([{
       catalogScopeDigest: SCOPE,
       authorAddress: AUTHOR,
       expectedCurrentCatalogHeadDigest: SUCCESSOR,
     }]);
-    expectMoved();
-    expect(inventory.listAppliedCatalogHeadsV1()).toEqual([]);
+    expectRelisted([]);
     inventory.deleteAppliedCatalogHeadV1({
       catalogScopeDigest: SCOPE,
       authorAddress: AUTHOR,
       expectedCurrentCatalogHeadDigest: SUCCESSOR,
     });
-    expectMoved();
+    expectRelisted([]);
+    expectUnchanged();
 
-    // A reopened inventory never reports a revision an earlier one did.
+    // A reopened inventory lists afresh; the closed one refuses.
+    expect(inventory.compareAndSwapAppliedCatalogHeadV1(genesis).status).toBe('applied');
+    expectRelisted([genesisRow]);
     inventory.close();
     foundations.splice(foundations.indexOf(inventory), 1);
     const reopened = await openInventoryV1(directory);
     foundations.push(reopened);
-    expect(seen.has(reopened.readAppliedCatalogHeadsRevisionV1())).toBe(false);
-    expect(() => inventory.readAppliedCatalogHeadsRevisionV1()).toThrow();
+    const afterRestart = reopened.readAppliedCatalogHeadsSnapshotV1();
+    expect(afterRestart).not.toBe(snapshot);
+    expect(afterRestart.heads).toEqual([genesisRow]);
+    expect(afterRestart.token).toBe(snapshot.token);
+    expect(() => inventory.readAppliedCatalogHeadsSnapshotV1()).toThrow();
+  });
+
+  it('keys the token on every field of every row, in listing order', () => {
+    const tokenOf = (rows: readonly object[]) =>
+      createAppliedCatalogHeadsSnapshotV1(rows as never).token;
+    const row = expectedSnapshot(GENESIS, GENESIS_INVENTORY, '0', '0');
+    const other = {
+      ...expectedSnapshot(SUCCESSOR, SUCCESSOR_INVENTORY, '1', '1'),
+      authorAddress: `0x${'99'.repeat(20)}`,
+    };
+    const token = tokenOf([row, other]);
+    expect(tokenOf([{ ...row }, { ...other }])).toBe(token);
+    expect(tokenOf([other, row])).not.toBe(token);
+    expect(tokenOf([row])).not.toBe(token);
+    expect(tokenOf([])).not.toBe(tokenOf([row]));
+    const variants: Array<Partial<typeof row>> = [
+      { catalogScopeDigest: `0x${'aa'.repeat(32)}` },
+      { authorAddress: `0x${'bb'.repeat(20)}` },
+      { currentCatalogHeadDigest: LOSING_HEAD },
+      { appliedInventoryDigest: SUCCESSOR_INVENTORY },
+      { catalogVersion: '7' },
+      { inventoryRowCount: '7' },
+    ];
+    for (const variant of variants) {
+      expect(tokenOf([{ ...row, ...variant }, other])).not.toBe(token);
+    }
   });
 
   for (const commitLanded of [false, true]) {
-    it(`moves when an applied-head write's COMMIT fails and ${commitLanded ? 'landed' : 'rolled back'}`, () => {
+    it(`lists again when an applied-head write's COMMIT fails and ${commitLanded ? 'landed' : 'rolled back'}`, () => {
       const path = join(temporaryDirectory(), `applied-commit-${commitLanded}.sqlite3`);
       let database = new DatabaseSync(path);
       database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
@@ -227,17 +270,19 @@ describe('RFC-64 applied-head inventory revision', () => {
       });
       const inventory = new CandidateInventoryV1(facade, reopen);
       try {
-        const before = inventory.readAppliedCatalogHeadsRevisionV1();
+        const before = inventory.readAppliedCatalogHeadsSnapshotV1();
+        expect(before.heads).toEqual([]);
         failNextCommit = true;
         expect(inventory.compareAndSwapAppliedCatalogHeadV1(
           input(null, GENESIS, GENESIS_INVENTORY, '0', '0'),
         ).status).toBe('applied');
         expect(reopen).toHaveBeenCalledTimes(1);
-        const afterCas = inventory.readAppliedCatalogHeadsRevisionV1();
-        expect(afterCas).not.toBe(before);
-        expect(inventory.listAppliedCatalogHeadsV1()).toEqual([
+        const afterCas = inventory.readAppliedCatalogHeadsSnapshotV1();
+        expect(afterCas.token).not.toBe(before.token);
+        expect(afterCas.heads).toEqual([
           expectedSnapshot(GENESIS, GENESIS_INVENTORY, '0', '0'),
         ]);
+        expect(inventory.readAppliedCatalogHeadsSnapshotV1()).toBe(afterCas);
 
         failNextCommit = true;
         inventory.deleteAppliedCatalogHeadV1({
@@ -246,8 +291,9 @@ describe('RFC-64 applied-head inventory revision', () => {
           expectedCurrentCatalogHeadDigest: GENESIS,
         });
         expect(reopen).toHaveBeenCalledTimes(2);
-        expect(inventory.readAppliedCatalogHeadsRevisionV1()).not.toBe(afterCas);
-        expect(inventory.listAppliedCatalogHeadsV1()).toEqual([]);
+        const afterDelete = inventory.readAppliedCatalogHeadsSnapshotV1();
+        expect(afterDelete.token).toBe(before.token);
+        expect(afterDelete.heads).toEqual([]);
       } finally {
         inventory.close();
         try { database.close(); } catch { /* inventory owns the current handle */ }
@@ -255,7 +301,7 @@ describe('RFC-64 applied-head inventory revision', () => {
     });
   }
 
-  it('moves on a low-level reopen outside any applied-head write', () => {
+  it('lists again after a low-level reopen outside any applied-head write', () => {
     const path = join(temporaryDirectory(), 'applied-read-reopen.sqlite3');
     let database = new DatabaseSync(path);
     database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
@@ -275,11 +321,20 @@ describe('RFC-64 applied-head inventory revision', () => {
     });
     const inventory = new CandidateInventoryV1(makeFacade(), reopen);
     try {
-      const before = inventory.readAppliedCatalogHeadsRevisionV1();
+      const before = inventory.readAppliedCatalogHeadsSnapshotV1();
       failNextCommit = true;
       expect(() => inventory.listAppliedCatalogHeadsV1()).toThrow(/read COMMIT failed/u);
       expect(reopen).toHaveBeenCalledOnce();
-      expect(inventory.readAppliedCatalogHeadsRevisionV1()).not.toBe(before);
+      const after = inventory.readAppliedCatalogHeadsSnapshotV1();
+      expect(after).not.toBe(before);
+      expect(after.token).toBe(before.token);
+      // A snapshot read that fails leaves nothing behind to reuse.
+      failNextCommit = true;
+      expect(() => inventory.listAppliedCatalogHeadsV1()).toThrow(/read COMMIT failed/u);
+      failNextCommit = true;
+      expect(() => inventory.readAppliedCatalogHeadsSnapshotV1()).toThrow(/read COMMIT failed/u);
+      expect(reopen).toHaveBeenCalledTimes(3);
+      expect(inventory.readAppliedCatalogHeadsSnapshotV1().heads).toEqual([]);
     } finally {
       inventory.close();
       try { database.close(); } catch { /* inventory owns the current handle */ }

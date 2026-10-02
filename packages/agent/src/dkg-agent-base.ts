@@ -1,3 +1,4 @@
+import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -41,6 +42,7 @@ import type { Rfc64CatalogShadowObservabilityRuntimeV1 } from
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
+import { SlotFactsIndex } from './context-graph-claim-proof.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
@@ -140,7 +142,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -293,6 +295,7 @@ import {
 } from './chain-reconciler.js';
 import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+import { VmRefreshQueue } from './vm-refresh.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -471,19 +474,35 @@ export function createListContextGraphsCacheInvalidatingStore(
   invalidate: () => void,
   // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
   // dirty the projection by graph rather than by inserted quads (covers deletes).
-  markProjectionDirty?: (quads?: readonly Quad[], targetGraph?: string) => void,
+  markProjectionDirty?: (
+    quads?: readonly Quad[],
+    targetGraph?: string,
+    targetSubject?: string,
+  ) => void,
 ): TripleStore & Partial<SortedGraphSetSource> {
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
     changed: (result: T) => boolean,
-    markDirty?: (result: T) => void,
+    markDirty?: () => void,
+    operation?: StoreOperation,
   ): Promise<T> => {
-    const result = await work();
-    if (changed(result)) {
-      invalidate();
-      markDirty?.(result);
+    try {
+      const result = await work();
+      if (changed(result)) {
+        invalidate();
+        markDirty?.();
+      }
+      return result;
+    } catch (error) {
+      // A mutation may have committed before its response was lost. Only an
+      // outcome-tagged pre-dispatch refusal proves cache/authority state did
+      // not change; every indeterminate outcome must invalidate fail-closed.
+      if (operation !== undefined && !isStoreOperationNotStarted(error, operation)) {
+        invalidate();
+        markDirty?.();
+      }
+      throw error;
     }
-    return result;
   };
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
     === 'function'
@@ -504,13 +523,15 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.insert(quads, options),
         () => quads.length > 0,
         () => markProjectionDirty?.(quads),
+        'insert',
       );
     },
     delete(quads, options) {
       return invalidateAfterMutation(
         () => innerStore.delete(quads, options),
         () => quads.length > 0,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(quads),
+        'delete',
       );
     },
     deleteByPattern(pattern, options) {
@@ -518,6 +539,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
+        'deleteByPattern',
       );
     },
     deleteByPatternWithoutCount(pattern, options) {
@@ -525,6 +547,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => deleteByPatternWithoutCount(innerStore, pattern, options),
         () => true,
         () => markProjectionDirty?.(),
+        'deleteByPattern',
       );
     },
     query(sparql, options) {
@@ -532,6 +555,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.query(sparql, options),
         () => isSparqlUpdateOperation(sparql),
         () => markProjectionDirty?.(),
+        isSparqlUpdateOperation(sparql) ? 'query' : undefined,
       );
     },
     hasGraph(graphUri, options) {
@@ -545,6 +569,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.dropGraph(graphUri, options),
         () => true,
         () => markProjectionDirty?.(),
+        'dropGraph',
       );
     },
     replaceGraph: innerStore.replaceGraph
@@ -552,6 +577,7 @@ export function createListContextGraphsCacheInvalidatingStore(
           () => innerStore.replaceGraph!(graphUri, quads, options),
           () => true,
           () => markProjectionDirty?.(),
+          'replaceGraph',
         )
       : undefined,
     // Rootless KA materialization replaces the assertion graph and its UAL
@@ -570,7 +596,10 @@ export function createListContextGraphsCacheInvalidatingStore(
               options,
             ),
             () => true,
-            () => markProjectionDirty?.([...graphQuads, ...metadataQuads]),
+            // A complete replacement can delete recipient facts not present in
+            // the replacement payload. Treat it as opaque authority mutation.
+            () => markProjectionDirty?.(),
+            'replaceGraphAndSubject',
           )
       : undefined,
     // #1863 — the async-lift publisher persists a job transition via this atomic
@@ -583,12 +612,11 @@ export function createListContextGraphsCacheInvalidatingStore(
           invalidateAfterMutation(
             () => innerStore.replaceSubject!(graphUri, subject, quads, options),
             () => true,
-            // Dirty the projection by the TARGET GRAPH, not the inserted quads:
-            // a subject replace can DELETE projection-relevant metadata (or insert
-            // non-relevant/empty rows), which quad-keyed dirtying would miss. The
-            // target graph covers both delete and insert (#1863). No-op for a
-            // non-CG graph (e.g. the control-plane graph), so no hot-path churn.
-            () => markProjectionDirty?.(undefined, graphUri),
+            // The target graph covers deleted facts; the replacement quads
+            // cover inserted recipient facts. The subject lets downstream
+            // invalidation distinguish exact atomic replacement paths.
+            () => markProjectionDirty?.(quads, graphUri, subject),
+            'replaceSubject',
           )
       : undefined,
     // RFC-64 author publication moves a complete public-SWM projection and
@@ -596,24 +624,12 @@ export function createListContextGraphsCacheInvalidatingStore(
     // capability through this cache-invalidation decorator and invalidate only
     // after a proven commit; a clean guard conflict changes nothing.
     rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
-      ? async (input, options) => {
-          try {
-            return await invalidateAfterMutation(
-              () => innerStore.rfc64AuthorCommitCasV1!(input, options),
-              result => result === 'committed',
-              () => markProjectionDirty?.(),
-            );
-          } catch (error) {
-            // A rejected CAS may have committed before its response was lost.
-            // Only an outcome-tagged pre-dispatch refusal proves caches remain
-            // valid; every indeterminate failure dirties both cache layers.
-            if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
-              invalidate();
-              markProjectionDirty?.();
-            }
-            throw error;
-          }
-        }
+      ? (input, options) => invalidateAfterMutation(
+          () => innerStore.rfc64AuthorCommitCasV1!(input, options),
+          result => result === 'committed',
+          () => markProjectionDirty?.(),
+          'rfc64AuthorCommitCasV1',
+        )
       : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
@@ -634,6 +650,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.deleteBySubjectPrefix(graphUri, prefix, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
+        'deleteBySubjectPrefix',
       );
     },
     countQuads(graphUri, options) {
@@ -649,6 +666,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.update!(sparql, options),
         () => true,
         () => markProjectionDirty?.(),
+        'update',
       )
       : undefined,
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
@@ -720,7 +738,7 @@ export class DKGAgentBase {
   protected readonly lastHostCatchupSeqno: Map<string, Map<string, number>> = new Map();
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
-  protected readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
@@ -1013,6 +1031,8 @@ export class DKGAgentBase {
   static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
   /** Ledgered copies one audit pass examines (local reads only), keyset paged. */
   static readonly VM_PROMOTION_AUDIT_PAGE_SIZE = 1_000;
+  /** Max ledger rows checked for VM promotion in one graph-scoped store query. */
+  static readonly VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE = 64;
   /** Ledger namespaces one backfill pass pages through. */
   static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
   /** Per-asset VM reconciles one audit pass may run for landed copies. */
@@ -1063,6 +1083,8 @@ export class DKGAgentBase {
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   /** How long a clean legacy exact-filter miss suppresses one peer. */
   static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
+  /** Transport affinity is short-lived and never establishes asset coverage. */
+  static readonly VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS = 2 * 60_000;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
@@ -1074,6 +1096,11 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /** Maximum bound graphs one timer sweep admits before yielding to live work. */
+  static readonly VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE',
+    8,
+  );
   /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
   static readonly RS_HEAL_BATCH_MAX = 64;
   /**
@@ -1116,6 +1143,59 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_CONFIRMATION_DEPTH =
     Number(process.env['DKG_VM_RECONCILE_CONFIRMATION_DEPTH']) || 5;
+  /**
+   * #2858 — confirmed VM copies waiting for a refresh after a KA update, held
+   * process-wide. Each entry is one (graph, KA) pair, a few hundred bytes. A
+   * full set refuses a new target, which holds the update event lane at that
+   * event until targets settle or are given up.
+   */
+  static readonly VM_REFRESH_MAX_ENTRIES = 4096;
+  /**
+   * #2858 — age, from its first offer, at which a refresh target that never
+   * settled is given up (an unreachable holder, a graph whose pass no longer
+   * runs). It then no longer holds the event lane's persisted cursor or a
+   * slot, and its copy waits for the KA's next update or an asset fetch.
+   */
+  static readonly VM_REFRESH_MAX_AGE_MS = 24 * 60 * 60_000;
+  /**
+   * Refresh attempts one refresh worker runs for its graph. Each is a few
+   * chain reads plus one exact fetch that asks at most
+   * `VM_RECONCILE_EXACT_PEER_MAX` peers; more due targets continue in the
+   * graph's next pass.
+   */
+  static readonly VM_REFRESH_MAX_PER_PASS = 2;
+  /**
+   * Refresh workers running at once across graphs. A worker runs beside its
+   * graph's reconcile pass, never inside it, so this keeps the lane within the
+   * dispatcher's own concurrency.
+   */
+  static readonly VM_REFRESH_MAX_WORKERS = 2;
+  /**
+   * Wall clock for each network step of a refresh attempt that runs before
+   * any data moves: resolving the graph's curators, and connecting, probing
+   * and admitting one candidate peer. Without it these steps follow only the
+   * VM lifecycle signal, which never fires in normal operation, and a libp2p
+   * dial given a caller signal has no deadline of its own, so one peer that
+   * cannot be reached held the whole attempt. A peer past it is skipped for
+   * the next candidate; curator resolution past it falls back to connected
+   * peers.
+   */
+  static readonly VM_REFRESH_PEER_STEP_TIMEOUT_MS = 20_000;
+  /**
+   * Backstop for one whole refresh attempt, above the per-step bounds and the
+   * durable sync's own transfer budget for up to `VM_RECONCILE_EXACT_PEER_MAX`
+   * peers. An attempt past it is retried after backoff.
+   */
+  static readonly VM_REFRESH_ATTEMPT_TIMEOUT_MS = 10 * 60_000;
+  /**
+   * Delay before refreshing a copy whose workspace already stages a newer
+   * version. The lane that staged it (the publisher's own update, a core's
+   * StorageACK pending-update lane) promotes it within seconds of the
+   * confirmation. On a member nothing does (a curator's shared memory it
+   * recovered after a restart, for example), so the refresh takes over once
+   * this has passed; the graph's next reconcile pass starts it.
+   */
+  static readonly VM_REFRESH_STAGED_GRACE_MS = 30_000;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
     // A full catalogue scan enriches every globally known graph and is
@@ -1264,6 +1344,20 @@ export class DKGAgentBase {
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /**
+   * #2858 — confirmed VM copies behind an on-chain update, queued by the
+   * `KnowledgeAssetUpdated` nudge and worked off by a refresh worker each
+   * graph's reconcile pass starts. Retries follow the recovery backoff (sweep
+   * interval, doubling, to the recovery ceiling).
+   */
+  protected readonly vmRefreshQueue = new VmRefreshQueue({
+    maxEntries: DKGAgentBase.VM_REFRESH_MAX_ENTRIES,
+    baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
+    maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+    maxAgeMs: DKGAgentBase.VM_REFRESH_MAX_AGE_MS,
+  });
+  /** #2858 — the running refresh worker of each graph, at most one per graph. */
+  protected readonly vmRefreshWorkers = new Map<string, Promise<void>>();
   /** Next stable batch index to consider when the bounded rotation cache has waiters. */
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
@@ -1277,6 +1371,8 @@ export class DKGAgentBase {
     connectionKey: string;
     expiresAt: number;
   }>();
+  /** Owns process-local Core ordering and reusable-holder transitions. */
+  protected vmReconcilePublicCoreTransportPreferencePolicy!: VmRecoveryCoreTransportPreferencePolicy;
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
   /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
@@ -1487,9 +1583,11 @@ export class DKGAgentBase {
   /**
    * Chain-public facts per on-chain Context Graph id (decimal), merged from the
    * live `ContextGraphCreated` tail and ContextGraphStorage enumeration. Feeds
-   * the `onChain` field of `listContextGraphs` rows; never an authority input.
+   * the `onChain` field of `listContextGraphs` rows and the proof of off-chain
+   * on-chain id claims (indexed by committed name hash for that); never an
+   * authority input on its own.
    */
-  protected readonly onChainContextGraphFacts = new Map<string, OnChainContextGraphFacts>();
+  protected readonly onChainContextGraphFacts = new SlotFactsIndex<OnChainContextGraphFacts>();
   /** Lazily built ContextGraphStorage id enumeration (historical discovery). */
   protected contextGraphStorageDiscovery?: ContextGraphStorageDiscovery | null;
   /** One-shot guard for the "ContextGraphNameRegistry is not in the Hub" notice. */
@@ -1921,6 +2019,8 @@ export class DKGAgentBase {
   */
   protected readonly pendingSenderKeyByAgent = new Map<string, PendingSenderKeyEntry[]>();
   protected readonly pendingSenderKeyDrainByAgent = new Map<string, Promise<number>>();
+  /** Agent-wide serialization for the single SWM sender-key state file. */
+  protected swmSenderKeyStateSaveQueue: Promise<void> = Promise.resolve();
   /** Per-CG serialized host-mode persistence queue (moved here from the host-mode cluster during the mixin split). */
   protected readonly hostModePersistenceQueues = new Map<string, Promise<void>>();
   /** System graph holding agent-registry triples (moved here so holder classes can reference it). */
@@ -2012,7 +2112,14 @@ export class DKGAgentBase {
     if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
     const store = this.config.finalizationRecoveryStoreFactory
       ? await this.config.finalizationRecoveryStoreFactory(this.config.dataDir)
-      : await openSqliteFinalizationRecoveryStore(this.config.dataDir);
+      : await openSqliteFinalizationRecoveryStore(this.config.dataDir, {
+          onDisplaced: (displaced) => this.log.warn(
+            createOperationContext('system'),
+            `Finalization recovery parked ${displaced.ual} after `
+              + `${displaced.failureStreak} consecutive ${displaced.failureSignature} `
+              + `failures to admit ${displaced.admittedUal}; it is retried when the inbox has room`,
+          ),
+        });
     this.finalizationRuntime.attachRecoveryStore(store);
   }
 

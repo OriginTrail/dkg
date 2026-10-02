@@ -159,7 +159,7 @@ hardhat_mine_blocks() {
   resp=$(curl -sS -X POST -H 'Content-Type: application/json' \
     --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hardhat_mine\",\"params\":[\"${hexcount}\"]}" \
     "http://127.0.0.1:${HARDHAT_PORT}" 2>/dev/null || true)
-  if printf '%s' "$resp" | grep -q '"result":true'; then
+  if grep -q '"result":true' <<<"$resp"; then
     return 0
   fi
   warn "hardhat_mine response was unexpected: $resp"

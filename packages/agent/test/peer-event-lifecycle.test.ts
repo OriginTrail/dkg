@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_NETWORK_IDENTITY, PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED } from '@origintrail-official/dkg-core';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -233,6 +233,29 @@ describe('DKGAgent peer lifecycle integration', () => {
       f.dispatchClose();
       f.dispatchUpdate([PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC]);
       expect(f.state.knownCorePeerIds.has(f.peerId)).toBe(false);
+    } finally { await f.close(); }
+  });
+
+  it('retries sync once when peer:update adds only the pooled sync id (#2822)', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      vi.spyOn(f.agent, 'ensurePeerAdmittedForRecovery').mockResolvedValue(true);
+      vi.spyOn(f.agent, 'getSyncReconcilerProbe').mockResolvedValue(PROBE);
+      const attempt = vi.spyOn(f.agent, 'attemptSyncFromPeerWithReconcilerAccounting')
+        .mockResolvedValue('not-started');
+      f.state.session.markSkipped(f.peerId);
+
+      // Stale identify: inbound pooled pulls merge only the pooled id.
+      f.dispatchUpdate([PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED]);
+      await vi.waitFor(() => expect(attempt).toHaveBeenCalledOnce());
+      expect(attempt).toHaveBeenCalledWith(f.peerId, PROBE, 'on-connect');
+      expect(f.state.session.isSkipped(f.peerId)).toBe(false);
+
+      // The retry consumed the skip marker, so a repeat update is a no-op.
+      f.dispatchUpdate([PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await flushMicrotasks();
+      expect(attempt).toHaveBeenCalledOnce();
     } finally { await f.close(); }
   });
 

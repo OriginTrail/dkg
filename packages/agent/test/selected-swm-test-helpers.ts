@@ -356,6 +356,7 @@ export async function callTrySyncFromPeer(
       connectionKey: string | null;
     }>;
     resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
+    rfc64LegacySwmGossipAllowedForContextGraph: () => boolean;
     recordSyncReconcilerFailure: (peerId: string) => void;
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
@@ -366,6 +367,7 @@ export async function callTrySyncFromPeer(
     connectionKey: null,
   });
   agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: true });
+  agent.rfc64LegacySwmGossipAllowedForContextGraph = () => true;
   agent.recordSyncReconcilerFailure ??= () => {};
   const applyAccounting = agent.applySyncOnConnectAccounting;
   if (onSyncAccounting) {
@@ -531,6 +533,7 @@ export interface SelectedSwmLifecycleAgentFixture {
   resolveRfc64CatalogReceiverAuthorityV1: (
     contextGraphId: string,
   ) => { legacySyncAllowed: boolean };
+  rfc64LegacySwmGossipAllowedForContextGraph: (contextGraphId: string) => boolean;
   createSwmTargetExecutorSessionV1: () => SwmTargetExecutorV1;
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
@@ -872,6 +875,7 @@ export function createSelectedSwmLifecycleHarness(
       );
     },
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    rfc64LegacySwmGossipAllowedForContextGraph: () => true,
     createSwmTargetExecutorSessionV1: () => {
       createTargetExecutorSession ??=
         createSwmTargetExecutorSessionFactoryForTest(agent as never);

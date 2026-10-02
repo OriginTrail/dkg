@@ -3,7 +3,6 @@ import { availableParallelism } from 'node:os';
 import {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
-  isStoreSchedulerBusyError,
   activeDefaultStoreWorkPriority,
   withDefaultStoreWorkPriority,
 } from '../src/store-priority-scheduler.js';
@@ -274,46 +273,6 @@ describe('StorePriorityScheduler', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('exports a distinguishable busy error type for boundary mapping', () => {
-    const error = new StoreSchedulerBusyError('queue_full', 'ack', 'storage-ack.read');
-    expect(error).toBeInstanceOf(Error);
-    expect(error).toBeInstanceOf(StoreSchedulerBusyError);
-    expect(error).toMatchObject({
-      code: 'STORE_SCHEDULER_BUSY',
-      retryable: true,
-      reason: 'queue_full',
-    });
-    expect(isStoreSchedulerBusyError(error)).toBe(true);
-  });
-
-  it('recognizes only complete structural busy errors across package boundaries', () => {
-    const structural = {
-      code: 'STORE_SCHEDULER_BUSY',
-      retryable: true,
-      outcome: 'not_started',
-      storeOperationOutcomeTag: 'dkg.store-operation-outcome.v1',
-      reason: 'queue_wait_timeout',
-      priority: 'normal',
-      operation: 'remote-query.read',
-      storeOperation: 'query',
-    };
-
-    for (const priority of STORE_WORK_PRIORITIES) {
-      expect(isStoreSchedulerBusyError({ ...structural, priority })).toBe(true);
-    }
-    expect(isStoreSchedulerBusyError({ ...structural, retryable: false })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, outcome: 'indeterminate' })).toBe(false);
-    expect(isStoreSchedulerBusyError({
-      ...structural,
-      storeOperationOutcomeTag: 'dkg.store-operation-outcome.v2',
-    })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, storeOperation: 'unknown' })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, reason: undefined })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, priority: 'urgent' })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, operation: undefined })).toBe(false);
-    expect(isStoreSchedulerBusyError({ code: 'STORE_SCHEDULER_BUSY' })).toBe(false);
   });
 
   it('binds canonical operations at both scheduler-owned admission rejection sites', async () => {

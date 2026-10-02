@@ -3581,6 +3581,31 @@ describe('graph-scoped finalization handler', () => {
       scope: { ual: UAL },
     });
 
+    // An intact copy asked about another version (an update it has not
+    // received yet) is not current; a copy naming another KA batch is foreign.
+    await expect(resolveConfirmedGraphScopedVm(store, {
+      contextGraphId: CG,
+      ual: UAL,
+      merkleRoot: new Uint8Array(32).fill(0x5a),
+      kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
+    })).resolves.toEqual({ status: 'invalid', reason: 'not-current' });
+    await expect(resolveConfirmedGraphScopedVm(store, {
+      contextGraphId: CG,
+      ual: UAL,
+      assertionVersion: BigInt(VERSION) + 1n,
+      merkleRoot: message.kcMerkleRoot,
+      kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
+    })).resolves.toEqual({ status: 'invalid', reason: 'not-current' });
+    await expect(resolveConfirmedGraphScopedVm(store, {
+      contextGraphId: CG,
+      ual: UAL,
+      merkleRoot: new Uint8Array(32).fill(0x5a),
+      kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID + 1n,
+    })).resolves.toEqual({ status: 'invalid', reason: 'identity' });
+
     await store.insert([{
       graph: `did:dkg:context-graph:${CG}/_meta`,
       subject: UAL,

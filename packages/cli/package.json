@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.19",
+  "version": "10.0.20",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -55,6 +55,7 @@
     "@origintrail-official/dkg-epcis": "workspace:*",
     "@origintrail-official/dkg-local-llm": "workspace:*",
     "@origintrail-official/dkg-mcp": "workspace:*",
+    "@origintrail-official/dkg-node-store": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
@@ -68,7 +69,8 @@
     "jsonc-parser": "3.3.1",
     "n3": "^2.0.1",
     "semver": "^7.7.4",
-    "typescript": "^5.7"
+    "typescript": "^5.7",
+    "undici": "^7.29.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7",

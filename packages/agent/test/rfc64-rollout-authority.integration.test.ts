@@ -34,6 +34,7 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { isRfc64TransientAuthorityRefreshFailureV1 } from '../src/dkg-agent-rfc64-catalog.js';
 import {
   computeFlatKCRootV10,
   storeKnowledgeAssetOperationPublicQuads,
@@ -5324,6 +5325,102 @@ describe('RFC-64 rollout authority integration', () => {
     expect(status?.authorityState).not.toBe('blocked');
   });
 
+  it('classifies an unresolved private roster as transient, not as a denial', () => {
+    // This decision is what keeps the curator authoring: a denial parks the
+    // graph `blocked`, closing the only root-scope SWM lane a catalog-selected
+    // graph has.
+    expect(isRfc64TransientAuthorityRefreshFailureV1('registered-private-roster-unresolved')).toBe(true);
+    expect(isRfc64TransientAuthorityRefreshFailureV1('registered-authority-unfinalized')).toBe(true);
+    // Genuine denials must still fail closed.
+    for (const denial of [
+      'registered-authority-binding-mismatch',
+      'registered-authority-adapter-unsupported',
+      'unregistered-owner-unresolved',
+      'access-policy-unresolved',
+      'catalog-service-unavailable',
+      'authority-resolution-failed',
+    ]) {
+      expect(isRfc64TransientAuthorityRefreshFailureV1(denial)).toBe(false);
+    }
+  });
+
+  /**
+   * On a PRIVATE graph the refresh additionally requires a locally verified
+   * lifecycle roster. When that roster is not resolvable YET the refresh used
+   * to throw a bare `Error`, which is classified as a denial and parks the
+   * graph as `blocked`. That closes the curator's own authoring fence — and on
+   * a catalog-selected graph the catalog lane is the ONLY delivery path for
+   * root-scope SWM (legacy apply is deliberately closed), so the curator
+   * authored zero catalog rows and an RFC-64 matrix cell converged 0/50 SWM
+   * rather than slowly. `null` means "not resolvable yet"; a genuine
+   * revocation arrives as a resolved, smaller roster and still fails closed.
+   */
+  it('treats an unresolved private roster as retryable, keeping the author\'s catalog lane open', async () => {
+    const contextGraphId = `${AUTHOR}/private-roster-author`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    // The helper defaults to a PRIVATE graph, which is what this needs.
+    const indexed = {
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      nameHash: expectedNameHash,
+    };
+    const readSnapshots = vi.fn(async () => new Map([['9', indexed]]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const author = await startAgent({
+      name: 'private-roster-author',
+      config: { chainAdapter },
+    });
+    (author as any).localContextGraphProvenance.recordLocalCreate(contextGraphId);
+    author.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    author.subscribeToContextGraph(contextGraphId);
+    await author.whenRfc64CatalogResponsibilitiesIdleV1();
+    const signal = new AbortController().signal;
+
+    // A resolvable authenticated roster is a precondition of acceptance on a
+    // private graph; this fixture has no durable member state of its own.
+    const roster = vi
+      .spyOn(author as any, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValue([AUTHOR.toLowerCase()]);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .resolves.toMatchObject({ source: 'finalized-chain' });
+    const accepted = (author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    expect(accepted).not.toBeNull();
+
+    // The authenticated roster stops resolving locally.
+    roster.mockResolvedValue(null);
+    const request = (await author.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toMatchObject({ code: 'registered-private-roster-unresolved' });
+    expect(roster).toHaveBeenCalled();
+
+    // The accepted lineage survives the failed refresh rather than being
+    // cleared, which is what keeps the author's catalog lane usable. (This
+    // fixture does not select the graph, so the fence projection itself is
+    // asserted by the public sibling above; what is new here is the typed,
+    // retryable classification.)
+    expect((author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
+  });
+
   it('keeps a replica fail-closed but retryable through the same finality lag (no retained seed, not parked)', async () => {
     const contextGraphId = `${AUTHOR}/unfinalized-replica`;
     const expectedNameHash = ethers.keccak256(
@@ -5645,7 +5742,7 @@ describe('RFC-64 rollout authority integration', () => {
     })).resolves.toBe(false);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
     const confirmedMeta = vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(false);
-    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryGate')
+    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryRosterSource')
       .mockResolvedValue([AUTHOR, MEMBER]);
     await expect(edge.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
       .resolves.toBeNull();
@@ -5685,7 +5782,7 @@ describe('RFC-64 rollout authority integration', () => {
       { agentAddress: MEMBER },
     ] as ReturnType<DKGAgent['listLocalAgents']>);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryGate')
+    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryRosterSource')
       .mockResolvedValue([MEMBER]);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
 
@@ -5810,7 +5907,7 @@ describe('RFC-64 rollout authority integration', () => {
     (edge as any).defaultAgentAddress = MEMBER;
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([AUTHOR, MEMBER]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([AUTHOR, MEMBER]);
     vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1788482000000');
     vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
       .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
@@ -5930,7 +6027,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([localMember]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([localMember]);
     vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1');
 
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
@@ -5956,7 +6053,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([AUTHOR]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([AUTHOR]);
     vi.spyOn(edge, 'getCgMeta').mockResolvedValue({
       ...(await edge.getCgMeta(contextGraphId)),
       revokedAgents: [MEMBER],
@@ -6080,6 +6177,100 @@ describe('RFC-64 rollout authority integration', () => {
         stableReason: null,
       }),
     );
+  });
+
+  it('rejects an unregistered roster when metadata changes during the version read', async () => {
+    const contextGraphId = `${AUTHOR}/private-roster-revision-fence` as ContextGraphIdV1;
+    const curator = await startAgent({
+      name: 'private-roster-revision-fence',
+      config: {
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    });
+    (curator as any).defaultAgentAddress = AUTHOR;
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name: 'Private roster revision fence',
+      accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    await curator.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    const acceptedBefore = (curator as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    let releaseVersion!: () => void;
+    let versionEntered!: () => void;
+    const versionGate = new Promise<void>((resolve) => { releaseVersion = resolve; });
+    const versionRead = new Promise<void>((resolve) => { versionEntered = resolve; });
+    vi.spyOn(curator, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValue([AUTHOR, MEMBER]);
+    vi.spyOn(curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementation(async () => {
+        versionEntered();
+        await versionGate;
+        return '9';
+      });
+
+    const staleRefresh = curator.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+    await versionRead;
+    Reflect.get(curator, 'contextGraphMetaProjection').markDirty(contextGraphId);
+    releaseVersion();
+
+    await expect(staleRefresh).resolves.toBeNull();
+    expect((curator as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      contextGraphId,
+    )).toEqual(acceptedBefore);
+  });
+
+  it('rejects an unregistered authority generation when metadata changes during the policy read', async () => {
+    const contextGraphId = `${AUTHOR}/private-policy-revision-fence` as ContextGraphIdV1;
+    const curator = await startAgent({
+      name: 'private-policy-revision-fence',
+      config: {
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    });
+    (curator as any).defaultAgentAddress = AUTHOR;
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name: 'Private policy revision fence',
+      accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    await curator.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    const acceptedBefore = (curator as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    let releasePolicy!: () => void;
+    let policyEntered!: () => void;
+    const policyGate = new Promise<void>((resolve) => { releasePolicy = resolve; });
+    const policyRead = new Promise<void>((resolve) => { policyEntered = resolve; });
+    vi.spyOn(curator, 'getExplicitAccessPolicy')
+      .mockImplementationOnce(async () => {
+        policyEntered();
+        await policyGate;
+        return 'private';
+      });
+
+    const staleRefresh = curator.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+    await policyRead;
+    // Simulate an owner/policy authority-fact generation landing after the
+    // old owner was read but before this blocked policy read completes.
+    Reflect.get(curator, 'contextGraphMetaProjection').markDirty(contextGraphId);
+    releasePolicy();
+
+    await expect(staleRefresh).resolves.toBeNull();
+    expect((curator as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      contextGraphId,
+    )).toEqual(acceptedBefore);
   });
 
   it('keeps a blocked authority disabled throughout a stalled retry', async () => {
@@ -6535,6 +6726,10 @@ describe('RFC-64 rollout authority integration', () => {
         },
       },
     });
+    expect(stopped.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)
+      .legacySyncAllowed).toBe(false);
+    expect(stopped.canUseLegacySharedMemorySyncForContextGraphV1(CONTEXT_GRAPH_ID)).toBe(true);
+    await expect(stopped.canUseLegacyDurableSyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
     expect(stopped.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
     expect(stopped.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();

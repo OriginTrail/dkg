@@ -1,8 +1,15 @@
+// First: it mocks `node:worker_threads` for the bridge + worker round trip at
+// the end of this file, before `catchup-runner.ts` is loaded below.
+import { runCatchupThroughBridge } from './helpers/catchup-runner-worker-test-harness.js';
 import { describe, expect, it } from 'vitest';
+import { emptySharedMemorySyncResult, type DKGAgent } from '@origintrail-official/dkg-agent';
+import { createIncompleteDurableSyncResult } from '@origintrail-official/dkg-agent/dist/sync/durable-progress.js';
+import { Rfc64SwmRecoveryTargetRevokedErrorV1 } from '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { catchupReadinessResult, durableDiagnostics, sharedMemoryDiagnostics } from './_helpers/catchup-readiness-fixtures.js';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
+  catchupResultHasCleanResponse,
   classifyContextGraphCatchupReadiness,
   classifyNameHashOnlyCatchup,
 } from '../src/context-graph-readiness.js';
@@ -810,5 +817,211 @@ describe('name-hash-only catch-up classification', () => {
     expect(classifyNameHashOnlyCatchup({ state: 'resolved', message: 'resolves to "acme"' })).toBeNull();
     expect(classifyNameHashOnlyCatchup(null)).toBeNull();
     expect(classifyNameHashOnlyCatchup(undefined)).toBeNull();
+  });
+});
+
+/**
+ * Terminal status of a whole catch-up job: the daemon's real bridge and worker,
+ * with only the agent doubled, classified the way the subscribe route does it.
+ *
+ * The outsider case is the devnet invite/reject-flow shape: a node that is not
+ * on a private graph's allowlist has no `_meta` for it, so the graph looks
+ * public, legacy durable sync skips it as catalog-authoritative, and no RFC-64
+ * public policy admits the selected SWM lane. Nothing is ever sent, so no peer
+ * can deny it; the job used to end `failed` with "all reachable peers failed".
+ *
+ * The race case is an Edge's first subscribe to a public graph: the graph's
+ * RFC-64 policy commits in the background while the job prepares, so the lane
+ * has to be decided when each call runs.
+ */
+describe('catch-up terminal status through the bridge and worker', () => {
+  const CG = 'cg-terminal-status';
+  const PEERS = ['peer-a', 'peer-b', 'peer-c'];
+  const before = { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 };
+
+  function nodeAgent(node: {
+    isPrivate: boolean;
+    legacySyncAllowed: boolean;
+    /** Read on every resolver call, so a test can change it mid-job. */
+    selectedLane: { lane: 'selected-public' | 'ordinary-private' | null; active: boolean };
+    /** Runs on each sync-protocol probe, i.e. after `prepareCatchup` returned. */
+    onProbe?: () => void;
+    durable: () => Promise<unknown>;
+    selectedSharedMemory?: () => Promise<unknown>;
+    ordinarySharedMemory?: () => Promise<unknown>;
+  }) {
+    const calls = { durable: 0, selectedSharedMemory: 0, ordinarySharedMemory: 0 };
+    const agent = {
+      isPrivateContextGraph: async () => node.isPrivate,
+      // No local `_meta` means no curator to prefer.
+      resolveSyncPeerWithProvenance: async () => ({ peerId: undefined, provenance: 'bootstrap-hint' }),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: (contextGraphId: string) => ({
+        kind: 'rfc64-swm-recovery-runtime-authority-v1',
+        contextGraphId,
+        ...node.selectedLane,
+      }),
+      resolveRfc64CatalogReceiverAuthorityV1: (contextGraphId: string) => ({
+        contextGraphId,
+        legacySyncAllowed: node.legacySyncAllowed,
+      }),
+      ensurePeerConnected: async () => {},
+      primeCatchupConnections: async () => {},
+      listAdmittedConnectedPeers: async () => PEERS.map((peerId) => ({ toString: () => peerId })),
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+      waitForSyncProtocol: async () => {
+        node.onProbe?.();
+        return true;
+      },
+      syncDurableRecoveryContextGraph: async () => {
+        calls.durable += 1;
+        return { result: await node.durable() };
+      },
+      syncSelectedSharedMemoryFromPeerDetailed: async () => {
+        calls.selectedSharedMemory += 1;
+        return node.selectedSharedMemory!();
+      },
+      syncSharedMemoryFromPeerDetailed: async () => {
+        calls.ordinarySharedMemory += 1;
+        return node.ordinarySharedMemory!();
+      },
+      refreshMetaSyncedFlags: async () => {},
+      log: { info: () => {}, debug: () => {}, warn: () => {} },
+    };
+    return { agent: agent as unknown as DKGAgent, calls };
+  }
+
+  /**
+   * As the subscribe route does it: metadata is confirmed with the agent only
+   * once some peer answered.
+   */
+  const classify = (result: CatchupJobResult, agentConfirmsMeta = false) => (
+    classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: catchupResultHasCleanResponse(result) && agentConfirmsMeta,
+      isPrivate: false,
+      readinessBeforeCatchup: before,
+    })
+  );
+
+  it('ends an outsider unreachable with the join-request hint, not failed', async () => {
+    const { agent, calls } = nodeAgent({
+      isPrivate: false,
+      legacySyncAllowed: false,
+      selectedLane: { lane: null, active: false },
+      // What the agent returns once it has dropped the graph from legacy sync.
+      durable: async () => createIncompleteDurableSyncResult(),
+      selectedSharedMemory: async () => {
+        throw new Rfc64SwmRecoveryTargetRevokedErrorV1(CG);
+      },
+    });
+
+    const result = await runCatchupThroughBridge(agent, { contextGraphId: CG, includeSharedMemory: true });
+
+    const classification = classify(result);
+    expect(classification.jobStatus).toBe('unreachable');
+    expect(classification.error).toBe("No peer could deliver this project's data — the curator may be offline, or no node currently holds the data. You can still send a signed join request; they will receive it next time they come online.");
+    expect(result).toMatchObject({
+      peersResponded: 0,
+      peersSucceeded: 0,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+      denied: false,
+      deferredBackpressure: 0,
+    });
+    expect(result.peersTried).toBeGreaterThan(0);
+    expect(result.diagnostics?.durable.failedPeers).toBe(0);
+    expect(result.diagnostics?.sharedMemory.failedPeers).toBe(0);
+    // Neither plane reached the agent's sync lanes.
+    expect(calls).toEqual({ durable: 0, selectedSharedMemory: 0, ordinarySharedMemory: 0 });
+  });
+
+  it('runs selected SWM when the public policy commits after the job prepared', async () => {
+    const selectedLane: { lane: 'selected-public' | null; active: boolean } = {
+      lane: null,
+      active: false,
+    };
+    const { agent, calls } = nodeAgent({
+      isPrivate: false,
+      // A catalog graph's VM plane is not served by legacy durable sync.
+      legacySyncAllowed: false,
+      selectedLane,
+      // The background responsibility pass commits the policy during the probes.
+      onProbe: () => {
+        selectedLane.lane = 'selected-public';
+        selectedLane.active = true;
+      },
+      durable: async () => createIncompleteDurableSyncResult(),
+      // Verified data inserted; the bounded job ended before the scope did.
+      selectedSharedMemory: async () => ({
+        kind: 'selected-shared-memory',
+        shared: {
+          ...emptySharedMemorySyncResult(),
+          insertedTriples: 4,
+          fetchedDataTriples: 4,
+          insertedDataTriples: 4,
+          bytesReceived: 400,
+          completedPhases: 1,
+          timedOutPhases: 1,
+        },
+        scopeComplete: false,
+      }),
+    });
+
+    const result = await runCatchupThroughBridge(agent, { contextGraphId: CG, includeSharedMemory: true });
+
+    expect(calls.selectedSharedMemory).toBe(PEERS.length);
+    expect(result.sharedMemorySynced).toBe(4 * PEERS.length);
+    expect(result.peersResponded).toBe(PEERS.length);
+    expect(result.diagnostics?.sharedMemory.failedPeers).toBe(0);
+
+    // A peer answered, so the route asks the agent; the public graph is registered.
+    const classification = classify(result, true);
+    expect(classification.jobStatus).not.toBe('unreachable');
+    expect(classification.jobStatus).toBe('partial');
+    expect(classification.error).toMatch(/^Verified data was inserted, but this bounded catch-up job ended/);
+  });
+
+  it('still ends failed when a reachable peer times out and the rest fail in transport', async () => {
+    const { agent, calls } = nodeAgent({
+      isPrivate: false,
+      legacySyncAllowed: true,
+      selectedLane: { lane: 'selected-public', active: true },
+      durable: async () => ({ ...createIncompleteDurableSyncResult(), timedOutPhases: 1 }),
+      selectedSharedMemory: async () => {
+        throw new Error('stream reset by peer');
+      },
+    });
+
+    const result = await runCatchupThroughBridge(agent, { contextGraphId: CG, includeSharedMemory: true });
+
+    expect(calls.durable).toBe(1);
+    expect(calls.selectedSharedMemory).toBe(PEERS.length);
+    expect(result.peersTried).toBe(PEERS.length);
+    expect(result.peersResponded).toBe(1);
+    expect(result.diagnostics?.sharedMemory.failedPeers).toBe(PEERS.length);
+
+    const classification = classify(result);
+    expect(classification.jobStatus).toBe('failed');
+    expect(classification.error).toBe('Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.');
+  });
+
+  it('still ends denied when the peers deny the requester', async () => {
+    const { agent } = nodeAgent({
+      isPrivate: true,
+      legacySyncAllowed: true,
+      selectedLane: { lane: null, active: false },
+      durable: async () => ({ ...createIncompleteDurableSyncResult(), deniedPhases: 1 }),
+      ordinarySharedMemory: async () => ({ ...emptySharedMemorySyncResult(), deniedPhases: 1 }),
+    });
+
+    const result = await runCatchupThroughBridge(agent, { contextGraphId: CG, includeSharedMemory: true });
+
+    expect(result).toMatchObject({ denied: true, deniedPeers: PEERS.length, dataSynced: 0 });
+
+    const classification = classify(result);
+    expect(classification.jobStatus).toBe('denied');
+    expect(classification.error).toBe(`Sync denied by ${PEERS.length} remote peers`);
   });
 });

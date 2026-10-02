@@ -281,7 +281,9 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     const resolution = await agent.resolveWorkspaceAgentRecipientsForCurrentAuthority({
       contextGraphId: privateGraph,
     });
-    expect(live).toHaveBeenCalledTimes(1);
+    // One live roster selects keys; the second proves it did not rotate while
+    // key/peer resolution awaited the local store.
+    expect(live).toHaveBeenCalledTimes(2);
     expect(resolution.requiresEncryption).toBe(true);
     expect(resolution.recipients.map((recipient) => recipient.agentAddress.toLowerCase()))
       .toEqual([member.agentAddress.toLowerCase()]);

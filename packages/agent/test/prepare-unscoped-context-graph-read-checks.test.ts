@@ -78,6 +78,46 @@ function dependencies() {
 }
 
 describe('prepared unscoped Context Graph read checks', () => {
+  it.each(['rejected', 'replaced'] as const)(
+    'revalidates a prepared approved-private replica after it is %s',
+    async (change) => {
+      const deps = dependencies();
+      deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+      const approvedAuthority = {
+        kind: 'unregistered' as const,
+        approvedPrivateReplicaAuthority: {
+          approvedAgentAddress: 'outsider',
+          ownerAddress: 'owner',
+          requestGeneration: 'generation-1',
+          curatorPeerId: 'curator-peer',
+          memberAddresses: ['outsider'],
+          allowedPeers: [],
+        },
+      };
+      deps.getRegisteredAuthority
+        .mockResolvedValueOnce(approvedAuthority)
+        .mockResolvedValueOnce(change === 'rejected'
+          ? {
+              kind: 'unavailable',
+              reason: 'finalized-name-absence-unaccepted',
+            }
+          : {
+              kind: 'unregistered',
+              approvedPrivateReplicaAuthority: {
+                ...approvedAuthority.approvedPrivateReplicaAuthority,
+                approvedAgentAddress: 'replacement',
+                requestGeneration: 'generation-2',
+                memberAddresses: ['replacement'],
+              },
+            });
+      const signal = new AbortController().signal;
+      const check = await prepareUnscopedContextGraphReadChecks(deps, ['private'], signal);
+
+      expect(await check('private', signal)).toBe(false);
+      expect(deps.getRegisteredAuthority).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it.each(['unchanged', 'local-route', 'changed-hash'])(
     'denies a stale scalar miss after a positive batch despite %s routing', async (route) => {
       const deps = dependencies();

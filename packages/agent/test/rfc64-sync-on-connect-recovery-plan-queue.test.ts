@@ -239,7 +239,9 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const pushReplay = vi.fn(async () => ({ attempted: 0, admitted: 0 }));
     const bootstrapMetadata = vi.fn(async () => 'local-author' as const);
     const startSupervisor = vi.fn();
+    const observeLane = vi.fn();
     const agent = {
+      observeRfc64SwmCatalogProjectionLaneAvailabilityV1: observeLane,
       projectRfc64CatalogSubscriptionTransitionV1: project,
       rfc64PublicCatalogServiceV1: {
         deactivateReceiverContextGraph: deactivate,
@@ -297,6 +299,11 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     expect(bootstrapMetadata).toHaveBeenCalledOnce();
     expect(bootstrapMetadata).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
     expect(startSupervisor).toHaveBeenCalledOnce();
+    expect(observeLane).toHaveBeenCalledTimes(2);
+    expect(observeLane).toHaveBeenNthCalledWith(1, RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
+    expect(observeLane).toHaveBeenNthCalledWith(2, RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
+    expect(observeLane.mock.invocationCallOrder[0]).toBeLessThan(deactivate.mock.invocationCallOrder[0]!);
+    expect(observeLane.mock.invocationCallOrder[1]).toBeLessThan(startSupervisor.mock.invocationCallOrder[0]!);
   });
 
   it('does not push catalog replay to connected peers on activation for a graph this node did not author', () => {
@@ -313,7 +320,9 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
     const bootstrapMetadata = vi.fn(async () => 'not-found' as const);
     const startSupervisor = vi.fn();
+    const observeLane = vi.fn();
     const agent = {
+      observeRfc64SwmCatalogProjectionLaneAvailabilityV1: observeLane,
       projectRfc64CatalogSubscriptionTransitionV1: project,
       rfc64PublicCatalogServiceV1: { deactivateReceiverContextGraph: vi.fn() },
       clearRfc64CatalogOperationalTargetsV1: vi.fn(),
@@ -338,6 +347,8 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     expect(bootstrapMetadata).toHaveBeenCalledOnce();
     expect(bootstrapMetadata).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
     expect(startSupervisor).toHaveBeenCalledOnce();
+    expect(observeLane).toHaveBeenCalledOnce();
+    expect(observeLane).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
   });
 
   it('wires runtime authority into one-way coordinator admission and revalidation', async () => {

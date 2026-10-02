@@ -28,6 +28,7 @@ import type {
   ContextGraphStorageEntry,
   ContextGraphStorageRange,
 } from '@origintrail-official/dkg-chain';
+import { NO_NAME_COMMITMENT } from './context-graph-claim-proof.js';
 
 /** Ids read per durable page (one checkpoint save per page). */
 export const CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE = 16;
@@ -652,9 +653,21 @@ export type ObservedOnChainContextGraphFacts = Omit<OnChainContextGraphFacts, 'p
 };
 
 /**
+ * The name hash an observation commits, lowercase, or null for an opt-out:
+ * absent, empty, or bytes32(0). Enumeration already reads bytes32(0) as null;
+ * the live `ContextGraphCreated` event forwards the raw zero word.
+ */
+function committedObservationNameHash(nameHash: unknown): string | null {
+  if (typeof nameHash !== 'string' || nameHash.length === 0) return null;
+  const lower = nameHash.toLowerCase();
+  return lower === NO_NAME_COMMITMENT ? null : lower;
+}
+
+/**
  * Normalize one observation into facts: lowercase addresses and hash, an empty
- * name hash as an opt-out, and null for every field the observation does not
- * carry. An authority counts as read only alongside its publish policy.
+ * or zero name hash as an opt-out, and null for every field the observation
+ * does not carry. An authority counts as read only alongside its publish
+ * policy.
  */
 export function onChainContextGraphFactsFromObservation(
   observation: OnChainContextGraphObservation,
@@ -662,9 +675,7 @@ export function onChainContextGraphFactsFromObservation(
   const publishPolicy = observation.publishPolicy ?? null;
   return {
     onChainId: observation.contextGraphId,
-    nameHash: typeof observation.nameHash === 'string' && observation.nameHash.length > 0
-      ? observation.nameHash.toLowerCase()
-      : null,
+    nameHash: committedObservationNameHash(observation.nameHash),
     owner: observation.owner ? observation.owner.toLowerCase() : null,
     accessPolicy: Number.isSafeInteger(observation.accessPolicy) ? observation.accessPolicy : null,
     publishPolicy,
