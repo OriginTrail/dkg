@@ -117,6 +117,8 @@ const MAPPING_ROWS: readonly MappingRow[] = [
     () => precondition(exhaustedWithoutKeywords()), to('claimed', 'workspace_unavailable')),
   row('two wrappers are not unwrapped', 'claimed', 'claimed',
     () => precondition(precondition(exhaustedWithoutKeywords())), to('claimed', 'canonicalization_failed')),
+  row('only the ACK-precondition wrapper is unwrapped, not an arbitrary cause', 'claimed', 'claimed',
+    () => new Error('wrapped', { cause: exhaustedWithoutKeywords() }), to('claimed', 'canonicalization_failed')),
   row('a claimed origin on a validated record is not the C lane (persisted status decides)', 'validated', 'claimed',
     exhaustedWithoutKeywords, to('claimed', 'canonicalization_failed')),
   row('at claimed a typed store rejection is classified by its words (no proof exists yet)', 'claimed', 'claimed',
@@ -300,6 +302,9 @@ describe('GH#2945 recordExecutionFailure: the failure decision, characterized th
         timeoutAt: expect.any(Number),
         handling: 'check_chain_then_finalize_or_reset',
       });
+      // Stamped by the publisher's own clock while the failure is recorded, so before the job's update stamp.
+      expect(failed.failure.timeout?.timeoutAt).toBeGreaterThan(0);
+      expect(failed.failure.timeout?.timeoutAt).toBeLessThanOrEqual(failed.timestamps.updatedAt);
     } else {
       expect(failed.failure.timeout).toBeUndefined();
     }
@@ -379,6 +384,18 @@ describe('GH#2945 mapExecutionFailure: the same decision as a pure function', ()
     expect(failure.code).toBe('authority_forbidden');
     expect(failure.timeout).toBeUndefined();
     expect(clock.calls).toBe(1);
+  });
+
+  it('the C lane needs the REPORTED origin to be claimed as well as the record (a combination the state machine cannot commit)', () => {
+    const failure = mapExecutionFailure({
+      jobId: 'job-9',
+      currentStatus: 'claimed',
+      requestedOrigin: 'validated',
+      error: keyedExhaustedWithoutKeywords(),
+      now: countingClock().now,
+    });
+
+    expect(failure).toMatchObject({ failedFromState: 'validated', code: 'canonicalization_failed' });
   });
 
   describe('origins production never reports (pinned as the current collapse)', () => {
