@@ -23,6 +23,7 @@
 
 import type {
   TripleStore,
+  BoundedQueryResponseCapability,
   Quad as DKGQuad,
   QueryOptions,
   UpdateOptions,
@@ -69,6 +70,7 @@ import {
   AbortableStoreWorkLifecycle,
   composeAbortSignals,
   raceStoreWorkAgainstAbort,
+  type StoreWorkContext,
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
@@ -83,6 +85,7 @@ import {
   StoreOperationTimeoutError,
 } from '../store-operation-timeout.js';
 import { readSparqlResponseText } from './sparql-response-policy.js';
+import { relayAnswer, type RelayedAnswer } from './sparql-answer-relay.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
 import type {
   Rfc64SharedProjectionStreamCapabilityV1,
@@ -115,6 +118,86 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
+/**
+ * What a caller's abort after dispatch does to the HTTP request of a read. It
+ * is a required argument of {@link SparqlHttpStore.postQuery}, so no read path
+ * gets one by omission.
+ *
+ * What the server does once its client has gone depends on the answer. A
+ * streamed SELECT/CONSTRUCT stops when it next writes to the closed socket. A
+ * blocking evaluation (an aggregate, an ORDER BY) sends nothing until it is
+ * done and keeps evaluating, and once the fetch is aborted the client can no
+ * longer see it finish. The policies below follow from that.
+ *
+ * - `cancel-on-abort`: the request runs on the caller's signal and is aborted
+ *   with it. Used where the response consumer owns the body and stops reading
+ *   it when the caller leaves: the RFC-64 shared-projection stream, whose
+ *   spool is fed from the live body and cannot be drained-and-discarded.
+ * - `detach-on-caller-abort`: the request is not cancelled by the caller; it
+ *   runs on the store-close and client-deadline signals alone, under the
+ *   lifecycle's drain contract (`work.runDetached`), while the caller is
+ *   answered at once. From the first byte of the answer on, nothing is
+ *   buffered for a caller who has left (see `relayAnswer`): what remains of the
+ *   answer is read and discarded, but only up to
+ *   {@link ABANDONED_READ_DRAIN_BUDGET_BYTES}. A short answer that ends inside
+ *   that budget shows the server has finished; a longer one is streaming, so it
+ *   is cancelled, and its recovery stays retained.
+ *   Only honoured for a managed store with a recovery capability: only there
+ *   does a still-running abandoned read have a supervised restart as its
+ *   backstop. Anywhere else it behaves as `cancel-on-abort`, exactly as an
+ *   unmanaged endpoint always did.
+ */
+type SparqlHttpReadPolicy =
+  | { readonly kind: 'cancel-on-abort' }
+  | { readonly kind: 'detach-on-caller-abort'; readonly work: StoreWorkContext };
+
+const CANCEL_ON_ABORT: SparqlHttpReadPolicy = Object.freeze({ kind: 'cancel-on-abort' });
+
+/**
+ * How much of an answer is read, and thrown away, on behalf of a caller that
+ * has left, to find out whether the server has finished with the request. It is
+ * a hard bound on what an abandoned read costs the client once its caller is
+ * gone: nothing is ever buffered for it, and a longer answer is cancelled
+ * rather than read on (a streamed one would otherwise keep the server
+ * producing, and the client reading, for the whole client deadline). It is
+ * checked per chunk, so the client reads at most this much plus one chunk. 1 MiB
+ * is a few thousand result rows: enough for every aggregate, ASK and small
+ * SELECT to show a clean end, and about 30 ms of a streamed answer at the rate
+ * Oxigraph 0.5 produces one (about 35 MB/s).
+ */
+export const ABANDONED_READ_DRAIN_BUDGET_BYTES = 1024 * 1024;
+
+/**
+ * Settle with `work`, or reject at once with the caller's abort reason while
+ * `work` keeps running. `onAbandon` runs first, only when the abort wins.
+ */
+function raceCallerAbandon<T>(
+  work: Promise<T>,
+  caller: AbortSignal,
+  onAbandon: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      onAbandon();
+      reject(caller.reason);
+    };
+    caller.addEventListener('abort', onAbort, { once: true });
+    const finish = (settle: () => void) => {
+      if (settled) return;
+      settled = true;
+      caller.removeEventListener('abort', onAbort);
+      settle();
+    };
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (cause) => finish(() => reject(cause)),
+    );
+  });
 }
 
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
@@ -304,7 +387,8 @@ export interface SparqlHttpStoreOptions {
   now?: () => number;
 }
 
-export class SparqlHttpStore implements TripleStore {
+export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapability {
+  readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly writeRevisionCoverage = 'process-local' as const;
   readonly queryCancellation = 'interruptible' as const;
   /**
@@ -426,6 +510,12 @@ export class SparqlHttpStore implements TripleStore {
           'construct',
           effectiveOptions,
           (response) => consume(response, lifecycleSignal),
+          // Deliberately not detached, unlike an ordinary read: `consume` owns
+          // the live body (it spools it under `lifecycleSignal`) and stops
+          // reading when the caller leaves, so the request cannot be left
+          // running to be drained and discarded. An abort cancels the request
+          // and its recovery stays retained until the client deadline.
+          CANCEL_ON_ABORT,
         );
       },
     );
@@ -454,7 +544,7 @@ export class SparqlHttpStore implements TripleStore {
   private runStoreWork<T>(
     operation: StoreOperation,
     options: QueryOptions | undefined,
-    work: (signal: AbortSignal | undefined) => Promise<T>,
+    work: (signal: AbortSignal | undefined, context: StoreWorkContext) => Promise<T>,
   ): Promise<T> {
     const recovery = this.readRecoveryState();
     if (recovery?.recovering) {
@@ -462,11 +552,11 @@ export class SparqlHttpStore implements TripleStore {
     }
     return this.workLifecycle.run(
       options?.signal,
-      (signal) => {
+      (signal, context) => {
         return this.scheduler.run(
           options?.priority,
           options?.source ?? `sparql-http.${operation}`,
-          () => work(signal),
+          () => work(signal, context),
           signal,
           { storeOperation: operation },
         );
@@ -543,6 +633,7 @@ export class SparqlHttpStore implements TripleStore {
     storeOperation: StoreOperation,
     options: SparqlHttpQueryOptions | undefined,
     consume: (response: Response) => Promise<T>,
+    policy: SparqlHttpReadPolicy,
   ): Promise<T> {
     const recoveryAtStart = this.readRecoveryState();
     if (recoveryAtStart?.recovering) {
@@ -562,28 +653,119 @@ export class SparqlHttpStore implements TripleStore {
     const timeoutSignal = AbortSignal.timeout(this.timeout);
     const deadline = this.now() + this.timeout;
     const recoveryToken = this.managedReadRecovery.begin(recoveryAtStart);
-    const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
-    const signal = signalScope.signal ?? timeoutSignal;
+    // What a managed Oxigraph does after its client has gone depends on the
+    // answer: a streamed SELECT/CONSTRUCT stops when it next writes to the
+    // closed socket, but a blocking evaluation (an aggregate, an ORDER BY)
+    // sends nothing until it is done and keeps evaluating, and once the fetch is
+    // aborted the client can no longer see that finish. So a caller that merely
+    // stops waiting (its own budget, not a slow store) does not cancel the
+    // request: it runs detached, on the store-close and client-deadline signals
+    // alone, and only a request that outlives that deadline is reclaimed by a
+    // supervised restart. From the first byte of the answer on, though, a caller
+    // that has left gets nothing buffered for it: what remains of the answer is
+    // read and thrown away up to a small budget (a short answer shows the server
+    // finished; a long one is streaming, so it is cancelled and its recovery
+    // stays retained), see `relayAnswer`.
+    const detach = policy.kind === 'detach-on-caller-abort'
+      && recoveryToken !== null
+      && policy.work.callerSignal !== undefined
+      ? { work: policy.work, callerSignal: policy.work.callerSignal }
+      : undefined;
+    let requestSignal: AbortSignal = timeoutSignal;
     let dispatched = false;
+    let abandoned = false;
+    // Set only by having seen the server finish (an answer read to its clean
+    // end, by `consume` or, for a caller that left, by the relay). Never
+    // inferred from an error: a failed body, or an error status whose
+    // diagnostic body could not be read, shows nothing about the server.
+    let serverFinished = false;
+    let detachedRequest: Promise<T> | undefined;
+
+    /** One HTTP request, cancelled by `cancelSignal` and the client deadline. */
+    const request = async (cancelSignal: AbortSignal | undefined): Promise<T> => {
+      const scope = composeAbortSignals(cancelSignal, timeoutSignal);
+      const signal = requestSignal = scope.signal ?? timeoutSignal;
+      try {
+        throwIfAborted(signal);
+        dispatched = true;
+        const response = await fetch(this.queryEndpoint, {
+          method: 'POST',
+          headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
+          body: sparql,
+          signal,
+        });
+        let relay: RelayedAnswer | undefined;
+        if (detach !== undefined) {
+          relay = relayAnswer(response, detach.callerSignal, ABANDONED_READ_DRAIN_BUDGET_BYTES);
+          if (detach.callerSignal.aborted) {
+            // The caller left before the answer began: the relay discards it.
+            serverFinished = await relay.finish();
+            return undefined as T;
+          }
+        }
+        try {
+          // Keep the composed signal linked until the response body has
+          // settled. A fetch promise may resolve as soon as headers arrive,
+          // while JSON/N-Quads parsing is still holding the scheduler admission.
+          const result = await consume(relay?.response ?? response);
+          serverFinished = true;
+          return result;
+        } catch (error) {
+          // `consume` failed. If the caller left mid-body it was failed on
+          // purpose and the relay is discarding the rest in its place: wait for
+          // that (this request is the lifecycle's unit of work), and learn
+          // whether the server was seen to finish.
+          if (relay !== undefined && await relay.finish()) serverFinished = true;
+          throw error;
+        }
+      } finally {
+        scope.dispose();
+      }
+    };
+
     try {
-      throwIfAborted(signal);
-      dispatched = true;
-      const response = await fetch(this.queryEndpoint, {
-        method: 'POST',
-        headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
-        body: sparql,
-        signal,
-      });
-      // Keep the composed caller/deadline signal linked until the response body
-      // has settled. A fetch promise may resolve as soon as headers arrive,
-      // while JSON/N-Quads parsing is still holding the scheduler admission.
-      return await consume(response);
+      if (detach === undefined) return await request(options?.signal);
+      throwIfAborted(detach.callerSignal);
+      // The request is handed to the lifecycle, which keeps it in its drain
+      // set until it has settled; `close()` aborts and waits for it.
+      // SCHEDULER SLOT: the race below settles this call, and so the scheduler
+      // operation awaiting it, the moment the caller aborts. The slot is
+      // therefore freed then, not when the detached request finishes. That is
+      // unchanged from before detaching: aborting the fetch settled the
+      // operation just as early. What differs with the answer is only what the
+      // server does meanwhile: a streamed evaluation stops when it next writes
+      // to the closed socket (so the slot is freed for work that is really
+      // over), a blocking one keeps evaluating either way. Holding the slot
+      // until the server finishes would be a different admission policy (a
+      // runaway read would occupy a slot for up to the client deadline), so it
+      // is left to the maintainers rather than changed here.
+      detachedRequest = detach.work.runDetached(request);
+      return await raceCallerAbandon(
+        detachedRequest,
+        detach.callerSignal,
+        () => { abandoned = true; },
+      );
     } catch (error) {
-      if (signal.aborted) {
+      if (requestSignal.aborted || detach?.callerSignal.aborted) {
         getMetrics().storeCancellationCompletedTotal.add(1, {
           operation,
           source: options?.source ?? `sparql-http.${operation}`,
         });
+      }
+      if (abandoned && detachedRequest !== undefined) {
+        // The caller is gone but the request is still running. Hand it to the
+        // lifecycle-owned retained-deadline coordinator: it is reclaimed by a
+        // supervised restart only if it outlives the client deadline, and is
+        // withdrawn as soon as the server has visibly finished. A request whose
+        // answer was cancelled (longer than the drain budget) or failed never
+        // shows that, so its retention stays.
+        const retention = timeoutSignal.aborted
+          ? null
+          : this.managedReadRecovery.retain(operation, deadline, recoveryToken);
+        const settled = () => {
+          if (serverFinished) retention?.release();
+        };
+        void detachedRequest.then(settled, settled);
       }
       if (timeoutSignal.aborted) {
         this.notifyClientTimeout(operation);
@@ -595,9 +777,11 @@ export class SparqlHttpStore implements TripleStore {
           cause: error,
         });
       }
-      if (dispatched && signal.aborted) {
-        // Closing the HTTP connection does not cancel Oxigraph 0.5
-        // evaluation. Hand the dispatched read to the lifecycle-owned
+      if (!abandoned && dispatched && requestSignal.aborted) {
+        // A cancelled request does not show the server stopped: a streamed
+        // evaluation ends when it next writes to the closed socket, but a
+        // blocking one (an aggregate) keeps evaluating, and the client cannot
+        // tell which. Hand the dispatched read to the lifecycle-owned
         // retained-deadline coordinator instead of extending the caller wait.
         this.managedReadRecovery.retain(operation, deadline, recoveryToken);
       }
@@ -605,8 +789,6 @@ export class SparqlHttpStore implements TripleStore {
         throw this.recoveryError(storeOperation, 'indeterminate', error);
       }
       throw error;
-    } finally {
-      signalScope.dispose();
     }
   }
 
@@ -1033,17 +1215,27 @@ export class SparqlHttpStore implements TripleStore {
     const isConstruct = operation.kind === 'read'
       && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
-    return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal) => {
+    return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal, work) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
         ...options,
         signal: lifecycleSignal,
       };
+      // An ordinary read whose caller stops waiting leaves its dispatched
+      // request running until the server's answer starts (see
+      // SparqlHttpReadPolicy); the streaming projection reader is the one read
+      // that cancels at once.
+      const readPolicy: SparqlHttpReadPolicy = { kind: 'detach-on-caller-abort', work };
       const startedAt = this.now();
       throwIfAborted(lifecycleSignal);
 
       try {
         if (isConstruct) {
-          return await this.queryConstruct(trimmed, effectiveOptions, canonicalOperation);
+          return await this.queryConstruct(
+            trimmed,
+            effectiveOptions,
+            canonicalOperation,
+            readPolicy,
+          );
         }
 
         return await this.postQuery(
@@ -1070,6 +1262,7 @@ export class SparqlHttpStore implements TripleStore {
             });
             return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
           },
+          readPolicy,
         );
       } finally {
         this.maybeEmitSlowQuery({
@@ -1085,6 +1278,7 @@ export class SparqlHttpStore implements TripleStore {
     sparql: string,
     options: SparqlHttpQueryOptions | undefined,
     storeOperation: StoreOperation,
+    readPolicy: SparqlHttpReadPolicy,
   ): Promise<ConstructResult> {
     return this.postQuery(
       sparql,
@@ -1110,6 +1304,7 @@ export class SparqlHttpStore implements TripleStore {
         const quads = parseNQuadsTextTolerant(text);
         return { type: 'quads', quads };
       },
+      readPolicy,
     );
   }
 
@@ -1239,7 +1434,8 @@ export class SparqlHttpStore implements TripleStore {
     this.managedReadRecovery.close();
     // A managed endpoint is stopped immediately after store.close(). The
     // lifecycle owns one complete generation, aborting and draining every
-    // operation admitted before close while rejecting work attempted during
+    // operation admitted before close, including a dispatched read whose caller
+    // already left (`runDetached`), while rejecting work attempted during
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }

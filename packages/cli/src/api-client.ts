@@ -45,23 +45,14 @@ import type {
   ContextGraphOnChainReferenceNote,
 } from './catchup-status.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
+import {
+  resolveDaemonRequestDeadlines,
+  type DaemonRequestDeadlines,
+} from '@origintrail-official/dkg-core/daemon-request-deadlines';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
-
-/** Deadline for GET reads, which answer from local daemon state. */
-export const API_READ_TIMEOUT_MS = 30_000;
-
-/**
- * Deadline for every other request: several wait on peers or the chain.
- * `vm/publish` holds the request open for the publisher's storage-ACK window
- * (`ACK_TIMEOUT_MS`, 120 s, in packages/publisher/src/ack-collector.ts) plus
- * chain confirmation; registration, PCA and wallet routes wait for their
- * transactions. It stays under the 300 s Node's fetch waits on its own, so this
- * deadline, and a long mutation's outcome-unknown report, comes first.
- */
-export const API_LONG_TIMEOUT_MS = 240_000;
 
 /**
  * `/api/verify` collects signatures for up to 30 minutes when the request names
@@ -467,8 +458,13 @@ export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReach
    */
   rfc64SelectedPublicSync?: {
     defaultEnabled: boolean;
-    /** Requested scheduling scope; runtime classification still chooses the lane. */
+    /**
+     * Requested scheduling scope; runtime classification still chooses the
+     * lane. Without a node-operator token, only its catalog-backed graphs.
+     */
     requestedContextGraphs: string[];
+    /** Size of the whole requested scope. Absent on older daemons. */
+    requestedContextGraphCount?: number;
     catalogBackedContextGraphs: string[];
   };
   /**
@@ -502,6 +498,14 @@ export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReach
     max: number;
     rejectedTotal: number;
   };
+  // Event-loop delay over the last complete window (ms; null before the first
+  // sample). Null when the daemon runs no gauge; absent on older daemons.
+  eventLoopDelay?: {
+    p50Ms: number | null;
+    p99Ms: number | null;
+    maxMs: number | null;
+    windowMs: number;
+  } | null;
   // Auto-update status (surfaced by /api/status). Optional — daemons may omit.
   // `updateAvailable` is null until the first check completes;
   // `updateChannelTargetMissing` is true when a pinned auto-update channel has
@@ -665,15 +669,17 @@ export class ApiClient {
   private baseUrl: string;
   private token?: string;
   private readonly configFallback?: Readonly<ConfigFallbackContext>;
-  private readonly readTimeoutMs: number;
-  private readonly longTimeoutMs: number;
+  private readonly deadlines: DaemonRequestDeadlines;
   readonly controlPlaneWarning?: string;
 
   constructor(portOrBaseUrl: number | string, token?: string, opts?: {
     configFallback?: ConfigFallbackContext;
-    /** Deadline in ms for GET reads (default 30 000). */
+    /** Deadline in ms for GET reads (default `DKG_API_READ_TIMEOUT_MS`, else 30 000). */
     readTimeoutMs?: number;
-    /** Deadline in ms for every other request (default 240 000, never below `readTimeoutMs`). */
+    /**
+     * Deadline in ms for every other request (default `DKG_API_LONG_TIMEOUT_MS`,
+     * else 240 000; never below `readTimeoutMs`).
+     */
     longTimeoutMs?: number;
   }) {
     this.baseUrl = typeof portOrBaseUrl === 'number'
@@ -682,8 +688,7 @@ export class ApiClient {
     this.token = token;
     this.configFallback = opts?.configFallback && Object.freeze({ ...opts.configFallback });
     this.controlPlaneWarning = this.configFallback?.controlPlaneWarning;
-    this.readTimeoutMs = opts?.readTimeoutMs ?? API_READ_TIMEOUT_MS;
-    this.longTimeoutMs = Math.max(opts?.longTimeoutMs ?? API_LONG_TIMEOUT_MS, this.readTimeoutMs);
+    this.deadlines = resolveDaemonRequestDeadlines(opts);
   }
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
@@ -1183,6 +1188,10 @@ export class ApiClient {
     chainId: string;
     kav10Address: string;
     eip712Digest: string;
+    /** The KA the draft belongs to (absent from a daemon that predates GH#2958). */
+    kaUal?: string;
+    /** The number the draft will be published as: one above the KA's confirmed version (absent from a daemon that predates GH#2958). */
+    assertionVersion?: string;
   }> {
     return this.post(
       `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,
@@ -2235,7 +2244,10 @@ export class ApiClient {
   }> {
     const collectionMs = request.timeoutMs ?? VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS;
     return this.post('/api/verify', request, {
-      timeoutMs: Math.max(this.longTimeoutMs, collectionMs + REQUEST_CARRIED_TIMEOUT_MARGIN_MS),
+      timeoutMs: Math.max(
+        this.deadlines.longTimeoutMs,
+        collectionMs + REQUEST_CARRIED_TIMEOUT_MARGIN_MS,
+      ),
     });
   }
 
@@ -2493,11 +2505,11 @@ export class ApiClient {
   }
 
   /**
-   * Run one daemon round-trip under its deadline: GET reads take the read
-   * deadline, every other method the long one, unless the route overrides it.
-   * The deadline also covers reading the body. A long Knowledge Asset mutation
-   * that times out throws {@link DaemonOutcomeUnknownError}; other timeouts keep
-   * fetch's TimeoutError.
+   * Run one daemon round-trip under its deadline: the shared daemon policy's
+   * deadline for the method and path, unless the route overrides it. The
+   * deadline also covers reading the body. A long Knowledge Asset mutation
+   * that times out throws {@link DaemonOutcomeUnknownError}; other timeouts
+   * keep fetch's TimeoutError.
    */
   private async withDeadline<T>(
     method: string,
@@ -2505,7 +2517,7 @@ export class ApiClient {
     deadline: RequestDeadline,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const timeoutMs = deadline.timeoutMs ?? (method === 'GET' ? this.readTimeoutMs : this.longTimeoutMs);
+    const timeoutMs = deadline.timeoutMs ?? this.deadlines.timeoutMsFor({ method, path });
     const signal = AbortSignal.timeout(timeoutMs);
     try {
       return await run(signal);

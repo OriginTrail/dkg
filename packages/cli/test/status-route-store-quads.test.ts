@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { Command } from 'commander';
 import {
@@ -11,6 +12,7 @@ import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import { invalidateExternalStoreQuadsCache } from '../src/daemon/store-quads-cache.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
   runtime: null,
@@ -137,6 +139,7 @@ async function startStatusServer(
       nodeVersion: '0.0.0-test',
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      authentication: requestAuthentication({ kind: 'anonymous' }),
     } as unknown as RequestContext);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -151,6 +154,7 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 interface StatusBody {
+  commit?: string | null;
   storeUrl: string | null;
   storeQuads: number | null;
   storeQuadsStatus?: string;
@@ -181,6 +185,17 @@ async function cleanUpStoreQuads(): Promise<void> {
 
 describe('/api/status external-store quad count', () => {
   afterEach(cleanUpStoreQuads);
+
+  it('reports the full source commit for exact-build devnet release checks', async () => {
+    const { server, baseUrl } = await startStatusServer(async () => COUNT_123, LOCAL_STORE);
+    try {
+      const expected = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
+      const result = await fetchStatus(baseUrl);
+      expect(result.body.commit).toBe(expected);
+    } finally {
+      await closeServer(server);
+    }
+  });
 
   it.each([
     ['an external SPARQL store', SPARQL_HTTP_STORE, 'http://127.0.0.1:9/query'],

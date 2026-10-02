@@ -402,3 +402,265 @@ describe('listenForEvents over the one log', () => {
     adapter.destroy();
   });
 });
+
+/**
+ * `KnowledgeAssetUpdated` is the refresh nudge for nodes that hold a confirmed
+ * VM copy of an updated KA. The log already indexes it in the `knowledge-asset`
+ * family at the DKGKnowledgeAssets address, so the lane reads those rows —
+ * and only those — when coverage proves the range, and keeps its live scan
+ * otherwise.
+ */
+describe('KnowledgeAssetUpdated over the one log', () => {
+  const KA_STORAGE = `0x${'ab'.repeat(20)}`.toLowerCase();
+  const ROTATED_KA_STORAGE = `0x${'ba'.repeat(20)}`.toLowerCase();
+  const AUTHOR = `0x${'12'.repeat(20)}`;
+  const ROOT_V1 = `0x${'a1'.repeat(32)}`;
+  const ROOT_V2 = `0x${'b2'.repeat(32)}`;
+  const kaInterface = new ethers.Interface(loadAbi('DKGKnowledgeAssets'));
+  const updatedTopic0 = kaInterface.getEvent('KnowledgeAssetUpdated')!.topicHash.toLowerCase();
+
+  function kaRow(
+    name: 'KnowledgeAssetCreated' | 'KnowledgeAssetUpdated',
+    args: readonly unknown[],
+    blockNumber: number,
+  ): ChainEventLogRow {
+    const encoded = kaInterface.encodeEventLog(kaInterface.getEvent(name)!, [...args]);
+    return {
+      blockNumber,
+      blockHash: hash(blockNumber),
+      logIndex: 0,
+      transactionHash: hash(0xcc),
+      address: KA_STORAGE,
+      topics: [...encoded.topics],
+      data: encoded.data,
+      settled: true,
+    };
+  }
+  const createdRow = (blockNumber: number, kaId: bigint, root: string) => kaRow(
+    'KnowledgeAssetCreated',
+    [kaId, AUTHOR, 'publish-op', root, 10n, 1n, 2n, 1n, false],
+    blockNumber,
+  );
+  const updatedRow = (blockNumber: number, kaId: bigint, root: string) => kaRow(
+    'KnowledgeAssetUpdated',
+    [kaId, AUTHOR, 'update-op', root, 12n, 1n],
+    blockNumber,
+  );
+
+  function kaStore(coveredThroughBlock: number, rows: readonly ChainEventLogRow[]) {
+    const store = new MemoryChainEventLogStore();
+    store.seed(SCOPE, {
+      cursor: {
+        revision: 1,
+        lineage: hash(1),
+        deploymentBlockNumber: 10,
+        settledBlockNumber: coveredThroughBlock,
+        settledBlockHash: hash(coveredThroughBlock),
+        head: {
+          number: coveredThroughBlock,
+          hash: hash(coveredThroughBlock),
+          timestampSeconds: 1_700_000_000,
+          fetchedAtMs: 1_700_000_000_000,
+        },
+        topicSetVersion: 'v1',
+      },
+      coverage: [
+        {
+          family: 'context-graph-ka',
+          address: CG_STORAGE,
+          coveredFromBlock: 10,
+          coveredThroughBlock,
+          floorBlock: 10,
+        },
+        {
+          family: 'knowledge-asset',
+          address: KA_STORAGE,
+          coveredFromBlock: 10,
+          coveredThroughBlock,
+          floorBlock: 10,
+        },
+      ],
+    }, rows);
+    return store;
+  }
+
+  function makeKaAdapter(
+    store: MemoryChainEventLogStore | undefined,
+    liveLogs: readonly unknown[] = [],
+    currentKaStorageAddress = KA_STORAGE,
+  ) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapter.initialized = true;
+    adapter.init = async () => { adapter.initialized = true; };
+    const liveScans: string[] = [];
+    adapter.readContractWith = async (_c: unknown, label: string) => {
+      liveScans.push(label);
+      return label === 'kas.queryFilter(KnowledgeAssetUpdated)' ? [...liveLogs] : [];
+    };
+    adapter.contracts = {
+      contextGraphStorage: {
+        interface: cgInterface,
+        getAddress: async () => CG_STORAGE,
+        filters: { KnowledgeAssetRegisteredToContextGraph: () => ({}) },
+      },
+      knowledgeAssetStorage: {
+        interface: kaInterface,
+        getAddress: async () => currentKaStorageAddress,
+        filters: { KnowledgeAssetUpdated: () => ({}) },
+      },
+    };
+    if (store !== undefined) {
+      adapter.attachChainEventLog({
+        subscription: createChainEventLogSubscription({
+          scope: SCOPE,
+          store,
+          registry: new ChainEventDecoderRegistry()
+            .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface)
+            .registerKnowledgeAssets(KA_STORAGE, kaInterface),
+        }),
+        contextGraphStorageAddress: CG_STORAGE,
+        knowledgeAssetStorageAddress: KA_STORAGE,
+      });
+    }
+    return { adapter, liveScans };
+  }
+
+  it('serves only the update rows from the log and issues no queryFilter', async () => {
+    // The create row shares the address and the registration row shares the
+    // block range; neither may reach an update lane.
+    const store = kaStore(100, [
+      createdRow(40, 900n, ROOT_V1),
+      registrationRow(41, 7n, 900n),
+      updatedRow(60, 900n, ROOT_V2),
+    ]);
+    const { adapter, liveScans } = makeKaAdapter(store);
+
+    const events = await collect(adapter, ['KnowledgeAssetUpdated'], 10, 100);
+
+    expect(liveScans).toEqual([]);
+    expect(events).toEqual([{
+      type: 'KnowledgeAssetUpdated',
+      blockNumber: 60,
+      data: {
+        kaId: '900',
+        batchId: '900',
+        merkleRoot: ROOT_V2,
+        author: ethers.getAddress(AUTHOR),
+        txHash: hash(0xcc),
+        txIndex: undefined,
+        logIndex: 0,
+        blockHash: hash(60),
+      },
+    }]);
+    adapter.destroy();
+  });
+
+  it('falls back to the live scan when coverage is short, and yields what it finds', async () => {
+    const encoded = kaInterface.encodeEventLog(
+      kaInterface.getEvent('KnowledgeAssetUpdated')!,
+      [901n, AUTHOR, 'update-op', ROOT_V2, 12n, 1n],
+    );
+    const liveLog = {
+      blockNumber: 130,
+      blockHash: hash(130),
+      transactionHash: hash(0xdd),
+      transactionIndex: 3,
+      index: 8,
+      topics: encoded.topics,
+      data: encoded.data,
+    };
+    const { adapter, liveScans } = makeKaAdapter(kaStore(100, []), [liveLog]);
+
+    const events = await collect(adapter, ['KnowledgeAssetUpdated'], 10, 140);
+
+    expect(liveScans).toEqual(['kas.queryFilter(KnowledgeAssetUpdated)']);
+    expect(events).toEqual([expect.objectContaining({
+      type: 'KnowledgeAssetUpdated',
+      blockNumber: 130,
+      data: expect.objectContaining({
+        kaId: '901',
+        batchId: '901',
+        merkleRoot: ROOT_V2,
+        txHash: hash(0xdd),
+        txIndex: 3,
+        logIndex: 8,
+        blockHash: hash(130),
+      }),
+    })]);
+    adapter.destroy();
+  });
+
+  it('keeps the live scan when no log is attached, and after a DKGKnowledgeAssets rotation', async () => {
+    const detached = makeKaAdapter(undefined);
+    await collect(detached.adapter, ['KnowledgeAssetUpdated'], 10, 100);
+    expect(detached.liveScans).toEqual(['kas.queryFilter(KnowledgeAssetUpdated)']);
+
+    const rotated = makeKaAdapter(
+      kaStore(100, [updatedRow(60, 900n, ROOT_V2)]),
+      [],
+      ROTATED_KA_STORAGE,
+    );
+    expect(await collect(rotated.adapter, ['KnowledgeAssetUpdated'], 10, 100)).toEqual([]);
+    expect(rotated.liveScans).toEqual(['kas.queryFilter(KnowledgeAssetUpdated)']);
+    rotated.adapter.destroy();
+  });
+
+  it('scans nothing on a knowledge-asset storage ABI without the update event', async () => {
+    const { adapter, liveScans } = makeKaAdapter(kaStore(100, [updatedRow(60, 900n, ROOT_V2)]));
+    adapter.contracts.knowledgeAssetStorage = {
+      interface: new ethers.Interface([
+        'event KnowledgeAssetCreated(uint256 indexed id, address indexed author, string publishOperationId, bytes32 merkleRoot, uint88 byteSize, uint40 startEpoch, uint40 endEpoch, uint96 tokenAmount, bool isImmutable)',
+      ]),
+      getAddress: async () => KA_STORAGE,
+      filters: {},
+    };
+
+    expect(await collect(adapter, ['KnowledgeAssetUpdated'], 10, 100)).toEqual([]);
+    expect(liveScans).toEqual([]);
+    adapter.destroy();
+  });
+
+  it('borrows the event-scan lease against DKGKnowledgeAssets, not ContextGraphStorage', async () => {
+    const { adapter } = makeKaAdapter(kaStore(100, []));
+    const binding = adapter.chainEventLog!;
+    let received: unknown;
+    adapter.attachChainEventLog({
+      ...binding,
+      readEventScanLease: async (identity: unknown) => {
+        received = identity;
+        return { throughBlockNumber: 100, holds: async () => true };
+      },
+    });
+
+    const lease = await adapter.acquireEventScanHorizonLease(['KnowledgeAssetUpdated']);
+
+    expect(lease?.throughBlockNumber).toBe(100);
+    await expect(lease!.holds()).resolves.toBe(true);
+    expect(received).toEqual({
+      eventType: 'KnowledgeAssetUpdated',
+      knowledgeAssetStorageAddress: KA_STORAGE,
+      topic0: updatedTopic0,
+    });
+    adapter.destroy();
+  });
+
+  it('retires the update lease when the DKGKnowledgeAssets handle changes', async () => {
+    const { adapter } = makeKaAdapter(kaStore(100, []));
+    const binding = adapter.chainEventLog!;
+    adapter.attachChainEventLog({
+      ...binding,
+      readEventScanLease: async () => ({ throughBlockNumber: 100, holds: async () => true }),
+    });
+    const lease = await adapter.acquireEventScanHorizonLease(['KnowledgeAssetUpdated']);
+    expect(lease).toBeDefined();
+
+    // A ContextGraphStorage swap is not this lane's contract ...
+    adapter.contracts.contextGraphStorage = { ...adapter.contracts.contextGraphStorage };
+    await expect(lease!.holds()).resolves.toBe(true);
+    // ... a DKGKnowledgeAssets swap is.
+    adapter.contracts.knowledgeAssetStorage = { ...adapter.contracts.knowledgeAssetStorage };
+    await expect(lease!.holds()).resolves.toBe(false);
+    adapter.destroy();
+  });
+});

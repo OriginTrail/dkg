@@ -54,8 +54,9 @@ export interface ChainEventLogHubRotationWindow {
 }
 
 /**
- * The exact ContextGraphStorage identity a publisher event lane is about to
- * scan.
+ * The exact contract identity a publisher event lane is about to scan: the
+ * ContextGraphStorage events by that contract's address, and
+ * `KnowledgeAssetUpdated` by the DKGKnowledgeAssets address.
  *
  * The one-log runtime compares all three values with the address and topics it
  * indexed before it lends out a horizon. A family name alone is not enough:
@@ -64,13 +65,20 @@ export interface ChainEventLogHubRotationWindow {
  */
 export type ChainEventLogIndexedEventType =
   | 'ContextGraphCreated'
-  | 'KnowledgeAssetRegisteredToContextGraph';
+  | 'KnowledgeAssetRegisteredToContextGraph'
+  | 'KnowledgeAssetUpdated';
 
-export interface ChainEventLogEventScanIdentity {
-  readonly eventType: ChainEventLogIndexedEventType;
-  readonly contextGraphStorageAddress: string;
-  readonly topic0: string;
-}
+export type ChainEventLogEventScanIdentity =
+  | {
+    readonly eventType: 'ContextGraphCreated' | 'KnowledgeAssetRegisteredToContextGraph';
+    readonly contextGraphStorageAddress: string;
+    readonly topic0: string;
+  }
+  | {
+    readonly eventType: 'KnowledgeAssetUpdated';
+    readonly knowledgeAssetStorageAddress: string;
+    readonly topic0: string;
+  };
 
 /**
  * A revision-pinned claim over one exact indexed event family.
@@ -156,7 +164,7 @@ export interface ChainEventLogBinding {
   /**
    * A conservative, possibly lagging upper bound for background publisher
    * event scans, or `undefined` when the one log cannot prove one for the
-   * exact current ContextGraphStorage generation and requested indexed topic.
+   * exact current contract generation and requested indexed topic.
    *
    * This is deliberately not a chain-head API and carries no authorization or
    * finality meaning. Callers still pass each requested range through

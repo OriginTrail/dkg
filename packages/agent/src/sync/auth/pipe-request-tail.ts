@@ -1,12 +1,12 @@
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
-  SYNC_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 import {
   decodeExactAssetUals,
   encodeExactAssetUals,
 } from '../exact-assets.js';
+import { normalizeExactSyncResponseEncoding, type EXACT_SYNC_GZIP_ENCODING } from '../wire-compression.js';
 
 export interface ByteBudgetPageHint {
   pageMode?: typeof SYNC_BYTE_BUDGET_PAGE_MODE;
@@ -14,6 +14,7 @@ export interface ByteBudgetPageHint {
 }
 
 export interface PipeSyncRequestTail extends ByteBudgetPageHint {
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
   syncSessionId?: string;
   sinceBatchId?: string;
   assetUals?: string[];
@@ -22,7 +23,9 @@ export interface PipeSyncRequestTail extends ByteBudgetPageHint {
 /**
  * Normalize the additive byte-budget hint identically for authenticated JSON
  * envelopes and public pipe requests. A row hint without the matching
- * capability is intentionally inert.
+ * capability is intentionally inert. Positive hints below the legacy signed
+ * limit remain meaningful: exact DATA keeps its page-only plan and row order
+ * while the requester grows back from its learned transport floor.
  */
 export function normalizeByteBudgetPageHint(
   pageMode: unknown,
@@ -36,7 +39,7 @@ export function normalizeByteBudgetPageHint(
     pageMode: normalizedMode,
     pageRowsHint: normalizedMode !== undefined &&
       Number.isSafeInteger(rows) &&
-      rows > SYNC_PAGE_SIZE
+      rows > 0
       ? Math.min(rows, SYNC_BYTE_BUDGET_MAX_ROWS)
       : undefined,
   };
@@ -51,6 +54,7 @@ export function normalizeByteBudgetPageHint(
  */
 export function encodePipeSyncRequestTail(tail: PipeSyncRequestTail): string {
   const parts: string[] = [];
+  if (tail.responseEncoding) parts.push('response-encoding', tail.responseEncoding);
   const page = normalizeByteBudgetPageHint(tail.pageMode, tail.pageRowsHint);
   if (page.pageMode && page.pageRowsHint !== undefined) {
     parts.push('page-mode', page.pageMode, 'page-rows', String(page.pageRowsHint));
@@ -73,6 +77,7 @@ export function decodePipeSyncRequestTail(parts: readonly string[]): PipeSyncReq
   let assetUals: string[] | undefined;
   let rawPageMode: unknown;
   let rawPageRowsHint: unknown;
+  let responseEncoding: typeof EXACT_SYNC_GZIP_ENCODING | undefined;
 
   if (tail >= 2 && parts[tail - 2] === 'assets') {
     assetUals = decodeExactAssetUals(parts[tail - 1]);
@@ -108,10 +113,13 @@ export function decodePipeSyncRequestTail(parts: readonly string[]): PipeSyncReq
     parts[tail - 2] === 'page-mode'
   ) {
     rawPageMode = parts[tail - 1];
+    tail -= 2;
   }
+  if (tail >= 2 && parts[tail - 2] === 'response-encoding') responseEncoding = normalizeExactSyncResponseEncoding(parts[tail - 1]);
 
   return {
     ...normalizeByteBudgetPageHint(rawPageMode, rawPageRowsHint),
+    responseEncoding,
     syncSessionId,
     sinceBatchId,
     assetUals,

@@ -11,8 +11,8 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   mergeSameVersionGraphKnowledgeAssetMetadataV1,
+  overlayLocallyTrustedKnowledgeAssetControls,
   readGraphKnowledgeAssetConfirmationKindV1,
-  readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -311,8 +311,11 @@ export async function authenticateVerifiedGraphScopedAsset(
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
+    // Only the receipt's batch, root, hash and ordering are consumed below, so
+    // the adapter's unused block-header lookup for `blockTimestamp` is skipped.
     const resolved = await chain.resolvePublishByTxHash(transactionHash, {
       signal: options.signal,
+      skipBlockTimestamp: true,
     });
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (
@@ -458,7 +461,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       }
       assertCurrent();
     }
-    const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
+    const committedMetadata = await overlayLocallyTrustedKnowledgeAssetControls(
       store,
       asset.metaGraph,
       asset.ual,
@@ -477,7 +480,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       asset.dataQuads,
       asset.metaGraph,
       asset.ual,
-      [...replacementMetadata, ...locallyTrustedMetadata],
+      committedMetadata,
       commitOptions,
     );
     if (!replaced) {

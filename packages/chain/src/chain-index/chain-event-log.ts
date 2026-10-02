@@ -229,6 +229,20 @@ export interface ChainEventLogQuery {
   readonly topic0?: readonly string[];
   /** Indexed arg 1 — the per-graph backfill filter the KA read model needs. */
   readonly topic1?: readonly string[];
+  /**
+   * Indexed arg 2 — the per-KA filter behind the `kaToContextGraph` point read.
+   *
+   * A NARROWING hint only: every reader that passes it must still decode and
+   * fold what comes back, so a store that ignored it would be slower, never
+   * wrong.
+   */
+  readonly topic2?: readonly string[];
+}
+
+/** A {@link ChainEventLogQuery} counted instead of read. */
+export interface ChainEventLogCountQuery extends ChainEventLogQuery {
+  /** Count only settled (`true`) or only tail (`false`) rows; omitted counts both. */
+  readonly settled?: boolean;
 }
 
 /**
@@ -254,6 +268,15 @@ export interface ChainEventLogStore {
    */
   tombstone(scope: string, expectedRevision: number): Promise<number | undefined>;
   readEvents(scope: string, query: ChainEventLogQuery): Promise<readonly ChainEventLogRow[]>;
+  /**
+   * How many rows `readEvents(scope, query)` would return, narrowed by
+   * `settled` when it is given, without materializing them.
+   *
+   * Optional. The knowledge-asset ordinal cache uses it to prove a graph's
+   * settled prefix has not changed since it was folded; a store without it
+   * gets a correct cache that re-folds the whole graph once per revision.
+   */
+  countEvents?(scope: string, query: ChainEventLogCountQuery): Promise<number>;
   /** Block hash for a block the log already holds, without an RPC round trip. */
   blockHashAt(scope: string, blockNumber: number): Promise<string | undefined>;
 }

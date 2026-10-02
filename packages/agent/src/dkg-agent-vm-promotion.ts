@@ -52,7 +52,7 @@ import {
   storageAckLedgerStateQuery,
   storageAckPendingUpdatesQuery,
   storageAckNamespaceTargetsQuery,
-  storageAckPromotedQuery,
+  storageAckPromotedBatchQuery,
   stripLiteral,
   type StorageAckLedgerCandidate,
   type VmPromotionAuditStatus,
@@ -73,6 +73,13 @@ const PENDING_UPDATE_MIN_AGE_MS = 60_000;
  * version (a rollback) may have signed ACKs meanwhile: grandfather that window.
  */
 const STORAGE_ACK_LEDGER_REGRANDFATHER_GAP_MS = 60 * 60_000;
+/**
+ * Every ledger update below writes only the ledger graph. Naming it keeps a
+ * graph-set index current with one bounded probe; an undeclared update makes
+ * the next graph listing rescan the whole store.
+ */
+const STORAGE_ACK_LEDGER_TOUCHED_GRAPHS: readonly string[] =
+  Object.freeze([STORAGE_ACK_LEDGER_GRAPH]);
 /** Per-asset promotions requested by declined update ACKs that run at once. */
 const PRIOR_VERSION_PROMOTION_CONCURRENCY = 8;
 /** Further requests queue (single-flight per asset); beyond this they are left to the lanes. */
@@ -276,6 +283,8 @@ export class VmPromotionMethods extends DKGAgentBase {
     coreHostedGraphs: number;
     storageAckDeclinesLastHour: Record<string, number>;
     audit: VmPromotionAuditStatus;
+    /** #2858 — refresh targets held after KA updates, and the lane cursor they hold. */
+    refresh: ReturnType<DKGAgent['getVmRefreshStatus']>;
   } {
     const active = this.vmReconcileEnabled();
     const runtimeReady = this.vmReconcileRuntimeReady;
@@ -298,6 +307,7 @@ export class VmPromotionMethods extends DKGAgentBase {
       coreHostedGraphs,
       storageAckDeclinesLastHour: this.storageAckDeclinesLastHour(),
       audit: { ...this.vmPromotionAuditStatus },
+      refresh: this.getVmRefreshStatus(),
     };
   }
 
@@ -396,7 +406,11 @@ export class VmPromotionMethods extends DKGAgentBase {
         const through = instant(row?.['through']);
         const lastSeen = instant(row?.['seen']) ?? through;
         const now = new Date();
-        const options = { source: 'agent.storageAckLedger.grandfather', priority: 'background' as const };
+        const options = {
+          source: 'agent.storageAckLedger.grandfather',
+          priority: 'background' as const,
+          touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
+        };
         let since: string | undefined | null = null;
         if (through === undefined) {
           since = undefined;
@@ -559,7 +573,11 @@ export class VmPromotionMethods extends DKGAgentBase {
       if (ledgerReady) {
         await this.store.update?.(
           storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, new Date()),
-          { source: 'agent.storageAckLedger.seen', priority: 'background' },
+          {
+            source: 'agent.storageAckLedger.seen',
+            priority: 'background',
+            touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
+          },
         );
       }
       const metrics = getMetrics();
@@ -594,6 +612,7 @@ export class VmPromotionMethods extends DKGAgentBase {
       await this.store.update(storageAckLedgerOrphansDeleteUpdate(), {
         source: 'agent.storageAckLedger.orphans',
         priority: 'background',
+        touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
       });
       return 0;
     }
@@ -850,17 +869,33 @@ export class VmPromotionMethods extends DKGAgentBase {
     // it) keeps the rotation from passing over the same rows every time.
     let resumeAfter = this.vmPromotionAuditCursor;
     let exhausted = false;
-    for (const row of rows) {
+    let promotedCopies = new Set<string>();
+    for (let index = 0; index < rows.length; index += 1) {
       if (!active()) {
         exhausted = true;
         break;
       }
+      // Prefetch only the next bounded slice. A stale copy can exhaust the
+      // chain-check budget, so querying the whole ledger page up front would
+      // perform unnecessary store work under precisely that condition.
+      if (index % DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE === 0) {
+        const candidates = rows
+          .slice(index, index + DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE)
+          .map(parseStorageAckLedgerCandidate)
+          .filter((candidate): candidate is StorageAckLedgerCandidate => candidate !== null);
+        promotedCopies = await this.promotedStorageAckCopies(candidates, active);
+        if (!active()) {
+          exhausted = true;
+          break;
+        }
+      }
+      const row = rows[index]!;
       const candidate = parseStorageAckLedgerCandidate(row);
       if (candidate === null) {
         resumeAfter = row['op'] ?? resumeAfter;
         continue;
       }
-      if (await this.isStorageAckCopyPromoted(candidate)) {
+      if (promotedCopies.has(candidate.operationSubject)) {
         totals.examined += 1;
         resumeAfter = candidate.operationSubject;
         continue;
@@ -1016,11 +1051,27 @@ export class VmPromotionMethods extends DKGAgentBase {
   }
 
   async isStorageAckCopyPromoted(this: DKGAgent, candidate: StorageAckLedgerCandidate): Promise<boolean> {
-    const result = await this.store.query(
-      storageAckPromotedQuery(candidate.namespace, candidate.kaUal, candidate.assertionVersion),
-      { source: 'agent.vmPromotionAudit.promoted' },
-    );
-    return result.type === 'boolean' && result.value;
+    return (await this.promotedStorageAckCopies([candidate])).has(candidate.operationSubject);
+  }
+
+  /** Resolve promoted copies in bounded, graph-local batches instead of one ASK per ledger row. */
+  async promotedStorageAckCopies(
+    this: DKGAgent,
+    candidates: readonly StorageAckLedgerCandidate[],
+    active: () => boolean = () => true,
+  ): Promise<Set<string>> {
+    const promoted = new Set<string>();
+    if (candidates.length === 0 || !active()) return promoted;
+    const result = await this.store.query(storageAckPromotedBatchQuery(candidates), {
+      source: 'agent.vmPromotionAudit.promotedBatch',
+      priority: 'background',
+    });
+    if (!active()) return promoted;
+    if (result.type !== 'bindings') throw new Error('Promoted-copy batch query did not return bindings');
+    for (const row of result.bindings) {
+      if (row['op'] !== undefined) promoted.add(row['op']);
+    }
+    return promoted;
   }
 
   /** The on-chain graph a ledgered copy was ACKed for. */
@@ -1112,6 +1163,7 @@ export class VmPromotionMethods extends DKGAgentBase {
     if (typeof this.store.update === 'function') {
       await this.store.update(storageAckLedgerMarkUpdate(operationSubject, predicate, new Date(at)), {
         source: 'agent.storageAckLedger.mark',
+        touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
       });
       return;
     }

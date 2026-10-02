@@ -1,5 +1,7 @@
 export * from './types.js';
+export { gzipBounded, gunzipBounded, BoundedGzipLimitError, BoundedGzipCapacityError, type BoundedGzipOptions } from './bounded-gzip.js';
 export * from './constants.js';
+export * from './storage-ack-protocols.js';
 export * from './context-graph-storage-uri.js';
 export * from './context-graph-snapshot-uri.js';
 export * from './context-graph-on-chain-binding.js';
@@ -127,6 +129,7 @@ export {
   type KaLifecycleStage,
 } from './ka-lifecycle-logger.js';
 export { createLogRedactor, redactLogEntry, redactMessage, DEFAULT_SENSITIVE_KEYS, REDACTED } from './log-redaction.js';
+export { createBoundedKeyedLimiter, type BoundedKeyedLimiterOptions } from './bounded-denial-logger.js';
 export type { LogRedactor } from './log-redaction.js';
 export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,
@@ -223,6 +226,8 @@ export {
   ProtocolRouter,
   QuietRetryableHandlerError,
   type AdmissionCheckOptions,
+  type DuplexStreamOptions,
+  type DuplexStreamRequest,
   type ProtocolRegistrationOptions,
   type ProtocolRouterOptions,
   type SendOptions,
@@ -231,6 +236,25 @@ export {
   isRecoverableSendError,
   isProtocolUnsupportedError,
 } from './protocol-router.js';
+// Explicit experimental capability only; importing Core installs no handler.
+export {
+  EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
+  EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE,
+  exchangeExperimentalExactBatch,
+  registerExperimentalExactBatchResponder,
+  ExperimentalExactBatchUnsupportedError,
+  type ExactBatchTransportSession,
+  type ExactBatchTransportOptions,
+  type ExactBatchTransportEvent,
+  type ExactBatchResponderAuthorization,
+} from './experimental-exact-batch-stream.js';
+export {
+  EXACT_BATCH_STREAM_PROTOCOL, EXACT_BATCH_STREAM_WINDOW_SIZE, EXACT_BATCH_FRAME_KIND,
+  EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_FRAME_BYTES,
+  EXACT_BATCH_MAX_REQUEST_BYTES, EXACT_BATCH_MAX_ASSETS, EXACT_BATCH_MAX_CHUNKS_PER_ASSET,
+  EXACT_BATCH_REFUSALS, encodeExactBatchFrame, decodeExactBatchFrames, validateExactBatchFrame,
+  type ExactBatchFrame, type ExactBatchFrameKind, type ExactBatchRefusal,
+} from './experimental-exact-batch-wire.js';
 export {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,

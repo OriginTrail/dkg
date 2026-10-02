@@ -50,6 +50,8 @@ export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
 export const SYNC_BYTE_BUDGET_PAGE_MODE = 'byte-budget-v1' as const;
 /** Maximum rows a responder may materialize for one byte-budgeted durable page. */
 export const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;
+/** Exact DATA uses page-only store reads; never buffer a whole assertion. */
+export const SYNC_BYTE_BUDGET_EXACT_MAX_ROWS = 512;
 /**
  * Conservative first request for a previously unseen peer/path.
  *
@@ -158,6 +160,12 @@ export const SYNC_DENIED_RESPONSE = '__DKG_SYNC_DENIED__';
 export const GOSSIP_DIAL_COOLDOWN_MS = 30_000;
 /** Per-dial-attempt timeout for reconnect-on-gossip so a stuck dial can't starve the gossip handler path. */
 export const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
+/**
+ * How long a private share waits for an on-demand phonebook fetch of a roster
+ * member whose encryption key it lacks (#2849). The fetch itself keeps its own
+ * budget and serves a later share if this one stops waiting.
+ */
+export const SWM_RECIPIENT_KEY_FETCH_WAIT_MS = 30_000;
 /**
  * Cooldown for catchup-on-connection:open: suppresses duplicate catchup kicks
  * when the same peer briefly has overlapping direct + relayed connections

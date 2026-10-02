@@ -311,7 +311,7 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
       .toEqual([expect.objectContaining({
         outcome: 'failed',
         attempts: 1,
-        lastError: 'projection unavailable',
+        lastError: 'RFC-64 catalog repair unknown (stage: unknown)',
       })]);
   });
 

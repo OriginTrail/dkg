@@ -34,6 +34,7 @@ import {
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
   generateSubGraphRegistration,
@@ -50,8 +51,7 @@ import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
-import { storageAckOwedOperationsQuery } from './storage-ack-ledger.js';
-import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
+import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -151,6 +151,8 @@ export interface ContextGraphMetaOracleRecord {
   revokedAgents?: readonly string[];
   accessPolicy?: string;
 }
+
+type ContextGraphMetaOracleRead = () => Promise<ContextGraphMetaOracleRecord | null>;
 
 /**
  * Outcome of one `SharedMemoryHandler.handle()` invocation. Added
@@ -307,11 +309,11 @@ export class SharedMemoryHandler {
     contextGraphId: string,
   ) => Promise<ContextGraphMetaOracleRecord | null>;
   /**
-   * LIVE on-chain proof that a CG's access policy is public (`0`).
+   * Authenticated proof that a CG's SWM is public-readable.
    *
    * The SWM encryption requirement must be decided from the SAME authority on
    * both sides of the wire. The SENDER decides with this predicate
-   * (`resolveWorkspaceRecipientsGated` -> `isContextGraphPublicOnChain`) and
+   * (`resolveWorkspaceRecipientsGated` -> `isContextGraphSwmPublic`) and
    * sends PLAINTEXT for a public CG regardless of any agent gate, because on a
    * public CG the allowlist governs PUBLISH AUTHORITY, not READ ACCESS — there
    * is nothing to keep confidential. Without the same predicate here, the
@@ -319,12 +321,14 @@ export class SharedMemoryHandler {
    * and permanently dropped those plaintext writes, which silently broke every
    * member->curator SWM share on a public/curated CG.
    *
-   * Returns true ONLY on a live public proof. Absent oracle, `false`, or a
+   * Returns true ONLY on an authenticated public proof: a live on-chain public
+   * policy or, for an unregistered graph, its accepted owner-signed public
+   * policy. Absent oracle, `false`, or a
    * throw all mean "not proven public" and keep the encryption requirement —
    * the same fail-closed discipline the sender uses, so a stale mapping or an
    * RPC flake can never become a plaintext-acceptance hole.
    */
-  private readonly publicAccessPolicyOnChainOracle?: (
+  private readonly publicAccessPolicyOracle?: (
     contextGraphId: string,
   ) => Promise<boolean>;
   /**
@@ -459,11 +463,19 @@ export class SharedMemoryHandler {
         contextGraphId: string,
       ) => Promise<ContextGraphMetaOracleRecord | null>;
       /**
-       * Live on-chain public-access proof, mirroring the sender's
-       * `isContextGraphPublicOnChain`. Optional; when omitted the receiver
+       * Authenticated public-access proof (live on-chain policy, or an
+       * unregistered graph's accepted owner-signed policy), mirroring the
+       * sender's recipient resolver. Optional; when omitted the receiver
        * keeps the pre-existing (fail-closed) behaviour and requires
        * encryption for every agent-gated CG.
-       * See {@link SharedMemoryHandler#publicAccessPolicyOnChainOracle}.
+       * See {@link SharedMemoryHandler#publicAccessPolicyOracle}.
+       */
+      publicAccessPolicyOracle?: (
+        contextGraphId: string,
+      ) => Promise<boolean>;
+      /**
+       * @deprecated Use `publicAccessPolicyOracle`. Kept so existing callers
+       * keep their oracle: the proof it asks for is unchanged, only broader.
        */
       publicAccessPolicyOnChainOracle?: (
         contextGraphId: string,
@@ -535,7 +547,8 @@ export class SharedMemoryHandler {
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
-    this.publicAccessPolicyOnChainOracle = options?.publicAccessPolicyOnChainOracle;
+    this.publicAccessPolicyOracle = options?.publicAccessPolicyOracle
+      ?? options?.publicAccessPolicyOnChainOracle;
     this.legacyApplyAllowedOracle = options?.legacyApplyAllowedOracle;
     this.resolveDurableRootAtomicCompanion =
       options?.resolveDurableRootAtomicCompanion;
@@ -872,20 +885,22 @@ export class SharedMemoryHandler {
   }
 
   /**
-   * Whether the head is a StorageACK copy this node signed and still owes
-   * (see storage-ack-ledger.ts) that is not in the namespace's VM at its
-   * version yet. Nodes that keep no ledger always answer false.
+   * Whether this workspace scope has a signed StorageACK copy still owed and
+   * absent from VM. A local self-ACK keeps the queued head, so its ledger
+   * operation need not appear among the head aliases.
    */
   private async headIsUnpromotedOwedAckCopy(
     contextGraphId: string,
-    head: { readonly kaUal: string; readonly operationAliases: readonly { readonly shareOperationId: string }[] },
+    head: { readonly kaUal: string },
     version: bigint,
+    subGraphName?: string,
   ): Promise<boolean> {
-    const operations = [...new Set(head.operationAliases.map(
-      (alias) => workspaceOperationSubject(contextGraphId, alias.shareOperationId),
-    ))];
-    if (operations.length === 0) return false;
-    const owed = await this.store.query(storageAckOwedOperationsQuery(operations), {
+    const owed = await this.store.query(storageAckOwedCopiesByScopeQuery({
+      namespace: contextGraphId,
+      metaGraph: this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName),
+      kaUal: head.kaUal,
+      assertionVersion: version,
+    }), {
       source: 'publisher.swm.graphScoped.owedAckCopy',
     });
     if (owed.type !== 'bindings' || owed.bindings.length === 0) return false;
@@ -1052,6 +1067,14 @@ export class SharedMemoryHandler {
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
         return { applied: false, reason, retryable: false };
       }
+      // An LU-11 chunk envelope feeds host-mode ingest, which verifies it
+      // elsewhere. A member receives it on the same topic and has nothing to
+      // apply from it.
+      if (envelope?.type === GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED) {
+        const reason = `chunked envelope for context graph "${contextGraphId}" is for host-mode ingest`;
+        this.log.debug(ctx, `SWM write skipped: ${reason}`);
+        return { applied: false, reason, retryable: false };
+      }
 
       // Every currently supported wire shape carries its scope outside the
       // plaintext. Check it before policy work/decryption so a catalog-owned
@@ -1076,12 +1099,21 @@ export class SharedMemoryHandler {
         return declineNonAuthoritativeLegacyApply(encodedSubGraphName);
       }
 
+      // One inbound envelope must be judged from one projected metadata read.
+      // Besides keeping the agent/peer/policy gates on a coherent snapshot,
+      // this matters when the injected oracle proves an approved private
+      // replica against finalized/live authority: the three consumers below
+      // must not repeat that authority read independently on the hot path.
+      const readProjectedMeta = this.createContextGraphMetaOracleRead(contextGraphId);
       const agentGateAddresses = await withRpcUsageSite(
         CG_AUTH_RPC_SITES.workspaceApply,
-        () => this.getContextGraphAgentGateAddresses(contextGraphId),
+        () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
       );
-      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
-      const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(contextGraphId);
+      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
+      const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(
+        contextGraphId,
+        readProjectedMeta,
+      );
 
       if (hasPrivateAccessPolicy && agentGateAddresses === null && allowedPeers === null) {
         const reason = `private context graph "${contextGraphId}" has no gossip allowlist`;
@@ -1159,7 +1191,7 @@ export class SharedMemoryHandler {
       // Policy rationale lives in `workspace-encryption-policy.ts` (the
       // must-vs-may split and its fail-closed discipline). Local sequencing
       // note only: the probe is LAZY — evaluated solely when the CG is
-      // agent-gated, because the policy consumes provenPublicOnChain
+      // agent-gated, because the policy consumes provenPublic
       // exclusively behind `isAgentGated` and awaiting the chain RPC
       // unconditionally put ~30ms on the hot path of EVERY SWM gossip receive
       // (measured devnet regression: receive-apply 3ms -> 33ms flipped the
@@ -1168,10 +1200,10 @@ export class SharedMemoryHandler {
         resolveWorkspaceEncryptionRequirement({
           hasPrivateAccessPolicy,
           agentGateAddresses,
-          provenPublicOnChain: agentGateAddresses !== null
+          provenPublic: agentGateAddresses !== null
             ? await withRpcUsageSite(
               CG_AUTH_RPC_SITES.plaintextProbe,
-              () => this.isContextGraphProvenPublicOnChain(contextGraphId, ctx),
+              () => this.isContextGraphProvenPublic(contextGraphId, ctx),
             )
             : false,
         });
@@ -1508,7 +1540,9 @@ export class SharedMemoryHandler {
         });
         onPhase?.('validate', 'end');
 
-        const normalized = quads.map((q) => ({ ...q, graph: swmGraph }));
+        // Validated as received; record and persist it in the form the store
+        // returns it in.
+        const normalized = acceptIncomingPublicQuads(quads).map((q) => ({ ...q, graph: swmGraph }));
         const publicDigest = workspacePublicQuadsDigest(
           normalized.map((quad) => ({ ...quad, graph: '' })),
         );
@@ -1643,7 +1677,7 @@ export class SharedMemoryHandler {
           // the copy). Defer the newer share meanwhile, like a head repair:
           // the sender keeps it queued and it applies once the copy is
           // promoted.
-          if (await this.headIsUnpromotedOwedAckCopy(contextGraphId, currentHead, currentVersion)) {
+          if (await this.headIsUnpromotedOwedAckCopy(contextGraphId, currentHead, currentVersion, subGraphName)) {
             const reason =
               `OWED_STORAGE_ACK_COPY: ${contentScope.ual} version ${currentVersion} is a StorageACK ` +
               'copy this node signed and has not promoted yet';
@@ -2001,11 +2035,15 @@ export class SharedMemoryHandler {
     if (!envelope) {
       return { accepted: false, reasonCode: 'UNSIGNED', reason: 'unsigned envelope (host mode requires agent-signed gossip)' };
     }
+    // Agent and peer gates are two views of the same authority snapshot. Read
+    // the injected projection once so an authority-backed oracle is not
+    // resolved twice for one host-mode envelope.
+    const readProjectedMeta = this.createContextGraphMetaOracleRead(contextGraphId);
     const agentGateAddresses = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.hostEnvelope,
-      () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
     );
-    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
 
     // GH #1124 — resolve "fully-open (self-publishable) CG" HERE rather than
     // trusting a caller flag: the caller injects the (forced-fresh, fail-closed)
@@ -2229,10 +2267,30 @@ export class SharedMemoryHandler {
   }
 
   /**
+   * Build a lazy request-local read of the projected context-graph metadata.
+   * Laziness preserves the RPC-usage context of the first gate that consumes
+   * it; promise memoization keeps every later gate on the same snapshot.
+   */
+  private createContextGraphMetaOracleRead(
+    contextGraphId: string,
+  ): ContextGraphMetaOracleRead | undefined {
+    const oracle = this.contextGraphMetaOracle;
+    if (oracle === undefined) return undefined;
+    let projected: Promise<ContextGraphMetaOracleRecord | null> | undefined;
+    return () => {
+      projected ??= oracle(contextGraphId);
+      return projected;
+    };
+  }
+
+  /**
    * Returns the peer allowlist for a context graph, or null if no allowlist
    * is set (open CG — all peers allowed).
    */
-  private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+  private async getContextGraphAllowedPeers(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<string[] | null> {
     // The oracle record is intentionally PARTIAL (OT-RFC-49 public
     // projection): a populated record does NOT imply every gate field
     // was projected. Short-circuit on the projection ONLY for the
@@ -2241,7 +2299,7 @@ export class SharedMemoryHandler {
     // complete snapshot here would let a projection that carried only
     // `accessPolicy`/agent fields skip the peer allowlist entirely
     // (returns null ⇒ "open CG — all peers allowed").
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
     if (projected?.allowedPeers !== undefined) {
       const peers = [...new Set(projected.allowedPeers.filter((v): v is string => typeof v === 'string'))];
       return peers.length > 0 ? peers : null;
@@ -2266,7 +2324,10 @@ export class SharedMemoryHandler {
    * null if the graph is not agent-gated. Includes DKG_ALLOWED_AGENT and
    * DKG_PARTICIPANT_AGENT metadata.
    */
-  private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
+  private async getContextGraphAgentGateAddresses(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<string[] | null> {
     // The oracle record is intentionally PARTIAL (OT-RFC-49 public
     // projection): each gate field is resolved INDEPENDENTLY from the
     // projection-if-present-else-store, so a projection that carried
@@ -2276,7 +2337,7 @@ export class SharedMemoryHandler {
     // resolved separately and then subtracted — short-circuiting on a
     // whole truthy record here would let a partial projection fall
     // back to a *stale store allowlist with no revocation applied*.
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
 
     // Revoked tombstones: prefer the projection when it carried the
     // field, otherwise read `_meta`. Applied to whichever source the
@@ -2391,27 +2452,29 @@ export class SharedMemoryHandler {
   }
 
   /**
-   * True only on a LIVE on-chain proof that this CG's access policy is public.
+   * True only on an authenticated proof that this CG's access policy is
+   * public (live on-chain, or an unregistered graph's accepted owner-signed
+   * policy; see the oracle's wiring in the agent).
    *
    * Fail-closed by construction: no oracle, a `false` answer, or a throw all
    * yield `false` ("not proven public"), which keeps the encryption
-   * requirement. This mirrors the sender's `isContextGraphPublicOnChain` so the
+   * requirement. This mirrors the sender's `isContextGraphSwmPublic` so the
    * two sides of the wire cannot disagree about whether plaintext SWM is
    * acceptable. A throw is logged rather than swallowed silently — a
    * persistently failing probe means agent-gated public CGs keep rejecting
    * plaintext, which is safe but worth diagnosing.
    */
-  private async isContextGraphProvenPublicOnChain(
+  private async isContextGraphProvenPublic(
     contextGraphId: string,
     ctx: OperationContext,
   ): Promise<boolean> {
-    if (!this.publicAccessPolicyOnChainOracle) return false;
+    if (!this.publicAccessPolicyOracle) return false;
     try {
-      return await this.publicAccessPolicyOnChainOracle(contextGraphId);
+      return await this.publicAccessPolicyOracle(contextGraphId);
     } catch (err) {
       this.log.warn(
         ctx,
-        `public-access on-chain probe failed for "${contextGraphId}" — treating as NOT public `
+        `public-access probe failed for "${contextGraphId}" — treating as NOT public `
         + `(fail-closed: agent-gated SWM keeps requiring encryption): `
         + `${err instanceof Error ? err.message : String(err)}`,
       );
@@ -2419,7 +2482,10 @@ export class SharedMemoryHandler {
     }
   }
 
-  private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {
+  private async contextGraphHasPrivateAccessPolicy(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
     }
@@ -2428,7 +2494,7 @@ export class SharedMemoryHandler {
     // projected (`!== undefined`). The oracle record is PARTIAL, so a
     // record carrying only agent/peer fields must NOT be read as
     // "accessPolicy absent ⇒ not private"; fall back to the store.
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
     if (projected?.accessPolicy !== undefined) {
       return projected.accessPolicy.trim().toLowerCase() === 'private';
     }

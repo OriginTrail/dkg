@@ -19,6 +19,10 @@ import type {
   QueryCatalogReadResponse,
   QueryCatalogWriteQuad,
 } from '@origintrail-official/dkg-core/query-catalog';
+import {
+  resolveDaemonRequestDeadlines,
+  type DaemonRequestDeadlines,
+} from '@origintrail-official/dkg-core/daemon-request-deadlines';
 
 export type { AgentListFilters, AgentListPageOptions } from '@origintrail-official/dkg-core';
 
@@ -122,27 +126,24 @@ export interface DkgClientOptions {
   config: DkgConfig;
   /** Optional fetch implementation (mostly here for tests). */
   fetcher?: typeof fetch;
-  /** Deadline in ms for GET reads (default 30 000). */
+  /** Deadline in ms for GET reads (default `DKG_API_READ_TIMEOUT_MS`, else 30 000). */
   readTimeoutMs?: number;
   /**
    * Deadline in ms for every POST/PUT/DELETE, including the long Knowledge Asset
-   * mutations (default 240 000, never below `readTimeoutMs`).
+   * mutations (default `DKG_API_LONG_TIMEOUT_MS`, else 240 000; never below
+   * `readTimeoutMs`).
    */
   longTimeoutMs?: number;
 }
 
-/** Deadline for GET reads, which answer from local daemon state. */
-export const DKG_READ_TIMEOUT_MS = 30_000;
-
-/**
- * Deadline for every other request: several wait on peers or the chain.
- * `vm/publish` holds the request open for the publisher's storage-ACK window
- * (`ACK_TIMEOUT_MS`, 120 s, in packages/publisher/src/ack-collector.ts) plus
- * chain confirmation, and context-graph registration waits for its transaction.
- * It stays under the 300 s Node's fetch waits on its own, so this deadline, and
- * a long mutation's outcome-unknown report, comes first.
- */
-export const DKG_LONG_TIMEOUT_MS = 240_000;
+// The shared deadline constants, under the names this module publishes.
+export {
+  DAEMON_READ_TIMEOUT_MS as DKG_READ_TIMEOUT_MS,
+  DAEMON_LIST_READ_TIMEOUT_MS as DKG_LIST_READ_TIMEOUT_MS,
+  DAEMON_LONG_TIMEOUT_MS as DKG_LONG_TIMEOUT_MS,
+  DAEMON_READ_TIMEOUT_ENV as DKG_READ_TIMEOUT_ENV,
+  DAEMON_LONG_TIMEOUT_ENV as DKG_LONG_TIMEOUT_ENV,
+} from '@origintrail-official/dkg-core/daemon-request-deadlines';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
@@ -461,15 +462,13 @@ export class DkgClient {
   private readonly api: string;
   private readonly token: string;
   private readonly fetcher: typeof fetch;
-  private readonly readTimeoutMs: number;
-  private readonly longTimeoutMs: number;
+  private readonly deadlines: DaemonRequestDeadlines;
 
   constructor(opts: DkgClientOptions) {
     this.api = opts.config.api.replace(/\/$/, '');
     this.token = opts.config.token;
     this.fetcher = opts.fetcher ?? globalThis.fetch;
-    this.readTimeoutMs = opts.readTimeoutMs ?? DKG_READ_TIMEOUT_MS;
-    this.longTimeoutMs = Math.max(opts.longTimeoutMs ?? DKG_LONG_TIMEOUT_MS, this.readTimeoutMs);
+    this.deadlines = resolveDaemonRequestDeadlines(opts);
   }
 
   private async request<T = unknown>(
@@ -509,9 +508,9 @@ export class DkgClient {
   }
 
   /**
-   * Run one daemon round-trip under its deadline: GET reads take the read
-   * class, every other method the long class. The deadline also covers reading
-   * the body. A long Knowledge Asset mutation that times out reports
+   * Run one daemon round-trip under the shared daemon policy's deadline for
+   * its method and route. The deadline also covers reading the body. A long
+   * Knowledge Asset mutation that times out reports
    * {@link DkgOutcomeUnknownError}; other timeouts keep fetch's TimeoutError.
    */
   private async withDeadline<T>(
@@ -520,7 +519,7 @@ export class DkgClient {
     longMutation: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const timeoutMs = method === 'GET' ? this.readTimeoutMs : this.longTimeoutMs;
+    const timeoutMs = this.deadlines.timeoutMsFor({ method, path: route });
     const signal = AbortSignal.timeout(timeoutMs);
     try {
       return await run(signal);

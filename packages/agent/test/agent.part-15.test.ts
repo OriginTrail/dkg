@@ -3,11 +3,20 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {
-  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
-    return RealDKGAgent.create({
+  async create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    const agent = await RealDKGAgent.create({
       rfc64CatalogActivation: { enabled: false },
       ...config,
     });
+    // This file's synthetic persisted rows exercise persistence, caps and
+    // ordering. Give them local-create provenance so the admission guard does
+    // not turn those mechanics tests into remote-authority tests. The latter
+    // have their own rehydration coverage in private-read-chain-authority.
+    const rows = await config.contextGraphSubscriptionStore?.loadAll();
+    for (const row of rows ?? []) {
+      (agent as any).localContextGraphProvenance.recordLocalCreate(row.id);
+    }
+    return agent;
   },
 };
 
@@ -574,7 +583,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const confirmedId = 'approved-b-confirmed';
       const dormantId = 'approved-z-dormant';
       const confirmedOnChainHash = ethers.keccak256(ethers.toUtf8Bytes(confirmedId));
+      const confirmedMeta = contextGraphMetaUri(confirmedId);
+      const confirmedDelegation =
+        `did:dkg:agent-delegation:${confirmedId}:${localAgentAddress.toLowerCase()}`;
       const subscriptionWrites: any[] = [];
+      let agent!: DKGAgent;
       const subscriptionStore = {
         loadAll: async () => [
           // Reproduce the v10.0.6 poison: an unrelated empty peer promoted all
@@ -587,44 +600,55 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         delete: async () => {},
       };
       const membershipStore = {
-        loadAll: async () => [
-          ...[pendingId, confirmedId, dormantId].map((contextGraphId, index) => ({
-            contextGraphId,
-            principalType: 'agent' as const,
-            principalId: localAgentAddress,
-            role: 'participant',
-            status: 'active' as const,
-            source: 'join-approved',
-            metadata: { curatorPeerId: `12D3KooWRestartCurator${index}` },
-            firstSeenAt: 100 + index,
-            updatedAt: 200 + index,
-          })),
-          // A newer but non-local approval must not steer this node's signer.
-          {
-            contextGraphId: pendingId,
-            principalType: 'agent' as const,
-            principalId: ethers.Wallet.createRandom().address,
-            role: 'participant',
-            status: 'active' as const,
-            source: 'join-approved',
-            updatedAt: 999,
-          },
-          // Only explicit join-approved facts carry the bootstrap signer hint.
-          {
-            contextGraphId: pendingId,
-            principalType: 'agent' as const,
-            principalId: localAgentAddress,
-            role: 'participant',
-            status: 'active' as const,
-            source: 'allowed-agent',
-            updatedAt: 1_000,
-          },
-        ],
+        loadAll: async () => {
+          // Membership restoration runs after the network identity starts.
+          // Install the persisted receiver binding at that boundary so the
+          // registered-metadata proof exercises the real local peer id.
+          await agent.store.insert([{
+            subject: confirmedDelegation,
+            predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
+            object: sparqlString(agent.peerId),
+            graph: confirmedMeta,
+          }]);
+          return [
+            ...[pendingId, confirmedId, dormantId].map((contextGraphId, index) => ({
+              contextGraphId,
+              principalType: 'agent' as const,
+              principalId: localAgentAddress,
+              role: 'participant',
+              status: 'active' as const,
+              source: 'join-approved',
+              metadata: { curatorPeerId: `12D3KooWRestartCurator${index}` },
+              firstSeenAt: 100 + index,
+              updatedAt: 200 + index,
+            })),
+            // A newer but non-local approval must not steer this node's signer.
+            {
+              contextGraphId: pendingId,
+              principalType: 'agent' as const,
+              principalId: ethers.Wallet.createRandom().address,
+              role: 'participant',
+              status: 'active' as const,
+              source: 'join-approved',
+              updatedAt: 999,
+            },
+            // Only explicit join-approved facts carry the bootstrap signer hint.
+            {
+              contextGraphId: pendingId,
+              principalType: 'agent' as const,
+              principalId: localAgentAddress,
+              role: 'participant',
+              status: 'active' as const,
+              source: 'allowed-agent',
+              updatedAt: 1_000,
+            },
+          ];
+        },
         upsert: async () => {},
         delete: async () => {},
       };
 
-      const agent = await DKGAgent.create({
+      agent = await DKGAgent.create({
         name: 'ApprovedMembershipRestart',
         listenHost: '127.0.0.1',
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
@@ -638,9 +662,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const pendingUri = contextGraphDataGraphUri(pendingId);
       const pendingMeta = contextGraphMetaUri(pendingId);
       const confirmedUri = contextGraphDataGraphUri(confirmedId);
-      const confirmedMeta = contextGraphMetaUri(confirmedId);
-      const confirmedDelegation =
-        `did:dkg:agent-delegation:${confirmedId}:${localAgentAddress.toLowerCase()}`;
+      const confirmedCuratorPeerId = '12D3KooWRestartCurator1';
       await agent.store.insert([
         {
           subject: pendingUri,
@@ -681,7 +703,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         {
           subject: confirmedUri,
           predicate: DKG_ONTOLOGY.DKG_CREATOR,
-          object: 'did:dkg:agent:12D3KooWRestartCuratorCreator',
+          object: `did:dkg:agent:${confirmedCuratorPeerId}`,
           graph: confirmedMeta,
         },
         {
@@ -727,10 +749,20 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           graph: confirmedMeta,
         },
       ]);
+      await agent.writeRequesterJoinRequestState(confirmedId, localAgentAddress, {
+        status: 'approved',
+        requestGeneration: `0x${'12'.repeat(32)}`,
+        curatorPeerId: confirmedCuratorPeerId,
+        curatorAgentAddress: localAgentAddress.toLowerCase(),
+        curatorAuthorityEra: '0',
+      });
 
       try {
+        // Rehydration starts the retrying recovery loop (#2832), which runs
+        // this single attempt.
+        const recoverPendingMetadata = vi.spyOn(agent, 'recoverPendingJoinApprovalMetadata');
         const resumePendingMetadata = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
-          .mockResolvedValue(undefined);
+          .mockResolvedValue('completed');
         await agent.start();
         expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(localAgentAddress.toLowerCase());
 
@@ -755,6 +787,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain(pendingId);
         await expect(agent.canReadContextGraph(pendingId)).resolves.toBe(false);
+        expect(recoverPendingMetadata).toHaveBeenCalledWith(pendingId, '12D3KooWRestartCurator0');
         expect(resumePendingMetadata).toHaveBeenCalledWith(
           pendingId,
           '12D3KooWRestartCurator0',
@@ -766,6 +799,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           onChainHash: confirmedOnChainHash.toLowerCase(),
         });
         expect(agent.getSubscribedContextGraphs().get(confirmedId)?.pendingMeta).toBeUndefined();
+        expect(recoverPendingMetadata).not.toHaveBeenCalledWith(
+          confirmedId,
+          '12D3KooWRestartCurator1',
+        );
         expect(subscriptionWrites.filter((row) => row.id === confirmedId).at(-1)).toMatchObject({
           id: confirmedId,
           subscribed: true,

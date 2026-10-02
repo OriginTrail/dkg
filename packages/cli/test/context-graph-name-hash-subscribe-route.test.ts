@@ -63,6 +63,7 @@ const ALLOWED: AuthorityDecision = {
   onChainId: 33n,
   metadataBootstrap: 'eligible',
 };
+const PUBLIC_ADMISSION: AuthorityDecision = { ...ALLOWED, reason: 'chain-public' };
 
 interface NameHashAgentOptions {
   /** What the bounded pre-resolution returns. */
@@ -84,6 +85,7 @@ function nameHashAgent(options: NameHashAgentOptions = {}) {
     subscribe: [] as string[],
     unsubscribe: [] as string[],
     graphSync: [] as string[],
+    metadataBootstrap: [] as Array<{ id: string; proof: unknown }>,
     markState: 0,
   };
   const agent = {
@@ -125,6 +127,12 @@ function nameHashAgent(options: NameHashAgentOptions = {}) {
     isPrivateContextGraph: async () => false,
     markContextGraphSubscriptionState: () => { calls.markState += 1; },
     reconcileRfc64CatalogResponsibilityV1: async () => undefined,
+    bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: async (
+      id: string, _signal: AbortSignal | undefined, proof: unknown,
+    ) => {
+      calls.metadataBootstrap.push({ id, proof });
+      return 'no-accepted-public-policy' as const;
+    },
     resolveAgentByToken: () => undefined,
     getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
   };
@@ -250,6 +258,7 @@ describe('subscribing a Context Graph by its on-chain name hash', () => {
     const agent = nameHashAgent({
       resolveNow: async () => { resolved = true; return CLEARTEXT; },
       isResolved: () => resolved,
+      authority: async () => PUBLIC_ADMISSION,
     });
     const route = await startRoute(agent);
 
@@ -259,6 +268,9 @@ describe('subscribing a Context Graph by its on-chain name hash', () => {
     expect(agent.calls.subscribe).toEqual([CLEARTEXT]);
     await route.settled(body.catchup.jobId);
     expect(runs).toEqual([CLEARTEXT]);
+    expect(agent.calls.metadataBootstrap).toEqual([
+      { id: CLEARTEXT, proof: { contextGraphId: CLEARTEXT, onChainId: '33' } },
+    ]);
   });
 
   it('continues the same job under the cleartext id when the hash resolves mid-run', async () => {
@@ -272,12 +284,19 @@ describe('subscribing a Context Graph by its on-chain name hash', () => {
       },
       close: async () => undefined,
     } as any;
-    const agent = nameHashAgent({ isResolved: () => resolved });
+    const agent = nameHashAgent({
+      isResolved: () => resolved,
+      authority: async () => PUBLIC_ADMISSION,
+    });
     const route = await startRoute(agent);
 
     const { body } = await route.subscribe(NAME_HASH);
     const job = await route.settled(body.catchup.jobId);
     expect(runs).toEqual([NAME_HASH, CLEARTEXT]);
+    expect(agent.calls.metadataBootstrap).toEqual([
+      { id: NAME_HASH, proof: { contextGraphId: NAME_HASH, onChainId: '33' } },
+      { id: CLEARTEXT, proof: { contextGraphId: CLEARTEXT, onChainId: '33' } },
+    ]);
     expect(job.resolvedContextGraphId).toBe(CLEARTEXT);
     expect(route.catchupTracker.latestByContextGraph.get(CLEARTEXT)).toBe(body.catchup.jobId);
     // The cleartext round is classified normally (this round was unproductive).

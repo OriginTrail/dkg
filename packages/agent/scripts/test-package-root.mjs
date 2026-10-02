@@ -262,6 +262,8 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-repair-diagnostics-v1.js',
+  'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
@@ -346,6 +348,7 @@ const blockedRfc64Modules = [
   'catalog-replay-generation-v1.js',
   'catalog-replay-recovery-runtime-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
+  'catalog-operational-applied-heads-v1.js',
   'catalog-runtime-v1.js',
   'background-work-dispatcher-v1.js',
   'supervisor-status-v1.js',

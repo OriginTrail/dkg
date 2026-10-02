@@ -485,6 +485,26 @@ describe('EVMChainAdapter PCA read cache', () => {
     expect(adapter.readContract.calls).toHaveLength(1);
   });
 
+  it('does not reuse a soft missing-account verdict for strict funding verification', async () => {
+    const adapter = pcaReadCacheAdapter([]) as any;
+    const readFailure = Object.assign(new Error('PCA contract read failed'), { code: 'CALL_EXCEPTION' });
+    const softRead = deferred<unknown>();
+    const strictRead = deferred<unknown>();
+    const reads = [softRead.promise, strictRead.promise];
+    adapter.readContract = recorder(async () => reads.shift()!);
+
+    const soft = adapter.getPublishingConvictionAccountInfo(9n);
+    await vi.waitFor(() => expect(adapter.readContract.calls).toHaveLength(1));
+    const strict = adapter.getPublishingConvictionAccountInfo(9n, { strict: true });
+    const strictResult = expect(strict).rejects.toBe(readFailure);
+    await vi.waitFor(() => expect(adapter.readContract.calls).toHaveLength(2));
+    strictRead.reject(readFailure);
+    softRead.reject(readFailure);
+    await expect(soft).resolves.toBeNull();
+    await strictResult;
+    expect(adapter.readContract.calls).toHaveLength(2);
+  });
+
   it('public top-up refreshes warmed account-info cache immediately', async () => {
     const adapter = pcaReadCacheAdapter([
       accountInfoTuple(OWNER, 100n, 0n),

@@ -72,6 +72,13 @@ export interface Rfc64PublicCatalogCurrentReceiverReconcilerV1
    * strictly supersedes it. Equal-version conflicts are never deduplicated.
    */
   isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+  /**
+   * Optional synchronous, I/O-free form of {@link isHeadSatisfied}: `true`
+   * only when that check would resolve `true` right now; `false` whenever it
+   * cannot tell cheaply. Never throws. An announcement for a head this proves
+   * satisfied needs no receiver or pull work.
+   */
+  isHeadKnownSatisfied?(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean;
 }
 
 /** Constructor compatibility for implementations compiled against the V1 name. */
@@ -348,14 +355,25 @@ type ReceiverTaskOutcomeV1 =
     readonly error: unknown;
   };
 
+export const RFC64_RECEIVER_ADMISSION_DEFERRAL_MS_V1 = 500;
+export const RFC64_RECEIVER_MAX_ADMISSION_DEFERRALS_V1 = 240;
+/**
+ * The longest a task may legitimately sit in admission deferral while the
+ * process-wide finalized chain-read lane is held elsewhere. Anything that waits
+ * for this receiver to go idle must allow strictly MORE than this, or a single
+ * lawfully-deferring task defeats it every time.
+ */
+export const RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 =
+  RFC64_RECEIVER_ADMISSION_DEFERRAL_MS_V1 * RFC64_RECEIVER_MAX_ADMISSION_DEFERRALS_V1;
+
 const DEFAULTS = Object.freeze({
   maxConcurrent: 4,
   maxQueue: 1024,
   maxAttempts: 3,
   maxProvidersPerHead: 8,
   retryBackoffMs: 250,
-  admissionDeferralMs: 500,
-  maxAdmissionDeferrals: 240,
+  admissionDeferralMs: RFC64_RECEIVER_ADMISSION_DEFERRAL_MS_V1,
+  maxAdmissionDeferrals: RFC64_RECEIVER_MAX_ADMISSION_DEFERRALS_V1,
 });
 
 /**
@@ -521,6 +539,16 @@ export class Rfc64PublicCatalogReceiverV1 {
     remotePeerId: string,
   ): void {
     this.scheduleMany([{ announcement, remotePeerId }]);
+  }
+
+  /**
+   * True while this receiver admits work and holds no queued, deferred, or
+   * running ambient task for this exact head: scheduling it now could only
+   * start a new task, never add a provider or a fresh hint to existing work.
+   */
+  hasNoPendingTaskForHead(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean {
+    return !this.#closed
+      && this.#tasks.pending(rfc64ReceiverHeadKeyV1(announcement)) === undefined;
   }
 
   /** Atomically retain all discovered providers before the first fetch starts. */

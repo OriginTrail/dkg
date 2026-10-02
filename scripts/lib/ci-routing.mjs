@@ -156,6 +156,16 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
+  'packages/node-store': {
+    // Protocol persistence split out of node-ui: node-ui re-exports it, so every
+    // lane that loads node-ui loads it too (tornado_blazegraph through the CLI's
+    // Oxigraph launcher, see packages/cli). Its own tests run in kosava_node_ui
+    // and open node-ui's DashboardDB by relative path. Daemon runtime, not UI
+    // surface: like the other packages the devnet boots, the browser suite
+    // follows it after merge rather than on the PR.
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/graph-viz': {
     // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
     lanes: [
@@ -239,6 +249,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/agent': ['tornado_agent'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
+  'packages/node-store': ['kosava_node_ui'],
   'packages/graph-viz': ['kosava_supporting'],
   'packages/epcis': ['tornado_blazegraph', 'kosava_supporting'],
   'packages/mcp-dkg': ['kosava_supporting'],
@@ -288,7 +299,7 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|auth|boolean-env-override|config|oxigraph-memory-limits|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/read-authority-diagnostics|auth|boolean-env-override|config|oxigraph-memory-limits|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -326,6 +337,12 @@ export const PATH_TRIGGERS = Object.freeze([
   },
   // Files other packages load by relative path, outside their declared
   // dependencies.
+  {
+    patterns: [/^packages\/agent\/src\/sync\/(?:exact-assets|exact-batch-stream-contract|wire-compression)\.ts$/],
+    lanes: ['tornado_core'],
+    evmScopes: [],
+    reason: 'the Core stream transport tests import the Agent production codec',
+  },
   {
     patterns: [/^packages\/cli\/src\/extraction\/markdown-extractor\.ts$/],
     lanes: ['tornado_agent'],
