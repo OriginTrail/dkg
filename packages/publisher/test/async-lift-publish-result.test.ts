@@ -199,6 +199,19 @@ describe('async lift publish result mapping', () => {
     expect(failure.retryable).toBe(false);
   });
 
+  it('classifies inconclusive PCA funding as retryable RPC unavailability', () => {
+    const err = Object.assign(new Error('PCA funding verification is inconclusive; retry when chain reads recover.'), {
+      code: 'PCA_FUNDING_UNKNOWN',
+    });
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: err,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:pca-funding-unknown',
+    });
+    expect(failure.code).toBe('rpc_unavailable');
+    expect(failure.retryable).toBe(true);
+  });
+
   it('classifies PUBLISH_AUTHOR_NOT_CUSTODIAL as a TERMINAL authority_forbidden failure (not retryable)', () => {
     // GH#1786: the async worker discovers mid-publish that it cannot re-sign this author's
     // UpdateAuthorAttestation. That is PERMANENT — before this mapping it fell through to the

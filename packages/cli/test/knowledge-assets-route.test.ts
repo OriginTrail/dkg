@@ -41,6 +41,7 @@ import {
   postJson,
   getJson,
   postMultipart,
+  caseVariantAddress,
   type LiveDaemon,
 } from './helpers/live-daemon.js';
 
@@ -233,22 +234,20 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(descriptor.body.wmCurrentAssertion).toBeTruthy();
     });
 
-    it('atomic create canonicalizes a mixed-case self authorAgentAddress before sealing', async () => {
+    it('atomic create canonicalizes a differently-cased self authorAgentAddress before sealing', async () => {
       const agent = await registerAgentClient('ka-atomic-author-case');
       const cg = `ka-atomic-author-case-${Date.now().toString(36)}`;
       await createRegisteredAgentContextGraph(agent, cg);
-      const mixedCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
-      expect(mixedCaseAgent).not.toBe(agent.agentAddress);
 
       const res = await agent.post('/api/knowledge-assets', {
         contextGraphId: cg,
         name: 'agent-case-atomic',
         quads: [{ subject: 'ex:Case', predicate: 'ex:p', object: '"x"' }],
         finalize: true,
-        authorAgentAddress: mixedCaseAgent,
+        authorAgentAddress: caseVariantAddress(agent.agentAddress),
       });
 
-      expect(res.status, `mixed-case atomic create: ${JSON.stringify(res.body)}`).toBe(201);
+      expect(res.status, `differently-cased atomic create: ${JSON.stringify(res.body)}`).toBe(201);
       expect(String(res.body.authorAddress).toLowerCase()).toBe(agent.agentAddress.toLowerCase());
     });
 
@@ -342,6 +341,24 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(body.count).toBe(1);
       expect(JSON.stringify(body.quads)).toContain('ex:new');
       expect(JSON.stringify(body.quads)).not.toContain('ex:old');
+    });
+
+    it('returns a typed conflict when discarding a shared KA without an active WM draft', async () => {
+      const name = 'shared-discard-guard';
+      await createKa(REG, name);
+      await write(REG, name, [{ subject: 'ex:shared', predicate: 'ex:p', object: '"x"' }]);
+      const finalized = await postJson(daemon, `/api/knowledge-assets/${name}/wm/finalize`, { contextGraphId: REG });
+      expect(finalized.status, `finalize: ${JSON.stringify(finalized.body)}`).toBe(200);
+      const shared = await postJson(daemon, `/api/knowledge-assets/${name}/swm/share`, { contextGraphId: REG });
+      expect(shared.status, `share: ${JSON.stringify(shared.body)}`).toBe(200);
+
+      const discarded = await postJson(daemon, `/api/knowledge-assets/${name}/wm/discard`, { contextGraphId: REG });
+      expect(discarded.status, `discard: ${JSON.stringify(discarded.body)}`).toBe(409);
+      expect(discarded.body.code).toBe('KA_WM_LIFECYCLE_REQUIRED');
+      expect(String(discarded.body.error)).toMatch(/active Working Memory draft/i);
+
+      const descriptor = await getJson(daemon, `/api/knowledge-assets/${name}?contextGraphId=${REG}`);
+      expect(descriptor.status).toBe(200);
     });
   });
 

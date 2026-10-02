@@ -85,11 +85,14 @@ export interface PendingOrdinalRecoveryResult {
    * the fair scan moving through unvisited ordinals.
    */
   cooldownOnly?: boolean;
+  /** No peer work ran because node-local sync admission was unavailable. */
+  localAdmissionDeferred?: boolean;
 }
 
 type PendingOrdinalRecoveryDisposition =
   | { kind: 'not-attempted' }
   | { kind: 'cooldown'; continuationOrdinal: number | undefined }
+  | { kind: 'local-admission'; continuationOrdinal: number | undefined }
   | { kind: 'ordinal-continuation'; continuationOrdinal: number }
   | { kind: 'provider-continuation' }
   | { kind: 'exhausted' };
@@ -102,6 +105,9 @@ type PendingOrdinalRecoveryDisposition =
 function recoveryDisposition(
   result: PendingOrdinalRecoveryResult,
 ): PendingOrdinalRecoveryDisposition {
+  if (result.localAdmissionDeferred === true) {
+    return { kind: 'local-admission', continuationOrdinal: result.continuationOrdinal };
+  }
   if (result.cooldownOnly === true) {
     return { kind: 'cooldown', continuationOrdinal: result.continuationOrdinal };
   }
@@ -138,6 +144,7 @@ export interface ChainReconcilerDeps {
     onChainCgId: bigint,
     ordinal: number,
     headBlock: number | undefined,
+    context?: { readonly headOrdinal: number },
   ) => Promise<OrdinalOutcome>;
   /** Maximum ordinals attempted before yielding the global VM worker. */
   maxOrdinalsPerPass?: number;
@@ -173,6 +180,24 @@ export interface ChainReconcilerDeps {
   /** Confirmation depth (blocks) before a completed ordinal advances the watermark. */
   confirmationDepth: number;
   log: (msg: string) => void;
+  /**
+   * Observation only: receives the wall clock of this slice's serial stages
+   * when it completes. Never consulted by scheduling or cursor policy.
+   */
+  observePassTimings?: (timings: ReconcilePassTimings) => void;
+}
+
+/** Observation-only wall clock of one reconcile slice's serial stages. */
+export interface ReconcilePassTimings {
+  /** `getKCCount`. */
+  readonly headReadMs: number;
+  /** `getHeadBlock`. */
+  readonly blockReadMs: number;
+  /** Ordinal scan: per-ordinal chain membership read and local classification. */
+  readonly scanMs: number;
+  /** `recoverPendingOrdinals`: curator, peer readiness, sizing, exchange, post-fetch. */
+  readonly recoverMs: number;
+  readonly totalMs: number;
 }
 
 export interface ReconcileResult {
@@ -192,6 +217,8 @@ export interface ReconcileResult {
   shouldContinueImmediately: boolean;
   /** True when this pass stopped because its captured chain binding changed. */
   staleTarget: boolean;
+  /** Internal bounded retry signal; local pressure is not peer evidence. */
+  localAdmissionDeferred?: boolean;
 }
 
 interface OrdinalPassPlan {
@@ -268,6 +295,11 @@ function planOrdinalPass(
       watermark: currentWatermark,
       recovery,
     }) => {
+      if (recovery.kind === 'local-admission') {
+        // Retry the same historical slice after local capacity becomes usable.
+        // A never-started fetch cannot move this cursor past untouched KAs.
+        return Math.max(currentWatermark, historicalOrdinals[0] ?? currentWatermark);
+      }
       if (usesRecentLane) {
         return hasUnvisitedCandidates
           ? Math.max(currentWatermark, historicalContinuationOrdinal)
@@ -292,6 +324,25 @@ function planOrdinalPass(
 }
 
 /**
+ * Keep the verified completions of a pass that is about to reject. They wait
+ * in `ahead` like any out-of-order completion, and the next pass absorbs them
+ * through the usual contiguity and confirmation-depth gate. Without this, one
+ * ordinal that keeps throwing re-reads its settled siblings on every pass.
+ */
+function holdCompletedOrdinals(
+  state: CursorState,
+  ordinals: readonly number[],
+  outcomes: ReadonlyMap<number, OrdinalOutcome>,
+): void {
+  for (const ordinal of ordinals) {
+    const outcome = outcomes.get(ordinal);
+    if (outcome?.status !== 'reconciled' && outcome?.status !== 'already') continue;
+    if (ordinal < state.watermark || state.ahead.has(ordinal)) continue;
+    state.ahead.set(ordinal, outcome.blockNumber);
+  }
+}
+
+/**
  * One bounded sweep slice for a single CG: reconcile up to
  * `maxOrdinalsPerPass` ordinals in `[watermark, head)` (skipping ones already
  * completed and held in the cursor), then advance the contiguous,
@@ -304,7 +355,12 @@ export async function reconcileContextGraph(
   localCgId: string,
   onChainCgId: bigint,
 ): Promise<ReconcileResult> {
+  const passStartedAt = performance.now();
+  const observePass = (timings: ReconcilePassTimings): void => {
+    try { deps.observePassTimings?.(timings); } catch { /* observation only */ }
+  };
   const head = await deps.getKCCount(onChainCgId);
+  const headReadMs = performance.now() - passStartedAt;
   const before = state.watermark;
 
   // The persisted contiguous watermark is durable completeness evidence. If
@@ -313,6 +369,10 @@ export async function reconcileContextGraph(
   // an evidence mismatch, but is equally non-actionable in this pass.
   if (before >= head) {
     state.scanOrdinal = before;
+    observePass({
+      headReadMs, blockReadMs: 0, scanMs: 0, recoverMs: 0,
+      totalMs: performance.now() - passStartedAt,
+    });
     return {
       head,
       watermark: before,
@@ -331,12 +391,16 @@ export async function reconcileContextGraph(
   // synthetic version block for chain-backed data.
   let headBlock: number | undefined;
   let headUnavailable = false;
+  const blockStartedAt = performance.now();
   try {
     headBlock = await deps.getHeadBlock();
   } catch (err) {
     headUnavailable = true;
     deps.log(`reconcile ${localCgId}: getHeadBlock failed, holding watermark (${err instanceof Error ? err.message : String(err)})`);
   }
+  const blockReadMs = performance.now() - blockStartedAt;
+  let scanMs = 0;
+  let recoverMs = 0;
 
   // Re-absorb any depth-held ordinals as the head advances — a long-running
   // node makes progress on confirmation-depth-blocked ordinals even with no
@@ -384,6 +448,20 @@ export async function reconcileContextGraph(
     let nextOrdinalIndex = 0;
     let workerFailed = false;
     let workerError: unknown;
+    // Dispatch walks `ordinals` in ascending order, so every ordinal of this
+    // pass up to the highest one dispatched has an outcome or has thrown.
+    let highestDispatched: number | undefined;
+    // A rejected pass keeps what it proved: its completions wait in `ahead`,
+    // and the scan resumes past what it dispatched, so the ordinals that threw
+    // or stayed pending are retried with the next cycle like any other gap.
+    const keepRejectedPassProgress = (): void => {
+      holdCompletedOrdinals(state, ordinals, outcomes);
+      if (highestDispatched === undefined) return;
+      state.scanOrdinal = Math.max(
+        state.watermark,
+        Math.min(highestDispatched + 1, passPlan.historicalContinuationOrdinal),
+      );
+    };
 
     const runOrdinalWorker = async (): Promise<void> => {
       // Contain failures instead of racing them: a thrown ordinal must not
@@ -402,7 +480,14 @@ export async function reconcileContextGraph(
             return;
           }
           const ordinal = ordinals[index]!;
-          const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
+          highestDispatched = Math.max(highestDispatched ?? ordinal, ordinal);
+          const outcome = await deps.reconcileOrdinal(
+            localCgId,
+            onChainCgId,
+            ordinal,
+            headBlock,
+            { headOrdinal: head },
+          );
           processed += 1;
           if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
             staleTarget = true;
@@ -419,8 +504,13 @@ export async function reconcileContextGraph(
     };
 
     const workerCount = Math.min(ordinalConcurrency, ordinals.length);
+    const scanStartedAt = performance.now();
     await Promise.all(Array.from({ length: workerCount }, () => runOrdinalWorker()));
-    if (workerFailed) throw workerError;
+    scanMs = performance.now() - scanStartedAt;
+    if (workerFailed) {
+      if (!staleTarget) keepRejectedPassProgress();
+      throw workerError;
+    }
 
     const recoveryTargets = ordinals
       .map((ordinal) => outcomes.get(ordinal))
@@ -435,12 +525,23 @@ export async function reconcileContextGraph(
       // ordinal order, so this changes latency rather than correctness.
       .sort(passPlan.compareRecoveryTargets);
     if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
-      const recoveryResult = await deps.recoverPendingOrdinals(
-        localCgId,
-        onChainCgId,
-        recoveryTargets,
-        headBlock,
-      );
+      let recoveryResult: PendingOrdinalRecoveryResult;
+      const recoverStartedAt = performance.now();
+      try {
+        recoveryResult = await deps.recoverPendingOrdinals(
+          localCgId,
+          onChainCgId,
+          recoveryTargets,
+          headBlock,
+        );
+        recoverMs = performance.now() - recoverStartedAt;
+      } catch (error) {
+        // Recovery is the longest await; keep progress only under the same binding.
+        const stillCurrent = !deps.isTargetCurrent
+          || await Promise.resolve(deps.isTargetCurrent(localCgId, onChainCgId)).catch(() => false);
+        if (stillCurrent) keepRejectedPassProgress();
+        throw error;
+      }
       // Recovery is the longest await in the pass; the binding can be repaired
       // while it runs. Outcomes recovered under the old binding must never
       // advance or persist cursor state for the rebound CG, so re-check before
@@ -503,6 +604,7 @@ export async function reconcileContextGraph(
   const hasMore = !headUnavailable
     && !staleTarget
     && recovery.kind !== 'cooldown'
+    && recovery.kind !== 'local-admission'
     && (
       recoveryAttempted
         ? hasImmediateRecoveryContinuation
@@ -519,6 +621,10 @@ export async function reconcileContextGraph(
     deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, processed=${processed}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
   }
 
+  observePass({
+    headReadMs, blockReadMs, scanMs, recoverMs,
+    totalMs: performance.now() - passStartedAt,
+  });
   return {
     head,
     watermark: state.watermark,
@@ -528,6 +634,7 @@ export async function reconcileContextGraph(
     hasMore,
     shouldContinueImmediately,
     staleTarget,
+    ...(recovery.kind === 'local-admission' ? { localAdmissionDeferred: true } : {}),
   };
 }
 

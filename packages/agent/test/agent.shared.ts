@@ -41,7 +41,7 @@ import { wrapPublisherForTest, mockSealCtx } from '../../publisher/test/_helpers
 import { mockChainStubACKProvider } from '../../publisher/test/_helpers/acks.js';
 
 const require = createRequire(import.meta.url);
-const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../../../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
+const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
 const CCL_FACT_NS = 'https://example.org/ccl-fact#';
 
 /**

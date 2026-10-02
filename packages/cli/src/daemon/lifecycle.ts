@@ -71,15 +71,18 @@ import {
 } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
+  describeContextGraphOnChainIdResolution,
   loadOpWallets,
+  refusesPrivateContextGraphByOnChainId,
   KaNumberAllocator,
   planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
   resolveSyncAgentsMeta,
+  type ContextGraphOnChainIdResolution,
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
@@ -101,17 +104,6 @@ import {
   shutdownTelemetry,
   flushTelemetry,
   LlmClient,
-  SqliteMessageIdempotencyStore,
-  SqliteProtocolOutboxStore,
-  SqliteSyncCheckpointStore,
-  SqliteChangelogCursorStore,
-  SqliteChangelogEraGuard,
-  SqliteChainEventCursorStore,
-  SqliteChainEventLogStore,
-  SqliteContextGraphAuthorityIndexStore,
-  SqliteContextGraphAuthorityHistoryStore,
-  SqliteContextGraphRegistryScanCursorStore,
-  SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
 import {
@@ -120,8 +112,9 @@ import {
   saveConfig,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
-  resolveAutoUpdateConfig,
   resolveChainConfig,
+  resolveOtherNetworkRelays,
+  resolveNetworkPeerIsolationEnabled,
   dkgDir,
   writeApiPort,
   removeApiPort,
@@ -139,6 +132,7 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveContextGraphSubscriptionRehydrationEnabled,
+  approvalPolicyMigrationWarning,
   resolveNetworkDefaultContextGraphs,
   isPublisherRuntimeEnabled,
   resolvePublisherRetryTuning,
@@ -154,7 +148,6 @@ import {
   gitCommandEnv,
   gitCommandArgs,
   isStandaloneInstall,
-  resolveAutoUpdateSource,
   slotEntryPoint,
   CLI_NPM_PACKAGE,
   exitOnStoreConfigErrors,
@@ -202,6 +195,7 @@ import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
+import { createProtocolStores } from './protocol-persistence.js';
 import {
   decodeVmReconcileNegativeRow,
   encodeVmReconcileNegativeRow,
@@ -256,8 +250,6 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
   daemonState,
-  resolveStandaloneInstall,
-  resolveAutoUpdatePollingMode,
   type CorsAllowlist,
 } from './state.js';
 import {
@@ -273,6 +265,10 @@ import {
   closeDaemonBackingStoresAfterTeardown,
   runProducerQuiescentTeardown,
 } from './teardown.js';
+import {
+  startEventLoopDelayMonitor,
+  type EventLoopDelayView,
+} from './event-loop-delay-monitor.js';
 import {
   closeDaemonHttpServer,
   createDaemonDetachedResponseRegistry,
@@ -303,7 +299,6 @@ import {
   loadSkillTemplate,
   buildSkillMd,
   skillEtag,
-  DAEMON_EXIT_CODE_RESTART,
   parseRequiredSignatures,
   normalizeDetectedContentType,
   currentBundledMarkItDownAssetName,
@@ -355,7 +350,6 @@ import {
 import {
   normalizeRepo,
   isValidRepoSpec,
-  repoToFetchUrl,
   githubRepoForApi,
   resolveRemoteCommitSha,
   type PendingUpdateState,
@@ -369,9 +363,8 @@ import {
   acquireUpdateLock,
   releaseUpdateLock,
 } from './auto-update.js';
-import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
-import { resolveUpdateJitterMs, createUpdateHoldoffGate } from './auto-update-jitter.js';
-import { createGitUpdateRunCheck, createNpmUpdateRunCheck } from './auto-update-runner.js';
+import { isValidRef } from '../auto-update-ref.js';
+import { startDaemonAutoUpdate } from './auto-update-polling.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -729,7 +722,7 @@ export function orderACKCandidatePeerIds(input: {
   return selectACKCandidatePeers({
     connectedPeers: input.connectedPeerIds,
     selfPeerId: input.selfPeerId,
-    knownCorePeerIds: input.knownCorePeerIds,
+    capability: { mode: 'rank', corePeers: input.knownCorePeerIds },
     preferredACKPeerIds: input.preferredACKPeerIds,
     verifiedSameNetworkPeerIds: input.verifiedSameNetworkPeerIds,
     requiredACKs: Number.MAX_SAFE_INTEGER,
@@ -1007,6 +1000,77 @@ export async function resolveDaemonPublishEncryption(
   };
 }
 
+/** Bound on the chain reads one start may spend resolving configured on-chain ids. */
+const CONFIGURED_ON_CHAIN_ID_RESOLUTION_BUDGET_MS = 15_000;
+
+/**
+ * Map configured on-chain ids (`32`, `#32`) to the Context Graphs they name.
+ *
+ * Before this fix, `dkg subscribe 32 --save` wrote the number to
+ * config.contextGraphs and kept a durable subscription keyed by it; neither
+ * can ever sync. Each configured on-chain id is resolved again at every
+ * start, through the chain's name hash only (the discovery checkpoint answers
+ * offline for graphs already listed), so the mapping is verified, idempotent
+ * and never taken from a peer. The config file is not rewritten. A numeric
+ * subscription with no config entry (made through the API) is retired the
+ * same way, and its member intent moves to the graph it named. An id that
+ * resolves to nothing subscribable is logged and skipped; its number is never
+ * subscribed.
+ */
+export async function resolveConfiguredOnChainContextGraphIds(
+  agent: DKGAgent,
+  configuredContextGraphIds: readonly string[],
+  log: (message: string) => void,
+  signal: AbortSignal = AbortSignal.timeout(CONFIGURED_ON_CHAIN_ID_RESOLUTION_BUDGET_MS),
+): Promise<string[]> {
+  const configured = new Set(configuredContextGraphIds);
+  const numericSubscriptions = [...(agent.getSubscribedContextGraphs?.() ?? new Map())]
+    .filter(([contextGraphId, subscription]) => (
+      !configured.has(contextGraphId)
+      && subscription.subscribed === true
+      && subscription.onChainId === contextGraphId
+    ))
+    .map(([contextGraphId]) => contextGraphId);
+  const contextGraphIds: string[] = [];
+  for (const contextGraphId of [...configured, ...numericSubscriptions]) {
+    const isConfigured = configured.has(contextGraphId);
+    let resolution: ContextGraphOnChainIdResolution;
+    try {
+      // Start-up waits the cold budget for a chain read (within its own), so a
+      // slow RPC does not drop a configured graph for the whole boot.
+      resolution = await agent.resolveContextGraphOnChainIdReference?.(contextGraphId, { signal, wait: 'background' })
+        ?? { kind: 'as-given' };
+    } catch (error) {
+      // The resolver reports its own failures; a throw is a defect, so fail closed.
+      log(
+        `Context graph "${contextGraphId}" could not be resolved `
+        + `(${error instanceof Error ? error.message : String(error)}) — not subscribing it`,
+      );
+      continue;
+    }
+    if (resolution.kind === 'as-given') {
+      if (isConfigured) contextGraphIds.push(contextGraphId);
+      continue;
+    }
+    const label = isConfigured ? 'Configured context graph' : 'Context graph subscription';
+    if (resolution.kind !== 'resolved' || refusesPrivateContextGraphByOnChainId(resolution)) {
+      const refusal = resolution.kind === 'resolved'
+        ? { kind: 'private' as const, onChainId: resolution.onChainId }
+        : resolution;
+      log(`${label} "${contextGraphId}" is not subscribed: ${describeContextGraphOnChainIdResolution(refusal)}`);
+      continue;
+    }
+    if (!isConfigured && resolution.retiredNumericSubscription?.subscribed !== true) continue;
+    contextGraphIds.push(resolution.contextGraphId);
+    log(
+      `${label} "${contextGraphId}": ${describeContextGraphOnChainIdResolution(resolution)} `
+      + `Subscribing "${resolution.contextGraphId}"`
+      + (isConfigured ? `; you can replace "${contextGraphId}" in config.contextGraphs with it.` : '.'),
+    );
+  }
+  return contextGraphIds;
+}
+
 /**
  * Activate operator/network-configured context graphs without inventing a
  * local definition for an unknown namespaced graph.
@@ -1035,7 +1099,23 @@ export async function bootstrapConfiguredContextGraphs(input: {
   log: (message: string) => void;
 }): Promise<void> {
   const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
-  const configuredContextGraphIds = new Set(input.configuredContextGraphIds);
+  // A configured on-chain id (`32`, `#32`) subscribes the graph it names.
+  const onChainResolvedContextGraphIds = await resolveConfiguredOnChainContextGraphIds(
+    input.agent,
+    [...input.configuredContextGraphIds],
+    input.log,
+  );
+  // A `--save`d on-chain name hash that this node already resolved subscribes
+  // its verified cleartext graph. The durable cleartext row re-proves the
+  // commitment offline, so the operator's config file is never rewritten.
+  const configuredContextGraphIds = new Set(onChainResolvedContextGraphIds.map((contextGraphId) => {
+    const alias = input.agent.resolveContextGraphIdAlias?.(contextGraphId) ?? null;
+    if (alias === null) return contextGraphId;
+    input.log(
+      `Configured context graph ${contextGraphId} resolves to "${alias}" (verified name hash) — subscribing the cleartext id`,
+    );
+    return alias;
+  }));
   const networkDefaultContextGraphIds = new Set(input.networkDefaultContextGraphIds);
   const localBootstrapContextGraphIds = new Set([
     ...networkDefaultContextGraphIds,
@@ -1149,6 +1229,10 @@ async function runDaemonInnerWithStartupOwnership(
       config.contextGraphSubscriptionRehydrationEnabled,
       process.env.DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED,
     );
+  const networkPeerIsolationEnabled = resolveNetworkPeerIsolationEnabled(
+    config.networkPeerIsolationEnabled,
+    process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED,
+  );
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
   const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
@@ -1372,6 +1456,8 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
+  const approvalPolicyWarning = approvalPolicyMigrationWarning(chainBase?.approvalPolicy);
+  if (approvalPolicyWarning) log(approvalPolicyWarning);
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
     config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
@@ -1686,6 +1772,30 @@ async function runDaemonInnerWithStartupOwnership(
     }
   }
 
+  // Transport-level network isolation: the node refuses to dial, store or
+  // accept the relays of every OTHER bundled network (testnet refuses mainnet
+  // relays exactly as mainnet refuses testnet ones). Our own effective
+  // relayPeers are kept off this static list; one that fails the identity
+  // proof is still refused like any other peer. The operator kill switch
+  // turns the whole transport layer off; network admission still rejects
+  // foreign peers.
+  const otherNetworkRelays = networkPeerIsolationEnabled
+    ? resolveOtherNetworkRelays({
+        activeNetworkName: selectedNetworkConfig,
+        activeNetwork: network,
+        localRelayPeers: relayPeers,
+      })
+    : { relays: [], networkNames: [] };
+  if (!networkPeerIsolationEnabled) {
+    log(
+      "Network isolation: transport-level peer isolation disabled (networkPeerIsolationEnabled=false or DKG_NETWORK_PEER_ISOLATION_ENABLED=0); other DKG networks' peers are rejected by network admission only",
+    );
+  } else if (otherNetworkRelays.relays.length > 0) {
+    log(
+      `Network isolation: refusing connections to ${otherNetworkRelays.relays.length} relay peer(s) of other DKG networks (${otherNetworkRelays.networkNames.join(", ")})`,
+    );
+  }
+
   if (
     !relayPeers?.length &&
     !config.bootstrapPeers?.length &&
@@ -1712,12 +1822,6 @@ async function runDaemonInnerWithStartupOwnership(
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
   const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
-  const publicSnapshotStore = createPublicSnapshotStore(
-    dkgDir(),
-    { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
-    snapshotPageIndexStore,
-    log,
-  );
   const chainCursorScope = chainBase?.type === 'mock'
     ? (chainBase.chainId ?? 'mock:31337')
     : chainBase?.hubAddress
@@ -1759,60 +1863,17 @@ async function runDaemonInnerWithStartupOwnership(
     }
   }
 
-  // Universal Messenger substrate stores (rc.9 PR-2). Wired into the
-  // DKGAgent's Messenger so any caller that opts into
-  // `messenger.sendReliable` gets durable receiver-side idempotency
-  // + sender-side outbox retries against the shared DashboardDB.
-  // No caller exercises this path until PR-3 (chat + skill migration);
-  // wiring early keeps Milestone A trivially deployable + soak-testable.
-  const messengerIdempotencyStore = new SqliteMessageIdempotencyStore(dashDb);
-  const messengerOutboxStore = new SqliteProtocolOutboxStore(dashDb, {
-    maxAgeMs: DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
-    backoffFor: (attempts) => {
-      const idx = Math.min(
-        Math.max(attempts - 1, 0),
-        DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS.length - 1,
-      );
-      return DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[idx];
-    },
+  // Protocol persistence: the Universal Messenger substrate stores, sync and
+  // changelog cursors, chain cursors, the chain-event log, authority stores and
+  // the KA-number sequence. They live in `@origintrail-official/dkg-node-store`
+  // and are composed over the shared DashboardDB handle in `protocol-persistence.ts`.
+  const protocolStores = createProtocolStores(dashDb, {
+    chainCursorScope,
+    changelogEnabled: Boolean(config.store?.changelog),
   });
-  const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
-  const changelogCursorStore = new SqliteChangelogCursorStore(dashDb);
-  // OT-RFC-59 §6 P0: the durable era guard MUST back the changelog when enabled —
-  // it lives in node-ui.db (survives a `store.nq` RDF restore) so a restore/rollback
-  // rotates the era and forces peers to full-resync instead of silently skipping.
-  const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
-  const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
-  const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
-  // DashboardDB is process-owned local state under the same integrity boundary
-  // as the node identity/configuration. Authority generations cannot be proven
-  // from a watermark hash alone, so this composition-root admission is
-  // deliberately explicit rather than inferred from a structural store type.
-  const localContextGraphAuthorityHistoryStore =
-    new SqliteContextGraphAuthorityHistoryStore(dashDb);
-  const localContextGraphAuthorityIndexStore =
-    new SqliteContextGraphAuthorityIndexStore(dashDb);
-  // THE node's one chain log. Handed to the agent's chain adapter ONLY: that
-  // adapter builds the tick, starts it, and publishes the binding every other
-  // eligible reader consults. Per-wallet publisher adapters receive only a
-  // late-bound binding getter below — never this store — because a second store
-  // would be a second scanner, which is what this log exists to delete.
-  const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
-
-  // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
-  // Durable per-author KA-number sequence backing the off-chain
-  // `KaNumberAllocator`. Constructed here (alongside the other durable
-  // substrate stores) so the V20 `ka_numbers` table is opened and its
-  // sequence is co-located with the rest of the node's persistent state.
-  //
-  // OT-RFC-43 Option 1: the publisher allocates a deterministic packed
-  // reservedKaId per V10 mint (DKGPublisher.ensureReservedKaId) and lazily
-  // reconciles each author's floor against the chain's highest minted number on
-  // first use (chain.getMaxKaNumberForAuthor), satisfying the RFC §4.5 cold-start
-  // guard. (A blocking startup reconciliation sweep + the ongoing
-  // KnowledgeAssetCreated poller→reconcile wiring remain a hardening follow-up.)
-  const kaNumberStore = new SqliteKaNumberStore(dashDb);
-  const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
+  // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core): the
+  // off-chain allocator over the durable per-author KA-number sequence.
+  const kaNumberAllocator = new KaNumberAllocator(protocolStores.kaNumberStore);
 
   // Mint managed authority only after the complete agent config has been
   // assembled. Passing the start-up result through an ordinary object literal
@@ -1821,7 +1882,7 @@ async function runDaemonInnerWithStartupOwnership(
     runtimeStore,
     managedStore: managed?.storeConfig,
     changelogEnabled: Boolean(config.store?.changelog),
-    changelogEraGuard,
+    changelogEraGuard: protocolStores.changelogEraGuard,
   });
 
   const agentConfig: DKGAgentConfig = {
@@ -1843,6 +1904,8 @@ async function runDaemonInnerWithStartupOwnership(
     // `relayPeers` may carry operator transport relays, which never become
     // snapshot trust, and `relay: "none"` means no relay is contacted at all.
     networkRelays: config.relay === "none" ? [] : network?.relays ?? [],
+    otherNetworkRelays: otherNetworkRelays.relays,
+    networkPeerIsolation: networkPeerIsolationEnabled,
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
@@ -1876,9 +1939,13 @@ async function runDaemonInnerWithStartupOwnership(
     storeConfig: agentStoreConfig,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
-    publicSnapshotStore,
+    publicSnapshotStoreFactory: store => createPublicSnapshotStore(
+      dkgDir(), { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
+      { pageIndexStore: snapshotPageIndexStore, log, store },
+    ),
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     syncReconcilerEnabled: config.syncReconcilerEnabled,
+    vmReconcilerEnabled: config.vmReconcilerEnabled,
     syncReconcilerIntervalMs: config.syncReconcilerIntervalMs,
     syncStalenessThresholdMs: config.syncStalenessThresholdMs,
     syncBackoffBaseMs: config.syncBackoffBaseMs,
@@ -1886,6 +1953,7 @@ async function runDaemonInnerWithStartupOwnership(
     syncBackoffJitter: config.syncBackoffJitter,
     syncOnConnectEnabled: config.syncOnConnectEnabled,
     syncSystemContextGraphsOnConnect: config.syncSystemContextGraphsOnConnect,
+    onDemandAgentsPhonebook: config.onDemandAgentsPhonebook,
     durableSyncEnabled: config.durableSyncEnabled,
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,
@@ -1918,13 +1986,14 @@ async function runDaemonInnerWithStartupOwnership(
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
     storageAckTiming,
-    syncCheckpointStore,
-    changelogCursorStore,
-    chainEventCursorStore,
-    contextGraphRegistryScanCursorStore,
-    localContextGraphAuthorityHistoryStore,
-    localContextGraphAuthorityIndexStore,
-    chainEventLogStore,
+    syncCheckpointStore: protocolStores.syncCheckpointStore,
+    changelogCursorStore: protocolStores.changelogCursorStore,
+    chainEventCursorStore: protocolStores.chainEventCursorStore,
+    contextGraphRegistryScanCursorStore: protocolStores.contextGraphRegistryScanCursorStore,
+    contextGraphStorageDiscoveryStore: protocolStores.contextGraphStorageDiscoveryStore,
+    localContextGraphAuthorityHistoryStore: protocolStores.localContextGraphAuthorityHistoryStore,
+    localContextGraphAuthorityIndexStore: protocolStores.localContextGraphAuthorityIndexStore,
+    chainEventLogStore: protocolStores.chainEventLogStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2110,8 +2179,8 @@ async function runDaemonInnerWithStartupOwnership(
     },
     messengerOutboxDrain: config.messengerOutboxDrain,
     messengerStores: {
-      idempotencyStore: messengerIdempotencyStore,
-      outboxStore: messengerOutboxStore,
+      idempotencyStore: protocolStores.messengerStores.idempotencyStore,
+      outboxStore: protocolStores.messengerStores.outboxStore,
     },
     // Phase F — persist chain-driven VM reconciliation telemetry so the
     // /ui/observability Replication tab can aggregate it. Best-effort: a
@@ -2146,8 +2215,12 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const agent = await DKGAgent.create(agentConfig);
+  const publicSnapshotStore = agent.publicSnapshotStore;
 
   let publisherState: PublisherState = createInitialPublisherState(config);
+  const publisherStartupController = new AbortController();
+  let publisherStartupTimer: ReturnType<typeof setTimeout> | undefined;
+  let publisherStartup: Promise<void> | undefined;
   // Holds the running async-promote worker lifecycle (PR #3 of the
   // async-promote-queue series). Initialised in `startPostApiPublishing`
   // after the API is up so a recoverOnStartup hiccup never blocks boot;
@@ -2303,6 +2376,9 @@ async function runDaemonInnerWithStartupOwnership(
   // complete catch-up from v10.0.6's clean-empty false-ready state. Migrate
   // once before the API becomes available: private/unconfirmed rows retry,
   // while confirmed public rows retain their historical empty-CG semantics.
+  // It stays on the critical path so no readiness answer is served from a
+  // half-migrated row, and is bounded (per-row deadline plus a pass budget)
+  // so a slow chain read cannot hold the API closed.
   await migrateLegacyContextGraphReadiness({
     agent,
     store: dashDb,
@@ -2448,8 +2524,9 @@ async function runDaemonInnerWithStartupOwnership(
       },
     });
 
-    const publisherTimer = setTimeout(() => {
-      void (async () => {
+    publisherStartupTimer = setTimeout(() => {
+      if (publisherStartupController.signal.aborted) return;
+      publisherStartup = (async () => {
         const outcome = await startPublisherRuntimeWithOutcome({
           dataDir: dkgDir(),
           config,
@@ -2468,7 +2545,12 @@ async function runDaemonInnerWithStartupOwnership(
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
           publicSnapshotStore,
           log,
+          startupSignal: publisherStartupController.signal,
         });
+        if (publisherStartupController.signal.aborted) {
+          await outcome.runtime?.stop();
+          return;
+        }
         publisherState = outcome;
         if (!outcome.availability.available
           && outcome.availability.reason === 'publisher_startup_failed'
@@ -2476,9 +2558,11 @@ async function runDaemonInnerWithStartupOwnership(
           const err = outcome.error as any;
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
         }
-      })();
+      })().catch((error) => {
+        log(`Publisher startup cleanup error: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }, 0);
-    if (publisherTimer.unref) publisherTimer.unref();
+    publisherStartupTimer.unref?.();
   };
 
   log(`PeerId: ${agent.peerId}`);
@@ -2553,110 +2637,20 @@ async function runDaemonInnerWithStartupOwnership(
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
-  // Version check + auto-update.
-  // The resolver merges repo/branch/interval field-by-field across
-  // ~/.dkg/config.json → network/<env>.json → project.json, so defaults
-  // in the shipped configs take effect even when the local config
-  // omits the field (the common case after `dkg init` with default answers).
-  let updateInterval: ReturnType<typeof setInterval> | null = null;
-  const au = resolveAutoUpdateConfig(config, network);
-  const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(config, network);
-  const standalone = resolveStandaloneInstall(configuredAutoUpdateSource);
-  const pollingMode = resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone);
-
-  if (pollingMode === "git" && au) {
-    const checkIntervalMs = au.checkIntervalMinutes * 60_000;
-    let watchedRef = "";
-    let watchedRepo = "";
-    let watchedRefPlan: ReturnType<typeof resolveAutoUpdateGitRefPlan> | null = null;
-    try {
-      watchedRefPlan = resolveAutoUpdateGitRefPlan(au);
-      watchedRef = watchedRefPlan.ref;
-      watchedRepo = repoToFetchUrl(au.repo);
-    } catch (err: any) {
-      log(
-        `Auto-update (git): invalid config — ${err?.message ?? String(err)}. ` +
-          "Git polling disabled until config is fixed and the daemon is restarted.",
-      );
-    }
-
-    if (watchedRef && watchedRepo) {
-      log(
-        `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
-          `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
-      );
-      const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
-      if (verificationWarning) log(verificationWarning);
-
-      // Rollout jitter: hold off a per-node random delay between detecting an
-      // available commit and applying it, so a release never restarts the whole
-      // fleet in one window (the 2026-07-10 bootstrap-storm trigger). The gate is
-      // created ONCE here so its single-flight guard holds across polling ticks.
-      const gate = createUpdateHoldoffGate({
-        jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
-        isShuttingDown: () => shuttingDown,
-        setUpdating: (updating) => { daemonState.isUpdating = updating; },
-        log,
-      });
-      const runCheck = createGitUpdateRunCheck({
-        gate,
-        log,
-        lastUpdateCheck: daemonState.lastUpdateCheck,
-        au,
-        onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
-      });
-
-      setTimeout(runCheck, 15_000);
-      updateInterval = setInterval(runCheck, checkIntervalMs);
-    }
-  } else if (pollingMode === "git") {
-    log("Auto-update (git): disabled — autoUpdate.enabled is false.");
-  } else if (pollingMode === "npm") {
-    const checkIntervalMs = (au?.checkIntervalMinutes ?? 30) * 60_000;
-    // Even in version-check-only mode (au is null because auto-apply is
-    // disabled) the policy used for the check must reflect the operator's
-    // shipped intent, and must mirror resolveAutoUpdateConfig's precedence:
-    // local config BEFORE network default. A disabled node with a local
-    // channel / allowPrerelease pin must observe its own cohort, not the
-    // network's.
-    const allowPre = au?.allowPrerelease ?? config.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
-    const channel = au?.channel ?? config.autoUpdate?.channel ?? network?.autoUpdate?.channel;
-
-    log(
-      `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${au?.checkIntervalMinutes ?? 30}min)`,
-    );
-
-    // Rollout jitter (same rationale as the git path): stagger the fleet's
-    // restarts by holding off a per-node random delay before applying. The gate
-    // is null in version-check-only mode (au disabled) — detect + record only.
-    // Created ONCE so single-flight holds across polling ticks.
-    const gate = au
-      ? createUpdateHoldoffGate({
-          jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
-          isShuttingDown: () => shuttingDown,
-          setUpdating: (updating) => { daemonState.isUpdating = updating; },
-          log,
-        })
-      : null;
-    const runCheck = createNpmUpdateRunCheck({
-      gate,
-      log,
-      lastUpdateCheck: daemonState.lastUpdateCheck,
-      allowPrerelease: allowPre,
-      channel,
-      nodeRole: config.nodeRole ?? "edge",
-      onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
-    });
-
-    setTimeout(runCheck, 15_000);
-    updateInterval = setInterval(runCheck, checkIntervalMs);
-  } else if (au?.enabled) {
-    // Monorepo dev daemon with auto-update enabled in config — log
-    // once at boot so contributors understand why polling is silent.
-    log(
-      "Auto-update: skipped — monorepo checkout detected. Use `git pull && pnpm install && pnpm build` to update.",
-    );
-  }
+  // Version check + auto-update. Each mode's gate holds off a per-node random
+  // delay between detecting an update and applying it, so a release never
+  // restarts the whole fleet in one window (the 2026-07-10 bootstrap-storm
+  // trigger); the deadline is persisted under the DKG home, so a restart
+  // mid-hold resumes it instead of drawing a fresh hold.
+  const autoUpdate = startDaemonAutoUpdate({
+    config,
+    network,
+    isShuttingDown: () => shuttingDown,
+    setUpdating: (updating) => { daemonState.isUpdating = updating; },
+    log,
+    lastUpdateCheck: daemonState.lastUpdateCheck,
+    shutdown,
+  });
 
   // --- Dashboard DB + Metrics ---
 
@@ -3007,6 +3001,13 @@ async function runDaemonInnerWithStartupOwnership(
 
   await telemetryRuntime.startConfiguredBestEffort();
   backpressureMonitor.start();
+  // Main-thread stall gauge: `/api/status` → `eventLoopDelay`, plus one
+  // rate-limited warning line when a window's max passes 2 s.
+  const eventLoopDelayMonitor = startEventLoopDelayMonitor({ log });
+  // Route/plugin code gets the reading only, never `stop()`.
+  const eventLoopDelayView: EventLoopDelayView = Object.freeze({
+    snapshot: () => eventLoopDelayMonitor.snapshot(),
+  });
 
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
   const pruneRuntimeState = async (): Promise<void> => {
@@ -3736,6 +3737,7 @@ async function runDaemonInnerWithStartupOwnership(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
+        eventLoopDelay: eventLoopDelayView,
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
         emitMemoryGraphChanged,
@@ -3816,6 +3818,8 @@ async function runDaemonInnerWithStartupOwnership(
   async function shutdown(exitCode = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
+    clearTimeout(publisherStartupTimer);
+    publisherStartupController.abort(new Error('Daemon is shutting down'));
     // Closes catch-up admission ahead of every await below, announces, and
     // performs the early `api.port` removal that tells the supervisor's
     // liveness watcher (PR #664) this is a graceful shutdown — so it reads the
@@ -3838,7 +3842,7 @@ async function runDaemonInnerWithStartupOwnership(
     };
     const cleanup = (async () => {
       try {
-        if (updateInterval) clearInterval(updateInterval);
+        autoUpdate.stop();
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
         await runChainDiscoveryScan.close().catch((err: unknown) => {
@@ -3846,6 +3850,7 @@ async function runDaemonInnerWithStartupOwnership(
         });
         logVolumePruner.stop();
         backpressureMonitor.stop();
+        eventLoopDelayMonitor.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
         natStatusWatcherStop?.();
@@ -3870,6 +3875,7 @@ async function runDaemonInnerWithStartupOwnership(
             drainCatchupJobs,
             flushTelemetry,
             stopPublisherRuntime: async () => {
+              await publisherStartup;
               await publisherState.runtime
                 ?.stop()
                 .catch((err: any) =>

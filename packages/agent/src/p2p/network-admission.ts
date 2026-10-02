@@ -82,12 +82,17 @@ export class NetworkAdmissionService {
     this.setQuarantine(peerId, { kind: 'indefinite' });
   }
 
-  /** Apply the coordinator's bounded recovery cooldown using this service's clock. */
-  quarantinePeerForCooldown(peerId: string): void {
+  /**
+   * Apply the coordinator's bounded recovery cooldown using this service's
+   * clock. Returns the cooldown applied (ms), so transport-level refusal of the
+   * peer can mirror it exactly instead of keeping its own copy of the value.
+   */
+  quarantinePeerForCooldown(peerId: string): number {
     this.setQuarantine(peerId, {
       kind: 'cooldown',
       untilMs: this.now() + this.quarantineCooldownMs,
     });
+    return this.quarantineCooldownMs;
   }
 
   getRetryableProbeBackoff(peerId: string): NetworkAdmissionProbeBackoff | undefined {

@@ -10,6 +10,7 @@ import {
   validateSubGraphName,
   MemoryLayer,
   hashTripleV10,
+  keccak256Hex,
   TRUST_LEVEL_PREDICATE,
   LEGACY_TRUST_LEVEL_PREDICATE,
 } from '@origintrail-official/dkg-core';
@@ -202,13 +203,18 @@ export async function extractV10KCFromStore(
   cgId: bigint,
   kaId: bigint,
   subGraphNameHint?: string,
+  resolveCommittedNameHash?: () => Promise<string | null>,
 ): Promise<KCExtractionResult> {
   const cgIdStr = cgId.toString();
   // Map cgId (numeric) → local CG name via the ontology graph. The
   // publisher's V10 path writes `<NAME>/context/<cgId>/_meta`, so
   // without the name lookup we'd query the wrong URI and report
   // KCNotFound for every KC the agent has actually synced.
-  const cgName = await resolveContextGraphNameFromOnChainId(store, cgIdStr);
+  const cgName = await resolveContextGraphNameFromOnChainId(
+    store,
+    cgIdStr,
+    resolveCommittedNameHash,
+  );
   if (cgName === null) {
     throw new KCNotFoundError(cgId, kaId);
   }
@@ -713,18 +719,42 @@ async function resolveSubGraphNameFromMeta(
 async function resolveContextGraphNameFromOnChainId(
   store: TripleStore,
   cgIdStr: string,
+  resolveCommittedNameHash?: () => Promise<string | null>,
 ): Promise<string | null> {
   const result = await store.query(
-    `SELECT ?cgUri WHERE {
+    `SELECT DISTINCT ?cgUri WHERE {
        GRAPH <${ONTOLOGY_GRAPH}> {
          ?cgUri <${CONTEXT_GRAPH_ON_CHAIN_ID}> "${cgIdStr}" .
        }
-     } LIMIT 1`,
+     } LIMIT 2`,
   );
   if (result.type !== 'bindings' || result.bindings.length === 0) {
     return null;
   }
-  const cgUri = stripQuotes(result.bindings[0]['cgUri'] ?? '');
+  let cgUri = stripQuotes(result.bindings[0]['cgUri'] ?? '');
+  if (result.bindings.length > 1) {
+    // A migrated store can contain several historical names for one numeric
+    // slot. Never let result order select the graph used for a proof.
+    const committedNameHash = await resolveCommittedNameHash?.();
+    if (!committedNameHash || !/^0x[0-9a-fA-F]{64}$/.test(committedNameHash)) {
+      return null;
+    }
+    const candidates = await store.query(
+      `SELECT DISTINCT ?cgUri WHERE {
+         GRAPH <${ONTOLOGY_GRAPH}> {
+           ?cgUri <${CONTEXT_GRAPH_ON_CHAIN_ID}> "${cgIdStr}" .
+         }
+       } LIMIT 257`,
+    );
+    if (candidates.type !== 'bindings' || candidates.bindings.length > 256) return null;
+    const matching = candidates.bindings
+      .map((row) => stripQuotes(row['cgUri'] ?? ''))
+      .filter((uri) => uri.startsWith(CG_URI_PREFIX) && uri.length > CG_URI_PREFIX.length)
+      .filter((uri) => keccak256Hex(new TextEncoder().encode(uri.slice(CG_URI_PREFIX.length)))
+        .toLowerCase() === committedNameHash.toLowerCase());
+    if (matching.length !== 1) return null;
+    cgUri = matching[0]!;
+  }
   if (!cgUri.startsWith(CG_URI_PREFIX)) return null;
   const name = cgUri.slice(CG_URI_PREFIX.length);
   if (!name) return null;

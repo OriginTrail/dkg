@@ -2,18 +2,10 @@ import {
   deleteByPatternWithoutCount,
   tryUpdateWithTouchedGraphs,
   type Quad,
-  type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { sparqlIri } from '@origintrail-official/dkg-core';
-
-function catalogStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
-  return {
-    priority: 'ack',
-    source: `storage-ack.persistCatalog.${operation}`,
-    ...(signal ? { signal } : {}),
-  };
-}
+import { ACKCommitSequence } from './ack-commit-sequence.js';
 
 /**
  * Replace the touched subjects in a verified public catalog and make the
@@ -31,35 +23,37 @@ export async function replaceCatalogQuads(
   parsedCatalog: readonly Quad[],
   signal?: AbortSignal,
 ): Promise<void> {
+  const commit = new ACKCommitSequence(signal);
   const catalogSubjects = [...new Set(parsedCatalog.map((quad) => quad.subject))];
   const canUseTargetedUpdate = catalogSubjects.length > 0 &&
     catalogSubjects.every((subject) => !subject.startsWith('_:'));
-  const usedTargetedUpdate = canUseTargetedUpdate && await tryUpdateWithTouchedGraphs(
-    store,
+  const usedTargetedUpdate = canUseTargetedUpdate && await commit.write(
+    'storage-ack.persistCatalog.update',
+    (options) => tryUpdateWithTouchedGraphs(store,
     `DELETE { GRAPH ${sparqlIri(catalogGraph)} { ?s ?p ?o } }
 WHERE { GRAPH ${sparqlIri(catalogGraph)} {
   VALUES ?s { ${catalogSubjects.map((subject) => sparqlIri(subject)).join(' ')} }
   ?s ?p ?o
 } }`,
     [catalogGraph],
-    catalogStoreOptions('update', signal),
+    options),
+    (used) => used,
   );
 
   if (!usedTargetedUpdate) {
     for (const subject of catalogSubjects) {
-      await deleteByPatternWithoutCount(
-        store,
-        { graph: catalogGraph, subject },
-        catalogStoreOptions('deleteByPattern', signal),
+      await commit.write(
+        'storage-ack.persistCatalog.deleteByPattern',
+        (options) => deleteByPatternWithoutCount(store, { graph: catalogGraph, subject }, options),
       );
     }
   }
 
-  await store.insert(
-    parsedCatalog.map((quad) => ({ ...quad, graph: catalogGraph })),
-    catalogStoreOptions('insert', signal),
+  await commit.write(
+    'storage-ack.persistCatalog.insert',
+    (options) => store.insert(parsedCatalog.map((quad) => ({ ...quad, graph: catalogGraph })), options),
   );
   // The ACK asserts this data is stored. Force any debounced persistence
   // boundary before the caller signs it.
-  await store.flush?.(catalogStoreOptions('flush', signal));
+  await commit.write('storage-ack.persistCatalog.flush', async (options) => { await store.flush?.(options); });
 }

@@ -15,10 +15,19 @@ import { describe, expect, it } from 'vitest';
 import {
   ChainEventDecoderRegistry,
 } from '../src/chain-index/chain-event-decoders.js';
-import { createKnowledgeAssetReadModel } from
-  '../src/chain-index/knowledge-asset-read-model.js';
-import type { ChainEventLogCoverage, ChainEventLogRow } from
-  '../src/chain-index/chain-event-log.js';
+import {
+  createKnowledgeAssetReadModel,
+  type ContextGraphForKaAnswer,
+  type KnowledgeAssetReadView,
+} from '../src/chain-index/knowledge-asset-read-model.js';
+import { reduceContextGraphKaRegistrations } from
+  '../src/chain-index/knowledge-asset-reducer.js';
+import type {
+  ChainEventLogCoverage,
+  ChainEventLogQuery,
+  ChainEventLogRow,
+  ChainEventLogStore,
+} from '../src/chain-index/chain-event-log.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
@@ -302,6 +311,292 @@ describe('knowledge asset read model — kaToContextGraph', () => {
     await expect(model(store).readContextGraphForKa(4242n, {
       ownWrite: { blockNumber: 50, blockHash: hash(50) },
     })).resolves.toEqual({ kind: 'bound', contextGraphId: 7n, asOfBlockNumber: 100 });
+  });
+});
+
+describe('knowledge asset read model — kaToContextGraph point read', () => {
+  const REGISTRATION_TOPIC0 = cgInterface
+    .getEvent('KnowledgeAssetRegisteredToContextGraph')!.topicHash.toLowerCase();
+  const OTHER_EMITTER = `0x${'ab'.repeat(20)}`;
+  const uint256Topic = (value: bigint): string => `0x${value.toString(16).padStart(64, '0')}`;
+
+  /** Records every query and how many rows it handed back. */
+  function recording(inner: ChainEventLogStore): ChainEventLogStore & {
+    reads: Array<{ query: ChainEventLogQuery; rows: number }>;
+  } {
+    const reads: Array<{ query: ChainEventLogQuery; rows: number }> = [];
+    return {
+      reads,
+      load: (scope) => inner.load(scope),
+      commit: (scope, revision, commit) => inner.commit(scope, revision, commit),
+      tombstone: (scope, revision) => inner.tombstone(scope, revision),
+      blockHashAt: (scope, blockNumber) => inner.blockHashAt(scope, blockNumber),
+      async readEvents(scope, query) {
+        const rows = await inner.readEvents(scope, query);
+        reads.push({ query, rows: rows.length });
+        return rows;
+      },
+    };
+  }
+
+  /** A store that honours only the block range and the address, as before topic2 existed. */
+  function ignoringTopics(inner: ChainEventLogStore): ChainEventLogStore {
+    return {
+      ...recording(inner),
+      readEvents: (scope, query) => inner.readEvents(scope, {
+        fromBlockNumber: query.fromBlockNumber,
+        throughBlockNumber: query.throughBlockNumber,
+        ...(query.addresses === undefined ? {} : { addresses: query.addresses }),
+      }),
+    };
+  }
+
+  /**
+   * The pre-point-read `readContextGraphForKa`, in effect: every row of the
+   * address in the window, the finalized view's settled filter, the whole
+   * family decoded and folded ONCE, then one map lookup per KA.
+   */
+  async function fullFold(
+    store: ChainEventLogStore,
+    view: KnowledgeAssetReadView,
+  ): Promise<(kaId: bigint) => ContextGraphForKaAnswer | undefined> {
+    const state = await store.load(SCOPE);
+    const coverage = state?.coverage.find((entry) => entry.family === 'context-graph-ka');
+    if (state === undefined || coverage === undefined) return () => undefined;
+    const target = view === 'finalized' ? state.cursor.settledBlockNumber : state.cursor.head.number;
+    const horizon = Math.min(coverage.coveredThroughBlock, target);
+    if (horizon < coverage.coveredFromBlock) return () => undefined;
+    const rows = await store.readEvents(SCOPE, {
+      fromBlockNumber: coverage.coveredFromBlock,
+      throughBlockNumber: horizon,
+      addresses: [CG_STORAGE.toLowerCase()],
+    });
+    const horizonRows = view === 'finalized' ? rows.filter((entry) => entry.settled) : rows;
+    const fold = reduceContextGraphKaRegistrations(
+      registry().decodeContextGraphKaRegistrations(horizonRows),
+    );
+    return (kaId) => {
+      const bound = fold.contextGraphByKa.get(kaId.toString());
+      return bound === undefined
+        ? undefined
+        : { kind: 'bound', contextGraphId: bound, asOfBlockNumber: horizon };
+    };
+  }
+
+  /** mulberry32: small, seedable, and the same sequence on every run. */
+  function prng(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+      state = (state + 0x6d2b79f5) >>> 0;
+      let t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+    };
+  }
+
+  it('takes the registration topic0 from the decoder registry, per family and address', () => {
+    const decoders = registry();
+    expect(decoders.topic0For('context-graph-ka', `0x${'CD'.repeat(20)}`))
+      .toEqual([REGISTRATION_TOPIC0]);
+    const authority = decoders.topic0For('context-graph-authority', CG_STORAGE);
+    expect(authority.length).toBeGreaterThan(0);
+    expect(authority).not.toContain(REGISTRATION_TOPIC0);
+    expect(decoders.topic0For('context-graph-ka', OTHER_EMITTER)).toEqual([]);
+    expect(decoders.topic0For('context-graph-ka', 'not-an-address')).toEqual([]);
+  });
+
+  it('asks the store for exactly one KA\'s registrations', async () => {
+    const inner = seeded({
+      rows: [
+        creation(40, 7n),
+        registration(50, 7n, 4242n),
+        registration(51, 7n, 4243n),
+        registration(52, 8n, 4244n),
+      ],
+    });
+    const store = recording(inner);
+    const readModel = createKnowledgeAssetReadModel({
+      scope: SCOPE,
+      store,
+      registry: registry(),
+      contextGraphStorageAddress: CG_STORAGE,
+    });
+
+    await expect(readModel.readContextGraphForKa(4243n)).resolves.toEqual({
+      kind: 'bound',
+      contextGraphId: 7n,
+      asOfBlockNumber: 100,
+    });
+    expect(store.reads).toEqual([{
+      query: {
+        fromBlockNumber: CG_FLOOR,
+        throughBlockNumber: 100,
+        addresses: [CG_STORAGE.toLowerCase()],
+        topic0: [REGISTRATION_TOPIC0],
+        topic2: [uint256Topic(4243n)],
+      },
+      rows: 1,
+    }]);
+  });
+
+  it('keeps the first registration of a replayed or re-registered KA', async () => {
+    // The chain reverts a second registration, so a later row naming another
+    // graph is a replay; the fold is first-wins and the filter must not
+    // change which row comes first.
+    const store = seeded({
+      rows: [
+        registration(60, 9n, 4242n, { logIndex: 2 }),
+        registration(50, 7n, 4242n, { logIndex: 1 }),
+        registration(50, 8n, 4242n, { logIndex: 3 }),
+      ],
+    });
+    await expect(model(store).readContextGraphForKa(4242n)).resolves.toEqual({
+      kind: 'bound',
+      contextGraphId: 7n,
+      asOfBlockNumber: 100,
+    });
+  });
+
+  it('never binds a KA from another event whose topic2 happens to carry its id', async () => {
+    // `ContextGraphCreated` indexes the owner in topic2. A KA id equal to that
+    // address word matches the topic2 filter; topic0 and the decoder keep it
+    // from ever being read as a registration.
+    const ownerWord = BigInt(author(0x11));
+    const store = seeded({
+      rows: [
+        creation(40, 7n),
+        { ...registration(45, 7n, ownerWord), address: OTHER_EMITTER },
+      ],
+    });
+    expect(creation(40, 7n).topics[2]).toBe(uint256Topic(ownerWord));
+    for (const view of ['finalized', 'latest'] as const) {
+      await expect(model(store).readContextGraphForKa(ownerWord, { view })).resolves.toBeUndefined();
+      expect((await fullFold(store, view))(ownerWord)).toBeUndefined();
+    }
+  });
+
+  it('refuses ids no uint256 topic can carry without touching the rows', async () => {
+    const store = recording(seeded({ rows: [registration(50, 7n, 4242n)] }));
+    const readModel = createKnowledgeAssetReadModel({
+      scope: SCOPE,
+      store,
+      registry: registry(),
+      contextGraphStorageAddress: CG_STORAGE,
+    });
+    await expect(readModel.readContextGraphForKa(-1n)).resolves.toBeUndefined();
+    await expect(readModel.readContextGraphForKa(1n << 256n)).resolves.toBeUndefined();
+    expect(store.reads).toEqual([]);
+  });
+
+  it('refuses when the KA family is not registered, instead of reading unfiltered', async () => {
+    // An empty topic0 list reads as "no topic0 filter" in both stores.
+    const store = recording(seeded({ rows: [registration(50, 7n, 4242n)] }));
+    const readModel = createKnowledgeAssetReadModel({
+      scope: SCOPE,
+      store,
+      registry: new ChainEventDecoderRegistry().registerContextGraphAuthority(CG_STORAGE, cgInterface),
+      contextGraphStorageAddress: CG_STORAGE,
+    });
+    await expect(readModel.readContextGraphForKa(4242n)).resolves.toBeUndefined();
+    expect(store.reads).toEqual([]);
+  });
+
+  it('answers exactly as the full fold over randomized logs, views and coverage', async () => {
+    const ownerWord = BigInt(author(0x11));
+    const kaPool = [
+      ...Array.from({ length: 12 }, (_, index) => 1_000n + BigInt(index)),
+      // OT-RFC-43 ids: author in the high bits, ordinal in the low 96.
+      ...Array.from({ length: 6 }, (_, index) => (BigInt(author(0x30 + index)) << 96n) | 7n),
+      ownerWord,
+    ];
+    const absent = [999n, 0n, (1n << 256n) - 1n, BigInt(author(0x77)) << 96n];
+    let bound = 0;
+    let unbound = 0;
+    let replays = 0;
+
+    for (let seed = 1; seed <= 60; seed += 1) {
+      const random = prng(seed);
+      const pick = <T>(values: readonly T[]): T => values[Math.floor(random() * values.length)]!;
+      const settledBlockNumber = 90 + Math.floor(random() * 15);
+      const headBlockNumber = settledBlockNumber + Math.floor(random() * 10);
+      const coveredFromBlock = random() < 0.8 ? CG_FLOOR : CG_FLOOR + Math.floor(random() * 40);
+      const coveredThroughBlock = headBlockNumber - Math.floor(random() * 8);
+      const taken = new Set<string>();
+      const rows: ChainEventLogRow[] = [];
+      const seen = new Set<bigint>();
+      const place = (): { blockNumber: number; logIndex: number } => {
+        for (;;) {
+          const blockNumber = CG_FLOOR - 5 + Math.floor(random() * (headBlockNumber - CG_FLOOR + 10));
+          const logIndex = Math.floor(random() * 6);
+          const key = `${blockNumber}:${logIndex}`;
+          if (taken.has(key)) continue;
+          taken.add(key);
+          return { blockNumber, logIndex };
+        }
+      };
+      // Tail rows are unsettled; a rare unsettled row BELOW the settled
+      // cursor exercises the finalized view's per-row filter.
+      const settledFor = (blockNumber: number): boolean =>
+        blockNumber <= settledBlockNumber && random() > 0.05;
+      const rowCount = 20 + Math.floor(random() * 60);
+      for (let index = 0; index < rowCount; index += 1) {
+        const at = place();
+        const roll = random();
+        if (roll < 0.7) {
+          const kaId = pick(kaPool);
+          if (seen.has(kaId)) replays += 1;
+          seen.add(kaId);
+          rows.push(registration(at.blockNumber, BigInt(1 + Math.floor(random() * 5)), kaId, {
+            logIndex: at.logIndex,
+            settled: settledFor(at.blockNumber),
+          }));
+        } else if (roll < 0.85) {
+          rows.push(creation(at.blockNumber, BigInt(1 + Math.floor(random() * 5)), {
+            logIndex: at.logIndex,
+            settled: settledFor(at.blockNumber),
+          }));
+        } else {
+          rows.push({
+            ...registration(at.blockNumber, 3n, pick(kaPool), {
+              logIndex: at.logIndex,
+              settled: settledFor(at.blockNumber),
+            }),
+            address: OTHER_EMITTER,
+          });
+        }
+      }
+      const store = seeded({
+        settledBlockNumber,
+        headBlockNumber,
+        cgCoverage: { coveredFromBlock, coveredThroughBlock },
+        rows,
+      });
+
+      const pointReads = model(store);
+      // A store that drops the topic filters hands the fold a superset; the
+      // answer must not move, because the filter only narrows. Every decode
+      // there is a whole-family decode, so it is sampled rather than total.
+      const unfiltered = seed % 20 === 0
+        ? model(ignoringTopics(store) as MemoryChainEventLogStore)
+        : undefined;
+      for (const view of ['finalized', 'latest'] as const) {
+        const expectedFor = await fullFold(store, view);
+        for (const kaId of [...kaPool, ...absent]) {
+          const expected = expectedFor(kaId);
+          const served = await pointReads.readContextGraphForKa(kaId, { view });
+          expect(served, `seed ${seed} ${view} ka ${kaId}`).toEqual(expected);
+          if (unfiltered !== undefined) {
+            await expect(unfiltered.readContextGraphForKa(kaId, { view })).resolves.toEqual(expected);
+          }
+          if (expected === undefined) unbound += 1; else bound += 1;
+        }
+      }
+    }
+    // The generator really produced every case the equivalence is about.
+    expect(bound).toBeGreaterThan(500);
+    expect(unbound).toBeGreaterThan(500);
+    expect(replays).toBeGreaterThan(500);
   });
 });
 

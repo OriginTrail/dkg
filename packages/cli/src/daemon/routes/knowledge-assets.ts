@@ -36,20 +36,19 @@ import {
   validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
-  isWritableQuad,
-  validateQuadObjectTerms,
   respondIfReconcileUnavailable,
   respondIfStoreUnavailable,
   classifyStoreUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
-  validateWritableQuadLiteralSizes,
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
+  respondIfPcaFundingUnknown,
   SMALL_BODY_BYTES,
 } from "../http-utils.js";
+import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
 import {
@@ -263,7 +262,7 @@ function respondPromoteRecoveryError(
  * Map caller preconditions on WM/SWM operations to actionable 4xx responses.
  * VM publishing keeps its own mapping so chain failures remain server errors.
  */
-function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
+export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   if (respondPromoteRecoveryError(res, e, context)) return;
   if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
     jsonResponse(res, 409, { code: e.code, error: e.message });
@@ -320,6 +319,17 @@ function respondAssertionError(res: RequestContext["res"], e: any, context?: Pro
     jsonResponse(res, 409, {
       error: e.message,
       code: "ASSERTION_EMPTY",
+    });
+    return;
+  }
+  // GH#1425 — discard is valid only for an active WM draft. A shared or
+  // published asset must keep its lifecycle metadata so it can be reopened;
+  // expose the engine's typed precondition as an actionable conflict instead
+  // of leaking it as a generic 500.
+  if (e?.code === "KA_WM_LIFECYCLE_REQUIRED") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "KA_WM_LIFECYCLE_REQUIRED",
     });
     return;
   }
@@ -1021,11 +1031,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // OT-RFC-43 §10.5.5.
     const hasQuads = Array.isArray(quads) && quads.length > 0;
     if (hasQuads) {
-      if (!quads.every(isWritableQuad)) {
-        return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-      }
-      const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-      if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+      // Reject malformed quads and terms before any create/write mutation.
+      const invalid = validateWritableQuads("quads", quads);
+      if (invalid) return jsonResponse(res, 400, invalid);
     }
     const shouldFinalize = hasQuads && finalize !== false;
     // #1116 D5: the create ROUTE stays a primitive — create+write+seal, with
@@ -1158,6 +1166,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // attribution on the atomic create+finalize path, mirroring the dedicated
         // wm/finalize route's response.
         result.authorAddress = seal.authorAddress;
+        if (seal.assertionVersion !== undefined) result.assertionVersion = seal.assertionVersion;
+        if (seal.kaUal !== undefined) result.kaUal = seal.kaUal;
         result.status = "wm-sealed";
         emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
       }
@@ -1427,17 +1437,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (layer === "wm") {
       if (verb === "write") {
         if (!Array.isArray(parsed.quads)) return jsonResponse(res, 400, { error: 'Missing "quads"' });
-        // GH #306 — reject string-shaped / malformed quads here (4xx) instead of
-        // letting them crash the agent write path with a TypeError (HTTP 500).
-        if (!parsed.quads.every(isWritableQuad)) {
-          return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-        }
-        // GH #306/#787 (follow-up) — reject objects that are neither a quoted
-        // literal nor an absolute IRI before they reach (and crash) the parser.
-        const wmObjErr = validateQuadObjectTerms("quads", parsed.quads);
-        if (wmObjErr) return jsonResponse(res, 400, { error: wmObjErr });
-        const literalSize = validateWritableQuadLiteralSizes("quads", parsed.quads);
-        if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+        // GH #306 — reject malformed quads and terms here (4xx) instead of
+        // letting them crash the agent write path (HTTP 500).
+        const invalid = validateWritableQuads("quads", parsed.quads);
+        if (invalid) return jsonResponse(res, 400, invalid);
         // A bare write to a name that was never created used to fall through to
         // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is
         // permanently 404 in the descriptor API (no `_meta` lifecycle record,
@@ -1491,6 +1494,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           chainId: seal.chainId?.toString?.(),
           kav10Address: seal.kav10Address,
           eip712Digest: seal.eip712Digest,
+          // GH#2958 — the number this draft will be published as, and the KA it belongs to
+          // (the same fields the vm/publish-async 202 reports once the share has closed).
+          ...(seal.assertionVersion !== undefined ? { assertionVersion: seal.assertionVersion } : {}),
+          ...(seal.kaUal !== undefined ? { kaUal: seal.kaUal } : {}),
         });
       }
       if (verb === "discard") {
@@ -1671,6 +1678,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // failures can carry "Invalid"/"Unsafe" text and must NOT be down-classified
     // to 400 (parity with the legacy publish path).
     if (layer === "vm" && verb === "publish-async") {
+      let enqueueStarted = false;
       try {
         const publisherAvailability = ctx.publisherState.availability;
         if (!publisherAvailability.available) {
@@ -1710,6 +1718,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // Kept separate from `callerAgentAddress` so author selection is untouched.
         // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
         // payload that execution and recovery act on carries no authorization principal.
+        enqueueStarted = true;
         const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
           admittedByAgentAddress: requestAgentAddress,
         });
@@ -1733,6 +1742,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(subGraphName ? { subGraphName } : {}),
         });
       } catch (err: any) {
+        // A store read may have an indeterminate outcome while this request has
+        // not created a publish job. Keep these separate; enqueue itself may
+        // persist a job before throwing, so never make a no-job claim then.
+        const storeUnavailable = classifyStoreUnavailable(err);
+        if (storeUnavailable) {
+          return jsonResponse(res, 503, {
+            ...storeUnavailable.body,
+            ...(!enqueueStarted ? { jobCreated: false } : {}),
+          }, undefined, { 'Retry-After': '1' });
+        }
         if (respondPublicationPricingPolicyError(res, err)) return;
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
@@ -1767,10 +1786,18 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
+            // GH#2942 - WHY this job is held (what its record lacks, or whether this node can act on
+            // it), in the vocabulary `retryState.blocker` uses. Additive: the prose above and
+            // `retryable` keep their meaning, and a thrower with no blocker simply omits the key.
+            ...(err.blocker ? { blocker: err.blocker } : {}),
           });
         }
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
-          return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
+          return jsonResponse(res, 409, {
+            code: err.code,
+            error: err.message ?? String(err),
+            ...(!enqueueStarted ? { jobCreated: false } : {}),
+          });
         }
         // GH#2273 — a multi-valued SWM head now fails closed in the resolver. That is
         // transient SERVER-side corruption the sync repair heals, not a stale client
@@ -1900,6 +1927,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (respondPublicationPricingPolicyError(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;
+        // GH#2958 — the finalized version is not the next publishable one (the async lane maps
+        // the same code at enqueue). Raised by update() before anything was staged or sent, so
+        // 409 is safe; a 500 would invite a blind retry of a deterministic precondition.
+        if (e?.code === "PUBLISH_INTENT_STALE") {
+          return jsonResponse(res, 409, { code: "PUBLISH_INTENT_STALE", error: msg });
+        }
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }
@@ -1914,6 +1947,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (isNoFundedPublisherWalletLike(e)) {
           return jsonResponse(res, 400, noFundedPublisherWalletBody(msg));
         }
+        if (respondIfPcaFundingUnknown(res, e)) return;
         // A transient chain-RPC transport failure (all endpoints exhausted /
         // receipt lookup failed / timeout) is retryable -> 503/504, matching
         // /api/context-graph/register. Keyed strictly on err.code, so an

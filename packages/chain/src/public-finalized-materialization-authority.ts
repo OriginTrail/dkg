@@ -57,12 +57,6 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 /**
- * Resolve the chain-owned authority required for receiptless public VM
- * materialization. The adapter capability choreography stays here so graph
- * materializers consume one typed decision and never reproduce Solidity
- * default-value, root-version, or temporal-coherence rules.
- */
-/**
  * The public-CG gate: `active` AND `accessPolicy === 0`, from ONE read.
  *
  * The two point reads this replaces are correct — the caller pairs them, so
@@ -80,17 +74,24 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
  * graph, which is the same verdict the point reads reach.
  *
  * Only a DETERMINISTIC failure of the single read falls back. A transient one
- * rejects with the transport's own error and is not silently retried as three
+ * rejects with the transport's own error and is not silently retried as two
  * more requests, which would turn provider trouble into extra load.
+ *
+ * Every read carries the caller's signal. The one-read is shared in flight, and
+ * a waiter's own signal is the only way it can leave that flight: without it an
+ * aborted materialization holds the shared read open until it settles, and the
+ * physical RPC cannot be cancelled when the last waiter goes.
  */
 async function resolvePublicContextGraphGateV1(
   chain: ChainAdapter,
   onChainContextGraphId: bigint,
+  signal: AbortSignal | undefined,
 ): Promise<Readonly<{ active: boolean; accessPolicy: number }>> {
+  const readOptions = { signal };
   const oneRead = chain.getContextGraphLiveAuthority;
   if (oneRead !== undefined) {
     try {
-      const authority = await oneRead.call(chain, onChainContextGraphId);
+      const authority = await oneRead.call(chain, onChainContextGraphId, readOptions);
       return authority === null
         ? Object.freeze({ active: false, accessPolicy: 0 })
         : Object.freeze({
@@ -108,12 +109,18 @@ async function resolvePublicContextGraphGateV1(
     }
   }
   const [active, accessPolicy] = await Promise.all([
-    chain.isContextGraphActiveOnChain!(onChainContextGraphId),
-    chain.getContextGraphAccessPolicy!(onChainContextGraphId),
+    chain.isContextGraphActiveOnChain!(onChainContextGraphId, readOptions),
+    chain.getContextGraphAccessPolicy!(onChainContextGraphId, readOptions),
   ]);
   return Object.freeze({ active, accessPolicy });
 }
 
+/**
+ * Resolve the chain-owned authority required for receiptless public VM
+ * materialization. The adapter capability choreography stays here so graph
+ * materializers consume one typed decision and never reproduce Solidity
+ * default-value, root-version, or temporal-coherence rules.
+ */
 export async function resolvePublicFinalizedMaterializationAuthority(
   request: PublicFinalizedMaterializationAuthorityRequest,
 ): Promise<PublicFinalizedMaterializationAuthorityResult> {
@@ -150,7 +157,7 @@ export async function resolvePublicFinalizedMaterializationAuthority(
       ? Promise.resolve<bigint | undefined>(undefined)
       : chain.getMerkleRootCount!(request.kaId);
     const [gate, legacyRootCountBefore] = await Promise.all([
-      resolvePublicContextGraphGateV1(chain, onChainContextGraphId),
+      resolvePublicContextGraphGateV1(chain, onChainContextGraphId, request.signal),
       rootCountBeforeRead,
     ]);
     if (!gate.active) return { kind: 'unavailable', reason: 'inactive-context-graph' };

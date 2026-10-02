@@ -1,6 +1,5 @@
 import { hasValidGraphScopedContent, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import {
-  deleteByPatternWithoutCount,
   GraphManager,
   loadSelectedSharedMemoryQuads,
   type SharedMemoryReadSelection,
@@ -8,12 +7,8 @@ import {
   type Quad,
   type QueryOptions,
   type StorePressureSnapshot,
-  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
-import {
-  tryReplaceGraphWithDurableRootCompanionAtomically,
-  type DurableRootAtomicCompanionResolver,
-} from './durable-root-atomic-companion.js';
+import type { DurableRootAtomicCompanionResolver } from './durable-root-atomic-companion.js';
 import type {
   EventBus,
   PublishIntentMsg,
@@ -36,13 +31,14 @@ import {
   computePublishACKDigest,
   computeUpdateACKDigest,
   assertSafeIri,
-  assertSafeRdfTerm,
   STORAGE_ACK_DECLINE_CODES,
   DEFAULT_SEND_TIMEOUT_MS,
   boundedDeclineCodeLabel,
   computeCatalogRoot,
   catalogCommittedLeaves,
   contextGraphCatalogUri,
+  contextGraphDataUri,
+  partitionCatalogQuads,
   isSwmMerkleExcludedQuad,
   STORAGE_ACK_MAX_STAGING_BYTES,
   createGraphKnowledgeAssetScope,
@@ -57,14 +53,23 @@ import {
 } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { replaceCatalogQuads } from './catalog-persistence.js';
-import { generateKnowledgeAssetShareMetadata } from './metadata.js';
-import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
-import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { ACKCommitSequence } from './ack-commit-sequence.js';
+import { GraphScopedACKPersistence, assertPersistQuadTermsSafe, type GraphScopedACKPersistenceRequest, type GraphScopedAckCopy, type GraphScopedACKPersistenceResult, type StorageAckPriorVersionRequest } from './graph-scoped-ack-persistence.js';
+import {
+  type LocalStorageAckHeadExpectation,
+  type StorageAckRequestContext,
+} from './storage-ack-head-policy.js';
+export type { LocalStorageAckHeadExpectation, StorageAckRequestContext } from './storage-ack-head-policy.js';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
-import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
+
+/** Caller-visible deadline response and the handler work it may outlive. */
+export interface StorageACKExecution {
+  response: Promise<Uint8Array>;
+  completion: Promise<Uint8Array>;
+}
 
 /** Canonical positive decimal that is representable by an EVM uint256 slot. */
 function isCanonicalAuthoritativeContextGraphId(value: unknown): value is string {
@@ -276,17 +281,6 @@ export type StorageAckDecisionObserver = (decision: StorageAckDecision) => void 
  * whitespace), which is a strict subset of what the store itself rejects — so
  * this never turns a store-acceptable term into a false malformed-request.
  */
-function assertPersistQuadTermsSafe(quads: Quad[]): void {
-  for (const q of quads) {
-    assertSafeIri(q.subject);
-    assertSafeIri(q.predicate);
-    if (q.object.startsWith('"')) {
-      assertSafeRdfTerm(q.object);
-    } else {
-      assertSafeIri(q.object);
-    }
-  }
-}
 
 const MAX_DECLINE_ENTITY_COUNT = 5;
 const MAX_DECLINE_ENTITY_CHARS = 120;
@@ -307,6 +301,16 @@ function catalogRootForAckDigest(root: Uint8Array | undefined): Uint8Array {
     throw new Error(`catalogRoot must be 32 bytes, got ${root.length}`);
   }
   return root;
+}
+
+/**
+ * A curated inline catalog whose commitment this core has verified, held
+ * until the request's last gate has passed and only then persisted.
+ */
+interface VerifiedCuratedCatalog {
+  /** `<cg>/_catalog`, already checked by `assertSafeIri`. */
+  readonly graph: string;
+  readonly quads: Quad[];
 }
 
 function normalizePrivateMerkleRoots(
@@ -371,10 +375,6 @@ function isACKHandlerDeadlineAbort(err: unknown): boolean {
   return false;
 }
 
-function isACKHandlerDeadlineAbortSignal(signal: AbortSignal | undefined): boolean {
-  return Boolean(signal?.aborted && isACKHandlerDeadlineAbort(signal.reason));
-}
-
 async function runWithDeadline<T>(
   work: Promise<T>,
   deadlineMs: number,
@@ -415,6 +415,39 @@ function formatStorePressureSnapshot(snapshot: StorePressureSnapshot | undefined
     `normalQueued=${snapshot.normalQueued} backgroundQueued=${snapshot.backgroundQueued}`;
 }
 
+/**
+ * One public StorageACK the handler is about to sign: the data (and, for a
+ * graph-scoped publish, its SWM head) is stored and verified.
+ */
+/** A version an update ACK waits on: registered on chain, not yet in this core's VM. */
+export { DEFAULT_PENDING_ACK_TX_WINDOW_MS } from './graph-scoped-ack-persistence.js';
+export type { StorageAckPriorVersionRequest } from './graph-scoped-ack-persistence.js';
+
+export interface StorageAckVmPromotionRequest {
+  /** Numeric on-chain Context Graph id signed into the ACK digest. */
+  readonly contextGraphId: string;
+  /** Cleartext SWM graph id when the publisher supplied one. */
+  readonly swmGraphId?: string;
+  /** Informational only: publish and update requests are gated alike. */
+  readonly operation?: 'publish' | 'update';
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * The finality gate's answer. `ok` means this core has durably committed to
+ * carry the Knowledge Asset into its Verifiable Memory once the publish or
+ * update finalizes on chain; anything else is a decline, never a signature.
+ */
+export type StorageAckVmPromotionVerdict =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly code:
+        | typeof STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE
+        | typeof STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED;
+      readonly message: string;
+    };
+
 export interface StorageACKHandlerConfig {
   nodeRole: 'core' | 'edge';
   nodeIdentityId: bigint;
@@ -441,6 +474,47 @@ export interface StorageACKHandlerConfig {
   workspaceWriteLocks?: Map<string, Promise<void>>;
   /** Atomic negative-completeness witness for root graph-scoped ACK writes. */
   resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
+  /**
+   * StorageACK finality gate for PUBLIC ACKs (publish and update). Awaited
+   * immediately before signing, after the data is verified and stored and the
+   * signer is confirmed; the handler signs only on `{ ok: true }` and turns
+   * any other verdict (or a throw) into a CORE_VM_PROMOTION_* decline. The
+   * agent answers `ok` only when its chain-driven VM reconciliation is on and
+   * running and the graph is durably recorded as core-hosted, so the ACKed
+   * Knowledge Asset reaches this core's Verifiable Memory after the chain
+   * finalizes it.
+   *
+   * Curated (encrypted-payload) ACKs never reach this hook: a core never
+   * holds curated plaintext to promote. Their equivalent guarantee is the
+   * verified `<cg>/_catalog` commitment the handler flushes before signing,
+   * which is exactly what random sampling proves for curated KAs.
+   *
+   * DKGAgent always wires this. An embedding that omits it signs public ACKs
+   * without any VM-promotion guarantee (the pre-gate behaviour).
+   */
+  ensureVmPromotion?: (
+    request: StorageAckVmPromotionRequest,
+  ) => Promise<StorageAckVmPromotionVerdict>;
+  /**
+   * Called (fire-and-forget) when an update ACK is declined because the
+   * version it would replace is not in this core's VM yet. An update is only
+   * possible once that version is registered on chain, so the embedding can
+   * promote it right away and the publisher's transient retry then succeeds.
+   */
+  onPriorVersionAwaitingPromotion?: (request: StorageAckPriorVersionRequest) => void;
+  /**
+   * The Knowledge Asset's on-chain Merkle-root count (its latest landed
+   * version). Lets a gated core release a held ACK copy the chain has moved
+   * past, or that never landed, instead of refusing every later request.
+   * Without it such copies hold the head (the pre-hook behaviour).
+   */
+  readKnowledgeAssetRootCount?: (kaUal: string, signal?: AbortSignal) => Promise<bigint>;
+  /**
+   * How long a signed ACK copy is treated as possibly still landing (quorum
+   * collection plus transaction inclusion) before a same-version request with
+   * different content may replace it. Default 5 minutes.
+   */
+  pendingAckTxWindowMs?: number;
   /**
    * Optional live confirmation hook. When provided, the handler calls it
    * immediately before signing so removed/unregistered operational keys stop
@@ -652,6 +726,7 @@ export const DEFAULT_ACK_HANDLER_DEADLINE_MS =
 export class StorageACKHandler {
   private store: TripleStore;
   private readonly graphManager: GraphManager;
+  private readonly graphScopedPersistence: GraphScopedACKPersistence;
   private config: StorageACKHandlerConfig;
   private eventBus: EventBus;
   private readonly log = new Logger('StorageACKHandler');
@@ -661,6 +736,17 @@ export class StorageACKHandler {
     this.graphManager = new GraphManager(store);
     this.config = config;
     this.eventBus = eventBus;
+    this.graphScopedPersistence = new GraphScopedACKPersistence({
+      store,
+      graphManager: this.graphManager,
+      config,
+      ports: {
+        encodeDecline: (cgId, code, message, options) => this.encodeDecline(cgId, code, message, options),
+        runWhileLive: (work, signal) => this.runWhileLive(work, signal),
+        runStoreOpOrDecline: (cgId, work, signal) => this.runStoreOpOrDecline(cgId, work, signal),
+        isDeadlineAbort: isACKHandlerDeadlineAbort,
+      },
+    });
   }
 
   private getStorePressureSnapshot(): StorePressureSnapshot | undefined {
@@ -696,14 +782,17 @@ export class StorageACKHandler {
     // path so the operator's WARN line carries the real store/RPC error
     // but the remote publisher only sees a short sanitized reason —
     // internal error strings (paths, worker state) stay off the network.
-    options: { hookMessage?: string } = {},
+    // `labelCode` (optional) names the decline in the metric and the local
+    // hook when the wire carries an older, more widely understood code.
+    options: { hookMessage?: string; labelCode?: StorageACKDeclineCode } = {},
   ): Uint8Array {
+    const labelCode = options.labelCode ?? code;
     getMetrics().storageAckDeclinesTotal?.add(1, {
-      reason: boundedDeclineCodeLabel(code),
+      reason: boundedDeclineCodeLabel(labelCode),
     });
     if (this.config.onDecline) {
       const details = {
-        code,
+        code: labelCode,
         contextGraphId: compactDeclineText(cgId, MAX_DECLINE_LOG_CG_ID_CHARS),
         message: compactDeclineText(options.hookMessage ?? message, MAX_DECLINE_LOG_MESSAGE_CHARS),
       };
@@ -816,28 +905,144 @@ export class StorageACKHandler {
     signal?: AbortSignal,
   ): Promise<{ ok: true; value: T } | { ok: false; decline: Uint8Array }> {
     try {
-      return { ok: true, value: await op() };
+      const value = await this.runWhileLive(op, signal);
+      return { ok: true, value };
     } catch (err) {
       if (isACKHandlerDeadlineAbort(err)) throw err;
-      if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
+      signal?.throwIfAborted();
       return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
     }
   }
 
-  /** Persist a verified public catalog under the shared store-error boundary. */
+  /** Check both sides of an external operation so later ACK phases cannot run after cancellation. */
+  private async runWhileLive<T>(op: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    const value = await op();
+    signal?.throwIfAborted();
+    return value;
+  }
+
+  /** Signing is the final irreversible ACK phase; recheck after an async signer returns. */
+  private async signDigestWhileLive(digest: Uint8Array, signal?: AbortSignal): Promise<ethers.Signature> {
+    const signed = await this.runWhileLive(() => this.config.signerWallet.signMessage(digest), signal);
+    return ethers.Signature.from(signed);
+  }
+
+  /**
+   * An inline curated catalog must be exactly a catalog partition: every quad
+   * on the Context Graph's own DID (under the target on-chain id, or the SWM
+   * graph id the intent names), one subject throughout, only catalog
+   * predicates, and `rdf:type` only with a catalog class. This is the
+   * publisher's own partition rule (`partitionCatalogQuads`). Without it a
+   * publisher could commit arbitrary triples, on any subject, into this
+   * core's public `<cg>/_catalog`. Returns the decline, or undefined.
+   */
+  private declineUnlessCatalogPartition(
+    cgId: string,
+    swmGraphId: string | undefined,
+    parsedCatalog: readonly Quad[],
+    label: string,
+  ): Uint8Array | undefined {
+    const allowedSubjects = new Set<string>([contextGraphDataUri(cgId)]);
+    if (swmGraphId && swmGraphId.length > 0) allowedSubjects.add(contextGraphDataUri(swmGraphId));
+    const subject = parsedCatalog[0]?.subject;
+    if (subject === undefined || !allowedSubjects.has(subject)) {
+      return this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+        `${label}: inline catalog subject is not this Context Graph's DID`,
+      );
+    }
+    const { otherQuads } = partitionCatalogQuads(parsedCatalog, subject);
+    if (otherQuads.length > 0) {
+      return this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+        `${label}: inline catalog carries ${otherQuads.length} quad(s) outside the catalog partition ` +
+          `(another subject, a non-catalog predicate, or a non-catalog rdf:type)`,
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Verify a curated inline catalog against the publisher's claimed
+   * commitment. The publish and the update ACK share this, so the two cannot
+   * accept or reject the same catalog differently. The catalog must be
+   * exactly this Context Graph's catalog partition, and the committed
+   * leaf-set rebuilt from it (post-publish stamps stripped, the definition
+   * the producer and the prover both use) must reproduce the claimed leaf
+   * count and root. Nothing is persisted here: the caller persists the
+   * returned catalog only after its signer gate has passed. An unsafe
+   * `<cg>/_catalog` IRI is a malformed request (stream reset), so it throws.
+   */
+  private verifyCuratedCatalogCommitment(
+    cgId: string,
+    swmGraphId: string | undefined,
+    stagingQuads: Uint8Array,
+    claimed: { root: Uint8Array; leafCount: number },
+    label: 'curated ACK' | 'curated UPDATE ACK',
+  ): { ok: true; catalog: VerifiedCuratedCatalog } | { ok: false; decline: Uint8Array } {
+    const parsedCatalog = parseSimpleNQuads(new TextDecoder().decode(stagingQuads));
+    const partitionDecline = this.declineUnlessCatalogPartition(cgId, swmGraphId, parsedCatalog, label);
+    if (partitionDecline) return { ok: false, decline: partitionDecline };
+    const committedLeaves = catalogCommittedLeaves(parsedCatalog);
+    if (committedLeaves.length === 0) {
+      return {
+        ok: false,
+        decline: this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+          `${label}: inline catalog parsed to zero committed leaves`,
+        ),
+      };
+    }
+    const rebuilt = computeCatalogRoot(committedLeaves);
+    if (rebuilt.leafCount !== claimed.leafCount) {
+      return {
+        ok: false,
+        decline: this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+          `${label} leaf-count mismatch: rebuilt ${rebuilt.leafCount} catalog leaves ` +
+            `but publisher claims ${claimed.leafCount}`,
+        ),
+      };
+    }
+    if (!bytesEqual(rebuilt.root, claimed.root)) {
+      return {
+        ok: false,
+        decline: this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+          `${label} root mismatch: rebuilt catalog root=${ethers.hexlify(rebuilt.root).slice(0, 18)}... ` +
+            `does not match publisher claim=${ethers.hexlify(claimed.root).slice(0, 18)}...`,
+        ),
+      };
+    }
+    const graph = contextGraphCatalogUri(cgId);
+    assertSafeIri(graph);
+    return { ok: true, catalog: { graph, quads: parsedCatalog } };
+  }
+
+  /**
+   * Persist a verified public catalog to `<cg>/_catalog` (CLEAR/REPLACE) under
+   * the shared store-error boundary, so this core can serve it (the §7 facet
+   * open-serve) and the prover can rebuild the same root. A failing store
+   * returns the transient decline so the publisher retries once it recovers.
+   */
   private async persistCatalogOrDecline(
     cgId: string,
-    catalogGraph: string,
-    parsedCatalog: Quad[],
+    catalog: VerifiedCuratedCatalog,
     signal?: AbortSignal,
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
     // Malformed terms are a bad request, not a store outage — validate BEFORE
     // the store wrapper so they reset the stream instead of being mislabeled
     // as a transient decline (see assertPersistQuadTermsSafe).
-    assertPersistQuadTermsSafe(parsedCatalog);
+    assertPersistQuadTermsSafe(catalog.quads);
     const result = await this.runStoreOpOrDecline(
       cgId,
-      () => replaceCatalogQuads(this.store, catalogGraph, parsedCatalog, signal),
+      () => replaceCatalogQuads(this.store, catalog.graph, catalog.quads, signal),
       signal,
     );
     return result.ok ? { ok: true } : result;
@@ -860,159 +1065,26 @@ export class StorageACKHandler {
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsed);
     const result = await this.runStoreOpOrDecline(cgId, async () => {
-      await this.store.dropGraph(
-        stagingGraphUri,
-        ackStoreOptions('storage-ack.persistStaging.dropGraph', signal),
-      );
+      const commit = new ACKCommitSequence(signal);
+      await commit.write('storage-ack.persistStaging.dropGraph',
+        (options) => this.store.dropGraph(stagingGraphUri, options));
       const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert', signal));
+      await commit.write('storage-ack.persistStaging.insert',
+        (options) => this.store.insert(graphedQuads, options));
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush', signal));
+      await commit.write('storage-ack.persistStaging.flush',
+        async (options) => { await this.store.flush?.(options); });
     }, signal);
     return result.ok ? { ok: true } : result;
   }
 
-  /**
-   * Persist a verified rootless assertion as one exact SWM graph plus the
-   * constant-size workspace head needed by finalization and chain reconcile.
-   *
-   * StorageACK durability is not satisfied by the data graph alone: without
-   * the head, a core that does not subscribe to the CG's live publish topic
-   * cannot bind those triples back to the UAL after the chain event lands.
-   * The operation id binds asset identity, version, and content, so ACK retries
-   * replace the same metadata rows without aliasing identical-content KAs.
-   */
-  private async persistGraphScopedWorkspaceOrDecline(
-    cgId: string,
-    swmGraphId: string,
-    swmGraphUri: string,
-    graphPublish: GraphScopedPublishIntent,
-    parsed: Quad[],
-    publisherPeerId: string,
-    merkleRoot: Uint8Array,
-    replaceGraph: boolean,
-    signal?: AbortSignal,
-  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
-    assertPersistQuadTermsSafe(parsed);
-    const normalized = parsed.map((quad) => ({ ...quad, graph: swmGraphUri }));
-    const operationId = `storage-ack-${ethers.keccak256(ethers.toUtf8Bytes([
-      graphPublish.scope.ual,
-      graphPublish.scope.assertionVersion,
-      ethers.hexlify(merkleRoot),
-    ].join('\0'))).slice(2)}`;
-    const metaGraph = this.graphManager.sharedMemoryMetaUri(
-      swmGraphId,
-      graphPublish.subGraphName,
-    );
-    const publicDigest = workspacePublicQuadsDigest(
-      normalized.map((quad) => ({ ...quad, graph: '' })),
-    );
-    const metadata = generateKnowledgeAssetShareMetadata(
-      {
-        shareOperationId: operationId,
-        contextGraphId: swmGraphId,
-        kaUal: graphPublish.scope.ual,
-        assertionVersion: graphPublish.scope.assertionVersion,
-        publicTripleCount: normalized.length,
-        ...(graphPublish.privateMerkleRoot
-          ? { privateMerkleRoot: graphPublish.privateMerkleRoot }
-          : {}),
-        privateTripleCount: graphPublish.privateTripleCount,
-        publisherPeerId: publisherPeerId.trim() || 'unknown',
-        accessPolicy: graphPublish.accessPolicy,
-        allowedPeers: graphPublish.allowedPeers,
-        agentAddress: graphPublish.scope.agentAddress,
-        subGraphName: graphPublish.subGraphName,
-        timestamp: new Date(),
-      },
-      metaGraph,
-    );
-    const operationSubject = metadata[0]?.subject;
-    if (!operationSubject) {
-      throw new Error('StorageACK: graph-scoped workspace metadata is empty');
-    }
-    metadata.push({
-      subject: operationSubject,
-      predicate: 'http://dkg.io/ontology/publicQuadsDigest',
-      object: `"${publicDigest}"`,
-      graph: metaGraph,
-    });
-
-    const persist = async () => this.runStoreOpOrDecline(cgId, async () => {
-      const companion = graphPublish.subGraphName === undefined
-        ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
-            contextGraphId: swmGraphId,
-            kaUal: graphPublish.scope.ual,
-            assertionVersion: graphPublish.scope.assertionVersion,
-            shareOperationId: operationId,
-          }))
-        : undefined;
-      if (replaceGraph || companion !== undefined) {
-        const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
-          this.store,
-          swmGraphUri,
-          normalized,
-          companion,
-          ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
-        );
-        if (!replaced) {
-          throw Object.assign(
-            new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
-            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
-          );
-        }
-        // #2079: a REPLACE, not a drop — invisible to the catch-up lane's count
-        // gate, so the witness must be dropped explicitly. The head write and
-        // two other store calls follow, any of which can throw and leave content
-        // ahead of the head.
-        await invalidateSwmMaterializationWitness(
-          this.store,
-          swmGraphUri,
-          ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
-        ).catch(() => {});
-      }
-      await deleteByPatternWithoutCount(
-        this.store,
-        { graph: metaGraph, subject: operationSubject },
-        ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', signal),
-      );
-      await this.store.insert(
-        metadata,
-        ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta', signal),
-      );
-      // The current-head pointer is a delete/insert pair. Once that commit tail
-      // starts it must finish (including flush), even if the ACK deadline has
-      // already returned a decline; aborting between the two loses the last
-      // complete pointer. It remains isolated in the reserved ACK lane.
-      await storeKnowledgeAssetWorkspaceHead({
-        store: this.store,
-        graphManager: this.graphManager,
-        contextGraphId: swmGraphId,
-        kaUal: graphPublish.scope.ual,
-        assertionVersion: graphPublish.scope.assertionVersion,
-        shareOperationId: operationId,
-        subGraphName: graphPublish.subGraphName,
-        queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
-      });
-      await this.store.flush?.(
-        ackStoreOptions('storage-ack.persistGraphScoped.flush'),
-      );
-    }, signal);
-    const result = this.config.workspaceWriteLocks
-      ? await withKeyedLocks(
-        this.config.workspaceWriteLocks,
-        [swmKaWriteLockKey(
-          swmGraphId,
-          graphPublish.subGraphName,
-          graphPublish.scope.ual,
-        )],
-        persist,
-      )
-      : await persist();
-    return result.ok ? { ok: true } : result;
+  private persistGraphScopedWorkspaceOrDecline(
+    request: GraphScopedACKPersistenceRequest,
+  ): Promise<GraphScopedACKPersistenceResult> {
+    return this.graphScopedPersistence.execute(request);
   }
 
   /**
@@ -1029,15 +1101,88 @@ export class StorageACKHandler {
     signal?: AbortSignal,
   ): Promise<{ ok: true; quads: Quad[] } | { ok: false; decline: Uint8Array }> {
     try {
-      return { ok: true, quads: await this.loadSWMQuads(graphUri, rootEntities, signal) };
+      const quads = await this.runWhileLive(() => this.loadSWMQuads(graphUri, rootEntities, signal), signal);
+      return { ok: true, quads };
     } catch (err) {
       if (err instanceof StoreUnavailableError) {
         if (isACKHandlerDeadlineAbort(err)) throw err;
-        if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
+        signal?.throwIfAborted();
         return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
       }
       throw err;
     }
+  }
+
+  /**
+   * Run the StorageACK finality gate for a public ACK, so the publish and
+   * update handlers decline identically:
+   *   - `{ ok: true }`           → the core committed to promote the KA to
+   *     its VM (or no gate is wired): SIGN.
+   *   - `{ ok: false, decline }` → CORE_VM_PROMOTION_DISABLED as given, or
+   *     any other refusal (including a THROWN gate) as the transient
+   *     CORE_TEMPORARILY_UNAVAILABLE labelled CORE_VM_PROMOTION_UNAVAILABLE
+   *     (see {@link declineVmPromotionUnavailable}). Never sign.
+   */
+  private async checkVmPromotionOrDecline(
+    request: StorageAckVmPromotionRequest,
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    const gate = this.config.ensureVmPromotion;
+    if (!gate) return { ok: true };
+    let verdict: StorageAckVmPromotionVerdict;
+    try {
+      verdict = await this.runWhileLive(() => gate(request), request.signal);
+    } catch (err) {
+      if (isACKHandlerDeadlineAbort(err)) throw err;
+      request.signal?.throwIfAborted();
+      // An unanswered gate is not a commitment: never sign on it.
+      return {
+        ok: false,
+        decline: this.declineVmPromotionUnavailable(
+          request.contextGraphId,
+          'commitment unavailable',
+          err instanceof Error ? err.message : String(err),
+        ),
+      };
+    }
+    if (verdict.ok === true) return { ok: true };
+    if (verdict.code === STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED) {
+      return {
+        ok: false,
+        decline: this.encodeDecline(
+          request.contextGraphId,
+          STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED,
+          verdict.message,
+        ),
+      };
+    }
+    return {
+      ok: false,
+      decline: this.declineVmPromotionUnavailable(request.contextGraphId, verdict.message),
+    };
+  }
+
+  /**
+   * The transient finality-gate decline. It travels as
+   * CORE_TEMPORARILY_UNAVAILABLE, which every deployed publisher retries
+   * (10.0.18 treats unknown codes as terminal), with the VM reason in the
+   * message; logs and metrics keep the specific CORE_VM_PROMOTION_UNAVAILABLE
+   * label.
+   */
+  private declineVmPromotionUnavailable(
+    cgId: string,
+    reason: string,
+    localDetail?: string,
+  ): Uint8Array {
+    const wireMessage = `VM promotion unavailable: ${reason}`;
+    return this.encodeDecline(
+      cgId,
+      STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+      wireMessage,
+      {
+        labelCode: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
+        ...(localDetail ? { hookMessage: `${wireMessage}: ${localDetail}` } : {}),
+      },
+    );
   }
 
   /**
@@ -1108,28 +1253,57 @@ export class StorageACKHandler {
    * backpressure. Classifies the terminal outcome (ack / decline / reset)
    * for the `ackHandlerTotal` metric; a thrown error resets the stream and
    * is auto-recorded as a span ERROR by withSpan.
+   *
+   * Peer streams always use remote persistence semantics.
    */
-  handler = async (data: Uint8Array, peerId: PeerId): Promise<Uint8Array> => {
+  handler = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> =>
+    this.remoteExecution(data, peerId, externalSignal).response;
+
+  /** Keep the physical commit tail visible to the endpoint after a deadline reply. */
+  remoteExecution = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): StorageACKExecution =>
+    this.createPublishRequest(data, peerId, externalSignal, { kind: 'remote' });
+
+  /** Local dispatch carries immutable queued-head proof when a queued job owns it. */
+  localHandler = (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal?: AbortSignal,
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): Promise<Uint8Array> => this.localExecution(data, peerId, externalSignal, expectedHead).response;
+
+  localExecution = (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal?: AbortSignal,
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): StorageACKExecution => this.createPublishRequest(data, peerId, externalSignal, { kind: 'local', expectedHead });
+
+  private createPublishRequest = (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal: AbortSignal | undefined,
+    context: StorageAckRequestContext,
+  ): StorageACKExecution => {
     const chainIdLabel = this.config.chainId != null
       ? this.config.chainId.toString()
       : undefined;
-    return withSpan('publisher.storage_ack_handler', async (span) => {
-      let cgIdAttr: string | undefined;
-      let intentPreview: PublishIntentMsg | undefined;
+    let cgIdAttr: string | undefined;
+    let intentPreview: PublishIntentMsg | undefined;
+    try {
+      intentPreview = decodePublishIntent(data);
+      cgIdAttr = intentPreview.contextGraphId;
+    } catch {
+      // Malformed request — handlePublishIntent will throw + reset below.
+    }
+    const execution = this.runHandlerWithDeadline(
+      (signal) => this.handlePublishIntent(data, peerId, signal, context),
+      cgIdAttr,
+      externalSignal,
+    );
+    const response = withSpan('publisher.storage_ack_handler', async (span) => {
+      if (cgIdAttr) span.setAttribute('dkg.context_graph_id', cgIdAttr);
       try {
-        // contextGraphId is cheap to read off the decoded intent for the span
-        // attribute; the full classification rides the encoded response below.
-        intentPreview = decodePublishIntent(data);
-        cgIdAttr = intentPreview.contextGraphId;
-        if (cgIdAttr) span.setAttribute('dkg.context_graph_id', cgIdAttr);
-      } catch {
-        // Malformed request — handlePublishIntent will throw + reset below.
-      }
-      try {
-        const result = await this.runHandlerWithDeadline(
-          (signal) => this.handlePublishIntent(data, peerId, signal),
-          cgIdAttr,
-        );
+        const result = await execution.response;
         const decision = this.buildStorageAckDecision(intentPreview, result, peerId);
         await this.observeStorageAckDecision(decision);
         if (isStorageACKDecline(decision.ack)) {
@@ -1162,6 +1336,7 @@ export class StorageACKHandler {
         throw err;
       }
     });
+    return { response, completion: execution.completion };
   };
 
   /**
@@ -1179,17 +1354,23 @@ export class StorageACKHandler {
    * handler resets the stream exactly as before; the deadline only converts
    * the *slow* (non-throwing) case, which previously had no in-band signal.
    */
-  private runHandlerWithDeadline = async (
+  private runHandlerWithDeadline = (
     workFactory: (signal?: AbortSignal) => Promise<Uint8Array>,
     cgIdForDecline: string | undefined,
-  ): Promise<Uint8Array> => {
+    externalSignal?: AbortSignal,
+  ): StorageACKExecution => {
     const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
-    if (deadlineMs <= 0) return workFactory();
-
     const abortController = new AbortController();
-    const work = workFactory(abortController.signal);
+    const signal = externalSignal
+      ? AbortSignal.any([abortController.signal, externalSignal])
+      : abortController.signal;
+    const work = Promise.resolve().then(() => {
+      externalSignal?.throwIfAborted();
+      return workFactory(signal);
+    });
+    if (deadlineMs <= 0) return { response: work, completion: work };
 
-    return runWithDeadline(work, deadlineMs, () => {
+    const response = runWithDeadline(work, deadlineMs, () => {
       const storePressure = formatStorePressureSnapshot(this.getStorePressureSnapshot());
       const deadlineError = new ACKHandlerDeadlineAbortError(deadlineMs, storePressure);
       const decline = this.declineTemporarilyUnavailable(
@@ -1200,6 +1381,7 @@ export class StorageACKHandler {
       abortController.abort(deadlineError);
       return decline;
     });
+    return { response, completion: work };
   };
 
   /**
@@ -1210,8 +1392,10 @@ export class StorageACKHandler {
   private handlePublishIntent = async (
     data: Uint8Array,
     peerId: PeerId,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    context: StorageAckRequestContext,
   ): Promise<Uint8Array> => {
+    signal?.throwIfAborted();
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -1288,7 +1472,9 @@ export class StorageACKHandler {
           `before signing an ACK whose private merkleRoot they cannot recompute.`,
         );
       }
-      const curationVerdict = await this.config.isCgCurated(cgId, swmGraphIdForCuration);
+      const curationVerdict = await this.runWhileLive(
+        () => this.config.isCgCurated!(cgId, swmGraphIdForCuration), signal,
+      );
       if (curationVerdict !== true) {
         throw new Error(
           `PublishIntent.isEncryptedPayload=true rejected for cg=${cgId}${swmGraphIdForCuration ? ` (swmGraph=${swmGraphIdForCuration})` : ''}: ` +
@@ -1340,49 +1526,18 @@ export class StorageACKHandler {
         );
       }
 
-      // Independently rebuild the catalog commitment over the inline catalog
-      // via the SHARED definition (post-publish stamps stripped) so the core's
-      // rebuilt root is byte-identical to the producer's committed root AND the
-      // prover's later rebuild. DECLINE on any disagreement.
-      const parsedCatalog = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
-      const committedLeaves = catalogCommittedLeaves(parsedCatalog);
-      if (committedLeaves.length === 0) {
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-          'curated ACK: inline catalog parsed to zero committed leaves',
-        );
-      }
-      const rebuilt = computeCatalogRoot(committedLeaves);
-      if (rebuilt.leafCount !== claimedCatalogLeafCount) {
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-          `curated ACK leaf-count mismatch: rebuilt ${rebuilt.leafCount} catalog leaves ` +
-          `but publisher claims ${claimedCatalogLeafCount}`,
-        );
-      }
-      if (!bytesEqual(rebuilt.root, claimedCatalogRoot)) {
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-          `curated ACK root mismatch: rebuilt catalog root=${ethers.hexlify(rebuilt.root).slice(0, 18)}... ` +
-          `does not match publisher claim=${ethers.hexlify(claimedCatalogRoot).slice(0, 18)}...`,
-        );
-      }
-
-      // Root verified — persist the public catalog to `<cg>/_catalog` so this
-      // core can serve it (the §7 facet open-serve) and the prover can later
-      // rebuild the SAME root for curated proving. CLEAR/REPLACE the subjects.
-      // `assertSafeIri` stays OUTSIDE the persist helper below: an unsafe graph
-      // IRI is a malformed-request condition (stream reset), not a store outage.
-      // A failing store (worker restarting, 'store is closed') instead returns
-      // the transient decline so the publisher retries once the store recovers
-      // rather than bucketing us as no_response after a stream reset.
-      const catalogGraph = contextGraphCatalogUri(cgId);
-      assertSafeIri(catalogGraph);
-      const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
-      if (!persistedCatalog.ok) return persistedCatalog.decline;
+      // Independently rebuild and verify the catalog commitment. The verified
+      // catalog is persisted to `<cg>/_catalog` only after every remaining
+      // check and the signer gate below, so a request this core declines
+      // never changes its public catalog.
+      const verifiedCatalog = this.verifyCuratedCatalogCommitment(
+        cgId,
+        swmGraphIdForCuration,
+        intent.stagingQuads,
+        { root: claimedCatalogRoot, leafCount: claimedCatalogLeafCount },
+        'curated ACK',
+      );
+      if (!verifiedCatalog.ok) return verifiedCatalog.decline;
 
       // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
       if (intent.kaCount !== 1) {
@@ -1443,15 +1598,21 @@ export class StorageACKHandler {
         false,
       );
 
-      const curatedSignerGate = await this.checkSignerRegistrationOrDecline(
-        cgId,
-        'curated StorageACK signer is not confirmed on-chain as an operational wallet',
+      const curatedSignerGate = await this.runWhileLive(
+        () => this.checkSignerRegistrationOrDecline(
+          cgId,
+          'curated StorageACK signer is not confirmed on-chain as an operational wallet',
+        ), signal,
       );
       if (!curatedSignerGate.ok) return curatedSignerGate.decline;
+      // No VM-promotion gate here: the core never receives curated plaintext.
+      // What this ACK guarantees is the catalog commitment verified above and
+      // persisted to `<cg>/_catalog` below, the artifact random sampling proves.
 
-      const signature = ethers.Signature.from(
-        await this.config.signerWallet.signMessage(digest),
-      );
+      const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedCatalog.catalog, signal);
+      if (!persistedCatalog.ok) return persistedCatalog.decline;
+
+      const signature = await this.signDigestWhileLive(digest, signal);
       const MAX_UINT64 = (1n << 64n) - 1n;
       if (this.config.nodeIdentityId > MAX_UINT64) {
         throw new Error(
@@ -1474,6 +1635,22 @@ export class StorageACKHandler {
       });
     }
 
+    // Finality gate: a legacy (not graph-scoped) public intent leaves only a
+    // staging graph that nothing promotes, so a gated core cannot promise VM
+    // for it. Refuse before persisting anything.
+    if (!graphPublish && this.config.ensureVmPromotion) {
+      return this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED,
+        'legacy (not graph-scoped) public StorageACK: this core cannot keep a copy it can ' +
+          'promote to VM; publish graph-scoped content (DKG 10.0.7 or later)',
+      );
+    }
+    // The graph-scoped copy is written only after every check and gate below
+    // has passed, so a declined request leaves nothing behind.
+    let persistGraphCopy:
+      | ((digest: Uint8Array) => Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }>)
+      | undefined;
 
     if (intent.stagingQuads && intent.stagingQuads.length > 0) {
       // Size limit: reject oversized inline payloads to prevent memory exhaustion.
@@ -1555,32 +1732,25 @@ export class StorageACKHandler {
       // transient decline instead of resetting the stream — the durability
       // invariant is why we CANNOT sign anyway, so the publisher re-sends
       // once the store worker is back rather than bucketing us as no_response.
-      const stagingGraphUri = graphPublish
-        ? swmGraphUri
-        : `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
-      const persistedStaging = graphPublish
-        ? await this.persistGraphScopedWorkspaceOrDecline(
-            cgId,
-            swmGraphId,
-            swmGraphUri,
-            graphPublish,
-            parsed,
-            peerId.toString(),
-            merkleRoot,
-            true,
-            signal,
-          )
-        : await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed, signal);
-      if (!persistedStaging.ok) return persistedStaging.decline;
-      swmQuads = parsed;
-
-      // Schedule cleanup: remove staging graph after 10 minutes.
-      // Finalization may promote data to LTM before this fires.
-      if (!graphPublish) {
+      if (graphPublish) {
+        persistGraphCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline({
+          cgId, swmGraphId, swmGraphUri, graphPublish, parsed,
+          publisherPeerId: peerId.toString(), merkleRoot, replaceGraph: true,
+          signal, recordLedger: this.config.ensureVmPromotion !== undefined,
+          context, digest,
+        });
+      } else {
+        // Ungated embeddings only (a gated core declined legacy intents above).
+        const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
+        const persistedStaging = await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed, signal);
+        if (!persistedStaging.ok) return persistedStaging.decline;
+        // Schedule cleanup: remove staging graph after 10 minutes.
+        // Finalization may promote data to LTM before this fires.
         setTimeout(async () => {
           try { await this.store.dropGraph(stagingGraphUri); } catch { /* ignore */ }
         }, 10 * 60 * 1000);
       }
+      swmQuads = parsed;
     } else {
       // Fallback: data should already be in SWM (publishFromSharedMemory path).
       // Both the "no data" and "data but wrong merkle root" cases below are
@@ -1636,18 +1806,13 @@ export class StorageACKHandler {
         );
       }
       if (graphPublish) {
-        const persistedWorkspace = await this.persistGraphScopedWorkspaceOrDecline(
-          cgId,
-          swmGraphId,
-          swmGraphUri,
-          graphPublish,
-          swmQuads,
-          peerId.toString(),
-          merkleRoot,
-          false,
-          signal,
-        );
-        if (!persistedWorkspace.ok) return persistedWorkspace.decline;
+        const loadedQuads = swmQuads;
+        persistGraphCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline({
+          cgId, swmGraphId, swmGraphUri, graphPublish, parsed: loadedQuads,
+          publisherPeerId: peerId.toString(), merkleRoot, replaceGraph: false,
+          signal, recordLedger: this.config.ensureVmPromotion !== undefined,
+          context, digest,
+        });
       }
     }
 
@@ -1784,15 +1949,30 @@ export class StorageACKHandler {
       BigInt(intent.catalogLeafCount ?? 0),
       false,
     );
-    const signerGate = await this.checkSignerRegistrationOrDecline(
-      cgId,
-      'StorageACK signer is not confirmed on-chain as an operational wallet',
+    const signerGate = await this.runWhileLive(
+      () => this.checkSignerRegistrationOrDecline(
+        cgId,
+        'StorageACK signer is not confirmed on-chain as an operational wallet',
+      ), signal,
     );
     if (!signerGate.ok) return signerGate.decline;
-
-    const signature = ethers.Signature.from(
-      await this.config.signerWallet.signMessage(digest),
-    );
+    // Finality gate: sign only once this core has committed to carry the KA
+    // into its Verifiable Memory after the publish finalizes.
+    const promotionGate = await this.checkVmPromotionOrDecline({
+      contextGraphId: cgId,
+      ...(swmGraphId !== cgId ? { swmGraphId } : {}),
+      operation: 'publish',
+      ...(signal ? { signal } : {}),
+    });
+    if (!promotionGate.ok) return promotionGate.decline;
+    let signature: ethers.Signature;
+    if (persistGraphCopy) {
+      const persisted = await persistGraphCopy(digest);
+      if (!persisted.ok) return persisted.decline;
+      signature = persisted.signature;
+    } else {
+      signature = await this.signDigestWhileLive(digest, signal);
+    }
 
     const MAX_UINT64 = (1n << 64n) - 1n;
     if (this.config.nodeIdentityId > MAX_UINT64) {
@@ -1840,7 +2020,32 @@ export class StorageACKHandler {
    * per-send timeout exactly as publish did, and the update collector
    * rides the same transient-decline retry ladder.
    */
-  updateHandler = async (data: Uint8Array, peerId: PeerId): Promise<Uint8Array> => {
+  updateHandler = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> =>
+    this.remoteUpdateExecution(data, peerId, externalSignal).response;
+
+  remoteUpdateExecution = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): StorageACKExecution =>
+    this.createUpdateRequest(data, peerId, externalSignal, { kind: 'remote' });
+
+  localUpdateHandler = (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal?: AbortSignal,
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): Promise<Uint8Array> => this.localUpdateExecution(data, peerId, externalSignal, expectedHead).response;
+
+  localUpdateExecution = (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal?: AbortSignal,
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): StorageACKExecution => this.createUpdateRequest(data, peerId, externalSignal, { kind: 'local', expectedHead });
+
+  private createUpdateRequest = (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal: AbortSignal | undefined,
+    context: StorageAckRequestContext,
+  ): StorageACKExecution => {
     let cgIdForDecline: string | undefined;
     try {
       // contextGraphId is cheap to read off the decoded intent for the
@@ -1850,8 +2055,9 @@ export class StorageACKHandler {
       // Malformed request — handleUpdateIntent will throw + reset below.
     }
     return this.runHandlerWithDeadline(
-      (signal) => this.handleUpdateIntent(data, peerId, signal),
+      (signal) => this.handleUpdateIntent(data, peerId, signal, context),
       cgIdForDecline,
+      externalSignal,
     );
   };
 
@@ -1863,9 +2069,11 @@ export class StorageACKHandler {
    */
   private handleUpdateIntent = async (
     data: Uint8Array,
-    _peerId: PeerId,
-    signal?: AbortSignal,
+    peerId: PeerId,
+    signal: AbortSignal | undefined,
+    context: StorageAckRequestContext,
   ): Promise<Uint8Array> => {
+    signal?.throwIfAborted();
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -1933,6 +2141,23 @@ export class StorageACKHandler {
     // payload, so they leave it null.
     let publicUpdateByteSizeFloor: bigint | null = null;
     let publicUpdateFloorBasis = '';
+    // Finality gate: a public update must leave a versioned copy this core can
+    // promote once the update finalizes. Only the graph-scoped path does, so
+    // a gated core refuses legacy public updates before persisting anything.
+    if (intent.isEncryptedPayload !== true && !graphUpdate && this.config.ensureVmPromotion) {
+      return this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED,
+        'legacy (not graph-scoped) public UpdateStorageACK: this core cannot keep a copy it can ' +
+          'promote to VM; update graph-scoped content (DKG 10.0.7 or later)',
+      );
+    }
+    // Written only after every check and gate below has passed.
+    let persistUpdateCopy:
+      | ((digest: Uint8Array) => Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }>)
+      | undefined;
+    // A curated update's verified catalog, persisted only once the signer gate passed.
+    let verifiedUpdateCatalog: VerifiedCuratedCatalog | undefined;
     if (intent.isEncryptedPayload === true) {
       const swmGraphIdForCuration = intent.swmGraphId && intent.swmGraphId.length > 0
         ? intent.swmGraphId
@@ -1944,7 +2169,9 @@ export class StorageACKHandler {
           'UpdateIntent.isEncryptedPayload=true rejected: this core has no curation oracle wired and cannot verify the CG access policy',
         );
       }
-      const curationVerdict = await this.config.isCgCurated(cgId, swmGraphIdForCuration);
+      const curationVerdict = await this.runWhileLive(
+        () => this.config.isCgCurated!(cgId, swmGraphIdForCuration), signal,
+      );
       if (curationVerdict !== true) {
         return this.encodeDecline(
           cgId,
@@ -2007,47 +2234,18 @@ export class StorageACKHandler {
             `curated UPDATE ACK requires a positive newCatalogLeafCount; got ${claimedCatalogLeafCount}`,
           );
         }
-        // Rebuild over the SHARED committed-leaf definition (post-publish stamps
-        // stripped) so the rebuilt root is byte-identical to the producer's
-        // committed root AND the prover's later rebuild. DECLINE on disagreement.
-        const parsedCatalog = parseSimpleNQuads(
-          new TextDecoder().decode(intent.stagingQuads),
+        // Rebuild and verify the commitment exactly as the publish path does.
+        // The rotated catalog is REPLACE-persisted to `<cg>/_catalog` only
+        // after every remaining check and the signer gate below.
+        const verified = this.verifyCuratedCatalogCommitment(
+          cgId,
+          swmGraphIdForCuration,
+          intent.stagingQuads,
+          { root: intent.newCatalogRoot, leafCount: claimedCatalogLeafCount },
+          'curated UPDATE ACK',
         );
-        const committedLeaves = catalogCommittedLeaves(parsedCatalog);
-        if (committedLeaves.length === 0) {
-          return this.encodeDecline(
-            cgId,
-            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-            'curated UPDATE ACK: inline catalog parsed to zero committed leaves',
-          );
-        }
-        const rebuilt = computeCatalogRoot(committedLeaves);
-        if (rebuilt.leafCount !== claimedCatalogLeafCount) {
-          return this.encodeDecline(
-            cgId,
-            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-            `curated UPDATE ACK leaf-count mismatch: rebuilt ${rebuilt.leafCount} catalog leaves ` +
-            `but publisher claims ${claimedCatalogLeafCount}`,
-          );
-        }
-        if (!bytesEqual(rebuilt.root, intent.newCatalogRoot)) {
-          return this.encodeDecline(
-            cgId,
-            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-            `curated UPDATE ACK root mismatch: rebuilt catalog root=${ethers.hexlify(rebuilt.root).slice(0, 18)}... ` +
-            `does not match publisher claim=${ethers.hexlify(intent.newCatalogRoot).slice(0, 18)}...`,
-          );
-        }
-        // Root verified — REPLACE-persist the updated public catalog to
-        // `<cg>/_catalog` so this core serves + later proves the rotated root.
-        // `assertSafeIri` stays OUTSIDE the persist helper: an unsafe IRI is
-        // malformed-request territory (stream reset), not a store outage. A
-        // store outage during the persist returns the same transient decline
-        // as the publish handler's catalog persist (shared helper).
-        const catalogGraph = contextGraphCatalogUri(cgId);
-        assertSafeIri(catalogGraph);
-        const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
-        if (!persistedCatalog.ok) return persistedCatalog.decline;
+        if (!verified.ok) return verified.decline;
+        verifiedUpdateCatalog = verified.catalog;
       }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
@@ -2137,6 +2335,21 @@ export class StorageACKHandler {
         }
         publicUpdateFloorBasis = 'Σ UTF-8 term bytes (lower bound)';
       }
+      // A gated core keeps the update's own versioned copy plus head, like a
+      // publish copy, so it can promote the update once it lands on chain.
+      // The intent carries no access envelope, so the head records the legacy
+      // default (public, or owner-only when private triples are committed),
+      // except on a local self-ACK, which keeps the publisher's own head and
+      // its access envelope after the exact queued-head check.
+      // An embedding without the gate keeps the pre-gate behaviour.
+      const updateCopy: GraphScopedAckCopy = { ...graphUpdate, allowedPeers: [] };
+      const verifiedQuads = publicQuads;
+      const writeData = inlineByteLength !== undefined;
+      if (this.config.ensureVmPromotion) persistUpdateCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline({
+        cgId, swmGraphId, swmGraphUri, graphPublish: updateCopy, parsed: verifiedQuads,
+        publisherPeerId: peerId.toString(), merkleRoot: newMerkleRoot,
+        replaceGraph: writeData, signal, recordLedger: true, context, digest,
+      });
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {
       if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(
@@ -2282,15 +2495,36 @@ export class StorageACKHandler {
       BigInt(intent.newCatalogLeafCount ?? 0),
     );
 
-    const updateSignerGate = await this.checkSignerRegistrationOrDecline(
-      cgId,
-      'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
+    const updateSignerGate = await this.runWhileLive(
+      () => this.checkSignerRegistrationOrDecline(
+        cgId,
+        'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
+      ), signal,
     );
     if (!updateSignerGate.ok) return updateSignerGate.decline;
-
-    const signature = ethers.Signature.from(
-      await this.config.signerWallet.signMessage(digest),
-    );
+    // Finality gate for public updates, as for publishes. A curated update's
+    // guarantee is the catalog commitment verified above and persisted below.
+    if (intent.isEncryptedPayload !== true) {
+      const updatePromotionGate = await this.checkVmPromotionOrDecline({
+        contextGraphId: cgId,
+        ...(swmGraphId !== cgId ? { swmGraphId } : {}),
+        operation: 'update',
+        ...(signal ? { signal } : {}),
+      });
+      if (!updatePromotionGate.ok) return updatePromotionGate.decline;
+    }
+    if (verifiedUpdateCatalog) {
+      const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedUpdateCatalog, signal);
+      if (!persistedCatalog.ok) return persistedCatalog.decline;
+    }
+    let signature: ethers.Signature;
+    if (persistUpdateCopy) {
+      const persisted = await persistUpdateCopy(digest);
+      if (!persisted.ok) return persisted.decline;
+      signature = persisted.signature;
+    } else {
+      signature = await this.signDigestWhileLive(digest, signal);
+    }
     const MAX_UINT64 = (1n << 64n) - 1n;
     if (this.config.nodeIdentityId > MAX_UINT64) {
       throw new Error(

@@ -145,11 +145,29 @@ devnet_create_shared_ka() {
   while [ "$i" -lt "$count" ]; do
     asset=$(sed -n "$((i + 2))p" "$plan_file")
     body=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(d).body)));')
-    if ! resp=$(api_call "$node_id" POST /api/knowledge-assets "$body"); then
-      rm -f "$plan_file" "$responses_file" "$assets_file"
-      return 1
-    fi
-    if ! printf '%s' "$resp" | RESPONSES_FILE="$responses_file" node -e '
+    local attempt accepted=0 resume_share=0 share_path share_body
+    share_path=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write("/api/knowledge-assets/"+encodeURIComponent(JSON.parse(d).name)+"/swm/share"));')
+    share_body=$(printf '%s' "$body" | node -e '
+      let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+        const b=JSON.parse(d);
+        process.stdout.write(JSON.stringify({
+          contextGraphId:b.contextGraphId,
+          ...(b.subGraphName ? {subGraphName:b.subGraphName} : {}),
+          ...(typeof b.awaitCuratorAck === "boolean" ? {awaitCuratorAck:b.awaitCuratorAck} : {}),
+        }));
+      });
+    ')
+    for attempt in 1 2 3 4; do
+      if [ "$resume_share" -eq 1 ]; then
+        resp=$(api_call "$node_id" POST "$share_path" "$share_body") || {
+          rm -f "$plan_file" "$responses_file" "$assets_file"
+          return 1
+        }
+      elif ! resp=$(api_call "$node_id" POST /api/knowledge-assets "$body"); then
+        rm -f "$plan_file" "$responses_file" "$assets_file"
+        return 1
+      fi
+      if printf '%s' "$resp" | RESPONSES_FILE="$responses_file" RESUME_SHARE="$resume_share" node -e '
       const fs = require("fs");
       let d=""; process.stdin.on("data", c => d += c);
       process.stdin.on("end", () => {
@@ -159,13 +177,44 @@ devnet_create_shared_ka() {
           if (j.swmShared !== true) process.exit(1);
           if (j.publishReady !== true) process.exit(1);
           if (typeof j.shareOperationId !== "string" || j.shareOperationId.trim().length === 0) process.exit(1);
-          if (Number(j.promotedCount || 0) <= 0) process.exit(1);
+          const promoted = Number(j.promotedCount);
+          if (!Number.isFinite(promoted) || promoted < (process.env.RESUME_SHARE === "1" ? 0 : 1)) process.exit(1);
           fs.appendFileSync(process.env.RESPONSES_FILE, JSON.stringify(j) + "\n");
         } catch {
           process.exit(1);
         }
       });
     '; then
+        accepted=1
+        break
+      fi
+      # The one-shot create sealed this named KA before its SWM promotion
+      # failed. Resume only the share transition; repeating create would try
+      # to write into an already sealed draft.
+      if [ "$attempt" -lt 4 ] && printf '%s' "$resp" | RESUME_SHARE="$resume_share" node -e '
+        let d=""; process.stdin.on("data", c => d += c);
+        process.stdin.on("end", () => {
+          try {
+            const j = JSON.parse(d);
+            // A sealed asset can safely retry the share transition by name;
+            // never re-run create or depend on human-readable error wording.
+            // The loop remains bounded and accepts only a publish-ready share.
+            const retryable = process.env.RESUME_SHARE === "1"
+              ? typeof j.error === "string" && j.error.length > 0
+              : j.created === true && j.status === "wm-sealed"
+                && !j.error && Array.isArray(j.errors) && j.errors.length > 0
+                && j.errors.every((entry) => entry?.phase === "swm-share" && typeof entry.error === "string");
+            process.exit(retryable ? 0 : 1);
+          } catch { process.exit(1); }
+        });
+      '; then
+        resume_share=1
+        sleep "$((1 << (attempt - 1)))"
+        continue
+      fi
+      break
+    done
+    if [ "$accepted" -ne 1 ]; then
       printf 'devnet_create_shared_ka: /api/knowledge-assets did not return a publish-ready SWM share\n%s\n' "$resp" >&2
       rm -f "$plan_file" "$responses_file" "$assets_file"
       return 1
@@ -400,6 +449,36 @@ const fs = require("fs"); const path = require("path");
   )
 }
 
+# POST /api/query, retrying while the daemon answers with a retryable error
+# (its 503 body when read authority or the store is briefly unavailable).
+# Prints the last answer; callers must still reject an `{"error": ...}` body.
+# Since v10.0.17 an unscoped query fails on stores without all-writer
+# consistency coverage, so callers must pass contextGraphId.
+_devnet_query_with_retry() {
+  local node="$1" body="$2"
+  local attempt=1 attempts="${DEVNET_QUERY_RETRY_ATTEMPTS:-5}" resp
+  while :; do
+    resp=$(api_call "$node" POST /api/query "$body") || return 1
+    if [ "$attempt" -ge "$attempts" ] || ! printf '%s' "$resp" | node -e '
+      let d = "";
+      process.stdin.on("data", c => d += c);
+      process.stdin.on("end", () => {
+        try {
+          const j = JSON.parse(d);
+          process.exit(j.error && j.retryable === true ? 0 : 1);
+        } catch {
+          process.exit(1);
+        }
+      });
+    '; then
+      printf '%s' "$resp"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep "${DEVNET_QUERY_RETRY_DELAY_S:-3}"
+  done
+}
+
 devnet_private_roots_for_published_root() {
   local node="$1" cg="$2" root="$3"
   local body resp
@@ -417,17 +496,18 @@ devnet_private_roots_for_published_root() {
         }
       }
     `;
-    process.stdout.write(JSON.stringify({ sparql }));
+    process.stdout.write(JSON.stringify({ sparql, contextGraphId: cg }));
   ')
-  resp=$(api_call "$node" POST /api/query "$body") || return 1
+  resp=$(_devnet_query_with_retry "$node" "$body") || return 1
   printf '%s' "$resp" | node -e '
     let d = "";
     process.stdin.on("data", c => d += c);
     process.stdin.on("end", () => {
       try {
-        const j = JSON.parse(d || "{}");
-        if (j.error) throw new Error(j.error);
-        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings ?? [];
+        const j = JSON.parse(d);
+        if (j.error) throw new Error(typeof j.error === "string" ? j.error : JSON.stringify(j.error));
+        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings;
+        if (!Array.isArray(bindings)) throw new Error(`unexpected /api/query answer: ${d.slice(0, 200)}`);
         const roots = [];
         for (const row of bindings) {
           const cell = row?.privateRoot ?? row?.root;
@@ -469,17 +549,21 @@ devnet_catalog_quads_for_published_kc() {
       }
       ORDER BY ?p ?o
     `;
-    process.stdout.write(JSON.stringify({ sparql }));
+    // `?assertionGraph` is the per-author WM, SWM or VM graph of the KA (the
+    // pointer moves with each transition); a scoped GRAPH variable binds WM
+    // and SWM partitions only with includeContextGraphPartitions.
+    process.stdout.write(JSON.stringify({ sparql, contextGraphId: cg, includeContextGraphPartitions: true }));
   ')
-  resp=$(api_call "$node" POST /api/query "$body") || return 1
+  resp=$(_devnet_query_with_retry "$node" "$body") || return 1
   printf '%s' "$resp" | CG="$cg" node -e '
     let d = "";
     process.stdin.on("data", c => d += c);
     process.stdin.on("end", () => {
       try {
-        const j = JSON.parse(d || "{}");
-        if (j.error) throw new Error(j.error);
-        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings ?? [];
+        const j = JSON.parse(d);
+        if (j.error) throw new Error(typeof j.error === "string" ? j.error : JSON.stringify(j.error));
+        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings;
+        if (!Array.isArray(bindings)) throw new Error(`unexpected /api/query answer: ${d.slice(0, 200)}`);
         const subject = `did:dkg:context-graph:${process.env.CG}`;
         const quads = [];
         for (const row of bindings) {

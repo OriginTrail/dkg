@@ -283,15 +283,19 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       policyVersion: '3',
       rosterVersion: '3',
     });
+    // The provider states its cap, so the refused page is re-read in cap-sized
+    // requests rather than halves...
     expect(evidence.ranges).toEqual(expect.arrayContaining([
       [7, 30],
-      [7, 18],
-      [7, 12],
-      [13, 18],
-      [19, 30],
-      [19, 24],
-      [25, 30],
+      [7, 16],
+      [17, 26],
+      [27, 30],
     ]));
+    // ...and the cap is learned for the provider once: every later event
+    // stream starts at it instead of being refused first.
+    expect(evidence.ranges.filter(([from, to]) => from === 7 && to === 30)).toHaveLength(1);
+    expect(evidence.ranges.every(([from, to]) => (from === 7 && to === 30) || to - from + 1 <= 10))
+      .toBe(true);
   });
 
   it('anchors the legacy authority read at chain.finalityConfirmations', async () => {

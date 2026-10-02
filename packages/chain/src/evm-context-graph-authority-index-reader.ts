@@ -344,6 +344,7 @@ function authorityIndexScanInputV1(
         fromBlock,
         toBlock,
         signal: lifecycleSignal,
+        provider: input.provider,
       });
       return logs.map((log) => decodeContextGraphAuthorityIndexLog(
         input.contract.interface,

@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   OxigraphStore,
@@ -13,6 +16,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   generateKnowledgeAssetShareMetadata,
+  FileWorkspacePublicSnapshotStore,
+  snapshotReferenceCheck,
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -854,4 +859,51 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     );
     expect(stale.type === 'bindings' ? stale.bindings.map((row) => row['o']) : []).toEqual(['"stale-safe"']);
   });
+});
+
+it('holds a private recovery snapshot through the verified metadata commit', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-private-recovery-lease-'));
+  const store = new OxigraphStore();
+  const snapshots = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+    gc: { finalizedCleanupEnabled: true, finalizedRetentionMs: 0 },
+    isSnapshotReferenced: snapshotReferenceCheck(store), getAvailableBytes: async () => 100 * 1024 ** 3,
+  });
+  snapshots.stopGarbageCollection();
+  const payload: Quad[] = [{ subject: SUBJ, predicate: STATUS, object: '"restored"', graph: '' }];
+  const digest = workspacePublicQuadsDigest(payload);
+  const scope = createGraphKnowledgeAssetScope(UAL, 1);
+  const assertionGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
+  const operationId = 'private-lease-op', head = `${UAL}#dkg-swm-head`;
+  const meta: Quad[] = [
+    ...generateKnowledgeAssetShareMetadata({ shareOperationId: operationId, contextGraphId: CG,
+      kaUal: UAL, assertionVersion: 1, publicTripleCount: 1, privateTripleCount: 0,
+      publisherPeerId: 'peer-source', timestamp: new Date(0) }, WS_META),
+    { subject: `urn:dkg:share:${CG}:${operationId}`, predicate: `${DKG}publicQuadsDigest`, object: JSON.stringify(digest), graph: WS_META },
+    { subject: head, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, graph: WS_META },
+    { subject: head, predicate: `${DKG}kaUal`, object: UAL, graph: WS_META },
+    { subject: head, predicate: `${DKG}assertionVersion`, object: `"1"^^<${XSD_INTEGER}>`, graph: WS_META },
+    { subject: head, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: WS_META },
+    { subject: head, predicate: `${DKG}shareOperationId`, object: JSON.stringify(operationId), graph: WS_META },
+  ];
+  let reached!: () => void, finish!: () => void;
+  const blocked = new Promise<void>(resolve => { reached = resolve; });
+  const commit = new Promise<void>(resolve => { finish = resolve; });
+  const insert = store.insert.bind(store);
+  vi.spyOn(store, 'insert').mockImplementation(async rows => {
+    if (rows.some(q => q.predicate === `${DKG}publicQuadsDigest`)) { reached(); await commit; }
+    return insert(rows);
+  });
+  try {
+    await snapshots.putSnapshot({ digest, quads: payload });
+    await snapshots.lifecycle.markPublished([digest]);
+    const running = recoverContextGraphSwm({ ...makeDeps(store, [], meta), publicSnapshotStore: snapshots });
+    await Promise.race([blocked, running.then(() => { throw new Error('No metadata commit'); })]);
+    expect((await snapshots.collectGarbage()).deletedSnapshots).toBe(0);
+    expect(await snapshots.getSnapshot(digest)).toEqual(payload);
+    finish();
+    expect((await running).completed).toBe(true);
+    expect((await snapshots.collectGarbage()).referencedSnapshots).toBe(1);
+    await store.dropGraph(WS_META);
+    expect((await snapshots.collectGarbage()).finalizedSnapshots).toBe(1);
+  } finally { finish(); snapshots.stopGarbageCollection(); await store.close(); await rm(directory, { recursive: true, force: true }); }
 });

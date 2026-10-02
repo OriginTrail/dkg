@@ -1,5 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ApprovedPrivateReplicaAuthority } from './approved-private-replica.js';
+
+/**
+ * What could not answer when Context Graph authority is unavailable, for
+ * server-side diagnostics only (#2834): `store` is the local triple store or
+ * the metadata in it, `chain` is chain RPC or the finalized chain index,
+ * `local-state` is in-process registration or bootstrap state, and `unknown`
+ * is a failure whose error says neither.
+ */
+export type ContextGraphReadAuthorityDependency = 'store' | 'chain' | 'local-state' | 'unknown';
+
 export type LiveOnChainAccessPolicyUnavailableReason =
   | 'chain-access-policy-timeout'
   | 'chain-access-policy-unknown';
@@ -8,6 +19,8 @@ export type LiveOnChainAccessPolicyUnavailable = {
   kind: 'unavailable';
   reason: LiveOnChainAccessPolicyUnavailableReason;
   detail?: string;
+  /** Set where the failed read's own error says which dependency could not answer. */
+  dependency?: ContextGraphReadAuthorityDependency;
 };
 
 export type RegisteredContextGraphAuthorityUnavailableReason =
@@ -37,11 +50,17 @@ export type RegisteredContextGraphAuthorityUnavailable =
       reason: RegisteredContextGraphAuthorityNonPolicyUnavailableReason;
       onChainId?: bigint;
       detail?: string;
+      /** Set where the failed read's own error says which dependency could not answer. */
+      dependency?: ContextGraphReadAuthorityDependency;
     };
 
 /** Stable public contract for registered Context Graph authority state. */
 export type RegisteredContextGraphAuthority =
-  | { kind: 'unregistered' }
+  | {
+      kind: 'unregistered';
+      /** Current participant-only authority for an approved private replica. */
+      approvedPrivateReplicaAuthority?: ApprovedPrivateReplicaAuthority;
+    }
   | { kind: 'public'; onChainId: bigint }
   | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
   | RegisteredContextGraphAuthorityUnavailable;

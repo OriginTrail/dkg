@@ -242,8 +242,8 @@ describe('DKGAgent assertion promote boundary', () => {
     expect(assertionPromote).not.toHaveBeenCalled();
   });
 
-  it('forces a retry-marked post-commit observer failure to remain terminal', async () => {
-    const retryableCause = createPromoteRetryableFailure(new Error('observer failed'));
+  it('forces a retry-marked post-commit pointer failure to remain terminal', async () => {
+    const retryableCause = createPromoteRetryableFailure(new Error('pointer stamp failed'));
     const agent = promoteBoundaryAgent();
     agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
     agent.publisher = {
@@ -254,7 +254,10 @@ describe('DKGAgent assertion promote boundary', () => {
         shareOperationId: 'share-operation-1',
       }),
     };
-    agent.afterDurableSwmPromotionV1 = async () => { throw retryableCause; };
+    // The real hook runs: the canonical boundary around the stamp must not let a
+    // retry marker escape as retryable.
+    agent._stampSwmPointer = async () => { throw retryableCause; };
+    agent.scheduleRfc64SwmInventoryObserverV1 = vi.fn();
 
     const failure = await agent.assertion.promote('cg-1', 'asset-1', {
       accessPolicy: 'ownerOnly',

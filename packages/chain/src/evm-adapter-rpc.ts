@@ -18,6 +18,7 @@ import {
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { ContextGraphAuthorityIndexBootstrapUnavailableError } from
   './context-graph-authority-index-snapshot.js';
+import { EvmLogRangeUnavailableError } from './evm-log-range.js';
 export { boundedRetryFetchRequest } from './rpc-request-transport.js';
 
 /**
@@ -117,6 +118,10 @@ export function classifyRpcRetryDisposition(err: unknown): RpcRetryDisposition {
   // A failed trusted-core walk belongs to the bootstrap transport. Another RPC
   // endpoint must not multiply its complete peer/deadline/CAS budget.
   if (err instanceof ContextGraphAuthorityIndexBootstrapUnavailableError) return 'retry-later';
+  // One provider cannot serve this eth_getLogs range (history, archive or plan
+  // limit, or a span cap too small for the request budget). Another endpoint
+  // may: this must fail over whatever the provider's own error code was.
+  if (err instanceof EvmLogRangeUnavailableError) return 'failover';
   if (err instanceof Error) enrichEvmError(err);
   const code = errorCode(err);
   const status = errorStatus(err);

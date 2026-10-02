@@ -178,6 +178,8 @@ function transientDeclineRetryReason(code: string): string {
       return 'responder is still missing ciphertext chunks';
     case STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE:
       return 'responder store is saturated or temporarily unavailable';
+    case STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE:
+      return 'responder cannot yet commit to promoting the data to its verifiable memory';
     default:
       return 'the decline is retryable';
   }

@@ -51,10 +51,24 @@ describe('warm-core pinning ShardingTable gate', () => {
     },
   );
 
-  it.each([undefined, ''])('lets the phonebook role stand for a profile without an operational address (%j)', async (address) => {
+  it.each([undefined, ''])('denies a profile without an operational address when the chain can answer (%j)', async (address) => {
+    // Unsigned profiles: `nodeRole='core'` alone must not win a warm slot.
     const identity = vi.spyOn(chain, 'getIdentityIdForAddress');
-    expect(await agent.isShardingTableCore(address)).toBe(true);
+    expect(await agent.isShardingTableCore(address)).toBe(false);
     expect(identity).not.toHaveBeenCalled();
+  });
+
+  it('still lets the phonebook role stand for an address-less profile when the chain cannot answer', async () => {
+    Object.defineProperty(chain, 'isShardingTableMember', {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    });
+    try {
+      expect(await agent.isShardingTableCore(undefined)).toBe(true);
+    } finally {
+      delete (chain as unknown as Record<string, unknown>).isShardingTableMember;
+    }
   });
 
   it('pins a staked ShardingTable member', async () => {
