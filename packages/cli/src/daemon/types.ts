@@ -23,6 +23,8 @@ export interface CatchupJob {
   finishedAt?: number;
   result?: CatchupJobResult;
   error?: string;
+  /** Current registration applicability, not sticky VM verification. */
+  durablePlane?: 'required' | 'not-applicable';
   /** The verified cleartext id the job continued under (name-hash requests). */
   resolvedContextGraphId?: string;
 }
@@ -53,6 +55,7 @@ export function toCatchupStatusResponse(
     ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
     ...(job.result === undefined ? {} : { result: job.result }),
     ...(job.error === undefined ? {} : { error: job.error }),
+    ...(job.durablePlane === undefined ? {} : { durablePlane: job.durablePlane }),
     ...(graphSync === undefined ? {} : { graphSync }),
     ...(job.resolvedContextGraphId === undefined
       ? {}

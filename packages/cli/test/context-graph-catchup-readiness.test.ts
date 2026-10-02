@@ -64,8 +64,63 @@ describe('context graph catch-up readiness classification', () => {
     updatedAt: 1,
   };
 
+  const swmOnlyResult = () => catchupReadinessResult({
+    connectedPeers: 1, peersResponded: 1, peersSucceeded: 1, sharedMemorySynced: 29,
+    cleanPlaneCompletions: {
+      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 1, emptyPeers: 0 },
+    },
+  });
+
+  it.each(['denied', 'unavailable'] as const)(
+    'invalidates all readiness when completion authority is %s despite peer data and prior proof',
+    (outcome) => {
+      const classification = classifyContextGraphCatchupReadiness({
+        result: swmOnlyResult(), includeSharedMemory: true, hasConfirmedMeta: true, isPrivate: true,
+        completionAuthority: { outcome },
+        readinessBeforeCatchup: { ...swmVerifiedReadinessBeforeCatchup, durableVerified: true },
+      });
+      expect(classification).toMatchObject({
+        jobStatus: outcome === 'denied' ? 'denied' : 'unreachable', durablePlane: 'required',
+        readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+        statePatch: { synced: false, sharedMemorySynced: false, metaSynced: true, pendingMeta: false },
+      });
+      expect(classification.eventPayload).toBeUndefined();
+    },
+  );
+
+  it('classifies current qualified absence and a subsequent registration without manufacturing VM proof', () => {
+    const input = {
+      result: swmOnlyResult(), includeSharedMemory: true, hasConfirmedMeta: true, isPrivate: true,
+      readinessBeforeCatchup,
+    };
+    const unregistered = classifyContextGraphCatchupReadiness({
+      ...input, completionAuthority: { outcome: 'allowed', registration: 'unregistered' },
+    });
+    expect(unregistered).toMatchObject({ jobStatus: 'done', durablePlane: 'not-applicable' });
+    expect(unregistered.readinessPatch).toEqual({ durableVerified: false, sharedMemoryVerified: true });
+    const registered = classifyContextGraphCatchupReadiness({
+      ...input, completionAuthority: { outcome: 'allowed' },
+    });
+    expect(registered).toMatchObject({ jobStatus: 'unreachable', durablePlane: 'required' });
+    expect(registered.readinessPatch).toEqual(unregistered.readinessPatch);
+  });
+
+  it.each(['denied', 'unavailable'] as const)('preserves unchecked metadata when completion authority is %s', (outcome) => {
+    const classification = classifyContextGraphCatchupReadiness({
+      result: catchupReadinessResult(), includeSharedMemory: true,
+      hasConfirmedMeta: undefined, isPrivate: true,
+      completionAuthority: { outcome },
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
+    });
+    expect(classification.statePatch).toEqual({ synced: false, sharedMemorySynced: false });
+    expect(classification.readinessPatch).toEqual({ durableVerified: false, sharedMemoryVerified: false });
+    expect(classification.eventPayload).toBeUndefined();
+  });
+
   it('uses a clean per-peer completion even when aggregate diagnostics contain denial and timeout', () => {
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: mixedPeerResult(1),
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -99,6 +154,7 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics.durable.verifiedPrivateOnlyResponses = 1;
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -141,6 +197,7 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics.durable.deniedPhases = 0;
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -166,6 +223,7 @@ describe('context graph catch-up readiness classification', () => {
     // liveness success. That counter is deliberately not readiness evidence.
     result.peersSucceeded = 1;
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -195,6 +253,7 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.sharedMemory.completedPhases = 1;
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: true,
       hasConfirmedMeta: true,
@@ -236,6 +295,7 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.sharedMemory.emptyResponses = 1;
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: true,
       hasConfirmedMeta: true,
@@ -263,6 +323,7 @@ describe('context graph catch-up readiness classification', () => {
     const result = durableMetaOnlyResult();
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -281,6 +342,7 @@ describe('context graph catch-up readiness classification', () => {
     const result = durableMetaOnlyResult();
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: true,
       hasConfirmedMeta: true,
@@ -321,6 +383,7 @@ describe('context graph catch-up readiness classification', () => {
 
   it('persists a unanimously clean-empty round only because it was FULLY accounted', () => {
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: publicEmptyRoundResult(),
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -364,6 +427,7 @@ describe('context graph catch-up readiness classification', () => {
     mixed.diagnostics!.durable.failedPeers = 0;
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: mixed,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -390,6 +454,7 @@ describe('context graph catch-up readiness classification', () => {
     firstRun.diagnostics!.durable.failedPeers = 1;
 
     const first = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: firstRun,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -412,6 +477,7 @@ describe('context graph catch-up readiness classification', () => {
     secondRun.diagnostics!.durable.metaOnlyResponses = 1;
 
     const second = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: secondRun,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -430,6 +496,7 @@ describe('context graph catch-up readiness classification', () => {
     proven.dataSynced = 12;
     proven.cleanPlaneCompletions!.durable.verifiedDataPeers = 1;
     expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: proven,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -449,6 +516,7 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.durable.deniedPhases = 1;
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -473,6 +541,7 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.durable.failedPhases = 5;
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -494,6 +563,7 @@ describe('context graph catch-up readiness classification', () => {
     masked.diagnostics!.durable.failedPhases = 5;
 
     expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: masked,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -505,6 +575,7 @@ describe('context graph catch-up readiness classification', () => {
     const clean = publicEmptyRoundResult();
     delete clean.cleanPlaneCompletions;
     expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: clean,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -522,6 +593,7 @@ describe('context graph catch-up readiness classification', () => {
     delete lossy.cleanPlaneCompletions;
     lossy.diagnostics!.durable.failedPeers = 1;
     expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: lossy,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -536,6 +608,7 @@ describe('context graph catch-up readiness classification', () => {
 
   it('never proves a private plane from an empty round', () => {
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: publicEmptyRoundResult(),
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -568,6 +641,7 @@ describe('context graph catch-up readiness classification', () => {
 
   it('settles a registered-but-empty public graph on the curator hosted-empty round', () => {
     expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: curatorHostedEmptyResult(),
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -592,6 +666,7 @@ describe('context graph catch-up readiness classification', () => {
     mutate(result);
 
     expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -615,6 +690,7 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.sharedMemory.deniedPhases = 1;
 
     expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -630,6 +706,7 @@ describe('context graph catch-up readiness classification', () => {
     // Private planes stay proof-by-content only: an authorized-but-filtered
     // response is indistinguishable from an empty one on this side of the wire.
     expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result: curatorHostedEmptyResult(),
       includeSharedMemory: false,
       hasConfirmedMeta: true,
@@ -696,6 +773,7 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
     result: CatchupJobResult,
     over: Partial<{ includeSharedMemory: boolean; hasConfirmedMeta: boolean; isPrivate: boolean }> = {},
   ) => classifyContextGraphCatchupReadiness({
+    completionAuthority: { outcome: 'allowed' },
     result, includeSharedMemory: false, hasConfirmedMeta: true, isPrivate: false,
     readinessBeforeCatchup: before, ...over,
   });
@@ -897,6 +975,7 @@ describe('catch-up terminal status through the bridge and worker', () => {
    */
   const classify = (result: CatchupJobResult, agentConfirmsMeta = false) => (
     classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: true,
       hasConfirmedMeta: catchupResultHasCleanResponse(result) && agentConfirmsMeta,

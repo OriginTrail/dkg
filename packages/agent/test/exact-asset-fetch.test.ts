@@ -265,7 +265,9 @@ describe('exact Context Graph asset fetch', () => {
       [NAME_HASH],
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(whenIdle).toHaveBeenCalledTimes(2);
+    // Exact fetch retains its own physical authorization fence; registration
+    // discovery no longer registers an unrelated global reader drain.
+    expect(whenIdle).toHaveBeenCalledOnce();
     expect(legacyLookup).not.toHaveBeenCalled();
     expect(flush).toHaveBeenCalledTimes(1);
     expect(subscription.lastReconciledOrdinal).toBe(77);

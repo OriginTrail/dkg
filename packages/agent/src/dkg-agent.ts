@@ -2894,7 +2894,12 @@ export class DKGAgent extends DKGAgentBase {
     if (dispatcherDrain) drains.push(dispatcherDrain);
 
     let retirement!: Promise<void>;
-    retirement = Promise.allSettled(drains).then(() => {
+    retirement = Promise.allSettled(drains).then(async () => {
+      // All agent-owned producers are fenced and physically drained before
+      // sampling the reader's GLOBAL activity. Its idle boundary also owns
+      // detached adapter work, including readers without snapshots.close().
+      // Never attach this unrelated global drain to individual read results.
+      await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
       if (this.vmReconcileScheduling === vmReconcileScheduling) {
         this.vmReconcileScheduling = undefined;
       }
