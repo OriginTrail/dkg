@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Logger, type CanonicalLogRecord, type OperationContext } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CclResourceNotFoundError,
@@ -423,6 +424,80 @@ describe('/api/query request lifecycle', () => {
       expect(tracker.fail).toHaveBeenCalledTimes(outcome === 'indeterminate' ? 1 : 0);
     }
   });
+
+  it.each([
+    {
+      contextGraphId: 'registered-public',
+      source: 'registered-chain',
+      reason: 'chain-access-policy-timeout',
+    },
+    {
+      contextGraphId: 'unknown-graph',
+      source: 'legacy-local',
+      reason: 'pending-authoritative-metadata',
+    },
+  ])(
+    'maps unavailable read authority to one retryable response without exposing $source details',
+    async ({ contextGraphId, source, reason }) => {
+      const req = new RequestStub({
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+        contextGraphId,
+      });
+      const res = new ResponseStub();
+      const tracker = {
+        start: vi.fn(),
+        startPhase: vi.fn(),
+        completePhase: vi.fn(),
+        complete: vi.fn(),
+        fail: vi.fn(),
+        cancel: vi.fn(),
+      };
+      const authorityUnavailable = Object.assign(
+        new Error(`Internal authority detail for ${contextGraphId}`),
+        {
+          code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+          retryable: true,
+          contextGraphId,
+          source,
+          reason,
+          dependency: 'store',
+        },
+      );
+      const records: CanonicalLogRecord[] = [];
+      Logger.setSink((record) => { records.push(record); });
+      const quiet = [
+        vi.spyOn(process.stdout, 'write').mockImplementation(() => true),
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true),
+      ];
+
+      try {
+        await handleQueryRoutes(queryRouteContext(req, res, {
+          query: vi.fn(async () => { throw authorityUnavailable; }),
+        }, tracker));
+      } finally {
+        Logger.setSink(null);
+        for (const spy of quiet) spy.mockRestore();
+      }
+
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['Retry-After']).toBe('3');
+      expect(JSON.parse(res.body)).toEqual({
+        error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+        code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+        retryable: true,
+      });
+      expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), authorityUnavailable);
+      expect(tracker.cancel).not.toHaveBeenCalled();
+      expect(tracker.complete).not.toHaveBeenCalled();
+      // #2834: the response names the tracked operation, whose log line carries the attribution.
+      const tracked = tracker.start.mock.calls[0]![0] as OperationContext;
+      expect(res.headers['x-dkg-operation-id']).toBe(tracked.operationId);
+      const lines = records.filter((record) => record.operationId === tracked.operationId);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.message).toContain(`source=${source} reason=${reason} dependency=store`);
+      expect(lines[0]!.message).not.toContain(contextGraphId);
+    },
+  );
 
   it('maps a GenUI entity-query store timeout through the route as retryable 503', async () => {
     const req = new RequestStub({

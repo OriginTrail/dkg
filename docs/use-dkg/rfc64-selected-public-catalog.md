@@ -159,6 +159,15 @@ RFC-64 rollout configuration is snapshotted during daemon startup. Changes to
 provider bindings require a daemon restart. Finalized public VM reconciliation
 remains chain-inventoried in every per-CG mode.
 
+Release-native chain authority retains the exact event block number and hash in
+the policy object as auditable provenance. When an operator-selected authority
+anchor can include a non-consensus-final event, a reorg can therefore give the
+same logical authority generation a different `policyDigest`. Peers fail closed
+while their accepted digests differ. The recurring authoritative refresh may
+replace the orphaned source coordinates at the same policy era/version only
+when every other policy field and the complete roster generation are unchanged;
+any semantic change still requires the ordinary monotonic high-water advance.
+
 The example shows structure only. Do not invent or copy placeholder control
 values. The complete `policyEnvelope` must be the output of an independent
 finality/policy verifier. The daemon validates the canonical policy before the
@@ -305,9 +314,19 @@ independently. Bootstrap targets for eligible but unsubscribed CGs report
 
 The same block exposes `authorityRpcCircuit`, containing only `state`,
 `consecutiveExhaustions`, and `retryAtMs`. `open` means authority reads are
-cooling down after all configured RPC endpoints were exhausted; `half-open`
-means one recovery probe is in flight; `closed` is normal. This status omits
-endpoint URLs, RPC payloads, and graph identifiers.
+cooling down after all configured RPC endpoints were exhausted. `half-open`
+means the cooldown has elapsed while an exhaustion is still outstanding:
+recovery is not proven until an authority read actually reaches a provider, so
+the node reports `half-open` from the retry deadline onward whether or not a
+probe is running — an idle node stays there until its next scheduled authority
+read. `closed` is normal. This status omits endpoint URLs, RPC payloads, and
+graph identifiers.
+
+A brief `half-open` after each exhaustion is expected. Treat it as a signal
+only when it persists across several refresh intervals on a node that is
+actively syncing registered graphs: that means authority reads keep failing to
+reach the pool, and `consecutiveExhaustions` shows how far the backoff has
+escalated.
 
 ```json
 {
@@ -374,6 +393,7 @@ catalog is configured:
   "rfc64SelectedPublicSync": {
     "defaultEnabled": true,
     "requestedContextGraphs": ["0x.../selected-public-cg"],
+    "requestedContextGraphCount": 1,
     "catalogBackedContextGraphs": []
   }
 }
@@ -382,7 +402,14 @@ catalog is configured:
 `requestedContextGraphs` is the agent's live explicit scheduling scope. Entries
 are not classified as public merely by appearing there: the public-CG catch-up
 boundary applies selected scheduling, while the private-CG boundary ignores it
-and retains curator recovery.
+and retains curator recovery. Each shared-memory request of a public-CG
+catch-up job checks, when it starts, that an accepted RFC-64 public policy
+admits the selected lane for that CG; if none does, that request is recorded
+as not attempted rather than as a peer failure. `/api/status` needs no token,
+so only a request with the node-operator token (or any request when API auth
+is off) gets the whole scope; any other request gets only the entries that are
+also in `catalogBackedContextGraphs`.
+`requestedContextGraphCount` is the size of the whole scope either way.
 
 ### Repair an existing public graph
 

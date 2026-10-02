@@ -12,6 +12,8 @@ import {
   contextGraphMetaUri,
   contextGraphWorkspaceTopic,
   SWM_SENDER_KEY_MESSAGE_TYPE,
+  PROTOCOL_SWM_SENDER_KEY,
+  PROTOCOL_SWM_UPDATE,
   type OperationContext,
   type SwmSenderKeyMessageMsg,
 } from '@origintrail-official/dkg-core';
@@ -280,10 +282,10 @@ describe('DKGAgent SWM gossip signing', () => {
       return resolution;
     };
 
-    const reliableSends: Array<{ peerId: string; payload: Uint8Array }> = [];
+    const reliableSends: Array<{ peerId: string; protocolId: string; payload: Uint8Array }> = [];
     (agent as unknown as { messenger: object }).messenger = {
-      sendReliable: async (peerId: string, _protocol: string, payload: Uint8Array) => {
-        reliableSends.push({ peerId, payload });
+      sendReliable: async (peerId: string, protocolId: string, payload: Uint8Array) => {
+        reliableSends.push({ peerId, protocolId, payload });
         return {
           delivered: true,
           response: new Uint8Array(),
@@ -302,12 +304,15 @@ describe('DKGAgent SWM gossip signing', () => {
     await agent.awaitInFlightSubstrateFanOuts();
 
     expect(resolverCalls).toBe(1);
-    expect(reliableSends).toHaveLength(1);
-    expect(reliableSends[0]?.peerId).toBe(SNAPSHOT_PEER_A);
+    const senderKeySends = reliableSends.filter(({ protocolId }) => protocolId === PROTOCOL_SWM_SENDER_KEY);
+    const workspaceSends = reliableSends.filter(({ protocolId }) => protocolId === PROTOCOL_SWM_UPDATE);
+    expect(senderKeySends).toHaveLength(1);
+    expect(workspaceSends).toHaveLength(1);
+    expect(workspaceSends[0]?.peerId).toBe(SNAPSHOT_PEER_A);
     expect(reliableSends.some((send) => send.peerId === SNAPSHOT_PEER_B)).toBe(false);
     expect(gossip.messages).toEqual([]);
 
-    const envelope = decodeGossipEnvelope(reliableSends[0]!.payload);
+    const envelope = decodeGossipEnvelope(workspaceSends[0]!.payload);
     const encrypted = decodeSwmSenderKeyMessage(envelope.payload);
     expect(encrypted.type).toBe(SWM_SENDER_KEY_MESSAGE_TYPE);
     expect(encrypted.contextGraphId).toBe(contextGraphId);

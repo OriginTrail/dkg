@@ -97,7 +97,7 @@ import {
   isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryReplaceSubjectAtomically, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -877,8 +877,12 @@ export class JoinRequestMethods extends DKGAgentBase {
     }
     // This is a total private-recipient cap, not merely an allowlist-row cap:
     // participant agents receive ciphertext keys and private read authority too.
-    // Use the fresh authoritative union (allowed + participant - revoked).
-    const activeMembers = await this.getMemberRecoveryGate(contextGraphId) ?? [];
+    // Preserve the finalized chain roster for registered private graphs;
+    // unregistered graphs use the effective store-backed metadata union.
+    const activeMembers = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.joinPolicyRoster,
+      () => this.getMemberRecoveryRosterSource(contextGraphId),
+    ) ?? [];
     return {
       ownerDid,
       ownerAgentAddress,
@@ -1083,6 +1087,7 @@ export class JoinRequestMethods extends DKGAgentBase {
           OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?opKey }
         }
       } LIMIT 1`,
+      { source: 'agent.delegationRefresh.currentState' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return;
 
@@ -1171,7 +1176,10 @@ export class JoinRequestMethods extends DKGAgentBase {
       isPolicyDisableRequested: (contextGraphId) =>
         (this.contextGraphJoinPolicyDisableIntentCounts.get(contextGraphId) ?? 0) > 0,
       getContextGraphMeta: (contextGraphId) => this.getCgMeta(contextGraphId),
-      getActiveMembers: (contextGraphId) => this.getMemberRecoveryGate(contextGraphId),
+      getActiveMembers: (contextGraphId) => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.joinAdmissionRoster,
+        () => this.getMemberRecoveryRosterSource(contextGraphId),
+      ),
       getContextGraphOwner: (contextGraphId) => this.getContextGraphOwner(contextGraphId),
       resolveLocalOwnerAddress: (ownerDid) => this.resolveLocalJoinPolicyOwnerAddress(ownerDid),
       assertAlreadyMemberDelegationRefresh: (contextGraphId, delegation, carrierPeerId) =>
@@ -2582,8 +2590,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (!resolvedGeneration) {
       throw new Error(`Cannot notify join approval without a valid request generation`);
     }
+    // The outbox replays these bytes verbatim, so a binding missing here is
+    // missing for good; this read is admitted even while the circuit is open.
     const curatorBinding = await this.readRfc64CurrentCuratorAuthorityBindingV1(
       contextGraphId,
+      { admitWhileOpen: true },
     ).catch(() => null);
     const payload = JSON.stringify({
       type: 'join-approved',
@@ -2672,8 +2683,11 @@ export class JoinRequestMethods extends DKGAgentBase {
           `approved request has no valid generation; ask the joiner to re-submit.`,
       );
     }
+    // The outbox replays these bytes verbatim, so a binding missing here is
+    // missing for good; this read is admitted even while the circuit is open.
     const curatorBinding = await this.readRfc64CurrentCuratorAuthorityBindingV1(
       contextGraphId,
+      { admitWhileOpen: true },
     ).catch(() => null);
     const payload = JSON.stringify({
       type: 'join-approved',

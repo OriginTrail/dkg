@@ -90,6 +90,8 @@
 # Optional env vars:
 #   SWM_CG_CURATED   comma-separated curated CG ids (default: empty)
 #   SWM_CG_PUBLIC    comma-separated public CG ids   (default: empty)
+#   SWM_SUBGRAPH_NAME optional named subgraph to exercise the legacy SWM
+#                    fan-out lane on catalog-owned context graphs
 #   SWM_INTERVAL_S   start-to-start cycle cadence in seconds
 #                    (default: 30). Wall-clock spacing between
 #                    successive cycle starts — per-cycle work
@@ -102,6 +104,8 @@
 #                    work, so a 12h × 30s soak actually took
 #                    closer to 15h.
 #   SWM_TOTAL_CYCLES number of write cycles          (default: 1440)
+#   SWM_SETTLE_S     time for late inbound delivery after writes
+#                    (default: 300 seconds)
 #   PEERS_EXPECTED   comma-separated peer tags (other ops) for
 #                    per-peer delivery breakdown in summary. When
 #                    set, the script requires an explicit
@@ -161,8 +165,14 @@ done
 
 SWM_CG_CURATED="${SWM_CG_CURATED:-}"
 SWM_CG_PUBLIC="${SWM_CG_PUBLIC:-}"
+SWM_SUBGRAPH_NAME="${SWM_SUBGRAPH_NAME:-}"
 SWM_INTERVAL_S="${SWM_INTERVAL_S:-30}"
 SWM_TOTAL_CYCLES="${SWM_TOTAL_CYCLES:-1440}"
+SWM_SETTLE_S="${SWM_SETTLE_S:-300}"
+if ! grep -Eq '^[0-9]+$' <<<"$SWM_SETTLE_S"; then
+  echo "ERROR: SWM_SETTLE_S must be a non-negative integer" >&2
+  exit 64
+fi
 # Codex PR #572 R7 (round 3): SENDER_TAG previously defaulted to
 # "MILES", which means two operators who forget to override the
 # default collapse their writes into one sender set in the tally,
@@ -246,7 +256,7 @@ fi
 # depending on backend. Constrain to a portable identifier shape
 # now rather than spend hours debugging missing peers in the
 # tally after the fact.
-if ! printf '%s' "$SENDER_TAG" | grep -Eq '^[A-Za-z0-9_-]{1,32}$'; then
+if ! grep -Eq '^[A-Za-z0-9_-]{1,32}$' <<<"$SENDER_TAG"; then
   echo "ERROR: SENDER_TAG must match ^[A-Za-z0-9_-]{1,32}$ (got: '${SENDER_TAG}')." >&2
   echo "       The tag is interpolated into subject URIs of the form" >&2
   echo "         urn:swm-soak:<TAG>:<seq>" >&2
@@ -343,6 +353,7 @@ write_one_share() {
 import json
 print(json.dumps({
   'contextGraphId': '$cgId',
+  **({'subGraphName': '$SWM_SUBGRAPH_NAME'} if '$SWM_SUBGRAPH_NAME' else {}),
   'name': ('swm-soak-' + ''.join(c if c.isalnum() or c in '-_.' else '-' for c in '$RUN_ID-$seq'))[:120],
   'quads': [{
     'subject': '$subject',
@@ -397,11 +408,29 @@ except: print('fail')
   log "  write cg=$cgId seq=$seq → $ok"
 }
 
+validate_query_response() {
+  local response=$1 label=$2
+  printf '%s' "$response" | python3 -c '
+import json, sys
+label = sys.argv[1]
+try:
+  data = json.load(sys.stdin)
+except (ValueError, OSError) as error:
+  sys.exit(f"{label}: invalid query response: {error}")
+result = data.get("result") if isinstance(data, dict) else None
+if not isinstance(result, dict) or not isinstance(result.get("bindings"), list):
+  detail = data.get("error", data) if isinstance(data, dict) else data
+  sys.exit(f"{label}: query did not return bindings: {detail}")
+' "$label"
+}
+
 snapshot_swm_inbox() {
-  # SPARQL the SWM graph for each configured CG. Counts:
+  # Query the scoped SWM view for each configured CG. SWM uses per-KA
+  # named graphs, so an explicit bare /_shared_memory GRAPH misses data.
+  # Counts:
   #   - total tagged quads (any sender)
   #   - per-sender breakdown (sender tag extracted from subject URI)
-  # SELECT against the SWM named graph. The "tag" is extracted from
+  # The "tag" is extracted from
   # the subject pattern urn:swm-soak:<TAG>:<seq>.
   #
   # Codex PR #572 R8 (round 3): filter on the shared cohort id
@@ -417,19 +446,16 @@ snapshot_swm_inbox() {
   # no skew dependency.
   local label=$1 cgId=$2 ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  local swm_graph="did:dkg:context-graph:${cgId}/_shared_memory"
   local sparql
   sparql=$(cat <<SPARQL
 SELECT DISTINCT ?s WHERE {
-  GRAPH <${swm_graph}> {
-    ?s <urn:swm-soak:sentBy>   ?tag ;
-       <urn:swm-soak:cohortId> "${SOAK_COHORT_ID}" .
-  }
+  ?s <urn:swm-soak:sentBy>   ?tag ;
+     <urn:swm-soak:cohortId> "${SOAK_COHORT_ID}" .
 }
 SPARQL
 )
   local body resp
-  body=$(python3 -c "import json; print(json.dumps({'sparql': '''$sparql''', 'contextGraphId': '$cgId'}))")
+  body=$(python3 -c "import json; print(json.dumps({'sparql': '''$sparql''', 'contextGraphId': '$cgId', 'view': 'shared-working-memory', **({'subGraphName': '$SWM_SUBGRAPH_NAME'} if '$SWM_SUBGRAPH_NAME' else {})}))")
   resp=$(curl -s --max-time 30 -X POST "$API/api/query" \
     -H "Authorization: Bearer $AUTH" \
     -H "Content-Type: application/json" \
@@ -437,6 +463,7 @@ SPARQL
   printf '{"label":"%s","cgId":"%s","ts":"%s","data":%s}\n' \
     "$label" "$cgId" "$ts" "${resp:-{\"error\":\"empty response\"\}}" \
     >> "$LOG_DIR/swm-inbox.jsonl"
+  validate_query_response "$resp" "SWM inbox cg=$cgId label=$label" || return 1
   local summary
   summary=$(printf '%s' "$resp" | python3 -c "
 import json, re, sys, os
@@ -616,6 +643,7 @@ print(n)
 import json
 print(json.dumps({
   'contextGraphId': '$cgId',
+  **({'subGraphName': '$SWM_SUBGRAPH_NAME'} if '$SWM_SUBGRAPH_NAME' else {}),
   'name': ('swm-soak-summary-' + ''.join(c if c.isalnum() or c in '-_.' else '-' for c in '$RUN_ID'))[:120],
   'quads': [{
     'subject': '$subject',
@@ -665,26 +693,23 @@ except: print('fail')
 }
 
 snapshot_writes_accepted_summaries() {
-  # SPARQL the SWM graph for writes-accepted summary tombstones
+  # Query the scoped SWM view for writes-accepted summary tombstones
   # from EVERY peer in the cohort (including self). Receivers
   # consume the resulting jsonl to populate the per-peer
   # denominator in the final tally.
   local cgId=$1 ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  local swm_graph="did:dkg:context-graph:${cgId}/_shared_memory"
   local sparql
   sparql=$(cat <<SPARQL
 SELECT ?s ?tag ?writesAccepted WHERE {
-  GRAPH <${swm_graph}> {
-    ?s <urn:swm-soak:cohortId>      "${SOAK_COHORT_ID}" ;
-       <urn:swm-soak:sentBy>        ?tag ;
-       <urn:swm-soak:writesAccepted> ?writesAccepted .
-  }
+  ?s <urn:swm-soak:cohortId>      "${SOAK_COHORT_ID}" ;
+     <urn:swm-soak:sentBy>        ?tag ;
+     <urn:swm-soak:writesAccepted> ?writesAccepted .
 }
 SPARQL
 )
   local body resp
-  body=$(python3 -c "import json; print(json.dumps({'sparql': '''$sparql''', 'contextGraphId': '$cgId'}))")
+  body=$(python3 -c "import json; print(json.dumps({'sparql': '''$sparql''', 'contextGraphId': '$cgId', 'view': 'shared-working-memory', **({'subGraphName': '$SWM_SUBGRAPH_NAME'} if '$SWM_SUBGRAPH_NAME' else {})}))")
   resp=$(curl -s --max-time 30 -X POST "$API/api/query" \
     -H "Authorization: Bearer $AUTH" \
     -H "Content-Type: application/json" \
@@ -692,6 +717,7 @@ SPARQL
   printf '{"cgId":"%s","ts":"%s","data":%s}\n' \
     "$cgId" "$ts" "${resp:-{\"error\":\"empty response\"\}}" \
     >> "$LOG_DIR/writes-accepted-summaries-observed.jsonl"
+  validate_query_response "$resp" "writes-accepted summaries cg=$cgId" || return 1
 }
 
 split_cgs() {
@@ -729,7 +755,7 @@ log "  log_dir=$LOG_DIR"
 log "  pid=$$"
 log ""
 log "Baseline SLO + inbox snapshot (before first write):"
-for cg in "${ALL_CGS[@]}"; do snapshot_swm_inbox "baseline" "$cg"; done
+for cg in "${ALL_CGS[@]}"; do snapshot_swm_inbox "baseline" "$cg" || exit 1; done
 snapshot_slo "baseline"
 log ""
 
@@ -757,7 +783,7 @@ for seq in $(seq 1 "$SWM_TOTAL_CYCLES"); do
   done
   sleep 5
   for cg in "${ALL_CGS[@]}"; do
-    snapshot_swm_inbox "post-cycle-$seq" "$cg"
+    snapshot_swm_inbox "post-cycle-$seq" "$cg" || exit 1
   done
   snapshot_slo "post-cycle-$seq"
   if [ "$seq" -lt "$SWM_TOTAL_CYCLES" ]; then
@@ -780,10 +806,10 @@ log ""
 log "Publishing per-peer writes-accepted tombstone before settle window..."
 for cg in "${ALL_CGS[@]}"; do emit_writes_accepted_summary "$cg"; done
 
-log "All cycles done. Waiting 5min for any late inbound to settle (gossip mesh, substrate retries, runSyncOnConnect catch-up)..."
-sleep 300
-for cg in "${ALL_CGS[@]}"; do snapshot_swm_inbox "final" "$cg"; done
-for cg in "${ALL_CGS[@]}"; do snapshot_writes_accepted_summaries "$cg"; done
+log "All cycles done. Waiting ${SWM_SETTLE_S}s for any late inbound to settle (gossip mesh, substrate retries, runSyncOnConnect catch-up)..."
+sleep "$SWM_SETTLE_S"
+for cg in "${ALL_CGS[@]}"; do snapshot_swm_inbox "final" "$cg" || exit 1; done
+for cg in "${ALL_CGS[@]}"; do snapshot_writes_accepted_summaries "$cg" || exit 1; done
 snapshot_slo "final"
 
 log ""
@@ -824,7 +850,7 @@ export SWM_SUMMARY_PEERS_EXPECTED="$PEERS_EXPECTED"
 export SWM_SUMMARY_ALL_CGS_CSV="$ALL_CGS_CSV"
 export SWM_SUMMARY_TOTAL_CYCLES="$SWM_TOTAL_CYCLES"
 python3 <<'PYTHON' | tee -a "$LOG_DIR/main.log"
-import json, os, re
+import json, os, re, sys
 log_dir = os.environ["SWM_SUMMARY_LOG_DIR"]
 self_tag = os.environ["SWM_SUMMARY_SENDER_TAG"]
 peers_expected = [p.strip() for p in os.environ.get("SWM_SUMMARY_PEERS_EXPECTED", "").split(',') if p.strip()]
@@ -868,6 +894,10 @@ try:
         if isinstance(tag_v, dict): tag_v = tag_v.get('value', '')
         wa_v = r.get('writesAccepted', '')
         if isinstance(wa_v, dict): wa_v = wa_v.get('value', '')
+        # /api/query normalizes RDF literals as N-Triples strings ("tag",
+        # "10"); direct SPARQL adapters may return the unquoted values.
+        if isinstance(tag_v, str): tag_v = tag_v.strip('"')
+        if isinstance(wa_v, str): wa_v = wa_v.strip('"')
         if not tag_v: continue
         try: wa_int = int(wa_v)
         except (TypeError, ValueError): continue
@@ -969,22 +999,28 @@ def denominator_for(cg, tag):
 # somehow show up in the inbox without being configured (defense
 # in depth).
 report_cgs = sorted(set(all_cgs_configured) | set(by_cg_final.keys()))
+ship_ok = bool(report_cgs)
 for cg in report_cgs:
   by_tag = by_cg_final.get(cg, {})
   if cg not in by_cg_final:
     print(f'  cg={cg}: [no `final` SWM-inbox rows observed for this CG — INDETERMINATE; total transport failure or final SPARQL errored]')
+    ship_ok = False
   else:
     print(f'  cg={cg}:')
   src, denom, ok = denominator_for(cg, self_tag)
   got = len(by_tag.get(self_tag, set()))
   if not ok:
     print(f'    self ({self_tag}): {got} observed (no local writes.jsonl — INDETERMINATE)')
+    ship_ok = False
   elif denom == 0:
     print(f'    self ({self_tag}): {got}/0 — no accepted writes recorded locally for this CG (script wrote nothing here)')
+    ship_ok = False
   else:
     pct = (got / denom * 100.0) if denom else 0.0
     sanity = '' if got == denom else f'  [WARN: observed {got} self-shares but accepted {denom} locally]'
     print(f'    self ({self_tag}): {got}/{denom} = {pct:.2f}% (denom=local writes.jsonl){sanity}')
+    if got != denom:
+      ship_ok = False
 
   others_seen = sorted(t for t in by_tag if t != self_tag)
   reportable = peers_expected if peers_expected else others_seen
@@ -993,18 +1029,29 @@ for cg in report_cgs:
     src, denom, ok = denominator_for(cg, peer)
     if not ok:
       print(f'    from {peer}: {got} observed (no writes-accepted tombstone in cg — INDETERMINATE; review writes-accepted-summaries-observed.jsonl)')
+      ship_ok = False
       continue
     if denom == 0:
       print(f'    from {peer}: {got}/0 — peer reported zero accepted writes for this CG (peer ran but did not write here)')
+      ship_ok = False
       continue
     pct = (got / denom * 100.0) if denom else 0.0
     ship_gate = '' if pct >= 99.9 else '  [BELOW 99.9% — review postmortem]'
     print(f'    from {peer}: {got}/{denom} = {pct:.2f}% (denom=peer tombstone){ship_gate}')
+    if pct < 99.9:
+      ship_ok = False
   if peers_expected:
     unexpected = [t for t in others_seen if t not in peers_expected]
     if unexpected:
       print(f'    unexpected senders observed: {unexpected}')
+print(f'  VERDICT: {"PASS" if ship_ok else "FAIL"}')
+sys.exit(0 if ship_ok else 1)
 PYTHON
+summary_rc=$?
+if [ "$summary_rc" -ne 0 ]; then
+  log "SWM delivery gate failed (summary exit=$summary_rc)"
+  exit "$summary_rc"
+fi
 log ""
 log "Detailed logs:"
 log "  writes:                          $LOG_DIR/writes.jsonl"

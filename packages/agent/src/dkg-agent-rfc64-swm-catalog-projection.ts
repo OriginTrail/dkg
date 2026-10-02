@@ -200,7 +200,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
       asset,
       deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-      peers: lane.announcementPeers,
+      peers: this.resolveRfc64CatalogAnnouncementPeersV1(lane.announcementPeers),
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     });
@@ -329,14 +329,15 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       throwIfAbortedV1(params.signal);
       const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
         snapshot,
-        resolveAsset: (row) => resolveRfc64InventoryWorkspaceCatalogAssetV1({
+        signal: params.signal,
+        resolveAsset: (row, signal) => resolveRfc64InventoryWorkspaceCatalogAssetV1({
           store: this.store,
           publicSnapshotStore: this.publicSnapshotStore,
           contextGraphId: params.contextGraphId,
           authorAddress: params.authorAddress,
           laneKind: lane.kind,
           row,
-          signal: params.signal,
+          signal,
         }),
       });
       throwIfAbortedV1(params.signal);
@@ -353,7 +354,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           ),
           assets: prepared.assets,
           deployment,
-          peers: lane.announcementPeers,
+          peers: this.resolveRfc64CatalogAnnouncementPeersV1(lane.announcementPeers),
           catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
           catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
           targetPolicy: lane.projectionTargetPolicy,

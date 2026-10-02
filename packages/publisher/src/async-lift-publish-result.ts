@@ -165,7 +165,7 @@ function readPublishErrorFacts(error: unknown): { code: unknown; message: string
  * drifted would silently change the outcome depending on where the error surfaced:
  *   1. the failed-from STATE (`isKnowledgeAssetPublishPreconditionFailure`) — this is raised
  *      before any send, so the job must fail from 'validated', not 'broadcast';
- *   2. the failure CODE on that validated path (`recordExecutionFailure`), whose keyword
+ *   2. the failure CODE on that validated path (`mapExecutionFailure`), whose keyword
  *      chain would otherwise reach `canonicalization_failed`;
  *   3. the failure CODE on the broadcast path ({@link mapPublishExceptionToLiftJobFailure}),
  *      whose default is the RETRYABLE `rpc_unavailable` — the forever-retry trap.

@@ -1,0 +1,39 @@
+diff --git a/dist/src/stream.d.ts b/dist/src/stream.d.ts
+index 8f3f4741b616d9b20e710153a5adaca9bcc21730..0d3bab30616cceaccc86c5b623016865e5959c0c 100644
+--- a/dist/src/stream.d.ts
++++ b/dist/src/stream.d.ts
+@@ -48,7 +48,7 @@ export declare class YamuxStream extends AbstractStream {
+     /**
+      * Send a reset message to the remote muxer
+      */
+-    sendReset(): Promise<void>;
++    sendReset(): void;
+     /**
+      * Send a message to the remote muxer, informing them no more data messages
+      * will be sent by this end of the stream
+diff --git a/dist/src/stream.js b/dist/src/stream.js
+index 531336b4fb787db7263a1c6759a55324782fa788..f724a3ed70988c1115523e68eb39cb4fa2792092 100644
+--- a/dist/src/stream.js
++++ b/dist/src/stream.js
+@@ -95,7 +95,7 @@ export class YamuxStream extends AbstractStream {
+     /**
+      * Send a reset message to the remote muxer
+      */
+-    async sendReset() {
++    sendReset() {
+         this.sendFrame({
+             type: FrameType.WindowUpdate,
+             flag: Flag.RST,
+diff --git a/src/stream.ts b/src/stream.ts
+index 8c46f2ef01d43b2aeb92618fc30f479f977e07d2..530ac380dccd9fd24ef996eb1ed0233e0c2e86e3 100644
+--- a/src/stream.ts
++++ b/src/stream.ts
+@@ -127,7 +127,7 @@ export class YamuxStream extends AbstractStream {
+   /**
+    * Send a reset message to the remote muxer
+    */
+-  async sendReset (): Promise<void> {
++  sendReset (): void {
+     this.sendFrame({
+       type: FrameType.WindowUpdate,
+       flag: Flag.RST,

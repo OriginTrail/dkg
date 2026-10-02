@@ -17,12 +17,17 @@
 import type { Quad, QueryResult } from '@origintrail-official/dkg-storage';
 import {
   PROMOTE_JOB_STATES,
+  type PromoteAttemptError,
   type PromoteCommitMarker,
   type PromoteJob,
   type PromoteJobState,
   type PromoteLease,
   type PromoteRequest,
 } from './async-promote-queue-types.js';
+import {
+  PROMOTE_POST_COMMIT_FAILURE_CODE,
+  PROMOTE_POST_COMMIT_FAILURE_MESSAGE,
+} from './promote-replay-safety.js';
 
 export const DEFAULT_PROMOTE_CONTROL_GRAPH_URI = 'urn:dkg:promote-queue:control-plane';
 
@@ -355,6 +360,24 @@ export function parseJobPayload(binding: string | undefined): PromoteJob | null 
   // not a recognized value is skipped by the list/read/conflict paths. The cast is honest only
   // once the membership check has passed (state is provably a PromoteJobState here).
   return (PROMOTE_JOB_STATES as readonly string[]).includes(result.job.state) ? (result.job as PromoteJob) : null;
+}
+
+/**
+ * True when a recorded attempt failure is the publisher's post-commit
+ * disposition. Rows written by a worker that persists the diagnostic code are
+ * matched structurally; older rows carry no code and are recognized only by
+ * the producer's fixed message. A row whose code names a different
+ * diagnostic never matches, whatever its message says.
+ */
+export function isPromotePostCommitAttemptError(error: PromoteAttemptError | undefined): boolean {
+  if (!error) return false;
+  if (error.diagnosticCode !== undefined) return error.diagnosticCode === PROMOTE_POST_COMMIT_FAILURE_CODE;
+  return error.message === PROMOTE_POST_COMMIT_FAILURE_MESSAGE;
+}
+
+/** Stable `reason` the sweep writes once a post-commit replay budget is spent. */
+export function postCommitRecoveryExhaustedReason(attempts: number): string {
+  return `automatic post-commit recovery exhausted after ${attempts} attempts; needs operator inspection`;
 }
 
 /**

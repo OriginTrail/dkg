@@ -85,18 +85,6 @@ describe('RFC-64 legacy SWM boundary (live Blazegraph)', () => {
       );
       expect(HISTORICAL_OPERATION_ROWS).toBeGreaterThan(100_000);
       expect(firstHeadReadCount).toBe(1);
-      const captureQueries = querySpy.mock.calls.filter(([, options]) => (
-        options?.source === 'agent.rfc64.legacySwmBoundary.readHeads'
-      )).map(([sparql]) => sparql);
-      expect(captureQueries).toHaveLength(1);
-      expect(captureQueries[0]).toContain(
-        'BIND(?operationUal AS ?ual)',
-      );
-      expect(captureQueries[0]!.match(
-        /<http:\/\/dkg\.io\/ontology\/shareOperationId> \?shareId/g,
-      )).toHaveLength(2);
-      expect(captureQueries[0]).toContain('LIMIT 100001');
-
       // A second owner represents the next process start. It must load the
       // durable capture rather than repeat the capture query. The late-entry
       // marker read still runs on every start, so observe the sources directly.

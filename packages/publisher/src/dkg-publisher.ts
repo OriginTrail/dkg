@@ -1,3 +1,4 @@
+import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -22,7 +23,7 @@ import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
-  createPromotePostCommitFailure,
+  classifyPromoteCompanionSettlementFailure,
 } from './promote-replay-safety.js';
 import { finalizeCommittedAssertionPromote } from './assertion-promote-finalization.js';
 import {
@@ -38,7 +39,7 @@ import {
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
-import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
+import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, contextGraphOnChainIdBindingQuery, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
@@ -97,6 +98,8 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { DurableRootAtomicCompanionResolver } from
+  './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
 import {
   parseWorkspaceAgentRecipientResolution,
@@ -119,7 +122,7 @@ import {
   CuratorRejectedError,
   type CASCondition,
 } from './errors.js';
-import { isQuorumUnmetError } from './ack-errors.js';
+import { RpcPreconditionError, isQuorumUnmetError } from './ack-errors.js';
 import { stripOptionalLiteral } from './sparql-binding-literal.js';
 import {
   runLegacyWorkingMemoryMigration,
@@ -133,6 +136,10 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -524,6 +531,8 @@ export interface DKGPublisherConfig {
   resolveDurableRootPromotionAtomicCompanion?: (
     input: Readonly<DurableRootPromotionIdentity>,
   ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined;
+  /** Atomic late-boundary companion for root SWM staging/update writes. */
+  resolveDurableRootMaterializationAtomicCompanion?: DurableRootAtomicCompanionResolver;
   /**
    * RFC ka-metadata-trim Phase 3 (P3.3) — `metadata.provenanceEvents` config.
    * Default `true`. When `false` ("lite mode"), the lifecycle writers skip the
@@ -1164,11 +1173,14 @@ export class DKGPublisher implements Publisher {
   private tentativeCounter = 0;
   readonly writeLocks: Map<string, Promise<void>>;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  private readonly publishedSnapshotRetirement: PublishedSnapshotRetirement;
   /** OT-RFC-43 Option 1 — deterministic KA-id allocator (optional; see DKGPublisherConfig). */
   private readonly kaAllocator?: KaIdAllocator;
   private readonly resolveDurableRootPromotionAtomicCompanion?: (
     input: Readonly<DurableRootPromotionIdentity>,
   ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined;
+  private readonly resolveDurableRootMaterializationAtomicCompanion?:
+    DurableRootAtomicCompanionResolver;
   /** Authors whose allocator floor has been reconciled against the chain this process. */
   private readonly reconciledKaAuthors = new Set<string>();
   /** RFC ka-metadata-trim P3.3 — gate for the lifecycle PROV event rows (default true). */
@@ -1180,6 +1192,8 @@ export class DKGPublisher implements Publisher {
     this.kaAllocator = config.kaAllocator;
     this.resolveDurableRootPromotionAtomicCompanion =
       config.resolveDurableRootPromotionAtomicCompanion;
+    this.resolveDurableRootMaterializationAtomicCompanion =
+      config.resolveDurableRootMaterializationAtomicCompanion;
     this.provenanceEvents = config.provenanceEvents !== false;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
@@ -1230,6 +1244,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -1257,11 +1272,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async storedOnChainContextGraphId(contextGraphId: string): Promise<string | undefined> {
-    const ontologyGraph = contextGraphDataUri('ontology');
-    const contextGraphUri = contextGraphDataUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
-    );
+    const result = await this.store.query(contextGraphOnChainIdBindingQuery(contextGraphId));
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
     return stripOptionalLiteral(result.bindings[0]?.['id'])?.trim();
   }
@@ -1275,6 +1286,12 @@ export class DKGPublisher implements Publisher {
       store: this.store,
       writeLocks: this.writeLocks,
       graphManager: this.graphManager,
+      ...(this.resolveDurableRootMaterializationAtomicCompanion === undefined
+        ? {}
+        : {
+            resolveDurableRootAtomicCompanion:
+              this.resolveDurableRootMaterializationAtomicCompanion,
+          }),
       ...(this.publicSnapshotStore === undefined
         ? {}
         : { publicSnapshotStore: this.publicSnapshotStore }),
@@ -1318,6 +1335,29 @@ export class DKGPublisher implements Publisher {
   ): Promise<boolean> {
     if (onChainContextGraphId === undefined || onChainContextGraphId === null) return false;
     if (!this.chain || this.chain.chainId === 'none') return false;
+    const normalizedContextGraphId = contextGraphId.trim();
+    const normalizedOnChainId = String(onChainContextGraphId).trim();
+    const readFinalizedCreation = this.chain.getContextGraphFinalizedCreation;
+    if (typeof readFinalizedCreation === 'function') {
+      try {
+        const creation = await readFinalizedCreation.call(
+          this.chain,
+          BigInt(normalizedOnChainId),
+        );
+        if (creation !== undefined) {
+          const idMatches = /^\d+$/.test(normalizedContextGraphId)
+            ? normalizedContextGraphId === normalizedOnChainId
+            : creation.nameHash.toLowerCase() === ethers.keccak256(
+              ethers.toUtf8Bytes(normalizedContextGraphId),
+            ).toLowerCase();
+          return idMatches && creation.accessPolicy === 1;
+        }
+      } catch {
+        // A failed atomic proof is fail-closed. Do not splice either field
+        // with a separate latest-state read from a potentially different fork.
+        return false;
+      }
+    }
     if (typeof this.chain.getContextGraphAccessPolicy !== 'function') return false;
     if (!await this.onChainContextGraphMatchesLocalId(contextGraphId, onChainContextGraphId)) return false;
     try {
@@ -2024,7 +2064,10 @@ export class DKGPublisher implements Publisher {
     }
 
     const resolution = parseWorkspaceAgentRecipientResolution(
-      await resolveRecipients({ contextGraphId }),
+      await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publisherWrite,
+        () => resolveRecipients({ contextGraphId }),
+      ),
       contextGraphId,
     );
     if (!resolution.requiresEncryption) {
@@ -2261,7 +2304,20 @@ export class DKGPublisher implements Publisher {
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
     // Also skip when publishContextGraphId is set (remap flow) — the source
     // CG may be unregistered while the target CG is already on-chain.
-    if (this.chain.chainId !== 'none' && !this.chain.chainId.startsWith('mock') && !options?.publishContextGraphId) {
+    // And skip when the caller resolved the on-chain id itself: the chain tx
+    // below targets that id, and the agent supplies one only from its
+    // authoritative chain binding, a live chain lookup or the durable binding
+    // read here — the same test the queued VM-publish path applies. A node
+    // can hold only the chain binding: an edge learns a public graph's id from
+    // the ContextGraphCreated event, syncs no `ontology` graph, and never sees
+    // the one-shot registration gossip if it missed it or joined later.
+    const resolvedOnChainContextGraphId = options?.onChainContextGraphId?.trim();
+    if (
+      this.chain.chainId !== 'none'
+      && !this.chain.chainId.startsWith('mock')
+      && !options?.publishContextGraphId
+      && !resolvedOnChainContextGraphId
+    ) {
       const cgMetaUri = contextGraphMetaUri(contextGraphId);
       const cgDataUri = contextGraphDataUri(contextGraphId);
 
@@ -2272,12 +2328,10 @@ export class DKGPublisher implements Publisher {
       const regStatus = regResult.type === 'bindings' ? regResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') : undefined;
 
       if (regStatus !== 'registered') {
-        // Fall back to checking for an OnChainId triple in ontology — chain-discovered
-        // CGs have this but may not have _meta.registrationStatus synced yet.
-        const ontologyGraph = contextGraphDataUri('ontology');
-        const onChainResult = await this.store.query(
-          `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${cgDataUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
-        );
+        // Fall back to checking for a durable OnChainId binding (ontology for
+        // a public graph, `_meta` for a curated one) — chain-discovered CGs
+        // have this but may not have _meta.registrationStatus synced yet.
+        const onChainResult = await this.store.query(contextGraphOnChainIdBindingQuery(contextGraphId));
         const hasOnChainId = onChainResult.type === 'bindings' && onChainResult.bindings.length > 0;
 
         if (!hasOnChainId) {
@@ -3505,6 +3559,9 @@ export class DKGPublisher implements Publisher {
         );
       } catch (err) {
         // RC11 / PR1+PR3: no self-signed ACK fallback. ACK collection
+        // (A publishing Core's own StorageACK through its local endpoint is
+        // different: it is one verified signature of the Core quorum, not a
+        // fallback.)
         // failure is a publish failure — propagate the underlying
         // ACKProvider error verbatim so callers (and the daemon log)
         // see the real cause (RPC pre-flight, quorum unmet, transport,
@@ -5217,13 +5274,13 @@ export class DKGPublisher implements Publisher {
     // Compute real serialized byte size — must match the publish path serializer.
     // Done BEFORE `chain:writeahead:start` so any error during serialization
     // does not leave an unmatched write-ahead boundary.
-    const updateNquadsStr = allSkolemizedQuads
-      .map(
-        (q: { subject: string; predicate: string; object: string; graph?: string }) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || dataGraph}> .`,
-      )
-      .join('\n');
-    const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
+    const updatePayloadMeasurement = measureCanonicalPublicationPayload({
+      publicQuads: allSkolemizedQuads,
+      fallbackGraph: dataGraph,
+    });
+    const updateNquadsStr = updatePayloadMeasurement.publicNQuads;
+    const updateNquadsBytes = updatePayloadMeasurement.publicBytes;
+    const updateByteSize = updatePayloadMeasurement.publicByteSize;
 
     // OT-RFC-49 / WS-D (update) — mirror the curated PUBLISH producer
     // (dkg-publisher.ts:2030-2169). A value-adding curated update commits the
@@ -5327,12 +5384,17 @@ export class DKGPublisher implements Publisher {
         effectiveUpdateByteSize = updateByteSize;
       }
     } else {
-      // PUBLIC update — unchanged from the prior behaviour: send the full
-      // update N-quads inline so peers recompute `newMerkleRoot`, unless private
-      // roots are mixed in (then the peer can't recompute and we omit staging).
-      updateStagingQuads = updatePrivateRoots.length === 0
-        ? new TextEncoder().encode(updateNquadsStr)
-        : undefined;
+      // A graph-scoped intent carries its private root, so the receiver can fold
+      // it over small inline public updates without relying on a local SWM copy.
+      // Larger updates retain the exact per-KA SWM fallback because receivers
+      // reject inline staging payloads above the shared protocol ceiling.
+      // Legacy public updates keep their established inline behavior, while
+      // legacy mixed updates remain SWM-only because they carry no private root.
+      updateStagingQuads = graphUpdate !== undefined
+        ? selectPublicStagingQuads('inline-small-swm', updateNquadsBytes)
+        : updatePrivateRoots.length === 0
+          ? updateNquadsBytes
+          : undefined;
       effectiveUpdateByteSize = updateByteSize;
     }
     // B6 — deferred PUBLIC `_catalog` persist. Structurally identical to the
@@ -5509,9 +5571,9 @@ export class DKGPublisher implements Publisher {
           isEncryptedPayload: useEncryptedInlineUpdate ? true : undefined,
           // For a curated update the inline ACK payload is the PUBLIC catalog
           // N-quads (`updateStagingQuads` == the catalog bytes). For a public
-          // update it stays the full update N-quads (when no private roots are
-          // mixed in) so peers can recompute `newMerkleRoot`; otherwise the peer
-          // falls back to verifying against its SWM copy. Selected above.
+          // graph-scoped update it is the full update N-quads, with any private
+          // root carried separately on the intent. Legacy private-root updates
+          // still omit staging and fall back to an SWM copy. Selected above.
           stagingQuads: updateStagingQuads,
           swmGraphId: contextGraphId,
           subGraphName: options.subGraphName,
@@ -6917,6 +6979,44 @@ export class DKGPublisher implements Publisher {
     }
   }
 
+  private async hasActiveAssertionSeal(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): Promise<boolean> {
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    for (const subject of await this.activeAssertionSealSubjects(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+    )) {
+      const result = await this.store.query(`ASK { GRAPH <${assertSafeIri(metaGraph)}> {
+        <${assertSafeIri(subject)}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root
+      } }`);
+      if (result.type !== 'boolean') {
+        throw new Error('Cannot determine whether the Knowledge Asset already has a finalized seal');
+      }
+      if (result.value) return true;
+    }
+    return false;
+  }
+
+  private async assertDraftUnsealedForWrite(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+  ): Promise<void> {
+    if (await this.hasActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName)) {
+      throw Object.assign(new Error(
+        `Knowledge Asset "${name}" is already finalized. Resume sharing or publishing the existing assertion; ` +
+        'to change its content, reopen it with wm/pull-from or discard an unpublished draft before recreating it.',
+      ), { code: 'KA_ASSERTION_ALREADY_FINALIZED' });
+    }
+  }
+
   /**
    * A draft mutation is only valid while the lifecycle is exactly created/WM.
    * The checks are separate and bounded so corrupt duplicate rows cannot form
@@ -7470,6 +7570,10 @@ export class DKGPublisher implements Publisher {
     const operationSubjects = operationRows.type === 'bindings'
       ? [...new Set(operationRows.bindings.map((row) => row['operation']).filter(Boolean))]
       : [];
+    // Persist the candidate BEFORE removing its references. If cleanup fails or
+    // the process exits midway, remaining metadata makes collection fail closed.
+    // Only this confirmed/durable cleanup boundary creates retirement candidates.
+    await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, message => this.log.warn(ctx, message));
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
@@ -7667,7 +7771,10 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
-    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+    opts?: {
+      allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
+      onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
+    },
   ): Promise<string> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
     return this.withAssertionLifecycleWriteLock(
@@ -7682,13 +7789,24 @@ export class DKGPublisher implements Publisher {
           agentAddress,
           subGraphName,
         );
-        return this.assertionCreateUnlocked(
+        // A seal survives ordinary create retries. Resetting the lifecycle here
+        // would reopen its immutable WM graph and let a later write append data
+        // that no longer matches the signed commitment. Sanctioned pull-from
+        // clears the active seal before calling assertionCreateUnlocked.
+        if (await this.hasActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName)) {
+          await this.assertGraphScopedLifecycleWritable(contextGraphId, agentAddress, name, subGraphName);
+          opts?.onDisposition?.('sealed-noop');
+          return this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
+        }
+        const assertionUri = await this.assertionCreateUnlocked(
           contextGraphId,
           name,
           agentAddress,
           subGraphName,
           opts,
         );
+        opts?.onDisposition?.('created');
+        return assertionUri;
       },
     );
   }
@@ -7698,7 +7816,10 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
-    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+    opts?: {
+      allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
+      onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
+    },
   ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 
@@ -7888,6 +8009,7 @@ export class DKGPublisher implements Publisher {
       agentAddress,
       subGraphName,
     );
+    await this.assertDraftUnsealedForWrite(contextGraphId, name, agentAddress, subGraphName);
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
     const scopedGraphs = new Set<string>([graphUri]);
     const quads = input.map((t) => {
@@ -7975,6 +8097,7 @@ export class DKGPublisher implements Publisher {
       agentAddress,
       subGraphName,
     );
+    await this.assertDraftUnsealedForWrite(contextGraphId, name, agentAddress, subGraphName);
     rejectOversizedRdfLiterals(input, 'assertionWritePrivate.quads');
     await this.privateStore.storeKnowledgeAssetPrivateDraftTriples(
       contextGraphId,
@@ -9027,8 +9150,11 @@ export class DKGPublisher implements Publisher {
     try {
       resolvedRootCompanion?.settle?.(companionCommitted);
     } catch (error) {
-      // A companion settlement must never certify a retry after dispatch.
-      throw companionCommitted === false ? error : createPromotePostCommitFailure(error);
+      // A proven non-commit propagates the settlement failure as-is. After
+      // dispatch, only a storage-certified never-started settlement with an
+      // unknown compound outcome earns a bounded queue retry; a known commit
+      // or an indeterminate settlement failure stays post-commit fatal.
+      throw classifyPromoteCompanionSettlementFailure(error, companionCommitted);
     }
     if (promotionFailure !== undefined) throw promotionFailure.error;
     await finalizeCommittedAssertionPromote({
@@ -9400,10 +9526,16 @@ export class DKGPublisher implements Publisher {
           // A flaky/incapable oracle must not silently let the allocator reuse a
           // number; surface it so the operator notices rather than burning ids.
           // (The contract's _safeMint revert remains the ultimate backstop.)
-          throw new Error(
-            `OT-RFC-43 Option 1: failed to reconcile KA-number floor for author ${author} ` +
-            `against chain: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          // Thrown as the publisher's own RPC-precondition wrapper with the oracle's error kept as
+          // `cause`, so a typed transient transport failure raised here can still qualify for the
+          // same-job retry lane (the failure writer unwraps this wrapper by exactly one level).
+          throw new RpcPreconditionError({
+            method: 'getMaxKaNumberForAuthor',
+            message:
+              `OT-RFC-43 Option 1: failed to reconcile KA-number floor for author ${author} ` +
+              `against chain: ${err instanceof Error ? err.message : String(err)}`,
+            cause: err,
+          });
         }
       }
       if (chainMax >= 0n) {

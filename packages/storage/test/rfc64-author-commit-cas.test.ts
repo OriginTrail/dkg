@@ -608,6 +608,16 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(store.getWriteGen(unrelatedPrefix)).toBe(unrelatedBefore);
   });
 
+  it('rejects a staged triple whose predicate is not an IRI', () => {
+    const projection = authorCommitInput().sharedProjectionQuads;
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
+      sharedProjectionQuads: [{ ...projection[0], predicate: '_:p' }, projection[1]],
+    }))).toThrow(/predicate cannot be a blank node/);
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
+      authorSealQuads: [quad(SEAL, 'urn:p q', '"new-seal"', SEAL_GRAPH)],
+    }))).toThrow(/^Unsafe or empty IRI value/);
+  });
+
   it('rejects ambiguous or unbounded fixed-manifest inputs before building an update', () => {
     expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
       authorSealGraph: PROJECTION_GRAPH,

@@ -50,6 +50,17 @@
         "type": "uint256"
       }
     ],
+    "name": "CannotWriteValueToInactiveContextGraph",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
     "name": "CuratedCGRequiresCatalogCommitment",
     "type": "error"
   },
@@ -220,6 +231,17 @@
       }
     ],
     "name": "PublicCGCannotHaveCatalogCommitment",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "name": "PublicKARequiresMerkleLeafCount",
     "type": "error"
   },
   {

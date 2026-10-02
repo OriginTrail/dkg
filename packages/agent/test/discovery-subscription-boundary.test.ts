@@ -14,6 +14,7 @@ import { MockChainAdapter, type ContextGraphOnChain } from '@origintrail-officia
 import {
   AGENT_REGISTRY_CONTEXT_GRAPH,
   DKGAgent as RealDKGAgent,
+  createInMemoryContextGraphStorageDiscoveryStore,
   type ContextGraphMembershipRecord,
   type ContextGraphSubscriptionRecord,
 } from '../src/index.js';
@@ -44,7 +45,7 @@ describe('Context Graph discovery/subscription boundary', () => {
   it.each([
     ['default', undefined],
     ['explicitly enabled', true],
-  ] as const)('keeps persisted subscription rehydration %s', async (_label, enabled) => {
+  ] as const)('keeps rehydration %s but leaves an unproven remote row dormant', async (_label, enabled) => {
     const id = `rehydration-${_label.replace(/\s+/g, '-')}`;
     const record: ContextGraphSubscriptionRecord = {
       id,
@@ -72,17 +73,16 @@ describe('Context Graph discovery/subscription boundary', () => {
 
     try {
       await agent.start();
-      expect(agent.getSubscribedContextGraphs().get(id)).toMatchObject({
-        subscribed: true,
-        synced: true,
-      });
-      expect((agent as any).config.syncContextGraphs ?? []).toContain(id);
-      expect((agent as any).gossipRegistered.has(id)).toBe(true);
+      expect(agent.getSubscribedContextGraphs().has(id)).toBe(false);
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain(id);
+      expect((agent as any).gossipRegistered.has(id)).toBe(false);
+      expect(persisted.get(id)).toMatchObject(record);
       expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
         rehydrationEnabled: true,
         persistedTotal: 1,
-        activated: 1,
-        dormant: 0,
+        activated: 0,
+        dormant: 1,
+        dormantReasons: { authorityUnavailable: [id] },
       });
     } finally {
       await agent.stop().catch(() => {});
@@ -285,15 +285,17 @@ describe('Context Graph discovery/subscription boundary', () => {
       };
       const membershipStore = {
         loadAll: async () => [...persistedMemberships.values()].map((record) => ({ ...record })),
-        loadLocalOrigins: async () => [...persistedOrigins.values()].map((record) => ({ ...record })),
-        recordLocalOrigin: async (record: {
-          contextGraphId: string;
-          source: 'local-create' | 'implicit-swm-write';
-          createdAt: number;
-        }) => {
-          if (!persistedOrigins.has(record.contextGraphId)) {
-            persistedOrigins.set(record.contextGraphId, { ...record });
-          }
+        localOrigins: {
+          loadLocalOrigins: async () => [...persistedOrigins.values()].map((record) => ({ ...record })),
+          recordLocalOrigin: async (record: {
+            contextGraphId: string;
+            source: 'local-create' | 'implicit-swm-write';
+            createdAt: number;
+          }) => {
+            if (!persistedOrigins.has(record.contextGraphId)) {
+              persistedOrigins.set(record.contextGraphId, { ...record });
+            }
+          },
         },
         upsert: async (record: ContextGraphMembershipRecord & { updatedAt: number }) => {
           persistedMemberships.set(
@@ -476,10 +478,16 @@ describe('Context Graph discovery/subscription boundary', () => {
       await agentA.stop().catch(() => {});
     }
 
+    const restartChain = new MockChainAdapter();
+    vi.spyOn(restartChain, 'getContextGraphLiveAuthority').mockResolvedValue({
+      active: true,
+      accessPolicy: 0,
+      participantAgents: [],
+    });
     const agentB = await DKGAgent.create({
       name: 'DiscoveryBoundaryB',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: restartChain,
       contextGraphSubscriptionStore: subscriptionStore,
       contextGraphMembershipStore: membershipStore,
       nodeRole: 'edge',
@@ -625,6 +633,107 @@ describe('Context Graph discovery/subscription boundary', () => {
         expect((agent as any).gossipRegistered.has(id)).toBe(false);
         expect(persisted.has(id)).toBe(false);
       }
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('ignores out-of-uint256 chain ids from store discovery and direct metadata recording', async () => {
+    const overflow = (1n << 256n).toString(10);
+    const storeId = 'hostile-store-binding';
+    const laterValidId = 'later-valid-store-binding';
+    const directId = 'hostile-direct-binding';
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+    const save = vi.fn(async (record: ContextGraphSubscriptionRecord) => {
+      persisted.set(record.id, { ...record });
+    });
+    // A store claim binds only when this chain proves it: #9 commits the
+    // valid id's name hash.
+    const chain = new MockChainAdapter();
+    for (let id = 1; id < 9; id++) {
+      await chain.createOnChainContextGraph({
+        accessPolicy: 0,
+        publishPolicy: 1,
+        nameHash: ethers.keccak256(ethers.toUtf8Bytes(`hostile-store-filler-${id}`)),
+      } as never);
+    }
+    await chain.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(laterValidId)),
+    } as never);
+    const agent = await DKGAgent.create({
+      name: 'HostileStoreBinding',
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save,
+        delete: async (id) => { persisted.delete(id); },
+      },
+    });
+
+    try {
+      await agent.start();
+      await agent.discoverContextGraphsFromStorage();
+      const bind = vi.spyOn(agent, 'bindSubscriptionOnChainId');
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      await agent.store.insert([
+        {
+          subject: contextGraphDataGraphUri(storeId),
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: contextGraphDataGraphUri(storeId),
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: `"${overflow}"`,
+          graph: ontologyGraph,
+        },
+        {
+          subject: contextGraphDataGraphUri(laterValidId),
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: contextGraphDataGraphUri(laterValidId),
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: '"9"',
+          graph: ontologyGraph,
+        },
+      ]);
+
+      await expect(agent.discoverContextGraphsFromStore()).resolves.toBe(2);
+      expect(agent.getSubscribedContextGraphs().get(storeId)).toMatchObject({
+        subscribed: false,
+      });
+      expect(agent.getSubscribedContextGraphs().get(storeId)?.onChainId).toBeUndefined();
+      expect(agent.getSubscribedContextGraphs().get(laterValidId)?.onChainId).toBe('9');
+
+      // Exercise the durable enrichment path as well as discovery-only rows:
+      // an invalid ID must be omitted before the strict subscription writer.
+      agent.subscribeToContextGraph(directId);
+      await vi.waitFor(() => expect(persisted.get(directId)?.subscribed).toBe(true));
+      save.mockClear();
+      expect(() => agent.recordDiscoveredContextGraph(directId, {
+        name: 'Hostile direct binding',
+        onChainId: overflow,
+      })).not.toThrow();
+      expect(agent.getSubscribedContextGraphs().get(directId)?.onChainId).toBeUndefined();
+      await vi.waitFor(() => expect(save).toHaveBeenCalled());
+      expect(persisted.get(directId)?.onChainId).toBeUndefined();
+      expect(bind).toHaveBeenCalledOnce();
+      expect(bind).toHaveBeenCalledWith(
+        laterValidId,
+        expect.any(Object),
+        '9',
+      );
+      expect(persisted.has(storeId)).toBe(false);
+      expect(persisted.has(laterValidId)).toBe(false);
+      expect(persisted.get(directId)?.subscribed).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -979,8 +1088,15 @@ describe('Context Graph discovery/subscription boundary', () => {
   it('reconstructs an OnChainId-only edge catalogue entry after restart without chain RPC', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-discovery-restart-'));
     const localId = 'restart-chain-catalogue';
-    const onChainId = '505';
+    const onChainId = '3';
     const discoveryChain = new MockChainAdapter();
+    for (const filler of ['restart-filler-1', 'restart-filler-2', localId]) {
+      await discoveryChain.createOnChainContextGraph({
+        accessPolicy: 0,
+        publishPolicy: 1,
+        nameHash: ethers.keccak256(ethers.toUtf8Bytes(filler)),
+      } as never);
+    }
     (discoveryChain as any).listContextGraphsFromChain = async () => ([{
       contextGraphId: onChainId,
       name: localId,
@@ -989,6 +1105,18 @@ describe('Context Graph discovery/subscription boundary', () => {
       blockNumber: 103,
       metadataRevealed: true,
     }] satisfies ContextGraphOnChain[]);
+    // The storage enumeration checkpoint: this chain's facts, kept durably.
+    const checkpoint = createInMemoryContextGraphStorageDiscoveryStore();
+    const offlineChain = () => {
+      const chain = new MockChainAdapter();
+      (chain as any).listContextGraphsFromChain = async () => {
+        throw new Error('chain RPC unavailable');
+      };
+      (chain as any).readContextGraphStorageRange = async () => {
+        throw new Error('chain RPC unavailable');
+      };
+      return chain;
+    };
     let first: DKGAgent | undefined;
     let restarted: DKGAgent | undefined;
 
@@ -998,10 +1126,12 @@ describe('Context Graph discovery/subscription boundary', () => {
         listenHost: '127.0.0.1',
         nodeRole: 'edge',
         chainAdapter: discoveryChain,
+        contextGraphStorageDiscoveryStore: checkpoint,
         dataDir,
       });
       await first.start();
       expect(await first.discoverContextGraphsFromChain()).toBe(1);
+      await first.discoverContextGraphsFromStorage();
       expect(first.getSubscribedContextGraphs().get(localId)).toMatchObject({
         subscribed: false,
         onChainId,
@@ -1009,15 +1139,30 @@ describe('Context Graph discovery/subscription boundary', () => {
       await first.stop();
       first = undefined;
 
-      const offlineChain = new MockChainAdapter();
-      (offlineChain as any).listContextGraphsFromChain = async () => {
-        throw new Error('chain RPC unavailable');
-      };
+      // The ontology's OnChainId triple alone is a claim, whoever wrote it:
+      // with no chain facts to prove it, the entry is catalogued unbound.
+      restarted = await DKGAgent.create({
+        name: 'RestartCatalogueUnproven',
+        listenHost: '127.0.0.1',
+        nodeRole: 'edge',
+        chainAdapter: offlineChain(),
+        contextGraphStorageDiscoveryStore: createInMemoryContextGraphStorageDiscoveryStore(),
+        dataDir,
+      });
+      await restarted.start();
+      expect(await restarted.discoverContextGraphsFromStore()).toBe(1);
+      expect(restarted.getSubscribedContextGraphs().get(localId)).toMatchObject({ name: localId, subscribed: false });
+      expect(restarted.getSubscribedContextGraphs().get(localId)?.onChainId).toBeUndefined();
+      await restarted.stop();
+      restarted = undefined;
+
+      // The checkpoint proves it offline.
       restarted = await DKGAgent.create({
         name: 'RestartCatalogueOffline',
         listenHost: '127.0.0.1',
         nodeRole: 'edge',
-        chainAdapter: offlineChain,
+        chainAdapter: offlineChain(),
+        contextGraphStorageDiscoveryStore: checkpoint,
         dataDir,
       });
       await restarted.start();

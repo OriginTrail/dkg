@@ -1,4 +1,14 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  authorityIndexTrustDomain,
+  planAuthorityIndexBootstrap,
+  resolveAuthorityIndexConfig,
+  type AuthorityIndexBootstrapInput,
+  type AuthorityIndexBootstrapPlan,
+  type AuthorityIndexConfig,
+  type AuthorityIndexSnapshotPlan,
+  type ResolvedAuthorityIndexConfig,
+} from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
@@ -67,6 +77,7 @@ export * from './rfc64/swm-author-inventory-producer-v1.js';
 export * from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
+export * from './rfc64/unregistered-authority-transport-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
 export * from './rfc64/public-catalog-receiver-v1.js';
 export * from './rfc64/public-catalog-service-v1.js';
@@ -84,6 +95,7 @@ export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
 export * from './rfc64/catalog-responsibility-registry-v1.js';
 export type {
+  Rfc64AgentAuthorityResolverReadOptionsV1,
   Rfc64AuthorityReadCoordinatorSnapshotV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 export * from './rfc64/policy-cell-v1.js';
@@ -104,7 +116,22 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
-export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export { resolveSyncReconcilerEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
+export {
+  FinalizedAuthorityColdResolutionV1,
+  finalizedAuthorityColdResolutionOf,
+  peekFinalizedAuthorityColdResolution,
+} from './finalized-authority-cold-resolution.js';
+export {
+  CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_ENV,
+  CHAIN_AUTHORITY_READ_TIMEOUT_ENV,
+  DEFAULT_CHAIN_AUTHORITY_READ_BUDGETS,
+  chainAuthorityReadBudgetsOf,
+  resolveChainAuthorityReadBudgets,
+  resolveChainAuthorityTimeoutMs,
+  type ChainAuthorityReadBudgets,
+  type ChainAuthorityReadBudgetsConfig,
+} from './chain-authority-read-budgets.js';
 export {
   classifySharedMemoryFreshness,
   type SelectedSharedMemorySyncResult,
@@ -180,6 +207,31 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
+export {
+  CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
+  CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE,
+  CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
+  createInMemoryContextGraphStorageDiscoveryStore,
+  type ContextGraphStorageDiscoveryStore,
+} from './context-graph-storage-discovery.js';
+export type {
+  ContextGraphListOnChainFacts,
+  ListContextGraphsRow,
+} from './context-graph-list-authority-enrichment.js';
+export {
+  describeContextGraphOnChainIdResolution,
+  parseContextGraphOnChainIdReference,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphIdAsGiven,
+  type ContextGraphOnChainIdLookup,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdRefusal,
+  type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
+  type ResolvedContextGraphOnChainId,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,
@@ -211,6 +263,10 @@ export type {
 export type {
   Rfc64PublicCatalogBootstrapStatusV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
+export type {
+  PersistVerifiedRfc64UnregisteredAuthoritySeedInputV1,
+  ReadRfc64UnregisteredAuthoritySeedInputV1,
+} from './dkg-agent-rfc64-seed-store.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
@@ -305,10 +361,14 @@ export {
 } from './rootless-update-error.js';
 export type {
   ContextGraphReadAuthorityDecision,
+  ContextGraphReadAuthorityDependency,
   ContextGraphReadAuthorityOutcome,
   ContextGraphReadAuthoritySource,
+  SettledContextGraphReadAuthorityDecision,
+  UnavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityReadMode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,
@@ -316,6 +376,7 @@ export type {
   RegisteredContextGraphAuthorityUnavailableReason,
 } from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
+export type { FinalizedContextGraphAuthoritySnapshotReadV1 } from './dkg-agent-cg-resolve.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,

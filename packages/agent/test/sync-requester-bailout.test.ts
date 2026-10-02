@@ -528,6 +528,7 @@ describe('lifecycle shared-memory fanout isolation', () => {
       // selected scope.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
       createSwmTargetExecutorSessionV1: () => {
         createTargetExecutorSession ??=
           createSwmTargetExecutorSessionFactoryForTest(agent as never);

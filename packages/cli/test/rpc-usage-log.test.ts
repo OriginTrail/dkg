@@ -172,6 +172,32 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     }
   });
 
+  it('emits header consumer attribution including the explicit remainder', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_getBlockByNumber: 5, eth_blockNumber: 2 },
+        attributions: [
+          { method: 'eth_getBlockByNumber', consumer: 'chainIndex.head', count: 3 },
+          { method: 'eth_getBlockByNumber', consumer: 'unattributed', count: 2 },
+          { method: 'eth_blockNumber', consumer: 'receiptFinality.head', count: 2 },
+        ],
+        lifetimeTotal: 7,
+      },
+      60,
+      'base:84532',
+    );
+
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getBlockByNumber consumer=chainIndex.head count=3 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getBlockByNumber consumer=unattributed count=2 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_blockNumber consumer=receiptFinality.head count=2 window_s=60 chain=base:84532',
+    );
+  });
+
   it('never emits endpoint URLs and aggregates invalid external slots under other', () => {
     const endpointUrl = 'https://secret-token.example/rpc';
     const lines = formatRpcUsageLines(
