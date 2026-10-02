@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   RPC_TIMING_BUCKET_UPPER_MS,
   diffRpcRequestTiming,
@@ -72,8 +72,9 @@ describe('RPC request timing accumulator', () => {
 
 describe('RPC request timing through the governed provider', () => {
   beforeEach(() => resetRpcRequestTimingForTests());
+  afterEach(() => vi.restoreAllMocks());
 
-  it('splits a throttled background attempt into admission wait and endpoint latency', async () => {
+  it('counts every admitted attempt of each request class', async () => {
     const [{ RpcRequestGovernor }, { createRpcRequestProvider, withRpcRequestContext }, { startLoopbackRpc }] = await Promise.all([
       import('../src/rpc-request-governor.js'),
       import('../src/rpc-request-transport.js'),
@@ -108,12 +109,71 @@ describe('RPC request timing through the governed provider', () => {
       // Foreground: the explicit read plus the provider's own network discovery.
       expect(snapshot.foreground.admissionWait.count).toBe(rpc.totalHits() - 3);
       expect(snapshot.foreground.endpointLatency.count).toBe(rpc.totalHits() - 3);
-      // Admission wait is measured separately from the endpoint round trip.
-      expect(snapshot.background.admissionWait.totalMs).toBeGreaterThanOrEqual(0);
-      expect(snapshot.background.endpointLatency.totalMs).toBeGreaterThan(0);
     } finally {
       provider.destroy();
       await rpc.close();
+    }
+  });
+
+  it('attributes a queued admission and a slow endpoint answer each to its own metric', async () => {
+    const [{ createRpcRequestProvider, withRpcRequestContext }, loopback, { Network }] = await Promise.all([
+      import('../src/rpc-request-transport.js'),
+      import('./loopback-rpc-harness.js'),
+      import('ethers'),
+    ]);
+    // A virtual clock that only the two simulated delays advance, so every duration is exact and
+    // neither can leak into the other's metric unnoticed.
+    let virtualNow = 1_000;
+    vi.spyOn(performance, 'now').mockImplementation(() => virtualNow);
+    let admissionDelayMs = 0;
+    let endpointDelayMs = 0;
+    const harness = loopback.createLoopbackJsonRpcTestHarness();
+    const server = await harness.start((call, response) => {
+      virtualNow += endpointDelayMs;
+      loopback.sendJsonRpcResult(response, call, call.method === 'eth_chainId' ? loopback.CHAIN_ID_HEX : '0x10');
+    });
+    const provider = createRpcRequestProvider(server.url, {
+      maxRetries: 0,
+      network: Network.from(31_337),
+      admission: { acquireActiveRequest: async () => { virtualNow += admissionDelayMs; } },
+    });
+    const measureBackground = async () => {
+      const before = snapshotRpcRequestTiming();
+      await withRpcRequestContext({ requestClass: 'background' }, () => provider.send('eth_blockNumber', []));
+      return diffRpcRequestTiming(before, snapshotRpcRequestTiming());
+    };
+    try {
+      await provider.send('eth_chainId', []); // foreground warm-up: network discovery is out of the way
+
+      // Queued in admission, answered instantly: only the admission metric moves.
+      admissionDelayMs = 700;
+      endpointDelayMs = 0;
+      const queued = await measureBackground();
+      expect(queued.background.admissionWait).toMatchObject({ count: 1, totalMs: 700 });
+      expect(queued.background.endpointLatency).toMatchObject({ count: 1, totalMs: 0 });
+
+      // Admitted at once, slow endpoint: only the endpoint metric moves.
+      admissionDelayMs = 0;
+      endpointDelayMs = 300;
+      const slow = await measureBackground();
+      expect(slow.background.admissionWait).toMatchObject({ count: 1, totalMs: 0 });
+      expect(slow.background.endpointLatency).toMatchObject({ count: 1, totalMs: 300 });
+
+      // Both at once: each keeps exactly its own duration, in its own bucket.
+      admissionDelayMs = 120;
+      endpointDelayMs = 4_500;
+      const both = await measureBackground();
+      expect(both.background.admissionWait).toMatchObject({ count: 1, totalMs: 120 });
+      expect(both.background.endpointLatency).toMatchObject({ count: 1, totalMs: 4_500 });
+      // <=10, <=100, <=1000, <=5000, <=20000, >20000
+      expect(both.background.admissionWait.buckets).toEqual([0, 0, 1, 0, 0, 0]);
+      expect(both.background.endpointLatency.buckets).toEqual([0, 0, 0, 1, 0, 0]);
+      // Foreground was never touched by any of the background attempts.
+      expect(both.foreground.admissionWait.count).toBe(0);
+      expect(both.foreground.endpointLatency.count).toBe(0);
+    } finally {
+      provider.destroy();
+      await server.stop();
     }
   });
 

@@ -350,6 +350,13 @@ export class VmRecoveryPreparation {
       && !batch.controller.signal.aborted
       && this.#activeReads < this.#limits.maxSpeculativeReads
     ) {
+      // Recovery ownership can end without the lifecycle signal aborting (a stale generation, a
+      // rebind). A read started now would spend shared background capacity on a result that is
+      // discarded, so a dead batch stops here; reads already issued stay tracked until they settle.
+      if (this.#batchIsDead(batch)) {
+        this.#dropBatch(batch, true);
+        return;
+      }
       const next = [...batch.entries.values()].find((entry) => entry.state === 'queued');
       if (!next) return;
       this.#startRead(batch, next);
