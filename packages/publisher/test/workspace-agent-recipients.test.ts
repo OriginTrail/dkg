@@ -613,12 +613,12 @@ describe('resolveWorkspaceAgentRecipients', () => {
     }
   });
 
-  it('resolves the surviving key after eight retire-old rotations', async () => {
+  it('resolves the surviving key after 64 retire-old rotations', async () => {
     const store = new OxigraphStore();
     const wallet = ethers.Wallet.createRandom();
     await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
     const keys = [];
-    for (let index = 0; index < 9; index += 1) {
+    for (let index = 0; index < 65; index += 1) {
       keys.push(await insertAgentEncryptionKey(store, wallet, { keyFill: index + 1 }));
     }
     for (const retired of keys.slice(0, -1)) {
@@ -629,6 +629,46 @@ describe('resolveWorkspaceAgentRecipients', () => {
 
     expect(resolution.recipients).toHaveLength(1);
     expect(resolution.recipients[0]?.recipientKeyId).toBe(keys.at(-1)?.keyId);
+  });
+
+  it('does not grant history budget to 64 bare revocation markers', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const keys = [];
+    for (let index = 0; index < 65; index += 1) {
+      keys.push(await insertAgentEncryptionKey(store, wallet, { keyFill: index + 1 }));
+    }
+    for (const untrustedRetirement of keys.slice(0, -1)) {
+      await insertAgentEncryptionKeyRevocation(
+        store,
+        wallet,
+        untrustedRetirement.publicKeyBytes,
+        { omitProof: true },
+      );
+    }
+
+    await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
+      .rejects.toThrow(/Too many public encryption-key candidates/u);
+  });
+
+  it('does not amplify one authenticated retirement through non-canonical key aliases', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const retired = await insertAgentEncryptionKey(store, wallet, { keyFill: 70 });
+    await insertAgentEncryptionKeyRevocation(store, wallet, retired.publicKeyBytes);
+    await insertAgentEncryptionKey(store, wallet, { keyFill: 71 });
+    const canonical = encodeWorkspaceEncryptionKey(retired.publicKeyBytes);
+    await store.insert(Array.from({ length: 65 }, (_unused, index) => ({
+      subject: agentUri(wallet.address),
+      predicate: DKG_PUBLIC_ENCRYPTION_KEY,
+      object: `"${canonical}${'!'.repeat(index + 1)}"`,
+      graph: 'did:dkg:attacker-controlled-copy',
+    })));
+
+    await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
+      .rejects.toThrow(/Too many public encryption-key candidates/u);
   });
 
   it('ignores a malformed candidate when a verified active key also exists', async () => {

@@ -754,7 +754,8 @@ describe('approved private bare-name replica authorization', () => {
       if (
         !paused
         && typeof args[0] === 'string'
-        && args[0].includes('SELECT DISTINCT ?key ?algorithm ?peerId')
+        && args[0].includes('SELECT DISTINCT ?key WHERE')
+        && args[0].toLowerCase().includes(revokedMemberAddress)
       ) {
         paused = true;
         keyLookupEntered();

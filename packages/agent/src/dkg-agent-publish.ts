@@ -4115,7 +4115,10 @@ export class PublishMethods extends DKGAgentBase {
       this.swmSenderKeySendStates.set(stateKey, state);
       await this.saveSwmSenderKeyState();
     } else {
-      await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx);
+      await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx, {
+        contextGraphId,
+        subGraphName,
+      });
     }
 
     return {

@@ -39,7 +39,11 @@ export function swmReceiverStateKey(
   return `${swmSenderStateKey(contextGraphId, subGraphName, senderAgentAddress)}\0${epochId}`;
 }
 
-const SWM_SENDER_KEY_RECIPIENT_ROUTES_DOMAIN = 'dkg.swm.sender-key.recipient-routes.v1';
+// v2 invalidates route hashes written by the short-lived peer-variant build
+// whose pending rows did not yet retain their destination peer. On its first
+// publish after upgrade that state rotates instead of reusing an epoch whose
+// remaining delivery obligations cannot be reconstructed from disk.
+const SWM_SENDER_KEY_RECIPIENT_ROUTES_DOMAIN = 'dkg.swm.sender-key.recipient-routes.v2';
 
 /**
  * Hash the exact transport routes that received (or durably queued) setup for
@@ -121,6 +125,7 @@ export function serializePendingSenderKeyEntry(entry: PendingSenderKeyEntry): Re
     senderAgentAddress: entry.senderAgentAddress,
     recipientAgentAddress: entry.recipientAgentAddress,
     recipientKeyId: entry.recipientKeyId,
+    recipientPeerId: entry.recipientPeerId,
     epochId: entry.epochId,
     contextGraphId: entry.contextGraphId,
     subGraphName: entry.subGraphName,
@@ -177,6 +182,7 @@ export function deserializePendingSenderKeyEntry(entry: Record<string, unknown>)
     senderAgentAddress: senderAgentAddress.toLowerCase(),
     recipientAgentAddress: recipientAgentAddress.toLowerCase(),
     recipientKeyId: requiredString(entry.recipientKeyId, 'pending.recipientKeyId'),
+    recipientPeerId: optionalString(entry.recipientPeerId),
     epochId: requiredString(entry.epochId, 'pending.epochId'),
     contextGraphId: requiredString(entry.contextGraphId, 'pending.contextGraphId'),
     subGraphName: optionalString(entry.subGraphName),

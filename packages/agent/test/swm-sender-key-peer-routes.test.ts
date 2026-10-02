@@ -16,6 +16,7 @@ import {
   decryptSwmSenderKeyPackage,
   encodeSwmSenderKeyPackageAck,
   generateWorkspaceRecipientEncryptionKey,
+  type OperationContext,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import {
@@ -96,7 +97,11 @@ interface CuratedSenderKeyInternals extends SenderKeyInternals {
     recipients: readonly WorkspaceAgentRecipient[];
     membershipHash: string;
   }): Promise<SendState>;
-  drainPendingSenderKeyForRecipients(recipients: readonly WorkspaceAgentRecipient[]): Promise<number>;
+  drainPendingSenderKeyForRecipients(
+    recipients: readonly WorkspaceAgentRecipient[],
+    ctx?: OperationContext,
+    scope?: { contextGraphId: string; subGraphName?: string },
+  ): Promise<number>;
   prunePendingSenderKeysForEpochRotation(input: {
     contextGraphId: string;
     subGraphName?: string;
