@@ -253,6 +253,7 @@ test('the browser suite follows the UI surface and the packages its harness comp
     'packages/http-utils',
     'packages/local-llm',
     'packages/mcp-dkg',
+    'packages/node-store',
     'packages/okf',
     'packages/publisher',
     'packages/query',
