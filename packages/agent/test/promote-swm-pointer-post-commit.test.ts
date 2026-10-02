@@ -9,11 +9,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import {
-  DKGPublisher,
-  getPromoteFailureDisposition,
-  isStoreOperationProvenNotStarted,
-} from '@origintrail-official/dkg-publisher';
+import { DKGPublisher, getPromoteFailureDisposition } from '@origintrail-official/dkg-publisher';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   ASSERTION_SEAL_PREDICATES,
@@ -129,7 +125,6 @@ describe('GH#2901 — SWM pointer maintenance after a durable SWM commit', () =>
       expect(failure).toBeInstanceOf(Error);
       if (classification === 'raw') {
         expect(failure).toBe(injected);
-        expect(isStoreOperationProvenNotStarted(failure)).toBe(true);
         expect(getPromoteFailureDisposition(failure)).toBeUndefined();
       } else {
         expect(failure).toMatchObject({ cause: injected });

@@ -46,6 +46,7 @@ import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
+  runPromoteCommittedFinalization,
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -628,23 +629,26 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /**
    * One post-commit hook shared by every durable WM to SWM promotion path.
-   * A pointer-maintenance failure propagates to the caller (which classifies it
-   * against the already-committed operation), but the RFC-64 shadow observer is
-   * scheduled regardless: it is admitted to a bounded detached scheduler, so it
-   * cannot delay an already-committed user operation, and it does not depend on
-   * the pointer.
+   * The pointer stamp is classified by the canonical durable-finalization
+   * boundary: a storage failure proven never to have started keeps its raw type
+   * (the queue retries it directly), anything else becomes a post-commit
+   * failure, and a replay of the same committed operation repairs both. The
+   * RFC-64 shadow observer is scheduled regardless and sits OUTSIDE that
+   * boundary: it is admitted to a bounded detached scheduler that cannot throw,
+   * so it cannot delay an already-committed user operation, and it does not
+   * depend on the pointer.
    */
   async afterDurableSwmPromotionV1(
     this: DKGAgent,
     params: AfterDurableSwmPromotionParamsV1,
   ): Promise<void> {
     try {
-      await this._stampSwmPointer(
+      await runPromoteCommittedFinalization(() => this._stampSwmPointer(
         params.contextGraphId,
         params.assertionCoordinate,
         params.lifecycleAgentAddress,
         params.subGraphName ?? undefined,
-      );
+      ));
     } finally {
       if (params.shareOperationId !== null) {
         this.scheduleRfc64SwmInventoryObserverV1({

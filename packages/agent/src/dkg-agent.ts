@@ -139,8 +139,6 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
-  createPromotePostCommitFailure,
-  isStoreOperationProvenNotStarted,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -4076,27 +4074,18 @@ export class DKGAgent extends DKGAgentBase {
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
         // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
+        // The hook classifies its own pointer stamp (canonical durable-finalization
+        // boundary): a failure never reports success, and a replay of this same
+        // committed operation repairs it.
         if (promotedAllRoots) {
-          try {
-            await agent.afterDurableSwmPromotionV1({
-              contextGraphId,
-              subGraphName: opts?.subGraphName,
-              assertionCoordinate: name,
-              lifecycleAgentAddress: promoteAgentAddress,
-              shareOperationId: shareOperationId ?? null,
-              ctx: createOperationContext('share'),
-            });
-          } catch (error) {
-            // The hook's only fallible step is the idempotent pointer stamp, which a
-            // replay of this same operation repairs. A storage failure PROVEN never to
-            // have started keeps its raw type, so the queue retries directly (and a
-            // synchronous caller gets the retryable 503) exactly like the publisher's
-            // own durable tail. Anything else fails closed as post-commit; the
-            // recovery sweep still replays it within the job's retry budget.
-            throw isStoreOperationProvenNotStarted(error)
-              ? error
-              : createPromotePostCommitFailure(error);
-          }
+          await agent.afterDurableSwmPromotionV1({
+            contextGraphId,
+            subGraphName: opts?.subGraphName,
+            assertionCoordinate: name,
+            lifecycleAgentAddress: promoteAgentAddress,
+            shareOperationId: shareOperationId ?? null,
+            ctx: createOperationContext('share'),
+          });
         }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the
