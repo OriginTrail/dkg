@@ -84,7 +84,7 @@ need a separate JSON.parse + ad-hoc field extraction.
 Reject. The PRD's user-stories #6 and #12 specifically ask for a thin
 adapter shape ("publish a thin npm package that calls `createKafkaPlugin({ extension })`")
 so fork maintainers don't carry a forked plugin tree through every
-upstream sync. Forcing Path C makes ADR 0001 + Slice 2 a half-fix:
+upstream sync. Forcing Path C makes ADR 0001 (daemon route plugins) + Slice 2 a half-fix:
 forks would still merge-conflict on every `kafka-plugin` upstream
 change just as they did on `handle-request.ts` before route plugins.
 

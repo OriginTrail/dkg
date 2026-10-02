@@ -114,7 +114,8 @@ future work once a real cross-fork registry exists.
 - The runtime drop is silent after the first warn per unique key. A
   dynamic `augment` that produces an unlucky colliding key on some
   requests would log once and then silently drop on subsequent ones.
-  Acceptable — see ADR 0002's "Consequences → Negative" for the
+  Acceptable — see "Consequences → Negative" in ADR 0002
+  (`0002-kafka-plugin-extension-pattern.md`) for the
   matching trade-off discussion.
 
 ### Future work

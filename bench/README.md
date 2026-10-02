@@ -1,5 +1,7 @@
 # Benchmarking
 
+Run the commands below from the repository root.
+
 This repository uses two separate tools for two separate jobs:
 
 - Vitest is for unit and correctness tests.

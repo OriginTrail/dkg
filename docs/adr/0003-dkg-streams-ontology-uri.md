@@ -48,8 +48,8 @@ Pick `https://ontology.dkg.io/streams#` with prefix `dkg-streams:`.
 - The namespace is **owned by OriginTrail**; OriginTrail mints
   subclasses (`MqttStream`, `WebSocketStream`, ...). Forks adding their
   own ontology terms do so under their own namespace and add them as
-  secondary `@type` via the JSON-LD multi-type idiom (see ADR 0002 →
-  extension pattern).
+  secondary `@type` via the JSON-LD multi-type idiom (see ADR 0002,
+  `0002-kafka-plugin-extension-pattern.md` → extension pattern).
 - The IRI is **frozen once the first KA publishes.** A future namespace
   break would invalidate every existing KA's `@type` and silently break
   every cross-fork SPARQL query.
