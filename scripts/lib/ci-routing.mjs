@@ -583,6 +583,13 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     full: 'Global CI input changed',
   },
   {
+    // The authority mutation pilot: the core job's `pnpm test:mutation` runs
+    // Stryker with this configuration, which names the vitest config it runs.
+    pattern: /^test-policy\/(?:stryker\.config\.mjs|vitest\.mutation\.config\.ts)$/,
+    lanes: ['tornado_core'],
+    reason: 'the core job runs the mutation pilot with these configurations',
+  },
+  {
     // The disabled-test allowlist and test routes, read by the build job's lint
     // and test inventory.
     pattern: /^test-policy\//,
