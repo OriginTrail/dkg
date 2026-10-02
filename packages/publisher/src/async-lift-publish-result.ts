@@ -190,16 +190,25 @@ type PublishFailureRule = (
   facts: PublishFailureRuleFacts,
 ) => LiftJobFailureMetadata['code'] | undefined;
 
+/**
+ * GH#1786 — a permanent author-capability refusal raised mid-publish. Without this rule it
+ * reaches the RETRYABLE `rpc_unavailable` default and the queue keeps resetting a job that
+ * can never finalize. Asks the canonical predicate instead of repeating its checks, so this
+ * path cannot drift from the validated-path decisions that share it.
+ */
 function mapAuthorCapabilityFailure(
   facts: PublishFailureRuleFacts,
 ): LiftJobFailureMetadata['code'] | undefined {
   if (facts.failedFromState !== 'broadcast') return undefined;
-  return facts.errorCode === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
-    || messageIndicatesPublishAuthorNotCustodial(facts.lowerMessage)
-    ? 'authority_forbidden'
-    : undefined;
+  return isPermanentAuthorCapabilityFailure(facts.error) ? 'authority_forbidden' : undefined;
 }
 
+/**
+ * No operational wallet can fund the publish (dkg-chain `InsufficientPublisherFundsError`).
+ * Its message does not contain the "insufficient funds" text `classifyPublishFailureCode`
+ * matches, so it is recognized by its code, with a message-marker fallback for a re-wrap
+ * that dropped `.code`. Otherwise it would retry forever (#1013/#1121).
+ */
 function mapUnfundedWalletFailure(
   facts: PublishFailureRuleFacts,
 ): LiftJobFailureMetadata['code'] | undefined {

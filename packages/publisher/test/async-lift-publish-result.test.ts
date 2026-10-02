@@ -340,6 +340,32 @@ describe('async lift publish result mapping', () => {
         { message: 'cannot re-sign UpdateAuthorAttestation for author 0xabc' },
       )).toBe(true);
     });
+
+    it('decides the broadcast failure code for every error shape', () => {
+      // The broadcast mapper asks this predicate instead of repeating its checks. Whatever
+      // it accepts must fail the job terminally from 'broadcast'; whatever it rejects must
+      // not be reported as an authority failure.
+      const hostile = { get code(): never { throw new Error('boom'); }, message: 'x' };
+      const shapes: unknown[] = [
+        Object.assign(new Error('wrapped and reworded'), { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' }),
+        new Error('publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author 0xabc'),
+        { message: 'cannot re-sign UpdateAuthorAttestation for author 0xabc' },
+        new Error('connection reset by peer'),
+        new Error('No operational wallet has enough funds to publish to Verifiable Memory'),
+        hostile,
+        Object.create(null),
+        undefined,
+        null,
+      ];
+      const authorityFailures = shapes.map((error) => mapPublishExceptionToLiftJobFailure({
+        error,
+        failedFromState: 'broadcast',
+        errorPayloadRef: 'urn:error:author-predicate-agreement',
+      }).code === 'authority_forbidden');
+
+      expect(authorityFailures).toEqual(shapes.map((error) => isPermanentAuthorCapabilityFailure(error)));
+      expect(authorityFailures).toEqual([true, true, true, false, false, false, false, false, false]);
+    });
   });
 
   it('classifies confirmation mismatches on included jobs', () => {
