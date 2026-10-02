@@ -99,12 +99,37 @@ async function shareToSwm(holder: DKGAgent, contextGraphId: string, subject: str
   expect(promoted.promotedCount).toBeGreaterThan(0);
 }
 
+/**
+ * Names of `subject` as the agent's query API returns them. For polling until
+ * synced content arrives only: a rejected query counts as "not there yet", so an
+ * empty result here does not show that nothing is stored. Assert absence with
+ * {@link storedGraphsAbout}.
+ */
 async function swmNames(agent: DKGAgent, contextGraphId: string, subject: string): Promise<string[]> {
   const result = await agent.query(
     `SELECT ?name WHERE { <${subject}> <${NAME}> ?name }`,
     { contextGraphId, includeSharedMemory: true },
   ).catch(() => ({ bindings: [] as Array<Record<string, unknown>> }));
   return result.bindings.map((row) => String(row['name']));
+}
+
+/**
+ * Every graph of `contextGraphId` in the agent's own store that holds a triple
+ * about `subject`. A direct store read with no view or authority check in
+ * between, and it rejects when the read fails, so an empty result means the
+ * store was read and holds nothing about the subject under that id.
+ */
+async function storedGraphsAbout(
+  agent: Pick<DKGAgent, 'store'>,
+  contextGraphId: string,
+  subject: string,
+): Promise<string[]> {
+  const partition = contextGraphDataGraphUri(contextGraphId);
+  const result = await agent.store.query(`SELECT DISTINCT ?g WHERE { GRAPH ?g { <${subject}> ?p ?o } }`);
+  if (result.type !== 'bindings') throw new Error(`expected bindings from the store, got ${result.type}`);
+  return result.bindings
+    .map((row) => String(row['g']).replace(/^<(.*)>$/, '$1'))
+    .filter((graph) => graph === partition || graph.startsWith(`${partition}/`));
 }
 
 function row(agent: DKGAgent, id: string) {
@@ -145,7 +170,7 @@ describe('E2E: subscribe by on-chain name hash on a real ContextGraphStorage', (
     // ...and knows nothing else about it.
     expect(row(edge.agent, graph.id)).toBeUndefined();
     expect(edge.agent.resolveContextGraphIdAlias(graph.nameHash)).toBeNull();
-    expect(await swmNames(edge.agent, graph.id, subject)).toEqual([]);
+    expect(await storedGraphsAbout(edge.agent, graph.id, subject)).toEqual([]);
 
     // `dkg subscribe <hash>` with no peer connected: subscribed under the hash,
     // reported as name-hash-only, nothing invented.
@@ -195,8 +220,10 @@ describe('E2E: subscribe by on-chain name hash on a real ContextGraphStorage', (
       500,
     );
     expect(names.some((value) => value.includes('published before the edge subscribed'))).toBe(true);
-    // Nothing was ever stored under the hash.
-    expect(await swmNames(edge.agent, graph.nameHash, subject)).toEqual([]);
+    // The same direct read that found nothing before the subscription now finds
+    // the synced content under the cleartext id, and still nothing under the hash.
+    expect(await storedGraphsAbout(edge.agent, graph.id, subject)).not.toEqual([]);
+    expect(await storedGraphsAbout(edge.agent, graph.nameHash, subject)).toEqual([]);
   }, 300_000);
 
   it('ignores a wrong name-protocol answer and a forged ontology definition, then adopts what the honest peer proves', async () => {
@@ -393,4 +420,21 @@ describe('E2E: subscribe by on-chain name hash on a real ContextGraphStorage', (
       expect(rows.find((listed) => listed.id === refuted)?.onChainId, refuted).toBeUndefined();
     }
   }, 300_000);
+});
+
+describe('the direct store read behind the absence assertions', () => {
+  it('rejects when the store cannot be read, so a failed read never counts as nothing stored', async () => {
+    const unreadable = {
+      store: { query: async () => { throw new Error('store unavailable'); } },
+    } as unknown as Pick<DKGAgent, 'store'>;
+    await expect(storedGraphsAbout(unreadable, 'any-graph', 'urn:test:subject')).rejects.toThrow('store unavailable');
+  });
+
+  it('rejects an answer that is not a bindings result', async () => {
+    const wrongShape = {
+      store: { query: async () => ({ type: 'boolean', value: false }) },
+    } as unknown as Pick<DKGAgent, 'store'>;
+    await expect(storedGraphsAbout(wrongShape, 'any-graph', 'urn:test:subject'))
+      .rejects.toThrow('expected bindings from the store, got boolean');
+  });
 });
