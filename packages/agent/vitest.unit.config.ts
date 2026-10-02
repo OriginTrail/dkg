@@ -82,6 +82,7 @@ export default defineConfig({
       "test/exact-asset-wire-parse.test.ts",
       "test/swm/host-catchup-sign.test.ts",
       "test/swm/host-catchup-wire.test.ts",
+      "test/swm/host-catchup-requester.test.ts",
       "test/swm/host-mode-store.test.ts",
       "test/swm/host-mode-store-durability.test.ts",
       "test/swm/host-mode-store-dirsync-model.test.ts",
