@@ -1030,6 +1030,55 @@ describe('chat history routes over a turn that completes by transition, against 
     expect(await single(storeSessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
     expect(await listed(storeSessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
   });
+
+  it('lists the reply of the latest stored transition, whatever order the transitions were written in', async () => {
+    const CHAT = 'urn:dkg:chat:';
+    const DKG = 'http://dkg.io/ontology/';
+    const SCHEMA_ORG = 'http://schema.org/';
+    const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const XSD_DATETIME_IRI = 'http://www.w3.org/2001/XMLSchema#dateTime';
+    const quad = (subject: string, predicate: string, object: string) => ({ subject, predicate, object, graph: '' });
+    /** A `stored` transition on `turnSubject`, stamped `at`, written straight to the assertion. */
+    const writeStoredTransition = (turnSubject: string, turnId: string, at: Date, assistantReply: string) => {
+      const transition = `${CHAT}turn-transition:order-${randomUUID().slice(0, 8)}`;
+      return agent.assertion.write(AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, [
+        quad(transition, RDF_TYPE_IRI, `${DKG}ChatTurnPersistenceTransition`),
+        quad(transition, `${DKG}updatesTurn`, turnSubject),
+        quad(transition, `${DKG}turnId`, JSON.stringify(turnId)),
+        quad(transition, `${DKG}persistenceState`, JSON.stringify('stored')),
+        quad(transition, `${SCHEMA_ORG}dateCreated`, `"${at.toISOString()}"^^<${XSD_DATETIME_IRI}>`),
+        quad(transition, `${DKG}assistantReply`, JSON.stringify(assistantReply)),
+      ], { agentAddress });
+    };
+
+    // The durable-turn owner never writes a second `stored` transition, so
+    // the two per turn are written directly: one stamped a minute after the
+    // other. Half the turns get the newer one written first, half the older.
+    const sessionId = newSessionId();
+    const base = Date.now();
+    const turns = [0, 1, 2, 3].map((index) => ({ index, turnId: newTurnId() }));
+    for (const { index, turnId } of turns) {
+      const pending = await persistTurn(turn(sessionId, turnId, {
+        userMessage: `question ${index}`,
+        assistantReply: `working on ${index}`,
+        persistenceState: 'pending',
+      }));
+      expect(pending.body).toEqual({ ok: true, turnId });
+      await tick();
+      const [subject] = (await select(
+        `SELECT ?t WHERE { ?t <${RDF_TYPE_IRI}> <${DKG}ChatTurn> . ?t <${SCHEMA_ORG}isPartOf> <${CHAT}session:${sessionId}> . ?t <${DKG}turnId> ${JSON.stringify(turnId)} }`,
+      )).map((row) => row.t.replace(/[<>]/g, ''));
+      const older = () => writeStoredTransition(subject, turnId, new Date(base + 60_000), `older completion ${index}`);
+      const newer = () => writeStoredTransition(subject, turnId, new Date(base + 120_000), `newer completion ${index}`);
+      for (const write of index % 2 === 0 ? [newer, older] : [older, newer]) await write();
+    }
+
+    // The list query orders a message's transitions by their own timestamp,
+    // so the newer completion wins for every turn.
+    expect(await listed(sessionId)).toEqual(
+      turns.flatMap(({ index }) => exchange(`question ${index}`, `newer completion ${index}`)),
+    );
+  });
 });
 
 /**
