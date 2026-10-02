@@ -398,11 +398,13 @@ export async function resolveWorkspaceAgentRecipientKeys(
   const graphFilter = excludedGraphs.length === 0
     ? ''
     : `FILTER (?g NOT IN (${excludedGraphs.join(', ')}))`;
-  const candidateLimit = options.requiredPeerId === undefined
-    ? ''
-    : `LIMIT ${STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT + 1}`;
+  // Peer ids are routing metadata, not part of the wallet-signed encryption
+  // key proof. Bound the unrestricted path too: otherwise replicated profile
+  // graphs can pair one valid key with arbitrarily many peer ids and amplify
+  // both Sender Key setup and reliable workspace fanout without bound.
+  const candidateLimit = `LIMIT ${STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT + 1}`;
   const result = await store.query(
-    `SELECT ?key ?algorithm ?proof ?peerId WHERE {
+    `SELECT DISTINCT ?key ?algorithm ?proof ?peerId WHERE {
       VALUES ?agentSubject { ${agentUriValues} }
       GRAPH ?g {
         ?agentSubject <${DKG_PUBLIC_ENCRYPTION_KEY}> ?key .
@@ -418,16 +420,20 @@ export async function resolveWorkspaceAgentRecipientKeys(
   if (result.type !== 'bindings' || result.bindings.length === 0) {
     throw new WorkspaceAgentEncryptionKeyMissingError([checksum]);
   }
-  if (
-    options.requiredPeerId !== undefined
-    && result.bindings.length > STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT
-  ) {
+  if (result.bindings.length > STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT) {
     throw new Error(
       `Too many public encryption-key candidates for DKG agent ${checksum}`,
     );
   }
 
-  const verifiedKeys = new Map<string, WorkspaceAgentRecipient>();
+  // One wallet-verified key can be replicated in several profile graphs. Keep
+  // distinct peer bindings for that key so a later Context Graph allowlist can
+  // select the reachable variant. A peer-bound copy supersedes a peerless copy:
+  // retaining both would incorrectly make the transport projection incomplete.
+  const verifiedKeys = new Map<
+    string,
+    Map<string | undefined, WorkspaceAgentRecipient>
+  >();
   let sawWrongAlgorithm = false;
   let sawUntrustedOnly = false;
   let sawInvalidProof = false;
@@ -479,8 +485,12 @@ export async function resolveWorkspaceAgentRecipientKeys(
     }
 
     const recipientKeyId = workspaceAgentEncryptionKeyId(checksum, publicKeyBytes);
-    if (verifiedKeys.has(recipientKeyId)) continue;
-    verifiedKeys.set(recipientKeyId, {
+    let variants = verifiedKeys.get(recipientKeyId);
+    if (variants === undefined) {
+      variants = new Map();
+      verifiedKeys.set(recipientKeyId, variants);
+    }
+    const recipient = {
       purpose: WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
       recipientId: agentUri,
       recipientKeyId,
@@ -488,7 +498,15 @@ export async function resolveWorkspaceAgentRecipientKeys(
       publicKeyBytes,
       agentAddress: checksum,
       peerId: cleanPeerId,
-    });
+    } satisfies WorkspaceAgentRecipient;
+    if (cleanPeerId === undefined) {
+      // Do not let query ordering replace a usable peer-bound copy with the
+      // same key discovered in a graph that omitted peer provenance.
+      if (variants.size === 0) variants.set(undefined, recipient);
+      continue;
+    }
+    variants.delete(undefined);
+    variants.set(cleanPeerId, recipient);
   }
 
   if (verifiedKeys.size === 0) {
@@ -509,8 +527,13 @@ export async function resolveWorkspaceAgentRecipientKeys(
     throw new Error(`Missing public encryption key for DKG agent ${checksum}`);
   }
 
-  const revokedKeyIds = await loadVerifiedRevokedKeyIds(store, checksum, [...verifiedKeys.values()]);
+  const verifiedRecipients = [...verifiedKeys.values()].flatMap((variants) => (
+    [...variants.values()]
+  ));
+  const revokedKeyIds = await loadVerifiedRevokedKeyIds(store, checksum, verifiedRecipients);
   for (const id of revokedKeyIds) {
+    // Revocation is keyed by recipientKeyId, not by transport provenance, so
+    // retiring a key removes every peer-bound variant at once.
     verifiedKeys.delete(id);
   }
 
@@ -518,7 +541,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
     throw new Error(`All registered public encryption keys for DKG agent ${checksum} have been revoked`);
   }
 
-  return [...verifiedKeys.values()];
+  return [...verifiedKeys.values()].flatMap((variants) => [...variants.values()]);
 }
 
 /**

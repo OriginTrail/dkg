@@ -103,6 +103,8 @@ async function insertAgentEncryptionKey(
     omitProof?: boolean;
     keyFill?: number;
     subject?: string;
+    graph?: string;
+    peerId?: string;
   } = {},
 ): Promise<{ publicKeyBytes: Uint8Array; keyId: string }> {
   const recipientKey = generateWorkspaceRecipientEncryptionKey(
@@ -122,18 +124,19 @@ async function insertAgentEncryptionKey(
   });
   const proof = proofSigner.signingKey.sign(ethers.hashMessage(proofPayload)).serialized;
   const subject = options.subject ?? agentUri(wallet.address);
+  const graph = options.graph ?? 'did:dkg:system/agents';
   const quads = [{
     subject,
     predicate: DKG_PUBLIC_ENCRYPTION_KEY,
     object: `"${publicEncryptionKey}"`,
-    graph: 'did:dkg:system/agents',
+    graph,
   }];
   if (!options.omitAlgorithm) {
     quads.push({
       subject,
       predicate: DKG_ENCRYPTION_KEY_ALGORITHM,
       object: `"${options.algorithm ?? WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519}"`,
-      graph: 'did:dkg:system/agents',
+      graph,
     });
   }
   if (!options.omitProof) {
@@ -141,7 +144,15 @@ async function insertAgentEncryptionKey(
       subject,
       predicate: DKG_ENCRYPTION_KEY_PROOF,
       object: `"${proof}"`,
-      graph: 'did:dkg:system/agents',
+      graph,
+    });
+  }
+  if (options.peerId !== undefined) {
+    quads.push({
+      subject,
+      predicate: `${DKG}peerId`,
+      object: `"${options.peerId}"`,
+      graph,
     });
   }
   await store.insert(quads);
@@ -336,6 +347,82 @@ describe('resolveWorkspaceAgentRecipients', () => {
 
     expect(resolution.recipients).toHaveLength(1);
     expect(resolution.recipients[0]?.recipientKeyId).toBe(historical.keyId);
+  });
+
+  it('prefers a peer-bound copy over a peerless copy of the same verified key', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const peerless = await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 9,
+      graph: 'did:dkg:profile/peerless',
+    });
+    const peerBound = await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 9,
+      graph: 'did:dkg:profile/peer-a',
+      peerId: PEER_A,
+    });
+    expect(peerBound.keyId).toBe(peerless.keyId);
+
+    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
+
+    expect(resolution.recipients).toHaveLength(1);
+    expect(resolution.recipients[0]).toMatchObject({
+      recipientKeyId: peerless.keyId,
+      peerId: PEER_A,
+    });
+  });
+
+  it('preserves distinct peer-bound variants of the same verified key', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const first = await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 10,
+      graph: 'did:dkg:profile/peer-a',
+      peerId: PEER_A,
+    });
+    const second = await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 10,
+      graph: 'did:dkg:profile/peer-b',
+      peerId: PEER_B,
+    });
+    expect(second.keyId).toBe(first.keyId);
+
+    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
+
+    expect(resolution.recipients).toHaveLength(2);
+    expect(new Set(resolution.recipients.map((recipient) => recipient.recipientKeyId)))
+      .toEqual(new Set([first.keyId]));
+    expect(new Set(resolution.recipients.map((recipient) => recipient.peerId)))
+      .toEqual(new Set([PEER_A, PEER_B]));
+    expect(resolution.recipients.filter((recipient) => recipient.peerId === PEER_B))
+      .toHaveLength(1);
+  });
+
+  it('bounds peer-route variants of one wallet-verified key', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    await Promise.all(Array.from({ length: 64 }, async (_unused, index) => (
+      insertAgentEncryptionKey(store, wallet, {
+        keyFill: 13,
+        graph: `did:dkg:profile/peer-route-${index}`,
+        peerId: `peer-route-${index}`,
+      })
+    )));
+
+    await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
+      .resolves.toMatchObject({ requiresEncryption: true, recipients: { length: 64 } });
+
+    await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 13,
+      graph: 'did:dkg:profile/peer-route-64',
+      peerId: 'peer-route-64',
+    });
+
+    await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
+      .rejects.toThrow(/Too many public encryption-key candidates/u);
   });
 
   it('resolves AGENTS-graph private declarations through the sender-key recipient path', async () => {
@@ -540,6 +627,37 @@ describe('resolveWorkspaceAgentRecipients', () => {
 
     expect(resolution.recipients).toHaveLength(1);
     expect(resolution.recipients[0]?.recipientKeyId).toBe(active.keyId);
+  });
+
+  it('removes every peer-bound variant when their shared key ID is revoked', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const retired = await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 11,
+      graph: 'did:dkg:profile/retired-peer-a',
+      peerId: PEER_A,
+    });
+    const retiredVariant = await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 11,
+      graph: 'did:dkg:profile/retired-peer-b',
+      peerId: PEER_B,
+    });
+    const active = await insertAgentEncryptionKey(store, wallet, {
+      keyFill: 12,
+      graph: 'did:dkg:profile/active-peer-a',
+      peerId: PEER_A,
+    });
+    expect(retiredVariant.keyId).toBe(retired.keyId);
+    await insertAgentEncryptionKeyRevocation(store, wallet, retired.publicKeyBytes);
+
+    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
+
+    expect(resolution.recipients).toHaveLength(1);
+    expect(resolution.recipients[0]).toMatchObject({
+      recipientKeyId: active.keyId,
+      peerId: PEER_A,
+    });
   });
 
   it('ignores revocations whose proof was signed by another wallet (no bricking)', async () => {

@@ -91,6 +91,7 @@ describe('prepared unscoped Context Graph read checks', () => {
           requestGeneration: 'generation-1',
           curatorPeerId: 'curator-peer',
           memberAddresses: ['outsider'],
+          allowedPeers: [],
         },
       };
       deps.getRegisteredAuthority

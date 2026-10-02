@@ -12,6 +12,12 @@ export interface ApprovedPrivateReplicaAuthority {
   readonly requestGeneration: string;
   readonly curatorPeerId: string;
   readonly memberAddresses: readonly string[];
+  /**
+   * Source-qualified graph peer gate proved with this replica authority.
+   * Current producers always set this; optionality preserves the public
+   * authority shape accepted from older callers.
+   */
+  readonly allowedPeers?: readonly string[];
 }
 
 /**
@@ -102,5 +108,9 @@ export async function resolveApprovedPrivateReplicaAuthority(
     // This proof authorizes this receiver's approved local participant. It is
     // neither a generic owner policy nor a replacement encryption roster.
     memberAddresses: Object.freeze([approved]),
+    // Preserve the graph's own peer restriction with the proof. Consumers
+    // must not re-read the merged metadata projection, where source identity
+    // has already been discarded.
+    allowedPeers: Object.freeze([...meta.allowedPeers]),
   });
 }

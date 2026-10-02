@@ -6,13 +6,11 @@ import type {
   ContextGraphAgentGateAuthority,
   ContextGraphAgentGateUnavailableReason,
 } from './context-graph-authority.js';
-import type { RegisteredContextGraphAuthority } from
-  '../../registered-context-graph-authority.js';
+import type { SwmTransportAuthority } from './swm-transport-authority.js';
 
 export interface ContextGraphAgentGateAuthorityInput {
   contextGraphId: string;
-  getRegisteredAuthority(): Promise<RegisteredContextGraphAuthority>;
-  resolveRfc64PrivateRoster(): readonly string[] | null | undefined;
+  getTransportAuthority(): Promise<SwmTransportAuthority>;
   getLegacyMeta(): Promise<{
     allowedAgents: readonly string[];
     participantAgents: readonly string[];
@@ -32,31 +30,13 @@ function unavailableAuthority(
   };
 }
 
-/**
- * Canonical signing/encryption gate precedence: registered chain, accepted
- * RFC-64 private roster, then the legacy local projection.
- */
-export async function resolveContextGraphAgentGateAuthorityDecision(
-  input: ContextGraphAgentGateAuthorityInput,
-): Promise<ContextGraphAgentGateAuthority> {
-  const registeredAuthority = await input.getRegisteredAuthority();
-  if (registeredAuthority.kind === 'private') {
-    return { kind: 'available', agentAddresses: registeredAuthority.participantAgents };
-  }
-  if (registeredAuthority.kind === 'unavailable') {
-    return unavailableAuthority(registeredAuthority.reason, registeredAuthority.detail);
-  }
-
-  const rfc64Roster = registeredAuthority.kind === 'unregistered'
-    ? input.resolveRfc64PrivateRoster()
-    : undefined;
-  if (rfc64Roster !== undefined) {
-    if (rfc64Roster === null) {
-      return unavailableAuthority('rfc64-private-read-roster-unavailable');
-    }
+function conclusiveTransportGate(
+  transportAuthority: SwmTransportAuthority,
+): ContextGraphAgentGateAuthority | null {
+  if (transportAuthority.kind === 'private-roster') {
     const seen = new Set<string>();
     const accepted: string[] = [];
-    for (const value of rfc64Roster) {
+    for (const value of transportAuthority.participantAgents) {
       if (!ethers.isAddress(value)) continue;
       const checksum = ethers.getAddress(value);
       const key = checksum.toLowerCase();
@@ -66,8 +46,32 @@ export async function resolveContextGraphAgentGateAuthorityDecision(
     }
     return { kind: 'available', agentAddresses: accepted };
   }
+  if (transportAuthority.kind === 'unavailable') {
+    return unavailableAuthority(transportAuthority.reason, transportAuthority.detail);
+  }
+  return null;
+}
+
+/**
+ * Canonical signing/encryption gate precedence: registered chain, active
+ * accepted RFC-64 private roster, then the legacy local projection.
+ */
+export async function resolveContextGraphAgentGateAuthorityDecision(
+  input: ContextGraphAgentGateAuthorityInput,
+): Promise<ContextGraphAgentGateAuthority> {
+  const transportAuthority = await input.getTransportAuthority();
+  const conclusiveGate = conclusiveTransportGate(transportAuthority);
+  if (conclusiveGate !== null) return conclusiveGate;
 
   const meta = await input.getLegacyMeta();
+  // Metadata is an async boundary. A private RFC-64 policy can activate or a
+  // private registration can commit while it awaits the store; in either case
+  // that exact roster must supersede the captured legacy/approved projection.
+  const currentConclusiveGate = conclusiveTransportGate(
+    await input.getTransportAuthority(),
+  );
+  if (currentConclusiveGate !== null) return currentConclusiveGate;
+
   const seen = new Set<string>();
   const agents: string[] = [];
   let sawAgentGate = false;

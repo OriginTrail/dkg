@@ -11290,8 +11290,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * plaintext: registered public, or unregistered under an active accepted
    * owner-signed public policy (see classifySwmTransportAuthority). A retained
    * snapshot therefore never outvotes a registration the index shows. Private,
-   * legacy-unregistered or unavailable authority, or an unreadable chain, is
-   * `unproven`, which admits only the complete private definition.
+   * approved-private-replica, legacy-unregistered or unavailable authority, or
+   * an unreadable chain, is `unproven`, which admits only the complete private
+   * definition.
    */
   async resolveApprovedMemberAcceptance(this: DKGAgent,
     contextGraphId: string,

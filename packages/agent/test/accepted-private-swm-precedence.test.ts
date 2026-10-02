@@ -1,0 +1,655 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+import {
+  DKG_ONTOLOGY,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  computeWorkspaceAgentEncryptionKeyProofPayload,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  encodeWorkspaceEncryptionKey,
+  generateWorkspaceRecipientEncryptionKey,
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+
+import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
+
+const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/accepted-private';
+const PROFILE_GRAPH = 'did:dkg:context-graph:agents';
+const CURATOR_PEER_ID = '12D3KooWAcceptedPrivateCurator';
+
+function signedKeyQuads(wallet: ethers.HDNodeWallet): Quad[] {
+  const agentUri = `did:dkg:agent:${ethers.getAddress(wallet.address)}`;
+  const key = generateWorkspaceRecipientEncryptionKey(
+    agentUri,
+    `${agentUri}#accepted-private-x25519`,
+  );
+  const publicKeyBytes = key.publicKeyBytes!;
+  const proof = wallet.signingKey.sign(ethers.hashMessage(
+    computeWorkspaceAgentEncryptionKeyProofPayload({
+      agentAddress: wallet.address,
+      encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+      publicKeyBytes,
+    }),
+  )).serialized;
+  return [
+    {
+      subject: agentUri,
+      predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
+      object: `"${encodeWorkspaceEncryptionKey(publicKeyBytes)}"`,
+      graph: PROFILE_GRAPH,
+    },
+    {
+      subject: agentUri,
+      predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
+      object: `"${WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519}"`,
+      graph: PROFILE_GRAPH,
+    },
+    {
+      subject: agentUri,
+      predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
+      object: `"${proof}"`,
+      graph: PROFILE_GRAPH,
+    },
+  ];
+}
+
+function approvedUnregisteredAuthority(approvedAgentAddress: string) {
+  return {
+    kind: 'unregistered' as const,
+    approvedPrivateReplicaAuthority: {
+      approvedAgentAddress,
+      ownerAddress: approvedAgentAddress,
+      requestGeneration: 'accepted-private-generation',
+      curatorPeerId: CURATOR_PEER_ID,
+      memberAddresses: [approvedAgentAddress],
+      allowedPeers: [] as string[],
+    },
+  };
+}
+
+describe('accepted private RFC-64 SWM authority precedence', () => {
+  const stores: OxigraphStore[] = [];
+
+  afterEach(async () => {
+    await Promise.all(stores.splice(0).map((store) => store.close()));
+  });
+
+  it('encrypts only to the accepted private roster, never a stale metadata member', async () => {
+    const owner = ethers.Wallet.createRandom();
+    const member = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([
+      ...signedKeyQuads(owner),
+      ...signedKeyQuads(member),
+      ...signedKeyQuads(removed),
+      ...[owner, member, removed].map((wallet) => ({
+        subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${wallet.address}"`,
+        graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      })),
+    ]);
+
+    const resolveRegisteredContextGraphAuthority = vi.fn(async (
+      _contextGraphId: string,
+      options: { allowAcceptedRfc64FinalizedAbsence?: boolean },
+    ) => {
+      expect(options.allowAcceptedRfc64FinalizedAbsence).toBe(true);
+      return approvedUnregisteredAuthority(member.address);
+    });
+    const host = {
+      store,
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => (
+        [owner.address, member.address]
+      ),
+      getContextGraphAllowedPeers: vi.fn(async () => null),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    const resolution = await WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      });
+
+    expect(resolution.requiresEncryption).toBe(true);
+    expect(resolution.recipients.map(({ agentAddress }) => agentAddress).sort())
+      .toEqual([owner.address, member.address].map(ethers.getAddress).sort());
+    expect(resolution.recipients.map(({ agentAddress }) => agentAddress.toLowerCase()))
+      .not.toContain(removed.address.toLowerCase());
+    expect(host.ensureAgentsInOnDemandPhonebook).not.toHaveBeenCalled();
+  });
+
+  it('rejects recipient keys when the accepted private roster rotates during lookup', async () => {
+    const owner = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([
+      ...signedKeyQuads(owner),
+      ...signedKeyQuads(removed),
+    ]);
+    let currentRoster = [owner.address, removed.address];
+    const query = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (...args) => {
+      const result = await query(...args);
+      currentRoster = [owner.address];
+      return result;
+    });
+    const host = {
+      store,
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => (
+        approvedUnregisteredAuthority(owner.address)
+      )),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => currentRoster,
+      getContextGraphAllowedPeers: vi.fn(async () => null),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      })).rejects.toMatchObject({
+        reason: 'chain-participant-authority-unavailable',
+    });
+  });
+
+  it.each([
+    { nextKind: 'legacy-unregistered' as const },
+    { nextKind: 'approved-private-replica' as const },
+  ])('rejects accepted-private recipients when authority becomes $nextKind during lookup', async ({ nextKind }) => {
+    const owner = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([
+      ...signedKeyQuads(owner),
+      ...signedKeyQuads(removed),
+    ]);
+    const nextTransport = nextKind === 'legacy-unregistered'
+      ? { kind: nextKind }
+      : { kind: nextKind, allowedPeers: [] as string[] };
+    const host = {
+      store,
+      resolveSwmTransportAuthority: vi.fn()
+        .mockResolvedValueOnce({
+          kind: 'private-roster' as const,
+          participantAgents: [owner.address, removed.address],
+        })
+        .mockResolvedValueOnce(nextTransport),
+      getContextGraphAllowedPeers: vi.fn(async () => null),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      })).rejects.toMatchObject({
+        reason: 'chain-participant-authority-unavailable',
+      });
+  });
+
+  it('rejects legacy metadata recipients when approved-private authority activates during lookup', async () => {
+    const owner = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([
+      ...signedKeyQuads(owner),
+      ...signedKeyQuads(removed),
+      ...[owner, removed].map((wallet) => ({
+        subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${wallet.address}"`,
+        graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      })),
+    ]);
+    const host = {
+      store,
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 3 },
+      resolveSwmTransportAuthority: vi.fn()
+        .mockResolvedValueOnce({ kind: 'legacy-unregistered' as const })
+        .mockResolvedValueOnce({
+          kind: 'approved-private-replica' as const,
+          allowedPeers: [] as string[],
+        }),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      })).rejects.toMatchObject({
+        reason: 'chain-participant-authority-unavailable',
+      });
+  });
+
+  it('rejects a recipient snapshot that becomes stale while sender-key state loads', async () => {
+    const owner = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    let currentRoster = [owner.address, removed.address];
+    const host = {
+      swmSenderKeyStateLoaded: false,
+      loadSwmSenderKeyState: vi.fn(async () => {
+        currentRoster = [owner.address];
+      }),
+      resolveWorkspaceAgentRecipientsForCurrentAuthority: vi.fn(async () => ({
+        requiresEncryption: true as const,
+        recipients: currentRoster.map((agentAddress) => ({
+          agentAddress,
+          recipientKeyId: `${agentAddress}-key`,
+        })),
+      })),
+      getLocalSigningAgentForAddress: vi.fn(() => ({
+        agentAddress: owner.address,
+        privateKey: owner.privateKey,
+      })),
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => (
+        approvedUnregisteredAuthority(owner.address)
+      )),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => currentRoster,
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.encryptWorkspacePayloadWithSenderKey.call(
+      host as never,
+      {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        plaintext: new Uint8Array([1]),
+        senderAgentAddress: owner.address,
+        operationId: 'accepted-private-final-recheck',
+        shareOperationId: 'accepted-private-final-recheck',
+        timestampMs: Date.now(),
+        publisherPeerId: CURATOR_PEER_ID,
+        resolution: {
+          requiresEncryption: true,
+          recipients: [
+            { agentAddress: owner.address, recipientKeyId: `${owner.address}-key` },
+            { agentAddress: removed.address, recipientKeyId: `${removed.address}-key` },
+          ],
+        },
+      } as never,
+    )).rejects.toMatchObject({
+      reason: 'chain-participant-authority-unavailable',
+    });
+  });
+
+  it('uses the accepted private roster for recovery instead of stale metadata', async () => {
+    const owner = ethers.Wallet.createRandom();
+    const member = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    const getCgMeta = vi.fn(async () => ({
+      allowedAgents: [owner.address, member.address, removed.address],
+      participantAgents: [],
+      revokedAgents: [],
+    }));
+    const host = {
+      resolveRegisteredContextGraphAuthority: async () => (
+        approvedUnregisteredAuthority(member.address)
+      ),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => (
+        [owner.address, member.address]
+      ),
+      getCgMeta,
+    };
+
+    const recovery = await WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    );
+
+    expect(recovery).toEqual([owner.address, member.address]);
+    expect(getCgMeta).not.toHaveBeenCalled();
+  });
+
+  it('uses only the active accepted private roster for the SWM agent gate', async () => {
+    const approvedMember = ethers.Wallet.createRandom();
+    const retainedRemovedMember = ethers.Wallet.createRandom();
+    const getCgMeta = vi.fn(async () => ({
+      allowedAgents: [approvedMember.address],
+      participantAgents: [],
+      revokedAgents: [],
+    }));
+    const retainedRoster = vi.fn(() => [retainedRemovedMember.address]);
+    const host = {
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => (
+        approvedUnregisteredAuthority(approvedMember.address)
+      )),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => undefined,
+      resolveRfc64PrivateReadRosterV1: retainedRoster,
+      getCgMeta,
+      subscribedContextGraphs: new Map(),
+    };
+
+    const gate = await WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    );
+
+    expect(gate).toEqual({ kind: 'available', agentAddresses: [approvedMember.address] });
+    expect(gate).not.toEqual(expect.objectContaining({
+      agentAddresses: expect.arrayContaining([retainedRemovedMember.address]),
+    }));
+    expect(retainedRoster).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the SWM agent gate when private authority activates during metadata', async () => {
+    const member = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    let privateAuthorityActive = false;
+    const host = {
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => (
+        approvedUnregisteredAuthority(member.address)
+      )),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => (
+        privateAuthorityActive ? [member.address] : undefined
+      ),
+      getCgMeta: vi.fn(async () => {
+        privateAuthorityActive = true;
+        return {
+          allowedAgents: [removed.address],
+          participantAgents: [],
+          revokedAgents: [],
+        };
+      }),
+      subscribedContextGraphs: new Map(),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ kind: 'available', agentAddresses: [member.address] });
+  });
+
+  it('rechecks recovery authority after metadata and rejects a newly stale member', async () => {
+    const member = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    let privateAuthorityActive = false;
+    const getLocalMetadataMemberRecoveryGate = vi.fn(async () => {
+      privateAuthorityActive = true;
+      return [removed.address];
+    });
+    const resolveRegisteredContextGraphAuthority = vi.fn(async () => (
+      approvedUnregisteredAuthority(member.address)
+    ));
+    const host = {
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      resolveRegisteredContextGraphAuthority,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => (
+        privateAuthorityActive ? [member.address] : undefined
+      ),
+      getLocalMetadataMemberRecoveryGate,
+    };
+
+    const recovery = await WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    );
+
+    expect(recovery).toEqual([member.address]);
+    expect(recovery).not.toContain(removed.address);
+    expect(getLocalMetadataMemberRecoveryGate).toHaveBeenCalledOnce();
+    expect(resolveRegisteredContextGraphAuthority).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the registered private chain roster as the mutation source', async () => {
+    const member = ethers.Wallet.createRandom();
+    const staleOverlayMember = ethers.Wallet.createRandom();
+    const getLocalMetadataMemberRecoveryGate = vi.fn(async () => [staleOverlayMember.address]);
+    const host = {
+      resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => ({
+        kind: 'private' as const,
+        onChainId: 7n,
+        participantAgents: [member.address],
+      })),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => (
+        [staleOverlayMember.address]
+      ),
+      getLocalMetadataMemberRecoveryGate,
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.getMemberRecoveryRosterSource.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual([member.address]);
+    expect(getLocalMetadataMemberRecoveryGate).not.toHaveBeenCalled();
+  });
+
+  it('uses fresh metadata, not the accepted overlay, as an unregistered mutation source', async () => {
+    const previousMember = ethers.Wallet.createRandom();
+    const invitedMember = ethers.Wallet.createRandom();
+    const getLocalMetadataMemberRecoveryGate = vi.fn(async () => [invitedMember.address]);
+    const host = {
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => (
+        approvedUnregisteredAuthority(previousMember.address)
+      )),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => (
+        [previousMember.address]
+      ),
+      getLocalMetadataMemberRecoveryGate,
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.getMemberRecoveryRosterSource.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual([invitedMember.address]);
+    expect(getLocalMetadataMemberRecoveryGate).toHaveBeenCalledOnce();
+  });
+
+  it('switches a mutation source to the chain roster when registration commits during metadata', async () => {
+    const chainMember = ethers.Wallet.createRandom();
+    const staleLocalMember = ethers.Wallet.createRandom();
+    let registered = false;
+    const getLocalMetadataMemberRecoveryGate = vi.fn(async () => {
+      registered = true;
+      return [staleLocalMember.address];
+    });
+    const resolveRegisteredContextGraphAuthority = vi.fn(async () => registered
+      ? {
+          kind: 'private' as const,
+          onChainId: 7n,
+          participantAgents: [chainMember.address],
+        }
+      : approvedUnregisteredAuthority(staleLocalMember.address));
+    const host = {
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
+      resolveRegisteredContextGraphAuthority,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => undefined,
+      getLocalMetadataMemberRecoveryGate,
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.getMemberRecoveryRosterSource.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual([chainMember.address]);
+    expect(resolveRegisteredContextGraphAuthority).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails recovery closed when metadata authority facts change during the read', async () => {
+    const removed = ethers.Wallet.createRandom();
+    const contextGraphMetaProjection = { readAuthorityFactsRevision: 4 };
+    const host = {
+      contextGraphMetaProjection,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => (
+        approvedUnregisteredAuthority(removed.address)
+      )),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => undefined,
+      getLocalMetadataMemberRecoveryGate: vi.fn(async () => {
+        contextGraphMetaProjection.readAuthorityFactsRevision += 1;
+        return [removed.address];
+      }),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toBeNull();
+  });
+
+  it('drops a private accepted-policy allowance that deactivates during the registry read', async () => {
+    const member = ethers.Wallet.createRandom();
+    const resolveRegisteredContextGraphAuthority = vi.fn(async (
+      _contextGraphId: string,
+      options: { allowAcceptedRfc64FinalizedAbsence?: boolean },
+    ) => options.allowAcceptedRfc64FinalizedAbsence === true
+      ? approvedUnregisteredAuthority(member.address)
+      : {
+          kind: 'unavailable' as const,
+          reason: 'finalized-name-absence-unaccepted' as const,
+        });
+    const privateRoster = vi.fn()
+      .mockReturnValueOnce([member.address])
+      .mockReturnValueOnce(undefined);
+    const host = {
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: privateRoster,
+    };
+
+    await expect(host.resolveSwmTransportAuthority.call(host as never, CONTEXT_GRAPH_ID))
+      .resolves.toMatchObject({
+        kind: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+      });
+    expect(resolveRegisteredContextGraphAuthority.mock.calls.map(([, options]) => (
+      options.allowAcceptedRfc64FinalizedAbsence
+    ))).toEqual([true, false]);
+  });
+
+  it('lets registered public and private authority override an accepted private roster', async () => {
+    const acceptedMember = ethers.Wallet.createRandom();
+    const chainMember = ethers.Wallet.createRandom();
+    const authorityHost = (registered: unknown) => ({
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => registered),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => [acceptedMember.address],
+    });
+
+    const publicHost = authorityHost({ kind: 'public' as const, onChainId: 7n });
+    await expect(publicHost.resolveSwmTransportAuthority.call(
+      publicHost as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ kind: 'plaintext' });
+    await expect(WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+      publicHost as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toBeNull();
+
+    const privateHost = authorityHost({
+      kind: 'private' as const,
+      onChainId: 7n,
+      participantAgents: [chainMember.address],
+    });
+    await expect(privateHost.resolveSwmTransportAuthority.call(
+      privateHost as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({
+      kind: 'private-roster',
+      participantAgents: [chainMember.address],
+    });
+    await expect(WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+      privateHost as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual([chainMember.address]);
+  });
+
+  it('falls back to approved-private authority when accepted private deactivates', async () => {
+    const member = ethers.Wallet.createRandom();
+    const resolveRegisteredContextGraphAuthority = vi.fn(async () => (
+      approvedUnregisteredAuthority(member.address)
+    ));
+    const privateRoster = vi.fn()
+      .mockReturnValueOnce([member.address])
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(undefined);
+    const host = {
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: privateRoster,
+    };
+
+    await expect(host.resolveSwmTransportAuthority.call(host as never, CONTEXT_GRAPH_ID))
+      .resolves.toEqual({ kind: 'approved-private-replica', allowedPeers: [] });
+    expect(resolveRegisteredContextGraphAuthority.mock.calls.map(([, options]) => (
+      options.allowAcceptedRfc64FinalizedAbsence
+    ))).toEqual([true, false]);
+  });
+
+  it('uses a private roster rotation observed after the registry read', async () => {
+    const member = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    const privateRoster = vi.fn()
+      .mockReturnValueOnce([member.address, removed.address])
+      .mockReturnValueOnce([member.address]);
+    const host = {
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => (
+        approvedUnregisteredAuthority(member.address)
+      )),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: privateRoster,
+    };
+
+    await expect(host.resolveSwmTransportAuthority.call(host as never, CONTEXT_GRAPH_ID))
+      .resolves.toEqual({
+        kind: 'private-roster',
+        participantAgents: [member.address],
+      });
+    expect(privateRoster).toHaveBeenCalledTimes(2);
+  });
+
+  it('honors private authority that reactivates during the no-allowance reread', async () => {
+    const member = ethers.Wallet.createRandom();
+    const removed = ethers.Wallet.createRandom();
+    const privateRoster = vi.fn()
+      .mockReturnValueOnce([member.address, removed.address])
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce([member.address]);
+    const resolveRegisteredContextGraphAuthority = vi.fn(async () => (
+      approvedUnregisteredAuthority(member.address)
+    ));
+    const host = {
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      resolveRegisteredContextGraphAuthority,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: privateRoster,
+    };
+
+    await expect(host.resolveSwmTransportAuthority.call(host as never, CONTEXT_GRAPH_ID))
+      .resolves.toEqual({
+        kind: 'private-roster',
+        participantAgents: [member.address],
+      });
+    expect(resolveRegisteredContextGraphAuthority.mock.calls.map(([, options]) => (
+      options.allowAcceptedRfc64FinalizedAbsence
+    ))).toEqual([true, false]);
+    expect(privateRoster).toHaveBeenCalledTimes(3);
+  });
+});

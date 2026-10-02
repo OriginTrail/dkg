@@ -148,11 +148,13 @@ import {
 } from './internal/context-graph-authority/context-graph-access-policy.js';
 import {
   createContextGraphAuthorityError,
+  isContextGraphAuthorityUnavailableMarker,
   isRetryableContextGraphAuthorityUnavailableReason,
   type ContextGraphAgentGateAuthority,
 } from './internal/context-graph-authority/context-graph-authority.js';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
 import {
+  resolveSwmMemberRecoveryAuthorityDecision,
   resolveSwmRegisteredAuthorityDecision,
   resolveSwmTransportAuthorityDecision,
   type SwmRegisteredAuthorityReadOptions,
@@ -669,6 +671,49 @@ function withMemberKeyHint(
   );
 }
 
+function hasExactRecipientAgentRoster(
+  resolution: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>,
+  participantAgents: readonly string[],
+): boolean {
+  try {
+    const resolvedAgents = new Set(
+      resolution.recipients.map(({ agentAddress }) => ethers.getAddress(agentAddress).toLowerCase()),
+    );
+    const currentAgents = new Set(
+      participantAgents.map((address) => ethers.getAddress(address).toLowerCase()),
+    );
+    return currentAgents.size === resolvedAgents.size
+      && [...currentAgents].every((address) => resolvedAgents.has(address));
+  } catch {
+    return false;
+  }
+}
+
+function hasExactWorkspaceRecipientSet(
+  left: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>,
+  right: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>,
+): boolean {
+  const canonical = (recipient: WorkspaceAgentRecipient): string => [
+    ethers.getAddress(recipient.agentAddress).toLowerCase(),
+    recipient.recipientKeyId,
+    recipient.peerId ?? '',
+  ].join('\u0000');
+  try {
+    const leftRecipients = left.recipients.map(canonical).sort();
+    const rightRecipients = right.recipients.map(canonical).sort();
+    return leftRecipients.length === rightRecipients.length
+      && leftRecipients.every((recipient, index) => recipient === rightRecipients[index]);
+  } catch {
+    return false;
+  }
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
+}
+
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -728,11 +773,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   ): Promise<ContextGraphAgentGateAuthority> {
     return withRpcUsageSite(CG_AUTH_RPC_SITES.gate, () => resolveContextGraphAgentGateAuthorityDecision({
       contextGraphId,
-      getRegisteredAuthority: () => this.resolveSwmRegisteredAuthority(
+      getTransportAuthority: () => this.resolveSwmTransportAuthority(
         contextGraphId,
         { signal: options.signal },
       ),
-      resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
       getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
       getSubscriptionAgents: () => (
         this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
@@ -753,38 +797,117 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
-   * R9 (SECURITY) — FRESH, `_meta`-only member-recovery gate.
+   * R9 (SECURITY) — authoritative member-recovery gate.
    *
-   * Resolves `allowedAgents ∪ participantAgents` minus `revokedAgents` from the
-   * CG `_meta` projection (store-backed, write-invalidated), with the
-   * network-influenced `subscribedContextGraphs` subscription cache
-   * DELIBERATELY OMITTED — that cache is poisonable, and folding it in is
-   * exactly what `member-recovery-auth.ts` forbids.
+   * Registered and active accepted-private graphs use their exact authority
+   * roster. Only a legacy unregistered graph (including accepted public, whose
+   * local gate controls recovery rather than reads) resolves the effective
+   * store-backed metadata projection of
+   * `allowedAgents ∪ participantAgents` minus `revokedAgents` from the CG
+   * metadata. The network-influenced `subscribedContextGraphs`
+   * subscription cache is DELIBERATELY OMITTED — that cache is poisonable, and
+   * folding it in is exactly what `member-recovery-auth.ts` forbids.
    *
    * Unlike {@link getContextGraphAgentGateAddresses} (which also feeds normal
    * sync admission and may fold in the subscription cache only for graphs that
    * are not registered on-chain), this read is used ONLY for `request.recovery`
    * and is passed straight to
    * `isMemberRecoveryAuthorized`, which hard-denies on null/empty. Returns
-   * `null` when the CG has no `_meta` agent gate at all (⇒ hard-deny).
+   * `null` when the CG has no projected agent gate at all (⇒ hard-deny).
    */
   async getMemberRecoveryGate(
     this: DKGAgent,
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    const registeredAuthority = await withRpcUsageSite(
+    const recoveryAuthority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.recoveryGate,
-      () => this.resolveSwmRegisteredAuthority(contextGraphId, { signal: options.signal }),
+      () => resolveSwmMemberRecoveryAuthorityDecision(
+        this,
+        contextGraphId,
+        { signal: options.signal },
+      ),
     );
-    if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
-    if (registeredAuthority.kind !== 'unregistered') return null;
+    if (recoveryAuthority.kind === 'private-roster') {
+      return [...recoveryAuthority.participantAgents];
+    }
+    if (recoveryAuthority.kind !== 'legacy-unregistered') return null;
+
+    const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+    const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
+
+    // Metadata is another async boundary. Re-resolve the authoritative state
+    // before returning it so a private policy activation/rotation or a chain
+    // registration that commits during the store read takes precedence over
+    // the now-stale local projection.
+    const currentRecoveryAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recoveryGate,
+      () => resolveSwmMemberRecoveryAuthorityDecision(
+        this,
+        contextGraphId,
+        { signal: options.signal },
+      ),
+    );
+    if (currentRecoveryAuthority.kind === 'private-roster') {
+      return [...currentRecoveryAuthority.participantAgents];
+    }
+    if (currentRecoveryAuthority.kind !== 'legacy-unregistered') return null;
+    // A revocation or other authority-fact mutation during the metadata read
+    // invalidates the captured roster even if registration remained absent.
+    // Recovery is retryable, so fail closed instead of serving that snapshot.
+    return this.contextGraphMetaProjection.readAuthorityFactsRevision === metadataRevision
+      ? metadataGate
+      : null;
+  }
+
+  /**
+   * Authority source used while constructing or mutating a private roster.
+   * Registered private graphs retain their finalized chain participant set;
+   * unregistered graphs use the effective store-backed metadata projection.
+   * This deliberately ignores an accepted-private overlay roster so rotation
+   * does not ask the roster it is replacing to define its own successor.
+   */
+  async getMemberRecoveryRosterSource(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
+    const registered = await this.resolveSwmRegisteredAuthority(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (registered.kind === 'private') return [...registered.participantAgents];
+    if (registered.kind !== 'unregistered') return null;
+    const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+    const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
+    const currentRegistered = await this.resolveSwmRegisteredAuthority(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (currentRegistered.kind === 'private') {
+      return [...currentRegistered.participantAgents];
+    }
+    if (currentRegistered.kind !== 'unregistered') return null;
+    return this.contextGraphMetaProjection.readAuthorityFactsRevision === metadataRevision
+      ? metadataGate
+      : null;
+  }
+
+  /**
+   * Fresh effective store-backed metadata member set. This deliberately stays
+   * separate from the transport-authoritative recovery decision.
+   */
+  async getLocalMetadataMemberRecoveryGate(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
 
     const seen = new Set<string>();
     const agents: string[] = [];
     const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
     if (meta.allowedAgents.length === 0 && meta.participantAgents.length === 0) {
-      return null; // no _meta agent gate ⇒ hard-deny at the recovery gate
+      return null; // no projected agent gate ⇒ hard-deny at the recovery gate
     }
     const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
     const add = (value: string | undefined) => {
@@ -1184,6 +1307,70 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
+   * Resolve the transport peer gate that applies to inbound SWM traffic.
+   *
+   * Ordinary graphs retain the legacy merged metadata projection. A graph
+   * carrying a durable local join approval must instead use the peer roster
+   * from the same source-qualified proof that authorized its private replica;
+   * falling back to the merged projection there would let an unrelated
+   * AGENTS/ONTOLOGY row widen the inbound gate. Registration (or a proven
+   * public policy) supersedes that participant proof and keeps the established
+   * registered/public behaviour.
+   */
+  async resolveApprovedPrivateReplicaSwmAllowedPeersOverride(this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string[] | undefined> {
+    if (!this.localApprovedAgentByCG.has(contextGraphId)) {
+      return undefined;
+    }
+
+    const transport = await this.resolveSwmTransportAuthority(contextGraphId, {
+      authorityReadMode: 'finalized-index-or-live',
+    });
+    switch (transport.kind) {
+      case 'approved-private-replica':
+        // An empty proved list is an authoritative open peer gate. Keep it
+        // distinct from `undefined` (this override does not apply) so the
+        // SharedMemoryHandler projection wrapper never falls back to a merged
+        // secondary-source row.
+        return [...new Set(transport.allowedPeers)];
+      case 'plaintext':
+      case 'private-roster':
+        return undefined;
+      case 'unavailable':
+        throw createContextGraphAuthorityError(
+          `Context graph "${contextGraphId}" SWM peer gate authority is unavailable (${transport.reason})`,
+          transport,
+        );
+      case 'legacy-unregistered':
+        // The approval may have been removed while the authority read was in
+        // flight. Only that transition restores ordinary legacy behaviour.
+        if (!this.localApprovedAgentByCG.has(contextGraphId)) {
+          return undefined;
+        }
+        throw createContextGraphAuthorityError(
+          `Context graph "${contextGraphId}" still has a local join approval but no approved private replica authority`,
+          {
+            reason: 'finalized-name-absence-unaccepted',
+            detail: 'approved private replica authority did not survive current SWM authority resolution',
+          },
+        );
+    }
+  }
+
+  /** List/null adapter for SWM consumers that do not consume meta records. */
+  async resolveSwmAllowedPeersForCurrentAuthority(this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string[] | null> {
+    const approvedReplicaOverride =
+      await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(contextGraphId);
+    if (approvedReplicaOverride === undefined) {
+      return this.getContextGraphAllowedPeers(contextGraphId);
+    }
+    return approvedReplicaOverride.length > 0 ? approvedReplicaOverride : null;
+  }
+
+  /**
    * Whether SWM on this graph is public-readable, so plaintext may be both
    * sent and accepted. One predicate for both ends of the wire: the sender's
    * recipient resolver and the receiver's plaintext oracle.
@@ -1543,11 +1730,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * a public CG that never encrypts. Private graphs resolve recipients from
    * the live roster; unavailable registered authority fails closed. An
    * unregistered graph whose accepted owner-signed policy is public is
-   * treated like an on-chain public one.
+   * treated like an on-chain public one. An approved private replica retains
+   * the full effective metadata roster, while any explicit graph peer
+   * allowlist restricts the recipient keys available to every roster member.
    */
   async resolveWorkspaceRecipientsGated(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
+    // Hydrate durable sender-key state before resolving recipients. The
+    // publisher invokes the encryptor synchronously after this resolver, so
+    // this keeps state I/O out of the authority-fenced interval between the
+    // final recipient recheck and sender-key epoch selection/creation.
+    await this.loadSwmSenderKeyState();
     return this.resolveWorkspaceAgentRecipientsForCurrentAuthority(input);
   }
 
@@ -1582,9 +1776,59 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (transport.kind === 'plaintext') {
       return { requiresEncryption: false, recipients: [] };
     }
+    const unregisteredMetadataAuthorityRevision = (
+      transport.kind === 'approved-private-replica'
+      || transport.kind === 'legacy-unregistered'
+    )
+      ? this.contextGraphMetaProjection.readAuthorityFactsRevision
+      : null;
     let resolveKeys: () => Promise<WorkspaceAgentRecipientResolution>;
     if (transport.kind === 'legacy-unregistered') {
       resolveKeys = () => resolveWorkspaceAgentRecipients(this.store, input);
+    } else if (transport.kind === 'approved-private-replica') {
+      // Resolve the complete effective metadata roster first. Participant
+      // approval authorizes this receiver; it is not a replacement roster.
+      // The peer gate comes from the same source-qualified, revision-fenced
+      // proof as the transport classification, never the merged projection.
+      resolveKeys = async () => {
+        const resolution = await resolveWorkspaceAgentRecipients(this.store, input);
+        if (!resolution.requiresEncryption) {
+          throw new Error(
+            `Approved private replica "${input.contextGraphId}" resolved a plaintext SWM roster`,
+          );
+        }
+        if (transport.allowedPeers.length === 0) return resolution;
+
+        const allowedPeerSet = new Set(transport.allowedPeers);
+        const effectiveAgentAddresses = new Set(
+          resolution.recipients.map(({ agentAddress }) => agentAddress.toLowerCase()),
+        );
+        const authorizedRecipients = resolution.recipients.filter((recipient) => (
+          recipient.peerId !== undefined && allowedPeerSet.has(recipient.peerId)
+        ));
+        const authorizedAgentAddresses = new Set(
+          authorizedRecipients.map(({ agentAddress }) => agentAddress.toLowerCase()),
+        );
+        for (const agentAddress of effectiveAgentAddresses) {
+          if (!authorizedAgentAddresses.has(agentAddress)) {
+            throw new Error(
+              `Approved private replica "${input.contextGraphId}" requires encrypted SWM gossip but `
+              + `effective DKG agent ${ethers.getAddress(agentAddress)} has no recipient key `
+              + 'advertised by a peer in the context graph allowlist',
+            );
+          }
+        }
+        const [firstRecipient, ...remainingRecipients] = authorizedRecipients;
+        if (!firstRecipient) {
+          throw new Error(
+            `Approved private replica "${input.contextGraphId}" requires encrypted SWM gossip but has no allowed DKG agent recipients`,
+          );
+        }
+        return {
+          requiresEncryption: true,
+          recipients: [firstRecipient, ...remainingRecipients],
+        };
+      };
     } else {
       if (transport.kind === 'unavailable') {
         const message =
@@ -1652,34 +1896,106 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // every member whose key is missing, then the keys are resolved once more.
     // Every member still needs a key, so a share that cannot get one stays
     // closed.
-    try {
-      return await resolveKeys();
-    } catch (error) {
-      if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
-      if (typeof this.ensureAgentsInOnDemandPhonebook !== 'function') throw withMemberKeyHint(error);
-      await this.ensureAgentsInOnDemandPhonebook(
-        error.agentAddresses.map((address) => address.toLowerCase()),
-        AbortSignal.timeout(SWM_RECIPIENT_KEY_FETCH_WAIT_MS),
+    const resolution = await (async (): Promise<WorkspaceAgentRecipientResolution> => {
+      try {
+        return await resolveKeys();
+      } catch (error) {
+        if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
+        if (typeof this.ensureAgentsInOnDemandPhonebook !== 'function') {
+          throw withMemberKeyHint(error);
+        }
+        await this.ensureAgentsInOnDemandPhonebook(
+          error.agentAddresses.map((address) => address.toLowerCase()),
+          AbortSignal.timeout(SWM_RECIPIENT_KEY_FETCH_WAIT_MS),
+        );
+      }
+      try {
+        return await resolveKeys();
+      } catch (error) {
+        throw isWorkspaceAgentEncryptionKeyMissingError(error) ? withMemberKeyHint(error) : error;
+      }
+    })();
+
+    if (
+      transport.kind === 'private-roster'
+      || transport.kind === 'approved-private-replica'
+      || transport.kind === 'legacy-unregistered'
+    ) {
+      // Key and phonebook lookup are asynchronous. Re-read the paired
+      // transport decision after them so an accepted-private (or registered)
+      // roster rotation cannot return keys for a member removed meanwhile.
+      const currentTransport = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.recipients,
+        () => this.resolveSwmTransportAuthority(input.contextGraphId, {
+          authorityReadMode: 'finalized-index-or-live',
+          requireLiveRosterForPrivate: true,
+        }),
       );
+      if (currentTransport.kind === 'unavailable') {
+        throw createContextGraphAuthorityError(
+          `Context graph "${input.contextGraphId}" recipient authority is unavailable (${currentTransport.reason})`,
+          currentTransport,
+        );
+      }
+      const authorityStayedCurrent = transport.kind === 'private-roster'
+        ? currentTransport.kind === 'private-roster'
+          && resolution.requiresEncryption
+          && hasExactRecipientAgentRoster(resolution, currentTransport.participantAgents)
+        : transport.kind === 'approved-private-replica'
+          ? currentTransport.kind === 'approved-private-replica'
+            && unregisteredMetadataAuthorityRevision
+              === this.contextGraphMetaProjection.readAuthorityFactsRevision
+            && sameStringSet(transport.allowedPeers, currentTransport.allowedPeers)
+          : currentTransport.kind === 'legacy-unregistered'
+            && unregisteredMetadataAuthorityRevision
+              === this.contextGraphMetaProjection.readAuthorityFactsRevision;
+      if (!authorityStayedCurrent) {
+        throw createContextGraphAuthorityError(
+          `Context graph "${input.contextGraphId}" private authority changed while recipient keys were resolving`,
+          {
+            reason: 'chain-participant-authority-unavailable',
+            detail: 'retry recipient resolution against the current private authority',
+          },
+        );
+      }
     }
-    try {
-      return await resolveKeys();
-    } catch (error) {
-      throw isWorkspaceAgentEncryptionKeyMissingError(error) ? withMemberKeyHint(error) : error;
-    }
+    return resolution;
   }
 
   async encryptWorkspacePayloadWithSenderKey(this: DKGAgent,
     input: WorkspaceSenderKeyEncryptInput,
   ): Promise<Uint8Array> {
-    await this.loadSwmSenderKeyState();
+    let resolution = input.resolution;
+    if (!this.swmSenderKeyStateLoaded) {
+      await this.loadSwmSenderKeyState();
+      // Recipient authority may have changed while durable state was loading.
+      // Resolve once against the now-hydrated state and proceed only when the
+      // exact agent/key/peer snapshot is unchanged. The production publisher
+      // avoids this compatibility reread by hydrating in
+      // resolveWorkspaceRecipientsGated above.
+      const currentResolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+        contextGraphId: input.contextGraphId,
+      });
+      if (
+        !currentResolution.requiresEncryption
+        || !hasExactWorkspaceRecipientSet(resolution, currentResolution)
+      ) {
+        throw createContextGraphAuthorityError(
+          `Context graph "${input.contextGraphId}" authority changed while sender-key state was loading`,
+          {
+            reason: 'chain-participant-authority-unavailable',
+            detail: 'retry recipient resolution before creating or reusing a sender-key epoch',
+          },
+        );
+      }
+      resolution = currentResolution;
+    }
     const ctx = createOperationContext('share', input.operationId);
     const sender = this.getLocalSigningAgentForAddress(input.senderAgentAddress);
     if (!sender) {
       throw new Error(`Cannot create SWM Sender Key epoch: no local custodial signing key for agent ${input.senderAgentAddress}`);
     }
 
-    const resolution = input.resolution;
     const senderAddress = ethers.getAddress(sender.agentAddress);
     const recipientSet = new Set(resolution.recipients.map((recipient) => recipient.agentAddress.toLowerCase()));
     if (!recipientSet.has(senderAddress.toLowerCase())) {
@@ -2629,7 +2945,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `Recipient agent ${recipientAgentAddress} is not allowed for context graph "${pkg.contextGraphId}"`,
       );
     }
-    const allowedPeers = await this.getContextGraphAllowedPeers(pkg.contextGraphId);
+    let allowedPeers: string[] | null;
+    try {
+      allowedPeers = await this.resolveSwmAllowedPeersForCurrentAuthority(pkg.contextGraphId);
+    } catch (error) {
+      if (!isContextGraphAuthorityUnavailableMarker(error)) throw error;
+      throw new SwmSenderKeySetupRejectionError(
+        isRetryableContextGraphAuthorityUnavailableReason(error.reason)
+          ? 'agent-gate-pending'
+          : 'agent-gate-unavailable',
+        `Context graph "${pkg.contextGraphId}" SWM peer gate authority is unavailable (${error.reason})`,
+      );
+    }
     if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
       throw new SwmSenderKeySetupRejectionError(
         'sender-not-allowed',

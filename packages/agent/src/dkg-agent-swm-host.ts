@@ -2326,7 +2326,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (!authOk) {
       try {
-        const allowedPeers = await this.getContextGraphAllowedPeers(req.contextGraphId);
+        const allowedPeers = await this.resolveSwmAllowedPeersForCurrentAuthority(
+          req.contextGraphId,
+        );
         if (allowedPeers !== null) {
           anyAuthorityFound = true;
           if (allowedPeers.includes(fromPeerId)) authOk = true;
@@ -8609,7 +8611,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // on nodes that have persisted the CG's `allowedPeers`; host-only
     // cores never see it.
     try {
-      const allowedPeers = await this.getContextGraphAllowedPeers(req.contextGraphId);
+      const allowedPeers = await this.resolveSwmAllowedPeersForCurrentAuthority(
+        req.contextGraphId,
+      );
       if (allowedPeers !== null) {
         anyAuthoritySourceFound = true;
         if (allowedPeers.includes(fromPeerId)) {
