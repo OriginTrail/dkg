@@ -191,6 +191,31 @@ describe('VM recovery preparation owner', () => {
     expect(owner.prepare(s, ids(1, 900))).toEqual({ accepted: 1 });
   });
 
+  it('stops starting queued reads once recovery ownership is lost, while issued reads stay tracked until they settle', async () => {
+    const { reader, reads } = controlledReader();
+    const owner = own(new VmRecoveryPreparation(reader));
+    let current = true;
+    const s = scope({ isCurrent: () => current });
+    owner.prepare(s, ids(10));
+    await flush();
+    expect(reads).toHaveLength(2);
+
+    // Ownership ends without any abort of the operation's signal.
+    current = false;
+    expect(s.signal?.aborted ?? false).toBe(false);
+    reads[0]!.resolve();
+    await flush(10);
+    // The freed slot did not start a third read, and the other issued read is still accounted for.
+    expect(reads).toHaveLength(2);
+    expect(owner.stats().activeReads).toBe(1);
+    reads[1]!.resolve();
+    await flush(10);
+    expect(reads).toHaveLength(2);
+    expect(owner.stats()).toMatchObject({ activeReads: 0, retainedBytes: 0 });
+    // Nothing the lost operation prepared is ever handed out.
+    await expect(owner.hintsFor(s).take('100', { maxWaitMs: 5 })).resolves.toBeUndefined();
+  });
+
   it('counts a cancelled read against capacity until it physically settles', async () => {
     const { reader, reads } = controlledReader();
     const owner = own(new VmRecoveryPreparation(reader));

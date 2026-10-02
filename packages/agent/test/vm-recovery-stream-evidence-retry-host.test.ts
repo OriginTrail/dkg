@@ -47,9 +47,10 @@ async function harness(options: { retryIntervalMs?: number; olderDelayMs?: numbe
     return fetch(peer, graph, uals, requestOptions);
   };
   if (options.retryIntervalMs !== undefined) {
-    // Pre-create the host's owner with a test spacing; the host reuses it.
-    const readUpdateContext = h.chainAdapter.getKnowledgeAssetUpdateContext!.bind(h.chainAdapter);
-    vmRecoveryPreparationFor(h.agent, { readUpdateContext: (id, readOptions) => readUpdateContext(id, readOptions) },
+    // Pre-create the host's owner with a test spacing; the host reuses it. Its reader looks the
+    // adapter method up when it reads, so a test that instruments the adapter after the harness
+    // is built still sees the owner's speculative reads and not only the planner's live ones.
+    vmRecoveryPreparationFor(h.agent, { readUpdateContext: (id, readOptions) => h.chainAdapter.getKnowledgeAssetUpdateContext!(id, readOptions) },
       { authorityRetryMinIntervalMs: options.retryIntervalMs });
   }
   return { ...h, authority, transportModes, handedOver };
@@ -117,9 +118,13 @@ describe('registered-public observation gating the stream wire', () => {
       return original(kaId, readOptions);
     };
     await h.run();
-    // The read that gates the wire is never queued behind speculative sizing.
+    // The first target is the probe's own asset and keeps its live read; every other target of the
+    // pass is read only by the preparation owner (its hints are then consumed, never re-read live),
+    // so a `read:1` can only be a speculative read. It must be visible, and it must follow the read
+    // that gates the wire: that read is never queued behind speculative sizing.
+    expect(events).toContain('read:1');
     expect(events[0]).toBe('authority');
-    expect(events.some(event => event.startsWith('read:'))).toBe(true);
+    expect(events.indexOf('authority')).toBeLessThan(events.indexOf('read:1'));
   });
 
   it('never reads it more often than the spacing allows', async () => {
