@@ -806,6 +806,7 @@ import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistShutdownTimeoutError } from './context-graph-subscription-persist-scheduler.js';
 import {
   createLocalContextGraphOriginMembershipRecord,
 } from
@@ -2250,6 +2251,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS,
       );
     }
+    if (this.contextGraphSubscriptionPersistenceShutdownBlocked) {
+      throw new ContextGraphSubscriptionPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
+    }
     if (this.started) return;
     this.storageACKRegistrationRuntime.retireCurrentGeneration();
     this.chain.contextGraphAuthorityIndexSnapshots?.open();
@@ -2269,6 +2275,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
+    // stop() drained and closed subscription writes; a restarted agent admits
+    // them again. Writes issued before the first start() left it open.
+    this.contextGraphSubscriptionPersistence.reopenIfClosed();
     // stop() aborts detached cold authority flights; a restarted agent admits
     // new ones (the runtime is created lazily on first use otherwise).
     peekFinalizedAuthorityColdResolution(this)?.reopen();
@@ -2604,11 +2613,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.messenger.setOutboxResponseHandler(PROTOCOL_JOIN_REQUEST, async (result) => {
       await this.handleJoinRequestOutboxResponse(result);
     });
+    // Restart contract (see DKGAgentBase): the manager built here starts with
+    // no subscriptions and no handlers, so the registries that mirror the
+    // previous manager must not outlive it. A detached subscribe from the
+    // previous session can repopulate them after stop() returned, hence the
+    // reset lives at the manager swap and not only in stop().
+    this.resetGossipSessionState();
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
       chainId: this.config.networkIdentity?.chainId,
       isPeerAccepted: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
     });
+    const isRestart = ++this.gossipSessionCount > 1;
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphsFromDurableState();
@@ -3797,6 +3813,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const systemContextGraph of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
       this.subscribeToContextGraph(systemContextGraph, { syncMode: 'always-on' });
     }
+    // Same-instance restart: durable rows were replayed by rehydration above;
+    // give the live process-local subscriptions the wiring the new manager lacks.
+    if (isRestart) this.restoreLiveContextGraphGossipSubscriptions();
 
     // Connect to bootstrap peers
     if (this.config.bootstrapPeers) {
@@ -6534,6 +6553,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           processDurableBatchInWorker: durableContext.processDurableBatchInWorker,
           authenticationDeadline: contextGraphBudget.createGraphScopedAuthenticationDeadline,
           storeGraphScopedAsset: durableContext.storeGraphScopedAsset!,
+        },
+        reconnect: async (reconnectSignal) => {
+          try {
+            await this.ensurePeerConnected(remotePeerId, { signal: reconnectSignal });
+          } catch {
+            // Unreachable for now, or connected but no longer admitted.
+            return false;
+          }
+          return this.node.libp2p.getConnections()
+            .some((connection) => connection.remotePeer.toString() === remotePeerId);
         },
         logInfo: message => this.log.info(ctx, message),
       });
@@ -9412,13 +9441,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     write: () => Promise<void>,
   ): Promise<void> {
-    const previous = this.contextGraphSubscriptionPersistChains.get(contextGraphId) ?? Promise.resolve();
-    const run = previous.then(write);
-    const chain = run.catch(() => undefined);
-    this.contextGraphSubscriptionPersistChains.set(contextGraphId, chain);
-    void chain.finally(() => {
-      if (this.contextGraphSubscriptionPersistChains.get(contextGraphId) !== chain) return;
-      this.contextGraphSubscriptionPersistChains.delete(contextGraphId);
+    // The scheduler owns per-context-graph ordering, strict non-coalescing,
+    // write-start timing (a microtask after admission), shutdown drain and
+    // bounds; the revision maps below stay the cancel/supersede layer on top of
+    // it. The returned promise rejects when the write (or admission) fails, so
+    // an awaiting caller sees the failure. The lane keeps draining, so a failed
+    // write does not stall the next one for this context graph.
+    const run = this.contextGraphSubscriptionPersistence.enqueue(contextGraphId, write);
+    // Idle cleanup runs after the caller's own handlers and marks a failure as
+    // handled for a caller that drops the promise, as the chain tail did.
+    void run.catch(() => undefined).finally(() => {
       this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
     });
     return run;
@@ -9444,7 +9476,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   clearContextGraphSubscriptionPersistRevisionStateIfIdle(this: DKGAgent, contextGraphId: string): void {
     if ((this.contextGraphSubscriptionPersistPendingRevisions.get(contextGraphId)?.size ?? 0) > 0) return;
-    if (this.contextGraphSubscriptionPersistChains.has(contextGraphId)) return;
+    if (this.contextGraphSubscriptionPersistence.hasLane(contextGraphId)) return;
     const sub = this.subscribedContextGraphs.get(contextGraphId);
     if (sub?.subscribed === true || sub?.coreHosted === true) return;
     if (this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)) return;
@@ -10659,6 +10691,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const store = this.config.contextGraphSubscriptionStore;
     this.contextGraphSubscriptionRehydrationSlotIds.clear();
     this.contextGraphSubscriptionRehydrationPendingIds.clear();
+    this.contextGraphSubscriptionRehydrationPassAccountedIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
@@ -11083,6 +11116,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       authorityBudget?.dispose();
+      // Freeze the accounting as this pass leaves it: rebuilt from the rows it
+      // read, or inherited when it failed. No await separates the rebuild from
+      // this copy, so a persistence completion cannot land in between.
+      for (const id of this.contextGraphSubscriptionRehydrationAccountedIds) {
+        this.contextGraphSubscriptionRehydrationPassAccountedIds.add(id);
+      }
     }
   }
 
@@ -11145,7 +11184,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
     const activeUserIdsWithPendingStoreWrite = store
-      ? activeUserIds.filter((id) => this.contextGraphSubscriptionPersistChains.has(id))
+      ? activeUserIds.filter((id) => this.contextGraphSubscriptionPersistence.hasLane(id))
       : [];
     const storeDeleteIds = [...new Set([...persistedUserIds, ...activeUserIdsWithPendingStoreWrite])];
     const total = storeDeleteIds.length;

@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
 import { ContextGraphMembershipPersistScheduler } from '../src/context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from '../src/context-graph-subscription-persist-scheduler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import {
   INVENTORY_V1_RELATIVE_PATH,
@@ -61,6 +62,7 @@ function syntheticAgent(dataDirectory?: string): any {
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
+    contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
     rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64PersistenceV1: undefined,

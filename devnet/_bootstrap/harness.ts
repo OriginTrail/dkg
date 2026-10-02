@@ -31,6 +31,7 @@ import {
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ethers } from 'ethers';
+import { selectBindings, type SparqlBindingCell } from './select-response.js';
 
 export const REPO_ROOT = resolve(import.meta.dirname, '../..');
 export const RPC = process.env.DEVNET_RPC ?? 'http://127.0.0.1:8545';
@@ -673,58 +674,11 @@ export async function httpDelete(
   return { status: res.status, json };
 }
 
-/**
- * A single SPARQL result binding cell from the DKG daemon's /api/query. It arrives
- * either as an already-formatted N-Triples term STRING (`"v"@en`, `"v"^^<dt>`,
- * `<iri>`, `_:b`) or as a structured SPARQL-JSON object. Suites must NOT re-hedge
- * this union inline — route every cell through `normTerm` / `valueOf` / `lexical` /
- * `unwrapIri` below (the single typed boundary, per otReviewAgent #1397).
- */
-export type SparqlBindingCell =
-  | string
-  | {
-      value?: string;
-      datatype?: string;
-      type?: 'literal' | 'uri' | 'bnode' | string;
-      'xml:lang'?: string;
-      lang?: string;
-    };
-
-const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
-
-/**
- * Normalize a binding cell to its full N-Triples object-term string, preserving the
- * datatype/lang suffix (the form the V10 leaf canon consumes). Idempotent on cells
- * already in term-string form; elides the redundant xsd:string datatype.
- */
-export function normTerm(x: SparqlBindingCell | undefined | null): string {
-  if (typeof x === 'string') return x;
-  const o = x ?? {};
-  if (o.value === undefined) return '';
-  const lang = o['xml:lang'] ?? o.lang;
-  if (lang) return `"${o.value}"@${lang}`;
-  if (o.datatype && o.datatype !== XSD_STRING) return `"${o.value}"^^<${o.datatype}>`;
-  if (o.type === 'uri' || o.type === 'bnode') return o.value;
-  return /^["_<]/.test(o.value) ? o.value : `"${o.value}"`;
-}
-
-/** Bare string value of a cell (for IRI / non-literal columns that carry no suffix). */
-export function valueOf(x: SparqlBindingCell | undefined | null): string {
-  return typeof x === 'string' ? x : (x?.value ?? '');
-}
-
-/** Lexical form only: strip the surrounding quotes + any datatype/lang suffix. */
-export function lexical(x: SparqlBindingCell | undefined | null): string {
-  const t = valueOf(x);
-  const m = /^"((?:[^"\\]|\\.)*)"/.exec(t);
-  return m ? m[1] : t;
-}
-
-/** Strip the surrounding `<…>` from an IRI term (→ bare URN/URI), else pass through. */
-export function unwrapIri(x: SparqlBindingCell | undefined | null): string {
-  const t = valueOf(x);
-  return t.startsWith('<') && t.endsWith('>') ? t.slice(1, -1) : t;
-}
+// The binding cell type and its normalizers live in ./select-response.ts (the one owner of
+// how a SELECT answer is read); they are re-exported here so suites keep importing them from
+// the harness.
+export { lexical, normTerm, unwrapIri, valueOf } from './select-response.js';
+export type { SparqlBindingCell } from './select-response.js';
 
 export interface QueryOpts {
   contextGraphId?: string;
@@ -752,16 +706,17 @@ export async function queryNode(
   if (status !== 200) {
     throw new Error(`query on node${node.num} failed (${status}): ${JSON.stringify(json)}`);
   }
-  const bindings =
-    json?.result?.bindings ?? // current daemon shape
-    json?.results?.bindings ?? // SPARQL 1.1 JSON
-    json?.bindings; // legacy flat
-  if (!Array.isArray(bindings)) {
-    throw new Error(
-      `unrecognised /api/query response shape on node${node.num}: ${JSON.stringify(json).slice(0, 300)}`,
-    );
-  }
-  return bindings as Array<Record<string, SparqlBindingCell>>;
+  // The envelopes and the rows are read by the shared module (see select-response.ts), in its
+  // lenient reading: rows exactly as the daemon sent them, rejected only when no envelope
+  // holds an array.
+  return selectBindings(json, {
+    strict: false,
+    reject: () => {
+      throw new Error(
+        `unrecognised /api/query response shape on node${node.num}: ${JSON.stringify(json).slice(0, 300)}`,
+      );
+    },
+  });
 }
 
 export async function waitFor<T>(
