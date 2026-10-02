@@ -24,7 +24,7 @@ import {
   type LiftJobFailureCode,
   type LiftJobState,
 } from '../src/index.js';
-import { mapExecutionFailure } from '../src/async-lift-execution-failure.js';
+import { isKnowledgeAssetPublishPreconditionFailure, mapExecutionFailure } from '../src/async-lift-execution-failure.js';
 import {
   TX_HASH,
   corruptHeadError,
@@ -318,6 +318,34 @@ describe('GH#2945 recordExecutionFailure: the failure decision, characterized th
     await expect(session.recordExecutionFailure('claimed', nullPrototypeThrow())).rejects.toThrow();
 
     expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+  });
+});
+
+describe('GH#2945 isKnowledgeAssetPublishPreconditionFailure: the pre-send routing of a failed KA VM publish', () => {
+  // The caller reports 'validated' (not 'broadcast') for these, so a message-keyed failure that was never
+  // sent is not recorded as a possible transaction. No other suite pinned the message regexes.
+  it.each([
+    'the assertion is not finalized',
+    'No quads in shared memory for the share',
+    'the share has no private payload',
+    'the asset is not a complete full share',
+    'cannot recover the reservedKaId for this author',
+    'seal binds a different merkle root',
+  ])('routes "%s" to the pre-send state', (message) => {
+    expect(isKnowledgeAssetPublishPreconditionFailure(new Error(message))).toBe(true);
+  });
+
+  it('routes a structured precondition code with none of those words', () => {
+    expect(isKnowledgeAssetPublishPreconditionFailure(withCode('x', { code: 'PUBLISH_INTENT_STALE' }))).toBe(true);
+  });
+
+  it('does not route an unrelated failure or a null throw', () => {
+    expect(isKnowledgeAssetPublishPreconditionFailure(new Error('transport exploded'))).toBe(false);
+    expect(isKnowledgeAssetPublishPreconditionFailure(null)).toBe(false);
+  });
+
+  it('rejects on a null-prototype throw, as the legacy text read does (pinned, not hardened here)', () => {
+    expect(() => isKnowledgeAssetPublishPreconditionFailure(nullPrototypeThrow())).toThrow(/Cannot convert object to primitive value/);
   });
 });
 
