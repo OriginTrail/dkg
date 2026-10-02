@@ -135,15 +135,15 @@
     "command": "bash tools/observability/smoke-test.sh"
   },
   {
-    "pattern": "ccl_v0_1/tests/**",
+    "pattern": "packages/agent/ccl_v0_1/tests/**",
     "lane": "ccl-python-yaml",
-    "reason": "Python CCL driver loads the YAML case corpus; requires ccl_v0_1/requirements.txt",
+    "reason": "Python CCL driver loads the YAML case corpus; requires PyYAML",
     "cadence": "manual",
-    "command": "cd ccl_v0_1 && python3 tests/run_all_tests.py",
+    "command": "cd packages/agent/ccl_v0_1 && python3 tests/run_all_tests.py",
     "layer": "Python/YAML conformance",
     "prerequisites": [
       "Python 3",
-      "ccl_v0_1/requirements.txt"
+      "PyYAML"
     ]
   },
   {

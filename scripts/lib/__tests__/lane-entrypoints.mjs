@@ -76,6 +76,7 @@ export const BROWSER_SUITE_DEFERRED = Object.freeze([
   'packages/http-utils',
   'packages/local-llm',
   'packages/mcp-dkg',
+  'packages/node-store',
   'packages/okf',
   'packages/publisher',
   'packages/query',

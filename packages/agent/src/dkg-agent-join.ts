@@ -877,10 +877,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     }
     // This is a total private-recipient cap, not merely an allowlist-row cap:
     // participant agents receive ciphertext keys and private read authority too.
-    // Use the fresh authoritative union (allowed + participant - revoked).
+    // Preserve the finalized chain roster for registered private graphs;
+    // unregistered graphs use the effective store-backed metadata union.
     const activeMembers = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.joinPolicyRoster,
-      () => this.getMemberRecoveryGate(contextGraphId),
+      () => this.getMemberRecoveryRosterSource(contextGraphId),
     ) ?? [];
     return {
       ownerDid,
@@ -1177,7 +1178,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       getContextGraphMeta: (contextGraphId) => this.getCgMeta(contextGraphId),
       getActiveMembers: (contextGraphId) => withRpcUsageSite(
         CG_AUTH_RPC_SITES.joinAdmissionRoster,
-        () => this.getMemberRecoveryGate(contextGraphId),
+        () => this.getMemberRecoveryRosterSource(contextGraphId),
       ),
       getContextGraphOwner: (contextGraphId) => this.getContextGraphOwner(contextGraphId),
       resolveLocalOwnerAddress: (ownerDid) => this.resolveLocalJoinPolicyOwnerAddress(ownerDid),

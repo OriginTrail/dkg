@@ -1978,11 +1978,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
-   * Resolve the private member set from the hardened, store-backed `_meta`
-   * gate after the complete graph definition has been authenticated. This is
-   * deliberately independent of the accepted RFC-64 roster: responsibility
-   * and roster rotation cannot ask the roster they are about to establish for
-   * permission to establish it.
+   * Resolve the private member set from the authoritative roster source after
+   * the complete graph definition has been authenticated. Registered private
+   * graphs retain the finalized chain roster; unregistered graphs use the
+   * effective store-backed metadata projection. This is deliberately
+   * independent of the accepted RFC-64 overlay: responsibility and roster
+   * rotation cannot ask the roster they are about to establish for permission
+   * to establish it.
    */
   async resolveRfc64VerifiedPrivateRosterV1(
     this: DKGAgent,
@@ -1993,7 +1995,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     const gate = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.rfc64Roster,
-      () => this.getMemberRecoveryGate(contextGraphId),
+      () => this.getMemberRecoveryRosterSource(contextGraphId),
     ).catch(() => null);
     if (gate === null || gate.length === 0) return null;
     const members = new Set<EvmAddressV1>();
@@ -3382,6 +3384,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         })()
         : await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId, signal);
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
+      // Mutable local authority facts must be one projection generation. Keep
+      // the exact revision paired with every later metadata/version await and
+      // refuse to accept a composed snapshot if owner, policy, revocation, or
+      // membership facts changed in the meantime.
+      let metadataAuthorityRevision: number | null = null;
       if (registeredAuthorityRead !== null) {
         const { expectedNameHash, snapshot } = registeredAuthorityRead;
         if (signal?.aborted) throw signal.reason;
@@ -3393,6 +3400,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         }
         let authoritativeSnapshot = snapshot;
         if (snapshot.accessPolicy === 1) {
+          metadataAuthorityRevision = this.contextGraphMetaProjection
+            .readAuthorityFactsRevision;
           const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
           if (localRoster === null) {
             // TRANSIENT, and typed so it is classified as such. `null` here
@@ -3451,6 +3460,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         if (replicaUnregisteredAuthority !== null) {
           authority = replicaUnregisteredAuthority;
         } else {
+          // Capture before the first owner/policy authority-fact read. Taking
+          // this revision only before the later roster read could combine an
+          // old owner with a new policy/roster generation and still pass the
+          // acceptance-time fence.
+          metadataAuthorityRevision = this.contextGraphMetaProjection
+            .readAuthorityFactsRevision;
           const ownerDid = await this.getContextGraphOwner(contextGraphId);
           if (signal?.aborted) throw signal.reason;
           const normalizedOwnerDid = ownerDid
@@ -3528,6 +3543,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         contextGraphId,
         authorityRevision,
       )) return null;
+      if (
+        metadataAuthorityRevision !== null
+        && this.contextGraphMetaProjection.readAuthorityFactsRevision
+          !== metadataAuthorityRevision
+      ) return null;
       // Finalized absence was exact when the refresh request was created, but
       // RDF evidence loading is asynchronous. Discovery may bind the graph to
       // a chain id during that await without starting a successor reconcile
@@ -3820,6 +3840,45 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   ): boolean {
     return this.isRfc64CatalogTransportAuthorityActiveV1(contextGraphId)
       && this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId);
+  }
+
+  /**
+   * Current private roster of the accepted owner-signed unregistered policy,
+   * but only while RFC-64 catalog authority governs transport for this graph.
+   *
+   * `undefined` means that no active accepted private-unregistered authority
+   * applies. `null` keeps an applicable but incomplete private authority
+   * fail-closed. Callers must not use the retained accepted snapshot directly:
+   * it deliberately survives a kill switch or inactive catalog lane.
+   */
+  resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): readonly string[] | null | undefined {
+    if (!this.isRfc64CatalogTransportAuthorityActiveV1(contextGraphId)) {
+      return undefined;
+    }
+    const configuredPrivate = this.config.rfc64CatalogBootstrap?.acceptedPolicies.some(
+      ({ policyEnvelope }) => (
+        policyEnvelope.payload.contextGraphId === contextGraphId
+        && policyEnvelope.payload.accessPolicy === 1
+      ),
+    ) === true;
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    // A selected private graph stays fail-closed while its policy/roster has
+    // not yet been accepted. Once the catalog transport fence is inactive,
+    // the early return above deliberately restores the legacy fallback.
+    if (accepted === null) return configuredPrivate ? null : undefined;
+    if (
+      accepted.policy.source.kind !== 'owner-signed-unregistered'
+      || accepted.policy.accessPolicy !== 1
+    ) {
+      return undefined;
+    }
+    if (accepted.roster === null) return null;
+    return Object.freeze(
+      accepted.roster.members.map(({ agentAddress }) => agentAddress),
+    );
   }
 
   /**

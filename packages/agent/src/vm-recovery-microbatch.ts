@@ -32,6 +32,22 @@ function nonNegativeBigint(value: unknown): bigint | undefined {
   return typeof value === 'bigint' && value >= 0n ? value : undefined;
 }
 
+/** Conservative byte estimate for an already-validated public asset footprint. */
+export function estimateVmRecoveryAssetBytes(
+  byteSize: bigint,
+  merkleLeafCount: bigint,
+  limits: Readonly<Pick<
+    VmRecoveryMicrobatchLimits,
+    'fixedBytesPerAsset' | 'bytesPerLeafOverhead' | 'byteSizeMultiplierBps'
+  >>,
+): bigint {
+  const scaledByteFloor = (byteSize * limits.byteSizeMultiplierBps + 9_999n) / 10_000n;
+  const graphAndLeafFloor = byteSize + merkleLeafCount * limits.bytesPerLeafOverhead;
+  return (
+    scaledByteFloor > graphAndLeafFloor ? scaledByteFloor : graphAndLeafFloor
+  ) + limits.fixedBytesPerAsset;
+}
+
 /**
  * Pack one stable exact-recovery prefix. Unknown footprints remain singleton;
  * soft byte/leaf targets never reject an individually large KA, while executor
@@ -86,11 +102,7 @@ export function planVmRecoveryMicrobatch<T extends VmRecoveryTargetFootprint>(
       break;
     }
 
-    const scaledByteFloor = (byteSize * limits.byteSizeMultiplierBps + 9_999n) / 10_000n;
-    const graphAndLeafFloor = byteSize + merkleLeafCount * limits.bytesPerLeafOverhead;
-    const candidateEstimatedBytes = (
-      scaledByteFloor > graphAndLeafFloor ? scaledByteFloor : graphAndLeafFloor
-    ) + limits.fixedBytesPerAsset;
+    const candidateEstimatedBytes = estimateVmRecoveryAssetBytes(byteSize, merkleLeafCount, limits);
     const nextBytes = estimatedBytes + candidateEstimatedBytes;
     const nextLeaves = estimatedLeaves + merkleLeafCount;
     if (targets.length > 0 && (

@@ -12,6 +12,8 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ['packages/agent/test/sync-native-export-hostile.test.ts: pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href',
+    'an optional user-supplied external frozen 10.0.20 build; compatibility cases always execute the repository historical source fixture, and no repository lane can route the external build'],
   ['packages/agent/src/generic-sql-source.ts: moduleName', 'the optional mssql driver and node:sqlite, neither a repository file'],
   ['packages/agent/src/sqlite/module-loader-v1.ts: name', 'node:sqlite, the default loader, not a repository file'],
   ['packages/agent/test/generic-sql-source.test.ts: moduleName', 'node:sqlite, not a repository file'],
@@ -33,6 +35,8 @@ export const UNFOLLOWED_LOADS = new Map([
     "the agent package's own built dist/rfc64/ entries, checked through its export map"],
   ['packages/agent/scripts/test-package-root.mjs: `@origintrail-official/dkg-agent/dist/${path}`',
     "the agent package's own built dist/ entries, checked through its export map"],
+  ['packages/rdf-utils/scripts/rdf-literal-escape-benchmark.mjs: pathToFileURL(process.argv[4])',
+    "rdf-utils' built dist/rdf-literal-escape.js, which the benchmark passes to its own worker; built from rdf-utils source the rdf-utils rule routes"],
   ['packages/agent/scripts/bench-sync-telemetry.mjs: pathToFileURL(distFile).href',
     "the agent's built dist/sync/attempt-telemetry.js, built from agent source the agent rule routes"],
   ['scripts/devnet.sh: $cli_entry',
@@ -54,9 +58,16 @@ export const UNFOLLOWED_LOADS = new Map([
     "a copy of packages/cli/blazegraph-image-metadata.cjs in a temporary checkout; the file itself routes by the CLI rule"],
   ['packages/cli/test/blue-green-integration.test.ts: cmd', 'the git commands its git() helper runs in temporary repositories'],
   ['packages/cli/test/foreground-supervisor.test.ts: workerScript', 'a worker script the test writes to a temporary directory'],
+  ['packages/cli/test/oxigraph-managed-caller-abort.e2e.test.ts: ...args',
+    "the supervisor's own spawn arguments, passed through a wrapper that records each child's pid; they launch the Oxigraph server binary, not a repository file"],
   ['packages/evm-module/utils/helpers.ts: command', 'git rev-parse commands; every evm-module change runs full CI'],
+  ["packages/node-ui/scripts/test-package-exports.mjs: 'consumer.mjs'", 'a module the script writes to a temporary directory'],
+  ["packages/node-ui/scripts/test-package-exports.mjs: requireFromPackage.resolve('typescript/lib/tsc.js')",
+    "the TypeScript compiler, resolved from node_modules, not a repository file"],
   ['packages/random-sampling/src/proof-worker.ts: this.entryPath',
     "the package's own proof-worker-entry beside it, or one a caller passes; random-sampling code its rule routes"],
+  ['packages/rdf-utils/scripts/rdf-literal-escape-benchmark.mjs: import.meta.filename',
+    'the benchmark itself, re-run as its own worker process'],
   ['packages/storage/src/adapters/oxigraph-worker.ts: this.workerPath',
     "the storage package's own oxigraph-worker-impl (beside it, or its dist/ build), storage code its rule routes"],
   // Programs a child-process call runs that no reading identifies: tools, or

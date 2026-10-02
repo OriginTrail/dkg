@@ -385,6 +385,10 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
     ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
+    ['packages/agent/src/sync/exact-assets.ts', 'tornado_agent', 'the Agent stream receiver loads exact asset parsing'],
+    ['packages/agent/src/sync/exact-batch-stream-contract.ts', 'tornado_agent', 'the Agent stream tests load the proof contract'],
+    ['packages/agent/src/sync/wire-compression.ts', 'tornado_agent', 'the Agent stream receiver loads wire compression'],
+    ['packages/core/src/experimental-exact-batch-wire.ts', 'tornado_core', 'the Core stream tests load the fixed wire codec'],
     ['devnet/rfc64-runtime-provenance.mts', 'bura_cli', 'the CLI-started Gate 2 adapter imports the shared runtime modules'],
     ['devnet/rfc64-persistence-lifecycle/process-lifecycle.ts', 'tornado_blazegraph', 'the Blazegraph job runs the Gate 1 rollout tests'],
     ['test-systems/storage-conformance.test.ts', 'tornado_blazegraph', 'pnpm test:conformance runs in the Blazegraph job'],
@@ -407,6 +411,13 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // What install code reads from a directory the trace cannot resolve is
   // declared in INSTALL_HOOK_DEPENDENCIES, and each file it reads plans full CI.
   assert.deepEqual(installReadGaps(trace), { undeclared: [], stale: [], notFull: [], misnamed: [] });
+  const coreStreamSeeds = new Map(sourceFiles('packages/core')
+    .filter((file) => /^packages\/core\/test\/experimental-exact-batch-.*\.test\.ts$/.test(file))
+    .map((file) => [file, new Map([['tornado_core', 'Core stream tests']])]));
+  assert.equal(coreStreamSeeds.size, 3, 'trace the transport, loopback and pure wire suites');
+  const coreStreamTrace = traceLaneLoads(coreStreamSeeds);
+  assert.deepEqual([...coreStreamTrace.loaded.keys()].filter((file) => file.startsWith('packages/agent/')),
+    [], 'the fixed Core stream codec and its tests must not load Agent source');
   const { missing, unexplained, computed } = loadClosureGaps(trace, { unresolved });
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
   // A load the trace cannot follow fails closed until it is listed with the
