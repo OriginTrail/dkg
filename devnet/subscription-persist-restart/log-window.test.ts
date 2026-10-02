@@ -397,8 +397,36 @@ describe('withLogTroubleCheck', () => {
       rotate(Math.floor(readFileSync(file).length / 2));
       appendFileSync(file, Array.from({ length: 12 }, (_, i) => quiet(100 + i, 1_500)).join('') + freshTrouble);
     });
-    await expect(outcome).rejects.toThrow(/the log was rotated during the run/);
-    await expect(outcome).rejects.toThrow(freshTrouble.trim());
+    await expect(outcome).rejects.toThrow(`${WHAT} was rotated or truncated during the run`);
+    await expect(outcome).rejects.toThrow(`every matching line left in the log counts as new:\n${freshTrouble.trim()}`);
+  });
+
+  it('fails a body that passed when a rotation discarded the trouble the daemon logged', async () => {
+    writeFileSync(file, quiet(1));
+    const outcome = withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      appendFileSync(file, freshTrouble + Array.from({ length: 12 }, (_, i) => quiet(100 + i, 1_500)).join(''));
+      // The kept tail is shorter than the quiet lines, so the trouble line is dropped.
+      rotate(6_000);
+    });
+    expect(readFileSync(file, 'utf8')).not.toContain(freshTrouble.trim());
+    await expect(outcome).rejects.toThrow(
+      `${WHAT} was rotated or truncated during the run, so lines written before the rotation are gone `
+      + 'and the absence of persistence trouble cannot be confirmed; no matching line is left in the log',
+    );
+  });
+
+  it('adds the rotation to the error of a failing body even when no matching line is left', async () => {
+    writeFileSync(file, quiet(1));
+    const failure = new Error('expected 3 subscriptions, got 2');
+    const caught = await withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      appendFileSync(file, freshTrouble + Array.from({ length: 12 }, (_, i) => quiet(100 + i, 1_500)).join(''));
+      rotate(6_000);
+      throw failure;
+    }).catch((error: unknown) => error);
+
+    expect(caught).toBe(failure);
+    expect((caught as Error).message).toContain('expected 3 subscriptions, got 2');
+    expect((caught as Error).message).toContain(`${WHAT} was rotated or truncated during the run`);
   });
 
   it('finishes a line that was still being written when the body started', async () => {

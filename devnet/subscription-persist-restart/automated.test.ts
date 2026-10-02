@@ -34,9 +34,9 @@
  * the scenario runs, and that holds when the scenario fails midway too (the
  * daemon's trouble is added to the scenario's own failure, never lost behind it).
  * "While it runs" is a byte window of daemon.log recorded before the scenario's
- * first action (see log-window.ts): a log rotated by a daemon restart cannot hide
- * a fresh line. An `afterAll` check over the whole run backs it up for lines logged
- * between two scenarios.
+ * first action (see log-window.ts). A log rotated inside the window has lost
+ * lines, so the check fails rather than pass on what is left. An `afterAll`
+ * check over the whole run backs it up for lines logged between two scenarios.
  *
  * Node roles on the standard 6-node devnet: nodes 1-4 are cores, nodes 5-6 are
  * edges. Node 1 authors the context graphs; node 5 (an edge) churns them.
@@ -77,7 +77,7 @@ import {
   waitFor,
   type DevnetNode,
 } from '../_bootstrap/harness.js';
-import { markLog, matchingLinesSince, withLogTroubleCheck, type LogMark } from './log-window.js';
+import { markLog, matchingLinesSince, rotatedLogReport, withLogTroubleCheck, type LogMark } from './log-window.js';
 
 const AUTHOR_NODE = 1;
 const EDGE_NODE = Number(process.env.DEVNET_SPR_EDGE_NODE ?? 5);
@@ -206,15 +206,14 @@ describe('subscription persistence across a real node restart', () => {
     // The window is delimited by the byte offset recorded in beforeAll, never by
     // a count of earlier matches: a restart can rotate daemon.log, which drops
     // old matching lines and would let a count-based skip swallow a fresh one.
-    // A rotated log has no meaningful offset, so every matching line in it
-    // counts as new.
+    // A rotated log has no meaningful offset and has lost lines, so the window
+    // is incomplete and the run cannot be shown clean.
     if (!suiteMark) return;
     const { lines, rotated } = matchingLinesSince(daemonLogFile(edge), suiteMark, PERSISTENCE_TROUBLE);
+    expect(rotated, rotatedLogReport(`node${EDGE_NODE} daemon.log`, lines)).toBe(false);
     expect(
       lines,
-      `new persistence trouble in node${EDGE_NODE} daemon.log over the whole run`
-      + `${rotated ? ' (the log was rotated during the run, so every matching line in it counts as new)' : ''}:\n`
-      + lines.join('\n'),
+      `new persistence trouble in node${EDGE_NODE} daemon.log over the whole run:\n${lines.join('\n')}`,
     ).toEqual([]);
   });
 

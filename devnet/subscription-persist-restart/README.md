@@ -26,10 +26,11 @@ Every scenario also runs inside a log check on `daemon.log` of node 5: it gains
 no subscription or membership persistence drain timeout, no
 `CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT`, and no failed subscription persist
 while the scenario runs. Only lines written after a byte offset recorded before
-the scenario's first action count. If a restart rotated the log (a shorter file,
-or changed bytes before the offset), the offset is void and every matching line
-in the log counts as new, so a rotation can over-report but never hide a fresh
-line. A line the daemon was still writing when the offset was recorded stays
+the scenario's first action count. If the log was rotated (a shorter file, or
+changed bytes before the offset), the offset is void and the rotation has
+discarded lines, so the check fails: it reports every matching line still in the
+log and says that a clean run cannot be confirmed. A line the daemon was still
+writing when the offset was recorded stays
 inside the window, however long it already is. The check runs whether the
 scenario passed or failed: a failing scenario is rethrown with the daemon's
 trouble lines added to its message. An `afterAll` check over the whole run backs

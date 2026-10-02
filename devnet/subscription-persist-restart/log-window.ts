@@ -14,8 +14,12 @@
  *    long and those bytes are unchanged. The window is everything after them.
  *  - Otherwise it was rotated or truncated (a shorter file, or an in-place
  *    rewrite that grew back past the offset), the offset means nothing, and the
- *    WHOLE file is the window: every matching line counts as new. That can only
- *    over-report (a retained old line is blamed on this run), never hide one.
+ *    WHOLE file is read: every matching line still in it counts as new. That
+ *    reading is incomplete. A rotation keeps only the tail, so a line written
+ *    after the mark and before the kept tail is gone, and nothing left in the
+ *    file can show whether it matched. `rotated` reports this, and a check that
+ *    asserts "no trouble" must fail on it rather than pass on what is left
+ *    ({@link withLogTroubleCheck}, {@link rotatedLogReport}).
  *
  * The window always starts on a line boundary. The daemon may be in the middle
  * of a line when the mark is taken, and the beginning of that line (where a
@@ -34,7 +38,8 @@
  *
  * `withLogTroubleCheck` runs a body inside such a window and reports what the
  * daemon logged whether the body passed or failed, so a scenario that fails
- * midway cannot hide the trouble behind its own assertion error.
+ * midway cannot hide the trouble behind its own assertion error. A log rotated
+ * inside the window fails the check even when no matching line is left.
  */
 import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 
@@ -65,7 +70,10 @@ export interface LogMark {
 
 export interface LogWindow {
   readonly text: string;
-  /** True when the log did not continue from the mark, so `text` is the whole file. */
+  /**
+   * True when the log did not continue from the mark. `text` is then the whole
+   * file, and lines the rotation discarded are missing from it.
+   */
   readonly rotated: boolean;
 }
 
@@ -167,6 +175,18 @@ export function matchingLinesSince(
 }
 
 /**
+ * Why a window over a rotated log cannot show that the daemon logged no trouble,
+ * with the matching lines the log still holds. `what` names the log.
+ */
+export function rotatedLogReport(what: string, lines: readonly string[]): string {
+  return `${what} was rotated or truncated during the run, so lines written before the rotation are gone `
+    + 'and the absence of persistence trouble cannot be confirmed'
+    + (lines.length === 0
+      ? '; no matching line is left in the log'
+      : `; every matching line left in the log counts as new:\n${lines.join('\n')}`);
+}
+
+/**
  * Append `report` to a failure's message so it is not lost behind it. An error
  * whose message cannot be rewritten is wrapped instead, keeping it as the cause.
  */
@@ -192,6 +212,8 @@ function withReport(error: unknown, report: string): unknown {
  *  - `body` threw: its error is rethrown with any matching lines appended to its
  *    message, so an earlier assertion failure never hides trouble the daemon
  *    logged. With no matching line the error is rethrown untouched.
+ *  - The log was rotated while `body` ran: the window is incomplete, so the call
+ *    fails in the same two ways whether or not a matching line is left.
  *
  * `what` names the log in the report (for example "node5 daemon.log").
  */
@@ -209,11 +231,9 @@ export async function withLogTroubleCheck<T>(
     outcome = { ok: false, error };
   }
   const { lines, rotated } = matchingLinesSince(file, mark, patterns);
-  const report = lines.length === 0
-    ? ''
-    : `new persistence trouble in ${what}`
-      + `${rotated ? ' (the log was rotated during the run, so every matching line in it counts as new)' : ''}:\n`
-      + lines.join('\n');
+  const report = rotated
+    ? rotatedLogReport(what, lines)
+    : lines.length === 0 ? '' : `new persistence trouble in ${what}:\n${lines.join('\n')}`;
   if (!outcome.ok) throw report === '' ? outcome.error : withReport(outcome.error, report);
   if (report !== '') throw new Error(report);
   return outcome.value;
