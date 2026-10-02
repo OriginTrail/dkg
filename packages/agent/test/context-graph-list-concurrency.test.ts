@@ -53,6 +53,8 @@ describe('context graph list row concurrency', () => {
         listDeclaredContextGraphIds: async () => IDS,
       },
       subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainContextGraphFacts: new Map(),
       store: {
         listGraphsByPrefix: async () => [],
       },
@@ -76,6 +78,8 @@ describe('context graph list row concurrency', () => {
     const probe = concurrencyProbe();
     const fakeAgent = {
       subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainContextGraphFacts: new Map(),
       store: {
         query: async () => ({
           type: 'bindings',
@@ -86,6 +90,10 @@ describe('context graph list row concurrency', () => {
         }),
         listGraphsByPrefix: async () => [],
       },
+      resolveFinalizedContextGraphAuthorityTargetsV1: async () => ({
+        kind: 'legacy-current' as const,
+      }),
+      readLocalContextGraphRegistrationStatus: async () => probe.run('registered'),
       getContextGraphOnChainId: async () => probe.run(undefined),
       getCgMeta: async (id: string) => probe.run(projectedMeta(id)),
       getContextGraphCurator: async () => probe.run(undefined),

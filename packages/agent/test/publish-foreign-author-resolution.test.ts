@@ -10,7 +10,20 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { CG, MEMBER, CURATOR, OTHER, NAME, KA_UAL, RESERVED_KA_ID, PUBLIC_QUAD, MERKLE, sealAt, sealFor, stubAgent } from './_helpers/finalized-author.js';
+import {
+  CG,
+  CURATOR,
+  KA_UAL,
+  MEMBER,
+  MERKLE,
+  NAME,
+  OTHER,
+  PUBLIC_QUAD,
+  RESERVED_KA_ID,
+  sealAt,
+  sealFor,
+  stubAgent,
+} from './_helpers/foreign-author-resolution-fixtures.js';
 
 describe.each([
   ['source', sourceResolveAuthor],
@@ -704,28 +717,6 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
         selectedAuthorAgentAddress: malformed as unknown as string } as never,
       })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
     }
-  });
-});
-
-describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
-  it('resolves the member author from _meta when the caller (curator) is not the author', async () => {
-    const store = new OxigraphStore();
-    await store.insert(sealFor(MEMBER));
-    const agent = stubAgent(store, CURATOR); // curator is NOT the author
-    let historyAgent: string | undefined;
-    Object.defineProperty(agent, 'assertion', {
-      value: {
-        history: async (_cg: string, _n: string, o: { agentAddress: string }) => {
-          historyAgent = o.agentAddress;
-          return null; // force the early exit after author resolution
-        },
-      },
-      configurable: true,
-    });
-    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
-      .rejects.toThrow(/is not finalized or does not exist/);
-    // The async intent path resolved the MEMBER author before touching history.
-    expect(historyAgent).toBe(MEMBER);
   });
 });
 

@@ -12,6 +12,7 @@ import {
   GraphManager,
   LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
+  readExactGraphPaged,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
@@ -19,7 +20,12 @@ import {
   computeFlatKCRootV10,
   readLocallyTrustedKnowledgeAssetControlEnvelope,
   readLocallyTrustedKnowledgeAssetControls,
+  resolveKnowledgeAssetWorkspaceHead,
+  storeKnowledgeAssetOperationPublicQuads,
+  storageAckLedgerEntryQuads,
+  workspacePublicQuadsDigest,
 } from '../src/index.js';
+import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
@@ -172,6 +178,51 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       type: 'bindings',
       bindings: [{ section, name: '"Safety"' }],
     });
+  });
+
+  it.each([
+    ['head points at the signed copy', 'rootless-op-1'],
+    ['head preserves the queued share', 'storage-ack-signed-copy'],
+  ])('defers a newer share while %s and the copy is not yet in VM', async (_case, signedOperationId) => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect((await handler.handle(v2Request(), PEER_ID)).applied).toBe(true);
+    // A local self-ACK keeps the queued head but records a different signed
+    // copy in the ledger; both shapes must retain the copy until promotion.
+    await store.insert(storageAckLedgerEntryQuads({
+      operationSubject: workspaceOperationSubject(CONTEXT_GRAPH, signedOperationId),
+      namespace: CONTEXT_GRAPH,
+      metaGraph: new GraphManager(store).sharedMemoryMetaUri(CONTEXT_GRAPH),
+      contextGraphId: '42',
+      kaUal: UAL,
+      assertionVersion: 1,
+      operation: 'publish',
+      signedAt: new Date(),
+    }));
+    const next = v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-2',
+      assertionVersion: '2',
+    });
+
+    const deferred = await handler.handle(next, PEER_ID);
+
+    expect(deferred.applied).toBe(false);
+    if (deferred.applied) throw new Error('unreachable');
+    expect(deferred.retryable).toBe(true);
+    expect(deferred.reason).toContain('OWED_STORAGE_ACK_COPY');
+
+    // Once v1 is in VM the share applies.
+    await store.insert([
+      { subject: UAL, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: `${DATA_GRAPH}/_meta` },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: `${DATA_GRAPH}/_meta`,
+      },
+    ]);
+    expect((await handler.handle(next, PEER_ID)).applied).toBe(true);
   });
 
   it('replaces the whole KA graph without leaving prior subjects behind', async () => {
@@ -364,6 +415,77 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(drift).toMatchObject({ applied: false, retryable: false });
     if (drift.applied) throw new Error('expected policy-drift rejection');
     expect(drift.reason).toContain('CONFLICTING_KA_ASSERTION_VERSION');
+  });
+
+  it('acknowledges an older equivalent alias without churning SWM state and refreshes controls', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const original = v2Request({ timestampMs: Date.parse('2026-09-10T00:00:00.000Z') });
+    expect((await handler.handle(original, PEER_ID)).applied).toBe(true);
+
+    const selectedAlias = 'rootless-storage-ack-alias';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: selectedAlias,
+      kaUal: UAL,
+      assertionVersion: 1,
+      quads: [{
+        subject: 'urn:entity:1',
+        predicate: 'urn:predicate:value',
+        object: '"one"',
+        graph: '',
+      }],
+      privateTripleCount: 0,
+      publisherPeerId: PEER_ID,
+      accessPolicy: 'public',
+      timestamp: new Date('2026-09-10T00:00:01.000Z'),
+    });
+    const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+    await store.insert([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(selectedAlias),
+      graph: metaGraph,
+    }]);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    })).resolves.toMatchObject({
+      shareOperationId: selectedAlias,
+      shareOperationIds: ['rootless-op-1', selectedAlias],
+    });
+
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const snapshot = async (graph: string): Promise<string[]> => {
+      const result = await store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
+      );
+      if (result.type !== 'quads') throw new Error(`expected quads for ${graph}`);
+      return result.quads.map(({ subject, predicate, object }) => (
+        `${subject}\u0000${predicate}\u0000${object}`
+      )).sort();
+    };
+    const swmBefore = await snapshot(swmGraph);
+    const metadataBefore = await snapshot(metaGraph);
+    await store.deleteByPattern({ graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH });
+
+    const replay = await new SharedMemoryHandler(
+      store,
+      new TypedEventBus(),
+    ).handle(original, PEER_ID);
+    expect(replay.applied).toBe(true);
+    expect(await snapshot(swmGraph)).toEqual(swmBefore);
+    expect(await snapshot(metaGraph)).toEqual(metadataBefore);
+    expect(await store.countQuads(LOCAL_TRUSTED_KA_CONTROLS_GRAPH)).toBeGreaterThan(0);
   });
 
   it('keeps one KA-level transport owner across assertion versions', async () => {
@@ -614,6 +736,43 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       graph: metaGraph,
     }]);
     const replay = await handler.handle(inbound, PEER_ID);
+    expect(replay.applied).toBe(true);
+  });
+
+  it('records the fingerprint of the stored form for a copy with escaped text', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const lines = [
+      `<urn:entity:1> <urn:predicate:value> "Women\\u2019s Europeans \\uD83D\\uDDD3 12 October" <${DATA_GRAPH}> .`,
+      `<urn:entity:1> <urn:predicate:text> "line one\\nline two\\tend" <${DATA_GRAPH}> .`,
+    ].join('\n');
+    const request = v2Request({
+      nquads: new TextEncoder().encode(lines),
+      publicTripleCount: 2,
+    });
+
+    const outcome = await handler.handle(request, PEER_ID);
+
+    expect(outcome.applied).toBe(true);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    });
+    const readBack = await readExactGraphPaged(store, swmGraph, {
+      expectedQuadCount: 2,
+      outputGraph: '',
+    });
+    expect(head?.publicQuadsDigest).toBe(workspacePublicQuadsDigest(readBack));
+    // Replaying the same escaped share matches the recorded head.
+    const replay = await handler.handle(request, PEER_ID);
     expect(replay.applied).toBe(true);
   });
 });

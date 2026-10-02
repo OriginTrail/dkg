@@ -111,8 +111,11 @@ export function providerQuorumFixture(options: {
   };
 }
 
-export function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
-  const adapter: any = new EVMChainAdapter(minimalConfig());
+export function fixture(
+  initialHashes: ReadonlyArray<string | null> = [NAME_HASH],
+  configOverrides: Partial<EVMAdapterConfig> = {},
+) {
+  const adapter: any = new EVMChainAdapter({ ...minimalConfig(), ...configOverrides });
   adapter.initialized = true;
   adapter.init = vi.fn(async () => {});
   let storageAddress = '0x00000000000000000000000000000000000000c6';
@@ -209,7 +212,7 @@ export function historicalFixture(pages: ReadonlyArray<ReadonlyArray<bigint>> = 
   const filterFactory = vi.fn(() => filter);
   const parseLog = vi.fn(({ data }: { data: string }) => ({
     name: 'ContextGraphCreated',
-    args: { contextGraphId: BigInt(data) },
+    args: { contextGraphId: BigInt(data), nameHash: NAME_HASH },
   }));
   const storage = {
     getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6'),

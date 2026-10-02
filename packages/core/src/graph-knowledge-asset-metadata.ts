@@ -97,6 +97,12 @@ export type GraphKnowledgeAssetMetadataBinding =
 
 export type GraphKnowledgeAssetAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 
+/** Canonical effective access value shared across graph-scoped KA boundaries. */
+export interface GraphKnowledgeAssetAccessEnvelope {
+  readonly accessPolicy: GraphKnowledgeAssetAccessPolicy;
+  readonly allowedPeers: readonly string[];
+}
+
 /** Canonical, validated graph-scoped KA control-plane metadata. */
 export interface ParsedGraphKnowledgeAssetMetadata {
   readonly contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;

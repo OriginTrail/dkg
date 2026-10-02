@@ -19,9 +19,19 @@ import {
   assertSafeIri,
   sparqlString,
   validateNewContextGraphId,
+  validateContextGraphId,
+  contextGraphStorageOwnerCandidates,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const ROOT_CONTEXT_GRAPH_TYPES = Object.freeze([
+  'https://dkg.network/ontology#ContextGraph',
+  'http://dkg.io/ontology/ContextGraph',
+] as const);
+const SYSTEM_ONTOLOGY_GRAPH = contextGraphDataUri('ontology');
+const SYSTEM_AGENTS_GRAPH = contextGraphDataUri('agents');
+const MAX_CONTEXT_GRAPH_DECLARATION_BATCH = 256;
 
 export type NonEmptyGraphList = [string, ...string[]];
 export type SharedMemoryReadSelection = 'all' | { rootEntities: readonly string[] };
@@ -161,6 +171,87 @@ async function listGraphsByPrefix(
   return store.listGraphsByPrefix
     ? store.listGraphsByPrefix(prefix, options)
     : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
+}
+
+/**
+ * Return the root id represented by one known storage partition. The graph
+ * walk is retained for legacy/storage-only roots, but slash-bearing ids are
+ * intentionally handled by the declaration query below: a URI such as
+ * `owner/name` can also be a subgraph and cannot be classified by path alone.
+ */
+function contextGraphIdFromStorageGraph(graph: string): string | undefined {
+  if (!graph.startsWith(CG_PREFIX)) return undefined;
+  const rest = graph.slice(CG_PREFIX.length);
+  if (rest.length === 0) return undefined;
+  if (rest.endsWith('/_shared_memory_meta')) return rest.slice(0, -20);
+  if (rest.endsWith('/_shared_memory')) return rest.slice(0, -15);
+  if (rest.endsWith('/_private')) return rest.slice(0, -9);
+  if (rest.endsWith('/_meta')) return rest.slice(0, -6);
+  return rest;
+}
+
+function stripIriTerm(value: string): string {
+  return value.startsWith('<') && value.endsWith('>')
+    ? value.slice(1, -1)
+    : value;
+}
+
+/**
+ * Resolve ambiguous slash-bearing storage ids through authoritative root
+ * declarations. This is deliberately a bounded VALUES query: it avoids a
+ * store-wide semantic scan while ensuring subgraph metadata cannot be
+ * mistaken for a context-graph root.
+ */
+async function listDeclaredSlashContextGraphs(
+  store: TripleStore,
+  candidates: ReadonlySet<string>,
+  options?: QueryOptions,
+): Promise<string[]> {
+  const candidateUris = [...candidates]
+    .map((id) => contextGraphDataUri(id))
+    .filter((uri) => isSafeIri(uri));
+  const rootTypes = ROOT_CONTEXT_GRAPH_TYPES.map((iri) => `<${iri}>`).join(' ');
+  const declared = new Set<string>();
+
+  for (let offset = 0; offset < candidateUris.length; offset += MAX_CONTEXT_GRAPH_DECLARATION_BATCH) {
+    const values = candidateUris
+      .slice(offset, offset + MAX_CONTEXT_GRAPH_DECLARATION_BATCH)
+      .map((uri) => `<${uri}>`)
+      .join(' ');
+    const result = await store.query(
+      `SELECT DISTINCT ?ctxGraph WHERE {
+        VALUES ?ctxGraph { ${values} }
+        VALUES ?rootType { ${rootTypes} }
+        {
+          GRAPH <${SYSTEM_ONTOLOGY_GRAPH}> {
+            ?ctxGraph <${RDF_TYPE}> ?rootType .
+          }
+        }
+        UNION
+        {
+          GRAPH <${SYSTEM_AGENTS_GRAPH}> {
+            ?ctxGraph <${RDF_TYPE}> ?rootType .
+          }
+        }
+        UNION
+        {
+          GRAPH ?metaGraph {
+            ?ctxGraph <${RDF_TYPE}> ?rootType .
+          }
+          FILTER(STR(?metaGraph) = CONCAT(STR(?ctxGraph), "/_meta"))
+        }
+      }`,
+      options,
+    );
+    if (result.type !== 'bindings') continue;
+    for (const row of result.bindings) {
+      const uri = stripIriTerm(row.ctxGraph ?? '');
+      if (!uri.startsWith(CG_PREFIX)) continue;
+      const id = uri.slice(CG_PREFIX.length);
+      if (id.includes('/') && validateContextGraphId(id).valid) declared.add(id);
+    }
+  }
+  return [...declared];
 }
 
 /**
@@ -843,24 +934,63 @@ export class ContextGraphManager {
   async listContextGraphs(options?: QueryOptions): Promise<string[]> {
     const graphs = await listGraphsByPrefix(this.store, CG_PREFIX, options);
     const contextGraphs = new Set<string>();
+    const slashCandidates = new Set<string>();
+
+    // Context graphs ensured by this manager are already unambiguous. Keep
+    // these entries even when a freshly-created root has not written its
+    // registration marker yet.
+    for (const id of this.ensuredContextGraphs) contextGraphs.add(id);
+
     for (const g of graphs) {
-      if (g.startsWith(CG_PREFIX)) {
-        const rest = g.slice(CG_PREFIX.length);
-        const id = rest.endsWith('/_meta')
-          ? rest.slice(0, -6)
-          : rest.endsWith('/_private')
-            ? rest.slice(0, -9)
-            : rest.endsWith('/_shared_memory_meta')
-              ? rest.slice(0, -20)
-              : rest.endsWith('/_shared_memory')
-                ? rest.slice(0, -15)
-                : rest;
-        if (!id.includes('/')) {
-          contextGraphs.add(id);
-        }
+      const id = contextGraphIdFromStorageGraph(g);
+      if (id === undefined) continue;
+      if (!id.includes('/')) contextGraphs.add(id);
+
+      // Build the complete set of possible owner interpretations for an
+      // ambiguous URI, then admit only interpretations backed by a root
+      // ContextGraph declaration. A plain path-prefix filter cannot make this
+      // distinction: `owner/name` is also the storage URI of subgraph `name`
+      // under root `owner`.
+      const owners = contextGraphStorageOwnerCandidates(g);
+      for (const owner of owners ?? []) {
+        if (owner.includes('/')) slashCandidates.add(owner);
       }
     }
+
+    for (const id of await listDeclaredSlashContextGraphs(this.store, slashCandidates, options)) {
+      contextGraphs.add(id);
+    }
+
     return [...contextGraphs];
+  }
+
+  /**
+   * Enumerate every legal Context Graph owner interpretation represented by
+   * persisted storage graphs. This is an inventory boundary only: callers
+   * still resolve read authority for every returned candidate.
+   */
+  async listStoredContextGraphOwnerCandidates(options: QueryOptions = {}): Promise<string[]> {
+    options.signal?.throwIfAborted();
+    const graphUris = await listGraphsByPrefix(this.store, CG_PREFIX, {
+      ...options,
+      source: options.source ?? 'storage.contextGraphOwnerCandidates',
+    });
+    const candidates = new Set<string>();
+    let visited = 0;
+    for (const graph of graphUris) {
+      // Preserve cancellation responsiveness without imposing a cardinality
+      // limit: ordinary per-KA graph growth can legitimately be large.
+      if (visited++ % 512 === 511) await new Promise<void>((resolve) => setImmediate(resolve));
+      options.signal?.throwIfAborted();
+      if (!graph.startsWith(CG_PREFIX)) continue;
+      const owners = contextGraphStorageOwnerCandidates(graph);
+      if (owners === undefined) {
+        throw new Error('Cannot authorize unscoped query: unrecognized stored Context Graph owner');
+      }
+      for (const id of owners) candidates.add(id);
+    }
+    options.signal?.throwIfAborted();
+    return [...candidates];
   }
 
   /**

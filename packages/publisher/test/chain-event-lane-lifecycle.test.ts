@@ -1,0 +1,255 @@
+import { activeRpcRequestContext, type ChainAdapter } from '@origintrail-official/dkg-chain';
+import { describe, expect, it, vi } from 'vitest';
+import { ChainEventPoller } from '../src/chain-event-poller.js';
+import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
+import { makeChain, makeHandler, markPending } from './helpers/chain-event-lane-fixture.js';
+
+describe('ChainEventPoller lifecycle', () => {
+  it('aborts a queued background chain request before awaiting poll retirement', async () => {
+    let physicalSignal: AbortSignal | undefined;
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => {
+        physicalSignal = activeRpcRequestContext().signal;
+        markStarted();
+        await new Promise<never>((_resolve, reject) => {
+          const rejectOnAbort = () => reject(physicalSignal?.reason);
+          physicalSignal?.addEventListener('abort', rejectOnAbort, { once: true });
+          if (physicalSignal?.aborted) rejectOnAbort();
+        });
+        return 0;
+      },
+      listenForEvents: async function* () { /* no events */ },
+    } as unknown as ChainAdapter;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onContextGraphCreated: async () => { /* activate one polling lane */ },
+    });
+
+    await poller.start();
+    await started;
+    const stopped = poller.stop();
+    await vi.waitFor(() => expect(physicalSignal?.aborted).toBe(true));
+    await expect(stopped).resolves.toBeUndefined();
+  });
+
+  it('does not install a timer or initial poll when stopped during async startup restore', async () => {
+    const { adapter, filters } = makeChain({ head: 100, events: [] });
+    const handler = makeHandler();
+    markPending(handler, true);
+    let releaseRestore: () => void = () => {};
+    let restoreStarted: () => void = () => {};
+    const restoreStartedPromise = new Promise<void>((resolve) => { restoreStarted = resolve; });
+    const restoreReleasePromise = new Promise<void>((resolve) => { releaseRestore = resolve; });
+    const cursor: LaneCursorPersistence = {
+      async loadLane(lane) {
+        if (lane === 'publish') {
+          restoreStarted();
+          await restoreReleasePromise;
+        }
+        return undefined;
+      },
+      async saveLane() { /* not reached */ },
+    };
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: handler,
+      intervalMs: 10,
+      cursorPersistence: cursor,
+    });
+
+    const startPromise = poller.start();
+    await restoreStartedPromise;
+    await poller.stop();
+    releaseRestore();
+    await startPromise;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const state = poller as unknown as {
+      timer: ReturnType<typeof setInterval> | null;
+      inFlightPoll: Promise<void> | null;
+    };
+    expect(state.timer).toBeNull();
+    expect(state.inFlightPoll).toBeNull();
+    expect(filters).toEqual([]);
+  });
+
+  it('aborts an in-flight event callback without advancing its cursor', async () => {
+    let markCallbackStarted: () => void = () => undefined;
+    const callbackStarted = new Promise<void>((resolve) => { markCallbackStarted = resolve; });
+    const saved: Array<{ lane: string; block: number }> = [];
+    const { adapter } = makeChain({
+      head: 1,
+      events: [{
+        type: 'ContextGraphCreated',
+        blockNumber: 1,
+        data: { contextGraphId: '1', creator: '0x1', accessPolicy: 0 },
+      }],
+    });
+    const cursor: LaneCursorPersistence = {
+      async loadLane() { return undefined; },
+      async saveLane(lane, block) { saved.push({ lane, block }); },
+    };
+    let callbackAborted = false;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+      onContextGraphCreated: async ({ signal }) => {
+        markCallbackStarted();
+        if (!signal) throw new Error('poll callback did not receive a lifecycle signal');
+        await new Promise<void>((resolve) => {
+          const finish = () => {
+            callbackAborted = true;
+            signal.removeEventListener('abort', finish);
+            resolve();
+          };
+          signal.addEventListener('abort', finish, { once: true });
+          if (signal.aborted) finish();
+        });
+      },
+    });
+
+    await poller.start();
+    await callbackStarted;
+    await poller.stop();
+
+    expect(callbackAborted).toBe(true);
+    expect(saved).toEqual([]);
+  });
+
+  it('replays an event when its callback resolves after shutdown aborts the poll', async () => {
+    let markCallbackStarted: () => void = () => undefined;
+    const callbackStarted = new Promise<void>((resolve) => { markCallbackStarted = resolve; });
+    let callbackCount = 0;
+    const { adapter } = makeChain({
+      head: 1,
+      events: [{
+        type: 'ContextGraphCreated',
+        blockNumber: 1,
+        data: { contextGraphId: '1', creator: '0x1', accessPolicy: 0 },
+      }],
+    });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onContextGraphCreated: async ({ signal }) => {
+        callbackCount += 1;
+        if (callbackCount === 1) {
+          markCallbackStarted();
+          if (!signal) throw new Error('poll callback did not receive a lifecycle signal');
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+            if (signal.aborted) resolve();
+          });
+        }
+      },
+    });
+
+    await poller.start();
+    await callbackStarted;
+    await poller.stop();
+
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    await poller.stop();
+
+    expect(callbackCount).toBe(2);
+  });
+
+  it('does not dispatch an event yielded after shutdown aborts the poll', async () => {
+    let markListening: () => void = () => undefined;
+    const listening = new Promise<void>((resolve) => { markListening = resolve; });
+    let releaseEvent: () => void = () => undefined;
+    const eventRelease = new Promise<void>((resolve) => { releaseEvent = resolve; });
+    const callback = vi.fn();
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => 1,
+      listenForEvents: async function* () {
+        markListening();
+        await eventRelease;
+        yield {
+          type: 'ContextGraphCreated',
+          blockNumber: 1,
+          data: { contextGraphId: '1', creator: '0x1', accessPolicy: 0 },
+        };
+      },
+    } as unknown as ChainAdapter;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onContextGraphCreated: callback,
+    });
+
+    await poller.start();
+    await listening;
+    const stopping = poller.stop();
+    releaseEvent();
+    await stopping;
+
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('passes the lifecycle signal through every optional event callback', async () => {
+    const seen = new Set<string>();
+    const fail = (name: string) => async ({ signal }: { signal?: AbortSignal }) => {
+      if (!signal) throw new Error(`${name}: missing lifecycle signal`);
+      seen.add(name);
+      throw new Error(`${name}: callback failure`);
+    };
+    const { adapter } = makeChain({
+      head: 1,
+      events: [
+        {
+          type: 'KnowledgeAssetUpdated',
+          blockNumber: 1,
+          data: { merkleRoot: `0x${'11'.repeat(32)}`, batchId: '1' },
+        },
+        {
+          type: 'AllowListUpdated',
+          blockNumber: 1,
+          data: { contextGraphId: 'cg', agent: '0xagent', added: true },
+        },
+        {
+          type: 'ProfileCreated',
+          blockNumber: 1,
+          data: { identityId: '1' },
+        },
+        {
+          type: 'KnowledgeAssetRegisteredToContextGraph',
+          blockNumber: 1,
+          data: { contextGraphId: 'cg', kaId: '1', txHash: '0xtx', txIndex: 0 },
+        },
+        {
+          type: 'KCCreated',
+          blockNumber: 1,
+          data: { kaId: '1', author: '0xauthor', txHash: '0xtx', txIndex: 0 },
+        },
+      ],
+    });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onCollectionUpdated: fail('collection'),
+      onAllowListUpdated: fail('allow-list'),
+      onProfileEvent: fail('profile'),
+      onKARegisteredToContextGraph: fail('registered'),
+      onKnowledgeAssetCreated: fail('created'),
+    });
+
+    await poller.start();
+    await vi.waitFor(() => expect(seen).toEqual(new Set([
+      'collection', 'allow-list', 'profile', 'registered', 'created',
+    ])));
+    await poller.stop();
+  });
+});

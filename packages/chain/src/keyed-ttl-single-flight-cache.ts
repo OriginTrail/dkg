@@ -1,11 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { abortError, waitForSignal } from './wait-for-signal.js';
+
 export interface TtlValueCacheOptions<V> {
   ttlMs: number | ((value: CacheValue<V>) => number);
   now?: () => number;
 }
 
 export type CacheValue<V> = undefined extends V ? never : V;
+
+export const SINGLE_FLIGHT_INVALIDATED_CODE = 'SINGLE_FLIGHT_INVALIDATED' as const;
+
+/** Stable invalidation signal; diagnostic wording never controls retry policy. */
+export class SingleFlightInvalidatedError extends Error {
+  readonly code = SINGLE_FLIGHT_INVALIDATED_CODE;
+  readonly retryable: boolean;
+
+  constructor(
+    message = 'Shared request was invalidated',
+    options: { readonly retryable?: boolean } = {},
+  ) {
+    super(message);
+    this.name = 'SingleFlightInvalidatedError';
+    this.retryable = options.retryable === true;
+  }
+}
 
 /**
  * Small process-local TTL value cache.
@@ -143,6 +162,251 @@ export class KeyedSingleFlight<K, I = K> {
 
   private epochUnchanged(key: K, epoch: { global: number; key: number }): boolean {
     return this.globalEpoch === epoch.global && (this.keyEpochs.get(key) ?? 0) === epoch.key;
+  }
+}
+
+interface AbortableKeyedFlightState<V> {
+  readonly controller: AbortController;
+  readonly outcome: Promise<V>;
+  readonly abandonmentMessage: string;
+  waiters: number;
+  settled: boolean;
+  invalidated: Error | undefined;
+}
+
+interface AbortableKeyedFlightCoreOptions {
+  readonly defer: (dispatch: () => void) => void;
+  readonly detachOnDispatch: boolean;
+  readonly abandonmentMessage: string;
+}
+
+export interface AbortableKeyedFlightResult<V> {
+  /** True only for the caller that opened this physical flight. */
+  readonly initiated: boolean;
+  readonly value: V;
+}
+
+/**
+ * Canonical waiter/controller bookkeeping shared by immediate and deferred
+ * keyed flights. Policy stays in the wrappers: whether a key remains joinable
+ * after dispatch, what a loader rejection means, and how invalidation treats
+ * callers already enrolled.
+ */
+class AbortableKeyedFlightCore<K, V> {
+  readonly #inflight = new Map<K, AbortableKeyedFlightState<V>>();
+  readonly #options: AbortableKeyedFlightCoreOptions;
+
+  constructor(options: AbortableKeyedFlightCoreOptions) {
+    this.#options = options;
+  }
+
+  async run(
+    key: K,
+    load: (signal: AbortSignal) => Promise<V>,
+    waiterSignal?: AbortSignal,
+    onSuccess?: (value: V) => void,
+    abandonmentMessage = this.#options.abandonmentMessage,
+  ): Promise<AbortableKeyedFlightResult<V>> {
+    waiterSignal?.throwIfAborted();
+    let state = this.#inflight.get(key);
+    const initiated = state === undefined;
+    if (state === undefined) state = this.#open(key, load, onSuccess, abandonmentMessage);
+    else state.waiters += 1;
+
+    try {
+      const value = await waitForSignal(state.outcome, waiterSignal);
+      if (state.invalidated !== undefined) throw state.invalidated;
+      return { initiated, value };
+    } finally {
+      this.#leave(key, state);
+    }
+  }
+
+  /** Detach known keys while allowing already-enrolled callers to finish. */
+  detachAll(): void {
+    this.#inflight.clear();
+  }
+
+  invalidate(key: K, error: Error): void {
+    const state = this.#inflight.get(key);
+    this.#inflight.delete(key);
+    if (state === undefined) return;
+    state.invalidated = error;
+    if (!state.settled) state.controller.abort(error);
+  }
+
+  invalidateAll(createError: () => Error): void {
+    for (const key of this.#inflight.keys()) this.invalidate(key, createError());
+  }
+
+  #open(
+    key: K,
+    load: (signal: AbortSignal) => Promise<V>,
+    onSuccess: ((value: V) => void) | undefined,
+    abandonmentMessage: string,
+  ): AbortableKeyedFlightState<V> {
+    const controller = new AbortController();
+    let resolveOutcome!: (value: V) => void;
+    let rejectOutcome!: (error: unknown) => void;
+    const outcome = new Promise<V>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    const state: AbortableKeyedFlightState<V> = {
+      controller,
+      outcome,
+      abandonmentMessage,
+      // The initiator is enrolled before `defer` runs, including when a test
+      // or embedding invokes its dispatch callback synchronously.
+      waiters: 1,
+      settled: false,
+      invalidated: undefined,
+    };
+    const complete = (settle: () => void) => {
+      if (state.settled) return;
+      state.settled = true;
+      settle();
+      if (state.waiters === 0 && this.#inflight.get(key) === state) {
+        this.#inflight.delete(key);
+      }
+    };
+    this.#inflight.set(key, state);
+    const dispatch = () => {
+      if (this.#options.detachOnDispatch && this.#inflight.get(key) === state) {
+        this.#inflight.delete(key);
+      }
+      if (state.invalidated !== undefined) {
+        complete(() => rejectOutcome(state.invalidated));
+        return;
+      }
+      if (state.waiters === 0) {
+        const abandoned = abortError(state.abandonmentMessage);
+        if (!controller.signal.aborted) controller.abort(abandoned);
+        complete(() => rejectOutcome(abandoned));
+        return;
+      }
+      let loaded: Promise<V>;
+      try {
+        // Invoke synchronously inside the scheduled dispatch. Callers that
+        // wait one microtask before invalidating must know the loader has
+        // already subscribed to the physical signal.
+        loaded = load(controller.signal);
+      } catch (error) {
+        complete(() => rejectOutcome(error));
+        return;
+      }
+      void loaded.then(
+        (value) => {
+          try {
+            if (onSuccess !== undefined && this.#inflight.get(key) === state) {
+              onSuccess(value);
+            }
+            complete(() => resolveOutcome(value));
+          } catch (error) {
+            complete(() => rejectOutcome(error));
+          }
+        },
+        (error) => complete(() => rejectOutcome(error)),
+      );
+    };
+    try {
+      this.#options.defer(dispatch);
+    } catch (error) {
+      complete(() => rejectOutcome(error));
+    }
+    return state;
+  }
+
+  #leave(key: K, state: AbortableKeyedFlightState<V>): void {
+    state.waiters -= 1;
+    if (state.waiters > 0) return;
+    if (this.#inflight.get(key) === state) this.#inflight.delete(key);
+    if (state.settled || state.invalidated !== undefined) return;
+    state.controller.abort(abortError(state.abandonmentMessage));
+  }
+}
+
+export interface AbortableDeferredKeyedFlightOptions {
+  /** Defers dispatch so same-turn callers can enrol in the same flight. */
+  readonly defer: (dispatch: () => void) => void;
+  readonly abandonmentMessage?: string;
+}
+
+/**
+ * A keyed flight that is joinable only until dispatch. Detachment removes
+ * keys but does not disturb callers already enrolled in a live read.
+ */
+export class AbortableDeferredKeyedFlight<K, V> {
+  readonly #core: AbortableKeyedFlightCore<K, V>;
+
+  constructor(options: AbortableDeferredKeyedFlightOptions) {
+    this.#core = new AbortableKeyedFlightCore({
+      defer: options.defer,
+      detachOnDispatch: true,
+      abandonmentMessage: options.abandonmentMessage
+        ?? 'Deferred shared request has no active waiters',
+    });
+  }
+
+  run(
+    key: K,
+    load: (signal: AbortSignal) => Promise<V>,
+    waiterSignal?: AbortSignal,
+  ): Promise<AbortableKeyedFlightResult<V>> {
+    return this.#core.run(key, load, waiterSignal);
+  }
+
+  detachAll(): void {
+    this.#core.detachAll();
+  }
+}
+
+/**
+ * Per-key shared physical work with waiter-local cancellation.
+ *
+ * A caller abandoning its wait never poisons peers. When the final waiter
+ * leaves, the physical operation is aborted and detached from the key so a
+ * later caller can start fresh. Invalidation aborts and detaches the current
+ * physical request, suppresses stale publication through `onSuccess`, and
+ * rejects enrolled waiters even if the loader ignores cancellation or already
+ * completed before its result could be delivered.
+ */
+export class AbortableKeyedSingleFlight<K, V> {
+  readonly #core = new AbortableKeyedFlightCore<K, V>({
+    defer: (dispatch) => queueMicrotask(dispatch),
+    detachOnDispatch: false,
+    abandonmentMessage: 'Shared request has no active waiters',
+  });
+
+  async run(
+    key: K,
+    load: (signal: AbortSignal) => Promise<V>,
+    waiterSignal?: AbortSignal,
+    onSuccess?: (value: V) => void,
+    abandonmentMessage = 'Shared request has no active waiters',
+  ): Promise<V> {
+    return (await this.#core.run(
+      key,
+      load,
+      waiterSignal,
+      onSuccess,
+      abandonmentMessage,
+    )).value;
+  }
+
+  invalidate(
+    key: K,
+    reason = 'Shared request was invalidated',
+    options: { readonly retryable?: boolean } = {},
+  ): void {
+    this.#core.invalidate(key, new SingleFlightInvalidatedError(reason, options));
+  }
+
+  invalidateAll(
+    reason = 'Shared requests were invalidated',
+    options: { readonly retryable?: boolean } = {},
+  ): void {
+    this.#core.invalidateAll(() => new SingleFlightInvalidatedError(reason, options));
   }
 }
 

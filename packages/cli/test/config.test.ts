@@ -9,6 +9,7 @@ import { computeNetworkId } from '../../core/src/genesis.js';
 import {
   loadNetworkConfig,
   loadConfig,
+  DkgHomeFiles,
   removePid,
   removeApiPort,
   saveConfig,
@@ -34,9 +35,11 @@ import {
   resolveAutoUpdateSource,
   resolveUpdatePreferences,
   resolveContextGraphSubscriptionRehydrationEnabled,
+  approvalPolicyMigrationWarning,
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
+  resolveRfc64CatalogActivations,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveStorageAckTiming,
@@ -78,14 +81,14 @@ describe('resolveRfc64PublicCatalogActivation', () => {
   it('is fail-closed when omitted or explicitly disabled', () => {
     expect(resolveRfc64PublicCatalogActivation({}, chainIdentity)).toEqual({
       enabled: false,
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
       selectedContextGraphs: [],
     });
     expect(resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: { enabled: false },
     }, chainIdentity)).toEqual({
       enabled: false,
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
       selectedContextGraphs: [],
     });
     expect(resolveRfc64PublicCatalogActivation({
@@ -106,7 +109,7 @@ describe('resolveRfc64PublicCatalogActivation', () => {
       },
     }, chainIdentity)).toEqual({
       enabled: false,
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
       selectedContextGraphs: [],
     });
   });
@@ -711,6 +714,35 @@ describe('localAgentIntegrations config round-trip', () => {
     if (tempDir) await rm(tempDir, { recursive: true, force: true });
   });
 
+  it('keeps symmetric control-file operations bound to one immutable home', async () => {
+    const files = new DkgHomeFiles();
+    const otherHome = join(tempDir, 'other-home');
+    await mkdir(otherHome);
+    process.env.DKG_HOME = otherHome;
+    expect(Object.isFrozen(files)).toBe(true);
+    expect(files.home).toBe(tempDir);
+    expect(files.tokenPath).toBe(dkgAuthTokenPath(tempDir));
+    await writePid(222);
+    await writeApiPort(9444);
+    await files.writePid(111);
+    await files.writeApiPort(9333);
+    await files.saveConfig({ ...await files.loadConfig(), name: 'home-a' });
+    expect(files.configExists()).toBe(true);
+    expect((await files.loadConfig()).name).toBe('home-a');
+    expect(files.readConfigSync()).toMatchObject({ name: 'home-a' });
+    expect(await files.readPid()).toBe(111);
+    expect(await files.readApiPort()).toBe(9333);
+    expect(await readPid()).toBe(222);
+    expect(await readApiPort()).toBe(9444);
+    expect(configExists()).toBe(false);
+    await files.removePid();
+    await files.removeApiPort();
+    expect(await files.readPid()).toBeNull();
+    expect(await files.readApiPort()).toBeNull();
+    expect(await readPid()).toBe(222);
+    expect(await readApiPort()).toBe(9444);
+  });
+
   it('persists the generic local agent integration registry', async () => {
     await saveConfig({
       name: 'test-node',
@@ -795,36 +827,55 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveNetworkConfigName(loaded)).toBe('mainnet-base');
   });
 
-  it('round-trips RFC-64 per-CG authority and kill-switch state', async () => {
+  it('round-trips a bounded RFC-64 canary and advances it only after a restart edit', async () => {
     const contextGraphId = 'restart-stable-rollout-cg';
     await saveConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
       nodeRole: 'edge',
-      rfc64PublicCatalog: {
+      rfc64Catalog: {
         rollout: {
-          killSwitch: true,
+          killSwitch: false,
+          defaultMode: 'legacy',
           contextGraphModes: { [contextGraphId]: 'shadow' },
-        },
-        bootstrap: {
-          acceptedPublicPolicies: [policy(contextGraphId)],
-          retryIntervalMs: 30_000,
         },
       },
     });
 
     const loaded = await loadConfig();
-    expect(loaded.rfc64PublicCatalog?.rollout).toEqual({
-      killSwitch: true,
+    expect(loaded.rfc64Catalog?.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
       contextGraphModes: { [contextGraphId]: 'shadow' },
     });
-    expect(resolveRfc64PublicCatalogActivation(loaded, {
+    expect(resolveRfc64CatalogActivations(loaded, {
       networkId: 'otp:20430',
       evmChainId: '20430',
-    }).rollout).toEqual({
-      killSwitch: true,
+    }).catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
       contextGraphModes: { [contextGraphId]: 'shadow' },
+    });
+
+    await saveConfig({
+      ...loaded,
+      rfc64Catalog: {
+        ...loaded.rfc64Catalog,
+        rollout: {
+          ...loaded.rfc64Catalog?.rollout,
+          contextGraphModes: { [contextGraphId]: 'catalog' },
+        },
+      },
+    });
+    const restarted = await loadConfig();
+    expect(resolveRfc64CatalogActivations(restarted, {
+      networkId: 'otp:20430',
+      evmChainId: '20430',
+    }).catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [contextGraphId]: 'catalog' },
     });
   });
 
@@ -930,6 +981,46 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.relayServerCapacity).toBe(2048);
   });
 
+  it('round-trips explicitly trusted core authority index sources', async () => {
+    const authorityIndex = {
+      mode: 'core-snapshot' as const,
+      trustedCorePeers: ['/dns4/core.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+      maxTailBlocks: 2_000,
+      cacheEpoch: 1,
+    };
+    await saveConfig({
+      name: 'snapshot-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      authorityIndex,
+    });
+
+    expect((await loadConfig()).authorityIndex).toEqual(authorityIndex);
+  });
+
+  it.each(['json', 'yaml'])('rejects misplaced core.authorityIndex in persisted %s config', async (format) => {
+    const content = format === 'json'
+      ? JSON.stringify({ core: { authorityIndex: { mode: 'core-snapshot' } } })
+      : 'core:\n  authorityIndex:\n    mode: core-snapshot\n';
+    await writeFile(join(tempDir, `config.${format}`), content, 'utf8');
+    await expect(loadConfig()).rejects.toThrow(
+      'core.authorityIndex is not supported. Move authorityIndex to the top level',
+    );
+  });
+
+  it('keeps authority index snapshot trust absent for existing configs', async () => {
+    await saveConfig({
+      name: 'existing-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      relayPeers: ['/dns4/relay.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+    });
+
+    expect((await loadConfig()).authorityIndex).toBeUndefined();
+  });
+
   it('round-trips relayReservationCount through saveConfig/loadConfig (operator override)', async () => {
     // PR3 multi-reservation tuning: same contract as
     // relayServerCapacity above — operators should be able to
@@ -975,6 +1066,19 @@ describe('localAgentIntegrations config round-trip', () => {
 
     const loaded = await loadConfig();
     expect(loaded.syncSystemContextGraphsOnConnect).toBe(true);
+  });
+
+  it('round-trips the on-demand agents phonebook kill switch', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      onDemandAgentsPhonebook: false,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.onDemandAgentsPhonebook).toBe(false);
   });
 
   it('round-trips sync snapshot limits and Context Graph priorities', async () => {
@@ -1414,6 +1518,61 @@ describe('resolveChainConfig (field-level merge)', () => {
     }
   });
 
+  it('validates chain.indexTickMs as a positive integer with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.indexTickMs).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(12_000);
+    expect(resolveChainConfig({ chain: { indexTickMs: 3_000 } }, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(3_000);
+
+    for (const indexTickMs of [null, 0, -1, 1.5, Number.NaN, '6000']) {
+      expect(() => resolveChainConfig({
+        chain: { indexTickMs: indexTickMs as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        /chain\.indexTickMs must be a positive integer/,
+      );
+    }
+  });
+
+  it('resolves bounded authority reads only from an explicit boolean, with operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.boundedAuthorityReads).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(true);
+    expect(resolveChainConfig({ chain: { boundedAuthorityReads: false } }, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(false);
+
+    for (const invalid of [null, 'true', 1, {}, []]) {
+      expect(() => resolveChainConfig({
+        chain: { boundedAuthorityReads: invalid as never },
+      }, { chain: fullNetworkChain })).toThrow(/chain\.boundedAuthorityReads must be a boolean/);
+    }
+  });
+
+  it.each([
+    'authorityReadTimeoutMs',
+    'authorityColdResolutionTimeoutMs',
+  ] as const)('validates chain.%s as a positive integer with network fallback and operator precedence', (key) => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.[key]).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, [key]: 12_000 },
+    })?.[key]).toBe(12_000);
+    expect(resolveChainConfig({ chain: { [key]: 3_000 } }, {
+      chain: { ...fullNetworkChain, [key]: 12_000 },
+    })?.[key]).toBe(3_000);
+
+    for (const value of [null, 0, -1, 1.5, Number.NaN, '2500']) {
+      expect(() => resolveChainConfig({
+        chain: { [key]: value as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        new RegExp(`chain\\.${key} must be a positive integer`),
+      );
+    }
+  });
+
   it('rejects non-finite and sub-minimum receipt timeouts', () => {
     for (const receiptTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 999]) {
       expect(() => resolveChainConfig({ chain: { receiptTimeoutMs } }, { chain: fullNetworkChain }))
@@ -1668,6 +1827,46 @@ describe('resolveChainConfig (field-level merge)', () => {
       { chain: { ...fullNetworkChain, cgRegistryScanPageSize: 10_000 } },
     );
     expect(overridden?.cgRegistryScanPageSize).toBe(4_000);
+  });
+
+  it('merges and validates the RPC request budget per field', () => {
+    const merged = resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: 7, maxQueueSize: 32 } } },
+      {
+        chain: {
+          ...fullNetworkChain,
+          rpcRequestBudget: {
+            maxRequestsPerSecond: 12,
+            foregroundReservePercent: 75,
+            burstRequests: 24,
+            startupJitterMs: 45_000,
+          },
+        },
+      },
+    );
+    expect(merged?.rpcRequestBudget).toEqual({
+      maxRequestsPerSecond: 7,
+      foregroundReservePercent: 75,
+      burstRequests: 24,
+      maxQueueSize: 32,
+      startupJitterMs: 45_000,
+    });
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { foregroundReservePercent: 100 } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/foregroundReservePercent/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: null as never } },
+      { chain: fullNetworkChain },
+    )).toThrow(/plain object/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: null as never } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/maxRequestsPerSecond/);
+    expect(() => resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, rpcRequestBudget: null as never } },
+    )).toThrow(/plain object/);
   });
 
   it('merges publisher funding floors with operator precedence', () => {
@@ -2059,5 +2258,78 @@ describe('resolveApprovalPolicy (YAML/JSON config → runtime ApprovalPolicy)', 
         refillBelowFraction: Number.NaN,
       }),
     ).toThrow(/must be a finite number in \[0, 1\]/);
+  });
+
+  it('passes a valid targetAllowanceMultiple through', () => {
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 50 }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: undefined,
+      targetAllowanceMultiple: 50,
+      refillBelowFraction: undefined,
+    });
+    // 1 is the tightest legal multiple (ceiling == this publish's cost).
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 1 })
+        ?.targetAllowanceMultiple,
+    ).toBe(1);
+  });
+
+  it('rejects an out-of-contract targetAllowanceMultiple loudly', () => {
+    // Fail fast rather than clamp: a multiple < 1 would put the ceiling under
+    // the publish floor on every call, so the adapter's floor clamp would fire
+    // every time and `replenishing` would silently behave as `per-publish` —
+    // the operator's chosen mode cancelled, visible only on the gas bill.
+    // Same convention as `finalityConfirmations` and the two sibling fields.
+    for (const bad of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        () => resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: bad }),
+        `expected multiple ${bad} to be rejected`,
+      ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+    }
+    expect(() =>
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: '20' as any }),
+    ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+  });
+
+  it('carries both sizing fields through when the operator set both (adapter applies precedence)', () => {
+    // Resolution does not silently drop either field — precedence (absolute
+    // `targetAllowance` wins) is `computeApprovalAction`'s job, so the config
+    // layer stays a pure translator and the operator's file round-trips.
+    expect(
+      resolveApprovalPolicy({
+        mode: 'replenishing',
+        targetAllowance: '1000000000000000000000',
+        targetAllowanceMultiple: 5,
+      }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: 10n ** 21n,
+      targetAllowanceMultiple: 5,
+      refillBelowFraction: undefined,
+    });
+  });
+
+  it('warns only when replenishing relies on the changed implicit ceiling', () => {
+    const warning = approvalPolicyMigrationWarning({ mode: 'replenishing' });
+    expect(warning).toContain('20x the triggering publish cost');
+    expect(warning).toContain('legacy flat 1000 TRAC ceiling');
+    expect(warning).toContain('targetAllowance explicitly to retain a flat ceiling');
+    expect(warning).toContain('targetAllowanceMultiple to keep relative sizing');
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      refillBelowFraction: 0.25,
+    })).toBe(warning);
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowance: '1000000000000000000000',
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowanceMultiple: 20,
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({ mode: 'per-publish' })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning(undefined)).toBeUndefined();
   });
 });

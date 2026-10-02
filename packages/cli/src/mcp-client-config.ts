@@ -1,13 +1,13 @@
-import { existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { snapshotMcpConfigSource, writeMcpConfigAtomic, type McpConfigSourceSnapshot } from './mcp-config-file.js';
-import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
+import type {
+  McpPhysicalConfig,
+  McpPhysicalConfigSourceSnapshot,
+} from './mcp-physical-config.js';
 import { tomlDocumentAdapter } from './mcp-toml-document.js';
 import { jsonDocumentAdapter, jsoncDocumentAdapter } from './mcp-json-document.js';
 import { isPlainRecord, type DesiredRegistration, type PersistedRegistration, type RegistrationEdit, type McpConfigDocumentAdapter } from './mcp-config-document.js';
 export type { DesiredRegistration, PersistedRegistration, RegistrationEdit } from './mcp-config-document.js';
-import { DKG_SERVER_KEY, tildify, type McpConfigEndpoint } from './mcp-client-registry.js';
+import { DKG_SERVER_KEY } from './mcp-client-registry.js';
 
 export interface McpRegistration {
   command?: string;
@@ -43,19 +43,19 @@ export function classifyRegistration(current: RegistrationRead, expected: Desire
     && current.registration.dkgHome === expected.env.DKG_HOME ? 'registered' : 'stale';
 }
 
-const documentAdapters: Record<McpConfigEndpoint['format'], McpConfigDocumentAdapter> = {
+const documentAdapters: Record<McpPhysicalConfig['shape']['format'], McpConfigDocumentAdapter> = {
   json: jsonDocumentAdapter,
   jsonc: jsoncDocumentAdapter,
   toml: tomlDocumentAdapter,
 };
 
 function readConfigBody(
-  target: McpConfigEndpoint,
-  source: McpConfigSourceSnapshot = snapshotMcpConfigSource(target.configPath),
+  target: McpPhysicalConfig,
+  source: McpPhysicalConfigSourceSnapshot = target.readSource(),
 ): Record<string, unknown> {
-  try { return documentAdapters[target.format].parse(source.content ?? ''); }
+  try { return documentAdapters[target.shape.format].parse(source.content ?? ''); }
   catch {
-    throw new Error(`Existing file is not valid ${target.format.toUpperCase()}: ${tildify(target.configPath)}. Move it aside and re-run.`);
+    throw new Error(`Existing file is not valid ${target.shape.format.toUpperCase()}: ${target.displayPath}. Move it aside and re-run.`);
   }
 }
 
@@ -105,7 +105,7 @@ export type ServerKeyProbe =
  * that as "not installed": it would tell a user an integration is missing when
  * the truth is that their config could not be read.
  */
-export function readRegisteredServerKeys(target: McpConfigEndpoint): ServerKeyProbe {
+export function readRegisteredServerKeys(target: McpPhysicalConfig): ServerKeyProbe {
   let body: Record<string, unknown>;
   try {
     body = readConfigBody(target);
@@ -115,7 +115,7 @@ export function readRegisteredServerKeys(target: McpConfigEndpoint): ServerKeyPr
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, servers: {} };
     return { ok: false, reason: `could not read ${target.displayPath}` };
   }
-  const cursor = body[target.serverContainer];
+  const cursor = body[target.shape.serverContainer];
   // Missing container: readable config, nothing registered.
   if (cursor === undefined) return { ok: true, servers: {} };
   // Present but not a KEYED object: malformed exactly where we needed to read.
@@ -159,29 +159,26 @@ export function readRegisteredServerKeys(target: McpConfigEndpoint): ServerKeyPr
 
 /** Serialize the inspected source once, then persist through one transaction boundary. */
 function applyRegistrationEdit(
-  target: McpConfigEndpoint,
+  target: McpPhysicalConfig,
   edit: RegistrationEdit,
-  source: McpConfigSourceSnapshot,
+  source: McpPhysicalConfigSourceSnapshot,
 ): void {
-  const result = documentAdapters[target.format].applyEdit(source.content ?? '', edit, target.serverContainer);
+  const result = documentAdapters[target.shape.format].applyEdit(source.content ?? '', edit, target.shape.serverContainer);
   if (result.warning) {
-    process.stderr.write(`[mcp-config] WARNING: ${target.format.toUpperCase()} config at ${tildify(target.configPath)} ${result.warning}\n`);
+    process.stderr.write(`[mcp-config] WARNING: ${target.shape.format.toUpperCase()} config at ${target.displayPath} ${result.warning}\n`);
   }
-  const dir = dirname(target.configPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeMcpConfigAtomic(target.configPath, result.content,
-    mcpConfigPersistenceStrategy(target.location, source.destination), source);
+  target.write(result.content, source);
 }
 
 /** Inspect only: stale/null entries still count as an owned registration. */
-export function inspectRegistration(target: McpConfigEndpoint): boolean {
+export function inspectRegistration(target: McpPhysicalConfig): boolean {
   const container = readServerContainer(readConfigBody(target), target);
   return container !== undefined && Object.hasOwn(container, DKG_SERVER_KEY);
 }
 
 /** Remove only the owned leaf from one source snapshot. */
-export function removeRegistration(target: McpConfigEndpoint): boolean {
-  const source = snapshotMcpConfigSource(target.configPath);
+export function removeRegistration(target: McpPhysicalConfig): boolean {
+  const source = target.readSource();
   const body = readConfigBody(target, source);
   const container = readServerContainer(body, target);
   if (container === undefined || !Object.hasOwn(container, DKG_SERVER_KEY)) return false;
@@ -190,10 +187,10 @@ export function removeRegistration(target: McpConfigEndpoint): boolean {
 }
 
 export function writeRegistration(
-  target: McpConfigEndpoint,
+  target: McpPhysicalConfig,
   entry: DesiredRegistration,
 ): void {
-  const source = snapshotMcpConfigSource(target.configPath);
+  const source = target.readSource();
   const body = readConfigBody(target, source);
 
   // Codex Round-15 Fix 22 + Round-19 Fix 26: when refreshing an
@@ -224,20 +221,20 @@ export function writeRegistration(
 }
 
 /** Read the owned entry for setup classification; no mutation. */
-export function readRegistration(target: McpConfigEndpoint): RegistrationRead {
+export function readRegistration(target: McpPhysicalConfig): RegistrationRead {
   return normalizeRegistration(readOwnedRegistration(readConfigBody(target), target));
 }
 
-function readOwnedRegistration(body: Record<string, unknown>, target: McpConfigEndpoint): unknown {
+function readOwnedRegistration(body: Record<string, unknown>, target: McpPhysicalConfig): unknown {
   return readServerContainer(body, target)?.[DKG_SERVER_KEY];
 }
 
 function readServerContainer(
   body: Record<string, unknown>,
-  target: McpConfigEndpoint,
+  target: McpPhysicalConfig,
 ): Record<string, unknown> | undefined {
-  if (!Object.hasOwn(body, target.serverContainer)) return undefined;
-  const container = body[target.serverContainer];
+  if (!Object.hasOwn(body, target.shape.serverContainer)) return undefined;
+  const container = body[target.shape.serverContainer];
   if (!isPlainRecord(container)) {
     throw new Error(`Malformed MCP server container in ${target.displayPath}`);
   }

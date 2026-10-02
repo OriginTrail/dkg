@@ -28,6 +28,15 @@ export const PROTOCOL_SYNC = '/dkg/10.0.2/sync';
 // and response bytes are unchanged; the distinct wire id lets upgraded peers
 // negotiate stream reuse while older peers cleanly fall back to one-shot sync.
 export const PROTOCOL_SYNC_POOLED = '/dkg/10.0.3/sync';
+/**
+ * Whether an advertised protocol list proves the peer serves sync (#2822).
+ * The pooled id is only ever registered as the overlay of the PROTOCOL_SYNC
+ * handler, so either id is proof. libp2p identifies once per connection and
+ * later records only the ids its streams negotiate, so a peer that connected
+ * before registering its sync handlers can list just the pooled id.
+ */
+export const advertisesSyncProtocol = (protocols: readonly string[]): boolean =>
+  protocols.includes(PROTOCOL_SYNC) || protocols.includes(PROTOCOL_SYNC_POOLED);
 // OT-RFC-59 changelog read-lane — a SEPARATE protocol id, not a field on
 // PROTOCOL_SYNC: the legacy sync response is bare N-Quads with no envelope, so a
 // structured (era, headSeq, nextSeq, records) head cannot ride the existing
@@ -286,6 +295,24 @@ export function contextGraphMetaUri(contextGraphId: string, subGraphId?: string)
   return `did:dkg:context-graph:${contextGraphId}/_meta`;
 }
 
+/**
+ * Storage inverse of the legacy context partitions produced by
+ * {@link contextGraphDataUri} and {@link contextGraphMetaUri}. The rightmost
+ * `/context/<id>[/_meta]` suffix preserves slash-bearing CG IDs; the context ID
+ * is one nonempty path component. Bare CG graphs have no context coordinate.
+ */
+export function parseContextGraphContextStorageUri(uri: string): {
+  contextGraphId: string;
+  subGraphId: string;
+  metadata: boolean;
+} | undefined {
+  const prefix = 'did:dkg:context-graph:';
+  if (!uri.startsWith(prefix)) return undefined;
+  const context = /^(.*)\/context\/([^/]+)(\/_meta)?$/.exec(uri.slice(prefix.length));
+  if (!context || context[1].length === 0) return undefined;
+  return { contextGraphId: context[1], subGraphId: context[2], metadata: context[3] !== undefined };
+}
+
 export function contextGraphPrivateUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_private`;
 }
@@ -337,6 +364,28 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
 }
 
 /**
+ * Storage inverse of {@link contextGraphAssertionUri}, including historical
+ * peer-ID writers. The unsplit scope can be a root or a named subgraph. This
+ * recognizes placement only; cryptographic callers must use the EVM-checked
+ * {@link parseContextGraphAssertionUri} instead.
+ */
+export function parseContextGraphAssertionStorageUri(subject: string): {
+  scope: string;
+  agentAddress: string;
+  name: string;
+} | undefined {
+  const PREFIX = 'did:dkg:context-graph:';
+  if (!subject.startsWith(PREFIX)) return undefined;
+  const parts = subject.slice(PREFIX.length).split('/');
+  if (parts.length < 4) return undefined;
+  const name = parts[parts.length - 1]!;
+  const agentAddress = parts[parts.length - 2]!;
+  if (parts[parts.length - 3] !== 'assertion' || name.length === 0 || agentAddress.length === 0) return undefined;
+  const scope = parts.slice(0, parts.length - 3).join('/');
+  return scope.length === 0 ? undefined : { scope, agentAddress, name };
+}
+
+/**
  * Inverse of {@link contextGraphAssertionUri}: split an assertion-coordinate
  * subject `did:dkg:context-graph:<scope>/assertion/<addr>/<name>` into its
  * cryptographic coordinate, or `undefined` when the shape does not match.
@@ -359,19 +408,10 @@ export function parseContextGraphAssertionUri(subject: string): {
   agentAddress: string;
   name: string;
 } | undefined {
-  const PREFIX = 'did:dkg:context-graph:';
-  if (!subject.startsWith(PREFIX)) return undefined;
-  const parts = subject.slice(PREFIX.length).split('/');
-  // Minimum shape: <scope(>=1)>/assertion/<addr>/<name> → at least 4 segments.
-  if (parts.length < 4) return undefined;
-  const name = parts[parts.length - 1]!;
-  const agentAddress = parts[parts.length - 2]!;
-  const sentinel = parts[parts.length - 3]!;
-  if (sentinel !== 'assertion' || name.length === 0) return undefined;
-  if (!/^0x[0-9a-fA-F]{40}$/.test(agentAddress)) return undefined;
-  const scope = parts.slice(0, parts.length - 3).join('/');
-  if (scope.length === 0) return undefined;
-  return { scope, agentAddress, name };
+  const coordinate = parseContextGraphAssertionStorageUri(subject);
+  return coordinate && /^0x[0-9a-fA-F]{40}$/.test(coordinate.agentAddress)
+    ? coordinate
+    : undefined;
 }
 
 /**
@@ -467,6 +507,33 @@ export function contextGraphLayerUriCandidates(
   const layerBase = contextGraphLayerBaseUri(contextGraphId, layer, subGraphName);
   const canonical = `${layerBase}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
   const legacy = `${layerBase}/${agentAddress}/${kaNumber}`;
+  return canonical === legacy ? [canonical] : [canonical, legacy];
+}
+
+/**
+ * Canonical and caller-known legacy prefixes for the NAME-KEYED working-memory
+ * graph family, `…[/{sub}]/assertion/{addr}/{name}`.
+ *
+ * This is NOT a dead legacy shape. `DKGPublisher.wmGraphUri` falls back to
+ * {@link contextGraphAssertionUri} whenever `resolveKaGraphIdentity` returns
+ * null — i.e. whenever a per-author KA number cannot be resolved — so drafts
+ * still land here today. An unscoped working-memory read that only scans
+ * `…/_working_memory/{addr}/` therefore cannot see them.
+ *
+ * Mirrors {@link contextGraphLayerPrefixCandidates}: canonical (EVM-lowercased)
+ * address first, the caller's original casing second when it differs, because
+ * graphs written before address canonicalization are still addressed that way.
+ */
+export function contextGraphAssertionPrefixCandidates(
+  contextGraphId: string,
+  agentAddress: string,
+  subGraphName?: string,
+): string[] {
+  const base = subGraphName
+    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
+    : `did:dkg:context-graph:${contextGraphId}`;
+  const canonical = `${base}/assertion/${canonicalKnowledgeAssetAgentAddress(agentAddress)}/`;
+  const legacy = `${base}/assertion/${agentAddress}/`;
   return canonical === legacy ? [canonical] : [canonical, legacy];
 }
 

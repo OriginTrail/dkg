@@ -14,9 +14,9 @@ import {
   type Eip6963ProviderDetail,
   type Eip6963ProviderInfo,
 } from '../web3/eip6963.js';
-import { numericChainId, chainIdHex } from '../web3/chainId.js';
-import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
+import { numericChainId } from '../web3/chainId.js';
 import { loadProviderRdns, saveProviderRdns, clearProviderRdns } from '../web3/session.js';
+import { switchWalletToBootstrap } from '../web3/switchWalletChain.js';
 import type { PcaContracts } from '../api.js';
 
 /**
@@ -72,10 +72,6 @@ export function reconnectTarget(
 /** True when a wallet is connected but on a different chain than the node's PCA contracts. */
 export function isWrongNetwork(s: Pick<WalletState, 'address' | 'chainId' | 'expectedChainId'>): boolean {
   return s.address != null && s.expectedChainId != null && s.chainId !== s.expectedChainId;
-}
-
-function rpcUrlsForWalletAdd(bootstrap: PcaContracts): string[] {
-  return (bootstrap.walletRpcUrls ?? []).filter((rpcUrl) => /^https?:\/\//i.test(rpcUrl));
 }
 
 let reconnectAttempted = false;
@@ -189,35 +185,7 @@ export const useWalletStore = create<WalletState>((set, get) => {
       const { provider, bootstrap } = get();
       if (!provider) throw new Error('Wallet not connected.');
       if (!bootstrap) throw new Error('Chain not bootstrapped.');
-      const hex = chainIdHex(bootstrap.chainId);
-      try {
-        await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hex }] });
-      } catch (err: unknown) {
-        // 4902 = chain unknown to the wallet → offer to add it.
-        if ((err as { code?: number })?.code === 4902) {
-          const symbol = nativeGasSymbol(bootstrap.chainId);
-          const rpcUrls = rpcUrlsForWalletAdd(bootstrap);
-          if (rpcUrls.length === 0) {
-            throw new Error(
-              'Wallet does not know this chain and the node did not provide wallet-public RPC URLs. ' +
-              'Add the network in your wallet, then try again.',
-            );
-          }
-          await provider.request({
-            method: 'wallet_addEthereumChain',
-            params: [
-              {
-                chainId: hex,
-                chainName: `chain-${numericChainId(bootstrap.chainId)}`,
-                nativeCurrency: { name: symbol, symbol, decimals: 18 },
-                rpcUrls,
-              },
-            ],
-          });
-        } else {
-          throw err;
-        }
-      }
+      await switchWalletToBootstrap(provider, bootstrap);
     },
   };
 });

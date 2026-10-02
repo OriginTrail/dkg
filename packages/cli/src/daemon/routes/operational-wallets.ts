@@ -25,6 +25,7 @@ const FEATURE_UNAVAILABLE_503 = {
   error:
     'Chain adapter does not expose operational-wallet management — ' +
     'not available on this deployment',
+  code: 'OPERATIONAL_WALLET_MANAGEMENT_UNAVAILABLE',
 };
 
 // NoChainAdapter throws `noChain()` → 503.

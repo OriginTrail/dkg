@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { toShardingTableNode } from '../src/evm-adapter-conviction.js';
-import type { PcaRpcMethod } from '../src/chain-adapter.js';
+import type { BrowserWalletRpcMethod } from '../src/chain-adapter.js';
 
 const SIGNER = '0x1111111111111111111111111111111111111111';
 const COMMITTED = ethers.parseEther('10000');
@@ -229,9 +229,19 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     expect(c.nft).toBe(ethers.getAddress(c.nft));
     expect(c.token).toBe(ethers.getAddress(c.token));
     expect(c.nft).not.toBe(c.token);
+    expect('identityWallets' in c).toBe(false);
     expect(c.chainId).toBe('mock:31337');
     expect(c.rpcUrls).toEqual([]);
     expect(c.walletRpcUrls).toEqual([]);
+  });
+
+  it('exposes identity-wallet contracts through an independent capability', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const contracts = await mock.getIdentityWalletContracts();
+    expect(contracts.profile).toBe(ethers.getAddress(contracts.profile));
+    expect(contracts.identity).toBe(ethers.getAddress(contracts.identity));
+    expect(contracts.storage).toBe(ethers.getAddress(contracts.storage));
+    expect(contracts.chainId).toBe('mock:31337');
   });
 
   it('getPublishingConvictionContracts does not leak SECRETKEY from adapter getRpcUrls', async () => {
@@ -247,9 +257,9 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     expect(c.rpcUrls).toEqual([]);
   });
 
-  it('requestPublishingConvictionRpc covers the full PCA RPC method union', async () => {
+  it('requestBrowserWalletRpc covers the full browser-read method union', async () => {
     const mock = new MockChainAdapter('mock:31337', SIGNER);
-    const methods: PcaRpcMethod[] = [
+    const methods: BrowserWalletRpcMethod[] = [
       'eth_chainId',
       'eth_call',
       'eth_getTransactionReceipt',
@@ -259,8 +269,9 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     ];
 
     for (const method of methods) {
-      await expect(mock.requestPublishingConvictionRpc(method, [])).resolves.not.toBeUndefined();
+      await expect(mock.requestBrowserWalletRpc(method, [])).resolves.not.toBeUndefined();
     }
+    await expect(mock.requestPublishingConvictionRpc('eth_chainId', [])).resolves.toBe('0x7a69');
   });
 
   it('toShardingTableNode normalizes named object and positional tuple shapes', () => {

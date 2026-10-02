@@ -15,13 +15,30 @@
  * 200. Runs in the standard cli lane against the shared Hardhat node.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startLiveDaemon, stopLiveDaemon, postJson, type LiveDaemon } from '../../helpers/live-daemon.js';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { getSharedContext } from '../../../../chain/test/evm-test-context.js';
+import {
+  startLiveDaemon,
+  stopLiveDaemon,
+  postJson,
+  type LiveDaemon,
+} from '../../helpers/live-daemon.js';
 
 describe('/api/query error mapping (real daemon)', () => {
   let daemon: LiveDaemon;
 
   beforeAll(async () => {
-    daemon = await startLiveDaemon();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    daemon = await startLiveDaemon({
+      extraConfig: {
+        chain: {
+          type: 'evm',
+          rpcUrl,
+          hubAddress,
+          chainId: 'evm:31337',
+        },
+      },
+    });
   }, 120_000);
 
   afterAll(async () => {
@@ -30,12 +47,13 @@ describe('/api/query error mapping (real daemon)', () => {
 
   it('maps a real malformed-SPARQL parse error to HTTP 400, not 500 (#889)', async () => {
     // Balanced graph boundaries pass the scope scanner; the incomplete triple
-    // pattern is rejected by the real Oxigraph parser.
+    // pattern is rejected by the real Oxigraph parser. A known public scope
+    // keeps this parser/classifier oracle independent of unscoped admission.
     const { status, body } = await postJson(daemon, '/api/query', {
       sparql: 'SELECT ?s WHERE { ?s ?p }',
-      contextGraphId: 'all',
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
     });
-    expect(status).toBe(400);
+    expect(status, JSON.stringify(body)).toBe(400);
     expect(String(body.error)).toMatch(
       /error at \d+:\d+|expected one of|parse|syntax/i,
     );

@@ -1,17 +1,38 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_NETWORK_IDENTITY, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
+  InMemoryPeerSyncLease,
+  runSelectedSharedMemoryRetry,
   runSyncOnConnect,
+  SyncOnConnectBackpressureError,
   SyncOnConnectPostSyncError,
   type SyncOnConnectPeerOutcome,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
-import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import {
+  getSyncBackpressureBusyError,
+  resolveSyncGlobalBackpressure,
+  SyncBackpressureBusyError,
+  withGlobalSyncBackpressure,
+} from '../src/sync/backpressure.js';
+import type { OperationContext, PeerResolver } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import type { SelectedSharedMemorySyncResult } from '../src/sync/shared-memory-freshness.js';
+import { emptySharedMemorySyncResult } from '../src/sync/shared-memory-diagnostics.js';
+import {
+  asSyncOnConnectTestAgent,
+  peerSyncSessionDriver,
+} from './_helpers/sync-on-connect-test-fixture.js';
+
+const ACTIVE_SYNC_LIFETIME = new AbortController().signal;
+
+function syncState(agent: DKGAgent) {
+  return peerSyncSessionDriver(asSyncOnConnectTestAgent(agent));
+}
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -40,6 +61,12 @@ function freshPeerIdString(): string {
 }
 
 const noopLog = (_ctx: OperationContext, _message: string) => {};
+
+/**
+ * #2822 field log: identify ran before the peer registered its sync handlers,
+ * and its later pooled pulls added only the pooled id to the peer record.
+ */
+const STALE_IDENTIFY_PROTOCOLS = [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED];
 
 async function flushMicrotasks(): Promise<void> {
   // The peer-job transaction now crosses explicit phase-result and accounting
@@ -100,6 +127,46 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('preserves typed backpressure from selected-lane admission', async () => {
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('selected queue full', 'queue_full');
+
+    await expect(runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      selectedSharedMemoryLane: {
+        admitWork: async () => { throw busy; },
+      },
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
+  it('preserves typed backpressure from ordinary post-sync maintenance', async () => {
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('maintenance queue full', 'queue_full');
+
+    await expect(runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags: async () => { throw busy; },
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
   it('runs durable before ordinary SWM history', async () => {
     const remotePeer = freshPeerIdString();
     const order: string[] = [];
@@ -109,10 +176,11 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['ordinary'],
       getDurableSyncContextGraphs: () => ['ordinary'],
       ordinarySharedMemoryLane: {
@@ -138,20 +206,63 @@ describe('runSyncOnConnect callbacks', () => {
     ]);
   });
 
+  it('preserves typed backpressure from post-durable shared-memory sync', async () => {
+    // `ordinarySharedMemoryWork.syncFromPeer()` is awaited outside
+    // `runNonTransportStep`, after `durableSyncCompleted = true`. It is the one
+    // site where removing the attempt boundary's cause walk would otherwise let
+    // a bare busy error reach the `backoffEligible: true` wrap and grow peer
+    // backoff for purely local admission pressure.
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('shared queue full', 'queue_full');
+
+    await expect(runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => ['first'], async () => { throw busy; }),
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => ['first'],
+      syncFromPeer: async () => ({
+        insertedTriples: 1,
+        insertedDataTriples: 1,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
+  it('keeps the busy error as the cause so admission detectors still see it', async () => {
+    // `getSyncBackpressureBusyError()` walks `cause`; dropping it degraded
+    // `syncOperationRejectionReason` to 'aborted_before_start'.
+    const busy = new SyncBackpressureBusyError('queue full', 'queue_full');
+    const typed = new SyncOnConnectBackpressureError(busy);
+
+    expect(typed.cause).toBe(busy);
+    expect(getSyncBackpressureBusyError(typed)).toBe(busy);
+  });
+
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {
     const remotePeer = freshPeerIdString();
     const synced: SyncOnConnectPeerOutcome[] = [];
     let sharedRuns = 0;
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['first', 'second'], async () => {
         sharedRuns += 1;
         return 0;
       }),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['first', 'second'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -177,11 +288,12 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: SyncOnConnectPeerOutcome[] = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['first', 'second'], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['first', 'second'],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -206,16 +318,17 @@ describe('runSyncOnConnect callbacks', () => {
     }]);
   });
 
-  it('accepts omitted knownCorePeerIdsV2 for backwards-compatible call sites', async () => {
+  it('reconciles ACK capabilities through the required registry port', async () => {
     const remotePeer = freshPeerIdString();
-    const knownCorePeerIds = new Set<string>();
+    const peerCapabilities = new PeerCapabilityRegistry();
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC],
-      knownCorePeerIds,
+      peerCapabilities,
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 1,
       refreshMetaSyncedFlags: async () => {},
@@ -224,21 +337,62 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(outcome).toBe('synced');
-    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(peerCapabilities.supportsCore(remotePeer)).toBe(true);
   });
 
-  it('tracks and evicts V2 ACK capability from populated protocol lists', async () => {
+  it('reconciles populated and empty identify lists through the legacy set context', async () => {
     const remotePeer = freshPeerIdString();
     const knownCorePeerIds = new Set<string>();
-    const knownCorePeerIdsV2 = new Set<string>([remotePeer]);
-
-    const emptyIdentifyOutcome = await runSyncOnConnect({
+    const knownCorePeerIdsV2 = new Set<string>();
+    let protocols = [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC];
+    const context = {
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
-      getPeerProtocols: async () => [],
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => protocols,
       knownCorePeerIds,
       knownCorePeerIdsV2,
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 1,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    };
+
+    expect(await runSyncOnConnect(context)).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(true);
+
+    protocols = [];
+    expect(await runSyncOnConnect(context)).toBe('skipped-no-sync');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(true);
+
+    protocols = [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC];
+    expect(await runSyncOnConnect(context)).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(false);
+
+    protocols = [PROTOCOL_SYNC];
+    expect(await runSyncOnConnect(context)).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(false);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(false);
+  });
+
+  it('retains negotiated V2 through stale identify and revokes it on peer:update', async () => {
+    const remotePeer = freshPeerIdString();
+    const peerCapabilities = new PeerCapabilityRegistry();
+    peerCapabilities.observe(remotePeer, { source: 'negotiation', protocol: PROTOCOL_STORAGE_ACK });
+    peerCapabilities.observe(remotePeer, { source: 'negotiation', protocol: PROTOCOL_STORAGE_ACK_V2 });
+
+    const emptyIdentifyOutcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [],
+      peerCapabilities,
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => {},
@@ -247,15 +401,15 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(emptyIdentifyOutcome).toBe('skipped-no-sync');
-    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(true);
+    expect(peerCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(true);
 
     const v1OnlyOutcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC],
-      knownCorePeerIds,
-      knownCorePeerIdsV2,
+      peerCapabilities,
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 1,
       refreshMetaSyncedFlags: async () => {},
@@ -264,8 +418,12 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(v1OnlyOutcome).toBe('synced');
-    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
-    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(false);
+    expect(peerCapabilities.supportsCore(remotePeer)).toBe(true);
+    expect(peerCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(true);
+    peerCapabilities.observe(remotePeer, {
+      source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC],
+    });
+    expect(peerCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(false);
   });
 
   it('fires onPeerSkippedNoSync when the peer does not advertise PROTOCOL_SYNC', async () => {
@@ -275,11 +433,12 @@ describe('runSyncOnConnect callbacks', () => {
     const syncFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => ['/ipfs/id/1.0.0', '/meshsub/1.1.0'],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
@@ -299,17 +458,98 @@ describe('runSyncOnConnect callbacks', () => {
     expect(syncFromPeer.calls).toEqual([]);
   });
 
+  it('syncs a peer whose stale identify lists only the pooled sync id (#2822)', async () => {
+    const remotePeer = freshPeerIdString();
+    const skipped: string[] = [];
+    const syncFromPeer = recorder(async () => 3);
+
+    const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [...STALE_IDENTIFY_PROTOCOLS],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+      onPeerSkippedNoSync: (peerId) => skipped.push(peerId),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(skipped).toEqual([]);
+    expect(syncFromPeer.calls).toEqual([[remotePeer]]);
+  });
+
+  it('retries the selected lane for a peer whose stale identify lists only the pooled sync id (#2822)', async () => {
+    const remotePeer = freshPeerIdString();
+    const skipped: string[] = [];
+    const selectedSync = recorder(async (): Promise<SelectedSharedMemorySyncResult> => ({
+      kind: 'selected-shared-memory',
+      requestedScope: {
+        kind: 'selected-public',
+        targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
+      },
+      shared: { ...emptySharedMemorySyncResult(), insertedTriples: 2 },
+      scopeComplete: true,
+      selectedScopeComplete: true,
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
+    }));
+
+    const outcome = await runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [...STALE_IDENTIFY_PROTOCOLS],
+      selectedSharedMemoryLane: {
+        admitWork: () => ({ contextGraphIds: ['selected-cg'], syncFromPeer: selectedSync }),
+      },
+      logInfo: noopLog,
+      onPeerSkippedNoSync: (peerId) => skipped.push(peerId),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(skipped).toEqual([]);
+    expect(selectedSync.calls).toHaveLength(1);
+  });
+
+  it('still skips a selected retry when the peer lists neither sync id', async () => {
+    const remotePeer = freshPeerIdString();
+    const skipped: string[] = [];
+    const admitWork = recorder((_peerId: string) => null);
+
+    const outcome = await runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_NETWORK_IDENTITY, '/ipfs/id/1.0.0'],
+      selectedSharedMemoryLane: { admitWork },
+      logInfo: noopLog,
+      onPeerSkippedNoSync: (peerId) => skipped.push(peerId),
+    });
+
+    expect(outcome).toBe('skipped-no-sync');
+    expect(skipped).toEqual([remotePeer]);
+    expect(admitWork.calls).toEqual([]);
+  });
+
   it('fires onSyncAccounting after a successful sync', async () => {
     const remotePeer = freshPeerIdString();
     const skipped: string[] = [];
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 7,
       refreshMetaSyncedFlags: async () => {},
@@ -329,15 +569,16 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
         checkpointAdvances: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -366,6 +607,7 @@ describe('runSyncOnConnect callbacks', () => {
       const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
       const outcome = await runSyncOnConnect({
+        signal: ACTIVE_SYNC_LIFETIME,
         ordinarySharedMemoryLane: ordinaryLane(() => ['integrity-rejected-cg'], async () => ({
           insertedTriples: 0,
           timedOutPhases: 0,
@@ -373,9 +615,9 @@ describe('runSyncOnConnect callbacks', () => {
           deniedPhases: 0,
         })),
         remotePeer,
-        syncingPeers: new Set(),
+        syncingPeers: new InMemoryPeerSyncLease(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
-        knownCorePeerIds: new Set(),
+        peerCapabilities: new PeerCapabilityRegistry(),
         getSyncContextGraphs: () => ['integrity-rejected-cg'],
         syncFromPeer: async () => ({
           insertedTriples: 3,
@@ -407,6 +649,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-clean-empty'], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -414,9 +657,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-clean-empty'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -439,6 +682,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-clean-then-timeout'], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -448,9 +692,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-clean-then-timeout'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -473,6 +717,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined; progress: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -482,9 +727,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -509,6 +754,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-timeout'], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -518,9 +764,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-timeout'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -545,15 +791,16 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
         checkpointAdvances: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -575,6 +822,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         completedPhases: 0,
@@ -584,9 +832,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 3,
@@ -611,6 +859,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined; progress: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -618,9 +867,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 3,
@@ -647,6 +896,7 @@ describe('runSyncOnConnect callbacks', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -654,9 +904,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -696,6 +946,7 @@ describe('runSyncOnConnect callbacks', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -703,9 +954,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -745,6 +996,7 @@ describe('runSyncOnConnect callbacks', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -752,9 +1004,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         complete: false,
@@ -812,6 +1064,7 @@ describe('runSyncOnConnect callbacks', () => {
     }));
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => contextGraphs, async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -819,9 +1072,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => contextGraphs,
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
@@ -857,6 +1110,7 @@ describe('runSyncOnConnect callbacks', () => {
     }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -864,9 +1118,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -903,6 +1157,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-metadata-only'], async () => ({
         insertedTriples: 0,
         timedOutPhases: 0,
@@ -910,9 +1165,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-metadata-only'],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -938,6 +1193,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-shared-meta-only'], async () => ({
         insertedTriples: 1,
         insertedDataTriples: 0,
@@ -947,9 +1203,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-shared-meta-only'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -972,6 +1228,7 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => ['cg-shared-phase-failure'], async () => ({
         insertedTriples: 0,
         insertedDataTriples: 0,
@@ -982,9 +1239,9 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       })),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-shared-phase-failure'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -1005,18 +1262,19 @@ describe('runSyncOnConnect callbacks', () => {
 
   it('tags failures that happen after durable sync completes', async () => {
     const remotePeer = freshPeerIdString();
-    const syncingPeers = new Set<string>();
+    const syncingPeers = new InMemoryPeerSyncLease();
     const laterError = new Error('discovery failed');
     const synced: string[] = [];
     let caught: unknown;
 
     try {
       await runSyncOnConnect({
+        signal: ACTIVE_SYNC_LIFETIME,
         ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
         remotePeer,
         syncingPeers,
         getPeerProtocols: async () => [PROTOCOL_SYNC],
-        knownCorePeerIds: new Set(),
+        peerCapabilities: new PeerCapabilityRegistry(),
         getSyncContextGraphs: () => [],
         syncFromPeer: async () => 7,
         refreshMetaSyncedFlags: async () => {},
@@ -1035,7 +1293,7 @@ describe('runSyncOnConnect callbacks', () => {
     expect((caught as SyncOnConnectPostSyncError).cause).toBe(laterError);
     expect((caught as SyncOnConnectPostSyncError).backoffEligible).toBe(false);
     expect(synced).toEqual([]);
-    expect(syncingPeers.has(remotePeer)).toBe(false);
+    expect(syncingPeers.isHeld(remotePeer)).toBe(false);
   });
 
   it('leaves newly discovered durable sync failures eligible for peer backoff', async () => {
@@ -1054,11 +1312,12 @@ describe('runSyncOnConnect callbacks', () => {
 
     try {
       await runSyncOnConnect({
+        signal: ACTIVE_SYNC_LIFETIME,
         ordinarySharedMemoryLane: ordinaryLane(() => contextGraphs, async () => 0),
         remotePeer,
-        syncingPeers: new Set(),
+        syncingPeers: new InMemoryPeerSyncLease(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
-        knownCorePeerIds: new Set(),
+        peerCapabilities: new PeerCapabilityRegistry(),
         getSyncContextGraphs: () => contextGraphs,
         syncFromPeer,
         refreshMetaSyncedFlags: async () => {},
@@ -1086,11 +1345,12 @@ describe('runSyncOnConnect callbacks', () => {
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(resolveOrdinaryWork, syncSharedMemoryFromPeer),
       remotePeer,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['devnet-test'],
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
@@ -1109,15 +1369,16 @@ describe('runSyncOnConnect callbacks', () => {
 
   it('returns already-syncing without running duplicate work', async () => {
     const remotePeer = freshPeerIdString();
-    const syncingPeers = new Set([remotePeer]);
+    const syncingPeers = new InMemoryPeerSyncLease([remotePeer]);
     const syncFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
       ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
       remotePeer,
       syncingPeers,
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
@@ -1141,6 +1402,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       await agent.start();
 
       const remotePeer = freshPeerIdString();
+      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([peerIdFromString(remotePeer)]);
       let admitted = false;
       const ensureAdmitted = recorder(async (peerId: string) => {
         admitted = true;
@@ -1152,7 +1414,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       coordinator.ensureAdmitted = ensureAdmitted;
       // Pretend sync-on-connect ran earlier and skipped this peer because
       // identify hadn't completed (the libp2p race we're fixing).
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
+      syncState(agent).markSkipped(remotePeer);
 
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1178,7 +1440,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
 
       expect(calls).toEqual([remotePeer]);
       expect(ensureAdmitted.calls.map(([peerId]) => peerId)).toEqual([remotePeer]);
-      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
+      expect(syncState(agent).isSkipped(remotePeer)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1193,8 +1455,9 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
     try {
       await agent.start();
       const remotePeer = freshPeerIdString();
+      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([peerIdFromString(remotePeer)]);
       allowAllNetworkAdmission(agent);
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
+      syncState(agent).markSkipped(remotePeer);
       (agent as any).isPeerConnectedForSyncBackoff = () => true;
       (agent as any).getSyncReconcilerProbe = async () => ({
         protocolsKey: PROTOCOL_SYNC,
@@ -1225,11 +1488,11 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
         },
       } as any));
 
-      for (let i = 0; i < 50 && !(agent as any).syncReconcilerBackoff.has(remotePeer); i++) {
+      for (let i = 0; i < 50 && syncState(agent).snapshot(remotePeer).backoff === undefined; i++) {
         await new Promise(r => setTimeout(r, 10));
       }
 
-      const backoff = (agent as any).syncReconcilerBackoff.get(remotePeer);
+      const backoff = syncState(agent).snapshot(remotePeer).backoff;
       expect(backoff?.failures).toBe(1);
       expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
     } finally {
@@ -1248,7 +1511,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
+      syncState(agent).markSkipped(remotePeer);
 
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1269,7 +1532,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
 
       expect(calls).toEqual([]);
       // peer is still in the skipped set so the reconciler can decide later
-      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(true);
+      expect(syncState(agent).isSkipped(remotePeer)).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1366,9 +1629,9 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       );
 
       // freshPeer synced 30s ago — within the 10-minute threshold
-      (agent as any).lastSuccessfulSyncAt.set(freshPeer, Date.now() - 30_000);
+      syncState(agent).recordFreshness(freshPeer, { successfulAt: Date.now() - 30_000 });
       // stalePeer synced 20 minutes ago — well past the threshold
-      (agent as any).lastSuccessfulSyncAt.set(stalePeer, Date.now() - 20 * 60_000);
+      syncState(agent).recordFreshness(stalePeer, { successfulAt: Date.now() - 20 * 60_000 });
 
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1401,7 +1664,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       );
 
       const now = Date.now();
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, now - 30_000);
+      syncState(agent).recordFreshness(remotePeer, { successfulAt: now - 30_000 });
       (agent as any).lastSyncDisconnectedAt.set(remotePeer, now - 30_000);
 
       const calls: string[] = [];
@@ -1436,7 +1699,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       );
 
       // Simulate a sync already in flight for this peer.
-      (agent as any).syncingPeers.add(peerA);
+      syncState(agent).beginSync(peerA);
 
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1476,17 +1739,12 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
         calls.push(peerId);
       };
 
-      const backoffMap = (agent as any).syncReconcilerBackoff as Map<
-        string,
-        { failures: number; nextRetryAt: number }
-      >;
-
       // Tick 1: never synced → fires once and records failure #1.
       const t1 = Date.now();
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
       expect(calls).toEqual([peerA]);
-      const b1 = backoffMap.get(peerA)!;
+      const b1 = syncState(agent).snapshot(peerA).backoff!;
       expect(b1.failures).toBe(1);
       const delay1 = b1.nextRetryAt - t1;
       expect(delay1).toBeGreaterThan(0);
@@ -1495,16 +1753,20 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
       expect(calls).toEqual([peerA]);
-      expect(backoffMap.get(peerA)!.failures).toBe(1);
+      expect(syncState(agent).snapshot(peerA).backoff?.failures).toBe(1);
 
       // Force the window to have elapsed, then tick again → fires and
       // records failure #2 with a strictly larger window (exponential).
-      backoffMap.set(peerA, { failures: 1, nextRetryAt: Date.now() - 1 });
+      syncState(agent).recordBackoff(peerA, {
+        ...b1,
+        failures: 1,
+        nextRetryAt: Date.now() - 1,
+      });
       const t2 = Date.now();
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
       expect(calls).toEqual([peerA, peerA]);
-      const b2 = backoffMap.get(peerA)!;
+      const b2 = syncState(agent).snapshot(peerA).backoff!;
       expect(b2.failures).toBe(2);
       const delay2 = b2.nextRetryAt - t2;
       // failure-2 window (~10min ±25%) strictly exceeds the failure-1
@@ -1534,11 +1796,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       const trySync = recorder(async () => undefined);
       (agent as any).trySyncFromPeer = trySync;
 
-      const backoffMap = (agent as any).syncReconcilerBackoff as Map<
-        string,
-        { failures: number; nextRetryAt: number; protocolsKey?: string | null; connectionKey?: string | null }
-      >;
-      backoffMap.set(peerA, {
+      syncState(agent).recordBackoff(peerA, {
         failures: 1,
         nextRetryAt: Date.now() + 100_000,
         protocolsKey: '/dkg/old/sync',
@@ -1549,8 +1807,8 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await flushMicrotasks();
 
       expect(trySync.calls).toHaveLength(1);
-      expect(backoffMap.get(peerA)?.failures).toBe(1);
-      expect(backoffMap.get(peerA)?.protocolsKey).toBe(PROTOCOL_SYNC);
+      expect(syncState(agent).snapshot(peerA).backoff?.failures).toBe(1);
+      expect(syncState(agent).snapshot(peerA).backoff?.protocolsKey).toBe(PROTOCOL_SYNC);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1577,11 +1835,6 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       const trySync = recorder((...a: unknown[]) => origTrySync(...a));
       (agent as any).trySyncFromPeer = trySync;
 
-      const backoffMap = (agent as any).syncReconcilerBackoff as Map<
-        string,
-        { failures: number; nextRetryAt: number }
-      >;
-
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
       await (agent as any).reconcileSyncFromConnectedPeers();
@@ -1589,8 +1842,8 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       expect(trySync.calls).toHaveLength(2);
       expect(getPeerProtocols.calls.length).toBeGreaterThanOrEqual(2);
-      expect((agent as any).skippedNoSyncPeers.has(peerA)).toBe(true);
-      expect(backoffMap.has(peerA)).toBe(false);
+      expect(syncState(agent).isSkipped(peerA)).toBe(true);
+      expect(syncState(agent).snapshot(peerA).backoff).toBeUndefined();
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1617,7 +1870,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1671,7 +1924,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       });
       expect(outcome).toBe('deferred-backpressure');
       expect(trySync.calls).toHaveLength(1);
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
 
       occupiedFetch.resolve(emptySyncPage('meta'));
       await occupiedSlot;
@@ -1681,7 +1934,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await waitFor(() => trySync.calls.length === 2);
 
       expect(trySync.calls).toHaveLength(2);
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
     } finally {
       occupiedFetch.resolve(emptySyncPage('meta'));
       await occupiedSlot?.catch(() => {});
@@ -1706,6 +1959,14 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       allowAllNetworkAdmission(agent);
       stubDurableSyncExternalIo(agent);
       (agent as any).fetchSyncPages = async (...args: unknown[]) => emptySyncPage(String(args[4]));
+
+      // The durable recovery coordinator reconnects its requested candidate.
+      // Keep this synthetic peer's connection I/O local, just like its page
+      // fetches, while exercising real durable and private SWM admission.
+      const connectPeer = vi.spyOn(
+        (agent as unknown as { peerResolver: Pick<PeerResolver, 'connect'> }).peerResolver,
+        'connect',
+      ).mockResolvedValue({ status: 'connected', resolvedAddresses: [] });
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -1746,8 +2007,9 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
         connectionKey: null,
       });
       expect(outcome).toBe('deferred-backpressure');
+      expect(connectPeer).toHaveBeenCalledWith(peerA, {});
       expect(recoverContextGraphSwmFromPeer.calls).toEqual([]);
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
     } finally {
       releaseOccupiedSlot?.();
       await occupiedSlot?.catch(() => {});
@@ -1778,7 +2040,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1807,7 +2069,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
-      const backoff = (agent as any).syncReconcilerBackoff.get(peerA);
+      const backoff = syncState(agent).snapshot(peerA).backoff;
       expect(backoff?.failures).toBe(1);
       expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
     } finally {
@@ -1845,11 +2107,11 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       // Simulate connection:close winning the race before the
       // fire-and-forget sync attempt resolves without progress.
       connectedPeers = [];
-      (agent as any).syncReconcilerBackoff.delete(peerA);
+      syncState(agent).clearBackoff(peerA);
       resolveAttempt();
       await flushMicrotasks();
 
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1868,9 +2130,9 @@ describe('DKGAgent sync state lifecycle', () => {
       allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, Date.now());
-      (agent as any).syncReconcilerBackoff.set(remotePeer, { failures: 3, nextRetryAt: Date.now() + 100_000 });
+      syncState(agent).markSkipped(remotePeer);
+      syncState(agent).recordFreshness(remotePeer, { successfulAt: Date.now() });
+      syncState(agent).recordBackoff(remotePeer, { failures: 3, nextRetryAt: Date.now() + 100_000 });
 
       // Stub getPeers so the close handler considers the peer fully gone.
       (agent.node.libp2p as any).getPeers = recorder(() => []);
@@ -1884,9 +2146,9 @@ describe('DKGAgent sync state lifecycle', () => {
         },
       } as any));
 
-      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(true);
-      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(true);
+      expect(syncState(agent).isSkipped(remotePeer)).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastSuccessfulSync !== undefined).toBe(true);
+      expect(syncState(agent).snapshot(remotePeer).backoff !== undefined).toBe(true);
       expect((agent as any).lastSyncDisconnectedAt.has(remotePeer)).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
@@ -1904,7 +2166,7 @@ describe('DKGAgent sync state lifecycle', () => {
       allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, Date.now() - 30_000);
+      syncState(agent).recordFreshness(remotePeer, { successfulAt: Date.now() - 30_000 });
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
         calls.push(peerId);
@@ -1919,7 +2181,7 @@ describe('DKGAgent sync state lifecycle', () => {
         },
       } as any));
 
-      expect((agent as any).catchupOnConnectAt.has(remotePeer)).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastQueued > 0).toBe(false);
       await new Promise(r => setTimeout(r, 100));
       expect(calls).toEqual([]);
     } finally {
@@ -1939,8 +2201,8 @@ describe('DKGAgent sync state lifecycle', () => {
 
       const remotePeer = freshPeerIdString();
       const sameTickBoundary = Date.now() - 30_000;
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, sameTickBoundary);
-      (agent as any).catchupOnConnectAt.set(remotePeer, sameTickBoundary);
+      syncState(agent).recordFreshness(remotePeer, { successfulAt: sameTickBoundary });
+      syncState(agent).recordQueued(remotePeer, sameTickBoundary);
       (agent as any).lastSyncDisconnectedAt.set(remotePeer, sameTickBoundary);
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -1956,7 +2218,7 @@ describe('DKGAgent sync state lifecycle', () => {
         },
       } as any));
 
-      expect((agent as any).catchupOnConnectAt.get(remotePeer)).toBeGreaterThanOrEqual(sameTickBoundary);
+      expect(syncState(agent).snapshot(remotePeer).lastQueued).toBeGreaterThanOrEqual(sameTickBoundary);
       await new Promise(r => setTimeout(r, 3100));
       expect(calls).toEqual([remotePeer]);
     } finally {
@@ -1976,10 +2238,10 @@ describe('DKGAgent sync state lifecycle', () => {
 
       const remotePeer = freshPeerIdString();
       const now = Date.now();
-      (agent as any).catchupOnConnectAt.set(remotePeer, now - 20 * 60_000);
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, now - 20 * 60_000);
-      (agent as any).lastSyncProgressAt.set(remotePeer, now - 20 * 60_000);
-      (agent as any).syncReconcilerBackoff.set(remotePeer, {
+      syncState(agent).recordQueued(remotePeer, now - 20 * 60_000);
+      syncState(agent).recordFreshness(remotePeer, { successfulAt: now - 20 * 60_000 });
+      syncState(agent).recordFreshness(remotePeer, { progressAt: now - 20 * 60_000 });
+      syncState(agent).recordBackoff(remotePeer, {
         failures: 2,
         nextRetryAt: now - 20 * 60_000,
       });
@@ -1988,10 +2250,10 @@ describe('DKGAgent sync state lifecycle', () => {
 
       (agent as any).pruneSyncReconcilerState(now);
 
-      expect((agent as any).catchupOnConnectAt.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
-      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastQueued > 0).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastSuccessfulSync !== undefined).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastSyncProgress !== undefined).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).backoff !== undefined).toBe(false);
       expect((agent as any).lastSyncDisconnectedAt.has(remotePeer)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
@@ -2012,8 +2274,8 @@ describe('DKGAgent sync state lifecycle', () => {
       const remotePeer = freshPeerIdString();
       (agent.node.libp2p as any).getPeers = recorder(() => [peerIdFromString(remotePeer)]);
       (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
-      (agent as any).skippedNoSyncPeers.add(remotePeer);
-      (agent as any).syncReconcilerBackoff.set(remotePeer, {
+      syncState(agent).markSkipped(remotePeer);
+      syncState(agent).recordBackoff(remotePeer, {
         failures: 2,
         nextRetryAt: Date.now() - 60_000,
       });
@@ -2063,19 +2325,19 @@ describe('DKGAgent sync state lifecycle', () => {
       await new Promise(r => setTimeout(r, 0));
 
       expect(syncFromPeerDetailed.calls).toHaveLength(1);
-      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
-      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
+      expect(syncState(agent).isSkipped(remotePeer)).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).backoff !== undefined).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastSuccessfulSync !== undefined).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastSyncProgress !== undefined).toBe(false);
 
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
       await new Promise(r => setTimeout(r, 0));
 
       expect(syncFromPeerDetailed.calls).toHaveLength(2);
-      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
-      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).backoff !== undefined).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastSuccessfulSync !== undefined).toBe(false);
+      expect(syncState(agent).snapshot(remotePeer).lastSyncProgress !== undefined).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -2115,9 +2377,9 @@ describe('DKGAgent sync state lifecycle', () => {
       await flushMicrotasks();
 
       expect(calls).toEqual([peerA]);
-      expect((agent as any).lastSuccessfulSyncAt.has(peerA)).toBe(false);
-      expect((agent as any).lastSyncProgressAt.has(peerA)).toBe(true);
-      expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+      expect(syncState(agent).snapshot(peerA).lastSuccessfulSync !== undefined).toBe(false);
+      expect(syncState(agent).snapshot(peerA).lastSyncProgress !== undefined).toBe(true);
+      expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
 
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();

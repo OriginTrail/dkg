@@ -2,12 +2,14 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Contract, ethers, Wallet } from 'ethers';
+import { EVMChainAdapter } from '../src/evm-adapter.js';
+import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 
 import {
-  createEVMAdapter,
   createProvider,
   getSharedContext,
   HARDHAT_KEYS,
+  makeAdapterConfig,
   revertSnapshot,
   takeSnapshot,
 } from './evm-test-context.js';
@@ -23,9 +25,43 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     await revertSnapshot(fileSnapshotId);
   });
 
-  it('reads current tuple and all authority event generations at finalized anchors', async () => {
-    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+  it('materializes current authority and every generation from finalized events', async () => {
     const provider = createProvider();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    let checkpoint: Readonly<{ token: number; value: unknown | null }> | undefined;
+    const store: ContextGraphAuthorityIndexStore = {
+      load: async () => checkpoint,
+      compareAndSwap: async (_scope, expectedToken, value) => {
+        if (checkpoint?.token !== expectedToken) return undefined;
+        const nextToken = expectedToken === undefined ? 1 : expectedToken + 1;
+        checkpoint = Object.freeze({ token: nextToken, value });
+        return nextToken;
+      },
+      invalidate: async (_scope, expectedToken) => {
+        if (checkpoint?.token !== expectedToken) return undefined;
+        const nextToken = expectedToken + 1;
+        checkpoint = Object.freeze({ token: nextToken, value: null });
+        return nextToken;
+      },
+    };
+    const adapter = new EVMChainAdapter({
+      ...makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.CORE_OP),
+      localContextGraphAuthorityIndexStore: store,
+      // Every step below mutates authority through a raw contract handle and
+      // asserts the very next read, so bypassing the adapter's write-triggered
+      // invalidation is intentional here: use a 1ms tick and explicitly drop
+      // the projection after each raw write. Production-shape cache evidence
+      // (including the shipped 6s default, T-boundary refresh, stale-if-error
+      // arithmetic and old/new projection equivalence) lives in
+      // context-graph-authority-index-projection.unit.test.ts and
+      // context-graph-authority-indexed-snapshot.unit.test.ts.
+      indexTickMs: 1,
+    });
+    const dropProjections = () => (
+      adapter as unknown as {
+        contextGraphAuthorityIndex?: { dropProjections(): void };
+      }
+    ).contextGraphAuthorityIndex?.dropProjections();
     const owner = adapter.getSignerAddress();
     const retainedAgent = new Wallet(HARDHAT_KEYS.EXTRA1).address;
     const removedAgent = new Wallet(HARDHAT_KEYS.EXTRA2).address;
@@ -118,6 +154,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
         0n,
       )
     ).wait();
+    dropProjections();
     const afterAuthority = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );
@@ -138,6 +175,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
         0n,
       )
     ).wait();
+    dropProjections();
     const afterPolicy = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );
@@ -167,6 +205,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     const selfTransferReceipt = await (
       await storage.transferFrom(owner, owner, created.contextGraphId)
     ).wait();
+    dropProjections();
     const afterSelfTransfer = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );
@@ -184,6 +223,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     const transferReceipt = await (
       await storage.transferFrom(owner, newOwner, created.contextGraphId)
     ).wait();
+    dropProjections();
     const afterTransfer = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );
@@ -208,5 +248,25 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     expect(finalized?.hash).toBe(transferReceipt.blockHash);
     expect(BigInt(afterTransfer.sourceBlockNumber))
       .toBeLessThanOrEqual(BigInt(finalized!.number));
+
+    const deactivator = new Contract(
+      await hub.getAssetStorageAddress('ContextGraphStorage'),
+      ['function deactivateContextGraph(uint256 contextGraphId) external'],
+      new Wallet(HARDHAT_KEYS.DEPLOYER, provider),
+    );
+    await (await deactivator.deactivateContextGraph(created.contextGraphId)).wait();
+    dropProjections();
+    const afterDeactivation = await adapter.getContextGraphAuthoritySnapshot(
+      created.contextGraphId,
+    );
+    expect(afterDeactivation).toMatchObject({
+      active: false,
+      owner: newOwner.toLowerCase(),
+      ownershipEra: afterTransfer.ownershipEra,
+      policyVersion: afterTransfer.policyVersion,
+      rosterVersion: afterTransfer.rosterVersion,
+      sourceBlockNumber: afterTransfer.sourceBlockNumber,
+      sourceBlockHash: afterTransfer.sourceBlockHash,
+    });
   }, 120_000);
 });

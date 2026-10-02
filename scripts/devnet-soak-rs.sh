@@ -741,7 +741,14 @@ function isPlannedRestartPublishFailure(p) {
   const startMs = Number(restartWindow.stopTs ?? 0) * 1000;
   const endMs = (Number(restartWindow.apiReadyTs ?? 0) + Number(restartWindow.graceSec ?? 0)) * 1000;
   if (!startMs || !endMs || tsMs < startMs || tsMs > endMs) return false;
-  return /storage_ack_insufficient|Daemon is not running|ECONNREFUSED|fetch failed|api request failed/i.test(String(p.out ?? ""));
+  const output = String(p.out ?? "");
+  // The CLI can fail before its HTTP request when its own node is the one
+  // deliberately stopped. Only excuse that diagnostic for the stopped node;
+  // another node losing its API in this window remains a blocking failure.
+  if (/Cannot read API port/i.test(output)) {
+    return Number(p.node) === Number(restartWindow.node);
+  }
+  return /storage_ack_insufficient|Daemon is not running|ECONNREFUSED|fetch failed|api request failed/i.test(output);
 }
 
 // 1. Publisher: at least 90% of non-planned-outage attempts must succeed.

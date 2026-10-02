@@ -33,24 +33,24 @@
 .v10-pca-overview-wallet + .v10-pca-owned-groups {
   margin-top: 18px;
 }
-.v10-pca-wallet-connect.compact {
+.v10-wallet-connect.compact {
   min-width: 0;
   max-width: 420px;
 }
-.v10-pca-wallet-connect.compact .v10-pca-wallet-note {
+.v10-wallet-connect.compact .v10-wallet-note {
   max-width: 420px;
 }
-.v10-pca-wallet-pill {
+.v10-wallet-pill {
   max-width: 100%;
 }
-.v10-pca-wallet-pill-main,
-.v10-pca-wallet-pill-provider {
+.v10-wallet-pill-main,
+.v10-wallet-pill-provider {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.v10-pca-wallet-pill-wrap {
+.v10-wallet-pill-wrap {
   max-width: 100%;
 }
 .v10-pca-modal-box .v10-modal-body {
@@ -118,8 +118,8 @@
   gap: 10px;
   padding: 12px;
 }
-.v10-pca-owner-key-readiness .v10-pca-wallet-connect,
-.v10-pca-detail-band + .v10-modal-tip .v10-pca-wallet-pill-wrap {
+.v10-pca-owner-key-readiness .v10-wallet-connect,
+.v10-pca-detail-band + .v10-modal-tip .v10-wallet-pill-wrap {
   margin-top: 8px;
 }
 .v10-pca-node-picker-combo {

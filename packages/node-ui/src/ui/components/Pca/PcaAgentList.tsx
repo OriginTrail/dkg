@@ -1,5 +1,5 @@
 import React from 'react';
-import { WalletRow } from './WalletRow.js';
+import { WalletRow } from '../Wallet/WalletRow.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 

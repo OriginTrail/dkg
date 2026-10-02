@@ -4,7 +4,7 @@ import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import type { PublishAuthorSelectionOptions } from '../src/publish-author-selection.js';
 import { resolveFinalizedPublishIdentity } from '../src/internal/finalized-publish-identity.js';
-import { CG, MEMBER, CURATOR, OTHER, NAME, KA_UAL, RESERVED_KA_ID, PUBLIC_QUAD, MERKLE, sealFor, stubAgent } from './_helpers/finalized-author.js';
+import { CG, MEMBER, CURATOR, OTHER, NAME, KA_UAL, RESERVED_KA_ID, PUBLIC_QUAD, MERKLE, sealFor, stubAgent } from './_helpers/foreign-author-resolution-fixtures.js';
 
 it.each([
   { authorSelection: null },

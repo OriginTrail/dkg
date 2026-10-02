@@ -8,7 +8,7 @@ import {
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
 import { classifyCoverage, isPcaSpendable } from '../pca/coverage.js';
-import { eqAddress as eq } from '../pca/address.js';
+import { eqAddress as eq } from '../web3/address.js';
 
 /** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
 export interface PcaWalletProbe {

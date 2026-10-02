@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as configModule from '../src/config.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ApiClient } from '../src/api-client.js';
+import { ApiClient, DaemonOutcomeUnknownError } from '../src/api-client.js';
 import type { KnowledgeAssetFinalizedPublishOptions } from '../src/api-client.js';
 
 const PORT = 8899;
@@ -103,6 +104,28 @@ describe('ApiClient', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  it('constructs direct remote clients without reading the local DKG home', async () => {
+    const home = vi.fn(() => { throw new Error('unexpected local-home context'); });
+    vi.resetModules();
+    vi.doMock('../src/config.js', () => ({
+      ...configModule,
+      DkgHomeFiles: class {
+        constructor() { home(); }
+      },
+    }));
+    try {
+      const { ApiClient: RemoteApiClient } = await import('../src/api-client.js');
+      const mockedConfig = await import('../src/config.js');
+      expect(() => new mockedConfig.DkgHomeFiles()).toThrow('unexpected local-home context');
+      home.mockClear();
+      expect(() => new RemoteApiClient('https://remote.example')).not.toThrow();
+      expect(home).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('../src/config.js');
+      vi.resetModules();
+    }
+  });
+
   describe('GET endpoints', () => {
     it('status() calls public /api/status without auth header', async () => {
       const body = { name: 'test', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
@@ -113,6 +136,36 @@ describe('ApiClient', () => {
       expect(result).toEqual(body);
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/status`);
+      expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
+    });
+
+    it('status({ includeStoreQuads: true }) asks the public route to refresh the store count', async () => {
+      const body = { name: 'test', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      await client.status({ includeStoreQuads: true });
+      await client.status({ includeStoreQuads: false });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        `http://127.0.0.1:${PORT}/api/status?includeStoreQuads=true`,
+        `http://127.0.0.1:${PORT}/api/status`,
+      ]);
+      expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
+    });
+
+    it('status({ probeStore: true }) asks the public route for a reachability check, alone or with a count', async () => {
+      const body = { name: 'test', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      await client.status({ probeStore: true });
+      await client.status({ includeStoreQuads: true, probeStore: true });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        `http://127.0.0.1:${PORT}/api/status?probeStore=true`,
+        `http://127.0.0.1:${PORT}/api/status?includeStoreQuads=true&probeStore=true`,
+      ]);
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
     });
 
@@ -147,6 +200,57 @@ describe('ApiClient', () => {
       expect(result.status).toBe('unreachable');
       expect(result.jobStatus).toBe('partial');
     });
+
+    it.each(['persisted', 'persisted-env-token', 'fallback-json', 'fallback-yaml'] as const)(
+      'connect() keeps every local read in one home across a delayed read (%s)', async (mode) => {
+        const otherHome = join(tempDir, 'other-home');
+        await mkdir(otherHome);
+        process.env.DKG_HOME = tempDir;
+        delete process.env.DKG_API_PORT;
+        await writeFile(join(tempDir, 'daemon.pid'), '12345');
+        await writeFile(join(tempDir, 'auth.token'), 'home-a-token\n');
+        await writeFile(join(otherHome, 'auth.token'), 'home-b-token\n');
+        await writeFile(join(otherHome, 'config.json'), JSON.stringify({ name: 'node-b', apiPort: 9444, apiHost: '192.0.2.20' }));
+        if (mode === 'fallback-yaml') {
+          await writeFile(join(tempDir, 'config.yaml'), 'name: node-a\napiPort: 9317\napiHost: 192.0.2.10\n');
+        } else {
+          await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'node-a', apiPort: 9317, apiHost: '192.0.2.10' }));
+        }
+        if (mode === 'persisted-env-token') process.env.DKG_AUTH_TOKEN = 'token-a';
+        if (mode.startsWith('persisted')) await writeFile(join(tempDir, 'api.port'), '9317');
+        let release!: () => void;
+        let markEntered!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+        const readPort = configModule.DkgHomeFiles.prototype.readApiPort;
+        const read = vi.spyOn(configModule.DkgHomeFiles.prototype, 'readApiPort').mockImplementation(async function () {
+          const value = await readPort.call(this);
+          markEntered();
+          await gate;
+          return value;
+        });
+        const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+        globalThis.fetch = fetch;
+        try {
+          const connecting = ApiClient.connect({ allowConfigFallback: true });
+          await entered;
+          process.env.DKG_HOME = otherHome;
+          if (mode === 'persisted-env-token') process.env.DKG_AUTH_TOKEN = 'token-b';
+          release();
+          const connected = await connecting;
+          await connected.agents();
+          expect(calls[0].url).toBe('http://192.0.2.10:9317/api/agents');
+          expect(new Headers(calls[0].opts.headers).get('Authorization')).toBe(mode === 'persisted-env-token' ? 'Bearer token-a' : 'Bearer home-a-token');
+          if (!mode.startsWith('persisted')) {
+            expect(connected.controlPlaneWarning).toContain('api.port');
+            expect(connected.controlPlaneWarning).not.toContain('daemon.pid');
+          }
+        } finally {
+          release();
+          read.mockRestore();
+        }
+      },
+    );
 
     it('connect() gives DKG_AUTH_TOKEN precedence over the selected home token file', async () => {
       process.env.DKG_HOME = tempDir;
@@ -300,7 +404,10 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
 
       await expect(ApiClient.connect({ allowConfigFallback: true }))
-        .rejects.toThrow('Daemon is not running. Start it with: dkg start');
+        .rejects.toThrow(`Daemon is not running at ${tempDir}.\n`
+          + 'DKG_HOME selects the node directory checked by this command.\n'
+          + 'Start a daemon in that directory with: dkg start\n'
+          + 'For an existing devnet, set DKG_HOME to its node directory (for example .devnet/node1), then rerun this command.');
       expect(calls).toHaveLength(0);
       expect(existsSync(join(tempDir, 'api.port'))).toBe(false);
       expect(existsSync(join(tempDir, 'daemon.pid'))).toBe(false);
@@ -335,7 +442,10 @@ describe('ApiClient', () => {
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
 
-      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+      // A client reports the home it connected through, even if a later command
+      // changes the process-wide selection before this request fails.
+      process.env.DKG_HOME = join(tempDir, 'another-node');
+      await expect(connected.status()).rejects.toThrow(`Daemon is not running at ${tempDir}.`);
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe('http://127.0.0.1:9317/api/status');
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
@@ -349,7 +459,7 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
-      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+      await expect(connected.status()).rejects.toThrow(`Daemon is not running at ${tempDir}.`);
     });
 
     it('does not let a hostile nested error getter escape transport classification', async () => {
@@ -1540,6 +1650,188 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(published.options).toEqual({
       clearSharedMemoryAfter: false,
       pricingPolicy: 'full-content',
+    });
+  });
+});
+
+// Real, small deadlines: a 20 ms read class and a 1 s long class. The stub daemon
+// answers after `latencyMs` unless the request's signal aborts first, in which case
+// it rejects with the abort reason, as fetch does.
+describe('ApiClient per-route timeout classes', () => {
+  const originalFetch = globalThis.fetch;
+  const quads = [{ subject: 's', predicate: 'p', object: 'o' }];
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'api-client-timeouts-'));
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const slowDaemon = (latencyMs: number, status = 200, body: unknown = { kaId: '7', status: 'confirmed' }) => {
+    globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify(body), { status })), latencyMs);
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(init.signal!.reason);
+      }, { once: true });
+    })) as typeof fetch;
+  };
+  const timed = (longTimeoutMs = 1_000) =>
+    new ApiClient(PORT, 'test-token', { readTimeoutMs: 20, longTimeoutMs });
+
+  it('a publish that outlasts the read timeout is not reported as failed', async () => {
+    slowDaemon(80);
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).resolves.toEqual({ kaId: '7', status: 'confirmed' });
+  });
+
+  it('a GET read with the same latency still times out (control)', async () => {
+    slowDaemon(80);
+    await expect(timed().getKnowledgeAsset('cg', 'asset')).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('share, import-file, a sharing create and other writes take the long class', async () => {
+    slowDaemon(80);
+    const client = timed();
+    const filePath = join(tempDir, 'doc.md');
+    await writeFile(filePath, '# doc');
+    await expect(client.knowledgeAssetShare('cg', 'asset')).resolves.toBeDefined();
+    await expect(client.promoteAssertion('asset', { contextGraphId: 'cg' })).resolves.toBeDefined();
+    await expect(client.importAssertionFile('asset', { filePath, contextGraphId: 'cg' })).resolves.toBeDefined();
+    await expect(client.createKnowledgeAsset('cg', 'asset', { quads, alsoShareSwm: true })).resolves.toBeDefined();
+    // Chain-bound writes such as registration must not inherit the read deadline.
+    await expect(client.registerContextGraph('cg')).resolves.toBeDefined();
+  });
+
+  it('a long mutation past its deadline reports outcome unknown, pointing at ka history', async () => {
+    slowDaemon(400);
+    const err = await timed(100).knowledgeAssetPublish('cg', 'asset', { subGraphName: 'sg' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ code: 'OUTCOME_UNKNOWN', method: 'POST', path: '/api/knowledge-assets/asset/vm/publish' });
+    expect((err as Error).message).toContain('dkg ka history asset --context-graph-id cg --sub-graph-name sg');
+  });
+
+  it('other writes past the long deadline keep the plain timeout error', async () => {
+    slowDaemon(400);
+    // A create that neither shares nor publishes has nothing long in flight.
+    const err = await timed(100).createKnowledgeAsset('cg', 'asset', { quads }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('a daemon answer on a long mutation keeps its HTTP error', async () => {
+    slowDaemon(0, 409, { code: 'VM_PUBLISH_PRECONDITION', error: 'not shared' });
+    const err = await timed().knowledgeAssetPublish('cg', 'asset').catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ httpStatus: 409, message: 'not shared' });
+  });
+
+  it.each([
+    ['headers', 'fetch failed', 'UND_ERR_HEADERS_TIMEOUT'],
+    ['body', 'terminated', 'UND_ERR_BODY_TIMEOUT'],
+  ])("treats Node fetch's own %s timeout on a long mutation as outcome unknown", async (_phase, message, code) => {
+    // Node's fetch (undici) stops waiting on its own after 300 s without headers or
+    // body progress; that surfaces as a TypeError whose cause carries the undici code.
+    const undiciTimeout = Object.assign(new TypeError(message), { cause: { code } });
+    globalThis.fetch = (async () => { throw undiciTimeout; }) as typeof fetch;
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).rejects.toBeInstanceOf(DaemonOutcomeUnknownError);
+    // Outside the long mutations it stays the raw transport error.
+    await expect(timed().getKnowledgeAsset('cg', 'asset')).rejects.toBe(undiciTimeout);
+  });
+
+  it('passes a hostile transport error on a long mutation through untouched', async () => {
+    const hostileCause = new Proxy({}, { get: () => { throw new Error('hostile getter'); } });
+    const transportError = Object.assign(new TypeError('unclassified transport error'), { cause: hostileCause });
+    globalThis.fetch = (async () => { throw transportError; }) as typeof fetch;
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).rejects.toBe(transportError);
+  });
+
+  it('gives /api/verify its own collection window plus a margin', async () => {
+    slowDaemon(150);
+    // 150 ms outlasts the 100 ms long class; the request-carried window covers it.
+    await expect(timed(100).verify({
+      contextGraphId: 'cg',
+      verifiableMemoryId: 'vm-1',
+      batchId: '1',
+      timeoutMs: 1_000,
+    })).resolves.toBeDefined();
+  });
+
+  it('bounds the EPCIS by-path read with the read deadline', async () => {
+    slowDaemon(80);
+    await expect(timed().queryEpcisEventsByPath('/api/epcis/events')).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('keeps an EPCIS by-path error answer as an HTTP error', async () => {
+    slowDaemon(0, 404, { error: 'no such page' });
+    await expect(timed().queryEpcisEventsByPath('/api/epcis/events?page=9'))
+      .rejects.toMatchObject({ httpStatus: 404, message: 'no such page' });
+  });
+
+  it('a list read that outlasts the read timeout is not cut short', async () => {
+    slowDaemon(80, 200, { contextGraphs: [], accounts: [], jobs: [] });
+    const client = timed();
+    await expect(client.listContextGraphs()).resolves.toBeDefined();
+    await expect(client.listPcas()).resolves.toBeDefined();
+    await expect(client.publisherJobs('queued')).resolves.toBeDefined();
+  });
+
+  describe('deadline values', () => {
+    let deadlines: number[];
+
+    beforeEach(() => {
+      deadlines = [];
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        deadlines.push(ms);
+        return timeout(ms);
+      });
+      slowDaemon(0);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+
+    const readAll = async (client: ApiClient) => {
+      await client.listContextGraphs();
+      await client.listPcas();
+      await client.publisherJobs('queued');
+      await client.getPcaInfo('1');
+      await client.getKnowledgeAsset('cg', 'asset');
+      await client.registerContextGraph('cg');
+    };
+
+    // The shared policy's own tests (packages/core) cover its values, floors
+    // and validation; these check the client routes every request through it.
+    it('gives the graph, PCA and publisher-job lists 60 s, other reads 30 s and writes 240 s', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '');
+      await readAll(new ApiClient(PORT, 'test-token'));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 30_000, 30_000, 240_000]);
+    });
+
+    it('takes the deadlines from the environment unless explicit options win', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', ' 600000 ');
+      await readAll(new ApiClient(PORT, 'test-token'));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 45_000, 45_000, 600_000]);
+      deadlines.length = 0;
+      await readAll(new ApiClient(PORT, 'test-token', { readTimeoutMs: 20, longTimeoutMs: 1_000 }));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 20, 20, 1_000]);
+    });
+
+    it('refuses to construct with an invalid timeout override', () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '30s');
+      expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_READ_TIMEOUT_MS must be a whole number of milliseconds/);
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '0');
+      expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_LONG_TIMEOUT_MS must be a whole number of milliseconds/);
     });
   });
 });

@@ -1,6 +1,6 @@
 import { pcaAgentAccount, fetchPca } from '../api.js';
 import { isPcaDead, hasPcaBudget } from './pca-primitives.js';
-import { eqAddress as eq } from './address.js';
+import { eqAddress as eq } from '../web3/address.js';
 
 // Pre-flight wallet-binding probe — READ-ONLY.
 //

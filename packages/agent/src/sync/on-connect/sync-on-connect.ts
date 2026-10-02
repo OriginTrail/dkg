@@ -1,4 +1,7 @@
-import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { advertisesSyncProtocol, createOperationContext, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import type { PeerCapabilityRegistry } from '../../p2p/peer-capability.js';
+import { peerCapabilitySink, type SyncOnConnectInput } from './sync-on-connect-compat.js';
+export type { SyncOnConnectContext, LegacySyncOnConnectContext, SyncOnConnectInput } from './sync-on-connect-compat.js';
 import {
   classifyDurableProgress,
 } from '../durable-progress.js';
@@ -7,6 +10,10 @@ import {
   type SharedMemoryFreshnessSummary,
   type SelectedSharedMemorySyncResult,
 } from '../shared-memory-freshness.js';
+import {
+  SyncBackpressureBusyError,
+  type SyncBackpressureBusyReason,
+} from '../backpressure.js';
 
 type SyncProgressSummary = SharedMemoryFreshnessSummary & {
   insertedTriples: number;
@@ -55,12 +62,66 @@ export type SyncOnConnectPeerOutcome =
       progress: boolean;
     };
 
-export interface SyncOnConnectContext {
+export type ReleasePeerSyncLease = () => void;
+
+/** Atomic ownership of one peer's sync lane. */
+export interface PeerSyncLease {
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null;
+}
+
+/** Standalone lease owner for focused workflow tests. */
+export class InMemoryPeerSyncLease implements PeerSyncLease {
+  readonly #activePeers = new Set<string>();
+
+  constructor(initialPeers: Iterable<string> = []) {
+    for (const peerId of initialPeers) this.#activePeers.add(peerId);
+  }
+
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null {
+    return acquireSetPeerSyncLease(this.#activePeers, peerId);
+  }
+
+  isHeld(peerId: string): boolean { return this.#activePeers.has(peerId); }
+  get activeCount(): number { return this.#activePeers.size; }
+  clear(): void { this.#activePeers.clear(); }
+}
+
+function acquireSetPeerSyncLease(peers: Set<string>, peerId: string): ReleasePeerSyncLease | null {
+  if (peers.has(peerId)) return null;
+  peers.add(peerId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    peers.delete(peerId);
+  };
+}
+
+interface CompatiblePeerSyncContext {
+  /** Omitted by legacy callers whose invocation runs until it settles. */
+  signal?: AbortSignal;
+  syncingPeers: PeerSyncLease | Set<string>;
+}
+
+interface SessionPeerSyncContext {
+  signal: AbortSignal;
+  syncingPeers: PeerSyncLease;
+}
+
+/** Normalize ownership once at the published helper boundary. */
+function admitPeerSyncContext(context: CompatiblePeerSyncContext): SessionPeerSyncContext {
+  const peers = context.syncingPeers;
+  return {
+    signal: context.signal ?? new AbortController().signal,
+    syncingPeers: 'tryAcquirePeer' in peers
+      ? peers
+      : { tryAcquirePeer: peerId => acquireSetPeerSyncLease(peers, peerId) },
+  };
+}
+
+export interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   remotePeer: string;
-  syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
-  knownCorePeerIds: Set<string>;
-  knownCorePeerIdsV2?: Set<string>;
   getSyncContextGraphs: () => string[];
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
@@ -73,7 +134,7 @@ export interface SyncOnConnectContext {
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
    * Optional. Called when the peer is reachable but does not currently
-   * advertise PROTOCOL_SYNC. The orchestrator (`DKGAgent`) uses this to
+   * advertise either sync id. The orchestrator (`DKGAgent`) uses this to
    * remember the peer so it can retry later — either when libp2p's
    * `peer:update` event reports a new protocol list, or when the periodic
    * sync reconciler ticks. See packages/agent/src/dkg-agent.ts.
@@ -94,15 +155,24 @@ export interface SyncOnConnectContext {
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
+export type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
+
+/** The canonical workflow receives one registry-backed capability owner. */
+export interface RegistrySyncOnConnectContext extends SyncOnConnectBaseContext {
+  peerCapabilities: PeerCapabilitySink;
+}
+
+/** Every continuation inside an admitted session has an explicit lifetime and lease owner. */
+export type SessionSyncOnConnectContext = RegistrySyncOnConnectContext & SessionPeerSyncContext;
+
 /**
- * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectContext}, this
+ * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectInput}, this
  * shape cannot express durable, discovery, or ordinary shared-memory work, so
  * a selected retry cannot fall through when the broad on-connect workflow is
  * changed later.
  */
-interface SelectedSharedMemoryRetryContext {
+interface SelectedSharedMemoryRetryContext extends CompatiblePeerSyncContext {
   remotePeer: string;
-  syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -122,6 +192,27 @@ export class SyncOnConnectPostSyncError extends Error {
     this.name = 'SyncOnConnectPostSyncError';
     this.originalError = originalError;
     this.backoffEligible = options.backoffEligible;
+  }
+}
+
+/**
+ * Typed control flow for local admission pressure. This marker is translated
+ * to `deferred-backpressure` by the attempt boundary before generic
+ * post-sync errors are constructed, so accounting never has to inspect an
+ * arbitrary `Error.cause` chain.
+ */
+export class SyncOnConnectBackpressureError extends Error {
+  readonly reason: SyncBackpressureBusyReason;
+
+  constructor(error: SyncBackpressureBusyError) {
+    // Keep the cause: `getSyncBackpressureBusyError()` is documented as THE
+    // admission-pressure detector and is still live in ordered-sync,
+    // attempt-telemetry and lifecycle. Dropping it would degrade
+    // `syncOperationRejectionReason` to 'aborted_before_start' for any
+    // consumer that becomes reachable.
+    super(error.message, { cause: error });
+    this.name = 'SyncOnConnectBackpressureError';
+    this.reason = error.reason;
   }
 }
 
@@ -199,9 +290,15 @@ function classifySyncResult(
 export async function runSelectedSharedMemoryRetry(
   context: SelectedSharedMemoryRetryContext,
 ): Promise<SyncOnConnectOutcome> {
+  return runSessionSelectedSharedMemoryRetry(context, admitPeerSyncContext(context));
+}
+
+async function runSessionSelectedSharedMemoryRetry(
+  context: SelectedSharedMemoryRetryContext,
+  { signal, syncingPeers }: SessionPeerSyncContext,
+): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
-    syncingPeers,
     getPeerProtocols,
     selectedSharedMemoryLane,
     logInfo,
@@ -209,20 +306,28 @@ export async function runSelectedSharedMemoryRetry(
   const ctx = createOperationContext('sync');
   const shortPeer = remotePeer.slice(-8);
 
-  if (syncingPeers.has(remotePeer)) return 'already-syncing';
-  syncingPeers.add(remotePeer);
+  signal.throwIfAborted();
+  const releasePeerLease = syncingPeers.tryAcquirePeer(remotePeer);
+  if (releasePeerLease === null) return 'already-syncing';
 
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
-      return await step();
+      signal.throwIfAborted();
+      const result = await step();
+      signal.throwIfAborted();
+      return result;
     } catch (err) {
+      if (err instanceof SyncBackpressureBusyError) {
+        throw new SyncOnConnectBackpressureError(err);
+      }
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
-    if (!protocols.includes(PROTOCOL_SYNC)) {
+    signal.throwIfAborted();
+    if (!advertisesSyncProtocol(protocols)) {
       logInfo(
         ctx,
         `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`,
@@ -241,6 +346,7 @@ export async function runSelectedSharedMemoryRetry(
       `Retrying ${admittedWork.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
     );
     const selected = await admittedWork.syncFromPeer();
+    signal.throwIfAborted();
     const accounting = classifySyncResult(
       selected.shared,
       'shared',
@@ -279,19 +385,31 @@ export async function runSelectedSharedMemoryRetry(
     }
     return 'synced';
   } finally {
-    syncingPeers.delete(remotePeer);
+    releasePeerLease();
   }
 }
 
+export async function runRegistrySyncOnConnect(
+  context: RegistrySyncOnConnectContext,
+): Promise<SyncOnConnectOutcome> {
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), context.peerCapabilities);
+}
+
+/** Public compatibility entry point; legacy capability translation is isolated. */
 export async function runSyncOnConnect(
-  context: SyncOnConnectContext,
+  context: SyncOnConnectInput,
+): Promise<SyncOnConnectOutcome> {
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), peerCapabilitySink(context));
+}
+
+async function runSessionSyncOnConnect(
+  context: SyncOnConnectBaseContext,
+  { signal, syncingPeers }: SessionPeerSyncContext,
+  peerCapabilities: PeerCapabilitySink,
 ): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
-    syncingPeers,
     getPeerProtocols,
-    knownCorePeerIds,
-    knownCorePeerIdsV2 = new Set<string>(),
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
     ordinarySharedMemoryLane,
@@ -305,8 +423,9 @@ export async function runSyncOnConnect(
   const ctx = createOperationContext('sync');
   const shortPeer = remotePeer.slice(-8);
 
-  if (syncingPeers.has(remotePeer)) return 'already-syncing';
-  syncingPeers.add(remotePeer);
+  signal.throwIfAborted();
+  const releasePeerLease = syncingPeers.tryAcquirePeer(remotePeer);
+  if (releasePeerLease === null) return 'already-syncing';
 
   let durableSyncCompleted = false;
   let madeProgress = false;
@@ -384,32 +503,25 @@ export async function runSyncOnConnect(
   };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
-      return await step();
+      signal.throwIfAborted();
+      const result = await step();
+      signal.throwIfAborted();
+      return result;
     } catch (err) {
+      if (err instanceof SyncBackpressureBusyError) {
+        throw new SyncOnConnectBackpressureError(err);
+      }
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
+    signal.throwIfAborted();
 
-    if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
-      knownCorePeerIds.add(remotePeer);
-    } else if (protocols.length > 0) {
-      // #1093: only de-classify on a POPULATED protocol list. An empty
-      // list means identify hasn't completed yet (the dominant race on
-      // inbound connections) — evicting a previously-confirmed core here
-      // would re-poison the ACK candidate pool that
-      // `DKGAgent.getACKCandidatePeers` builds for the publisher.
-      knownCorePeerIds.delete(remotePeer);
-    }
-    if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
-      knownCorePeerIdsV2.add(remotePeer);
-    } else if (protocols.length > 0) {
-      knownCorePeerIdsV2.delete(remotePeer);
-    }
+    peerCapabilities.observe(remotePeer, { source: 'identify-snapshot', protocols });
 
-    const hasSync = protocols.includes(PROTOCOL_SYNC);
+    const hasSync = advertisesSyncProtocol(protocols);
     if (!hasSync) {
       logInfo(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
       context.onPeerSkippedNoSync?.(remotePeer, protocols);
@@ -427,6 +539,7 @@ export async function runSyncOnConnect(
       const synced = getDurableSyncContextGraphs
         ? await syncFromPeer(remotePeer, durableContextGraphIds)
         : await syncFromPeer(remotePeer);
+      signal.throwIfAborted();
       const syncedAccounting = recordSyncAccounting(synced, 'durable');
       logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
       if (syncedAccounting.deferredByBackpressure) {
@@ -466,6 +579,7 @@ export async function runSyncOnConnect(
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
+      signal.throwIfAborted();
       const discoverAccounting = recordSyncAccounting(discoverSynced, 'durable');
       logInfo(ctx, `Synced ${discoverAccounting.insertedTriples} durable triples for newly discovered CG(s) from ${shortPeer}`);
       if (discoverAccounting.deferredByBackpressure) {
@@ -489,6 +603,7 @@ export async function runSyncOnConnect(
       const wsContextGraphIds = ordinarySharedMemoryWork.contextGraphIds;
       if (wsContextGraphIds.length === 0) return finishSyncAccounting();
       const wsSynced = await ordinarySharedMemoryWork.syncFromPeer();
+      signal.throwIfAborted();
       const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
       logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
       if (sharedAccounting.deferredByBackpressure) {
@@ -498,6 +613,28 @@ export async function runSyncOnConnect(
 
     return finishSyncAccounting();
   } catch (err) {
+    if (err instanceof SyncOnConnectBackpressureError) {
+      throw err;
+    }
+    // Local admission pressure is not a peer failure.
+    //
+    // This conversion is required BY this change, not a pre-existing bug it
+    // fixes. Before it, `executeSyncOnConnectAttempt`'s catch called
+    // `getSyncBackpressureBusyError()` first, and `SyncOnConnectPostSyncError`
+    // sets `{ cause }` — so a bare busy escaping post-durable was found at
+    // depth 1 in the cause chain and already yielded `deferred-backpressure`
+    // with no accounting. Removing that cause walk is what would make the
+    // `backoffEligible: true` wrap below reachable for local pressure, so the
+    // marker has to be raised here instead.
+    //
+    // Note the invariant this relies on: the attempt boundary now matches only
+    // DIRECT instances. Any future site that wraps a busy error (an
+    // `AggregateError`, a new `{ cause }` rethrow in the shared-memory lane)
+    // falls through to `backoffEligible: true` and grows peer backoff for local
+    // pressure. A busy error must reach this boundary bare.
+    if (err instanceof SyncBackpressureBusyError) {
+      throw new SyncOnConnectBackpressureError(err);
+    }
     if (err instanceof SyncOnConnectPostSyncError) {
       throw err;
     }
@@ -506,6 +643,6 @@ export async function runSyncOnConnect(
     }
     throw err;
   } finally {
-    syncingPeers.delete(remotePeer);
+    releasePeerLease();
   }
 }

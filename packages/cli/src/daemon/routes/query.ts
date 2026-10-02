@@ -227,6 +227,8 @@ import {
   classifyClientError,
   sanitizeRevertMessage,
   respondIfStoreUnavailable,
+  isContextGraphReadAuthorityUnavailable,
+  respondIfContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -331,7 +333,12 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
+import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
+import {
+  admitContextGraphFollow,
+  type ContextGraphFollowCaller,
+} from '../context-graph-subscription-admission.js';
 import {
   API_QUERY_CALLER_DISCONNECTED,
   createStoreQueryRequestLifecycle,
@@ -413,6 +420,60 @@ function parseVerifyTimeoutMs(
   return { value };
 }
 
+/**
+ * The latest catch-up job for a Context Graph id that `caller` may see. The
+ * id as given wins; an on-chain id (`32`, `#32`) then finds the job of the row
+ * it names, under its cleartext id or its name hash (adoption can move a job
+ * between the two). A job names its graph, so a job that names a cleartext id
+ * the caller did not give is returned only to a caller who may follow the id
+ * there: an on-chain id that finds a cleartext row, or a name hash this node
+ * resolved. A refusal returns `undefined`, which the route answers exactly as
+ * an id with no job.
+ */
+export async function latestCatchupJobIdFor(
+  agent: DKGAgent,
+  catchupTracker: CatchupTracker,
+  contextGraphId: string,
+  caller: ContextGraphFollowCaller,
+): Promise<string | undefined> {
+  const direct = catchupTracker.latestByContextGraph.get(contextGraphId);
+  if (direct !== undefined) {
+    // A job found by a resolved name hash names the cleartext id: the one it
+    // continued under, or, once the hash resolved, the one its identity note
+    // reports. A lookup by the cleartext id itself follows nothing.
+    const cleartextId = catchupTracker.jobs.get(direct)?.resolvedContextGraphId
+      ?? agent.resolveContextGraphIdAlias?.(contextGraphId)
+      ?? null;
+    if (cleartextId === null || cleartextId === contextGraphId) return direct;
+    return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed' ? direct : undefined;
+  }
+  const lookup = agent.lookupContextGraphOnChainIdReference?.(contextGraphId);
+  if (lookup?.kind !== 'held') return undefined;
+  const jobId = catchupTracker.latestByContextGraph.get(lookup.contextGraphId)
+    ?? catchupTracker.latestByContextGraph.get(lookup.nameHash);
+  if (jobId === undefined) return undefined;
+  return await mayFollowOnChainIdToRow(agent, lookup, caller) ? jobId : undefined;
+}
+
+/**
+ * Whether `caller` may read `job` by its job id. The id is no proof: while the
+ * name hash a job was created under is unresolved, any caller can learn it.
+ * Once the job names a cleartext id other than the one it was created under,
+ * only a caller who may follow the hash to that id sees the job. A refusal is
+ * answered exactly as an unknown job id.
+ */
+async function mayReadCatchupJobById(
+  agent: DKGAgent,
+  job: CatchupJob,
+  caller: ContextGraphFollowCaller,
+): Promise<boolean> {
+  const cleartextId = job.resolvedContextGraphId
+    ?? agent.resolveContextGraphIdAlias?.(job.contextGraphId)
+    ?? null;
+  if (cleartextId === null || cleartextId === job.contextGraphId) return true;
+  return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed';
+}
+
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -452,7 +513,16 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
     const sparql = parsed.sparql;
-    const contextGraphId = parsed.contextGraphId;
+    // `all` is the legacy CLI/UI spelling for an unscoped query. Treating it
+    // as a real Context Graph id sends the request through the chain-backed
+    // private-graph authorizer before the SPARQL parser runs. Besides being
+    // semantically wrong, that made malformed-query HTTP status depend on an
+    // unrelated authority RPC finishing first. The existing unscoped agent
+    // path owns dataset privacy (including private-CG exclusion), so normalize
+    // only this exact compatibility sentinel at the route boundary.
+    const contextGraphId = parsed.contextGraphId === 'all'
+      ? undefined
+      : parsed.contextGraphId;
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
@@ -533,6 +603,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       details: { sparql: sparql.slice(0, 200) },
     });
     tracker.startPhase(ctx, "parse");
+    // Declared outside the try so the catch can tell a caller abort apart from
+    // a genuine server-side failure.
+    let queryLifecycle: ApiQueryRequestLifecycle | undefined;
     try {
       tracker.completePhase(ctx, "parse");
       tracker.startPhase(ctx, "execute");
@@ -590,7 +663,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // and SWM catch-up (issue #1989). Thread connection cancellation all the
       // way to the SPARQL adapter: if the HTTP caller times out or disconnects,
       // its queued/in-flight store request must not remain as orphan work.
-      const queryLifecycle = createApiQueryRequestLifecycle(req, res);
+      queryLifecycle = createApiQueryRequestLifecycle(req, res);
 
       let result;
       try {
@@ -621,7 +694,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           operationCtx: ctx,
         });
       } finally {
-        queryLifecycle.dispose();
+        queryLifecycle?.dispose();
       }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
@@ -642,6 +715,21 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       if (err?.code === API_QUERY_CALLER_DISCONNECTED) {
         tracker.cancel(ctx, err);
         if (!res.writableEnded) res.end();
+        return;
+      }
+      if (isContextGraphReadAuthorityUnavailable(err)) {
+        // The authority resolver folds ANY failure of its sources — including
+        // the abort raised when this caller disconnected — into `unavailable`,
+        // which drops the API_QUERY_CALLER_DISCONNECTED code checked above. An
+        // aborted request is a cancellation, not a retryable server failure:
+        // classify it as such instead of writing a 503 to a dead socket.
+        if (queryLifecycle?.signal.aborted) {
+          tracker.cancel(ctx, err);
+          if (!res.writableEnded) res.end();
+          return;
+        }
+        respondIfContextGraphReadAuthorityUnavailable(res, err, ctx);
+        tracker.fail(ctx, err);
         return;
       }
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
@@ -730,6 +818,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       if (typeT) entityRdfType = typeT.o;
     } catch (err: any) {
       if (respondIfStoreUnavailable(res, err) !== null) return;
+      // The scoped triple read goes through the same authority resolution as
+      // `/api/query`; an unavailable source is retryable and its internal
+      // source/reason must not be echoed back through the generic 500 message.
+      if (respondIfContextGraphReadAuthorityUnavailable(res, err)) return;
       return jsonResponse(res, 500, {
         error: `Failed to fetch entity triples: ${err.message}`,
       });
@@ -935,14 +1027,20 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
+    const caller = {
+      isNodeAdmin: canAdministerNode(authentication),
+      agentAddress: actorFromRequestContext(ctx).effectiveAgentAddress,
+    };
     const jobId =
       jobIdParam ??
-      (contextGraphId ? catchupTracker.latestByContextGraph.get(contextGraphId) : undefined);
+      (contextGraphId
+        ? await latestCatchupJobIdFor(agent, catchupTracker, contextGraphId, caller)
+        : undefined);
     if (!jobId) {
       return jsonResponse(res, 404, { error: "No catch-up job found" });
     }
     const job = catchupTracker.jobs.get(jobId);
-    if (!job) {
+    if (!job || (jobIdParam !== null && !await mayReadCatchupJobById(agent, job, caller))) {
       return jsonResponse(res, 404, {
         error: `Catch-up job "${jobId}" not found`,
       });
@@ -950,7 +1048,8 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
 
     return jsonResponse(res, 200, toCatchupStatusResponse(
       job,
-      agent.getRfc64SelectedSwmGraphSyncStatus(job.contextGraphId),
+      agent.getRfc64SelectedSwmGraphSyncStatus(job.resolvedContextGraphId ?? job.contextGraphId),
+      agent.describeContextGraphIdentity?.(job.contextGraphId),
     ));
   }
 

@@ -17,7 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   appendFile,
   chmod,
@@ -55,18 +55,24 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
+import {
+  enrichEvmError,
+  MockChainAdapter,
+  resolveRpcUrls,
+  getRpcFailoverStats,
+} from '@origintrail-official/dkg-chain';
+import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 import {
   DKGAgent,
   loadOpWallets,
   resolveSyncReconcilerEnabled,
+  resolveVmReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
-import {
-  rfc64CatalogKillSwitchActiveV1,
-  rfc64CatalogRolloutModeForContextGraphV1,
-} from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
+import { parseStatusQuery, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
+import { requestExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
+import { probeExternalStore } from '../store-reachability.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -117,11 +123,13 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { buildRfc64StatusBlocksV1 } from './rfc64-status-block.js';
+export { buildRfc64CatalogConfigurationEvidenceV1 } from './rfc64-status-block.js';
 import { buildRelayStatusBlock } from '../relay-status-block.js';
 import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/registry-client.js';
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, canAdministerNode } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -191,6 +199,7 @@ import {
   loadMarkItDownTargets,
   getNodeVersion,
   getCurrentCommitShort,
+  getCurrentCommitFull,
   loadBuildInfo,
   detectInstallMode,
   loadSkillTemplate,
@@ -336,7 +345,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 
 // In-process cache for the dkg-integrations registry. Sidebar polls
 // open/close and 60s refresh would otherwise hit GitHub on every tick;
@@ -352,47 +361,31 @@ interface RegistryCacheSnapshot {
 let registryCache: RegistryCacheSnapshot | null = null;
 let registryCacheInflight: Promise<RegistryCacheSnapshot> | null = null;
 
-function routeWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  }) as Promise<T>;
-}
-
-async function probeRpcEndpoint(rpcUrl: string, index: number): Promise<{
+export async function probeRpcEndpoint(
+  rpcUrl: string,
+  index: number,
+  routeTransport?: DaemonRouteRpcTransport,
+): Promise<{
   index: number;
   role: 'primary' | 'backup';
   ok: boolean;
+  status: 'healthy' | 'unhealthy' | 'skipped-local-capacity';
   latencyMs: number | null;
   blockNumber: number | null;
   error?: string;
 }> {
-  const provider = new ethers.JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });
-  const start = Date.now();
-  try {
-    const blockNumber = await routeWithTimeout(provider.getBlockNumber(), 3_000, 'RPC health probe');
-    return {
-      index,
-      role: index === 0 ? 'primary' : 'backup',
-      ok: true,
-      latencyMs: Date.now() - start,
-      blockNumber,
-    };
-  } catch (err) {
+  if (routeTransport === undefined) {
     return {
       index,
       role: index === 0 ? 'primary' : 'backup',
       ok: false,
+      status: 'skipped-local-capacity',
       latencyMs: null,
       blockNumber: null,
-      error: err instanceof Error && err.message.includes('timed out')
-        ? 'RPC health probe timed out'
-        : 'RPC health probe failed',
+      error: 'RPC health probe skipped: daemon RPC transport unavailable',
     };
   }
+  return routeTransport.probeEndpoint(rpcUrl, index);
 }
 
 interface PublicChainSummary {
@@ -453,100 +446,15 @@ function buildPublicInfoChainSummary(
   };
 }
 
-function createRouteEvmProvider(rpcUrl: string, rpcUrls?: string[]): ethers.JsonRpcProvider | ethers.FallbackProvider {
-  const providers = resolveRpcUrls(rpcUrl, rpcUrls)
-    .map((url) => new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 }));
-  if (providers.length === 1) return providers[0];
-  return new ethers.FallbackProvider(
-    providers.map((provider, index) => ({
-      provider,
-      priority: index + 1,
-      stallTimeout: 4_000,
-      weight: 1,
-    })),
-    undefined,
-    { quorum: 1 },
-  );
-}
-
-// Quad-count cache for external SPARQL backends. A full-store COUNT is not a
-// liveness check: on a multi-million-row namespace it can occupy the store for
-// seconds and compete directly with sync. Normal /api/status polling therefore
-// never starts it. Operators may request a background refresh explicitly with
-// `?includeStoreQuads=true`; subsequent ordinary status calls can reuse the
-// cached value without touching the store. Cold/stale explicit callers get the
-// current snapshot while one refresh runs in the background, so status never
-// waits on the count.
-// Local backends bypass this entirely (file-bytes metric stays on the
-// metrics collector tick).
-const STORE_QUADS_CACHE_TTL_MS = 30_000;
-type StoreQuadsStatus = 'pending' | 'ready' | 'unreachable';
-interface StoreQuadsSnapshot {
-  value: number | null;
-  status: StoreQuadsStatus;
-}
-
-let storeQuadsCache: {
-  value: number | null;
-  status: Exclude<StoreQuadsStatus, 'pending'>;
-  fetchedAt: number;
-} | null = null;
-let storeQuadsInflight: Promise<void> | null = null;
-
-/** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
-export function invalidateExternalStoreQuadsCache(): void {
-  storeQuadsCache = null;
-  storeQuadsInflight = null;
-}
-
-function getCachedExternalStoreQuads(
-  agent: DKGAgent,
-  now: number,
-): StoreQuadsSnapshot {
-  if (storeQuadsCache && now - storeQuadsCache.fetchedAt < STORE_QUADS_CACHE_TTL_MS) {
-    return { value: storeQuadsCache.value, status: storeQuadsCache.status };
+function createRouteEvmProvider(
+  rpcUrl: string,
+  rpcUrls: string[] | undefined,
+  routeTransport?: DaemonRouteRpcTransport,
+): ethers.JsonRpcProvider | ethers.FallbackProvider {
+  if (routeTransport === undefined) {
+    throw new Error('Daemon RPC transport unavailable');
   }
-
-  const currentSnapshot: StoreQuadsSnapshot = storeQuadsCache
-    ? { value: storeQuadsCache.value, status: storeQuadsCache.status }
-    : { value: null, status: 'pending' };
-  if (!storeQuadsInflight) {
-    const refresh = (async () => {
-      try {
-        const r = await agent.store.query(
-          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
-          { priority: 'health', source: 'daemon.status.storeQuads' },
-        );
-        let value: number | null = null;
-        if (r.type === 'bindings' && r.bindings.length > 0) {
-          const cell = r.bindings[0].c ?? '';
-          const digits = cell.match(/\d+/)?.[0];
-          value = digits ? parseInt(digits, 10) : 0;
-        }
-        storeQuadsCache = {
-          value,
-          status: value === null ? 'unreachable' : 'ready',
-          fetchedAt: Date.now(),
-        };
-      } catch {
-        // Surface "unknown" rather than a stale value; operators can
-        // distinguish unreachable from genuinely-empty via storeBackend +
-        // their network logs. Cache the null briefly to avoid hammering
-        // a flapping endpoint.
-        storeQuadsCache = { value: null, status: 'unreachable', fetchedAt: Date.now() };
-      }
-    })();
-    storeQuadsInflight = refresh;
-    void refresh.finally(() => {
-      if (storeQuadsInflight === refresh) storeQuadsInflight = null;
-    });
-  }
-  return currentSnapshot;
-}
-
-function peekCachedExternalStoreQuads(): StoreQuadsSnapshot | null {
-  if (!storeQuadsCache) return null;
-  return { value: storeQuadsCache.value, status: storeQuadsCache.status };
+  return routeTransport.createProvider(rpcUrl, rpcUrls);
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
@@ -588,6 +496,7 @@ function projectRfc64SelectedPublicSyncStatus(
   agent: DKGAgent,
   networkDefaultContextGraphs: readonly string[],
   catalogBackedContextGraphs: readonly string[],
+  isNodeAdmin: boolean,
 ) {
   // This is the effective requested sync scope, not proof that every listed
   // graph is public. Runtime classification still decides whether a graph uses
@@ -596,82 +505,58 @@ function projectRfc64SelectedPublicSyncStatus(
     ...agent.getSyncContextGraphIds(),
     ...networkDefaultContextGraphs,
   ])];
+  const catalogBacked = new Set(catalogBackedContextGraphs);
+  // `/api/status` is unauthenticated, and the scope names private graphs and
+  // the cleartext ids of adopted name hashes. A caller without node-admin
+  // authority sees only the selected public catalog graphs, which this
+  // response already lists, and a count of the whole scope.
   return {
     defaultEnabled: true,
-    requestedContextGraphs,
-    catalogBackedContextGraphs: [...new Set(catalogBackedContextGraphs)],
+    requestedContextGraphs: isNodeAdmin
+      ? requestedContextGraphs
+      : requestedContextGraphs.filter((contextGraphId) => catalogBacked.has(contextGraphId)),
+    requestedContextGraphCount: requestedContextGraphs.length,
+    catalogBackedContextGraphs: [...catalogBacked],
   };
-}
-
-export interface Rfc64CatalogConfigurationEvidenceV1 {
-  readonly schemaVersion: 1;
-  readonly source:
-    | 'default-omitted'
-    | 'operator-override'
-    | 'compatibility-seed'
-    | 'explicit-disabled';
-  readonly catalogControlPresent: boolean;
-  readonly deprecatedPublicControlPresent: boolean;
-  readonly activationManifestPresent: boolean;
-  readonly deprecatedDisabledOverride: boolean;
-  readonly killSwitch: boolean;
-  readonly legacyOverrideCount: number;
-  readonly shadowOverrideCount: number;
-  readonly digest: string;
 }
 
 /**
- * Privacy-safe attestation of the startup controls that selected RFC-64.
- * Private graph ids and policy material participate in the digest but never
- * leave the node; a release harness can still prove the clean omission case.
+ * Aggregate-only view of subscriptions this node knows only by their on-chain
+ * name hash. `/api/status` is unauthenticated, so it never names the affected
+ * graphs; the admin-only `GET /api/context-graph/subscriptions` has the rows.
+ * Those blocked by a conflicting binding are counted apart: no peer can
+ * unblock them, so "waiting for a peer" would be wrong advice.
  */
-export function buildRfc64CatalogConfigurationEvidenceV1(
-  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
-  effectiveRollout: Readonly<{
-    killSwitch: boolean;
-    contextGraphModes: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
-  }>,
-): Rfc64CatalogConfigurationEvidenceV1 {
-  const catalogControlPresent = config.rfc64Catalog !== undefined;
-  const deprecatedPublicControlPresent = config.rfc64PublicCatalog !== undefined;
-  const catalog = config.rfc64Catalog;
-  const publicCatalog = config.rfc64PublicCatalog;
-  const deprecatedDisabledOverride = catalog?.enabled === false
-    || (catalog === undefined && publicCatalog?.enabled === false);
-  const activationManifestPresent = catalog?.bootstrap !== undefined
-    || publicCatalog?.bootstrap !== undefined;
-  const modes = Object.entries(effectiveRollout.contextGraphModes)
-    .sort(([left], [right]) => left.localeCompare(right));
-  const source = !catalogControlPresent && !deprecatedPublicControlPresent
-    ? 'default-omitted' as const
-    : deprecatedDisabledOverride
-      ? 'explicit-disabled' as const
-      : activationManifestPresent
-        ? 'compatibility-seed' as const
-        : 'operator-override' as const;
-  const digestPayload = {
-    schemaVersion: 1,
-    catalogControlPresent,
-    deprecatedPublicControlPresent,
-    activationManifestPresent,
-    deprecatedDisabledOverride,
-    killSwitch: effectiveRollout.killSwitch,
-    contextGraphModes: modes,
+export function summarizeContextGraphIdentityStatus(
+  agent: DKGAgent,
+): { nameHashOnly: number; bindingConflicts?: number; message?: string } {
+  let nameHashOnly = 0;
+  let bindingConflicts = 0;
+  for (const [contextGraphId, subscription] of agent.getSubscribedContextGraphs?.() ?? []) {
+    if (subscription?.subscribed !== true) continue;
+    const identity = agent.describeContextGraphIdentity?.(contextGraphId);
+    if (identity?.state !== 'name-hash-only' && identity?.state !== 'name-hash-only-private') continue;
+    nameHashOnly += 1;
+    if (identity.bindingConflict === true) bindingConflicts += 1;
+  }
+  if (nameHashOnly === 0) return { nameHashOnly };
+  const graphs = (count: number) => `${count} subscribed Context Graph${count === 1 ? ' is' : 's are'} known only by `
+    + 'the on-chain name hash';
+  const waiting = nameHashOnly - bindingConflicts;
+  const parts: string[] = [];
+  if (waiting > 0) {
+    parts.push(`${graphs(waiting)} and cannot sync yet; waiting for a peer to reveal the cleartext id, `
+      + 'or subscribe with the cleartext id');
+  }
+  if (bindingConflicts > 0) {
+    parts.push(`${graphs(bindingConflicts)} and blocked by a conflicting binding: the cleartext id is already `
+      + 'bound to a different on-chain Context Graph on this node');
+  }
+  return {
+    nameHashOnly,
+    ...(bindingConflicts > 0 ? { bindingConflicts } : {}),
+    message: `${parts.join('. ')} (details: GET /api/context-graph/subscriptions).`,
   };
-  return Object.freeze({
-    schemaVersion: 1,
-    source,
-    catalogControlPresent,
-    deprecatedPublicControlPresent,
-    activationManifestPresent,
-    deprecatedDisabledOverride,
-    killSwitch: effectiveRollout.killSwitch,
-    legacyOverrideCount: modes.filter(([, mode]) => mode === 'legacy').length,
-    shadowOverrideCount: modes.filter(([, mode]) => mode === 'shadow').length,
-    digest: `sha256:${createHash('sha256')
-      .update(JSON.stringify(digestPayload))
-      .digest('hex')}`,
-  });
 }
 
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
@@ -702,6 +587,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     apiHost,
     apiPortRef,
     admission,
+    routeRpcTransport,
     url,
     path,
     requestAgentAddress,
@@ -828,13 +714,18 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     });
     const reportsExternalStoreQuads =
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
-    const includeStoreQuads = url.searchParams.get('includeStoreQuads') === 'true'
-      || url.searchParams.get('includeStoreQuads') === '1';
-    const storeQuadsSnapshot = reportsExternalStoreQuads
-      ? includeStoreQuads
-        ? getCachedExternalStoreQuads(agent, Date.now())
-        : peekCachedExternalStoreQuads()
-      : null;
+    const { includeStoreQuads, probeStore } = parseStatusQuery(url.searchParams);
+    const storeQuadsNow = Date.now();
+    // A local backend reports no count; the cache returns complete fields.
+    const storeQuadsFields: StoreQuadsStatusFields = !reportsExternalStoreQuads
+      ? { storeQuads: null }
+      : includeStoreQuads
+        ? requestExternalStoreQuads(agent, storeQuadsNow)
+        : peekCachedExternalStoreQuads(storeQuadsNow);
+    // Started now so its wait overlaps the awaits below; awaited for the reply.
+    const storeReachabilityCheck = reportsExternalStoreQuads && probeStore
+      ? probeExternalStore(agent)
+      : undefined;
     const backpressure = backpressureRegistry.capture();
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to
@@ -842,132 +733,18 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // sentinels when build-info.json is absent (monorepo / dev),
     // so consumers can branch reliably.
     const buildInfo = loadBuildInfo();
-    // Runtime projection only: lifecycle owns the single canonical activation
-    // snapshot. A missing field is broken request-context wiring, not a disabled
-    // feature, so keep the RequestContext contract strict here.
     const rfc64PublicCatalogActivation = ctx.rfc64PublicCatalog;
-    const rfc64CatalogActivation = ctx.rfc64Catalog ?? {
-      enabled: rfc64PublicCatalogActivation.enabled,
-      selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
-      selectedPublicContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
-      selectedPrivateContextGraphs: [],
-      accessPolicyAuthority: undefined,
-      // The compatibility-only public projection has no private bootstrap
-      // manifest, but keep the fallback structurally aligned with the shared
-      // activation snapshot so downstream status projection stays typed.
-      bootstrap: undefined,
-      autoPublish: rfc64PublicCatalogActivation.autoPublish,
-      rollout: rfc64PublicCatalogActivation.rollout,
-    };
-    const rfc64CatalogRollout = rfc64CatalogActivation.rollout ?? {
-      // Resolved activations produced by this release always carry a total
-      // rollout plan. Preserve the package-boundary compatibility behavior for
-      // older direct JS callers that still pass the pre-rollout shape.
-      killSwitch: rfc64CatalogKillSwitchActiveV1(rfc64CatalogActivation),
-      contextGraphModes: Object.fromEntries(
-        rfc64CatalogActivation.selectedContextGraphs.map((contextGraphId) => [
-          contextGraphId,
-          rfc64CatalogRolloutModeForContextGraphV1(
-            rfc64CatalogActivation,
-            contextGraphId,
-          ),
-        ]),
-      ),
-    };
-    const rfc64CatalogConfiguration = buildRfc64CatalogConfigurationEvidenceV1(
-      config,
-      rfc64CatalogRollout,
-    );
-    const rfc64PublicCatalogService =
-      rfc64CatalogActivation.enabled
-      && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
-        ? agent.rfc64PublicCatalogStatsV1()
-        : null;
-    const rfc64CatalogBootstrapStatus =
-      rfc64CatalogActivation.enabled
-      && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
-        ? agent.readRfc64PublicCatalogBootstrapStatusV1()
-        : null;
-    const rfc64CatalogRuntimeSelection =
-      typeof agent.readRfc64CatalogRuntimeSelectionV1 === 'function'
-        ? agent.readRfc64CatalogRuntimeSelectionV1()
-        : {
-            subscriptionDriven: false,
-            eligibleContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
-            selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
-          };
-    const rfc64CatalogResponsibilities =
-      typeof agent.readRfc64CatalogResponsibilitiesV1 === 'function'
-        ? agent.readRfc64CatalogResponsibilitiesV1()
-        : [];
-    const rfc64CatalogContextGraphs =
-      typeof agent.readRfc64CatalogOperationalStatusV1 === 'function'
-        ? await agent.readRfc64CatalogOperationalStatusV1()
-        : [];
-    const selectedPublicContextGraphs = new Set(
-      rfc64CatalogActivation.selectedPublicContextGraphs,
-    );
-    const rfc64PublicCatalogBootstrap =
-      rfc64PublicCatalogActivation.enabled && rfc64CatalogBootstrapStatus !== null
-        ? {
-            ...rfc64CatalogBootstrapStatus,
-            // Keep the compatibility surface public-only. The shared runtime
-            // status also contains private targets and provider identities.
-            targets: rfc64CatalogBootstrapStatus.targets.filter(
-              ({ scope }) => selectedPublicContextGraphs.has(scope.contextGraphId),
-            ),
-          }
-        : null;
-    const rfc64PrivateRecovery = rfc64CatalogActivation.selectedPrivateContextGraphs.map(
-      (contextGraphId) => {
-        const targets = rfc64CatalogBootstrapStatus?.targets.filter(
-          ({ scope }) => scope.contextGraphId === contextGraphId,
-        ) ?? [];
-        const outcomeCounts = Object.fromEntries(
-          [...new Set(targets.map(({ outcome }) => outcome))]
-            .sort()
-            .map((outcome) => [
-              outcome,
-              targets.filter((target) => target.outcome === outcome).length,
-            ]),
-        );
-        const completionReasons = [...new Set(targets.flatMap(
-          ({ completionReason }) => completionReason === null ? [] : [completionReason],
-        ))].sort();
-        const accepted = rfc64CatalogActivation.bootstrap?.acceptedPolicies.find(
-          ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
-        );
-        return {
-          contextGraphId,
-          mode: rfc64CatalogRolloutModeForContextGraphV1(
-            rfc64CatalogActivation,
-            contextGraphId,
-          ),
-          accessPolicy: accepted?.policyEnvelope.payload.accessPolicy,
-          publishPolicy: accepted?.policyEnvelope.payload.publishPolicy,
-          vmRequired:
-            accepted?.policyEnvelope.payload.accessPolicy === 1
-            && accepted.policyEnvelope.payload.source.kind === 'finalized-chain',
-          targetCount: targets.length,
-          outcomeCounts,
-          completionReasons,
-        };
-      },
-    );
-    const rfc64CompleteSwmProviders = rfc64PublicCatalogActivation.enabled
-      ? (rfc64PublicCatalogActivation.bootstrap?.acceptedPublicPolicies ?? [])
-        .filter((accepted) => (accepted.completeSwmProviders?.length ?? 0) > 0)
-        .map((accepted) => ({
-          contextGraphId: accepted.policyEnvelope.payload.contextGraphId,
-          accessPolicy: accepted.policyEnvelope.payload.accessPolicy,
-          publishPolicy: accepted.policyEnvelope.payload.publishPolicy,
-          providers: accepted.completeSwmProviders,
-        }))
-      : [];
+    const { rfc64PublicCatalog, rfc64Catalog } = await buildRfc64StatusBlocksV1({
+      activationState: ctx.rfc64CatalogActivationState,
+      catalogActivation: ctx.rfc64Catalog,
+      publicCatalogActivation: rfc64PublicCatalogActivation,
+      agent,
+    });
     const rfc64SelectedPublicSync = projectRfc64SelectedPublicSyncStatus(
       agent,
       resolveNetworkDefaultContextGraphs(network),
       rfc64PublicCatalogActivation.selectedContextGraphs,
+      canAdministerNode(actorFromRequestContext(ctx).authentication),
     );
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
@@ -991,10 +768,13 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
       }
     }
+    const storeReachability = await storeReachabilityCheck;
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
-      commit: buildInfo.commit !== "uncommitted" ? buildInfo.commit : (nodeCommit || null),
+      commit: buildInfo.commit !== "uncommitted"
+        ? buildInfo.commit
+        : (getCurrentCommitFull() ?? nodeCommit ?? null),
       commitShort: buildInfo.commitShort !== "00000000"
         ? buildInfo.commitShort
         : (nodeCommit ? nodeCommit.slice(0, 8) : null),
@@ -1008,7 +788,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       networkName: network?.networkName ?? null,
       storeBackend: config.store?.backend ?? "oxigraph-worker",
       // External backend visibility (RFC 120 / plan PR 1 item 3). For
-      // local backends the URL/count stay null and count status is omitted.
+      // local backends the URL/count stay null and count status/age are omitted.
       storeUrl: isExternalBackend(config.store?.backend)
         ? (() => {
             const opts = (config.store?.options ?? {}) as Record<string, unknown>;
@@ -1033,8 +813,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // for that backend (getStoreBytes is null, there's no store.nq), and a
       // failed query here is how operators see the managed server is down
       // (e.g. after a failed revive) instead of it always looking healthy.
-      storeQuads: storeQuadsSnapshot?.value ?? null,
-      storeQuadsStatus: storeQuadsSnapshot?.status,
+      // `storeQuadsStatus` says what a null count means ('not-requested',
+      // 'pending', 'unreachable'); `storeQuadsAgeMs` is how old the cached
+      // result is, since ordinary polling never refreshes it.
+      ...storeQuadsFields,
+      // Only when requested (`probeStore`): whether the store answers right now.
+      storeReachability,
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
       // holding a slot, max = the configured cap (0 = disabled), rejectedTotal =
@@ -1045,6 +829,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         max: admission.max,
         rejectedTotal: admission.rejectedTotal,
       },
+      // Main-thread stalls over the last complete window (p50/p99/max ms).
+      // A max in the seconds means every route, stream and timer waited that
+      // long; the daemon log carries a rate-limited warning for it.
+      eventLoopDelay: ctx.eventLoopDelay?.snapshot() ?? null,
       // Public status carries state only. Detailed lane timings and operation
       // summaries stay behind the node-admin diagnostics route.
       backpressure: {
@@ -1057,13 +845,24 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       },
       // The certification harness must be able to distinguish an operator
       // setting from the switch the agent actually honors. This projection
-      // deliberately uses the same resolver as both runtime reconcile gates,
-      // including environment-variable precedence.
+      // deliberately uses the same resolvers as the runtime gates (periodic
+      // peer sync and chain-driven VM reconcile respectively), including
+      // environment-variable precedence.
       syncLifecycle: {
         syncReconcilerEnabled: resolveSyncReconcilerEnabled(
           config.syncReconcilerEnabled,
         ),
+        vmReconcilerEnabled: resolveVmReconcilerEnabled(
+          config.vmReconcilerEnabled,
+        ),
       },
+      // Effective VM promotion on this node: whether chain-driven VM
+      // reconcile can run (switch AND chain capability), a core's StorageACK
+      // finality gate and handler state, its declines per code over the last
+      // hour, and the last ACK promotion audit result.
+      vmPromotion: typeof agent.getVmPromotionStatus === 'function'
+        ? agent.getVmPromotionStatus()
+        : undefined,
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,
@@ -1078,68 +877,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       hasIdentity: identityId > 0n,
       asyncPublisher: publisherState.availability,
       finalizationRecovery,
-      rfc64PublicCatalog: {
-        enabled: rfc64PublicCatalogActivation.enabled,
-        selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
-        runtimeSelection: {
-          subscriptionDriven: rfc64CatalogRuntimeSelection.subscriptionDriven,
-          selectedContextGraphs: rfc64CatalogRuntimeSelection.selectedContextGraphs.filter(
-            (contextGraphId) => selectedPublicContextGraphs.has(contextGraphId),
-          ),
-        },
-        rollout: {
-          killSwitch: rfc64CatalogRollout.killSwitch,
-          contextGraphModes: Object.fromEntries(
-            rfc64PublicCatalogActivation.selectedContextGraphs.map((contextGraphId) => [
-              contextGraphId,
-              rfc64CatalogRollout.contextGraphModes[contextGraphId],
-            ]),
-          ),
-        },
-        autoPublishEnabled: rfc64PublicCatalogActivation.autoPublish !== undefined,
-        completeSwmProviders: rfc64CompleteSwmProviders,
-        service: rfc64PublicCatalogService,
-        bootstrap: rfc64PublicCatalogBootstrap,
-      },
-      // Local operator projection only. Never expose roster members, peer-to-
-      // wallet bindings, or private provider identities through status.
-      rfc64Catalog: {
-        enabled: rfc64CatalogActivation.enabled,
-        selectedContextGraphs: rfc64CatalogActivation.selectedContextGraphs,
-        selectedPublicContextGraphs: rfc64CatalogActivation.selectedPublicContextGraphs,
-        selectedPrivateContextGraphs: rfc64CatalogActivation.selectedPrivateContextGraphs,
-        runtimeSelection: rfc64CatalogRuntimeSelection,
-        responsibilities: rfc64CatalogResponsibilities,
-        contextGraphs: rfc64CatalogContextGraphs,
-        configuration: rfc64CatalogConfiguration,
-        autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
-        rollout: rfc64CatalogRollout,
-        privateAuthorityConfigured:
-          rfc64CatalogActivation.accessPolicyAuthority !== undefined,
-        privateRecovery: rfc64PrivateRecovery,
-        resourceTelemetry:
-          rfc64CatalogActivation.selectedPrivateContextGraphs.length === 0
-            || rfc64PublicCatalogService === null
-            ? null
-            : {
-                providerAttempts: rfc64PublicCatalogService.receiver.providerAttempts,
-                providerSwitches: rfc64PublicCatalogService.receiver.providerSwitches,
-                providerSuccesses: rfc64PublicCatalogService.receiver.providerSuccesses,
-                providerBackoffMs: rfc64PublicCatalogService.receiver.providerBackoffMs,
-                controlObjectCacheHits:
-                  rfc64PublicCatalogService.nativeReceiver?.controlObjectCacheHits ?? 0,
-                controlObjectNetworkFetches:
-                  rfc64PublicCatalogService.nativeReceiver?.controlObjectNetworkFetches ?? 0,
-                kaBundleCacheHits:
-                  rfc64PublicCatalogService.nativeReceiver?.kaBundleCacheHits ?? 0,
-                kaBundleNetworkFetches:
-                  rfc64PublicCatalogService.nativeReceiver?.kaBundleNetworkFetches ?? 0,
-                kaBundleCacheBytes:
-                  rfc64PublicCatalogService.nativeReceiver?.kaBundleCacheBytes ?? 0,
-                kaBundleNetworkBytes:
-                  rfc64PublicCatalogService.nativeReceiver?.kaBundleNetworkBytes ?? 0,
-              },
-      },
+      rfc64PublicCatalog,
+      rfc64Catalog,
       // Product-default scheduling is deliberately separate from the signed
       // catalog authority surface above. Every explicitly requested CG is
       // eligible for RFC-64 selected PUBLIC-SWM scheduling; private CGs retain
@@ -1147,6 +886,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // public SWM scope terminal. The harness knows its generated CG is public
       // and uses this exact requested-scope projection as its no-spend preflight.
       rfc64SelectedPublicSync,
+      contextGraphIdentity: summarizeContextGraphIdentityStatus(agent),
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
@@ -1366,7 +1106,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     try {
-      const provider = createRouteEvmProvider(rpcUrl, chain?.rpcUrls);
+      const provider = createRouteEvmProvider(rpcUrl, chain?.rpcUrls, routeRpcTransport);
       const tokenAddr = chain?.tokenAddress
         ?? (await new ethers.Contract(
           hubAddress,
@@ -1441,7 +1181,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     const rpcUrls = resolveRpcUrls(rpcUrl, chain?.rpcUrls);
-    const rpcs = await Promise.all(rpcUrls.map((url, index) => probeRpcEndpoint(url, index)));
+    const rpcs = await Promise.all(
+      rpcUrls.map((rpc, index) => probeRpcEndpoint(rpc, index, routeRpcTransport)),
+    );
     const primary = rpcs[0];
     const healthy = rpcs.find((rpc) => rpc.ok);
     return jsonResponse(res, 200, {

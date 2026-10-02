@@ -10,10 +10,41 @@
  */
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
-import { ethers } from 'ethers';
-import type { OperationalWalletRegistrationResult, TxResult, IdentityProof } from './chain-adapter.js';
+import { ethers, type Contract } from 'ethers';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import type {
+  IdentityProof,
+  IdentityWalletContracts,
+  OperationalWalletRegistrationResult,
+  TxResult,
+} from './chain-adapter.js';
 
 export class IdentityMethods extends EVMChainAdapterBase {
+  /** Independent all-or-none browser capability for node-identity key rotation. */
+  async getIdentityWalletContracts(): Promise<IdentityWalletContracts | null> {
+    await this.init();
+    const profile = this.contracts.profile;
+    const identity = this.contracts.identity;
+    if (!profile || !identity) return null;
+    let storage: Contract;
+    try {
+      storage = await this.getIdentityStorage();
+    } catch (error) {
+      if (error instanceof HubContractNotFoundError && error.contractName === 'IdentityStorage') {
+        return null;
+      }
+      throw error;
+    }
+    return {
+      profile: ethers.getAddress(await profile.getAddress()),
+      identity: ethers.getAddress(await identity.getAddress()),
+      storage: ethers.getAddress(await storage.getAddress()),
+      chainId: this.chainId,
+      rpcUrls: [...this.walletRpcUrls],
+      walletRpcUrls: [...this.walletRpcUrls],
+    };
+  }
+
   async ensureOperationalWalletsRegistered(options?: {
     identityId?: bigint;
     additionalAddresses?: string[];

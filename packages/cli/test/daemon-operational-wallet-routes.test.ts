@@ -161,6 +161,7 @@ describe('POST /api/operational-wallets', () => {
     const { res, done } = runCtx('POST', '/api/operational-wallets', agent, opWalletsWithAdmin, { address: EXTERNAL });
     await done;
     expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('OPERATIONAL_WALLET_MANAGEMENT_UNAVAILABLE');
   });
 
   it('maps OperationalKeyTaken to 409', async () => {

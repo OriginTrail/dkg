@@ -16,6 +16,7 @@ import {
   messageIndicatesNoFundedPublisherWallet,
   Logger,
   createOperationContext,
+  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
@@ -24,10 +25,14 @@ import {
 } from '@origintrail-official/dkg-agent';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
-  StoreSchedulerBusyError,
+  isStoreSchedulerBusyError,
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
+import {
+  createReadAuthorityDiagnostics,
+  type ContextGraphReadAuthorityAttribution,
+} from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
 import type { CorsAllowlist } from './state.js';
@@ -81,11 +86,11 @@ export interface StoreUnavailableClassification {
 export function classifyStoreUnavailable(
   err: unknown,
 ): StoreUnavailableClassification | null {
-  if (err instanceof StoreSchedulerBusyError) {
+  if (isStoreSchedulerBusyError(err)) {
     return {
       outcome: 'not_started',
       body: {
-        error: err.message,
+        error: err.message ?? 'Store scheduler is temporarily busy; retry the request',
         code: err.code,
         reason: err.reason,
         priority: err.priority,
@@ -111,6 +116,84 @@ export function classifyStoreUnavailable(
       ...(typeof err.timeoutMs === 'number' ? { timeoutMs: err.timeoutMs } : {}),
     },
   };
+}
+
+/**
+ * Kept structural for the same package-boundary reason as
+ * CALLER_SPARQL_REJECTED in routes/query-error.ts: the agent emits this
+ * internal marker, while the daemon owns its public HTTP representation.
+ */
+export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE';
+
+export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
+  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return false;
+  try {
+    return Reflect.get(err, 'code') === CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE
+      && Reflect.get(err, 'retryable') === true;
+  } catch {
+    return false;
+  }
+}
+
+const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
+
+/**
+ * The attribution a thrown read-authority marker carries. The agent's error is
+ * recognised structurally, so each field is read defensively; a missing,
+ * non-string or throwing field becomes `unknown` here and nowhere else.
+ */
+function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
+  const field = (key: keyof ContextGraphReadAuthorityAttribution): string => {
+    try {
+      const value: unknown = Reflect.get(err as object, key);
+      return typeof value === 'string' ? value : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  };
+  return { source: field('source'), reason: field('reason'), dependency: field('dependency') };
+}
+
+/**
+ * Uniform retryable response for an unresolvable Context Graph read authority,
+ * the one renderer every route uses. The graph id, authority source and
+ * internal reason stay out of the body; the attribution goes to the daemon log
+ * under `ctx`'s operation id (#2834), which the response carries as
+ * `x-dkg-operation-id` for correlation.
+ */
+export function respondContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  attribution: ContextGraphReadAuthorityAttribution,
+  ctx: OperationContext = createOperationContext('query'),
+): void {
+  readAuthorityDiagnostics.record(ctx, attribution);
+  jsonResponse(
+    res,
+    503,
+    {
+      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '3', 'x-dkg-operation-id': ctx.operationId },
+  );
+}
+
+/**
+ * Renders the read-authority 503 for the agent's thrown marker. Shared by
+ * every route that reaches `DKGAgent.query` with a scoped `contextGraphId`, so
+ * a chain/metadata outage is never reported as a 500.
+ */
+export function respondIfContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  err: unknown,
+  ctx?: OperationContext,
+): boolean {
+  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  respondContextGraphReadAuthorityUnavailable(res, decodeReadAuthorityAttribution(err), ctx);
+  return true;
 }
 
 export function respondIfStoreUnavailable(
@@ -150,11 +233,26 @@ export function noFundedPublisherWalletBody(message: string): { code: string; er
   return { code: NO_FUNDED_PUBLISHER_WALLET_CODE, error: message };
 }
 
+/** A strict PCA funding read was inconclusive, not a proved wallet shortfall.
+ * Use a fixed message: the underlying RPC error may contain private endpoint
+ * details and its transport code is intentionally not the public error code. */
+export function respondIfPcaFundingUnknown(res: ServerResponse, err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code !== 'PCA_FUNDING_UNKNOWN') return false;
+  res.setHeader('Retry-After', '1');
+  jsonResponse(res, 503, {
+    code: 'PCA_FUNDING_UNKNOWN',
+    error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+    retryable: true,
+  });
+  return true;
+}
+
 /**
  * Map a thrown request error to the daemon's top-level HTTP response — the
  * single neutral place that rethrowing lifecycle publish routes
  * and the lifecycle catch agree on status codes: 413 payload-too-large; 400 for
- * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; otherwise a 500
+ * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; 503 for
+ * inconclusive PCA funding; otherwise a 500
  * with the EVM-decoded message. Unit-testable in isolation.
  */
 export function respondWithDaemonError(res: ServerResponse, err: any): void {
@@ -174,9 +272,16 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.
     jsonResponse(res, 400, noFundedPublisherWalletBody(typeof err?.message === 'string' ? err.message : String(err)));
+  } else if (respondIfPcaFundingUnknown(res, err)) {
+    // A rethrowing publish path has the same retryable verdict as /vm/publish.
   } else if (respondIfStoreUnavailable(res, err)) {
     // Store admission pressure and adapter deadlines are transient. The typed
     // response preserves whether work never started or may have completed.
+  } else if (respondIfContextGraphReadAuthorityUnavailable(res, err)) {
+    // A scoped read whose authority source could not answer is retryable, not a
+    // server bug: any route that RE-THROWS gets the same uniform 503 the
+    // `/api/query` boundary returns instead of a 500 that also echoes the
+    // internal authority source/reason in its message.
   } else if (respondIfChainRpcTransportError(res, err)) {
     // Transient transport exhaustion (RPC_ENDPOINTS_EXHAUSTED /
     // RPC_RECEIPT_LOOKUP_FAILED → 503, TIMEOUT → 504) is retryable — a route
@@ -231,26 +336,6 @@ export async function resolveNameToPeerId(
   return match?.peerId ?? null;
 }
 
-/**
- * GH #306 / #787 — shape guard for the WRITE routes (wm/write,
- * shared-memory/write). The `graph` term is OPTIONAL here: those routes
- * legitimately accept `{subject,predicate,object}`
- * and fill the graph internally. Without this guard, a string-shaped quad
- * (e.g. an N-Quad line `"<s> <p> <o> ."`) slips past a bare `Array.isArray`
- * check and crashes the agent write path with a TypeError → HTTP 500 instead
- * of an actionable 4xx.
- */
-export function isWritableQuad(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.subject === "string" &&
-    typeof v.predicate === "string" &&
-    typeof v.object === "string" &&
-    (v.graph === undefined || typeof v.graph === "string")
-  );
-}
-
 export function validateWritableQuadLiteralSizes(
   label: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
@@ -264,28 +349,6 @@ export function validateWritableQuadLiteralSizes(
     }
     throw err;
   }
-}
-
-/**
- * GH #306 / #787 (follow-up) — validate each quad's `object` term is either a
- * quoted RDF literal (`"…"`) or an absolute IRI. Shared by lifecycle write
- * routes and other quad-accepting validation paths: the shape guard
- * ({@link isWritableQuad}) only checks that fields
- * are strings, so an object that is neither a literal nor an IRI (e.g. a bare
- * word `hello` or a number `123`) slips past them and crashes the RDF parser
- * with an uncaught "No scheme found in an absolute IRI" → HTTP 500 instead of an
- * actionable 400.
- */
-export function validateQuadObjectTerms(
-  label: string,
-  quads: ReadonlyArray<{ object: string }>,
-): string | null {
-  const badIndex = quads.findIndex((q) => {
-    const object = q.object.trim();
-    return !object.startsWith('"') && !isSafeIri(object);
-  });
-  if (badIndex === -1) return null;
-  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term or absolute IRI`;
 }
 
 /**
@@ -341,6 +404,7 @@ export function sanitizeRpcMessage(msg: string): string {
  * keyed STRICTLY on `err.code` (never message text):
  *   - `RPC_ENDPOINTS_EXHAUSTED`   → 503 (all configured endpoints failed over)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` → 503 (receipt lookup failed on every endpoint)
+ *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` → 503 (operation outcome is conservative)
  *   - `TIMEOUT`                   → 504 (receipt wait / RPC request timed out)
  *
  * Returns `undefined` for anything else. On-chain reverts (`CALL_EXCEPTION`),
@@ -386,6 +450,17 @@ export function classifyChainRpcTransportStatus(
           code,
         ),
       };
+    case "RPC_REQUEST_GOVERNOR_QUEUE_FULL":
+      return {
+        status: 503,
+        body: {
+          ...transportBody(msg || "Chain RPC request capacity is temporarily full.", code),
+          retryable: true,
+          // Admission failed for this raw attempt, but the containing operation
+          // may already have reached another endpoint (especially writes).
+          outcome: "indeterminate",
+        },
+      };
     case "RPC_TIMEOUT":
       // Internal, chain-namespaced timeout code. Expose the public/legacy
       // `code: "TIMEOUT"` in the 504 body (clients key on that), keeping the
@@ -420,6 +495,9 @@ export function respondIfChainRpcTransportError(
 ): boolean {
   const transport = classifyChainRpcTransportStatus(err);
   if (!transport) return false;
+  if (transport.body.code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL') {
+    res.setHeader('Retry-After', '1');
+  }
   jsonResponse(res, transport.status, extraBody ? { ...extraBody, ...transport.body } : transport.body);
   return true;
 }
@@ -1661,6 +1739,8 @@ export function corsHeaders(origin?: string | null): Record<string, string> {
   const headers: Record<string, string> = {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    // Lets cross-origin clients read a 503's retry hint and its log correlation id (#2834).
+    "Access-Control-Expose-Headers": "Retry-After, x-dkg-operation-id",
   };
   if (origin !== "*") headers["Vary"] = "Origin";
   return headers;
@@ -1835,10 +1915,12 @@ export function applyServerLimits(
 
 /**
  * Cheap GET/HEAD paths exempt from concurrency admission control — liveness /
- * health / manifest handlers that must stay answerable under load (monitoring,
+ * manifest handlers that must stay answerable under load (monitoring,
  * `dkg status`, doctor, MCP setup probes), plus the long-lived `/api/events`
  * SSE stream (which must NOT hold an in-flight slot for the connection's whole
- * lifetime, or a few open dashboard tabs would exhaust the pool).
+ * lifetime, or a few open dashboard tabs would exhaust the pool). RPC health
+ * GET is intentionally absent because it performs outbound work; only its
+ * cheap HEAD form is exempt.
  *
  * NOTE: this is one of several HTTP path-category tables in the daemon (see
  * `auth.ts` public paths, `isLoopbackRateLimitExemptPath`, and the default
@@ -1847,7 +1929,6 @@ export function applyServerLimits(
  */
 const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
   '/api/status',
-  '/api/chain/rpc-health',
   '/api/events',
   '/.well-known/skill.md',
   '/.well-known/skill-importer.md',
@@ -1863,6 +1944,7 @@ const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
  */
 export function isAdmissionExempt(method: string | undefined, pathname: string): boolean {
   if (method === 'OPTIONS') return true;
+  if (method === 'HEAD' && pathname === '/api/chain/rpc-health') return true;
   if ((method === 'GET' || method === 'HEAD') && ADMISSION_EXEMPT_GET_PATHS.has(pathname)) return true;
   return false;
 }

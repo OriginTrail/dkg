@@ -70,6 +70,7 @@ const PACKET = [
       'test/catchup-runner-worker-impl.test.ts',
       'test/context-graph-subscribe-readiness.test.ts',
       'test/context-graph-catchup-readiness.test.ts',
+      'test/context-graph-readiness-swm-shortfall.test.ts',
       'test/catchup-runner-worker-lifecycle.test.ts',
       'test/daemon-catchup-telemetry-shutdown.test.ts',
     ],

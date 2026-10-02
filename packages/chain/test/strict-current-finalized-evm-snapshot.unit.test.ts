@@ -82,9 +82,16 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // The anchor is re-read after the read-profile preflight and again at
+      // scope exit, for the EIP-1898 profile too. `requireCanonical` was the
+      // only protection once the anchor became the operator's depth — the HEAD
+      // at the default — and an endpoint that ignores it would otherwise let a
+      // precommit attest against a block that has since been orphaned.
+      'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
       'eth_call',
+      'eth_getBlockByNumber',
     ]);
     const anchored = server.calls.filter(({ method }) => (
       method === 'eth_getCode' || method === 'eth_call'
@@ -123,8 +130,12 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Post-preflight anchor fence — now run for the EIP-1898 profile too.
+      'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Scope-exit anchor fence.
+      'eth_getBlockByNumber',
     ]);
   });
 
@@ -162,8 +173,12 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Post-preflight anchor fence — now run for the EIP-1898 profile too.
+      'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Scope-exit anchor fence.
+      'eth_getBlockByNumber',
     ]);
   });
 
@@ -200,8 +215,12 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Post-preflight anchor fence — now run for the EIP-1898 profile too.
+      'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Scope-exit anchor fence.
+      'eth_getBlockByNumber',
     ]);
   });
 
@@ -228,6 +247,8 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Post-preflight anchor fence — now run for the EIP-1898 profile too.
+      'eth_getBlockByNumber',
       'eth_getCode',
     ]);
   });
@@ -260,8 +281,12 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Post-preflight anchor fence — now run for the EIP-1898 profile too.
+      'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // No scope-exit fence: the consumer threw, so the scope never exits
+      // cleanly and the snapshot is discarded rather than attested.
     ]);
     expect(second.calls).toHaveLength(0);
   });
@@ -275,7 +300,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
         case 'eth_getBlockByNumber':
           sendJsonRpcResult(response, rpcCall, {
             number: '0x7b',
-            hash: rpcCall.params[0] === 'finalized' ? BLOCK_HASH : OTHER_BLOCK_HASH,
+            hash: rpcCall.params[0] === 'latest' ? BLOCK_HASH : OTHER_BLOCK_HASH,
           });
           return;
         case 'eth_getCode':
@@ -310,11 +335,11 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
           sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
           return;
         case 'eth_getBlockByNumber': {
-          const finalizedLookup = rpcCall.params[0] === 'finalized';
-          if (!finalizedLookup) numberedHeaderReads += 1;
+          const headLookup = rpcCall.params[0] === 'latest';
+          if (!headLookup) numberedHeaderReads += 1;
           sendJsonRpcResult(response, rpcCall, {
             number: '0x7b',
-            hash: finalizedLookup || numberedHeaderReads !== 2 ? BLOCK_HASH : OTHER_BLOCK_HASH,
+            hash: headLookup || numberedHeaderReads !== 2 ? BLOCK_HASH : OTHER_BLOCK_HASH,
           });
           return;
         }
@@ -371,11 +396,11 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
               sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
               return;
             case 'eth_getBlockByNumber': {
-              const finalizedLookup = rpcCall.params[0] === 'finalized';
-              if (!finalizedLookup) numberedHeaderReads += 1;
+              const headLookup = rpcCall.params[0] === 'latest';
+              if (!headLookup) numberedHeaderReads += 1;
               sendJsonRpcResult(response, rpcCall, {
                 number: '0x7b',
-                hash: finalizedLookup || numberedHeaderReads === 1 ? BLOCK_HASH : postHash,
+                hash: headLookup || numberedHeaderReads === 1 ? BLOCK_HASH : postHash,
               });
               return;
             }
@@ -432,11 +457,11 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
           sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
           return;
         case 'eth_getBlockByNumber': {
-          const finalizedLookup = rpcCall.params[0] === 'finalized';
-          if (!finalizedLookup) numberedHeaderReads += 1;
+          const headLookup = rpcCall.params[0] === 'latest';
+          if (!headLookup) numberedHeaderReads += 1;
           sendJsonRpcResult(response, rpcCall, {
             number: '0x7b',
-            hash: finalizedLookup || numberedHeaderReads <= 2
+            hash: headLookup || numberedHeaderReads <= 2
               ? BLOCK_HASH
               : OTHER_BLOCK_HASH,
           });
@@ -498,6 +523,11 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Post-preflight anchor fence — now run for the EIP-1898 profile too.
+      'eth_getBlockByNumber',
+      // The consumer itself does not throw (it asserts the escaped read is
+      // rejected), so this scope DOES exit cleanly and its fence runs too.
+      'eth_getBlockByNumber',
     ]);
   });
 
@@ -783,6 +813,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
   });
 
   it('preserves a terminal batch failure that precedes a sibling RPC deadline', async () => {
+    const terminalResponseSent = deferred<void>();
     const siblingStarted = deferred<void>();
     const siblingClosed = deferred<void>();
     const baseHandler = successfulHandler();
@@ -792,8 +823,15 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       }
       if (rpcCall.params[0] === TO) {
         sendJsonRpcResult(response, rpcCall, '0x');
+        terminalResponseSent.resolve(undefined);
         return;
       }
+      // Do not let the test advance the fake attempt deadline until the
+      // terminal sibling's response has reached the client event loop. Under
+      // package-wide load the hanging request can otherwise arrive first and
+      // the test itself manufactures the opposite ordering from its title.
+      await terminalResponseSent.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
       response.on('close', () => siblingClosed.resolve(undefined));
       siblingStarted.resolve(undefined);
     });
@@ -843,6 +881,8 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      // Post-preflight anchor fence — now run for the EIP-1898 profile too.
+      'eth_getBlockByNumber',
     ]);
   });
 

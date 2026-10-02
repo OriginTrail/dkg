@@ -3,7 +3,7 @@ import type { RandomSamplingStatusResponse } from './api-client.js';
 
 type DisabledStatus = Pick<
   RandomSamplingStatusResponse,
-  'role' | 'identityId' | 'disabledReason'
+  'role' | 'identityId' | 'disabledReason' | 'retiring'
 >;
 
 const DISABLED_REASON_MESSAGES: Record<RandomSamplingDisabledReason, string> = {
@@ -19,6 +19,7 @@ const DISABLED_REASON_MESSAGES: Record<RandomSamplingDisabledReason, string> = {
 };
 
 export function describeRandomSamplingDisabledStatus(status: DisabledStatus): string {
+  if (status.retiring) return 'prover disabled; waiting for physical resource cleanup';
   if (status.disabledReason) {
     return DISABLED_REASON_MESSAGES[status.disabledReason];
   }

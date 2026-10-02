@@ -340,6 +340,22 @@ describe('durable sync control metadata admission', () => {
     expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
 
+  it('keeps original metadata indexes across interleaved sanitized rows (#1943)', () => {
+    const keptRow = quad(IRI_SUBJECT, `${DKG}status`, '"keep"');
+    const meta = [
+      quad('_:before', `${DKG}status`, '"drop"'),
+      keptRow,
+      quad('"after"', `${DKG}label`, '"drop-too"'),
+    ];
+
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+
+    expect(selection.metaIndexes).toEqual([1]);
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([keptRow]);
+    expect(selection.droppedNonIriSubjectTriples).toBe(2);
+    expect(selection.consumedUnpersistedMetaTriples).toBe(2);
+  });
+
   it('counts an all-non-IRI system-CG metadata-only page as fully consumed so the cursor advances (#1921)', () => {
     // Livelock-fix-intact guard: after the candidate-gate, an acceptUnverified
     // (system-CG) metadata-only page consisting ENTIRELY of non-IRI subjects —

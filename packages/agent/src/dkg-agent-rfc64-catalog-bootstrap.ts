@@ -20,8 +20,7 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64CatalogWorkloadOwnerV1 } from './rfc64/catalog-runtime-v1.js';
 import { Rfc64CatalogSynchronizationErrorV1 } from
   './rfc64/catalog-synchronization-error-v1.js';
-import { Rfc64CoalescingSupervisorV1 } from
-  './rfc64/coalescing-supervisor-v1.js';
+import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import type { Rfc64ActivePeerSwmRecoveryPlanV1 } from
   './rfc64/swm-recovery-plan-v1.js';
 import {
@@ -157,7 +156,7 @@ interface BootstrapStateV1 {
   readonly retryIntervalMs?: number;
   readonly recoveryProviderPeerIds: readonly string[];
   readonly targets: MutableTargetStatusV1[];
-  readonly runner: Rfc64CoalescingSupervisorV1;
+  readonly runner: CoalescingRecurringTask;
   pass: number;
   lastPassStartedAtMs: number | null;
   lastPassCompletedAtMs: number | null;
@@ -217,7 +216,7 @@ export class Rfc64CatalogBootstrapOwnerV1 implements Rfc64CatalogWorkloadOwnerV1
     this.#catalogPhaseReady = false;
     this.#configuredRecoveryProviders = new Set(partition.recoveryProviderPeerIds);
     let state!: BootstrapStateV1;
-    const runner = new Rfc64CoalescingSupervisorV1({
+    const runner = new CoalescingRecurringTask({
       retryIntervalMs: partition.retryIntervalMs,
       runPass: (signal) => this.#runPass(state, ctx, signal),
       onError: (error) => {

@@ -2,8 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   RpcFailoverClient,
-  waitForTransactionReceiptWithFailover,
 } from '../src/rpc-failover-client.js';
+import { waitForTransactionReceiptWithFailover } from '../src/transaction-receipt-failover.js';
 import { ChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { waitForReceiptWithDeadline } from '../src/receipt-wait.js';
 

@@ -1,0 +1,37 @@
+import { describe, expect, it, vi } from 'vitest';
+import { Rfc64CatalogReplayConnectionRuntimeV1 } from
+  '../src/rfc64/catalog-replay-connection-runtime-v1.js';
+
+describe('RFC-64 catalog replay connection debounce', () => {
+  it('evicts only the oldest peer when the debounce table reaches capacity', () => {
+    const replay = vi.fn(async () => ({ failed: 0 }));
+    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+      selectContextGraphIds: () => ['public-cg'],
+      acquireFence: (_contextGraphId, peerId) => ({
+        peerId,
+        generation: 1,
+        release: vi.fn(),
+      }),
+      reannounce: vi.fn(async () => undefined),
+      replay,
+      warn: vi.fn(),
+    }, 100, 2);
+
+    runtime.prepare('peer-a', 0)?.admit();
+    runtime.prepare('peer-b', 1)?.admit();
+    runtime.prepare('peer-c', 2)?.admit();
+
+    expect(runtime.prepare('peer-b', 3)).toBeNull();
+    const retriedA = runtime.prepare('peer-a', 3);
+    expect(retriedA).not.toBeNull();
+    retriedA?.reject();
+    expect(replay).toHaveBeenCalledWith('public-cg', {
+      peerId: 'peer-a',
+      generation: 1,
+      release: expect.any(Function),
+    });
+
+    runtime.reset();
+    expect(runtime.prepare('peer-b', 4)).not.toBeNull();
+  });
+});

@@ -16,6 +16,7 @@ import {
 } from '@opentelemetry/sdk-metrics';
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { sendSyncRequest } from '../src/p2p/sync-transport.js';
+import { UNRESTRICTED_SYNC_WORK } from '../src/sync/work-admission.js';
 
 const PROTO = '/dkg/10.0.2/sync';
 
@@ -26,6 +27,7 @@ function baseParams(send: any) {
     retryAttempts: 1,
     contextGraphId: 'cg-1',
     offset: 0,
+    workAdmission: UNRESTRICTED_SYNC_WORK,
     requestFactory: async () => new Uint8Array([1, 2, 3]),
     send,
     protocolId: PROTO,

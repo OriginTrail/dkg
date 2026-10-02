@@ -233,4 +233,48 @@ describe('SWM TTL cleanup of graph-scoped V2 operations', () => {
     expect(await graphTripleCount(store, assertionGraph)).toBe(0);
     expect(await graphTripleCount(store, seeded.snapshotGraph)).toBe(0);
   }, 60_000);
+
+  it('bounds expiry batches and joins concurrent cleanup callers', async () => {
+    const cg = 'swm-ttl-v2-bounded-batch';
+    await node.createContextGraph({ id: cg, name: 'V2 TTL bounded batch', description: 'batch cleanup' });
+    const metaGraph = contextGraphSharedMemoryMetaUri(cg);
+    const publishedAt = new Date(Date.now() - TTL_MS * 2).toISOString();
+    const quads: Quad[] = [];
+    for (let i = 0; i < 251; i += 1) {
+      const subject = opSubject(cg, `batch-${i}`);
+      quads.push(
+        { graph: metaGraph, subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${DKG}WorkspaceOperation` },
+        { graph: metaGraph, subject, predicate: `${DKG}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+        { graph: metaGraph, subject, predicate: `${DKG}rootEntity`, object: `urn:v2:batch:${i}` },
+      );
+    }
+    await store.insert(quads);
+
+    const originalQuery = store.query.bind(store);
+    const expiryBatchSizes: number[] = [];
+    const instrumentedStore = store as TripleStore & {
+      query: TripleStore['query'];
+    };
+    instrumentedStore.query = async (query, options) => {
+      const result = await originalQuery(query, options);
+      if (
+        options?.source === 'agent.swmCleanup.expiredOperations'
+        && query.includes(metaGraph)
+      ) {
+        expiryBatchSizes.push(result.type === 'bindings' ? result.bindings.length : -1);
+      }
+      return result;
+    };
+    try {
+      const first = node.cleanupExpiredSharedMemory();
+      const second = node.cleanupExpiredSharedMemory();
+      const [firstDeleted, secondDeleted] = await Promise.all([first, second]);
+      expect(firstDeleted).toBeGreaterThan(0);
+      expect(secondDeleted).toBe(firstDeleted);
+      expect(expiryBatchSizes).toEqual([250, 1, 0]);
+      expect(expiryBatchSizes.every((size) => size <= 250)).toBe(true);
+    } finally {
+      instrumentedStore.query = originalQuery;
+    }
+  }, 60_000);
 });

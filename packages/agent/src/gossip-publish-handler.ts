@@ -1,5 +1,6 @@
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, type OntologyBindingSlotClass,
   Logger, createOperationContext,
   isSafeIri, assertSafeIri, validateSubGraphName, validateContextGraphId,
   contextGraphSubGraphUri,
@@ -19,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
+  acceptIncomingPublicQuads,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   generateGraphKnowledgeAssetMetadata,
@@ -39,6 +41,10 @@ import type {
 } from './dkg-agent-types.js';
 import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+
+/** One registration announces one binding; more in a message are dropped unread. */
+const MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS = 4;
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
@@ -161,6 +167,12 @@ export interface GossipPublishHandlerCallbacks {
   getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
   /** Resolve the topic Context Graph to its authoritative on-chain id. */
   getContextGraphOnChainId?: (id: string) => Promise<string | null>;
+  /**
+   * Classify the on-chain slot named by an ontology id binding (see
+   * `DKGAgent#classifyOntologyBindingSlot`). A binding to a slot proven
+   * curated is not stored from ontology gossip.
+   */
+  classifyOnChainSlot?: (onChainId: string) => Promise<OntologyBindingSlotClass>;
   markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
@@ -321,7 +333,9 @@ export class GossipPublishHandler {
               `(wire=${graphPublish.publicTripleCount}, parsed=${quads.length})`,
           );
         }
-        normalized = quads.map((quad) => ({ ...quad, graph: dataGraph }));
+        // Compared with this node's own head below and written to VM: take
+        // the payload in the form the store returns it in.
+        normalized = acceptIncomingPublicQuads(quads).map((quad) => ({ ...quad, graph: dataGraph }));
       } else {
         const filteredQuads = quads.filter(q => {
           const g = q.graph;
@@ -387,6 +401,7 @@ export class GossipPublishHandler {
         }
 
         normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
+        normalized = await this.filterCuratedOnChainBindings(normalized, ctx);
       } else {
         const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
 
@@ -540,7 +555,6 @@ export class GossipPublishHandler {
           || workspaceHead.publicQuadsDigest !== publicDigest
           || workspaceHead.privateTripleCount !== graphPublish.privateTripleCount
           || workspaceHead.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
-          || workspaceHead.accessPolicy === undefined
         ) {
           this.log.warn(
             ctx,
@@ -550,8 +564,8 @@ export class GossipPublishHandler {
           return;
         }
         if (
-          graphPublish.accessPolicy !== workspaceHead.accessPolicy
-          || graphPublish.allowedPeers.join('\0') !== workspaceHead.allowedPeers.join('\0')
+          graphPublish.accessPolicy !== workspaceHead.access.accessPolicy
+          || graphPublish.allowedPeers.join('\0') !== workspaceHead.access.allowedPeers.join('\0')
           || (fromPeerId !== undefined && fromPeerId !== workspaceHead.publisherPeerId)
         ) {
           this.log.warn(
@@ -581,9 +595,9 @@ export class GossipPublishHandler {
             contextGraphId: request.contextGraphId,
             merkleRoot,
             publisherPeerId: workspaceHead.publisherPeerId,
-            accessPolicy: workspaceHead.accessPolicy,
-            ...(workspaceHead.accessPolicy === 'allowList'
-              ? { allowedPeers: workspaceHead.allowedPeers }
+            accessPolicy: workspaceHead.access.accessPolicy,
+            ...(workspaceHead.access.accessPolicy === 'allowList'
+              ? { allowedPeers: [...workspaceHead.access.allowedPeers] }
               : {}),
             timestamp: new Date(),
             subGraphName,
@@ -897,6 +911,38 @@ export class GossipPublishHandler {
         `Failed to promote gossip tentative→confirmed for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Drop on-chain id bindings whose slot the chain proves curated: ontology
+   * carries public graphs, and a curated graph's binding stays in its own
+   * `_meta`. A binding whose slot isn't proven either way is stored, as
+   * before: a registration announcement usually outruns this node's view of
+   * a new slot, and a node without chain reads can't classify at all. The
+   * metadata relocation removes such a binding later if its slot proves
+   * curated. Each distinct slot costs a chain read, so a message gets only a
+   * few.
+   */
+  private async filterCuratedOnChainBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
+    const classify = this.callbacks.classifyOnChainSlot;
+    if (!classify) return quads;
+    const bindingPredicate = CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE;
+    const onChainIds = [...new Set(quads
+      .filter((q) => q.predicate === bindingPredicate)
+      .map((q) => stripLiteral(q.object).trim()))];
+    if (onChainIds.length === 0) return quads;
+    const kept = new Set<string>();
+    for (const onChainId of onChainIds.slice(0, MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS)) {
+      if (!isCanonicalAuthoritativeContextGraphId(onChainId)) continue;
+      if (await classify(onChainId).catch(() => 'unknown') !== 'curated') kept.add(onChainId);
+    }
+    const dropped = onChainIds.length - kept.size;
+    if (dropped > 0) {
+      this.log.info(ctx, `Skipped ${dropped} ontology gossip binding(s) of a curated or unreadable slot`);
+    }
+    return quads.filter((q) => (
+      q.predicate !== bindingPredicate || kept.has(stripLiteral(q.object).trim())
+    ));
   }
 
   private async filterInvalidOntologyPolicyBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {

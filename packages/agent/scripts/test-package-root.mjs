@@ -4,6 +4,9 @@ import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = await import('@origintrail-official/dkg-agent');
+if ('createRandomSamplingRuntime' in root.DKGAgent.prototype) {
+  throw new Error('internal Random Sampling runtime factory leaked from the agent surface');
+}
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
@@ -11,8 +14,14 @@ const legacyChainReconciler = await import(
 const legacyCatalogSync = await import(
   '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-catalog-sync.js'
 );
+const legacySharedMemorySync = await import(
+  '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js'
+);
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
+);
+const chainAuthorityReadBudgets = await import(
+  '@origintrail-official/dkg-agent/chain-authority-read-budgets'
 );
 const registeredAuthorityContract = await import(
   '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
@@ -66,6 +75,7 @@ if (
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
   || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
+  || typeof legacySharedMemorySync.selectSwmSnapshotCoverage !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }
@@ -222,6 +232,12 @@ if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !
   throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
 }
 if (
+  typeof chainAuthorityReadBudgets.resolveChainAuthorityTimeoutMs !== 'function'
+  || typeof chainAuthorityReadBudgets.resolveChainAuthorityReadBudgets !== 'function'
+) {
+  throw new Error('chain authority read budgets subpath did not expose its resolvers');
+}
+if (
   typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationChainIdentityV1
   !== 'function'
 ) {
@@ -261,11 +277,16 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-repair-diagnostics-v1.js',
+  'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'catalog-authority-refresh-binding-v1.js',
   'catalog-authority-refresh-loop-v1.js',
+  'catalog-authority-revision-projection-v1.js',
   'authority-rpc-circuit-breaker-v1.js',
+  'finalized-authority-snapshot-batch-runtime-v1.js',
   'public-catalog-workload-owner-v1.js',
   'catalog-responsibility-registry-v1.js',
   'release-native-catalog-authority-v1.js',
@@ -279,10 +300,14 @@ const blockedRfc64Modules = [
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',
   'catalog-head-lineage-v1.js',
+  'catalog-limits-v1.js',
   'catalog-peers-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
   'control-envelope-signer-v1.js',
+  'unregistered-replica-authority-v1.js',
+  'unregistered-authority-seed-store-v1.js',
+  'unregistered-authority-transport-v1.js',
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
@@ -334,10 +359,15 @@ const blockedRfc64Modules = [
   'swm-inventory-shadow-runtime-v1.js',
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',
+  'catalog-replay-connection-runtime-v1.js',
+  'catalog-replay-generation-v1.js',
+  'catalog-replay-recovery-runtime-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
+  'catalog-operational-applied-heads-v1.js',
   'catalog-runtime-v1.js',
-  'coalescing-supervisor-v1.js',
+  'background-work-dispatcher-v1.js',
   'supervisor-status-v1.js',
+  'catalog-shadow-observability-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
 const emittedRfc64Modules = await listEmittedRfc64Modules();
@@ -383,6 +413,19 @@ if (packageExports['./dist/rfc64/*'] !== null) {
 }
 if (packageExports['./dist/*'] !== './dist/*') {
   throw new Error('historical non-RFC-64 ./dist/* compatibility was not preserved');
+}
+
+for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.js']) {
+  const subpath = `./dist/${path}`;
+  if (packageExports[subpath] !== null) {
+    throw new Error(`internal Random Sampling module is not explicitly blocked: ${path}`);
+  }
+  try {
+    await import(`@origintrail-official/dkg-agent/dist/${path}`);
+    throw new Error(`internal Random Sampling module unexpectedly resolved: ${path}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
 }
 
 async function listEmittedRfc64Modules() {

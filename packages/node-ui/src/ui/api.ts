@@ -2,12 +2,16 @@ import {
   BASE,
   authHeaders,
   HttpError,
+  LONG_MUTATION_TIMEOUT_MS,
+  OutcomeUnknownError,
   fetchWithTimeout,
   get,
   getWithTimeout,
   post,
+  postLongMutation,
   put,
   del,
+  requestLongMutation,
 } from './http.js';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
@@ -19,12 +23,20 @@ import type {
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
-// keep working (barrel), and the PCA client from its extracted module.
-export { authHeaders, HttpError } from './http.js';
+// keep working (barrel), and domain clients from their extracted modules.
+export { authHeaders, HttpError, OutcomeUnknownError } from './http.js';
 export * from './pca-api.js';
+export * from './identity-wallet-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
+
+/** Message for a long Knowledge Asset mutation whose response never arrived. */
+function outcomeUnknownMessage(action: string): string {
+  return `${action} got no response within ${LONG_MUTATION_TIMEOUT_MS / 60_000} minutes. ` +
+    'The outcome is unknown: the node keeps working after the page stops waiting, so it may still complete. ' +
+    "Check the Knowledge Asset's history before retrying.";
+}
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -586,16 +598,11 @@ export async function importFile(
   if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
   if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
 
-  const res = await fetch(`${BASE}/api/knowledge-assets/${encodeURIComponent(assertionName)}/wm/import-file`, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: form,
-  });
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    throw new Error((errBody as { error?: string })?.error ?? `HTTP ${res.status}`);
-  }
-  return res.json() as Promise<ImportFileResult>;
+  return requestLongMutation<ImportFileResult>(
+    `/api/knowledge-assets/${encodeURIComponent(assertionName)}/wm/import-file`,
+    { method: 'POST', headers: authHeaders(), body: form },
+    outcomeUnknownMessage(`Importing "${file.name}" into "${assertionName}"`),
+  );
 }
 
 // --- Query ---
@@ -721,8 +728,8 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
   const data = await executeQuery(sparql, { contextGraphId });
   const map: Record<string, string> = {};
   for (const b of (data?.result?.bindings ?? [])) {
-    const name = typeof b.name === 'string' ? b.name : b.name?.value;
-    const ual = typeof b.ual === 'string' ? b.ual : b.ual?.value;
+    const name = bv(b.name);
+    const ual = bv(b.ual);
     if (name && ual && !map[name]) map[name] = ual;
   }
   return map;
@@ -1024,13 +1031,14 @@ export const knowledgeAssetShare = (
   rawOptions: AtomicShareOptions = {},
 ) => {
   const opts = normalizeAtomicShareOptions(rawOptions);
-  return post<AtomicShareResult>(
+  return postLongMutation<AtomicShareResult>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
     {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       awaitCuratorAck: opts.awaitCuratorAck,
     },
+    outcomeUnknownMessage(`Sharing "${name}"`),
   );
 };
 
@@ -1043,13 +1051,14 @@ export const knowledgeAssetPublish = (
   opts: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions = {},
 ) => {
   const publishOptions = finalizedPublishOptionsPayload(opts, ['subGraphName']);
-  return post<KnowledgeAssetPublishResult>(
+  return postLongMutation<KnowledgeAssetPublishResult>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
     {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     },
+    outcomeUnknownMessage(`Publishing "${name}"`),
   );
 };
 
@@ -1080,6 +1089,9 @@ export interface BatchPublishResult {
   // Every per-KA failure (not just the last), so callers can report the count + the
   // name/reason of each — `failures.length` is the failed count.
   failures: Array<{ name: string; subGraph?: string; error: string }>;
+  // Publishes that got no response before the client deadline: the node may still
+  // mint them, so they are neither published nor failed. Absent when there are none.
+  outcomeUnknown?: Array<{ name: string; subGraph?: string; error: string }>;
   sample: PublishResult | null; // a representative confirmed result for the headline
   // B8 (#1365 round-3) — the CONFIRMED discount aggregated across the batch, NOT a
   // property of the headline `sample` (which is picked for cleanliness, not discount).
@@ -1105,6 +1117,7 @@ export async function publishAssertionsToVm(
   let partial = 0;
   let firstPartialError: string | undefined;
   const failures: BatchPublishResult['failures'] = [];
+  const outcomeUnknown: NonNullable<BatchPublishResult['outcomeUnknown']> = [];
   let sample: PublishResult | null = null;
   // B8 (#1365 round-3) — aggregate the CONFIRMED discount across the BATCH (the headline
   // `sample` is picked for cleanliness, not discount, so a mixed batch could hide a real
@@ -1154,7 +1167,9 @@ export async function publishAssertionsToVm(
       }
     } catch (err: unknown) {
       const message = (err as { message?: string })?.message ?? 'publish failed';
-      failures.push({ name: a.name, ...(a.subGraph ? { subGraph: a.subGraph } : {}), error: message });
+      const entry = { name: a.name, ...(a.subGraph ? { subGraph: a.subGraph } : {}), error: message };
+      if (err instanceof OutcomeUnknownError) outcomeUnknown.push(entry);
+      else failures.push(entry);
     }
   }
   const convictionCostCovered: ConvictionCostCovered | undefined = firstCovered
@@ -1167,7 +1182,27 @@ export async function publishAssertionsToVm(
         drawnFromTopUp: aggDrawnTopUp.toString(),
       }
     : undefined;
-  return { published, total: items.length, partial, partialError: firstPartialError, failures, sample, convictionCostCovered };
+  return {
+    published,
+    total: items.length,
+    partial,
+    partialError: firstPartialError,
+    failures,
+    ...(outcomeUnknown.length > 0 ? { outcomeUnknown } : {}),
+    sample,
+    convictionCostCovered,
+  };
+}
+
+/**
+ * One-line note for a batch's publishes whose outcome is unknown (see
+ * {@link BatchPublishResult.outcomeUnknown}); `undefined` when there are none.
+ */
+export function outcomeUnknownPublishNote(result: Pick<BatchPublishResult, 'outcomeUnknown'>): string | undefined {
+  const count = result.outcomeUnknown?.length ?? 0;
+  if (count === 0) return undefined;
+  return `${count} knowledge asset${count === 1 ? '' : 's'}: publish outcome unknown — the node may still publish ` +
+    `${count === 1 ? 'it' : 'them'}. Check the history before publishing again.`;
 }
 
 // --- Assertions (WM objects) ---
@@ -1423,8 +1458,8 @@ export async function listAssertions(
   const bindings: any[] = listData?.result?.bindings ?? [];
   const countByGraph = new Map<string, number>();
   for (const b of (countData?.result?.bindings ?? [])) {
-    const g = typeof b.g === 'string' ? b.g : b.g?.value;
-    const cntRaw = typeof b.cnt === 'string' ? b.cnt : b.cnt?.value;
+    const g = bv(b.g);
+    const cntRaw = bv(b.cnt);
     // The aggregate comes back as a typed RDF literal whose lexical form can be
     // wrapped: `"21"^^<http://www.w3.org/2001/XMLSchema#integer>`. A bare
     // `parseInt('"21"^^…')` reads the leading quote and yields NaN, which the
@@ -1962,6 +1997,7 @@ export type LocalAgentChannelTarget = 'bridge' | 'gateway';
 export interface LocalAgentHealthResponse {
   ok: boolean;
   configured?: boolean;
+  detected?: boolean;
   ready?: boolean;
   reachable?: boolean;
   offline?: boolean;
@@ -2305,8 +2341,23 @@ interface LocalLlmChatWireResponse {
   readOnly: true;
 }
 
-export const fetchLocalLlmHealth = () =>
-  get<LocalAgentHealthResponse>('/api/local-llm/health');
+interface LocalLlmHealthWireResponse extends Omit<LocalAgentHealthResponse, 'detected'> {
+  detected?: boolean;
+}
+
+function normalizeLocalLlmHealth(
+  health: LocalLlmHealthWireResponse,
+): LocalAgentHealthResponse & { detected: boolean } {
+  return {
+    ...health,
+    // v10.0.16 daemons did not expose detection separately. Their ready bit is
+    // the only positive evidence that the conventional endpoint was compatible.
+    detected: typeof health.detected === 'boolean' ? health.detected : health.ready === true,
+  };
+}
+
+export const fetchLocalLlmHealth = async () =>
+  normalizeLocalLlmHealth(await get<LocalLlmHealthWireResponse>('/api/local-llm/health'));
 
 export async function sendLocalLlmChat(
   text: string,
@@ -2517,6 +2568,9 @@ interface LocalAgentSurface {
     profile?: string;
   }) => Record<string, unknown>;
   fetchHealth?: () => Promise<LocalAgentHealthResponse>;
+  isVisible?: (args: {
+    health: LocalAgentHealthResponse | null;
+  }) => boolean;
   streamChat?: typeof streamOpenClawLocalChat;
 }
 
@@ -2527,6 +2581,13 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     defaultSessionId: () => 'local-llm:dkg-ui',
     resolveChatContext: () => ({}),
     fetchHealth: fetchLocalLlmHealth,
+    // Keep an explicitly configured endpoint visible even while unavailable.
+    // For convention-based discovery, show only a backend the daemon recognized.
+    isVisible: ({ health }) => (
+      health === null
+      || health.configured !== false
+      || health.detected === true
+    ),
     streamChat: streamLocalLlmChat,
   },
   openclaw: {
@@ -2816,13 +2877,7 @@ async function mapLocalAgentIntegrationRecord(
   const health = configured && hasChatBridge && surface?.fetchHealth
     ? normalizeLocalAgentHealth(await surface.fetchHealth().catch(() => null))
     : null;
-  // The daemon-owned integration exists in the registry on every node. Keep it
-  // out of the UI when the operator supplied no local-LLM configuration and
-  // the conventional local endpoint did not pass the LLM readiness probe.
-  // Reachability alone is insufficient: an unrelated HTTP service can occupy
-  // the default port. An explicit but temporarily offline configuration
-  // remains visible so its error is useful.
-  if (id === 'local-llm' && health?.configured === false && health.ready !== true) {
+  if (surface?.isVisible?.({ health }) === false) {
     return null;
   }
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
@@ -2928,7 +2983,7 @@ async function mapLocalAgentIntegrationRecord(
     chatAttachments,
     connectSupported,
     configured,
-    detected: configured || chatReady,
+    detected: configured || health?.detected === true || chatReady,
     persistentChat,
     chatReady,
     bridgeOnline,
@@ -3192,6 +3247,7 @@ export const fetchWalletsBalances = () =>
     symbol?: string;
     error?: string;
   }>('/api/wallets/balances');
+
 export const fetchRpcHealth = () =>
   get<{
     ok: boolean;

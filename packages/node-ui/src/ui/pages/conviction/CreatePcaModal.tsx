@@ -521,7 +521,7 @@ export function CreatePcaModal({
           </div>
           {hardwareSelected ? (
             <div className="v10-pca-owner-key-readiness">
-              <WalletConnectControl />
+              <WalletConnectControl testId="pca-wallet-connect" />
               {hardwareReadiness && (
                 <p className="v10-pca-create-warn" role="status" data-testid="pca-create-hw-readiness">
                   {hardwareReadiness}

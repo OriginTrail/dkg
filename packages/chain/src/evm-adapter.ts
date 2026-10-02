@@ -14,8 +14,8 @@
  * are unchanged externally, and the module-local helpers/types are re-exported.
  */
 
+import { applyMixins } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from './chain-adapter.js';
-import { applyMixins } from './evm-adapter-apply-mixins.js';
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { IdentityMethods } from './evm-adapter-identity.js';
 import { PublishMethods } from './evm-adapter-publish.js';
@@ -39,9 +39,12 @@ export {
   type PublisherWalletBalance,
 } from './evm-adapter-errors.js';
 export {
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
   resolveRpcUrls,
   isRetryableRpcError,
   isKnownTransactionError,
+  type RpcRetryDisposition,
 } from './evm-adapter-rpc.js';
 export {
   computeApprovalAction,

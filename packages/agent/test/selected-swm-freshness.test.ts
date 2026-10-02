@@ -57,6 +57,7 @@ describe('shared-memory freshness classification', () => {
     const finalRaw = {
       ...complete,
       failedPhases: 1,
+      localYield: true as const,
       snapshotPlaneIncomplete: 1,
     };
     const resolved = applySelectedSwmFreshnessResolution(finalRaw, {

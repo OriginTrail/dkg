@@ -25,6 +25,12 @@ export interface Rfc64CatalogWorkloadOwnerV1 {
   close(): Promise<void>;
 }
 
+/** A workload whose coalescing scheduler accepts an explicit refresh nudge. */
+export interface Rfc64CatalogRefreshableWorkloadOwnerV1
+extends Rfc64CatalogWorkloadOwnerV1 {
+  trigger(): void;
+}
+
 /** Public transport adds an early receiver-admission fence to the owner contract. */
 export interface Rfc64PublicCatalogRuntimeOwnerV1 extends Rfc64CatalogWorkloadOwnerV1 {
   closeReceiverAdmission(): Promise<void>;

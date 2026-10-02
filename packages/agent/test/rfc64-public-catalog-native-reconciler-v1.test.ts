@@ -12,6 +12,7 @@ import { buildOpenOwnerContextGraphPolicyV1 } from '../src/rfc64/open-catalog-po
 import { classifyRfc64CatalogReconciliationTerminalReasonV1 } from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
+  createRfc64VerifiedStagedCatalogHeadMemoV1,
   type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
   type Rfc64BoundedPublicRootCatalogStagedHeadV1,
 } from '../src/rfc64/public-catalog-native-reconciler-v1.js';
@@ -180,25 +181,26 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     const genesis = announcement('0');
     readAppliedCatalogHeadV1.mockReturnValue(snapshot(genesis));
 
-    await expect(reconciler.isHeadApplied(genesis)).resolves.toBe(true);
-    await expect(reconciler.isHeadApplied(announcement('0', {
+    await expect(reconciler.isHeadSatisfied(genesis)).resolves.toBe(true);
+    await expect(reconciler.isHeadSatisfied(announcement('0', {
       policyDigest: `0x${'88'.repeat(32)}` as Digest32V1,
       signatureVariantDigest: `0x${'99'.repeat(32)}` as Digest32V1,
     }))).resolves.toBe(true);
 
     const successor = announcement('1');
     readAppliedCatalogHeadV1.mockReturnValue(snapshot(successor));
-    await expect(reconciler.isHeadApplied(successor)).resolves.toBe(true);
+    await expect(reconciler.isHeadSatisfied(successor)).resolves.toBe(true);
 
     for (const mismatch of [
       { currentCatalogHeadDigest: `0x${'aa'.repeat(32)}` as Digest32V1 },
-      { catalogVersion: '2' },
       { catalogScopeDigest: `0x${'bb'.repeat(32)}` as Digest32V1 },
       { authorAddress: '0xcccccccccccccccccccccccccccccccccccccccc' as EvmAddressV1 },
     ] satisfies Array<Partial<AppliedCatalogHeadSnapshotV1>>) {
       readAppliedCatalogHeadV1.mockReturnValue(snapshot(successor, mismatch));
-      await expect(reconciler.isHeadApplied(successor)).resolves.toBe(false);
+      await expect(reconciler.isHeadSatisfied(successor)).resolves.toBe(false);
     }
+    readAppliedCatalogHeadV1.mockReturnValue(snapshot(successor, { catalogVersion: '2' }));
+    await expect(reconciler.isHeadSatisfied(successor)).resolves.toBe(true);
 
     const expectedScopeDigest = computeAuthorCatalogScopeDigestV1(
       deriveRfc64PublicOpenCatalogScopeV1(successor, ACCEPTED_POLICY),
@@ -207,6 +209,33 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     expect(() => deriveRfc64PublicOpenCatalogScopeV1(announcement('1', {
       subGraphName: 'not-root' as never,
     }), ACCEPTED_POLICY)).toThrow('accepted null-governance owner policy');
+  });
+
+  it('retires a stale announcement only when a newer same-scope head is durable', async () => {
+    const stale = announcement('7', {
+      catalogHeadObjectDigest: `0x${'17'.repeat(32)}` as Digest32V1,
+    });
+    const newer = announcement('8', {
+      catalogHeadObjectDigest: `0x${'18'.repeat(32)}` as Digest32V1,
+    });
+    const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(newer));
+    const requiresAppliedHeadPrecommit = vi.fn(() => true);
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      requiresAppliedHeadPrecommit,
+    });
+
+    await expect(reconciler.isHeadSatisfied(stale)).resolves.toBe(true);
+    expect(requiresAppliedHeadPrecommit).not.toHaveBeenCalled();
+
+    const conflicting = announcement('8', {
+      catalogHeadObjectDigest: `0x${'19'.repeat(32)}` as Digest32V1,
+    });
+    await expect(reconciler.isHeadSatisfied(conflicting)).resolves.toBe(false);
+    expect(requiresAppliedHeadPrecommit).toHaveBeenCalledWith(conflicting);
   });
 
   it('replays a durable private finalized head when current chain inventory changes', async () => {
@@ -237,17 +266,17 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     });
     const signal = new AbortController().signal;
 
-    await expect(reconciler.isHeadApplied(current)).resolves.toBe(false);
+    await expect(reconciler.isHeadSatisfied(current)).resolves.toBe(false);
     await expect(reconciler.reconcileHead('peer-a', current, signal)).resolves.toBe('applied');
 
     finalizedChainAssetCount = 2;
-    await expect(reconciler.isHeadApplied(current)).resolves.toBe(false);
+    await expect(reconciler.isHeadSatisfied(current)).resolves.toBe(false);
     const failedReplay = reconciler.reconcileHead('peer-a', current, signal);
     await expect(failedReplay).rejects.toBe(incomplete);
     expect(classifyRfc64CatalogReconciliationTerminalReasonV1(incomplete))
       .toBe('no-authorized-provider');
     expect(requiresAppliedHeadPrecommit).toHaveBeenCalledWith(current);
-    expect(readAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(readAppliedCatalogHeadV1).toHaveBeenCalledTimes(2);
     expect(synchronize).toHaveBeenCalledTimes(2);
   });
 
@@ -262,22 +291,25 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
       inventory: { readAppliedCatalogHeadV1 },
       resolveTrustedCatalogScope,
       resolveDeployment: async () => DEPLOYMENT,
-      readStagedCatalogHead,
+      stagedCatalogHeads: { read: readStagedCatalogHead },
     });
 
-    await expect(reconciler.isHeadApplied(successor)).resolves.toBe(true);
+    await expect(reconciler.isHeadSatisfied(successor)).resolves.toBe(true);
     expect(readStagedCatalogHead).toHaveBeenCalledWith(successor);
+    // A provider without a peek: the synchronous check cannot tell.
+    expect(reconciler.isHeadKnownSatisfied!(successor)).toBe(false);
+    expect(readStagedCatalogHead).toHaveBeenCalledTimes(1);
 
     readStagedCatalogHead.mockResolvedValueOnce(stagedHead(successor, '3'));
-    await expect(reconciler.isHeadApplied(successor)).resolves.toBe(false);
+    await expect(reconciler.isHeadSatisfied(successor)).resolves.toBe(false);
 
     readStagedCatalogHead.mockResolvedValueOnce(stagedHead(successor, '2', {
       signatureVariantDigest: `0x${'ab'.repeat(32)}` as Digest32V1,
     }));
-    await expect(reconciler.isHeadApplied(successor)).resolves.toBe(false);
+    await expect(reconciler.isHeadSatisfied(successor)).resolves.toBe(false);
 
     readStagedCatalogHead.mockResolvedValueOnce(null);
-    await expect(reconciler.isHeadApplied(successor)).resolves.toBe(false);
+    await expect(reconciler.isHeadSatisfied(successor)).resolves.toBe(false);
 
     const legacyOnly = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
       nativeReceiver: receiver(vi.fn()),
@@ -285,7 +317,7 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
       resolveTrustedCatalogScope,
       resolveDeployment: async () => DEPLOYMENT,
     });
-    await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(false);
+    await expect(legacyOnly.isHeadSatisfied(successor)).resolves.toBe(false);
   });
 
   it('dedupes an exact zero-row successor with and without staged-head support', async () => {
@@ -299,10 +331,10 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
       inventory: { readAppliedCatalogHeadV1 },
       resolveTrustedCatalogScope,
       resolveDeployment: async () => DEPLOYMENT,
-      readStagedCatalogHead,
+      stagedCatalogHeads: { read: readStagedCatalogHead },
     });
 
-    await expect(withStagedHead.isHeadApplied(successor)).resolves.toBe(true);
+    await expect(withStagedHead.isHeadSatisfied(successor)).resolves.toBe(true);
     expect(readStagedCatalogHead).toHaveBeenCalledWith(successor);
 
     const legacyOnly = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
@@ -311,12 +343,31 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
       resolveTrustedCatalogScope,
       resolveDeployment: async () => DEPLOYMENT,
     });
-    await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(true);
+    await expect(legacyOnly.isHeadSatisfied(successor)).resolves.toBe(true);
 
     readAppliedCatalogHeadV1.mockReturnValueOnce(snapshot(successor, {
       inventoryRowCount: '2',
     }));
-    await expect(legacyOnly.isHeadApplied(successor)).resolves.toBe(false);
+    await expect(legacyOnly.isHeadSatisfied(successor)).resolves.toBe(false);
+  });
+
+  it('rejects a staged-head provider without a reader or with a non-function peek', () => {
+    const read = vi.fn(async () => null);
+    const options = (stagedCatalogHeads: unknown) => ({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1: () => null },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      stagedCatalogHeads,
+    }) as Parameters<typeof createRfc64BoundedPublicRootCatalogNativeReconcilerV1>[0];
+    for (const invalid of [null, {}, { read: 'read' }, { read, peek: 'peek' }, { peek: read }]) {
+      expect(() => createRfc64BoundedPublicRootCatalogNativeReconcilerV1(options(invalid)))
+        .toThrow(TypeError);
+    }
+    for (const valid of [undefined, { read }, { read, peek: undefined }, { read, peek: () => null }]) {
+      expect(() => createRfc64BoundedPublicRootCatalogNativeReconcilerV1(options(valid)))
+        .not.toThrow();
+    }
   });
 
   it('maps only the explicit native not-found error and propagates all other failures', async () => {
@@ -372,5 +423,155 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
       .rejects.toBe(cancellation);
     expect(resolveDeployment).toHaveBeenCalledTimes(1);
     expect(synchronize).not.toHaveBeenCalled();
+  });
+
+  it('answers an exact applied head from a verified staged head without a second read', async () => {
+    const applied = announcement('1');
+    const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(applied, {
+      inventoryRowCount: '2',
+    }));
+    const readVerifiedStagedHead = vi.fn(async (input: Rfc64PublicCatalogHeadAnnouncementV1) => (
+      stagedHead(input, '2')
+    ));
+    const staged = createRfc64VerifiedStagedCatalogHeadMemoV1(readVerifiedStagedHead);
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      stagedCatalogHeads: staged,
+    });
+
+    // Nothing verified yet: the synchronous check cannot tell and reads nothing.
+    expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(false);
+    expect(readVerifiedStagedHead).not.toHaveBeenCalled();
+
+    await expect(reconciler.isHeadSatisfied(applied)).resolves.toBe(true);
+    expect(readVerifiedStagedHead).toHaveBeenCalledTimes(1);
+
+    for (let connect = 0; connect < 5; connect += 1) {
+      expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(true);
+      await expect(reconciler.isHeadSatisfied(applied)).resolves.toBe(true);
+    }
+    expect(readVerifiedStagedHead).toHaveBeenCalledTimes(1);
+    // The applied row is still read on every check: a head replaced or
+    // removed since is seen at once.
+    expect(readAppliedCatalogHeadV1).toHaveBeenCalledTimes(12);
+
+    readAppliedCatalogHeadV1.mockReturnValue(snapshot(applied, { inventoryRowCount: '3' }));
+    expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(false);
+    await expect(reconciler.isHeadSatisfied(applied)).resolves.toBe(false);
+    readAppliedCatalogHeadV1.mockReturnValue(null);
+    expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(false);
+    readAppliedCatalogHeadV1.mockReturnValue(snapshot(applied, {
+      inventoryRowCount: '2',
+      currentCatalogHeadDigest: `0x${'ac'.repeat(32)}` as Digest32V1,
+    }));
+    expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(false);
+    expect(readVerifiedStagedHead).toHaveBeenCalledTimes(1);
+  });
+
+  it('never proves a new, conflicting, other-variant, or precommit-bound head satisfied', async () => {
+    const applied = announcement('1');
+    const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(applied, {
+      inventoryRowCount: '2',
+    }));
+    const readVerifiedStagedHead = vi.fn(async (input: Rfc64PublicCatalogHeadAnnouncementV1) => (
+      stagedHead(input, '2')
+    ));
+    const staged = createRfc64VerifiedStagedCatalogHeadMemoV1(readVerifiedStagedHead);
+    let requiresPrecommit = false;
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(vi.fn()),
+      inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      stagedCatalogHeads: staged,
+      requiresAppliedHeadPrecommit: () => requiresPrecommit,
+    });
+    await expect(reconciler.isHeadSatisfied(applied)).resolves.toBe(true);
+    expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(true);
+
+    const newer = announcement('2', {
+      catalogHeadObjectDigest: `0x${'a2'.repeat(32)}` as Digest32V1,
+    });
+    const conflicting = announcement('1', {
+      catalogHeadObjectDigest: `0x${'a1'.repeat(32)}` as Digest32V1,
+    });
+    const otherVariant = announcement('1', {
+      signatureVariantDigest: `0x${'a3'.repeat(32)}` as Digest32V1,
+    });
+    for (const candidate of [newer, conflicting, otherVariant]) {
+      expect(reconciler.isHeadKnownSatisfied!(candidate)).toBe(false);
+    }
+    expect(readVerifiedStagedHead).toHaveBeenCalledTimes(1);
+    // The full check still reads and verifies each of them.
+    await expect(reconciler.isHeadSatisfied(newer)).resolves.toBe(false);
+    await expect(reconciler.isHeadSatisfied(conflicting)).resolves.toBe(false);
+    await expect(reconciler.isHeadSatisfied(otherVariant)).resolves.toBe(true);
+    expect(readVerifiedStagedHead.mock.calls.map(([input]) => input)).toEqual([
+      applied,
+      newer,
+      conflicting,
+      otherVariant,
+    ]);
+
+    // An older announcement is durably dominated with or without a staged head.
+    expect(reconciler.isHeadKnownSatisfied!(announcement('0', {
+      catalogHeadObjectDigest: `0x${'a0'.repeat(32)}` as Digest32V1,
+    }))).toBe(true);
+
+    requiresPrecommit = true;
+    expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(false);
+    await expect(reconciler.isHeadSatisfied(applied)).resolves.toBe(false);
+
+    requiresPrecommit = false;
+    readAppliedCatalogHeadV1.mockImplementation(() => {
+      throw new Error('inventory unavailable');
+    });
+    expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(false);
+    await expect(reconciler.isHeadSatisfied(applied)).rejects.toThrow('inventory unavailable');
+  });
+
+  it('remembers only exact verified staged heads, within its bound', async () => {
+    const first = announcement('1');
+    const second = announcement('1', {
+      catalogHeadObjectDigest: `0x${'b2'.repeat(32)}` as Digest32V1,
+    });
+    const third = announcement('1', {
+      catalogHeadObjectDigest: `0x${'b3'.repeat(32)}` as Digest32V1,
+    });
+    let result: 'head' | 'null' | 'mismatch' | 'throw' = 'null';
+    const read = vi.fn(async (input: Rfc64PublicCatalogHeadAnnouncementV1) => {
+      if (result === 'throw') throw new Error('unreadable');
+      if (result === 'null') return null;
+      return stagedHead(input, '1', result === 'mismatch'
+        ? { signatureVariantDigest: `0x${'b9'.repeat(32)}` as Digest32V1 }
+        : {});
+    });
+    const memo = createRfc64VerifiedStagedCatalogHeadMemoV1(read, 2);
+
+    await expect(memo.read(first)).resolves.toBeNull();
+    result = 'throw';
+    await expect(memo.read(first)).rejects.toThrow('unreadable');
+    result = 'mismatch';
+    await expect(memo.read(first)).resolves.toMatchObject({
+      signatureVariantDigest: `0x${'b9'.repeat(32)}`,
+    });
+    expect(memo.peek(first)).toBeNull();
+    result = 'head';
+    const remembered = await memo.read(first);
+    expect(memo.peek(first)).toBe(remembered);
+    await expect(memo.read(first)).resolves.toBe(remembered);
+    expect(read).toHaveBeenCalledTimes(4);
+
+    await memo.read(second);
+    expect(memo.peek(first)).toBe(remembered);
+    // `first` was used last, so `second` is the one the bound evicts.
+    await memo.read(third);
+    expect(memo.peek(second)).toBeNull();
+    expect(memo.peek(first)).toBe(remembered);
+    expect(memo.peek(third)).not.toBeNull();
+    expect(() => createRfc64VerifiedStagedCatalogHeadMemoV1(read, 0)).toThrow(TypeError);
   });
 });

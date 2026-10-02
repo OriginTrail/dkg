@@ -4,7 +4,7 @@
  * These tests verify the full end-to-end flows across 2+ nodes with EVMChainAdapter:
  *
  * 1. ContextGraph publish: write → replicate → collect receiver sigs → on-chain → finalization
- * 2. Context graph publish: same + collect participant sigs → publishToContextGraph
+ * 2. Legacy two-layer context graph publish (participant sigs): refused by gated receivers
  * 3. verify for already-published KCs
  * 4. Negative: insufficient receiver signatures → publish rejected
  * 5. Negative: insufficient participant signatures → context graph registration rejected
@@ -12,73 +12,22 @@
  */
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent as RealDKGAgent } from '../src/index.js';
+import {
+  bindAndSubscribePublicContextGraph,
+  createPublishProtocolAgent,
+  pollUntil,
+  sleep,
+  stageRootlessAssertion,
+  type PublishProtocolAgent,
+} from './_helpers/publish-protocol.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens, setMinimumRequiredSignatures } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
-
-type DKGAgent = RealDKGAgent;
-const DKGAgent = {
-  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
-    return RealDKGAgent.create({
-      rfc64CatalogActivation: { enabled: false },
-      ...config,
-    });
-  },
-};
 
 const CONTEXT_GRAPH = 'publish-protocol-e2e';
 const ENTITY_1 = 'urn:protocol:entity:1';
 const ENTITY_2 = 'urn:protocol:entity:2';
 const ENTITY_3 = 'urn:protocol:entity:3';
-
-function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
-
-async function stageRootlessAssertion(
-  node: DKGAgent,
-  contextGraphId: string,
-  name: string,
-  quads: Array<{ subject: string; predicate: string; object: string }>,
-) {
-  await node.assertion.create(contextGraphId, name);
-  await node.assertion.write(contextGraphId, name, quads);
-  return node.assertion.promote(contextGraphId, name);
-}
-
-async function bindAndSubscribePublicContextGraph(
-  node: DKGAgent,
-  contextGraphId: string,
-  onChainId: string,
-) {
-  // Role-aware activation intentionally fails closed until the local label is
-  // bound to a live public on-chain CG. These protocol tests isolate SWM and
-  // finalization behavior, so bind the registration deterministically instead
-  // of racing background ontology discovery before subscribing the replicas.
-  await (node as any).store.insert([{
-    subject: `did:dkg:context-graph:${contextGraphId}`,
-    predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
-    object: `"${onChainId}"`,
-    graph: 'did:dkg:context-graph:ontology',
-  }]);
-  node.subscribeToContextGraph(contextGraphId);
-}
-
-async function pollUntil(
-  queryFn: () => Promise<{ bindings: any[] }>,
-  predicate: (bindings: any[]) => boolean,
-  timeoutMs: number,
-  intervalMs = 500,
-): Promise<any[]> {
-  const deadline = Date.now() + timeoutMs;
-  let lastResult: any[] = [];
-  while (Date.now() < deadline) {
-    const result = await queryFn();
-    lastResult = result.bindings;
-    if (predicate(lastResult)) return lastResult;
-    await sleep(intervalMs);
-  }
-  return lastResult;
-}
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -100,18 +49,36 @@ afterAll(async () => {
 
 describe('E2E: ContextGraph publish with receiver signature collection', () => {
   const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  let nodeA: DKGAgent;
-  let nodeB: DKGAgent;
-  let nodeC: DKGAgent;
+  let nodeA: PublishProtocolAgent;
+  let nodeB: PublishProtocolAgent;
+  let nodeC: PublishProtocolAgent;
+  let describeSnapshot: string | undefined;
+
+  beforeAll(async () => {
+    describeSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    await setMinimumRequiredSignatures(
+      createProvider(),
+      hubAddress,
+      HARDHAT_KEYS.DEPLOYER,
+      2,
+    );
+  });
 
   afterAll(async () => {
-    try { await nodeA?.stop(); } catch {}
-    try { await nodeB?.stop(); } catch {}
-    try { await nodeC?.stop(); } catch {}
+    try {
+      try { await nodeA?.stop(); } catch {}
+      try { await nodeB?.stop(); } catch {}
+      try { await nodeC?.stop(); } catch {}
+    } finally {
+      if (describeSnapshot !== undefined) {
+        await revertSnapshot(describeSnapshot);
+      }
+    }
   });
 
   it('bootstraps 3 agents with shared chain and connects them', async () => {
-    nodeA = await DKGAgent.create({
+    nodeA = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'ProtoA',
       listenPort: 0,
@@ -119,7 +86,7 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       chainAdapter: chainA,
       nodeRole: 'core',
     });
-    nodeB = await DKGAgent.create({
+    nodeB = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'ProtoB',
       listenPort: 0,
@@ -131,7 +98,7 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       // read-both bag-semantics issue is tracked separately in #1270.
       syncOnConnectEnabled: false,
     });
-    nodeC = await DKGAgent.create({
+    nodeC = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'ProtoC',
       listenPort: 0,
@@ -192,16 +159,17 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
     /**
      * The new flow:
      * 1. A has data in workspace (already replicated to B and C)
-     * 2. A calls publishFromSharedMemory
+     * 2. A publishes the shared assertion (graph-scoped, as every default
+     *    publish path has been since 10.0.7)
      * 3. Publisher internally: prepares merkle root → requests receiver sigs from B, C
      * 4. B and C verify they have the data and sign (merkleRoot, publicByteSize)
      * 5. Publisher submits on-chain tx with collected receiver signatures
      * 6. On-chain: verifies publisher sig + minimumRequiredSignatures receiver sigs
      * 7. Finalization broadcast → B, C promote workspace → data graph
      */
-    const result = await nodeA.publishFromSharedMemory(
+    const result = await nodeA.publishFromFinalizedAssertion(
       CONTEXT_GRAPH,
-      'all',
+      'protocol-entity',
       { clearSharedMemoryAfter: true },
     );
 
@@ -253,6 +221,7 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
     const publishEvent = events[events.length - 1];
     expect(publishEvent.data.publisherAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
   }, 10_000);
+
 });
 
 // ========================================================================
@@ -267,9 +236,9 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
 
 describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-node (OT-RFC-44)', () => {
   const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  let nodeA: DKGAgent;
-  let nodeB: DKGAgent;
-  let nodeC: DKGAgent;
+  let nodeA: PublishProtocolAgent;
+  let nodeB: PublishProtocolAgent;
+  let nodeC: PublishProtocolAgent;
   const MCG = 'design-b-multi-entity-e2e';
 
   afterAll(async () => {
@@ -279,11 +248,11 @@ describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-n
   });
 
   it('bootstraps 3 agents and a context graph', async () => {
-    nodeA = await DKGAgent.create({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiA', listenPort: 0, skills: [], chainAdapter: chainA, nodeRole: 'core' });
+    nodeA = await createPublishProtocolAgent({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiA', listenPort: 0, skills: [], chainAdapter: chainA, nodeRole: 'core' });
     // Keep receiver startup catch-up out of this GossipSub/finalization canary;
     // duplicate logical rows across VM layouts are tracked separately in #1270.
-    nodeB = await DKGAgent.create({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP), nodeRole: 'core', syncOnConnectEnabled: false });
-    nodeC = await DKGAgent.create({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiC', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP), nodeRole: 'core', syncOnConnectEnabled: false });
+    nodeB = await createPublishProtocolAgent({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP), nodeRole: 'core', syncOnConnectEnabled: false });
+    nodeC = await createPublishProtocolAgent({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiC', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP), nodeRole: 'core', syncOnConnectEnabled: false });
 
     await nodeA.start();
     await nodeB.start();
@@ -326,9 +295,9 @@ describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-n
   }, 25_000);
 
   it('publishes all three entities as ONE KA with cross-node ACKs (THE CANARY)', async () => {
-    const result = await nodeA.publishFromSharedMemory(
+    const result = await nodeA.publishFromFinalizedAssertion(
       MCG,
-      'all',
+      'multi-entity-file',
       { clearSharedMemoryAfter: true },
     );
 
@@ -374,8 +343,8 @@ describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-n
 
 describe('E2E: Context graph publish with receiver + participant signatures', () => {
   const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  let nodeA: DKGAgent;
-  let nodeB: DKGAgent;
+  let nodeA: PublishProtocolAgent;
+  let nodeB: PublishProtocolAgent;
   let contextGraphId: string;
 
   afterAll(async () => {
@@ -385,7 +354,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
 
   it('bootstraps 2 agents, connects, creates context graph', async () => {
     const ctx = getSharedContext();
-    nodeA = await DKGAgent.create({
+    nodeA = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'CtxProtoA',
       listenPort: 0,
@@ -393,7 +362,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
       chainAdapter: chainA,
       nodeRole: 'core',
     });
-    nodeB = await DKGAgent.create({
+    nodeB = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'CtxProtoB',
       listenPort: 0,
@@ -425,22 +394,18 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     await sleep(1500);
   }, 20_000);
 
-  it('A writes to workspace, enshrines to context graph with both sig layers', async () => {
+  it('a gated receiver refuses the legacy two-layer context-graph publish', async () => {
+    // The sub-context-graph publish with participant signatures exists only on
+    // the legacy (not graph-scoped) path. A 10.0.19 Core cannot keep a copy of
+    // such a publish that it could promote to VM, so it declines the ACK with
+    // CORE_VM_PROMOTION_DISABLED and nothing is published.
     const ctx = getSharedContext();
     await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'context-protocol-entity', [
       { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Context Protocol Entity"' },
     ]);
     await sleep(5000);
 
-    /**
-     * The context graph publish flow:
-     * 1. Prepare data + compute merkle root
-     * 2. Collect receiver signatures from core nodes (B) — they sign (merkleRoot, publicByteSize)
-     * 3. Collect participant signatures — they sign (contextGraphId, merkleRoot)
-     * 4. Submit atomic publishToContextGraph on-chain with both sets of signatures
-     * 5. Broadcast finalization to peers
-     */
-    const result = await nodeA.publishFromSharedMemory(
+    const outcome = await nodeA.publishFromSharedMemory(
       CONTEXT_GRAPH,
       'all',
       {
@@ -452,31 +417,21 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
           vs: new Uint8Array(32),
         }],
       },
+    ).then(
+      (result) => ({ status: result.status, error: '' }),
+      (err: unknown) => ({ status: 'rejected', error: err instanceof Error ? err.message : String(err) }),
     );
 
-    expect(result.status).toBe('confirmed');
-    expect(result.ual).toBeDefined();
-
-    // A has data in context graph data graph
+    expect(outcome.status).not.toBe('confirmed');
+    expect(outcome.error).toContain('CORE_VM_PROMOTION_DISABLED');
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
-    const aData = await nodeA.query(
-      `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_2}> <http://schema.org/name> ?name } }`,
-    );
-    expect(aData.bindings.length).toBe(1);
-  }, 40_000);
-
-  it('B receives finalization and promotes to context graph', async () => {
-    const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
-
-    const bBindings = await pollUntil(
-      () => nodeB.query(
+    for (const node of [nodeA, nodeB]) {
+      const data = await node.query(
         `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_2}> <http://schema.org/name> ?name } }`,
-      ),
-      (b) => b.length > 0,
-      20_000,
-    );
-    expect(bBindings.length).toBe(1);
-  }, 30_000);
+      );
+      expect(data.bindings.length).toBe(0);
+    }
+  }, 40_000);
 
   it('context graph data is NOT in contextGraph data graph', async () => {
     const aContextGraphData = await nodeA.query(
@@ -492,14 +447,14 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
 // ========================================================================
 
 describe('E2E: Publish KC directly to context graph', () => {
-  let nodeA: DKGAgent;
+  let nodeA: PublishProtocolAgent;
 
   afterAll(async () => {
     try { await nodeA?.stop(); } catch {}
   });
 
-  it('publishes KC via publishDirect from a lone core: no peer ACKs → tentative (RC11 / PR1)', async () => {
-    nodeA = await DKGAgent.create({
+  it('declines legacy direct publish from a lone core through its local ACK handler', async () => {
+    nodeA = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'DirectCGA',
       listenPort: 0,
@@ -521,21 +476,11 @@ describe('E2E: Publish KC directly to context graph', () => {
     ]);
     await sleep(2000);
 
-    // RC11 / PR1 (review fix): the publisher's self-signed ACK fallback
-    // is gone. `DKGAgent.publishFromSharedMemory()` unconditionally wires
-    // `createV10ACKProvider()` on a V10-ready Hardhat chain, and that
-    // provider routes through `ACKCollector.collect()` which throws
-    // verbatim on "no connected core peers". The publisher's catch at
-    // `dkg-publisher.ts:1989-1994` rethrows verbatim (RC11 / PR1+PR3),
-    // so the publish REJECTS — it does not silently downgrade to
-    // `tentative`. Pre-PR1 the publisher synthesised a `peerId: 'self'`
-    // ACK that the contract would reject anyway on any network with
-    // `minimumRequiredSignatures >= 2`; the new behaviour fails loudly
-    // in the daemon log instead. The replicate-then-publish on-chain
-    // path is covered by the multi-node §1 / §2 tests above.
+    // The publishing core now requests its own ACK. Legacy non-graph-scoped
+    // data cannot be promoted to VM, so the local handler declines explicitly.
     await expect(
       nodeA.publishFromSharedMemory(CONTEXT_GRAPH, 'all'),
-    ).rejects.toThrow(/ACK collection failed: no connected core peers/);
+    ).rejects.toThrow(/CORE_VM_PROMOTION_DISABLED/);
   }, 20_000);
 });
 
@@ -544,7 +489,7 @@ describe('E2E: Publish KC directly to context graph', () => {
 // ========================================================================
 
 describe('E2E: Publish rejected with insufficient receiver signatures', () => {
-  let nodeA: DKGAgent;
+  let nodeA: PublishProtocolAgent;
   let _describeSnapshot: string;
 
   beforeAll(async () => {
@@ -562,7 +507,7 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
   it('publish fails gracefully when no peers provide receiver sigs', async () => {
     // Single node, no peers to collect receiver signatures from
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    nodeA = await DKGAgent.create({
+    nodeA = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'LonelyA',
       listenPort: 0,
@@ -582,22 +527,13 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Lonely Data"' },
     ]);
 
-    /**
-     * RC11 / PR1 (review fix): with `minimumRequiredSignatures=2`
-     * on-chain AND the lone publisher having no peer cores, the ACK
-     * collector throws "no connected core peers" before the on-chain
-     * submit branch is even reached. The publisher rethrows verbatim
-     * (no self-signed-ACK fallback in PR1+PR3), so the call REJECTS.
-     * Pre-PR1 the publisher synthesised a single self-signed ACK that
-     * the chain rejected as 1<2; the new behaviour fails earlier and
-     * the operator sees the real cause in the daemon log.
-     */
+    // Self is a candidate, but one core cannot satisfy a two-ACK quorum.
     await expect(
       nodeA.publishFromSharedMemory(
         CONTEXT_GRAPH,
         'all',
       ),
-    ).rejects.toThrow(/ACK collection failed: no connected core peers/);
+    ).rejects.toThrow(/need 2 ACKs but only 1 core peers connected/);
   }, 20_000);
 });
 
@@ -606,15 +542,15 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
 // ========================================================================
 
 describe('E2E: Context graph registration rejected with insufficient participant sigs', () => {
-  let nodeA: DKGAgent;
+  let nodeA: PublishProtocolAgent;
 
   afterAll(async () => {
     try { await nodeA?.stop(); } catch {}
   });
 
-  it('context graph publish from a lone core: no peer ACKs → tentative (RC11 / PR1)', async () => {
+  it('declines legacy context graph publish from a lone core through its local ACK handler', async () => {
     const ctx = getSharedContext();
-    nodeA = await DKGAgent.create({
+    nodeA = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'ParticipantA',
       listenPort: 0,
@@ -638,24 +574,15 @@ describe('E2E: Context graph registration rejected with insufficient participant
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Needs Sigs"' },
     ]);
 
-    // RC11 / PR1 (review fix): V10 + LU-2 still enforces the *global*
-    // `minimumRequiredSignatures`, but the publisher no longer
-    // synthesises a self-signed ACK when peer collection yields
-    // nothing. A lone core with no other peers in its mesh therefore
-    // hits `ACKCollector.collect` with `corePeers.length === 0`, which
-    // throws "no connected core peers". The publisher rethrows
-    // verbatim and `publishFromSharedMemory` REJECTS — there is no
-    // silent tentative-downgrade. Pre-PR1 this test asserted
-    // `confirmed` because the (now-deleted) self-signed ACK satisfied
-    // the 1-of-1 quorum on the harness; that path is gone. The
-    // multi-peer happy path is covered by §1 / §2 above.
+    // The local core participates in ACK collection and declines this legacy
+    // non-graph-scoped payload because it cannot promote a copy to VM.
     await expect(
       nodeA.publishFromSharedMemory(
         CONTEXT_GRAPH,
         'all',
         { subContextGraphId: contextGraphId },
       ),
-    ).rejects.toThrow(/ACK collection failed: no connected core peers/);
+    ).rejects.toThrow(/CORE_VM_PROMOTION_DISABLED/);
   }, 20_000);
 });
 
@@ -665,8 +592,8 @@ describe('E2E: Context graph registration rejected with insufficient participant
 
 describe('E2E: Edge node participates in context graph governance', () => {
   const chainCore = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  let coreNode: DKGAgent;
-  let edgeNode: DKGAgent;
+  let coreNode: PublishProtocolAgent;
+  let edgeNode: PublishProtocolAgent;
   let contextGraphId: string;
 
   afterAll(async () => {
@@ -676,7 +603,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
 
   it('edge node (identity, no stake) can sign as context graph participant', async () => {
     const ctx = getSharedContext();
-    coreNode = await DKGAgent.create({
+    coreNode = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'CoreNode',
       listenPort: 0,
@@ -690,7 +617,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
      * but not in the sharding table (no minimum stake).
      * Can participate in context graph governance.
      */
-    edgeNode = await DKGAgent.create({
+    edgeNode = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'EdgeNode',
       listenPort: 0,

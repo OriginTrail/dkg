@@ -26,8 +26,10 @@ import {
 import {
   computeFlatKCRootV10,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
-  resolveKnowledgeAssetOperationPublicQuads,
+  KnowledgeAssetOperationPublicSnapshotNotFoundError,
+  resolveKnowledgeAssetWorkspaceHeadPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
+  workspaceHeadIncludesShareOperationId,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -37,6 +39,10 @@ import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
 import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
   '../durable-author-seal-resolver-v1.js';
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './abort-v1.js';
+import {
+  CatalogRepairIntegrityErrorV1,
+  observeCatalogRepairStageV1,
+} from './catalog-repair-diagnostics-v1.js';
 
 export interface Rfc64DurableCatalogAssetIdentityV1 {
   readonly assertionCoordinate: SwmAuthorInventoryRowV1['assertionCoordinate'];
@@ -129,19 +135,21 @@ async function resolveDurableCatalogAssetV1(
   const laneKind = resolution.kind === 'inventory-row'
     ? resolution.laneKind
     : 'private';
-  const { graphManager, seal } = await resolveStrictSealV1(params, identity);
-  const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
+  const { graphManager, seal } = await observeCatalogRepairStageV1(
+    'seal', () => resolveStrictSealV1(params, identity),
+  );
+  const head = await observeCatalogRepairStageV1('workspace_head', () => resolvePublishedKnowledgeAssetWorkspaceHead({
     store: params.store,
     graphManager,
     contextGraphId: params.contextGraphId,
     kaUal: identity.kaUal,
-  });
+  }));
   throwIfAbortedV1(params.signal);
 
   const inventoryRowDiffers = resolution.kind === 'inventory-row'
     && head !== undefined
     && (
-      head.shareOperationId !== resolution.row.shareOperationId
+      !workspaceHeadIncludesShareOperationId(head, resolution.row.shareOperationId)
       || head.publicTripleCount !== Number(resolution.row.publicTripleCount)
       || head.privateTripleCount !== Number(resolution.row.privateTripleCount)
     );
@@ -149,49 +157,66 @@ async function resolveDurableCatalogAssetV1(
     && head.assertionVersion === identity.assertionVersion
     && head.publicTripleCount === Number(seal.publicTripleCount)
     && head.privateTripleCount === Number(seal.privateTripleCount)
-    && laneAcceptsWorkspaceHeadV1(laneKind, head.accessPolicy)
+    && laneAcceptsWorkspaceHeadV1(laneKind, head.access.accessPolicy)
     && !inventoryRowDiffers;
+  const resolveVerifiedVmProjection = () => resolveFinalizedVmProjectionQuadsV1(
+    params,
+    identity,
+    seal,
+    resolution.kind === 'inventory-row'
+      ? 'agent.rfc64.swmInventory.catalogReconcile.vmProjection'
+      : 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection',
+  );
   let projectionQuads: readonly Quad[];
   if (workspaceHeadMatches) {
-    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
-      store: params.store,
-      graphManager,
-      contextGraphId: params.contextGraphId,
-      shareOperationId: head.shareOperationId,
-      kaUal: identity.kaUal,
-      assertionVersion: identity.assertionVersion,
-      publicSnapshotStore: params.publicSnapshotStore,
+    projectionQuads = await observeCatalogRepairStageV1('public_snapshot', async () => {
+      try {
+        const snapshot = await resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+          store: params.store,
+          graphManager,
+          contextGraphId: params.contextGraphId,
+          head,
+          ...(params.publicSnapshotStore === undefined
+            ? {}
+            : { publicSnapshotStore: params.publicSnapshotStore }),
+        });
+        throwIfAbortedV1(params.signal);
+        return snapshot.quads;
+      } catch (error) {
+        if (
+          resolution.kind !== 'confirmed-vm-repair'
+          || !(error instanceof KnowledgeAssetOperationPublicSnapshotNotFoundError)
+        ) throw error;
+        // Confirmed repair is independently anchored by the durable metadata
+        // envelope and author seal, so an unusable equivalent SWM locator may
+        // safely fall back to the exact verified VM projection.
+        return resolveVerifiedVmProjection();
+      }
     });
-    throwIfAbortedV1(params.signal);
-    projectionQuads = snapshot.quads;
   } else {
     // A finalized private lift may replace or retire its SWM workspace head
     // before the detached inventory/catalog observer runs. Only this private
     // lane may fall back, and the confirmed metadata envelope plus the strict
     // author seal still have to prove the exact VM projection.
     if (laneKind !== 'private') {
-      throw new Error(`durable RFC-64 workspace head differs for ${identity.kaUal}`);
+      throw new CatalogRepairIntegrityErrorV1(`durable RFC-64 workspace head differs for ${identity.kaUal}`);
     }
-    projectionQuads = await resolveFinalizedVmProjectionQuadsV1(
-      params,
-      identity,
-      seal,
-      resolution.kind === 'inventory-row'
-        ? 'agent.rfc64.swmInventory.catalogReconcile.vmProjection'
-        : 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection',
-    );
+    projectionQuads = await resolveVerifiedVmProjection();
   }
 
-  assertProjectionMatchesSealV1(projectionQuads, seal, identity.kaUal);
-  const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(projectionQuads);
-  if (
-    resolution.kind === 'inventory-row'
-    && computeKaProjectionDigestV1(projectionBytes) !== resolution.row.projectionDigest
-  ) {
-    throw new Error(
-      `durable RFC-64 projection differs from signed inventory row ${identity.kaUal}`,
-    );
-  }
+  const projectionBytes = await observeCatalogRepairStageV1('projection_validation', async () => {
+    assertProjectionMatchesSealV1(projectionQuads, seal, identity.kaUal);
+    const bytes = encodeCanonicalCgSharedPublicRootProjectionV1(projectionQuads);
+    if (
+      resolution.kind === 'inventory-row'
+      && computeKaProjectionDigestV1(bytes) !== resolution.row.projectionDigest
+    ) {
+      throw new CatalogRepairIntegrityErrorV1(
+        `durable RFC-64 projection differs from signed inventory row ${identity.kaUal}`,
+      );
+    }
+    return bytes;
+  });
   return catalogAssetV1(identity.assertionCoordinate, projectionBytes, seal);
 }
 
@@ -206,10 +231,10 @@ async function resolveFinalizedVmProjectionQuadsV1(
     MemoryLayer.VerifiableMemory,
     createGraphKnowledgeAssetScope(identity.kaUal, identity.assertionVersion),
   );
-  const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(params.store, {
+  const stored = await observeCatalogRepairStageV1('vm_metadata', () => readConfirmedGraphKnowledgeAssetMetadataEnvelope(params.store, {
     contextGraphId: params.contextGraphId,
     ual: identity.kaUal,
-  });
+  }));
   throwIfAbortedV1(params.signal);
   const expectedPrivateMerkleRoot = seal.privateMerkleRoot === null
     ? undefined
@@ -229,21 +254,24 @@ async function resolveFinalizedVmProjectionQuadsV1(
     || stored.envelope.assertionGraph !== vmGraph
     || stored.envelope.subGraphName !== undefined
   ) {
-    throw new Error(`durable finalized VM projection differs for ${identity.kaUal}`);
+    throw new CatalogRepairIntegrityErrorV1(`durable finalized VM projection differs for ${identity.kaUal}`);
   }
-  let quads: Quad[];
-  try {
-    quads = await readExactGraphPaged(params.store, vmGraph, {
-      expectedQuadCount: Number(seal.publicTripleCount),
-      outputGraph: '',
-      queryOptions: { source, signal: params.signal },
-    });
-  } catch (error) {
-    if (error instanceof ExactGraphReadError && error.kind === 'integrity') {
-      throw new Error(`durable finalized VM projection differs for ${identity.kaUal}`);
+  const quads = await observeCatalogRepairStageV1('vm_projection', async () => {
+    try {
+      return await readExactGraphPaged(params.store, vmGraph, {
+        expectedQuadCount: Number(seal.publicTripleCount),
+        outputGraph: '',
+        queryOptions: { source, signal: params.signal },
+      });
+    } catch (error) {
+      if (error instanceof ExactGraphReadError && error.kind === 'integrity') {
+        throw new CatalogRepairIntegrityErrorV1(
+          `durable finalized VM projection differs for ${identity.kaUal}`, { cause: error },
+        );
+      }
+      throw error;
     }
-    throw error;
-  }
+  });
   throwIfAbortedV1(params.signal);
   return quads;
 }
@@ -262,14 +290,14 @@ async function resolveStrictSealV1(
     signal: params.signal,
   });
   if (candidate === undefined) {
-    throw new Error(`durable RFC-64 catalog asset ${identity.kaUal} has no strict author seal`);
+    throw new CatalogRepairIntegrityErrorV1(`durable RFC-64 catalog asset ${identity.kaUal} has no strict author seal`);
   }
   if (
     candidate.coordinate.scope !== params.contextGraphId
     || candidate.coordinate.agentAddress.toLowerCase() !== params.authorAddress
     || candidate.coordinate.name !== identity.assertionCoordinate
   ) {
-    throw new Error(
+    throw new CatalogRepairIntegrityErrorV1(
       `durable RFC-64 catalog asset ${identity.kaUal} has a different seal coordinate`,
     );
   }
@@ -279,7 +307,7 @@ async function resolveStrictSealV1(
     || seal.kaUal !== identity.kaUal
     || computeCanonicalGraphScopedAuthorSealDigestV1(seal) !== identity.sealDigest
   ) {
-    throw new Error(`durable RFC-64 catalog asset ${identity.kaUal} has a different author seal`);
+    throw new CatalogRepairIntegrityErrorV1(`durable RFC-64 catalog asset ${identity.kaUal} has a different author seal`);
   }
   return Object.freeze({ graphManager: new GraphManager(params.store), seal });
 }
@@ -307,14 +335,14 @@ function assertProjectionMatchesSealV1(
   kaUal: string,
 ): void {
   if (quads.length !== Number(seal.publicTripleCount)) {
-    throw new Error(`durable finalized VM projection differs for ${kaUal}`);
+    throw new CatalogRepairIntegrityErrorV1(`durable finalized VM projection differs for ${kaUal}`);
   }
   const privateRoots = seal.privateMerkleRoot === null
     ? []
     : [ethers.getBytes(seal.privateMerkleRoot)];
   const actualRoot = ethers.hexlify(computeFlatKCRootV10([...quads], privateRoots)).toLowerCase();
   if (actualRoot !== seal.assertionMerkleRoot) {
-    throw new Error(`durable finalized VM projection differs for ${kaUal}`);
+    throw new CatalogRepairIntegrityErrorV1(`durable finalized VM projection differs for ${kaUal}`);
   }
 }
 

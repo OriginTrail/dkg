@@ -1,6 +1,10 @@
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  activeRpcRequestContext,
+  withRpcRequestContext,
+} from '../src/rpc-request-transport.js';
+import {
   callsForMethod,
   deferred,
   fixture,
@@ -30,6 +34,71 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     await expect(survivor).resolves.toBe(1n);
     expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(2);
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(2);
+  });
+
+  it('cancels the physical chain lookup when its final waiter leaves', async () => {
+    const { adapter, readContractWithOptions } = fixture([NAME_HASH]);
+    let blockFirstHighWater = true;
+    let physicalSignal: AbortSignal | undefined;
+    readContractWithOptions.mockImplementation(async (
+      _contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (method === 'getLatestContextGraphId' && blockFirstHighWater) {
+        blockFirstHighWater = false;
+        physicalSignal = activeRpcRequestContext().signal;
+        return new Promise<never>((_resolve, reject) => {
+          const rejectOnAbort = () => reject(physicalSignal?.reason);
+          physicalSignal?.addEventListener('abort', rejectOnAbort, { once: true });
+          if (physicalSignal?.aborted) rejectOnAbort();
+        });
+      }
+      return method === 'getLatestContextGraphId' ? 1n : NAME_HASH;
+    });
+    const controller = new AbortController();
+    const abandoned = adapter.resolveContextGraphIdByNameHash(NAME_HASH, {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(physicalSignal).toBeDefined());
+
+    controller.abort(new Error('caller deadline'));
+    await expect(abandoned).rejects.toThrow('caller deadline');
+    expect(physicalSignal?.aborted).toBe(true);
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(1n);
+  });
+
+  it('does not make a foreground lookup join same-hash background admission', async () => {
+    const { adapter, readContractWithOptions } = fixture([NAME_HASH]);
+    const backgroundRelease = deferred<void>();
+    readContractWithOptions.mockImplementation(async (
+      _contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (
+        method === 'getLatestContextGraphId'
+        && activeRpcRequestContext().requestClass === 'background'
+      ) {
+        await backgroundRelease.promise;
+      }
+      return method === 'getLatestContextGraphId' ? 1n : NAME_HASH;
+    });
+
+    const background = withRpcRequestContext(
+      { requestClass: 'background' },
+      () => adapter.resolveContextGraphIdByNameHash(NAME_HASH),
+    );
+    await vi.waitFor(() => {
+      expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId'))
+        .toHaveLength(1);
+    });
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(1n);
+    backgroundRelease.resolve(undefined);
+    await expect(background).resolves.toBe(1n);
+    expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(4);
   });
 
   it('reuses an unchanged high-water snapshot across different hashes', async () => {
@@ -162,7 +231,9 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     await vi.waitFor(() => {
       expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(2);
     });
-    expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(1);
+    // Each caller obtains its initial admission/high-water snapshot before it
+    // joins the serialized state lane. Only the range scan itself is shared.
+    expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(2);
     release.resolve(undefined);
 
     await expect(first).resolves.toBe(1n);
@@ -228,10 +299,13 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     const survivor = adapter.resolveContextGraphIdByNameHash(OTHER_HASH);
     release.resolve(undefined);
     await expect(survivor).resolves.toBe(2n);
-    expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(4);
+    // The abandoned lookup cannot publish its partial slot state. Its two
+    // already-started reads retire, then the survivor performs a clean scan
+    // and exact candidate verification.
+    expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(5);
   });
 
-  it('discards a refresh invalidated while its slot reads are in flight', async () => {
+  it('discards and retries a refresh invalidated while its slot reads are in flight', async () => {
     const { adapter, readContractWithOptions } = fixture([NAME_HASH]);
     const firstRead = deferred<string>();
     let blockFirst = true;
@@ -252,9 +326,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     adapter.invalidatePublishPreflightCache();
     blockFirst = false;
     firstRead.resolve(NAME_HASH);
-    await expect(invalidated).rejects.toThrow(/binding changed during current-slot refresh/i);
-
-    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(1n);
+    await expect(invalidated).resolves.toBe(1n);
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(3);
   });
 
@@ -277,7 +349,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     });
 
     await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /binding changed during current-slot resolution/i,
+      /ambiguous.*2 numeric ids/i,
     );
   });
 
@@ -303,6 +375,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
       await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
       await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
       expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(1);
+      expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(2);
 
       vi.setSystemTime(30_001);
       hashes.set(2n, NAME_HASH);

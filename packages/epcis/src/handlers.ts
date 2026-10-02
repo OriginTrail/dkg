@@ -1,5 +1,7 @@
+import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
-import { buildEpcisQuery } from './query-builder.js';
+import { prepareCaptureContentRdf } from './capture-rdf.js';
+import { buildEpcisQuery, EpcisQueryInputError } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
@@ -63,7 +65,6 @@ export interface EventsQueryResult {
 const DEFAULT_PER_PAGE = 30;
 const MAX_PER_PAGE = 1000;
 
-const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
 
 /**
  * Strip N-Quads literal wrapping from a SPARQL binding value.
@@ -107,11 +108,7 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
 
   // Strip eventType URI prefix to short name
   const rawType = unwrapLiteral(binding['eventType'] ?? '');
-  if (rawType.startsWith(EPCIS_TYPE_PREFIX)) {
-    event.type = rawType.slice(EPCIS_TYPE_PREFIX.length);
-  } else if (rawType) {
-    event.type = rawType;
-  }
+  if (rawType) event.type = compactEpcisEventType(rawType);
 
   // Simple string fields — unwrap N-Quads literal quoting, include only when non-empty
   const eventTime = unwrapLiteral(binding['eventTime']);
@@ -194,10 +191,13 @@ export async function handleEventsQuery(
   // selection is per-request (route-level), not derivable from the
   // SPARQL query string, so it lives on the config rather than in
   // `params`.
-  const sparql = buildEpcisQuery(
-    { ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset },
-    config.contextGraphId,
-  );
+  let sparql: string;
+  try {
+    sparql = buildEpcisQuery({ ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset }, config.contextGraphId);
+  } catch (error) {
+    if (error instanceof EpcisQueryInputError) throw new EpcisQueryError(error.message, 400);
+    throw error;
+  }
   // The engine's scope guard rejects any explicit GRAPH IRI outside the
   // allow-set it derives from the query options, so the options MUST match
   // exactly the graphs `buildEpcisQuery` references for this route:
@@ -260,6 +260,27 @@ export async function handleEventsQuery(
 
 const validator = createValidator();
 
+// The selected document is schema-validated before publication. A secondary
+// private slot may contain a partial JSON-LD document, so slot contents remain
+// unknown at this boundary; only these two named visibility slots are handled.
+interface CaptureContent {
+  public?: unknown;
+  private?: unknown;
+}
+
+interface ResolvedCaptureContent {
+  document: unknown;
+  content: CaptureContent;
+}
+
+async function normalizeCaptureContent(content: CaptureContent): Promise<CaptureContent> {
+  try {
+    return await prepareCaptureContentRdf(content);
+  } catch (error) {
+    throw new EpcisValidationError([error instanceof Error ? error.message : String(error)]);
+  }
+}
+
 export async function handleCaptureAsync(
   request: CaptureRequest,
   config: AsyncCaptureConfig,
@@ -281,7 +302,7 @@ export async function handleCaptureAsync(
       }
     : undefined;
 
-  const result = await config.publisher.publishAsync(effectiveContextGraphId, content, opts);
+  const result = await config.publisher.publishAsync(effectiveContextGraphId, await normalizeCaptureContent(content), opts);
 
   return {
     captureID: result.captureID,
@@ -291,7 +312,7 @@ export async function handleCaptureAsync(
   };
 }
 
-function resolveCaptureContent(epcisDocument: unknown): { document: unknown; content: unknown } {
+function resolveCaptureContent(epcisDocument: unknown): ResolvedCaptureContent {
   if (!epcisDocument || typeof epcisDocument !== 'object' || Array.isArray(epcisDocument)) {
     return { document: epcisDocument, content: { private: epcisDocument } };
   }
@@ -313,7 +334,7 @@ function resolveCaptureContent(epcisDocument: unknown): { document: unknown; con
     throw new EpcisValidationError(['Privacy envelope requires a public or private EPCIS document']);
   }
 
-  const content: Record<string, unknown> = {};
+  const content: CaptureContent = {};
   if (hasPublic) {
     content.public = publicDoc;
   }

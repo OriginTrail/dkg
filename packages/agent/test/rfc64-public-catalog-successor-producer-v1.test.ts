@@ -25,6 +25,17 @@ import {
   snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
 } from '../src/rfc64/public-catalog-successor-asset-v1.js';
 import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from '../src/rfc64/public-catalog-native-transport-v1.js';
+import { verifyAuthorCatalogBucketRowAuthorshipsV1 } from '../src/rfc64/catalog-row-authorship.js';
+
+// Counted pass-through: the producer closes its produced bucket once, however
+// many rows it holds (#2812).
+vi.mock('../src/rfc64/catalog-row-authorship.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/rfc64/catalog-row-authorship.js')>();
+  return {
+    ...actual,
+    verifyAuthorCatalogBucketRowAuthorshipsV1: vi.fn(actual.verifyAuthorCatalogBucketRowAuthorshipsV1),
+  };
+});
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
 const ATTACKER_WALLET = new ethers.Wallet(`0x${'77'.repeat(32)}`);
@@ -196,6 +207,7 @@ describe('RFC-64 public/open one-row successor producer', () => {
       seal: secondSeal,
     };
 
+    vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mockClear();
     const unordered = await producer.produceAndStageExactSet({
       ...common,
       assets: [secondAsset, firstAsset],
@@ -204,6 +216,10 @@ describe('RFC-64 public/open one-row successor producer', () => {
       ...common,
       assets: [firstAsset, secondAsset],
     });
+    // One closure of the two-row bucket per successor, not one per row.
+    expect(vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mock.calls.map(([input]) => (
+      input.catalogBucket.payload.rows.length
+    ))).toEqual([2, 2]);
 
     expect(unordered.publication.head.payload).toMatchObject({
       totalRows: '2',

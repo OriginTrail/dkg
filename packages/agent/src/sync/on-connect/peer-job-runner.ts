@@ -40,13 +40,17 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   private pendingInitialProbe: Readonly<{ value: Probe }> | null;
   private ordinaryFailedWithoutAccounting = false;
   private terminalState: 'active' | 'cancelled' | 'finished' = 'active';
+  private readonly cancelForLifetime = () => this.cancel();
 
   constructor(
     private readonly dependencies: ReconciledSyncOnConnectPeerJobDependencies<
       SelectedPlan,
       Probe
     >,
-    options: Readonly<{ initialProbe?: Probe }> = {},
+    private readonly options: Readonly<{
+      signal: AbortSignal;
+      initialProbe?: Probe;
+    }>,
   ) {
     // A job is one explicit phase plan: optional automatic selected work,
     // followed by invariant ordinary work. An explicitly queued selected lane
@@ -55,6 +59,8 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     this.pendingInitialProbe = options.initialProbe === undefined
       ? null
       : { value: options.initialProbe };
+    if (options.signal.aborted) this.cancel();
+    else options.signal.addEventListener('abort', this.cancelForLifetime, { once: true });
   }
 
   async runSelected(recoveryPlan?: SelectedPlan): Promise<SyncReconcilerAttemptOutcome> {
@@ -97,6 +103,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   }
 
   cancel(): void {
+    this.options.signal.removeEventListener('abort', this.cancelForLifetime);
     if (this.terminalState !== 'active') return;
     this.terminalState = 'cancelled';
     this.automaticSelectedPhase = null;
@@ -105,6 +112,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   }
 
   finish(): void {
+    this.options.signal.removeEventListener('abort', this.cancelForLifetime);
     if (this.terminalState !== 'active') return;
     this.terminalState = 'finished';
     let entries: readonly SyncOnConnectPeerAccountingEntry<Probe>[] =
@@ -180,6 +188,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     lane: SyncOnConnectPeerAccountingEntry<Probe>['lane'],
     attempt: SyncAttempt,
   ): Promise<SyncReconcilerAttemptOutcome> {
+    if (this.terminalState !== 'active') return 'not-started';
     const probe = await this.acquirePhaseProbe();
     if (probe === null || this.terminalState !== 'active') return 'not-started';
     const entriesBeforeAttempt = this.accountingEntries.length;
@@ -200,7 +209,9 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
             this.accountingEntries.push({ lane, outcome, probe });
           }
         },
-        onBackpressure: this.dependencies.logBackpressure,
+        onBackpressure: (detail) => {
+          if (this.terminalState === 'active') this.dependencies.logBackpressure(detail);
+        },
       });
     } catch (error: unknown) {
       if (

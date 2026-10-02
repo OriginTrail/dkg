@@ -34,13 +34,13 @@ import {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
   PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
-  createKnowledgeAssetVmPublishSnapshotMetadata,
-  createKnowledgeAssetVmPublishSnapshotRequest,
-  resolveLiftWorkspaceSlice,
   storeKnowledgeAssetOperationPublicQuads,
-  validateLiftPublishPayload,
+  type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager, createTripleStore, StoreOperationTimeoutError, StoreSchedulerBusyError,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
@@ -89,6 +89,31 @@ async function seedRootlessPublicSnapshot(
     kaUal,
     kaNumber: kaNumber.toString(),
     publicTripleCount: quads.length,
+  };
+}
+
+function rootlessIntent(snapshot: {
+  shareOperationId: string; kaUal: string; kaNumber: string; publicTripleCount: number;
+}): KnowledgeAssetVmPublishRequest {
+  return {
+    ...snapshot,
+    contextGraphId: CG_ID,
+    name: ASSERTION_NAME,
+    roots: [],
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    assertionVersion: '1',
+    privateTripleCount: 0,
+    seal: {
+      merkleRoot: `0x${'12'.repeat(32)}`,
+      authorAddress: ROOTLESS_AUTHOR,
+      signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+      schemeVersion: 1,
+    },
+    sealChainId: '31337',
+    sealKav10Address: '0x2222222222222222222222222222222222222222',
+    sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+    sealMerkleRoot: `0x${'12'.repeat(32)}`,
+    intentKey: `sha256:${'ab'.repeat(32)}`,
   };
 }
 
@@ -213,7 +238,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       body: JSON.stringify(body),
     });
     const json = await res.json().catch(() => null);
-    return { status: res.status, body: json };
+    return { status: res.status, body: json, headers: res.headers };
   }
 
   async function postRoot(body: Record<string, unknown>) {
@@ -461,7 +486,84 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
+    expect(res.body.jobCreated).toBe(false);
     expect(enqueueCalls).toBe(0);
+  });
+
+  it.each([
+    ['queue full', () => new StoreSchedulerBusyError('queue_full', 'normal', 'query'), 'not_started'],
+    ['queue wait', () => new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'query'), 'not_started'],
+    ['structural busy', () => ({ ...new StoreSchedulerBusyError('queue_full', 'normal', 'query') }), 'not_started'],
+    ['managed recovery', () => new StoreOperationTimeoutError({
+      backend: 'oxigraph-server', operation: 'query', outcome: 'not_started',
+      message: 'Store recovery in progress; query must be retried',
+    }), 'not_started'],
+    ['dispatched read timeout', () => new StoreOperationTimeoutError({
+      backend: 'oxigraph-server', operation: 'query', timeoutMs: 30_000,
+      message: 'Invalid store response: read deadline exceeded',
+    }), 'indeterminate'],
+  ] as const)('vm/publish-async retries the unchanged intent after preflight reports %s', async (_label, makeError, outcome) => {
+    const failure = makeError();
+    let pressured = true;
+    const preflighted: KnowledgeAssetVmPublishRequest[] = [];
+    const enqueued: KnowledgeAssetVmPublishRequest[] = [];
+    const intent = rootlessIntent({
+      shareOperationId: 'unchanged-share-2824',
+      kaUal: `did:dkg:31337/${ROOTLESS_AUTHOR}/7`, kaNumber: '7', publicTripleCount: 1,
+    });
+    const originalIntent = structuredClone(intent);
+    // Real snapshot resolution belongs to the focused agent operation tests.
+    // Here the package boundary supplies failures to the HTTP admission policy.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => intent,
+      preflightKnowledgeAssetVmPublishSnapshot: async (request: KnowledgeAssetVmPublishRequest) => {
+        preflighted.push(request);
+        if (pressured) throw failure;
+      },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async (request: KnowledgeAssetVmPublishRequest) => {
+        enqueued.push(request);
+        return 'job-after-pressure';
+      },
+    });
+    const rejected = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(preflighted).toEqual([originalIntent]);
+    expect(rejected.status).toBe(503);
+    expect(rejected.headers.get('Retry-After')).toBe('1');
+    expect(rejected.body).toMatchObject({
+      code: failure.code, retryable: true, outcome, jobCreated: false,
+    });
+    expect(rejected.body).not.toHaveProperty('jobId');
+    expect(String(rejected.body.error)).not.toMatch(/re-share|stale/i);
+    expect(enqueued).toEqual([]);
+
+    pressured = false;
+    const accepted = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(accepted.status).toBe(202);
+    expect(accepted.body).toMatchObject({ jobId: 'job-after-pressure', shareOperationId: intent.shareOperationId });
+    expect(accepted.body).not.toHaveProperty('jobCreated');
+    expect(preflighted).toEqual([originalIntent, originalIntent]);
+    expect(enqueued).toEqual([originalIntent]);
+    expect(enqueued[0]).toBe(intent);
+  });
+
+  it('vm/publish-async makes no no-job claim if enqueue persists and then throws', async () => {
+    const jobs: string[] = [];
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({ shareOperationId: 'enqueue-boundary' }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        jobs.push('persisted-job');
+        throw new StoreOperationTimeoutError({ backend: 'oxigraph-server', operation: 'insert' });
+      },
+    });
+    const response = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Retry-After')).toBe('1');
+    expect(response.body).toMatchObject({ code: 'STORE_OPERATION_TIMEOUT', outcome: 'indeterminate' });
+    expect(response.body).not.toHaveProperty('jobCreated');
+    expect(jobs).toEqual(['persisted-job']);
   });
 
   it('vm/publish-async: KA_WORKSPACE_HEAD_CORRUPT → 503 { code, error, retryable }', async () => {
@@ -544,6 +646,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.retryable).toBe(true);
     expect(res.body.retryable).not.toBe(false);
     expect(res.body.existingJobId).toBe('job-7');
+    // GH#2942 - a thrower that carries no blocker adds no key: the body is exactly what it was.
+    expect(res.body).not.toHaveProperty('blocker');
     // The message names the automatic lane FIRST and the by-id clear as the impatient-operator
     // exit, with the exact job to act on.
     expect(String(res.body.error)).toContain('Chain recovery re-checks this job');
@@ -599,6 +703,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
     expect(res.body.retryable).toBe(false);
     expect(res.body.existingJobId).toBe('job-8');
+    expect(res.body).not.toHaveProperty('blocker');
     expect(String(res.body.error)).toContain('no automatic exit');
     expect(String(res.body.error)).toContain('/api/publisher/clear-job');
     expect(String(res.body.error)).toContain('job-8');
@@ -607,6 +712,57 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     // that can actually clear the job, which is what makes this pair discriminating rather than
     // a single-branch check that a reversal could satisfy.
     expect(String(res.body.error)).toContain('{"jobId":"job-8","allowPendingTransaction":true}');
+  });
+
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF forwards the publisher\'s blocker additively [GH#2942]', async () => {
+    // The 503 says THAT the job is held and whether an automatic lane exists; the blocker says WHY,
+    // in the vocabulary `retryState.blocker` uses. It rides beside the unchanged prose and
+    // `retryable`, so a client that ignores it behaves exactly as before.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'pending-proof-op-blocker',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new LiftJobPendingChainProofError(
+          'LiftJob job-9 failed as rpc_unavailable after a transaction may have been submitted; '
+            + 'it cannot be republished until chain recovery proves the transaction absent',
+          'job-9',
+          false,
+          {
+            code: 'nonce_missing',
+            summary: 'A CREATE needs the nonce its transaction reserved to prove it was never sent.',
+            missing: ['nonce'],
+          },
+        );
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+
+    expect(res.status).toBe(503);
+    expect(res.body.retryable).toBe(false);
+    expect(res.body.blocker).toEqual({
+      code: 'nonce_missing',
+      summary: 'A CREATE needs the nonce its transaction reserved to prove it was never sent.',
+      missing: ['nonce'],
+    });
+    expect(String(res.body.error)).toContain('no automatic exit');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate
@@ -757,69 +913,27 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
-  it('vm/publish-async rejects a missing real share snapshot before enqueue', async () => {
-    const store = await createTripleStore({ backend: 'oxigraph' });
+  it.each(['PUBLISH_INTENT_STALE', 'PUBLISH_NOT_FULL_SHARE'] as const)('vm/publish-async rejects %s during intent resolution before preflight or enqueue', async (code) => {
+    let preflightCalls = 0;
     let enqueueCalls = 0;
-    const intent = {
-      contextGraphId: CG_ID,
-      name: ASSERTION_NAME,
-      shareOperationId: 'missing-real-share-op',
-      roots: ['urn:test:missing-root'],
-      seal: {
-        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
-        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
-        signature: {
-          r: `0x${'34'.repeat(32)}` as `0x${string}`,
-          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
-        },
-        schemeVersion: 1,
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => {
+        throw Object.assign(new Error('Re-share required before publishing'), { code });
       },
-      sealChainId: '31337' as `${bigint}`,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
-      intentKey: `sha256:${'ef'.repeat(32)}`,
-    };
+      preflightKnowledgeAssetVmPublishSnapshot: async () => { preflightCalls += 1; },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        enqueueCalls += 1;
+        return 'job-should-not-exist';
+      },
+    });
 
-    try {
-      await startWith({}, {
-        resolveFinalizedAssertionVmPublishIntent: async () => intent,
-        preflightKnowledgeAssetVmPublishSnapshot: async (request: unknown) => {
-          const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request as any);
-          const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request as any);
-          try {
-            const resolved = await resolveLiftWorkspaceSlice({
-              store,
-              graphManager: new GraphManager(store),
-              request: snapshot,
-            });
-            validateLiftPublishPayload({ request: snapshot, metadata: snapshotMetadata, resolved });
-          } catch (err) {
-            throw Object.assign(
-              new Error(
-                `Cannot enqueue VM publish for "${ASSERTION_NAME}" because share snapshot ` +
-                  `missing-real-share-op is unavailable or stale. Re-share the knowledge asset before enqueueing: ` +
-                  (err instanceof Error ? err.message : String(err)),
-              ),
-              { code: 'PUBLISH_INTENT_STALE' },
-            );
-          }
-        },
-      }, {}, {
-        enqueueKnowledgeAssetVmPublish: async () => {
-          enqueueCalls += 1;
-          return 'job-should-not-exist';
-        },
-      });
-
-      const res = await post('vm/publish-async', { contextGraphId: CG_ID });
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
-      expect(String(res.body.error)).toContain('Re-share');
-      expect(enqueueCalls).toBe(0);
-    } finally {
-      await store.close();
-    }
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code, jobCreated: false });
+    expect(String(res.body.error)).toContain('Re-share');
+    expect(preflightCalls).toBe(0);
+    expect(enqueueCalls).toBe(0);
   });
 
   it('vm/publish-async accepts uint72 publisher identity overrides into the immutable intent', async () => {
@@ -2460,6 +2574,81 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(publishCount).toBe(1);
       expect(res.status).toBe(400);
       expect(String(res.body.error)).toMatch(/could not be auto-registered on-chain/i);
+    });
+  });
+
+  // GH#2958 — a finalized update whose number is not the next publishable version is a caller
+  // precondition (the draft is stale), not a server failure: 409 with its own code on the sync
+  // lane too (it used to fall through to a bare 500 that invites a blind retry).
+  describe('GH#2958 stale finalized update', () => {
+    const STALE = 'Cannot publish the update of did:dkg:test/1/45: this finalized version is numbered 3, '
+      + 'but the next publishable version is 2 (the confirmed version is 1).';
+    const finalizeResult = {
+      assertionUri: 'did:dkg:assertion:numbered',
+      merkleRoot: new Uint8Array(32),
+      authorAddress: `0x${'cd'.repeat(20)}`,
+      schemeVersion: 1,
+      chainId: 1n,
+      kav10Address: `0x${'ef'.repeat(20)}`,
+      eip712Digest: `0x${'12'.repeat(32)}`,
+    };
+
+    it('vm/publish maps PUBLISH_INTENT_STALE to 409 with its own code', async () => {
+      await startWith({}, {
+        publishFromFinalizedAssertion: async () => {
+          throw Object.assign(new Error(STALE), { code: 'PUBLISH_INTENT_STALE' });
+        },
+      });
+      const res = await post('vm/publish', { contextGraphId: CG_ID });
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ code: 'PUBLISH_INTENT_STALE', error: STALE });
+    });
+
+    it.each([
+      [Object.assign(new Error('not a complete full share'), { code: 'PUBLISH_NOT_FULL_SHARE' }), 'PUBLISH_NOT_FULL_SHARE'],
+      [new Error('assertion "x" is not finalized'), 'VM_PUBLISH_PRECONDITION'],
+      // a regex-matched precondition that happens to carry an unrelated code is NOT relabelled
+      [Object.assign(new Error('No quads in shared memory'), { code: 'SOMETHING_ELSE' }), 'VM_PUBLISH_PRECONDITION'],
+    ])('vm/publish keeps the existing 409 body for %s', async (error, code) => {
+      await startWith({}, { publishFromFinalizedAssertion: async () => { throw error; } });
+      const res = await post('vm/publish', { contextGraphId: CG_ID });
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ code, error: error.message });
+    });
+
+    it('wm/finalize returns the number the draft was sealed with, and the KA it belongs to', async () => {
+      await startWith({
+        finalize: async () => ({ ...finalizeResult, assertionVersion: '2', kaUal: 'did:dkg:test/1/45' }),
+      });
+      const res = await post('wm/finalize', { contextGraphId: CG_ID });
+      expect(res.status).toBe(200);
+      expect(res.body.assertionVersion).toBe('2');
+      expect(res.body.kaUal).toBe('did:dkg:test/1/45');
+    });
+
+    it('wm/finalize omits both keys when the engine does not report them', async () => {
+      await startWith({ finalize: async () => finalizeResult });
+      const res = await post('wm/finalize', { contextGraphId: CG_ID });
+      expect(res.status).toBe(200);
+      expect(Object.keys(res.body)).not.toContain('assertionVersion');
+      expect(Object.keys(res.body)).not.toContain('kaUal');
+    });
+
+    it('the one-shot create+finalize returns them as well', async () => {
+      await startWith({
+        create: async () => 'did:dkg:assertion:one-shot',
+        write: async () => undefined,
+        finalize: async () => ({ ...finalizeResult, assertionVersion: '1', kaUal: 'did:dkg:test/1/46' }),
+      });
+      const res = await postRoot({
+        contextGraphId: CG_ID,
+        name: 'one-shot-numbered',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+        finalize: true,
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.assertionVersion).toBe('1');
+      expect(res.body.kaUal).toBe('did:dkg:test/1/46');
     });
   });
 });

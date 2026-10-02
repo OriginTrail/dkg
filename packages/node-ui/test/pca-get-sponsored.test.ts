@@ -78,7 +78,7 @@ describe('GetSponsoredPanel', () => {
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(container, 'operational wallets');
     // The per-wallet gas line uses the native symbol.
-    expect(container.querySelector('.v10-pca-wallet-gas')?.textContent).toContain('xDAI');
+    expect(container.querySelector('.v10-wallet-gas')?.textContent).toContain('xDAI');
     // Non-testnet → no faucet link, hand-funding copy in the native symbol.
     expect(container.querySelector('a[href*="faucet"]')).toBeNull();
     expect(container.textContent).toContain('Fund with native xDAI');
@@ -96,7 +96,7 @@ describe('GetSponsoredPanel', () => {
     await waitForText(container, 'operational wallets');
     const faucet = container.querySelector('a[href*="faucet"]') as HTMLAnchorElement | null;
     expect(faucet).toBeTruthy();
-    expect(container.querySelector('.v10-pca-wallet-gas')?.textContent).toContain('ETH');
+    expect(container.querySelector('.v10-wallet-gas')?.textContent).toContain('ETH');
     await unmount();
   });
 
@@ -161,10 +161,10 @@ describe('GetSponsoredPanel', () => {
     // Scope to the approval-results section (the wallets-share list also renders a
     // statusless WalletRow for W1).
     const results = container.querySelector('.v10-pca-approve-results')!;
-    const w1Row = Array.from(results.querySelectorAll('.v10-pca-wallet-row')).find((r) =>
+    const w1Row = Array.from(results.querySelectorAll('.v10-wallet-row')).find((r) =>
       r.getAttribute('aria-label')?.toLowerCase().startsWith(W1.toLowerCase()),
     )!;
-    const status = w1Row.querySelector('.v10-pca-wallet-status')!;
+    const status = w1Row.querySelector('.v10-wallet-status')!;
     expect(status.getAttribute('data-tone')).toBe('neutral');
     expect(status.textContent?.toLowerCase()).not.toContain('not approved');
     await unmount();
@@ -314,7 +314,7 @@ describe('GetSponsoredPanel', () => {
     await waitForText(container, '0x71D4');
     expect(container.textContent).not.toContain('No operational wallets detected');
     // The wallet renders in both the list and the handshake half — at least one.
-    expect(container.querySelectorAll('.v10-pca-wallet-row').length).toBeGreaterThanOrEqual(1);
+    expect(container.querySelectorAll('.v10-wallet-row').length).toBeGreaterThanOrEqual(1);
     await unmount();
   });
 

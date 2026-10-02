@@ -48,7 +48,7 @@ function fakeAgent(config: { nodeRole?: 'core' | 'edge'; syncAgentsMeta?: boolea
           enabled: false,
           selectedContextGraphs: [],
           selectedPublicContextGraphs: [],
-          rollout: { killSwitch: false, contextGraphModes: {} },
+          rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
         },
       }),
     },

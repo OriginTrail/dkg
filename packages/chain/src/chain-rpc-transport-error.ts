@@ -11,9 +11,10 @@
  * over a single set of chain-NAMESPACED codes:
  *   - `RPC_ENDPOINTS_EXHAUSTED`   — every configured RPC failed over (writes)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` — receipt lookup failed on every endpoint
+ *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` — local admission queue has no capacity
  *   - `RPC_TIMEOUT`               — receipt wait / bounded RPC request timed out
  *
- * All three are chain-OWNED, namespaced codes — only the chain/CLI failover
+ * All four are chain-OWNED, namespaced codes — only the chain/CLI failover
  * stack ever stamps them — so the guard is ONE simple structural check (`code`),
  * with no `instanceof`/prototype coupling and identical behaviour for every
  * transport case (each survives a plain-object re-wrap that preserves `.code`).
@@ -30,6 +31,7 @@
 export const CHAIN_RPC_TRANSPORT_CODES = [
   'RPC_ENDPOINTS_EXHAUSTED',
   'RPC_RECEIPT_LOOKUP_FAILED',
+  'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
   'RPC_TIMEOUT',
 ] as const;
 
@@ -118,6 +120,36 @@ export function isRpcEndpointsExhaustedError(
 }
 
 /**
+ * GH#2942 — a TRANSIENT transport failure that names no transaction.
+ *
+ * The three codes are the ones a lookup, estimate or admission wait raises while a transaction is
+ * still being PREPARED: every endpoint failed over (`RPC_ENDPOINTS_EXHAUSTED`), the local request
+ * governor had no capacity (`RPC_REQUEST_GOVERNOR_QUEUE_FULL`), or a bounded request ran out of time
+ * (`RPC_TIMEOUT`). Each of them is also what a failure AFTER a send looks like — a broadcast that
+ * exhausted every endpoint, a receipt wait that timed out — and the field that tells the two apart
+ * is `txHash`: the broadcast and receipt emitters always stamp the hash they were handling, so an
+ * error that carries one is about a transaction and never qualifies. `RPC_RECEIPT_LOOKUP_FAILED` is
+ * excluded for the same reason (it is only ever raised for a transaction that was sent).
+ *
+ * This is a statement about the CAUSE, not a proof that nothing was sent: an absent `txHash` proves
+ * nothing, which is why the publisher accepts it only together with its own positional proof that
+ * the write-ahead hook never durably recorded a hash. Nothing is unwrapped: a re-wrapped error that
+ * lost its `code` simply does not qualify, and prose never does. Throw-safe, because it runs on the
+ * publisher's failure-recording path: a throwing accessor reads as "no".
+ */
+export function isTransientRpcTransportFailureWithoutTransaction(err: unknown): boolean {
+  try {
+    if (!isChainRpcTransportError(err)) return false;
+    if (err.txHash) return false;
+    return err.code === 'RPC_ENDPOINTS_EXHAUSTED'
+      || err.code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL'
+      || err.code === 'RPC_TIMEOUT';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Shared factory for the chain-RPC TIMEOUT transport error, so the chain-side
  * `withTimeout`, the receipt-wait deadline, and the CLI `cliWithTimeout` all emit
  * the SAME `RPC_TIMEOUT` (never the generic `TIMEOUT`) from ONE place — the
@@ -128,6 +160,19 @@ export function createRpcTimeoutError(
   opts?: { cause?: unknown; txHash?: string },
 ): ChainRpcTransportError {
   return new ChainRpcTransportError('RPC_TIMEOUT', message, opts);
+}
+
+/**
+ * An endpoint attempt whose deadline expired while its request still waited in
+ * the process-local RPC governor, before anything was sent. It carries the
+ * local-capacity code, so failover treats it like a full queue: no endpoint is
+ * blamed and none is tried next, because every endpoint shares that queue.
+ */
+export function createRpcAdmissionTimeoutError(
+  message: string,
+  opts?: { cause?: unknown },
+): ChainRpcTransportError {
+  return new ChainRpcTransportError('RPC_REQUEST_GOVERNOR_QUEUE_FULL', message, opts);
 }
 
 /**

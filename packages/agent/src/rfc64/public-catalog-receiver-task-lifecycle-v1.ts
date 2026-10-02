@@ -14,6 +14,12 @@ export type Rfc64ReceiverSchedulingClassV1 =
 export interface Rfc64ReceiverSchedulingPolicyV1 {
   readonly schedulingClass: Rfc64ReceiverSchedulingClassV1;
   readonly placement: 'tail' | 'before-same-scope';
+  /**
+   * Version dominance over strictly older AMBIENT work for the same scope, in
+   * two halves: on admission, abort the active task holding the scope lock;
+   * after this task's durable success, retire the queued heads.
+   */
+  readonly preemptsOlderActiveAmbient: boolean;
   readonly retiresOlderAmbientAfterDurableSuccess: boolean;
 }
 
@@ -21,16 +27,19 @@ const RFC64_RECEIVER_SCHEDULING_POLICIES_V1 = Object.freeze({
   ambient: Object.freeze({
     schedulingClass: 'ambient',
     placement: 'tail',
+    preemptsOlderActiveAmbient: false,
     retiresOlderAmbientAfterDurableSuccess: false,
   }),
   isolated: Object.freeze({
     schedulingClass: 'isolated',
     placement: 'tail',
+    preemptsOlderActiveAmbient: false,
     retiresOlderAmbientAfterDurableSuccess: false,
   }),
   'verified-current-head': Object.freeze({
     schedulingClass: 'verified-current-head',
     placement: 'before-same-scope',
+    preemptsOlderActiveAmbient: true,
     retiresOlderAmbientAfterDurableSuccess: true,
   }),
 } satisfies Record<Rfc64ReceiverSchedulingClassV1, Rfc64ReceiverSchedulingPolicyV1>);
@@ -71,8 +80,16 @@ export class Rfc64ReceiverTaskLifecycleV1<
   readonly #pendingByKey = new Map<string, TTask>();
   readonly #deferred = new Set<TTask>();
   readonly #active = new Set<TTask>();
-  readonly #activeScopeKeys = new Set<string>();
+  /** One semantic writer per scope: the task currently holding that scope's lock. */
+  readonly #activeByScopeKey = new Map<string, TTask>();
   readonly #deferredTimers = new Map<TTask, ReturnType<typeof setTimeout>>();
+
+  constructor(
+    private readonly onSettled: (
+      task: TTask,
+      result: Rfc64PublicCatalogReceiverCompletionV1,
+    ) => void,
+  ) {}
 
   get queuedCount(): number {
     return this.#queue.length;
@@ -92,6 +109,34 @@ export class Rfc64ReceiverTaskLifecycleV1<
 
   get isIdle(): boolean {
     return this.#queue.length === 0 && this.#deferred.size === 0 && this.#active.size === 0;
+  }
+
+  /**
+   * Idleness for ONE context graph.
+   *
+   * A replay pass for graph A must not be held open by graph B's queued work:
+   * while it is parked, A latches its own replay-active flag, and the status
+   * projection withholds A's catalog parity for as long as that lasts. Every
+   * task already carries its own `contextGraphId` — `cancelContextGraph` fences
+   * on the same field — so scoping the question needs no new state. It is a
+   * linear scan where `isIdle` is O(1), bounded by the receiver's admission
+   * caps; an id that matches no task reads idle, so callers must pass the
+   * exact id their tasks were filed under.
+   *
+   * Deferred tasks count as busy, matching `isIdle`: a task waiting on its
+   * retry timer is work this context graph has not finished.
+   */
+  isIdleForContextGraph(contextGraphId: string): boolean {
+    for (const task of this.#queue) {
+      if (task.contextGraphId === contextGraphId) return false;
+    }
+    for (const task of this.#deferred) {
+      if (task.contextGraphId === contextGraphId) return false;
+    }
+    for (const task of this.#active) {
+      if (task.contextGraphId === contextGraphId) return false;
+    }
+    return true;
   }
 
   pending(key: string): TTask | undefined {
@@ -139,7 +184,7 @@ export class Rfc64ReceiverTaskLifecycleV1<
   }
 
   takeNextRunnable(): TTask | undefined {
-    const index = this.#queue.findIndex((task) => !this.#activeScopeKeys.has(task.scopeKey));
+    const index = this.#queue.findIndex((task) => !this.#activeByScopeKey.has(task.scopeKey));
     if (index < 0) return undefined;
     const [task] = this.#queue.splice(index, 1);
     return task;
@@ -147,21 +192,27 @@ export class Rfc64ReceiverTaskLifecycleV1<
 
   begin(task: TTask): void {
     this.#active.add(task);
-    this.#activeScopeKeys.add(task.scopeKey);
+    this.#activeByScopeKey.set(task.scopeKey, task);
     task.running = true;
   }
 
   finishRunning(task: TTask): void {
     task.running = false;
     this.#active.delete(task);
-    this.#activeScopeKeys.delete(task.scopeKey);
+    if (this.#activeByScopeKey.get(task.scopeKey) === task) {
+      this.#activeByScopeKey.delete(task.scopeKey);
+    }
+  }
+
+  /** The task currently holding one scope's semantic writer lock, if any. */
+  activeForScope(scopeKey: string): TTask | undefined {
+    return this.#activeByScopeKey.get(scopeKey);
   }
 
   cancelContextGraph(
     contextGraphId: string,
     reason: Error,
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): void {
     const tasks = new Set(
@@ -172,7 +223,7 @@ export class Rfc64ReceiverTaskLifecycleV1<
     for (const task of tasks) {
       task.cancellation.abort(reason);
       if (task.running === true) continue;
-      this.finalize(task, completion(task), beforeSettle, notify);
+      this.finalize(task, completion(task), notify);
     }
   }
 
@@ -189,25 +240,23 @@ export class Rfc64ReceiverTaskLifecycleV1<
 
   finalizeNonRunning(
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): void {
     for (const task of new Set(this.#pendingByKey.values())) {
       if (task.running === true) continue;
-      this.finalize(task, completion(task), beforeSettle, notify);
+      this.finalize(task, completion(task), notify);
     }
   }
 
   finalizeNonRunningWhere(
     predicate: (task: TTask) => boolean,
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): number {
     let finalized = 0;
     for (const task of new Set(this.#pendingByKey.values())) {
       if (task.running === true || !predicate(task)) continue;
-      if (this.finalize(task, completion(task), beforeSettle, notify)) finalized += 1;
+      if (this.finalize(task, completion(task), notify)) finalized += 1;
     }
     return finalized;
   }
@@ -216,7 +265,6 @@ export class Rfc64ReceiverTaskLifecycleV1<
   finalizeOneNonRunningWhere(
     predicate: (task: TTask) => boolean,
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): boolean {
     const task = [...this.#pendingByKey.values()].find(
@@ -224,26 +272,24 @@ export class Rfc64ReceiverTaskLifecycleV1<
     );
     return task === undefined
       ? false
-      : this.finalize(task, completion(task), beforeSettle, notify);
+      : this.finalize(task, completion(task), notify);
   }
 
   /** Finalize at most one queued, but never deferred or active, task. */
   finalizeOneQueuedWhere(
     predicate: (task: TTask) => boolean,
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): boolean {
     const task = this.#queue.find(predicate);
     return task === undefined
       ? false
-      : this.finalize(task, completion(task), beforeSettle, notify);
+      : this.finalize(task, completion(task), notify);
   }
 
   finalize(
     task: TTask,
     result: Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): boolean {
     if (task.settled === true) return false;
@@ -252,7 +298,7 @@ export class Rfc64ReceiverTaskLifecycleV1<
     if (queueIndex >= 0) this.#queue.splice(queueIndex, 1);
     this.removeDeferred(task);
     if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
-    beforeSettle(task);
+    this.onSettled(task, result);
     const waiters = task.completionWaiters?.splice(0) ?? [];
     for (const resolve of waiters) notify(() => resolve(result));
     return true;

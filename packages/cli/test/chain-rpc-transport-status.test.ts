@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-import { describe, it, expect } from 'vitest';
-import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { classifyChainRpcTransportStatus } from '../src/daemon/http-utils.js';
+import type { ServerResponse } from 'node:http';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  ChainRpcTransportError,
+  EVMChainAdapter,
+  RpcRequestGovernor,
+} from '@origintrail-official/dkg-chain';
+import {
+  classifyChainRpcTransportStatus,
+  respondIfChainRpcTransportError,
+} from '../src/daemon/http-utils.js';
 import { cliWithTimeout } from '../src/cli-rpc.js';
 
 describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', () => {
@@ -25,6 +33,75 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
     const r = classifyChainRpcTransportStatus({ code: 'RPC_RECEIPT_LOOKUP_FAILED', message: 'm', txHash: '0xabc' });
     expect(r?.status).toBe(503);
     expect(r?.body).toMatchObject({ code: 'RPC_RECEIPT_LOOKUP_FAILED', txHash: '0xabc' });
+  });
+
+  it('maps local RPC governor saturation to retryable 503/indeterminate', () => {
+    expect(classifyChainRpcTransportStatus({
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+      message: 'local queue is full',
+    })).toEqual({
+      status: 503,
+      body: {
+        error: 'local queue is full',
+        code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+        retryable: true,
+        outcome: 'indeterminate',
+      },
+    });
+  });
+
+  it('emits Retry-After when responding to local RPC governor saturation', () => {
+    const response = {
+      setHeader: vi.fn(),
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    } as unknown as ServerResponse;
+    expect(respondIfChainRpcTransportError(response, {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+      message: 'local queue is full',
+    })).toBe(true);
+    expect(response.setHeader).toHaveBeenCalledWith('Retry-After', '1');
+    expect(response.writeHead).toHaveBeenCalledWith(
+      503,
+      expect.objectContaining({ 'Content-Type': 'application/json' }),
+    );
+  });
+
+  it('keeps an uninitialized adapter queue-full response conservatively indeterminate', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 0.1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 1,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    const queuedController = new AbortController();
+    const queued = governor.acquire('foreground', queuedController.signal);
+    const adapter = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'evm:31337',
+      allowNoAdminSigner: true,
+      rpcRequestAdmission: governor,
+    });
+    try {
+      const error = await adapter.getIdentityId().catch((cause) => cause);
+      expect(error).toMatchObject({ code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' });
+      expect(classifyChainRpcTransportStatus(error)).toMatchObject({
+        status: 503,
+        body: {
+          code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+          retryable: true,
+          outcome: 'indeterminate',
+        },
+      });
+    } finally {
+      queuedController.abort(new Error('test cleanup'));
+      await queued.catch(() => {});
+      adapter.destroy();
+    }
   });
 
   it('maps an RPC_TIMEOUT -> 504 with the public/legacy `code: TIMEOUT` body', () => {

@@ -12,7 +12,7 @@
  * `chainRpcTotal.add(...)` were changed to include `{ rpc_url: this.rpcUrls[i] }`
  * this test would fail" — whereas the prior hand-written-sample test would not.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { metrics } from '@opentelemetry/api';
 import {
   MeterProvider,
@@ -209,6 +209,89 @@ describe('chain RPC telemetry — real readContractWith emits bounded labels', (
     const pts = chainRpcDataPoints().filter((p) => p.attrs.rpc_method === 'eth_getLogs');
     expect(pts.length).toBeGreaterThanOrEqual(1);
     expect(pts.every((p) => p.attrs.outcome !== 'ok')).toBe(true);
+    a.destroy?.();
+  });
+
+  it('preserves local queue-full from a log page without touching the backup', async () => {
+    const queueFull = Object.assign(new Error('local capacity exhausted'), {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+    });
+    const primaryQuery = async () => { throw queueFull; };
+    const backupQuery = vi.fn(async () => []);
+    const primary = { queryFilter: primaryQuery };
+    const backup = { queryFilter: backupQuery };
+    const contract = {
+      connect: (provider: typeof primary | typeof backup) => provider,
+    };
+    const a: any = new EVMChainAdapter(minimalConfig());
+
+    await expect(a.queryEventLogsPage(
+      contract,
+      {},
+      0,
+      100,
+      [
+        { provider: primary, backendHead: 100 },
+        { provider: backup, backendHead: 100 },
+      ],
+      new Map(),
+      'unit queue-full getLogs',
+    )).rejects.toBe(queueFull);
+    expect(backupQuery).not.toHaveBeenCalled();
+    a.destroy?.();
+  });
+
+  it('preserves local queue-full from head/code probes without fallback or retry', async () => {
+    const queueFull = Object.assign(new Error('local capacity exhausted'), {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+    });
+    const primary = {
+      getBlockNumber: vi.fn(async () => { throw queueFull; }),
+      getCode: vi.fn(async () => { throw queueFull; }),
+    };
+    const backup = {
+      getBlockNumber: vi.fn(async () => 100),
+      getCode: vi.fn(async () => '0x1234'),
+    };
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.providers = [primary, backup];
+
+    await expect(a.resolveLogScanHead('unit queue-full head')).rejects.toBe(queueFull);
+    expect(backup.getBlockNumber).not.toHaveBeenCalled();
+    await expect(a.getContractCodeAtBlock(
+      primary,
+      '0x0000000000000000000000000000000000000001',
+      100,
+      'unit queue-full code',
+      'Contract',
+    )).rejects.toBe(queueFull);
+    expect(primary.getCode).toHaveBeenCalledTimes(1);
+    expect(backup.getCode).not.toHaveBeenCalled();
+    a.destroy?.();
+  });
+
+  it('preserves local queue-full from deploy-block resolution without trying backup code', async () => {
+    const queueFull = Object.assign(new Error('local capacity exhausted'), {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+    });
+    const primary = {
+      getBlockNumber: vi.fn(async () => 100),
+      getCode: vi.fn(async () => { throw queueFull; }),
+    };
+    const backup = {
+      getBlockNumber: vi.fn(async () => 99),
+      getCode: vi.fn(async () => '0x1234'),
+    };
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.providers = [primary, backup];
+
+    await expect(a.resolveContractDeployBlock(
+      '0x0000000000000000000000000000000000000001',
+      'unit queue-full deploy resolution',
+      'Contract',
+    )).rejects.toBe(queueFull);
+    expect(primary.getCode).toHaveBeenCalledTimes(1);
+    expect(backup.getCode).not.toHaveBeenCalled();
     a.destroy?.();
   });
 });

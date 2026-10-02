@@ -14,6 +14,7 @@ import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { formatTracSymbol, formatTrac, formatTracTooltip } from '../lib/formatTrac.js';
 import { redactRpcUrl } from '../lib/redactRpcUrl.js';
 import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
+import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -462,6 +463,9 @@ function GeneralSettingsTab() {
           </div>
         </div>
       </section>
+
+      {/* Node Identity Wallets — independent of Publisher Conviction support. */}
+      <IdentityWalletsSection blockExplorerUrl={s?.blockExplorerUrl ?? null} />
 
       {/* Blockchain Config */}
       <section className="card">

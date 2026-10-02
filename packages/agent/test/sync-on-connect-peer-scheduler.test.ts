@@ -34,6 +34,33 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe('sync-on-connect per-peer scheduler', () => {
+  it('permanently closes its queue and fences errors from active work', async () => {
+    vi.useFakeTimers();
+    let rejectWork!: (error: unknown) => void;
+    const work = new Promise<void>((_resolve, reject) => { rejectWork = reject; });
+    const runOrdinary = vi.fn(() => work);
+    const cancel = vi.fn();
+    const onError = vi.fn();
+    const onInternalError = vi.fn();
+    const scheduler = createScheduler({ runOrdinary, runSelected: vi.fn(async () => {}), cancel, onInternalError });
+    try {
+      scheduler.enqueueOrdinary(PEER, onError, 0);
+      scheduler.enqueueOrdinary('pending-peer', onError, 30_000);
+      await vi.advanceTimersByTimeAsync(0);
+      scheduler.close();
+      scheduler.close();
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(scheduler.size).toBe(0);
+      expect(scheduler.enqueueOrdinary(PEER, onError, 0)).toBe(false);
+      expect(scheduler.enqueueSelected(PEER, onError, 0)).toBe(false);
+      rejectWork(new Error('old network closed'));
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(runOrdinary).toHaveBeenCalledOnce();
+      expect(onError).not.toHaveBeenCalled();
+      expect(onInternalError).not.toHaveBeenCalled();
+    } finally { scheduler.close(); vi.useRealTimers(); }
+  });
+
   it('upgrades pending ordinary work and drains selected first', async () => {
     const ordering: string[] = [];
     const finish = vi.fn();

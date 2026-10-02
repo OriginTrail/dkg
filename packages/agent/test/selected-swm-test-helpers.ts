@@ -1,3 +1,5 @@
+import type { PeerSyncSession } from '../src/sync/peer-sync-session.js';
+import type { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -150,6 +152,7 @@ export function graphBackedManifest(contextGraphId: string): ReturnType<typeof s
 
 export function cleanDurableResult(): SharedMemorySyncResult {
   return {
+    snapshotPlaneIncomplete: 0,
     insertedTriples: 0,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
@@ -167,7 +170,6 @@ export function cleanDurableResult(): SharedMemorySyncResult {
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
-    snapshotPlaneIncomplete: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
   };
@@ -216,6 +218,7 @@ export function result(
     backoffWorthyFailures: 0,
     deferredBackpressure: options.deferredBackpressure ?? 0,
     snapshotPlaneIncomplete: completed ? 0 : 1,
+    ...(completed ? {} : { localYield: true as const }),
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
     swmCoverage,
@@ -285,14 +288,11 @@ export interface SelectedProviderSelectionAgent {
       }>;
     };
   };
+  peerSyncSession: PeerSyncSession;
   networkAdmissionCoordinator: { isAcceptedPeer: (peerId: string) => boolean };
-  syncingPeers: Set<string>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
-  skippedNoSyncPeers: Set<string>;
-  lastSuccessfulSyncAt: Map<string, number>;
-  lastSyncProgressAt: Map<string, number>;
-  syncReconcilerBackoff: Map<string, unknown>;
+  peerCapabilityRegistry: PeerCapabilityRegistry;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   rfc64SwmRecoveryCoordinatorV1: {
     admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;
@@ -356,6 +356,7 @@ export async function callTrySyncFromPeer(
       connectionKey: string | null;
     }>;
     resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
+    rfc64LegacySwmGossipAllowedForContextGraph: () => boolean;
     recordSyncReconcilerFailure: (peerId: string) => void;
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
@@ -366,6 +367,7 @@ export async function callTrySyncFromPeer(
     connectionKey: null,
   });
   agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: true });
+  agent.rfc64LegacySwmGossipAllowedForContextGraph = () => true;
   agent.recordSyncReconcilerFailure ??= () => {};
   const applyAccounting = agent.applySyncOnConnectAccounting;
   if (onSyncAccounting) {
@@ -531,6 +533,7 @@ export interface SelectedSwmLifecycleAgentFixture {
   resolveRfc64CatalogReceiverAuthorityV1: (
     contextGraphId: string,
   ) => { legacySyncAllowed: boolean };
+  rfc64LegacySwmGossipAllowedForContextGraph: (contextGraphId: string) => boolean;
   createSwmTargetExecutorSessionV1: () => SwmTargetExecutorV1;
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
@@ -872,6 +875,7 @@ export function createSelectedSwmLifecycleHarness(
       );
     },
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    rfc64LegacySwmGossipAllowedForContextGraph: () => true,
     createSwmTargetExecutorSessionV1: () => {
       createTargetExecutorSession ??=
         createSwmTargetExecutorSessionFactoryForTest(agent as never);

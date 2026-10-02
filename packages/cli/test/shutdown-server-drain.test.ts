@@ -61,6 +61,7 @@ function shutdownCleanup(
     stopPromoteWorker: noop,
     closeCatchupRunner: noop,
     stopAgent: async () => { stopDependencies(); },
+    stopRpcUsageTelemetry: noop,
     stopTelemetry: noop,
     log: () => undefined,
   })).then(() => undefined);
@@ -230,6 +231,7 @@ describe('HTTP callback draining during bounded shutdown', () => {
       stopPromoteWorker: noop,
       closeCatchupRunner: noop,
       stopAgent: async () => { downstreamSteps.push('agent'); },
+      stopRpcUsageTelemetry: async () => { downstreamSteps.push('rpc-usage'); },
       stopTelemetry: async () => { downstreamSteps.push('telemetry'); },
       log: () => undefined,
     })).then(() => undefined);
@@ -238,7 +240,7 @@ describe('HTTP callback draining during bounded shutdown', () => {
       .resolves.toEqual({ forced: false });
     await closed;
     expect(detachedResponses.size).toBe(0);
-    expect(downstreamSteps).toEqual(['agent', 'telemetry']);
+    expect(downstreamSteps).toEqual(['agent', 'rpc-usage', 'telemetry']);
   });
 
   it('lets an in-flight callback complete within a longer budget before dependencies stop', async () => {

@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphAuthorityHistoryStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
+import { SqliteChainEventLogStore } from '@origintrail-official/dkg-node-store';
+import { DashboardDB, SqliteContextGraphAuthorityIndexStore, SqliteSyncCheckpointStore, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -961,6 +962,146 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
   });
 });
 
+describe('DashboardDB — chain log KA point-read index', () => {
+  const KA_INDEX = 'idx_chain_events_scope_address_ka';
+
+  function kaIndexColumns(handle: Database.Database): string[] {
+    return (handle.pragma(`index_info(${KA_INDEX})`) as Array<{ name: string }>)
+      .map((column) => column.name);
+  }
+
+  function kaIndexCount(handle: Database.Database): number {
+    return (handle.prepare(`
+      SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'index' AND name = ?
+    `).get(KA_INDEX) as { c: number }).c;
+  }
+
+  it('creates the index on a fresh database', () => {
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+  });
+
+  it('adds the index to a current-version database that predates it, keeping its rows', () => {
+    // Exactly what a node-ui.db written by a V38 binary without this index
+    // looks like: same user_version, chain log populated, index absent.
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`DROP INDEX ${KA_INDEX}`);
+    raw.prepare(`
+      INSERT INTO chain_events (
+        scope, block_number, log_index, block_hash, tx_hash, address,
+        topic0, topic1, topic2, topic3, data, settled
+      ) VALUES ('scope', 7, 0, '0xb', '0xt', '0xa', '0x0', '0x1', '0x2', NULL, '0x', 1)
+    `).run();
+    expect(raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexCount(raw)).toBe(0);
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+    expect((db.db.prepare('SELECT COUNT(*) AS c FROM chain_events').get() as { c: number }).c)
+      .toBe(1);
+
+    // Idempotent: every later open re-runs the same statement.
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(kaIndexCount(db.db)).toBe(1);
+  });
+
+  it('creates the index when a pre-chain-log database is upgraded', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TABLE chain_index_cursor;
+      DROP TABLE chain_events;
+      DROP TABLE chain_index_coverage;
+    `);
+    raw.pragma('user_version = 37');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexCount(db.db)).toBe(1);
+  });
+
+  /** A current-version database whose KA index is gone, with one registration row. */
+  function withoutKaIndex(): void {
+    db.close();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`DROP INDEX ${KA_INDEX}`);
+    raw.prepare(`
+      INSERT INTO chain_events (
+        scope, block_number, log_index, block_hash, tx_hash, address,
+        topic0, topic1, topic2, topic3, data, settled
+      ) VALUES ('scope', 7, 0, '0xb', '0xt', '0xa', '0x0', '0x1', '0x2', NULL, '0x', 1)
+    `).run();
+    raw.close();
+  }
+
+  async function kaPointRead(handle: DashboardDB) {
+    return new SqliteChainEventLogStore(handle).readEvents('scope', {
+      fromBlockNumber: 0, throughBlockNumber: 10, addresses: ['0xa'], topic0: ['0x0'], topic2: ['0x2'],
+    });
+  }
+
+  it('starts without the index when the disk is full, and builds it on a later start', async () => {
+    withoutKaIndex();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const exec = Database.prototype.exec;
+    const full = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (this: Database.Database, sql: string) {
+      if (sql.includes(`CREATE INDEX IF NOT EXISTS ${KA_INDEX}`)) {
+        throw new Database.SqliteError('database or disk is full', 'SQLITE_FULL');
+      }
+      return exec.call(this, sql);
+    });
+    let warnings: string[];
+    try {
+      db = new DashboardDB({ dataDir: dir });
+    } finally {
+      warnings = warn.mock.calls.map((call) => String(call[0]));
+      full.mockRestore();
+      warn.mockRestore();
+    }
+    expect(warnings.join('\n'))
+      .toMatch(/could not build idx_chain_events_scope_address_ka.*database or disk is full/);
+    expect(kaIndexCount(db.db)).toBe(0);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    // The rest of the chain log came up, and the KA read is served unpinned.
+    await expect(kaPointRead(db)).resolves.toHaveLength(1);
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+    await expect(kaPointRead(db)).resolves.toHaveLength(1);
+  });
+
+  it('starts when SQLite itself refuses to build the index', () => {
+    // A real failure, not a mocked one: another schema object already holds
+    // the index's name, so CREATE INDEX IF NOT EXISTS errors.
+    withoutKaIndex();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`CREATE TABLE ${KA_INDEX} (placeholder INTEGER)`);
+    raw.close();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let warnings: string[];
+    try {
+      db = new DashboardDB({ dataDir: dir });
+    } finally {
+      warnings = warn.mock.calls.map((call) => String(call[0]));
+      warn.mockRestore();
+    }
+    expect(warnings.join('\n')).toMatch(/there is already a table named/);
+    expect(kaIndexCount(db.db)).toBe(0);
+  });
+});
+
 describe('DashboardDB — V27 join-approval ledger migration', () => {
   it('repairs a missing audit-cap trigger on a current-version database', () => {
     const dbPath = join(dir, 'node-ui.db');
@@ -1787,79 +1928,11 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
   });
 });
 
-describe('SqliteKaNumberStore — bigint counter (codex PR #976 F6)', () => {
-  let db: DashboardDB;
-  let dir: string;
-  let store: SqliteKaNumberStore;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'dkg-ka-number-store-test-'));
-    db = new DashboardDB({ dataDir: dir });
-    store = new SqliteKaNumberStore(db);
-  });
-
-  afterEach(() => {
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  const AUTHOR = '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1';
-
-  it('allocate / peekNext return bigint, not number', () => {
-    const a = store.allocate(AUTHOR);
-    expect(typeof a).toBe('bigint');
-    expect(a).toBe(0n);
-
-    expect(typeof store.peekNext(AUTHOR)).toBe('bigint');
-    expect(store.peekNext(AUTHOR)).toBe(1n);
-
-    expect(store.allocate(AUTHOR)).toBe(1n);
-    expect(store.allocate(AUTHOR)).toBe(2n);
-  });
-
-  it('reconcileFloor accepts bigint and raises but never lowers', () => {
-    store.reconcileFloor(AUTHOR, 41n);
-    expect(store.peekNext(AUTHOR)).toBe(41n);
-    expect(store.allocate(AUTHOR)).toBe(41n);
-
-    // Stale floor must not pull the sequence backwards.
-    store.reconcileFloor(AUTHOR, 5n);
-    expect(store.peekNext(AUTHOR)).toBe(42n);
-  });
-
-  it('stays exact past Number.MAX_SAFE_INTEGER (no silent precision loss)', () => {
-    // This is the F6 invariant against the REAL sqlite path. Pre-fix
-    // the store returned JS `number`, so values past 2^53 would round
-    // to the nearest even — successive `allocate()` calls could either
-    // return the same value twice (kaId collision) or skip one.
-    const past = BigInt(Number.MAX_SAFE_INTEGER); // 2^53 - 1
-    store.reconcileFloor(AUTHOR, past);
-    const a = store.allocate(AUTHOR);
-    const b = store.allocate(AUTHOR);
-    const c = store.allocate(AUTHOR);
-    expect(a).toBe(past);
-    expect(b).toBe(past + 1n);
-    expect(c).toBe(past + 2n);
-    expect(a).not.toBe(b);
-    expect(b).not.toBe(c);
-    // peekNext is also exact.
-    expect(store.peekNext(AUTHOR)).toBe(past + 3n);
-  });
-});
-
 describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   let now = Date.now();
-  const manifestA = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-  const manifestB = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
-  const prefixA = 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
 
   beforeEach(() => {
     now = Date.now();
-  });
-
-  const checkpointStore = () => new SqliteSyncCheckpointStore(db, {
-    clock: () => now,
-    ttlMs: 24 * 60 * 60 * 1000,
   });
 
   it('fresh install carries the sync_checkpoints table and expiry index', () => {
@@ -1881,284 +1954,6 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     expect(columns).toContain('manifest_digest');
     expect(columns).toContain('manifest_prefix_digest');
     expect(columns).toContain('terminal');
-  });
-
-  it('round-trips, overwrites, deletes, and expires checkpoints', () => {
-    const store = checkpointStore();
-    store.set('peer|cg|durable|data', 500);
-    expect(store.get('peer|cg|durable|data')).toEqual({
-      offset: 500,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-    });
-
-    store.set('peer|cg|durable|data', 750);
-    expect(store.get('peer|cg|durable|data')).toEqual({
-      offset: 750,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-    });
-
-    store.delete('peer|cg|durable|data');
-    expect(store.get('peer|cg|durable|data')).toBeUndefined();
-
-    store.set('peer|cg|durable|meta', 100);
-    now += 24 * 60 * 60 * 1000 + 1;
-    expect(store.get('peer|cg|durable|meta')).toBeUndefined();
-  });
-
-  it('persists non-expired checkpoints across DashboardDB reopen and prunes stale rows', () => {
-    const store = checkpointStore();
-    store.set('peer|cg|swm|data', 42);
-    store.set('peer|cg|swm|meta', 43);
-    db.close();
-
-    db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
-    expect(reopened.get('peer|cg|swm|data')).toEqual({
-      offset: 42,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-    });
-
-    now += 24 * 60 * 60 * 1000 + 1;
-    expect(reopened.get('peer|cg|swm|data')).toBeUndefined();
-    expect(reopened.pruneExpired(now)).toBe(1);
-    const count = (db.db.prepare(`SELECT COUNT(*) AS c FROM sync_checkpoints`).get() as { c: number }).c;
-    expect(count).toBe(0);
-  });
-
-  it('persists the responder session with its verified offset across reopen', () => {
-    const store = checkpointStore();
-    const key = 'peer|cg|durable|data';
-    const sessionExpiresAt = now + 10 * 60 * 1000;
-
-    store.setResponderSession(key, 'durable-data:restart-safe', sessionExpiresAt);
-    store.set(key, 573235);
-    expect(store.get(key)).toEqual({
-      offset: 573235,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-      responderSessionId: 'durable-data:restart-safe',
-      responderSessionExpiresAtMs: sessionExpiresAt,
-      responderSessionOffset: 573235,
-    });
-
-    db.close();
-    db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
-    expect(reopened.get(key)).toMatchObject({
-      offset: 573235,
-      responderSessionId: 'durable-data:restart-safe',
-      responderSessionExpiresAtMs: sessionExpiresAt,
-    });
-
-    now = sessionExpiresAt + 1;
-    expect(reopened.get(key)).toEqual({
-      offset: 573235,
-      updatedAtMs: sessionExpiresAt - 10 * 60 * 1000,
-      expiresAtMs: sessionExpiresAt - 10 * 60 * 1000 + 24 * 60 * 60 * 1000,
-    });
-    expect(db.db.prepare(`
-      SELECT responder_session_id, responder_session_expires_at
-        FROM sync_checkpoints WHERE key = ?
-    `).get(key)).toEqual({
-      responder_session_id: null,
-      responder_session_expires_at: null,
-    });
-  });
-
-  it('persists a manifest-bound verified prefix across restart and safely rebinds it', () => {
-    const key = 'peer|cg|durable|data';
-    const sessionExpiresAt = now + 10 * 60 * 1000;
-    const store = checkpointStore();
-
-    store.setManifestBoundOffset(key, 573235, manifestA, now, prefixA);
-    store.setResponderSession(key, 'durable-data:generation-a', sessionExpiresAt, now, manifestA);
-    expect(store.get(key)).toEqual({
-      offset: 573235,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-      manifestDigest: manifestA,
-      manifestPrefixDigest: prefixA,
-      responderSessionId: 'durable-data:generation-a',
-      responderSessionExpiresAtMs: sessionExpiresAt,
-      responderSessionOffset: 573235,
-    });
-
-    db.close();
-    db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
-    expect(reopened.get(key)).toMatchObject({
-      offset: 573235,
-      manifestDigest: manifestA,
-      manifestPrefixDigest: prefixA,
-      responderSessionId: 'durable-data:generation-a',
-    });
-
-    // The requester has already proven this prefix is byte-identical in the
-    // fresh META generation. Rebinding retains the verified offset and prefix
-    // but must discard the responder token from the old immutable row list.
-    now += 1;
-    reopened.setManifestBoundOffset(key, 573235, manifestB, now, prefixA);
-    expect(reopened.get(key)).toEqual({
-      offset: 573235,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-      manifestDigest: manifestB,
-      manifestPrefixDigest: prefixA,
-    });
-
-    // Priming a fresh responder generation with the new manifest must not
-    // reset the already-verified local prefix to zero.
-    reopened.setResponderSession(
-      key,
-      'durable-data:generation-b',
-      sessionExpiresAt,
-      now,
-      manifestB,
-    );
-    expect(reopened.get(key)).toMatchObject({
-      offset: 573235,
-      manifestDigest: manifestB,
-      manifestPrefixDigest: prefixA,
-      responderSessionId: 'durable-data:generation-b',
-    });
-
-    db.close();
-    db = new DashboardDB({ dataDir: dir });
-    const restarted = new SqliteSyncCheckpointStore(db, { clock: () => now });
-    expect(restarted.get(key)).toMatchObject({
-      offset: 573235,
-      manifestDigest: manifestB,
-      manifestPrefixDigest: prefixA,
-      responderSessionId: 'durable-data:generation-b',
-    });
-
-    now = sessionExpiresAt + 1;
-    expect(restarted.get(key)).toEqual({
-      offset: 573235,
-      updatedAtMs: sessionExpiresAt - 10 * 60 * 1000 + 1,
-      expiresAtMs: sessionExpiresAt - 10 * 60 * 1000 + 1 + 24 * 60 * 60 * 1000,
-      manifestDigest: manifestB,
-      manifestPrefixDigest: prefixA,
-    });
-  });
-
-  it('persists terminal manifest completion across restart and clears it on rebind', () => {
-    const key = 'peer|cg|durable|data';
-    const store = checkpointStore();
-    store.setManifestBoundOffset(key, 6_357_721, manifestA, now, prefixA, true);
-
-    db.close();
-    db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
-    expect(reopened.get(key)).toMatchObject({
-      offset: 6_357_721,
-      manifestDigest: manifestA,
-      manifestPrefixDigest: prefixA,
-      terminal: true,
-    });
-
-    reopened.setManifestBoundOffset(key, 512, manifestB, now + 1, prefixA);
-    expect(reopened.get(key)?.terminal).toBeUndefined();
-  });
-
-  it('resets an offset when a responder session is bound to a different manifest', () => {
-    const key = 'peer|cg|durable|data';
-    const store = checkpointStore();
-    store.setManifestBoundOffset(key, 4096, manifestA, now, prefixA);
-
-    store.setResponderSession(
-      key,
-      'durable-data:unproven-generation',
-      now + 60_000,
-      now,
-      manifestB,
-    );
-
-    expect(store.get(key)).toEqual({
-      offset: 0,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-      manifestDigest: manifestB,
-      responderSessionId: 'durable-data:unproven-generation',
-      responderSessionExpiresAtMs: now + 60_000,
-      responderSessionOffset: 0,
-    });
-
-    // Legacy/non-manifest writes cannot leave a stale cryptographic binding or
-    // responder token attached to an unrelated offset.
-    store.set(key, 128, now + 1);
-    expect(store.get(key)).toEqual({
-      offset: 128,
-      updatedAtMs: now + 1,
-      expiresAtMs: now + 1 + 24 * 60 * 60 * 1000,
-    });
-  });
-
-  it('rejects malformed manifest bindings', () => {
-    const store = checkpointStore();
-    expect(() => store.setManifestBoundOffset(
-      'peer|cg|durable|data',
-      1,
-      'sha256:not-a-digest',
-    )).toThrow('Invalid sync manifest digest');
-    expect(() => store.setManifestBoundOffset(
-      'peer|cg|durable|data',
-      1,
-      manifestA,
-      now,
-      'sha256:not-a-prefix',
-    )).toThrow('Invalid sync manifest prefix digest');
-  });
-
-  it.each([
-    ['invalid manifest digest', {
-      manifest_digest: 'sha256:not-a-digest',
-      manifest_prefix_digest: null,
-      responder_session_id: null,
-      responder_session_expires_at: null,
-      responder_session_offset: null,
-    }],
-    ['orphan manifest prefix', {
-      manifest_digest: null,
-      manifest_prefix_digest: prefixA,
-      responder_session_id: null,
-      responder_session_expires_at: null,
-      responder_session_offset: null,
-    }],
-    ['partial responder session', {
-      manifest_digest: manifestA,
-      manifest_prefix_digest: prefixA,
-      responder_session_id: 'torn-session',
-      responder_session_expires_at: now + 60_000,
-      responder_session_offset: null,
-    }],
-  ])('fails closed and deletes a persisted row with %s', (_name, malformed) => {
-    const key = `peer|cg|durable|data|checkpoint:v2|${_name}`;
-    db.db.prepare(`
-      INSERT INTO sync_checkpoints (
-        key, offset, updated_at, expires_at,
-        responder_session_id, responder_session_expires_at, responder_session_offset,
-        manifest_digest, manifest_prefix_digest, terminal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-    `).run(
-      key,
-      512,
-      now,
-      now + 60_000,
-      malformed.responder_session_id,
-      malformed.responder_session_expires_at,
-      malformed.responder_session_offset,
-      malformed.manifest_digest,
-      malformed.manifest_prefix_digest,
-    );
-
-    expect(checkpointStore().get(key)).toBeUndefined();
-    expect(db.db.prepare(
-      'SELECT key FROM sync_checkpoints WHERE key = ?',
-    ).get(key)).toBeUndefined();
   });
 
   it('creates sync_checkpoints when upgrading a pre-V21 DB', () => {
@@ -2246,121 +2041,30 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   });
 });
 
-describe('DashboardDB — chain RPC cursor stores', () => {
-  it('persists chain-event lane cursors by scope across reopen', async () => {
-    const store = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
-
-    await store.saveLane('contextGraphDiscovery', 1234);
-    await store.saveLane('vmReconcile', 5678);
-    expect(await store.loadLane('contextGraphDiscovery')).toBe(1234);
-    expect(await store.loadLane('vmReconcile')).toBe(5678);
-    expect(db.db.prepare(
-      `SELECT value FROM runtime_cursors
-       WHERE namespace = 'chainEventPoller.cursor'
-         AND scope = 'evm:1:hub=0xabc'
-         AND key = 'contextGraphDiscovery'`,
-    ).get()).toEqual({ value: 1234 });
-    expect(await new SqliteChainEventCursorStore(db, { scope: 'evm:2:hub=0xabc' }).loadLane('contextGraphDiscovery')).toBeUndefined();
-
-    await store.saveLane('contextGraphDiscovery', 0);
-    await store.saveLane('contextGraphDiscovery', -1);
-    await store.saveLane('contextGraphDiscovery', 1.5);
-    await store.saveLane('contextGraphDiscovery', Number.MAX_SAFE_INTEGER + 1);
-    expect(await store.loadLane('contextGraphDiscovery')).toBe(1234);
-
-    db.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run('chainEventPoller.cursor:evm:1:hub=0xabc:badLane', '0');
-    expect(await store.loadLane('badLane')).toBeUndefined();
-    db.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run('chainEventPoller.cursor:evm:1:hub=0xabc:legacyLane', '2468');
-    expect(await store.loadLane('legacyLane')).toBe(2468);
-
+describe('DashboardDB — authority index schema migration', () => {
+  it('migrates V35 to the authority index schema without disturbing existing data', async () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
+      .run('v35-representative-setting', 'preserved');
     db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE context_graph_authority_indexes');
+    raw.pragma('user_version = 35');
+    raw.close();
+
     db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
-    expect(await reopened.loadLane('contextGraphDiscovery')).toBe(1234);
-    expect(await reopened.loadLane('vmReconcile')).toBe(5678);
-    expect(await reopened.loadLane('legacyLane')).toBe(2468);
-  });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.db.prepare(`SELECT value FROM settings WHERE key = ?`)
+      .get('v35-representative-setting')).toEqual({ value: 'preserved' });
 
-  it('persists registry scan cursors by deployment key and ignores corrupt values', async () => {
-    const store = new SqliteContextGraphRegistryScanCursorStore(db);
-    const key = {
-      chainId: 'evm:1',
-      deploymentId: 'evm:1:hub=0xabc',
-      registryAddress: '0x3333333333333333333333333333333333333333',
-    };
-
-    await store.save(key, 5000);
-    expect(await store.load(key)).toBe(5000);
-    expect(db.db.prepare(
-      `SELECT value FROM runtime_cursors
-       WHERE namespace = 'contextGraphRegistryScan.cursor'
-         AND scope = ?
-         AND key = ?`,
-    ).get(`${key.chainId}:${key.deploymentId}`, key.registryAddress.toLowerCase())).toEqual({ value: 5000 });
-    await store.save(key, 0);
-    await store.save(key, -1);
-    await store.save(key, 1.5);
-    await store.save(key, Number.MAX_SAFE_INTEGER + 1);
-    expect(await store.load(key)).toBe(5000);
-    expect(await store.load({ ...key, registryAddress: '0x4444444444444444444444444444444444444444' })).toBeUndefined();
-
-    db.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run(
-      `contextGraphRegistryScan.cursor:${key.chainId}:${key.deploymentId}:0x5555555555555555555555555555555555555555`,
-      'not-a-number',
-    );
-    expect(await store.load({ ...key, registryAddress: '0x5555555555555555555555555555555555555555' })).toBeUndefined();
-    db.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run(
-      `contextGraphRegistryScan.cursor:${key.chainId}:${key.deploymentId}:0x6666666666666666666666666666666666666666`,
-      '6000',
-    );
-    expect(await store.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
-
-    db.close();
-    db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteContextGraphRegistryScanCursorStore(db);
-    expect(await reopened.load(key)).toBe(5000);
-    expect(await reopened.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
-  });
-
-  it('atomically persists versioned Context Graph authority checkpoints', async () => {
-    const store = new SqliteContextGraphAuthorityHistoryStore(db);
-    const key = 'evm:84532:hub=0xabc:0x3333333333333333333333333333333333333333:9';
-    const checkpoint = {
-      version: 1,
-      state: {
-        throughBlockNumber: 5000,
-        throughBlockHash: `0x${'55'.repeat(32)}`,
-        nameHash: `0x${'88'.repeat(32)}`,
-        ownershipEra: 2,
-        policyVersion: 4,
-        rosterVersion: 7,
-        sourceBlockNumber: 4990,
-        sourceBlockHash: `0x${'44'.repeat(32)}`,
-      },
-      integrity: `0x${'99'.repeat(32)}`,
-    };
-
-    await store.save(key, checkpoint);
-    expect(await store.load(key)).toEqual(checkpoint);
-    const persisted = db.db.prepare(
-      `SELECT value FROM settings WHERE key = ?`,
-    ).get(`${SqliteContextGraphAuthorityHistoryStore.KEY_PREFIX}${key}`) as { value: string };
-    expect(JSON.parse(persisted.value)).toEqual(checkpoint);
-
-    db.close();
-    db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteContextGraphAuthorityHistoryStore(db);
-    expect(await reopened.load(key)).toEqual(checkpoint);
-    await reopened.delete(key);
-    expect(await reopened.load(key)).toBeUndefined();
+    const store = new SqliteContextGraphAuthorityIndexStore(db);
+    const scope = 'evm:84532:v35-migration';
+    const checkpoint = { version: 1, cursor: { throughBlockNumber: 42 } };
+    expect(await store.compareAndSwap(scope, undefined, checkpoint)).toBe(1);
+    expect(await store.load(scope)).toEqual({ token: 1, value: checkpoint });
+    expect(await store.invalidate(scope, 1)).toBe(2);
+    expect(await store.compareAndSwap(scope, 2, checkpoint)).toBe(3);
   });
 });
 
@@ -2411,6 +2115,77 @@ describe('DashboardDB — context graph memberships', () => {
     const remaining = db.listContextGraphMembers('project-a');
     expect(remaining).toHaveLength(1);
     expect(remaining[0].principal_id).toBe('peer-1');
+  });
+
+  it('keeps local graph origin immutable when membership rows change', () => {
+    db.recordLocalContextGraphOrigin({
+      context_graph_id: 'origin-project',
+      source: 'local-create',
+      created_at: 1000,
+    });
+    db.upsertContextGraphMember({
+      context_graph_id: 'origin-project',
+      principal_type: 'agent',
+      principal_id: '0x1111111111111111111111111111111111111111',
+      role: 'curator',
+      status: 'active',
+      source: 'local-create',
+      updated_at: 1000,
+    });
+    db.upsertContextGraphMember({
+      context_graph_id: 'origin-project',
+      principal_type: 'agent',
+      principal_id: '0x1111111111111111111111111111111111111111',
+      role: 'participant',
+      status: 'active',
+      source: 'allowed-agent',
+      updated_at: 2000,
+    });
+    // Replays and a different creation path cannot replace the first fact.
+    db.recordLocalContextGraphOrigin({
+      context_graph_id: 'origin-project',
+      source: 'implicit-swm-write',
+      created_at: 3000,
+    });
+
+    expect(db.listLocalContextGraphOrigins()).toContainEqual({
+      context_graph_id: 'origin-project',
+      source: 'local-create',
+      created_at: 1000,
+    });
+    expect(db.listContextGraphMembers('origin-project')).toContainEqual(
+      expect.objectContaining({
+        source: 'allowed-agent',
+        updated_at: 2000,
+      }),
+    );
+  });
+
+  it('migrates trusted V36 membership provenance into the graph-level journal', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.upsertContextGraphMember({
+      context_graph_id: 'legacy-origin-project',
+      principal_type: 'agent',
+      principal_id: '0x2222222222222222222222222222222222222222',
+      role: 'curator',
+      status: 'active',
+      source: 'local-create',
+      first_seen_at: 1234,
+      updated_at: 2345,
+    });
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE local_context_graph_origins');
+    raw.pragma('user_version = 36');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.listLocalContextGraphOrigins()).toContainEqual({
+      context_graph_id: 'legacy-origin-project',
+      source: 'local-create',
+      created_at: 1234,
+    });
   });
 });
 
@@ -3064,47 +2839,7 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
   });
 });
 
-describe('SqliteChangelogCursorStore — OT-RFC-59 durable (era,seq) cursor (SC5)', () => {
-  it('upserts per (peer,cg), keeps keys independent, is durable across reopen, validates seq', () => {
-    const store = new SqliteChangelogCursorStore(db);
-    expect(store.get('peerA', 'cg1')).toBeUndefined();
-    store.set('peerA', 'cg1', 'era-1', 5);
-    expect(store.get('peerA', 'cg1')).toMatchObject({ era: 'era-1', seq: 5 });
-    // upsert (same key) replaces era + seq
-    store.set('peerA', 'cg1', 'era-2', 9);
-    expect(store.get('peerA', 'cg1')).toMatchObject({ era: 'era-2', seq: 9 });
-    // distinct (peer,cg) keys are independent (seq is per-responder-node)
-    store.set('peerB', 'cg1', 'era-x', 3);
-    store.set('peerA', 'cg2', 'era-y', 7);
-    expect(store.get('peerB', 'cg1')!.seq).toBe(3);
-    expect(store.get('peerA', 'cg2')!.seq).toBe(7);
-    expect(store.get('peerA', 'cg1')!.seq).toBe(9);
-    // seq 0 is valid (first contact / reseed); negative rejected
-    store.set('peerC', 'cg1', 'era-1', 0);
-    expect(store.get('peerC', 'cg1')!.seq).toBe(0);
-    expect(() => store.set('peerC', 'cg1', 'era-1', -1)).toThrow(/Invalid changelog cursor seq/);
-    // durable across a fresh DashboardDB on the same dir (never TTL-pruned)
-    const db2 = new DashboardDB({ dataDir: dir });
-    const store2 = new SqliteChangelogCursorStore(db2);
-    expect(store2.get('peerA', 'cg1')).toMatchObject({ era: 'era-2', seq: 9 });
-  });
-});
-
-describe('SqliteChangelogEraGuard — OT-RFC-59 §6 P0 durable era guard', () => {
-  it('round-trips (era, highSeq) as a singleton, is durable across reopen, validates highSeq', async () => {
-    const guard = new SqliteChangelogEraGuard(db);
-    expect(await guard.load()).toBeNull();
-    await guard.save('era-1', 10);
-    expect(await guard.load()).toEqual({ era: 'era-1', highSeq: 10 });
-    // singleton: a second save REPLACES (not a second row) — this is the node-global high-water
-    await guard.save('era-2', 42);
-    expect(await guard.load()).toEqual({ era: 'era-2', highSeq: 42 });
-    await expect(guard.save('era-2', -1)).rejects.toThrow(/Invalid changelog era high_seq/);
-    // survives a fresh DashboardDB on the same dir (the whole point — outlives a store.nq restore)
-    const guard2 = new SqliteChangelogEraGuard(new DashboardDB({ dataDir: dir }));
-    expect(await guard2.load()).toEqual({ era: 'era-2', highSeq: 42 });
-  });
-
+describe('DashboardDB — V23/V24 changelog tables', () => {
   it('an existing pre-v24 db upgrades and gains the changelog_era + changelog_cursors tables', () => {
     // Fresh db is already at current version; assert both OT-RFC-59 tables exist after migration.
     const tables = (db.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)

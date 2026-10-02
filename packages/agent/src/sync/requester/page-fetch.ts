@@ -1,3 +1,9 @@
+import {
+  assertSyncWorkAdmission,
+  composeSyncWorkAdmission,
+  SyncWorkAdmissionExhaustedError,
+  type SyncWorkAdmission,
+} from '../work-admission.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -15,6 +21,7 @@ import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
+import { decodeNegotiatedExactSyncResponse, EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from '../wire-compression.js';
 import {
   getSyncCheckpointKey,
   type DurableManifestDigest,
@@ -42,6 +49,11 @@ import {
   SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
+import {
+  sharedMemoryCompletionFields,
+  type SharedMemoryCompletionFields,
+  type SharedMemoryWorkOutcome,
+} from '../shared-memory-completion.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -166,11 +178,13 @@ function createResponderSessionId(includeSharedMemory: boolean, phase: SyncPhase
   return createSyncResponderSessionId(`${includeSharedMemory ? 'swm' : 'durable'}-${phase}`);
 }
 
-export interface SyncPageResult {
+interface SyncPageResultFields {
   quads: Quad[];
   /** Absolute raw responder row coordinate for every retained quad. */
   quadRawOffsets?: number[];
   bytesReceived: number;
+  /** Actual inflated/plain body bytes used by cumulative admission, separate from wire telemetry. */
+  decodedBytesReceived?: number;
   /** Verified manifest coordinate used by checkpoint/materialization logic. */
   resumedFromOffset: number;
   /** Raw responder-session coordinate used on the wire for this invocation. */
@@ -187,9 +201,13 @@ export interface SyncPageResult {
   /** Raw responder-session coordinate after the last accepted page. */
   rawNextOffset?: number;
   checkpointKey: string;
-  completed: boolean;
-  timedOut: boolean;
 }
+
+/**
+ * Page completion prevents a local scheduler yield from being paired with a
+ * contradictory successful completion at construction time.
+ */
+export type SyncPageResult = SyncPageResultFields & SharedMemoryCompletionFields;
 
 export interface SyncPageProgress {
   readonly resumedFromOffset: number;
@@ -197,13 +215,24 @@ export interface SyncPageProgress {
 }
 
 function acceptedIncompletePrefixResult(
-  result: Omit<SyncPageResult, 'completed' | 'timedOut'>,
+  result: SyncPageResultFields,
 ): SyncPageResult {
   return {
     ...result,
-    completed: false,
-    timedOut: true,
+    ...sharedMemoryCompletionFields('timed-out'),
   };
+}
+
+type SyncAdmissionTerminalOutcome = Extract<
+  SharedMemoryWorkOutcome,
+  'timed-out' | 'local-budget-yield'
+>;
+
+function syncAdmissionTerminalOutcome(
+  error: unknown,
+): SyncAdmissionTerminalOutcome | undefined {
+  if (!(error instanceof SyncWorkAdmissionExhaustedError)) return undefined;
+  return error.outcome === 'timed_out' ? 'timed-out' : 'local-budget-yield';
 }
 
 /** Canonical transport path identity for learned requester page sizing. */
@@ -212,6 +241,8 @@ export interface SyncPageSizeProfileScope {
   contextGraphId: string;
   includeSharedMemory: boolean;
   phase: SyncPhase;
+  /** Compression changes path capacity; keep its learned stalls separate. */
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
 }
 
 const DEFAULT_SYNC_PAGE_SIZE_PROFILE_TTL_MS = 10 * 60_000;
@@ -283,6 +314,7 @@ export class SyncPageSizeProfileCache {
       scope.contextGraphId,
       scope.includeSharedMemory ? 'swm' : 'vm',
       scope.phase,
+      scope.responseEncoding ?? null,
     ]);
   }
 }
@@ -379,6 +411,7 @@ class AdaptiveSyncPageSizer {
  * too easy for a new modifier to occupy an older modifier's slot.
  */
 export interface SyncPageFetchOptions {
+  readonly workAdmission?: SyncWorkAdmission;
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly signal?: AbortSignal;
@@ -428,6 +461,8 @@ export class SyncPageAccumulationLimitError extends Error {
 }
 
 interface FetchSyncPagesParams {
+  /** Compatibility entry point only; the stateful implementation requires this. */
+  workAdmission?: SyncWorkAdmission;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
@@ -488,6 +523,8 @@ interface FetchSyncPagesParams {
   sinceBatchId?: string;
   /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
   assetUals?: string[];
+  /** Explicit local negotiated profile; never inferred from an unsolicited response marker. */
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
   /** Selected-SWM-only policy for returning a validated incomplete prefix. */
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   /** Isolates an internal requester whose retained prefix is not shareable. */
@@ -580,15 +617,33 @@ function checkpointKeyForFetch(params: FetchSyncPagesParams): string {
 }
 
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
-  if (params.ephemeralRequesterState !== true) return fetchSyncPagesWithState(params);
+  // This exported low-level entry point is the deadline-only compatibility
+  // boundary. Every requester above it forwards one already-composed
+  // capability, and the stateful implementation below requires it.
+  const admittedParams: AdmittedFetchSyncPagesParams = {
+    ...params,
+    workAdmission: params.workAdmission ?? composeSyncWorkAdmission({
+      deadline: params.deadline,
+    }),
+  };
+  if (admittedParams.ephemeralRequesterState !== true) {
+    return fetchSyncPagesWithState(admittedParams);
+  }
   try {
-    return await fetchSyncPagesWithState(params);
+    return await fetchSyncPagesWithState(admittedParams);
   } finally {
-    deleteSyncPageCheckpoint(params.checkpointStore, checkpointKeyForFetch(params));
+    deleteSyncPageCheckpoint(
+      admittedParams.checkpointStore,
+      checkpointKeyForFetch(admittedParams),
+    );
   }
 }
 
-async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<SyncPageResult> {
+type AdmittedFetchSyncPagesParams = FetchSyncPagesParams & {
+  workAdmission: SyncWorkAdmission;
+};
+
+async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Promise<SyncPageResult> {
   const {
     ctx,
     remotePeerId,
@@ -597,9 +652,8 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     phase,
     graphUri,
     snapshotRef,
-    deadline,
     syncPageTimeoutMs,
-    syncRouterAttempts,
+    workAdmission,
     syncPageRetryAttempts,
     syncPageSize,
     syncDeniedResponse,
@@ -615,6 +669,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     buildSyncRequest,
     sinceBatchId,
     assetUals,
+    responseEncoding,
     returnAcceptedPrefixOnRetryableTransportFailure,
     maxAcceptedBytes,
     maxAcceptedQuads,
@@ -627,6 +682,13 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     logInfo,
     logDebug,
   } = params;
+
+  const profile = resolveExactSyncGzipProfile({ responseEncoding, includeSharedMemory, phase, assetUals });
+  const usesExactGzip = profile !== undefined;
+  const admittedByteLimit = profile ? Math.min(maxAcceptedBytes ?? profile.maxInflatedBytes,
+    profile.maxInflatedBytes) : maxAcceptedBytes;
+  const admittedHeapLimit = profile ? Math.min(maxAcceptedHeapBytesEstimate ?? profile.maxHeapBytesEstimate,
+    profile.maxHeapBytesEstimate) : maxAcceptedHeapBytesEstimate;
 
   const allQuads: Quad[] = [];
   const allQuadRawOffsets: number[] = [];
@@ -730,12 +792,29 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     supportsSessionClear: checkpointStore.clearResponderSession !== undefined,
   });
   let bytesReceived = 0;
+  let decodedBytesReceived = 0;
+  let decodedRowsReceived = 0;
+  const decodePage = async (bytes: Uint8Array) => {
+    const decoded = await decodeNegotiatedExactSyncResponse(bytes, { allowCompression: usesExactGzip, signal,
+      maxInflatedBytes: usesExactGzip ? Math.max(0, admittedByteLimit! - decodedBytesReceived) : undefined });
+    const nextDecodedBytes = decodedBytesReceived + decoded.bytes.byteLength;
+    if (admittedByteLimit !== undefined && nextDecodedBytes > admittedByteLimit) {
+      throw new SyncPageAccumulationLimitError('bytes', nextDecodedBytes, admittedByteLimit);
+    }
+    const nextDecodedRows = decodedRowsReceived + (decoded.rows ?? 0);
+    if (profile && nextDecodedRows > profile.maxRows) {
+      throw new SyncPageAccumulationLimitError('quads', nextDecodedRows, profile.maxRows);
+    }
+    decodedBytesReceived = nextDecodedBytes; decodedRowsReceived = nextDecodedRows;
+    return decodeSyncResponse(decoded.bytes);
+  };
   let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
-  let timedOut = false;
+  let admissionOutcome: SyncAdmissionTerminalOutcome | undefined;
   let yielded = false;
-  // Start an unknown peer/path at the conservative initial page size, then
-  // grow toward the throughput ceiling only after sustained success. Reduce
+  // Ordinary unknown paths start conservatively; a bounded exact singleton
+  // starts at its negotiated ceiling. Keep previously learned stalls within
+  // that encoding profile and reduce
   // within the existing bounded retry budget if a response cannot traverse
   // the wire.
   // ProtocolRouter may surface an oversized response as a generic stream reset,
@@ -752,17 +831,18 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
   // testnet-canary+ requester uses a byte-budget ceiling here, so short≠EOF holds for meta and
   // data alike; a pre-canary requester using the 500-row cap is the only one
   // that would regress, and only on an oversized (>4 MiB) meta subject.
-  const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
+  const usesByteBudgetPagination = usesExactGzip || syncPageSize > SYNC_PAGE_SIZE;
   const pageSizeProfileScope = {
     remotePeerId,
     contextGraphId,
     includeSharedMemory,
     phase,
+    responseEncoding: profile?.responseEncoding,
   } satisfies SyncPageSizeProfileScope;
   const adaptivePageSizer = new AdaptiveSyncPageSizer(
     syncPageSize,
     usesByteBudgetPagination,
-    pageSizeProfileCache?.preferred(pageSizeProfileScope),
+    pageSizeProfileCache?.preferred(pageSizeProfileScope) ?? (usesExactGzip ? syncPageSize : undefined),
     pageSizeProfileCache
       ? (pageSize) => pageSizeProfileCache.remember(pageSizeProfileScope, pageSize)
       : undefined,
@@ -786,10 +866,15 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     onRetry: (attempt: number, delay: number, error: unknown) => void,
   ): Promise<Uint8Array> => sendSyncRequest({
     remotePeerId,
-    timeoutMs: Math.min(
+    // Leave part of this round for a fresh request after a stalled attempt.
+    // Recompute after authentication on every retry; transport admission then
+    // applies the remaining monotonic private-job allowance.
+    timeoutMs: syncPageTimeoutMs,
+    attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
       syncPageTimeoutMs,
-      Math.max(2000, Math.floor(Math.max(0, deadline - Date.now()) / syncRouterAttempts)),
+      Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
     ),
+    workAdmission,
     retryAttempts: syncPageRetryAttempts,
     signal,
     contextGraphId,
@@ -852,7 +937,21 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
         },
       );
       throwIfAborted(signal);
-      const primeBody = decodeSyncResponse(primeBytes);
+      const nextBytesReceived = bytesReceived + primeBytes.byteLength;
+      if (admittedByteLimit !== undefined && nextBytesReceived > admittedByteLimit) {
+        throw toSyncPeerRespondedError(new SyncPageAccumulationLimitError(
+          'bytes', nextBytesReceived, admittedByteLimit,
+        ));
+      }
+      let primeBody: string;
+      try {
+        primeBody = await decodePage(primeBytes);
+      } catch (error) {
+        // The priming response crossed the wire too. A malformed compressed
+        // body or resource refusal cannot be treated as a retryable transport
+        // interruption merely because this page precedes the main parse loop.
+        throw toSyncPeerRespondedError(error);
+      }
       if (
         primeBody === syncDeniedResponse
         || (extraDeniedResponses && extraDeniedResponses.includes(primeBody))
@@ -868,14 +967,6 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
           `Durable sync session returned an empty generation-prime page for nonzero offset ${resumedFromOffset}`,
         );
       }
-      const nextBytesReceived = bytesReceived + primeBytes.byteLength;
-      if (maxAcceptedBytes !== undefined && nextBytesReceived > maxAcceptedBytes) {
-        throw toSyncPeerRespondedError(new SyncPageAccumulationLimitError(
-          'bytes',
-          nextBytesReceived,
-          maxAcceptedBytes,
-        ));
-      }
       bytesReceived = nextBytesReceived;
       responsePages += 1;
       phaseTelemetry.recordPage();
@@ -888,10 +979,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
 
     while (true) {
       throwIfAborted(signal);
-      if (Date.now() > deadline) {
-        timedOut = true;
-        break;
-      }
+      assertSyncWorkAdmission(workAdmission);
 
       const curOffset = offset;
       const transportStartedAt = Date.now();
@@ -915,13 +1003,12 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
       phaseTelemetry.recordPage();
 
       const nextBytesReceived = bytesReceived + responseBytes.byteLength;
-      if (maxAcceptedBytes !== undefined && nextBytesReceived > maxAcceptedBytes) {
-        const error = new SyncPageAccumulationLimitError(
-          'bytes',
-          nextBytesReceived,
-          maxAcceptedBytes,
-        );
-        throw toSyncPeerRespondedError(error);
+      // Bound physical traffic independently of inflation. Gzip permits zero
+      // padding, so a tiny decoded page can still occupy a full wire frame.
+      if (admittedByteLimit !== undefined && nextBytesReceived > admittedByteLimit) {
+        throw toSyncPeerRespondedError(new SyncPageAccumulationLimitError(
+          'bytes', nextBytesReceived, admittedByteLimit,
+        ));
       }
 
       let parsed: { quads: Quad[]; totalQuads: number; sourceIndexes?: number[] };
@@ -929,7 +1016,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
       let parseDurationMs = 0;
       try {
         const decodeStartedAt = Date.now();
-        const nquadsText = decodeSyncResponse(responseBytes);
+        const nquadsText = await decodePage(responseBytes);
         decodeDurationMs = Date.now() - decodeStartedAt;
         bytesReceived = nextBytesReceived;
         if (
@@ -962,13 +1049,13 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
         const nextAcceptedHeapBytesEstimate =
           acceptedHeapBytesEstimate + parsedHeapBytesEstimate;
         if (
-          maxAcceptedHeapBytesEstimate !== undefined
-          && nextAcceptedHeapBytesEstimate > maxAcceptedHeapBytesEstimate
+          admittedHeapLimit !== undefined
+          && nextAcceptedHeapBytesEstimate > admittedHeapLimit
         ) {
           throw new SyncPageAccumulationLimitError(
             'heap-bytes',
             nextAcceptedHeapBytesEstimate,
-            maxAcceptedHeapBytesEstimate,
+            admittedHeapLimit,
           );
         }
         acceptedHeapBytesEstimate = nextAcceptedHeapBytesEstimate;
@@ -1030,6 +1117,14 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
       if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
+    const terminalOutcome = syncAdmissionTerminalOutcome(err);
+    if (terminalOutcome !== undefined) {
+      if (signal?.aborted) {
+        phaseTelemetry.finish('error', allQuads.length);
+        throw asAbortError(signal.reason);
+      }
+      admissionOutcome = terminalOutcome;
+    } else {
     // The transport retry helper has no onRetry callback after its terminal
     // attempt. Persist one final backoff step so the next bounded continuation
     // does not repeat the same known-failing page size from scratch.
@@ -1161,6 +1256,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
           ? { quadRawOffsets: allQuadRawOffsets }
           : {}),
         bytesReceived,
+        decodedBytesReceived,
         resumedFromOffset,
         rawResumedFromOffset,
         responderSessionStartedFresh,
@@ -1201,6 +1297,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
           ? { quadRawOffsets: allQuadRawOffsets }
           : {}),
         bytesReceived,
+        decodedBytesReceived,
         resumedFromOffset,
         rawResumedFromOffset,
         responderSessionStartedFresh,
@@ -1221,9 +1318,12 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
 
     phaseTelemetry.finish('error', allQuads.length);
     throw err;
+    }
   }
 
-  if (usesPageSession && responderSession) {
+  if (admissionOutcome === 'local-budget-yield') {
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+  } else if (usesPageSession && responderSession) {
     // R10 recovery has its own responder-session scope and MUST rebuild the
     // COMPLETE state from offset 0 on every (re)try (see swm-recovery
     // `fetchPhaseFully`, which deletes the checkpoint on a partial abandon). It
@@ -1259,7 +1359,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     }
   }
 
-  if (timedOut) {
+  if (admissionOutcome === 'timed-out') {
     const scope = includeSharedMemory ? 'shared-memory' : 'durable';
     logWarn(
       ctx,
@@ -1267,7 +1367,14 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     );
   }
 
-  phaseTelemetry.finish(timedOut ? 'timed_out' : 'completed', allQuads.length);
+  phaseTelemetry.finish(
+    admissionOutcome === 'timed-out'
+      ? 'timed_out'
+      : admissionOutcome === 'local-budget-yield'
+        ? 'local_yield'
+        : 'completed',
+    allQuads.length,
+  );
 
   return {
     quads: allQuads,
@@ -1275,6 +1382,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
       ? { quadRawOffsets: allQuadRawOffsets }
       : {}),
     bytesReceived,
+    decodedBytesReceived,
     resumedFromOffset,
     rawResumedFromOffset,
     responderSessionStartedFresh,
@@ -1282,7 +1390,8 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     nextOffset: offset,
     rawNextOffset: offset,
     checkpointKey,
-    completed: !timedOut && !yielded,
-    timedOut,
+    ...sharedMemoryCompletionFields(
+      admissionOutcome ?? (yielded ? 'incomplete' : 'completed'),
+    ),
   };
 }

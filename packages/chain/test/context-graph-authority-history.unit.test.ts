@@ -158,7 +158,7 @@ function directHistoryInput(params: Readonly<{
     read: (fromBlock: number, toBlock: number) => Promise<readonly T[]>,
     fromBlock: number,
     toBlock: number,
-  ) => readAdaptiveEvmLogRange({ read, fromBlock, toBlock, signal: params.signal });
+  ) => readAdaptiveEvmLogRange({ provider: {}, read, fromBlock, toBlock, signal: params.signal });
   return {
     cache: params.cache,
     cacheKey: params.cacheKey,
@@ -681,6 +681,28 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     expect(normalizeContextGraphAuthorityHistoryState({ ...valid, ...patch })).toBeUndefined();
   });
 
+  it('decodes the fixed v1 generation-order compatibility fixture', () => {
+    const state: ContextGraphAuthorityHistoryState = {
+      throughBlockNumber: 30,
+      throughBlockHash: FINALIZED_HASH,
+      nameHash: NAME_HASH,
+      ownershipEra: 0,
+      policyVersion: 0,
+      rosterVersion: 0,
+      sourceBlockNumber: 1,
+      sourceBlockHash: `0x${'01'.repeat(32)}`,
+    };
+    const persistedV1 = {
+      version: 1,
+      state,
+      // Fixed independently from the encoder so changing tuple order breaks
+      // backward compatibility instead of silently updating the assertion.
+      integrity: '0xa6c25f9c288f489861f99e68560160d7aeaca450f9ed151db406bdfb1e50a958',
+    };
+
+    expect(decodeContextGraphAuthorityHistoryCheckpoint(persistedV1)).toEqual(state);
+  });
+
   it('rejects old-version and integrity-less checkpoint envelopes', () => {
     const state: ContextGraphAuthorityHistoryState = {
       throughBlockNumber: 30,
@@ -771,6 +793,7 @@ describe('adaptive EVM log-range transport', () => {
   it('recognizes nested managed-provider errors and preserves both split halves', async () => {
     const calls: Array<readonly [number, number]> = [];
     const result = await readAdaptiveEvmLogRange({
+      provider: {},
       fromBlock: 1,
       toBlock: 100,
       read: async (fromBlock, toBlock) => {

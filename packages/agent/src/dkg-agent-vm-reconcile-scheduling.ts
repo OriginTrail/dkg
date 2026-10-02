@@ -4,6 +4,11 @@
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+
+const VM_RECONCILE_SYSTEM_CONTEXT_GRAPH_IDS = new Set<string>(
+  Object.values(SYSTEM_CONTEXT_GRAPHS),
+);
 
 export class VmReconcileSchedulingMethods extends DKGAgentBase {
   protected selectVmReconcileTargets(this: DKGAgent) {
@@ -11,10 +16,61 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
     const unbound: string[] = [];
     for (const [localCgId, sub] of this.subscribedContextGraphs) {
       if (!sub.subscribed && !sub.coreHosted) continue;
-      if (this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
+      // AGENTS and ONTOLOGY are off-chain bootstrap/control graphs. Their
+      // durable subscription rows intentionally have no numeric V10 binding;
+      // treating them as unbound VM targets launches a full historical
+      // name-hash scan on every sweep even though they can never reconcile
+      // against ContextGraphStorage.
+      if (VM_RECONCILE_SYSTEM_CONTEXT_GRAPH_IDS.has(localCgId)) continue;
+      const binding = this.contextGraphBindingState.currentBindingFor(
+        localCgId,
+        sub,
+      );
+      const hasBindingCandidate = binding !== undefined;
+      // A graph created on this node remains SWM-only until registration (or
+      // authoritative registration recovery) installs its numeric binding.
+      // The unbound VM lane exists for pre-subscribed remote PUBLIC graphs;
+      // admitting local-origin graphs here races create -> register and turns
+      // an explicitly off-chain graph into a historical reverse-name scan.
+      if (
+        this.localContextGraphProvenance.hasLocalCreate(localCgId)
+        && !hasBindingCandidate
+      ) continue;
+      // Registration owns the binding transition. Avoid queueing a competing
+      // cold resolver while its preparatory transaction may be awaiting a
+      // delayed receipt; the registration completion path or next sweep will
+      // make the newly authoritative target visible.
+      if (this.contextGraphRegistrationsInFlight?.has(localCgId)) continue;
+      // An accepted owner-signed unregistered authority is terminal evidence
+      // that this subscription has no finalized VM inventory. Do not turn the
+      // periodic safety net into a fresh historical name-hash crawl each tick.
+      if (
+        binding?.bindingKind !== 'authoritative'
+        && this.hasAcceptedRfc64UnregisteredAuthorityV1(localCgId)
+      ) {
+        continue;
+      }
+      if (hasBindingCandidate) bound.add(localCgId);
       else if (sub.subscribed) unbound.push(localCgId);
     }
-    for (const localCgId of this.rfc64SelectedVmReconcileTargetIds()) bound.add(localCgId);
+    for (const localCgId of this.rfc64SelectedVmReconcileTargetIds()) {
+      if (VM_RECONCILE_SYSTEM_CONTEXT_GRAPH_IDS.has(localCgId)) continue;
+      const sub = this.subscribedContextGraphs.get(localCgId);
+      const binding = sub === undefined
+        ? undefined
+        : this.contextGraphBindingState.currentBindingFor(localCgId, sub);
+      if (
+        binding?.bindingKind !== 'authoritative'
+        && this.hasAcceptedRfc64UnregisteredAuthorityV1(localCgId)
+      ) continue;
+      if (
+        this.localContextGraphProvenance.hasLocalCreate(localCgId)
+        && (sub === undefined
+          || !this.contextGraphBindingState.hasBindingCandidate(localCgId, sub))
+      ) continue;
+      if (this.contextGraphRegistrationsInFlight?.has(localCgId)) continue;
+      bound.add(localCgId);
+    }
     return {
       bound: [...bound],
       unbound: unbound.filter(key => !bound.has(key)),
@@ -58,5 +114,26 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
       sweep.isLifecycleCurrent,
       sweep.lifecycleSignal,
     );
+  }
+
+  /**
+   * The phonebook now resolves these graphs' curators. Re-rank their exact
+   * recovery now: pre-network suppression sees only connected peers and cached
+   * curators, so a resolvable but unconnected curator would otherwise wait out
+   * an earlier negative backoff (up to ten minutes) before its first attempt.
+   */
+  scheduleVmRecoveryForResolvedCurators(
+    this: DKGAgent,
+    contextGraphIds: readonly string[],
+  ): void {
+    for (const contextGraphId of contextGraphIds) {
+      if (!this.subscribedContextGraphs.has(contextGraphId)) continue;
+      this.clearVmReconcileRotationStateForContextGraph(contextGraphId);
+      this.clearVmReconcileActiveFetchCooldown(contextGraphId);
+      this.vmReconcileCuratorPeersByCg.delete(contextGraphId);
+      this.vmReconcileCuratorPageCursorByCg.delete(contextGraphId);
+      this.vmReconcileScheduling?.releaseLiveHold(contextGraphId);
+      this.vmReconcileScheduling?.triggerLive(contextGraphId);
+    }
   }
 }

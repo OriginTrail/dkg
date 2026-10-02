@@ -1,0 +1,181 @@
+/* Feature-neutral browser-wallet primitives shared by PCA and node identity management. */
+
+.v10-wallet-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-surface);
+}
+.v10-wallet-addr {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  min-width: 0;
+}
+.v10-wallet-status {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.v10-wallet-status[data-tone='success'] { color: var(--text-success); }
+.v10-wallet-status[data-tone='warn'] { color: var(--text-warning); }
+.v10-wallet-status[data-tone='danger'] { color: var(--text-danger); }
+.v10-wallet-gas {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-left: auto;
+}
+.v10-wallet-trailing { margin-left: auto; display: inline-flex; align-items: center; }
+.v10-wallet-gas + .v10-wallet-trailing { margin-left: 8px; }
+
+.v10-wallet-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 240px;
+  position: relative;
+}
+.v10-wallet-connect-btn,
+.v10-wallet-pill-btn,
+.v10-wallet-pill-link,
+.v10-wallet-provider {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.v10-wallet-connect-btn {
+  align-self: flex-start;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.v10-wallet-connect-btn:hover { background: var(--bg-hover); }
+.v10-wallet-connect-btn:focus-visible,
+.v10-wallet-provider:focus-visible,
+.v10-wallet-pill-btn:focus-visible,
+.v10-wallet-pill-link:focus-visible {
+  outline: 2px solid var(--text-link);
+  outline-offset: 1px;
+}
+.v10-wallet-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+  max-width: 520px;
+}
+.v10-wallet-error {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-danger);
+}
+.v10-wallet-picker {
+  position: absolute;
+  top: 34px;
+  left: 0;
+  z-index: 35;
+  width: min(320px, 90vw);
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.v10-wallet-provider {
+  width: 100%;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.v10-wallet-provider:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.v10-wallet-provider:disabled { opacity: 0.55; cursor: not-allowed; }
+.v10-wallet-provider-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+.v10-wallet-picker-empty {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+.v10-wallet-pill-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.v10-wallet-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+.v10-wallet-pill[data-state='wrong-network'] {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: var(--amber-dim);
+}
+.v10-wallet-pill-main {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.v10-wallet-pill-provider {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.v10-wallet-pill-btn {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.v10-wallet-pill-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.v10-wallet-pill-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-warning);
+}
+.v10-wallet-pill-link {
+  border: none;
+  background: transparent;
+  color: var(--text-link);
+  font-size: 11px;
+  padding: 0;
+  cursor: pointer;
+}
+.v10-wallet-pill-link:disabled { opacity: 0.6; cursor: not-allowed; }

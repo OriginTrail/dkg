@@ -23,69 +23,11 @@ import type {
 } from './chain-adapter.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { PcaUnavailableError } from './pca-errors.js';
-import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
+import { enrichEvmError, errorCode, getPcaLogicInterface } from './evm-adapter-errors.js';
 import type { PcaMutationInvalidation } from './pca-read-cache.js';
-import { withTimeout } from './evm-adapter-rpc.js';
+import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
-
-/** Latest-family `eth_getBlockByNumber` block tags that are TIP reads (must stay
- *  preference-transparent). A concrete hex block number or `earliest` is a fixed
- *  block → sticky (prefer the endpoint that already has it). */
-const PCA_TIP_BLOCK_TAGS = new Set<string>(['latest', 'pending', 'safe', 'finalized']);
-
-type PcaReadStrategy = 'tipTransparent' | 'tipNullableTransparent' | 'stickyNullable' | 'sticky';
-
-/**
- * Classify a PCA proxy read by (method, params) into its endpoint-freshness +
- * nullability strategy — pure and total over {@link PcaRpcMethod}. Lifting the
- * routing rules out of `requestPublishingConvictionRpc` keeps the transport
- * dispatch declarative. The tip block-tag POSITION differs by method:
- * `eth_getBlockByNumber` → params[0]; `eth_call` → params[1] (params[0] is the
- * call object, and an OMITTED tag defaults to `latest`). A concrete hex block is
- * NOT tip.
- *   - `tipTransparent`         — `eth_blockNumber` (never null) or a latest-family
- *     `eth_call` (reads current contract state a lagging backend would stale):
- *     canonical-fresh, preference-transparent, non-nullable.
- *   - `tipNullableTransparent` — a latest-family `eth_getBlockByNumber`: tip
- *     (transparent) BUT nullable — a lagging/partially-synced primary can return
- *     null for a block a backup already has, so fail over on null before returning.
- *   - `stickyNullable`         — receipt / tx / a CONCRETE block: prefer the
- *     endpoint that already observed it, but a `null` ("not here yet") fails over
- *     rather than terminating the lookup or reinforcing a preference.
- *   - `sticky`                 — `eth_call` at a concrete block / `eth_chainId`: a
- *     null-ish answer is a valid result that can't change, so plain sticky.
- */
-function classifyPcaRead(method: PcaRpcMethod, params: readonly unknown[]): PcaReadStrategy {
-  const isLatestFamilyTag = (t: unknown): boolean => typeof t === 'string' && PCA_TIP_BLOCK_TAGS.has(t);
-  switch (method) {
-    // Never-null tip: the current head.
-    case 'eth_blockNumber':
-      return 'tipTransparent';
-    // Reads CURRENT contract state (tip) when the block tag (params[1]) is omitted
-    // (defaults to `latest`) or latest-family; a CONCRETE block is a fixed answer.
-    case 'eth_call':
-      return params[1] === undefined || isLatestFamilyTag(params[1]) ? 'tipTransparent' : 'sticky';
-    // Latest-family block = tip but NULLABLE (a lagging primary may lack it); a
-    // concrete block is fixed but still nullable ("not here yet" must fail over).
-    case 'eth_getBlockByNumber':
-      return isLatestFamilyTag(params[0]) ? 'tipNullableTransparent' : 'stickyNullable';
-    // Receipt / tx lookups: prefer the endpoint that already saw it; a `null` means
-    // "not here yet" and fails over rather than terminating the lookup.
-    case 'eth_getTransactionReceipt':
-    case 'eth_getTransactionByHash':
-      return 'stickyNullable';
-    // Chain id: a fixed answer that can't change → plain sticky.
-    case 'eth_chainId':
-      return 'sticky';
-    default: {
-      // Exhaustive over PcaRpcMethod: a newly-added method must pick a strategy
-      // HERE (a conscious routing decision) or this is a compile error (TS2322) —
-      // never a silent `sticky` fallback.
-      const _exhaustive: never = method;
-      return _exhaustive;
-    }
-  }
-}
+import { isRetryableRpcError } from './evm-adapter-rpc.js';
 
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
@@ -104,22 +46,30 @@ export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNod
 }
 
 export class ConvictionMethods extends EVMChainAdapterBase implements ConvictionReader {
-  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader {
+  /** @deprecated Use the feature-neutral browser-wallet RPC bridge. */
+  async requestPublishingConvictionRpc(
+    method: PcaRpcMethod,
+    params: unknown[] = [],
+  ): Promise<unknown> {
+    return this.requestBrowserWalletRpc(method, params);
+  }
+
+  protected override publisherConvictionPlanReader(): PublisherConvictionPlanReader {
     return {
-      getAccountId: (publisherAddress) => withTimeout(
-        this.getConvictionAgentAccountId(publisherAddress),
+      getAccountId: (publisherAddress) => withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca publish-plan account lookup',
+        () => this.getConvictionAgentAccountId(publisherAddress, { strict: true }),
       ),
-      getLockDurationEpochs: (accountId) => withTimeout(
-        this.getConvictionAccountLockDurationEpochs(accountId),
+      getLockDurationEpochs: (accountId) => withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca publish-plan lock lookup',
+        () => this.getConvictionAccountLockDurationEpochs(accountId, { strict: true }),
       ),
-      canCover: (accountId, baseCost) => withTimeout(
-        this.convictionAccountCanCover(accountId, baseCost),
+      canCover: (accountId, baseCost) => withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca publish-plan coverage probe',
+        () => this.convictionAccountCanCover(accountId, baseCost, { strict: true }),
       ),
     };
   }
@@ -128,29 +78,31 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     address: string,
     requiredCostWei: bigint,
     publishEpochs?: number,
+    strictRead = false,
   ): Promise<boolean> {
     if (!this.contracts.dkgPublishingConvictionNFT) return false;
     try {
-      const accountId = await withTimeout(
-        this.getConvictionAgentAccountId(address),
+      const accountId = await withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca agent account lookup',
+        () => this.getConvictionAgentAccountId(address, { strict: strictRead }),
       );
       if (accountId <= 0n) return false;
       if (publishEpochs !== undefined) {
-        const lockEpochs = await withTimeout(
-          this.getConvictionAccountLockDurationEpochs(accountId),
+        const lockEpochs = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           'pca account lock-duration probe',
+          () => this.getConvictionAccountLockDurationEpochs(accountId, { strict: strictRead }),
         );
         if (lockEpochs !== publishEpochs) return false;
       }
-      return await withTimeout(
-        this.convictionAccountCanCover(accountId, requiredCostWei > 0n ? requiredCostWei : 1n),
+      return await withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca account coverage probe',
+        () => this.convictionAccountCanCover(accountId, requiredCostWei > 0n ? requiredCostWei : 1n, { strict: strictRead }),
       );
-    } catch {
+    } catch (error) {
+      if (strictRead && (isRetryableRpcError(error) || errorCode(error) === 'CALL_EXCEPTION')) throw error;
       return false;
     }
   }
@@ -217,7 +169,10 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     });
   }
 
-  async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
+  async getConvictionAccountLockDurationEpochs(
+    accountId: bigint,
+    opts?: { strict?: boolean },
+  ): Promise<number> {
     await this.init();
     if (!this.contracts.dkgPublishingConvictionNFT) return 0;
     if (accountId <= 0n) return 0;
@@ -238,7 +193,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       const lock = tuple[5];
       return Number(lock);
     } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return 0;
+      if (err?.code === 'CALL_EXCEPTION' && !opts?.strict) return 0;
       throw err;
     }
   }
@@ -267,17 +222,21 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    * gating on real coverage of the pending cost closes that.
    *
    * Returns `false` when the NFT is not deployed, the id is non-positive,
-   * the account is missing, or the chain call reverts — callers treat the
-   * unknown case as "cannot fund", which fails safe to "do not coerce".
+   * or the account cannot cover the cost. Soft callers also treat a revert as
+   * false; strict publisher funding checks propagate failed reads as unknown.
    * `baseCost <= 0` is treated as trivially coverable.
    */
-  async convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean> {
+  async convictionAccountCanCover(
+    accountId: bigint,
+    baseCost: bigint,
+    opts?: { strict?: boolean },
+  ): Promise<boolean> {
     await this.init();
     if (!this.contracts.dkgPublishingConvictionNFT) return false;
     if (accountId <= 0n) return false;
     if (baseCost <= 0n) return true;
     try {
-      const info = await this.getPublishingConvictionAccountInfo(accountId);
+      const info = await this.getPublishingConvictionAccountInfo(accountId, { strict: opts?.strict });
       if (!info) return false;
 
       // Expiry is TIMESTAMP-based on-chain: `coverPublishingCost` reverts
@@ -302,19 +261,14 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       let discountedCost = (baseCost * (BPS_DENOMINATOR - discountBps)) / BPS_DENOMINATOR;
       if (discountedCost === 0n && baseCost > 0n) discountedCost = 1n;
 
-      if (!this.contracts.chronos) {
-        this.contracts.chronos = await this.resolveContract('Chronos');
-      }
-      const currentEpoch: bigint = BigInt(await this.readContract(
-        this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
-      ));
+      const currentEpoch = await this.getCurrentEpoch();
       const remaining: bigint = await this.readContract(
         this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRemainingAllowance',
         'getRemainingAllowance', accountId, currentEpoch,
       );
       return BigInt(remaining) >= discountedCost;
     } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return false;
+      if (err?.code === 'CALL_EXCEPTION' && !opts?.strict) return false;
       throw err;
     }
   }
@@ -442,7 +396,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
 
   async getPublishingConvictionAccountInfo(
     accountId: bigint,
-    opts?: { extended?: boolean },
+    opts?: { extended?: boolean; strict?: boolean },
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     await this.init();
     // Undeployed NFT → capability error (503). null is reserved below
@@ -483,12 +437,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
             );
             info.primaryNode = BigInt(acct[9]);
             info.lastPrimaryNodeChangeEpoch = Number(acct[10]);
-            if (!this.contracts.chronos) {
-              this.contracts.chronos = await this.resolveContract('Chronos');
-            }
-            const currentEpoch: bigint = BigInt(await this.readContract(
-              this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
-            ));
+            const currentEpoch = await this.getCurrentEpoch();
             info.currentEpoch = Number(currentEpoch);
             info.remainingAllowance = BigInt(await this.readContract(
               convictionNft, 'pcaNFT.getRemainingAllowance',
@@ -498,12 +447,12 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
         }
         return info;
       } catch (err: any) {
-        if (err?.code === 'CALL_EXCEPTION') {
+        if (err?.code === 'CALL_EXCEPTION' && !opts?.strict) {
           return null;
         }
         throw err;
       }
-    });
+    }, !!opts?.strict);
   }
 
   async topUpPublishingConvictionAccount(accountId: bigint, amount: bigint): Promise<TxResult> {
@@ -861,22 +810,21 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
   }
 
   /**
-   * Browser bootstrap (sub-PR #2 HW signing) — the minimal resolved contract
-   * addresses + chain params the in-browser viem layer needs to submit
-   * owner-actions direct-to-contract, in ONE call (no in-browser Hub
-   * resolution, H2). Returns `{ nft, token, chainId, rpcUrls }`:
+   * Browser bootstrap (sub-PR #2 HW signing) — the resolved contract
+   * addresses + chain params the in-browser viem layer needs to submit PCA
+   * owner-actions direct-to-contract, in ONE call (no in-browser Hub resolution, H2):
    *   - `nft` = DKGPublishingConvictionNFT (wrapper) — every wallet-signed write
    *     (create/topUp/registerAgent/deregisterAgent) targets it, and it's the
    *     ERC721Enumerable + mint-Transfer source for discovery/accountId parse.
    *   - `token` = the TRAC ERC-20 the approve pre-step allows the wrapper to pull.
-   * Both EIP-55 checksummed. `chainId` is returned AS-IS (may be the compound
+   * All addresses are EIP-55 checksummed. `chainId` is returned AS-IS (may be the compound
    * `base:84532` form — the FE extracts the numeric tail for viem's Chain.id).
    * `rpcUrls` contains only configured wallet-public endpoints. The daemon route
    * replaces it with same-origin `/api/pca/rpc` for node-UI browser reads so
    * configured operator RPC URLs/API keys never leave the node process.
    * Undeployed NFT/token → PcaUnavailableError (route → 503), the same
-   * capability signal as the other PCA reads. NO Hub/logic/ShardingTable — no
-   * browser owner-action touches them.
+   * capability signal as the other PCA reads. Node-identity contracts are
+   * intentionally exposed by the independent identity-wallet capability.
    */
   async getPublishingConvictionContracts(): Promise<PcaContracts> {
     await this.init();
@@ -892,23 +840,4 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     };
   }
 
-  async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
-    await this.init();
-    const label = `pca rpc ${method}`;
-    const send = (provider: ethers.JsonRpcProvider) => provider.send(method, params);
-    // Route by the (method, params) endpoint-freshness + nullability strategy (see
-    // classifyPcaRead). `tipNullableTransparent` keeps the `skipPreferred` opt-out —
-    // transport plumbing owned HERE in the single dispatch, not spelled at a caller.
-    // Exhaustive over PcaReadStrategy: the `never` tail turns a future strategy that
-    // forgets to pick a transport into a COMPILE error, not a silent `readProvider`.
-    const strategy = classifyPcaRead(method, params);
-    switch (strategy) {
-      case 'tipTransparent':         return this.readTipProvider(label, send);
-      case 'tipNullableTransparent': return this.readProviderRetryingNull(label, send, { skipPreferred: true });
-      case 'stickyNullable':         return this.readProviderRetryingNull(label, send);
-      case 'sticky':                 return this.readProvider(label, send);
-    }
-    const _exhaustive: never = strategy;
-    throw new Error(`unreachable PCA read strategy: ${String(_exhaustive)}`);
-  }
 }

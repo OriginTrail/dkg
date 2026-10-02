@@ -15,6 +15,9 @@ import {
   fetchConnections,
   fetchRetentionSettings,
   fetchTelemetrySettings,
+  fetchIdentityWalletContracts,
+  fetchOperationalWallets,
+  IdentityWalletApiDecodeError,
   markNotificationsRead,
   fetchRpcHealth,
   fetchQueryHistory,
@@ -248,6 +251,104 @@ describe('UI API tests', () => {
     it('fetchRpcHealth calls /api/rpc-health', async () => {
       await fetchRpcHealth();
       expect(requestLog.some(r => r.url.startsWith('/api/chain/rpc-health'))).toBe(true);
+    });
+
+    it('surfaces a malformed identity-wallet bootstrap as a typed decode error', async () => {
+      await expect(fetchIdentityWalletContracts()).rejects.toBeInstanceOf(IdentityWalletApiDecodeError);
+      expect(requestLog.some(r => r.url.startsWith('/api/identity-wallets/contracts'))).toBe(true);
+    });
+
+    it('accepts the daemon identity-wallet bootstrap wire payload', async () => {
+      const contracts = {
+        profile: `0x${'11'.repeat(20)}`,
+        identity: `0x${'22'.repeat(20)}`,
+        storage: `0x${'33'.repeat(20)}`,
+        chainId: 'base:84532',
+        rpcUrls: ['/api/identity-wallets/rpc'],
+        walletRpcUrls: ['https://wallet.example/base-sepolia'],
+      };
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 200,
+        body: contracts,
+      });
+
+      await expect(fetchIdentityWalletContracts()).resolves.toEqual(contracts);
+    });
+
+    it('maps only the stable identity-wallet capability 503 to unavailable', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 503,
+        body: {
+          error: 'Identity wallet management is not available on this deployment',
+          code: 'IDENTITY_WALLET_MANAGEMENT_UNAVAILABLE',
+        },
+      });
+
+      await expect(fetchIdentityWalletContracts()).resolves.toBeNull();
+    });
+
+    it('preserves transient identity-wallet bootstrap failures for retry', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 503,
+        body: { error: 'RPC endpoints exhausted', code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      });
+
+      await expect(fetchIdentityWalletContracts()).rejects.toMatchObject({
+        status: 503,
+        body: { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      });
+    });
+
+    it.each([
+      ['missing address', { isAdmin: false, isPrimary: false, registered: true }],
+      ['non-boolean admin flag', { address: '0xabc', isAdmin: 'yes', isPrimary: false, registered: true }],
+      ['non-boolean primary flag', { address: '0xabc', isAdmin: false, isPrimary: 0, registered: true }],
+      ['invalid registration state', { address: '0xabc', isAdmin: false, isPrimary: false, registered: 'unknown' }],
+    ])('surfaces an operational-wallet entry with %s as a typed decode error', async (_label, wallet) => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 200,
+        body: {
+          identityId: '61',
+          hasProfile: true,
+          adminKeyConfigured: true,
+          canManage: true,
+          wallets: [wallet],
+        },
+      });
+      await expect(fetchOperationalWallets()).rejects.toBeInstanceOf(IdentityWalletApiDecodeError);
+    });
+
+    it('maps only the stable operational-wallet capability 503 to unavailable', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 503,
+        body: {
+          error: 'Operational wallet management is unavailable',
+          code: 'OPERATIONAL_WALLET_MANAGEMENT_UNAVAILABLE',
+        },
+      });
+
+      await expect(fetchOperationalWallets()).resolves.toEqual({ available: false });
+    });
+
+    it('accepts a complete operational-wallet snapshot', async () => {
+      const snapshot = {
+        identityId: '61',
+        hasProfile: true,
+        adminKeyConfigured: true,
+        canManage: true,
+        wallets: [{ address: '0xabc', isAdmin: false, isPrimary: true, registered: null }],
+      };
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 200,
+        body: snapshot,
+      });
+      await expect(fetchOperationalWallets()).resolves.toEqual({ available: true, snapshot });
     });
 
     it('fetchEconomics calls /api/economics', async () => {
@@ -773,6 +874,16 @@ describe('UI API tests', () => {
       const map = await fetchAssertionUals('cg-1');
       expect(map['spec.md']).toBe('did:dkg:evm:31337/0xabc/7');
       expect(map['demo.md']).toBe('did:dkg:evm:31337/0xabc/8');
+    });
+
+    it('fetchAssertionUals normalizes raw N-Triples string bindings', async () => {
+      queryBindings = [{
+        name: '"spec.md"',
+        ual: '"did:dkg:evm:31337/0xabc/7"',
+      }];
+      await expect(fetchAssertionUals('cg-1')).resolves.toEqual({
+        'spec.md': 'did:dkg:evm:31337/0xabc/7',
+      });
     });
 
     it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {

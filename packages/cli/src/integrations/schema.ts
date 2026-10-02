@@ -1,9 +1,12 @@
 // TypeScript shape of a DKG integration registry entry.
 //
-// Mirrors schema/integration.schema.json in OriginTrail/dkg-integrations. Only
-// the fields the CLI actually consumes are typed strongly; the rest ride in
-// `[unknownExtras: string]: unknown` so a schema bump in the registry doesn't
-// break the CLI without a corresponding code change here.
+// Integration authors should validate entries against the canonical JSON Schema:
+// https://github.com/OriginTrail/dkg-integrations/blob/main/schema/integration.schema.json
+// That schema and registry CI define authoring requirements, including category,
+// schemaVersion and v10PrimitivesUsed. This module models the CLI's runtime
+// consumption contract: isIntegrationEntry checks fields needed for dispatch,
+// while unknown extras preserve forward compatibility with registry updates.
+// Passing this runtime guard alone does not establish registry acceptance.
 
 export type TrustTier = 'community' | 'verified' | 'featured';
 export type MemoryLayer = 'WM' | 'SWM' | 'VM';
@@ -307,4 +310,3 @@ function isValidInstallSpec(v: unknown): boolean {
       return false;
   }
 }
-

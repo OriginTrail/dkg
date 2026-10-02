@@ -4,11 +4,13 @@ import {
   contextGraphFinalizationTopic,
   contextGraphAppTopic,
   contextGraphDataUri,
+  contextGraphMetaUri,
   contextGraphSessionsTopic,
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
   contextGraphAssertionUri,
   parseContextGraphAssertionUri,
+  parseContextGraphContextStorageUri,
   DHT_PROTOCOL,
   validateContextGraphId,
   validateNewContextGraphId,
@@ -21,6 +23,27 @@ import {
   wireTopicForNetwork,
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
+
+describe('legacy context storage inverse', () => {
+  it.each(['plain', 'team/context/old', 'tenant/_meta'])('round-trips context partitions for %s', (contextGraphId) => {
+    expect(parseContextGraphContextStorageUri(contextGraphDataUri(contextGraphId, '7'))).toEqual({
+      contextGraphId, subGraphId: '7', metadata: false,
+    });
+    expect(parseContextGraphContextStorageUri(contextGraphMetaUri(contextGraphId, '7'))).toEqual({
+      contextGraphId, subGraphId: '7', metadata: true,
+    });
+  });
+
+  it.each([
+    'urn:other:graph/context/7',
+    'did:dkg:context-graph:team',
+    'did:dkg:context-graph:team/context/',
+    'did:dkg:context-graph:/context/7',
+    'did:dkg:context-graph:team/context/7/_meta/extra',
+  ])('rejects an absent or incomplete context partition %s', (uri) => {
+    expect(parseContextGraphContextStorageUri(uri)).toBeUndefined();
+  });
+});
 
 describe('parseContextGraphAssertionUri (inverse of contextGraphAssertionUri)', () => {
   const ADDR = '0xA32f1cc125401B55911678847426759094055B2d';

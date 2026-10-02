@@ -270,16 +270,16 @@ describe('WalletRow', () => {
     const { container, unmount } = await render(
       React.createElement(WalletRow, { address: addr, status: 'approved', statusTone: 'success' }),
     );
-    const row = container.querySelector('.v10-pca-wallet-row')!;
+    const row = container.querySelector('.v10-wallet-row')!;
     expect(row.getAttribute('role')).toBe('group');
     // Full address (not the truncated form) lives in aria-label, with status.
     expect(row.getAttribute('aria-label')).toBe(`${addr}, approved`);
     // Visible address is truncated but the full address is in the title.
-    const addrEl = container.querySelector('.v10-pca-wallet-addr')!;
+    const addrEl = container.querySelector('.v10-wallet-addr')!;
     expect(addrEl.textContent).toContain('…');
     expect(addrEl.getAttribute('title')).toBe(addr);
     // Status is rendered as text with a tone data attribute (not colour-only).
-    const status = container.querySelector('.v10-pca-wallet-status')!;
+    const status = container.querySelector('.v10-wallet-status')!;
     expect(status.textContent).toBe('approved');
     expect(status.getAttribute('data-tone')).toBe('success');
     // Copy control carries the full address in its accessible name.
@@ -634,7 +634,7 @@ describe('SponsorshipHandshake', () => {
         role: 'edge',
       }),
     );
-    expect(container.querySelectorAll('.v10-pca-wallet-row').length).toBe(2);
+    expect(container.querySelectorAll('.v10-wallet-row').length).toBe(2);
     expect(container.querySelector('.v10-pca-handshake-account-id')?.textContent).toBe('PCA #7');
     expect(container.querySelector('.v10-pca-handshake-copyall')).toBeTruthy();
     await unmount();

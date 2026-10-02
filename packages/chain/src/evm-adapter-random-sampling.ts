@@ -15,9 +15,75 @@ import { NoEligibleContextGraphError, NoEligibleKnowledgeCollectionError, Challe
 import type { NodeChallenge, CreateChallengeResult, TxResult, ProofPeriodStatus } from './chain-adapter.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
 import { withTimeout } from './evm-adapter-rpc.js';
+import type { EVMChainAdapter } from './evm-adapter.js';
+import { RandomSamplingContractsUnavailableError, type RandomSamplingAvailability } from './random-sampling-availability.js';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { MAX_PROBE_AGE_MS, DURATION_PROBE_TIMEOUT_MS } from './evm-adapter-constants.js';
 
 export class RandomSamplingMethods extends EVMChainAdapterBase {
+  async resolveRandomSamplingAvailability(this: EVMChainAdapter, identityId: bigint): Promise<RandomSamplingAvailability> {
+    try {
+      await this.init();
+      await this.getRandomSampling();
+      const contextReader = this.getRandomSamplingReadContextReader();
+      const bindingId = contextReader.getRandomSamplingBindingId();
+      const hubGeneration = this.hubBindingGeneration;
+      const shardingTableStorage = await this.resolveContract('ShardingTableStorage');
+      const shardingTableAddress = this.contractBindingAddress(shardingTableStorage);
+      if (
+        shardingTableAddress === undefined
+        || this.hubBindingGeneration !== hubGeneration
+      ) throw new Error('ShardingTableStorage binding changed during eligibility lookup');
+      const observed = this.randomSamplingEligibilityObservation;
+      if (
+        bindingId !== undefined
+        && observed?.identityId === identityId
+        && observed.bindingId === bindingId
+        && observed.shardingTableAddress === shardingTableAddress
+        && observed.hubGeneration === hubGeneration
+        && Date.now() - observed.checkedAtMs
+          < EVMChainAdapterBase.RANDOM_SAMPLING_ELIGIBILITY_MAX_REUSE_MS
+        && contextReader.isRandomSamplingBindingCurrent(bindingId)
+      ) {
+        return { kind: 'available', member: true };
+      }
+      const member = await this.readRandomSamplingLifecycleMembership(
+        shardingTableStorage,
+        identityId,
+      );
+      const currentShardingTableStorage = await this.resolveContract('ShardingTableStorage');
+      if (
+        bindingId === undefined
+        || this.hubBindingGeneration !== hubGeneration
+        || this.contractBindingAddress(currentShardingTableStorage) !== shardingTableAddress
+        || !contextReader.isRandomSamplingBindingCurrent(bindingId)
+      ) {
+        this.randomSamplingEligibilityObservation = undefined;
+        throw new Error('Random Sampling eligibility bindings changed during lookup');
+      }
+      this.randomSamplingEligibilityObservation = member
+        ? Object.freeze({
+            bindingId,
+            identityId,
+            shardingTableAddress,
+            hubGeneration,
+            checkedAtMs: Date.now(),
+          })
+        : undefined;
+      return { kind: 'available', member };
+    } catch (error) {
+      if (error instanceof RandomSamplingContractsUnavailableError
+        || (error instanceof HubContractNotFoundError && (
+          error.contractName === 'RandomSampling'
+          || error.contractName === 'RandomSamplingStorage'
+          || error.contractName === 'ShardingTableStorage'
+        ))) {
+        return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+      }
+      return { kind: 'indeterminate', error };
+    }
+  }
+
   /**
    * Map a caught chain error onto a typed prover error when the revert
    * matches one of the documented retry-next-period / non-retryable

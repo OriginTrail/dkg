@@ -8,17 +8,22 @@ import {
   computeCatalogRoot,
   contextGraphCatalogUri,
   createGraphKnowledgeAssetScope,
+  decodeStorageACK,
   decodePublishIntent,
   encodePublishIntent,
+  isStorageACKDecline,
   knowledgeAssetLayerGraphUri,
+  STORAGE_ACK_DECLINE_CODES,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, readExactGraphPaged, type Quad } from '@origintrail-official/dkg-storage';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import {
   StorageACKHandler,
   type StorageACKHandlerConfig,
 } from '../src/storage-ack-handler.js';
+import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { resolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
+import { workspacePublicQuadsDigest } from '../src/workspace-snapshot-store.js';
 import {
   computeFlatKCMerkleLeafCountV10,
   computeFlatKCRootV10,
@@ -64,6 +69,89 @@ function byteSizeFloor(quads: readonly Pick<Quad, 'subject' | 'predicate' | 'obj
 }
 
 describe('graph-scoped publish storage ACKs', () => {
+  it.each([
+    { label: 'clean capability refusal', throwAfterCommit: false, expectedSettle: false },
+    { label: 'indeterminate post-commit failure', throwAfterCommit: true, expectedSettle: undefined },
+  ])('preserves atomic root-boundary semantics on $label', async ({
+    throwAfterCommit,
+    expectedSettle,
+  }) => {
+    const base = new OxigraphStore();
+    const quads: Quad[] = [{
+      subject: 'urn:asset:root-boundary',
+      predicate: 'urn:p:value',
+      object: '"root-boundary"',
+      graph: SWM_GRAPH,
+    }];
+    await base.insert(quads);
+    if (throwAfterCommit) {
+      const atomicReplace = base.replaceGraphAndSubject!.bind(base);
+      base.replaceGraphAndSubject = async (...args) => {
+        await atomicReplace(...args);
+        throw new Error('response lost after compound StorageACK commit');
+      };
+    }
+    const store = throwAfterCommit
+      ? base
+      : new Proxy(base, {
+          get(target, property, receiver) {
+            if (property === 'replaceGraphAndSubject') return undefined;
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+    const markerGraph = 'urn:test:rfc64-late-boundary';
+    const markerSubject = 'urn:test:rfc64-late-boundary:storage-ack';
+    const settle = vi.fn();
+    const handler = new StorageACKHandler(
+      store,
+      {
+        ...handlerConfig(ethers.Wallet.createRandom(), false),
+        resolveDurableRootAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"storage-ack"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      },
+      new TypedEventBus(),
+    );
+    const intent = encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(quads, []),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: byteSizeFloor(quads),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    const decoded = decodeStorageACK(await handler.handler(intent, PEER));
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(settle).toHaveBeenCalledWith(expectedSettle);
+    await expect(base.query(
+      `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({
+      type: 'boolean',
+      value: throwAfterCommit,
+    });
+  });
+
   it('serializes workspace persistence in the shared per-KA lock domain', async () => {
     const store = new OxigraphStore();
     const writeLocks = new Map<string, Promise<void>>();
@@ -342,8 +430,11 @@ describe('graph-scoped publish storage ACKs', () => {
       publicTripleCount: quads.length,
       privateTripleCount: 0,
       publisherPeerId: 'publisher-peer',
-      accessPolicy: 'allowList',
-      allowedPeers: ['12D3KooWReader'],
+      access: {
+        kind: 'persisted',
+        accessPolicy: 'allowList',
+        allowedPeers: ['12D3KooWReader'],
+      },
     });
   });
 
@@ -428,5 +519,55 @@ describe('graph-scoped publish storage ACKs', () => {
     // members through encrypted gossip/sync and must never be mislabeled as a
     // complete exact SWM graph on this core.
     expect(await store.countQuads(SWM_GRAPH)).toBe(0);
+  });
+
+  it('records the fingerprint of the stored form for an inline copy with escaped text', async () => {
+    const store = new OxigraphStore();
+    const handler = new StorageACKHandler(
+      store,
+      handlerConfig(ethers.Wallet.createRandom(), false),
+      new TypedEventBus(),
+    );
+    const nquads = [
+      `<urn:asset:escaped> <urn:p:headline> "Women\\u2019s Europeans \\uD83D\\uDDD3 12 October" <${SWM_GRAPH}> .`,
+      `<urn:asset:escaped> <urn:p:text> "line one\\nline two\\tend" <${SWM_GRAPH}> .`,
+    ].join('\n');
+    const stagingQuads = new TextEncoder().encode(nquads);
+    const wireQuads = parseSimpleNQuads(nquads);
+    const intent = encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(wireQuads, []),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: stagingQuads.length,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(wireQuads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: wireQuads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+      stagingQuads,
+    });
+
+    const decoded = decodeStorageACK(await handler.handler(intent, PEER));
+
+    expect(isStorageACKDecline(decoded)).toBe(false);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    });
+    const readBack = await readExactGraphPaged(store, SWM_GRAPH, {
+      expectedQuadCount: wireQuads.length,
+      outputGraph: '',
+    });
+    // Finalization recomputes the fingerprint from the store and compares it
+    // with the one recorded here.
+    expect(head?.publicQuadsDigest).toBe(workspacePublicQuadsDigest(readBack));
   });
 });
