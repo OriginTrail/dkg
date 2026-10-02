@@ -13,6 +13,11 @@
 import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChainAdapter, PublishTransactionResolution } from '@origintrail-official/dkg-chain';
+import {
+  ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
+  createRpcTimeoutError,
+} from '@origintrail-official/dkg-chain';
 import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import type { AsyncLiftChainProofLookup, DKGPublisher, LiftJob } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -538,6 +543,32 @@ describe('GH#2270 runner chain-proof resolution', () => {
         resolvePublishTransaction: vi.fn(async () => {
           throw new Error('ETIMEDOUT: rpc unreachable');
         }),
+      });
+
+      expect(await createChainProofResolver(publishers)(lookup)).toEqual({ status: 'inconclusive' });
+    });
+
+    // GH#2945 — the one collapse whose cause is known: the chain package's own typed transport failure.
+    // Everything else stays unclassified, so "no reason" never means "the RPC was fine".
+    it.each([
+      ['every endpoint exhausted', () => new RpcEndpointsExhaustedError('all endpoints failed', { rpcUrls: [] })],
+      ['a bounded request timeout', () => createRpcTimeoutError('eth_getTransactionReceipt timed out after 10000ms')],
+      ['a full request governor queue', () => new ChainRpcTransportError('RPC_REQUEST_GOVERNOR_QUEUE_FULL', 'governor queue wait timed out')],
+    ])('reports inconclusive WITH the rpc-unavailable reason when the lookup throws %s', async (_label, make) => {
+      const publishers = publishersWith({
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(async () => { throw make(); }),
+      });
+
+      expect(await createChainProofResolver(publishers)(lookup))
+        .toEqual({ status: 'inconclusive', reason: 'rpc-unavailable' });
+    });
+
+    it('does not claim the RPC was down for a throw that is not the typed transport failure', async () => {
+      const lookingLikeOne = Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' });
+      const publishers = publishersWith({
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(async () => { throw lookingLikeOne; }),
       });
 
       expect(await createChainProofResolver(publishers)(lookup)).toEqual({ status: 'inconclusive' });

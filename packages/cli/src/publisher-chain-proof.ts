@@ -22,7 +22,7 @@
  * a resend of a transaction that may be in flight.
  */
 import { ethers } from 'ethers';
-import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
+import { buildKnowledgeAssetUal, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import type {
   CanonicalFinalizationReceipt,
   ChainAdapter,
@@ -430,10 +430,15 @@ async function resolvePublishTransactionState(
     // its jobs and the operator's by-id clear remains; adapters that implement the tri-state lookup
     // are unaffected.
     return { status: 'inconclusive' };
-  } catch {
+  } catch (error) {
     // Transient RPC/provider errors establish nothing — report that rather than
-    // crashing the daemon, so the recovery timeout mechanism handles it.
-    return { status: 'inconclusive' };
+    // crashing the daemon, so the recovery timeout mechanism handles it. When the chain package's own
+    // typed transport failure says no endpoint could answer, say so (GH#2945): it is the one collapse
+    // here whose cause is known. Any other throw stays unclassified, and so does every other
+    // `inconclusive` in this module — "no reason" never means "the RPC was fine".
+    return isChainRpcTransportError(error)
+      ? { status: 'inconclusive', reason: 'rpc-unavailable' }
+      : { status: 'inconclusive' };
   }
 }
 
