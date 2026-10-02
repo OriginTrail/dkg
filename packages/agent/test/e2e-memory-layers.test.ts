@@ -368,6 +368,9 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
         : { accessPolicy: 'ownerOnly' });
       const newerIntent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
       expect(newerIntent.shareOperationId).not.toBe(intent.shareOperationId);
+      // GH#2958 — the superseded draft was finalized but never published; it must not burn its
+      // number: the next draft is still confirmed + 1, the number `update()` will accept.
+      expect(newerIntent.assertionVersion).toBe(intent.assertionVersion);
       const newerWorkspace = await fixture.readWorkspace(newerIntent);
       if (change === 'content') expect(newerIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
       else expect(newerWorkspace.head).toMatchObject({
@@ -391,6 +394,44 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect((await fixture.readWorkspace()).operation).toEqual(fixture.originalWorkspace.operation);
     });
   }, 180_000);
+
+  // GH#2958 — the whole issue on a real chain: a finalized update that is abandoned (superseded by
+  // a newer edit) must not make the KA unpublishable. The superseded job is refused terminally,
+  // and the newer draft - numbered confirmed + 1 again - publishes as an update.
+  it('publishes the newer draft after a superseded update was abandoned [GH#2958]', async () => {
+    await withUpdateFixture({ label: 'abandoned-then-newer', accessPolicy: 'ownerOnly' }, async (fixture) => {
+      const { agent, cg, name, root, queue, jobId, intent, dispatch } = fixture;
+      await agent.assertion.pullFrom(cg, name, 'swm', { onConflict: 'replace' });
+      await agent.assertion.write(cg, name, [
+        { subject: root, predicate: 'http://schema.org/name', object: '"newer than the abandoned draft"' },
+      ]);
+      const sealed = await agent.assertion.finalize(cg, name);
+      expect(sealed.assertionVersion).toBe('2');
+      await agent.assertion.promote(cg, name, { accessPolicy: 'ownerOnly' });
+      const newerIntent = await agent.resolveFinalizedAssertionVmPublishIntent(cg, name);
+      expect(newerIntent.assertionVersion).toBe(intent.assertionVersion);
+
+      // The abandoned draft's job ends terminally ...
+      expect(await queue.retryDetailed({ jobId })).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+      expect(await queue.processNext('wallet-1')).toMatchObject({
+        jobId,
+        status: 'failed',
+        failure: { code: 'publish_intent_stale', retryable: false },
+      });
+      expect(dispatch).not.toHaveBeenCalled();
+
+      // ... and does not hold the KA: the newer draft is admitted and published as version 2.
+      const newerJobId = await queue.enqueueKnowledgeAssetVmPublish(newerIntent);
+      const finalized = await queue.processNext('wallet-1');
+      expect(finalized?.jobId).toBe(newerJobId);
+      expect(finalized?.status, JSON.stringify(finalized?.failure)).toBe('finalized');
+      expect(finalized?.broadcast).toMatchObject({ operationKind: 'update', txHash: expect.any(String) });
+      expect(dispatch).toHaveBeenCalledOnce();
+      const scope = createGraphKnowledgeAssetScope(newerIntent.kaUal!, newerIntent.assertionVersion!);
+      const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+      expect(await (agent as any).chain.getMerkleRootCount(kaId)).toBe(2n);
+    });
+  }, 240_000);
 });
 
 describe('Memory layer isolation (single agent)', () => {
