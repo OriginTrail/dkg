@@ -174,32 +174,72 @@ describe('#2079 isGraphAssetMaterialized fast path', () => {
     expect(await mat.isGraphAssetMaterialized(d)).toBe(false);
   });
 
-  it('rehashes equal-count out-of-band replacements after the process-local memo expires', async () => {
-    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+  it('answers a second materializer from the standing witness without the read-back', async () => {
+    // A fresh materializer has an empty memo, so this row reaches the durable
+    // witness: the count gate runs, the ASK answers, and no CONSTRUCT follows.
     const inner = newStore();
-    const v1 = payload('v1', 6);
-    const v2 = payload('v2', 6);
-    await inner.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
-    const { store, constructs } = processLocalCountingStore(inner);
+    const quads = payload('v1', 6);
+    await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+    const { store, constructs, countQueries } = countingStore(inner);
+    const newMaterializer = () => createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const d = descriptorFor(quads);
+
+    expect(await newMaterializer().isGraphAssetMaterialized(d)).toBe(true);
+    expect(countQueries()).toBe(1);
+    expect(constructs()).toBe(1);
+
+    expect(await newMaterializer().isGraphAssetMaterialized(d)).toBe(true);
+    expect(countQueries()).toBe(2);
+    expect(constructs()).toBe(1);
+  });
+
+  it('offers no memo on a store that cannot see every writer: count gate and witness on every check', async () => {
+    // With process-local coverage another process can change the graph without
+    // moving this process's generation, so an unchanged generation proves
+    // nothing. Every check pays the count; the witness still saves the read.
+    const inner = newStore();
+    const quads = payload('v1', 6);
+    await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+    const { store, constructs, countQueries } = processLocalCountingStore(inner);
     const mat = createSharedMemorySnapshotMaterializer({
       store,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });
-    const d1 = descriptorFor(v1);
+    const d = descriptorFor(quads);
 
-    expect(await mat.isGraphAssetMaterialized(d1)).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+
+    expect(countQueries()).toBe(2);
     expect(constructs()).toBe(1);
-    expect(await readSwmMaterializationWitness(inner, GRAPH, d1.publicQuadsDigest)).toBe(true);
+  });
 
-    // Simulate a second process replacing the backing graph. The process-local
-    // revision above deliberately remains stable, the count is unchanged, and
-    // the durable v1 witness remains present.
-    await inner.replaceGraph(GRAPH, v2.map((q) => ({ ...q, graph: GRAPH })));
-    now.mockReturnValue(1_031_000);
+  it('catches an out-of-band removal on the very next check of a process-local store', async () => {
+    // The window a memo would open here: a writer this process's generation
+    // never sees drops the graph, the durable witness still stands, and the
+    // clock is frozen so no expiry can explain the answer.
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const inner = newStore();
+    const quads = payload('v1', 6);
+    await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+    const { store } = processLocalCountingStore(inner);
+    const mat = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const d = descriptorFor(quads);
+    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
 
-    expect(await mat.isGraphAssetMaterialized(d1)).toBe(false);
-    expect(constructs()).toBe(2);
+    await inner.dropGraph(GRAPH);
+    expect(await readSwmMaterializationWitness(inner, GRAPH, d.publicQuadsDigest)).toBe(true);
+
+    expect(await mat.isGraphAssetMaterialized(d)).toBe(false);
   });
 
   it('writes NO witness when the digest does NOT match, and stays false on re-check', async () => {
@@ -246,11 +286,13 @@ describe('#2079 isGraphAssetMaterialized fast path', () => {
     await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
 
     let failAsks = false;
+    let failedAsks = 0;
     const store = new Proxy(inner, {
       get(target, prop, receiver) {
         if (prop === 'query') {
           return async (sparql: string, options?: unknown) => {
             if (failAsks && sparql.trimStart().startsWith('ASK')) {
+              failedAsks += 1;
               throw new Error('store unavailable');
             }
             return (target as TripleStore).query(sparql, options as never);
@@ -259,20 +301,21 @@ describe('#2079 isGraphAssetMaterialized fast path', () => {
         return Reflect.get(target, prop, receiver);
       },
     }) as TripleStore;
-
-    const mat = createSharedMemorySnapshotMaterializer({
+    const newMaterializer = () => createSharedMemorySnapshotMaterializer({
       store,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });
     const d = descriptorFor(quads);
 
-    // Warm the memo, then break only the ASK.
-    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+    // Write the witness, then break only the ASK.
+    expect(await newMaterializer().isGraphAssetMaterialized(d)).toBe(true);
     failAsks = true;
 
-    // Still correct — it recomputed instead of throwing.
-    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+    // A fresh materializer has no in-process memo, so this check reaches the
+    // ASK. Still correct — it recomputed instead of throwing.
+    expect(await newMaterializer().isGraphAssetMaterialized(d)).toBe(true);
+    expect(failedAsks).toBeGreaterThan(0);
   });
 
   it('does not certify v2 from a v1 witness when the quad COUNT is unchanged', async () => {

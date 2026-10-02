@@ -37,9 +37,9 @@ const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 /**
- * A successful full graph validation remains reusable only for this short
- * window. The write-generation check catches local mutations; the TTL is the
- * backstop for stores that can be changed by another process.
+ * How long one successful validation may be reused. The memo is offered only
+ * where an unchanged write generation already proves that no writer touched
+ * the graph, so this bounds reuse; it is not the invalidation.
  */
 const MATERIALIZATION_MEMO_TTL_MS = 30_000;
 const MATERIALIZATION_MEMO_MAX_ENTRIES = 1024;
@@ -321,18 +321,20 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     return raw !== '0' && raw.toLowerCase() !== 'false';
   })();
 
-  // The durable witness remains the compatibility path for stores without a
-  // write-revision capability. Stores that expose a stable generation can use
-  // this bounded process-local memo to skip both COUNT and CONSTRUCT on an
-  // unchanged descriptor. The short TTL limits the stale-read window when a
-  // second process can mutate the same backing store.
-  const graphWriteRevision = asGraphWriteRevisionSource(deps.store);
-  // A durable witness can seed the in-process memo only when the revision
-  // source observes every writer. With process-local coverage, another
-  // process can replace equal-count content without changing our generation;
-  // every memo miss (including TTL expiry and LRU eviction) must therefore
-  // re-bind the content digest with CONSTRUCT before the memo is refreshed.
-  const witnessCanSeedMemo = graphWriteRevision?.writeRevisionCoverage !== 'process-local';
+  // In-process memo of a successful validation, bound to the graph's write
+  // generation. A hit skips the count gate, the witness ASK and the read-back,
+  // so it is offered only where an unchanged generation proves that nothing
+  // wrote the graph: a revision source that observes EVERY writer.
+  //
+  // With process-local coverage another process can remove or replace the
+  // graph without moving this process's generation, and the count gate the
+  // witness module requires on every call is exactly what a hit would skip.
+  // Those stores, and stores with no revision capability, get no memo: they
+  // keep the count gate + durable witness path below, unchanged.
+  const revisionSource = asGraphWriteRevisionSource(deps.store);
+  const graphWriteRevision = revisionSource?.writeRevisionCoverage === 'all-writers'
+    ? revisionSource
+    : null;
   const materializationMemo = new Map<string, MaterializationMemoEntry>();
   const readWriteRevision = (assertionGraph: string) => {
     try {
@@ -720,6 +722,11 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       const expected = descriptor.publicQuadsCount;
       if (!Number.isSafeInteger(expected) || expected < 0) return false;
       const validationRevision = readWriteRevision(descriptor.assertionGraph);
+      // Memo fast path, ahead of the count gate on purpose. The gate exists
+      // for removals a witness cannot see; an unchanged all-writers generation
+      // proves there was no removal, or any other write, since the validation
+      // that seeded the entry.
+      //
       // Empty projections have a second control-plane health check below;
       // keep that check on every call instead of memoizing only the graph row.
       if (expected > 0 && readMemo(descriptor)) return true;
@@ -750,7 +757,6 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       // which is not worth trading self-healing for. Do not reorder these.
       if (
         witnessUsable
-        && witnessCanSeedMemo
         && await readSwmMaterializationWitness(
           deps.store,
           descriptor.assertionGraph,

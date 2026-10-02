@@ -152,6 +152,21 @@ function countingStore(inner: TripleStore) {
   return { store: proxy, constructs: () => constructs, countQueries: () => countQueries };
 }
 
+/**
+ * Presents `inner` as a store whose revision source sees every writer but
+ * whose generation never moves. A memo miss on it cannot be explained by the
+ * generation check.
+ */
+function fixedRevisionStore(inner: TripleStore): TripleStore {
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === 'writeRevisionCoverage') return 'all-writers';
+      if (prop === 'getWriteRevision') return () => ({ generation: 0, stable: true });
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as TripleStore;
+}
+
 async function distinctObjects(store: TripleStore, graph: string, subject: string, predicate: string): Promise<string[]> {
   const result = await store.query(
     `SELECT DISTINCT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
@@ -261,6 +276,70 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         vi.unstubAllEnvs();
       }
     });
+
+    it('does not memoize a validation that a write raced', async () => {
+      // The read-back sees v1, then a writer installs equal-count v2 before the
+      // check finishes. The check may report what it read, but it must not keep
+      // that answer under the post-write generation.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        let raceNextConstruct = true;
+        const store = new Proxy(inner, {
+          get(target, prop, receiver) {
+            if (prop === 'query') {
+              return async (sparql: string, options?: unknown) => {
+                const result = await (target as TripleStore).query(sparql, options as never);
+                if (raceNextConstruct && sparql.trimStart().startsWith('CONSTRUCT')) {
+                  raceNextConstruct = false;
+                  await target.replaceGraph(v2.assertionGraph, inGraph(v2.payload, v2.assertionGraph));
+                }
+                return result;
+              };
+            }
+            return Reflect.get(target, prop, receiver);
+          },
+        }) as TripleStore;
+        const { materializer } = materializerFor(store);
+
+        expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+        // The store now holds v2. A memoized answer would still say v1.
+        expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('drops its memo entry when it replaces the graph itself', async () => {
+      // On this store the generation never moves, so only the materializer
+      // forgetting its own entry can make the last check touch the store.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { store, constructs, countQueries } = countingStore(inner);
+        const { materializer } = materializerFor(fixedRevisionStore(store));
+        const descriptor = descriptorFor(v1);
+
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(1);
+        expect(constructs()).toBe(1);
+
+        await materializer.replaceGraph(v1.assertionGraph, inGraph(v1.payload, v1.assertionGraph));
+
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(2);
+        expect(constructs()).toBe(2);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   describe('readStoredHead', () => {
@@ -345,11 +424,8 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     const { materializer, invalidations } = materializerFor(store);
     await materializer.replaceGraph(v1.assertionGraph, inGraph(v1.payload, v1.assertionGraph));
     expect(invalidations()).toBe(1);
-    expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
-    // A replacement on the same materializer must invalidate its process-local
-    // memo before the next validation.
-    await materializer.replaceGraph(v1.assertionGraph, inGraph(v1.payload, v1.assertionGraph));
-    expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    const { materializer: checker } = materializerFor(store);
+    expect(await checker.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
   });
 
   describe('end-to-end catch-up with the real materializer', () => {
