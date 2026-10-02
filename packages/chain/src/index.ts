@@ -188,6 +188,18 @@ export {
   type RpcUsageRecorder,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+// Observation-only split of physical RPC attempts into local admission wait and
+// endpoint latency. Process-cumulative, bounded and secret-free; consumers diff
+// two non-draining snapshots.
+export {
+  RPC_TIMING_BUCKET_UPPER_MS,
+  diffRpcRequestTiming,
+  snapshotRpcRequestTiming,
+  type RpcRequestTimingClassSnapshot,
+  type RpcRequestTimingSnapshot,
+  type RpcTimingDistribution,
+  type RpcTimingRequestClass,
+} from './rpc-request-timing.js';
 // The bounded census of call sites that reach `cgStorage.getContextGraph`.
 export {
   CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
@@ -258,12 +270,20 @@ export {
   RpcEndpointsExhaustedError,
   isChainRpcTransportError,
   isRpcEndpointsExhaustedError,
+  isTransientRpcTransportFailureWithoutTransaction,
   createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
   type RpcEndpointExhaustionKind,
   type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
+export {
+  CHAIN_WRITE_AHEAD_HOOK_FAILED_CODE,
+  ChainWriteAheadHookError,
+  getChainWriteAheadHookCause,
+  isChainWriteAheadHookError,
+  type ChainWriteAheadHookErrorLike,
+} from './write-ahead-hook-error.js';
 export {
   classifyContextGraphRegistrationFailure,
   markContextGraphRegistrationNotSubmitted,
@@ -281,6 +301,9 @@ export {
   noteRpcExhaustion,
   notePreferredEndpoint,
   noteRpcServed,
+  // GH#2942 — the publisher persists a transport failure's message and must reduce any URL in
+  // it (a configured RPC URL can carry an API key) to its host first.
+  hostOnlyRpcText,
 } from './rpc-failover-log.js';
 export {
   HubResolutionCache,

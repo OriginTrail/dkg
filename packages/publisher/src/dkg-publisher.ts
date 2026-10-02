@@ -1,3 +1,4 @@
+import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -121,7 +122,7 @@ import {
   CuratorRejectedError,
   type CASCondition,
 } from './errors.js';
-import { isQuorumUnmetError } from './ack-errors.js';
+import { RpcPreconditionError, isQuorumUnmetError } from './ack-errors.js';
 import { stripOptionalLiteral } from './sparql-binding-literal.js';
 import {
   runLegacyWorkingMemoryMigration,
@@ -1172,6 +1173,7 @@ export class DKGPublisher implements Publisher {
   private tentativeCounter = 0;
   readonly writeLocks: Map<string, Promise<void>>;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  private readonly publishedSnapshotRetirement: PublishedSnapshotRetirement;
   /** OT-RFC-43 Option 1 — deterministic KA-id allocator (optional; see DKGPublisherConfig). */
   private readonly kaAllocator?: KaIdAllocator;
   private readonly resolveDurableRootPromotionAtomicCompanion?: (
@@ -1242,6 +1244,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -7567,6 +7570,10 @@ export class DKGPublisher implements Publisher {
     const operationSubjects = operationRows.type === 'bindings'
       ? [...new Set(operationRows.bindings.map((row) => row['operation']).filter(Boolean))]
       : [];
+    // Persist the candidate BEFORE removing its references. If cleanup fails or
+    // the process exits midway, remaining metadata makes collection fail closed.
+    // Only this confirmed/durable cleanup boundary creates retirement candidates.
+    await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, message => this.log.warn(ctx, message));
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
@@ -9519,10 +9526,16 @@ export class DKGPublisher implements Publisher {
           // A flaky/incapable oracle must not silently let the allocator reuse a
           // number; surface it so the operator notices rather than burning ids.
           // (The contract's _safeMint revert remains the ultimate backstop.)
-          throw new Error(
-            `OT-RFC-43 Option 1: failed to reconcile KA-number floor for author ${author} ` +
-            `against chain: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          // Thrown as the publisher's own RPC-precondition wrapper with the oracle's error kept as
+          // `cause`, so a typed transient transport failure raised here can still qualify for the
+          // same-job retry lane (the failure writer unwraps this wrapper by exactly one level).
+          throw new RpcPreconditionError({
+            method: 'getMaxKaNumberForAuthor',
+            message:
+              `OT-RFC-43 Option 1: failed to reconcile KA-number floor for author ${author} ` +
+              `against chain: ${err instanceof Error ? err.message : String(err)}`,
+            cause: err,
+          });
         }
       }
       if (chainMax >= 0n) {

@@ -327,6 +327,12 @@ export const PATH_TRIGGERS = Object.freeze([
   // Files other packages load by relative path, outside their declared
   // dependencies.
   {
+    patterns: [/^packages\/agent\/src\/sync\/(?:exact-assets|exact-batch-stream-contract|wire-compression)\.ts$/],
+    lanes: ['tornado_core'],
+    evmScopes: [],
+    reason: 'the Core stream transport tests import the Agent production codec',
+  },
+  {
     patterns: [/^packages\/cli\/src\/extraction\/markdown-extractor\.ts$/],
     lanes: ['tornado_agent'],
     evmScopes: [],

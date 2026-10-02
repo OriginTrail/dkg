@@ -66,6 +66,7 @@ import {
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
 import type {
+  AsyncLiftLastChainCheck,
   AsyncPreparedPublishPayload,
   LiftJobRetryProjection,
   PendingTransactionClearOverride,
@@ -428,10 +429,28 @@ type JobDetailContext = Pick<RequestContext, 'publisherControl' | 'publisherStat
 /** The ONE place the operator-facing retry answer is derived: the publisher's configured view, */
 /** narrowed by this daemon's runtime availability. */
 function runtimeRetryState(ctx: JobDetailContext, job: PersistedLiftJob): LiftJobRetryProjection {
-  return narrowRetryStateToRuntime(
-    ctx.publisherControl.describeConfiguredRetryState(job),
-    ctx.publisherState.availability,
+  return withLastChainCheck(
+    narrowRetryStateToRuntime(
+      ctx.publisherControl.describeConfiguredRetryState(job),
+      ctx.publisherState.availability,
+    ),
+    // GH#2945 — only the RUNTIME publisher runs the chain-proof dispatcher, so only it can say what the
+    // latest re-check found; the control instance this route reads the record through has no schedule.
+    ctx.publisherState.runtime?.publisher.lastChainProofCheck?.(job),
   );
+}
+
+/**
+ * GH#2945 — a held job's `chain_recheck_pending` blocker carries what the running publisher's latest
+ * re-check found, when it has an observation for this exact incarnation. Nothing else is touched: no
+ * runtime, no observation or any other blocker leaves the projection exactly as derived.
+ */
+function withLastChainCheck(
+  projection: LiftJobRetryProjection,
+  lastCheck: AsyncLiftLastChainCheck | undefined,
+): LiftJobRetryProjection {
+  if (lastCheck === undefined || projection.blocker?.code !== 'chain_recheck_pending') return projection;
+  return { ...projection, blocker: { ...projection.blocker, lastCheck } };
 }
 
 /**

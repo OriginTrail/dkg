@@ -311,8 +311,11 @@ export async function authenticateVerifiedGraphScopedAsset(
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
+    // Only the receipt's batch, root, hash and ordering are consumed below, so
+    // the adapter's unused block-header lookup for `blockTimestamp` is skipped.
     const resolved = await chain.resolvePublishByTxHash(transactionHash, {
       signal: options.signal,
+      skipBlockTimestamp: true,
     });
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (

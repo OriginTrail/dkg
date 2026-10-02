@@ -638,6 +638,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.retryable).toBe(true);
     expect(res.body.retryable).not.toBe(false);
     expect(res.body.existingJobId).toBe('job-7');
+    // GH#2942 - a thrower that carries no blocker adds no key: the body is exactly what it was.
+    expect(res.body).not.toHaveProperty('blocker');
     // The message names the automatic lane FIRST and the by-id clear as the impatient-operator
     // exit, with the exact job to act on.
     expect(String(res.body.error)).toContain('Chain recovery re-checks this job');
@@ -693,6 +695,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
     expect(res.body.retryable).toBe(false);
     expect(res.body.existingJobId).toBe('job-8');
+    expect(res.body).not.toHaveProperty('blocker');
     expect(String(res.body.error)).toContain('no automatic exit');
     expect(String(res.body.error)).toContain('/api/publisher/clear-job');
     expect(String(res.body.error)).toContain('job-8');
@@ -701,6 +704,57 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     // that can actually clear the job, which is what makes this pair discriminating rather than
     // a single-branch check that a reversal could satisfy.
     expect(String(res.body.error)).toContain('{"jobId":"job-8","allowPendingTransaction":true}');
+  });
+
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF forwards the publisher\'s blocker additively [GH#2942]', async () => {
+    // The 503 says THAT the job is held and whether an automatic lane exists; the blocker says WHY,
+    // in the vocabulary `retryState.blocker` uses. It rides beside the unchanged prose and
+    // `retryable`, so a client that ignores it behaves exactly as before.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'pending-proof-op-blocker',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new LiftJobPendingChainProofError(
+          'LiftJob job-9 failed as rpc_unavailable after a transaction may have been submitted; '
+            + 'it cannot be republished until chain recovery proves the transaction absent',
+          'job-9',
+          false,
+          {
+            code: 'nonce_missing',
+            summary: 'A CREATE needs the nonce its transaction reserved to prove it was never sent.',
+            missing: ['nonce'],
+          },
+        );
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+
+    expect(res.status).toBe(503);
+    expect(res.body.retryable).toBe(false);
+    expect(res.body.blocker).toEqual({
+      code: 'nonce_missing',
+      summary: 'A CREATE needs the nonce its transaction reserved to prove it was never sent.',
+      missing: ['nonce'],
+    });
+    expect(String(res.body.error)).toContain('no automatic exit');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate
