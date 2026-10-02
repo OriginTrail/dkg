@@ -399,17 +399,18 @@ export async function resolveWorkspaceAgentRecipientKeys(
     ? ''
     : `FILTER (?g NOT IN (${excludedGraphs.join(', ')}))`;
   // Peer ids are routing metadata, not part of the wallet-signed encryption
-  // key proof. Bound the unrestricted path too: otherwise replicated profile
-  // graphs can pair one valid key with arbitrarily many peer ids and amplify
-  // both Sender Key setup and reliable workspace fanout without bound.
+  // key proof. Bound key/route candidates independently from proof history:
+  // the RDF schema stores both keys and proofs on the agent subject, so joining
+  // them in SPARQL produces an N x N product during ordinary key rotation.
+  // Separate 64-row bounds keep both reliable fanout and proof verification
+  // work finite without treating that product as 64 distinct recipients.
   const candidateLimit = `LIMIT ${STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT + 1}`;
   const result = await store.query(
-    `SELECT DISTINCT ?key ?algorithm ?proof ?peerId WHERE {
+    `SELECT DISTINCT ?key ?algorithm ?peerId WHERE {
       VALUES ?agentSubject { ${agentUriValues} }
       GRAPH ?g {
         ?agentSubject <${DKG_PUBLIC_ENCRYPTION_KEY}> ?key .
         OPTIONAL { ?agentSubject <${DKG_ENCRYPTION_KEY_ALGORITHM}> ?algorithm }
-        OPTIONAL { ?agentSubject <${DKG_ENCRYPTION_KEY_PROOF}> ?proof }
         OPTIONAL { ?agentSubject <${DKG_PEER_ID}> ?peerId }
       }
       ${graphFilter}
@@ -425,6 +426,29 @@ export async function resolveWorkspaceAgentRecipientKeys(
       `Too many public encryption-key candidates for DKG agent ${checksum}`,
     );
   }
+  const proofResult = await store.query(
+    `SELECT DISTINCT ?proof WHERE {
+      VALUES ?agentSubject { ${agentUriValues} }
+      GRAPH ?g {
+        ?agentSubject <${DKG_ENCRYPTION_KEY_PROOF}> ?proof .
+      }
+      ${graphFilter}
+    }
+    ${candidateLimit}`,
+  );
+  if (
+    proofResult.type === 'bindings'
+    && proofResult.bindings.length > STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT
+  ) {
+    throw new Error(
+      `Too many public encryption-key proof candidates for DKG agent ${checksum}`,
+    );
+  }
+  const proofCandidates = proofResult.type === 'bindings'
+    ? proofResult.bindings
+      .map((row) => stringBinding(row['proof']))
+      .filter((proof): proof is string => proof !== undefined)
+    : [];
 
   // One wallet-verified key can be replicated in several profile graphs. Keep
   // distinct peer bindings for that key so a later Context Graph allowlist can
@@ -442,9 +466,8 @@ export async function resolveWorkspaceAgentRecipientKeys(
   for (const row of result.bindings) {
     const publicKey = stringBinding(row['key']);
     const algorithm = stringBinding(row['algorithm']);
-    const proof = stringBinding(row['proof']);
     const peerId = stringBinding(row['peerId']);
-    if (!publicKey || !algorithm || !proof) {
+    if (!publicKey || !algorithm || proofCandidates.length === 0) {
       sawUntrustedOnly = true;
       continue;
     }
@@ -467,8 +490,9 @@ export async function resolveWorkspaceAgentRecipientKeys(
       continue;
     }
 
-    const cleanProof = stripRdfLiteral(proof);
-    const verified = verifyAgentEncryptionKeyProof(checksum, publicKeyBytes, cleanProof);
+    const verified = proofCandidates.some((proof) => (
+      verifyAgentEncryptionKeyProof(checksum, publicKeyBytes, stripRdfLiteral(proof))
+    ));
     if (!verified) {
       sawInvalidProof = true;
       continue;

@@ -54,7 +54,10 @@ import {
   type DiscoveredAgent,
   type PendingSenderKeyEntry,
 } from '../src/index.js';
-import { swmSenderStateKey } from '../src/dkg-agent-swm-state.js';
+import {
+  computeSwmSenderKeyRecipientRouteHash,
+  swmSenderStateKey,
+} from '../src/dkg-agent-swm-state.js';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
@@ -1345,6 +1348,10 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
       senderAgentAddress: sender.agentAddress,
       epochId: 'epoch-existing',
       membershipHash,
+      recipientRouteHash: computeSwmSenderKeyRecipientRouteHash({
+        contextGraphId,
+        recipients: resolution.recipients,
+      }),
       createdAtMs: Date.now(),
       nextMessageIndex: 0,
       chainKey,

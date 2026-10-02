@@ -425,6 +425,22 @@ describe('resolveWorkspaceAgentRecipients', () => {
       .rejects.toThrow(/Too many public encryption-key candidates/u);
   });
 
+  it('bounds proof candidates independently from key-route variants', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    await insertAgentEncryptionKey(store, wallet);
+    await store.insert(Array.from({ length: 64 }, (_unused, index) => ({
+      subject: agentUri(wallet.address),
+      predicate: DKG_ENCRYPTION_KEY_PROOF,
+      object: `"untrusted-proof-${index}"`,
+      graph: 'did:dkg:system/agents',
+    })));
+
+    await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
+      .rejects.toThrow(/Too many public encryption-key proof candidates/u);
+  });
+
   it('resolves AGENTS-graph private declarations through the sender-key recipient path', async () => {
     const store = new OxigraphStore();
     const wallet = ethers.Wallet.createRandom();
@@ -595,6 +611,24 @@ describe('resolveWorkspaceAgentRecipients', () => {
       expect(recipient.agentAddress).toBe(ethers.getAddress(wallet.address));
       expect(recipient.encryptionKeyAlgorithm).toBe(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519);
     }
+  });
+
+  it('resolves the surviving key after eight retire-old rotations', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    const keys = [];
+    for (let index = 0; index < 9; index += 1) {
+      keys.push(await insertAgentEncryptionKey(store, wallet, { keyFill: index + 1 }));
+    }
+    for (const retired of keys.slice(0, -1)) {
+      await insertAgentEncryptionKeyRevocation(store, wallet, retired.publicKeyBytes);
+    }
+
+    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
+
+    expect(resolution.recipients).toHaveLength(1);
+    expect(resolution.recipients[0]?.recipientKeyId).toBe(keys.at(-1)?.keyId);
   });
 
   it('ignores a malformed candidate when a verified active key also exists', async () => {

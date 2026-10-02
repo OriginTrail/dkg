@@ -442,6 +442,7 @@ import {
 } from './dkg-agent-helpers.js';
 import { reconcileAndAllocateKaNumber, readMaxKaNumberWithRetry, isTransientChainError } from './allocator.js';
 import {
+  computeSwmSenderKeyRecipientRouteHash,
   swmSenderStateKey,
   swmReceiverStateKey,
   serializeSwmSenderSendState,
@@ -4067,13 +4068,24 @@ export class PublishMethods extends DKGAgentBase {
         recipientKeyId: r.recipientKeyId,
       })),
     });
+    const recipientRouteHash = computeSwmSenderKeyRecipientRouteHash({
+      contextGraphId,
+      subGraphName,
+      recipients: resolution.recipients,
+    });
 
     const stateKey = swmSenderStateKey(contextGraphId, subGraphName, senderAddress);
     let state = this.swmSenderKeySendStates.get(stateKey);
-    if (!state || state.membershipHash !== membershipHash) {
+    if (
+      !state
+      || state.membershipHash !== membershipHash
+      || state.recipientRouteHash !== recipientRouteHash
+    ) {
       const reason = !state
         ? 'no persisted state'
-        : `membership changed (was=${state.membershipHash} now=${membershipHash})`;
+        : state.membershipHash !== membershipHash
+          ? `membership changed (was=${state.membershipHash} now=${membershipHash})`
+          : `recipient routes changed (was=${state.recipientRouteHash ?? 'legacy-untracked'} now=${recipientRouteHash})`;
       this.log.info(
         ctx,
         `${logPrefix}: bootstrapping/rotating swm-sender-key epoch for curated CG ${contextGraphId} ` +

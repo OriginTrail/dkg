@@ -94,6 +94,7 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  tryCanonicalPeerIdString,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -401,6 +402,7 @@ import {
   sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
 import {
+  computeSwmSenderKeyRecipientRouteHash,
   swmSenderStateKey,
   swmReceiverStateKey,
   serializeSwmSenderSendState,
@@ -777,6 +779,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         contextGraphId,
         { signal: options.signal },
       ),
+      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
       getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
       getSubscriptionAgents: () => (
         this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
@@ -2015,9 +2018,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         recipientKeyId: recipient.recipientKeyId,
       })),
     });
+    const recipientRouteHash = computeSwmSenderKeyRecipientRouteHash({
+      contextGraphId: input.contextGraphId,
+      subGraphName: input.subGraphName,
+      recipients: resolution.recipients,
+    });
     const stateKey = swmSenderStateKey(input.contextGraphId, input.subGraphName, senderAddress);
     let state = this.swmSenderKeySendStates.get(stateKey);
-    if (!state || state.membershipHash !== membershipHash) {
+    if (
+      !state
+      || state.membershipHash !== membershipHash
+      || state.recipientRouteHash !== recipientRouteHash
+    ) {
       const pruned = this.prunePendingSenderKeysForEpochRotation({
         contextGraphId: input.contextGraphId,
         subGraphName: input.subGraphName,
@@ -2090,6 +2102,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       senderAgentAddress,
       epochId,
       membershipHash: input.membershipHash,
+      recipientRouteHash: computeSwmSenderKeyRecipientRouteHash({
+        contextGraphId: input.contextGraphId,
+        subGraphName: input.subGraphName,
+        recipients: input.recipients,
+      }),
       chainKey,
       nextMessageIndex: 0,
       senderSigningSecretKey: senderSigningKeypair.secretKey,
@@ -2129,7 +2146,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         });
         const packageBytes = encodeSwmSenderKeyPackage(pkg);
 
-        if (this.hasLocalAgent(recipientAgentAddress)) {
+        const recipientIsLocal = this.hasLocalAgent(recipientAgentAddress);
+        let targetsLocalPeer = recipient.peerId === undefined;
+        if (recipientIsLocal && recipient.peerId !== undefined) {
+          const localPeerId = this.node.peerId.toString();
+          const canonicalRecipientPeerId = tryCanonicalPeerIdString(recipient.peerId);
+          const canonicalLocalPeerId = tryCanonicalPeerIdString(localPeerId);
+          targetsLocalPeer = recipient.peerId === localPeerId
+            || (
+              canonicalRecipientPeerId !== null
+              && canonicalLocalPeerId !== null
+              && canonicalRecipientPeerId === canonicalLocalPeerId
+            );
+        }
+        if (recipientIsLocal && targetsLocalPeer) {
           try {
             await this.acceptSwmSenderKeyPackage(pkg, this.node.peerId.toString(), input.ctx);
             return { kind: 'success', agentAddress: recipientAgentAddress };

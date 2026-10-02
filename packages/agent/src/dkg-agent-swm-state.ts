@@ -14,6 +14,7 @@
  * and are not a general-purpose validation library.
  */
 
+import { createHash } from 'node:crypto';
 import { ethers } from 'ethers';
 import {
   encodeWorkspaceEncryptionKey,
@@ -38,6 +39,49 @@ export function swmReceiverStateKey(
   return `${swmSenderStateKey(contextGraphId, subGraphName, senderAgentAddress)}\0${epochId}`;
 }
 
+const SWM_SENDER_KEY_RECIPIENT_ROUTES_DOMAIN = 'dkg.swm.sender-key.recipient-routes.v1';
+
+/**
+ * Hash the exact transport routes that received (or durably queued) setup for
+ * a Sender Key epoch. Logical membership remains `(agent, key)`; this separate
+ * snapshot ensures that adding or removing a peer-bound variant rotates the
+ * epoch without redefining the authenticated member set.
+ */
+export function computeSwmSenderKeyRecipientRouteHash(input: {
+  contextGraphId: string;
+  subGraphName?: string;
+  recipients: readonly {
+    agentAddress: string;
+    recipientKeyId: string;
+    peerId?: string;
+  }[];
+}): string {
+  const uniqueRoutes = new Map<string, readonly [string, string, string]>();
+  for (const recipient of input.recipients) {
+    const route = [
+      ethers.getAddress(recipient.agentAddress).toLowerCase(),
+      recipient.recipientKeyId,
+      recipient.peerId ?? '',
+    ] as const;
+    uniqueRoutes.set(JSON.stringify(route), route);
+  }
+  const routes = [...uniqueRoutes.values()].sort((left, right) => {
+    const byAgent = left[0].localeCompare(right[0]);
+    if (byAgent !== 0) return byAgent;
+    const byKey = left[1].localeCompare(right[1]);
+    return byKey !== 0 ? byKey : left[2].localeCompare(right[2]);
+  });
+  const digest = createHash('sha256')
+    .update(JSON.stringify({
+      domain: SWM_SENDER_KEY_RECIPIENT_ROUTES_DOMAIN,
+      contextGraphId: input.contextGraphId,
+      subGraphName: input.subGraphName ?? '',
+      routes,
+    }))
+    .digest('hex');
+  return `sha256:${digest}`;
+}
+
 export function serializeSwmSenderSendState(state: LocalSwmSenderKeySendState): Record<string, unknown> {
   return {
     contextGraphId: state.contextGraphId,
@@ -45,6 +89,7 @@ export function serializeSwmSenderSendState(state: LocalSwmSenderKeySendState): 
     senderAgentAddress: state.senderAgentAddress,
     epochId: state.epochId,
     membershipHash: state.membershipHash,
+    recipientRouteHash: state.recipientRouteHash,
     chainKey: encodeWorkspaceEncryptionKey(state.chainKey),
     nextMessageIndex: state.nextMessageIndex,
     senderSigningSecretKey: encodeWorkspaceEncryptionKey(state.senderSigningSecretKey),
@@ -92,6 +137,7 @@ export function deserializeSwmSenderSendState(entry: Record<string, unknown>): L
     senderAgentAddress: ethers.getAddress(requiredString(entry.senderAgentAddress, 'senderAgentAddress')),
     epochId: requiredString(entry.epochId, 'epochId'),
     membershipHash: requiredString(entry.membershipHash, 'membershipHash'),
+    recipientRouteHash: optionalString(entry.recipientRouteHash),
     chainKey: decodeWorkspaceEncryptionKey(requiredString(entry.chainKey, 'chainKey')),
     nextMessageIndex: requiredNumber(entry.nextMessageIndex, 'nextMessageIndex'),
     senderSigningSecretKey: decodeWorkspaceEncryptionKey(requiredString(entry.senderSigningSecretKey, 'senderSigningSecretKey')),

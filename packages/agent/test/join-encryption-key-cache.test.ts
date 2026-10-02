@@ -159,12 +159,31 @@ function defaultBestEffortStore(input: Readonly<{
       if (sparql.includes('SELECT ?predicate ?object')) {
         return { type: 'bindings', bindings: input.cacheRows ?? [] };
       }
-      if (sparql.includes('SELECT DISTINCT ?key ?algorithm ?proof ?peerId')) {
+      if (sparql.includes('SELECT DISTINCT ?key ?algorithm ?peerId')) {
         expect(sparql).toContain(
           'FILTER (?g NOT IN (<urn:dkg:local:join-encryption-key-cache>))',
         );
         expect(sparql).toContain('LIMIT 65');
-        return { type: 'bindings', bindings: input.profileRows };
+        return {
+          type: 'bindings',
+          bindings: input.profileRows.map((row) => ({
+            ...(row['key'] === undefined ? {} : { key: row['key'] }),
+            ...(row['algorithm'] === undefined ? {} : { algorithm: row['algorithm'] }),
+            ...(row['peerId'] === undefined ? {} : { peerId: row['peerId'] }),
+          })),
+        };
+      }
+      if (sparql.includes('SELECT DISTINCT ?proof WHERE')) {
+        expect(sparql).toContain(
+          'FILTER (?g NOT IN (<urn:dkg:local:join-encryption-key-cache>))',
+        );
+        expect(sparql).toContain('LIMIT 65');
+        return {
+          type: 'bindings',
+          bindings: input.profileRows.flatMap((row) => (
+            row['proof'] === undefined ? [] : [{ proof: row['proof'] }]
+          )),
+        };
       }
       if (sparql.includes('SELECT ?keyId ?revokedAt ?revocationProof')) {
         return { type: 'bindings', bindings: [] };
@@ -367,7 +386,7 @@ describe('cold join encryption-key cache replacement', () => {
       await expect(cache(agent, warm.delegation)).resolves.toBeUndefined();
 
       expect(replaceSubject).toHaveBeenCalledTimes(1);
-      expect(query).toHaveBeenCalledTimes(3);
+      expect(query).toHaveBeenCalledTimes(4);
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();

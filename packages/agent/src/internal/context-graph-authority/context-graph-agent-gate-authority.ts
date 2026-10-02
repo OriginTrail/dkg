@@ -11,6 +11,7 @@ import type { SwmTransportAuthority } from './swm-transport-authority.js';
 export interface ContextGraphAgentGateAuthorityInput {
   contextGraphId: string;
   getTransportAuthority(): Promise<SwmTransportAuthority>;
+  readMetadataRevision(): number;
   getLegacyMeta(): Promise<{
     allowedAgents: readonly string[];
     participantAgents: readonly string[];
@@ -63,6 +64,7 @@ export async function resolveContextGraphAgentGateAuthorityDecision(
   const conclusiveGate = conclusiveTransportGate(transportAuthority);
   if (conclusiveGate !== null) return conclusiveGate;
 
+  const metadataRevision = input.readMetadataRevision();
   const meta = await input.getLegacyMeta();
   // Metadata is an async boundary. A private RFC-64 policy can activate or a
   // private registration can commit while it awaits the store; in either case
@@ -71,6 +73,16 @@ export async function resolveContextGraphAgentGateAuthorityDecision(
     await input.getTransportAuthority(),
   );
   if (currentConclusiveGate !== null) return currentConclusiveGate;
+  // Approved-private authority proves this receiver's membership, not every
+  // member in the legacy roster. A different member can be revoked while the
+  // transport recheck awaits and leave that proof valid. Do not combine the
+  // fresh receiver proof with a stale metadata gate from before the revoke.
+  if (input.readMetadataRevision() !== metadataRevision) {
+    return unavailableAuthority(
+      'local-existence-unavailable',
+      `Context graph "${input.contextGraphId}" metadata authority changed while resolving its agent gate`,
+    );
+  }
 
   const seen = new Set<string>();
   const agents: string[] = [];

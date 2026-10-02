@@ -715,6 +715,150 @@ describe('approved private bare-name replica authorization', () => {
       .rejects.toThrow(/effective DKG agent .* has no recipient key advertised by a peer/u);
   });
 
+  it('rejects approved-private recipient keys when another member is revoked during lookup', async () => {
+    const curator = new ethers.Wallet(`0x${'37'.repeat(32)}`);
+    const revokedMember = new ethers.Wallet(`0x${'38'.repeat(32)}`);
+    const curatorAddress = curator.address.toLowerCase();
+    const revokedMemberAddress = revokedMember.address.toLowerCase();
+    const fixture = await approvedBareNameReplicaFixture({
+      requesterOwner: curatorAddress,
+      curators: [curatorAddress],
+      additionalAllowedAgents: [revokedMemberAddress],
+    });
+    if (fixture.member.privateKey === undefined) {
+      throw new Error('approved fixture member must be custodial');
+    }
+    const memberWallet = new ethers.Wallet(fixture.member.privateKey);
+    await fixture.receiver.store.insert([
+      ...signedWorkspaceProfileKeyQuads(curator, CURATOR_PEER, 'race-curator-x25519'),
+      ...signedWorkspaceProfileKeyQuads(
+        memberWallet,
+        fixture.receiver.peerId,
+        'race-approved-member-x25519',
+      ),
+      ...signedWorkspaceProfileKeyQuads(
+        revokedMember,
+        THIRD_ALLOWED_PEER,
+        'race-revoked-member-x25519',
+      ),
+    ]);
+
+    const query = fixture.receiver.store.query.bind(fixture.receiver.store);
+    let releaseKeyLookup!: () => void;
+    let keyLookupEntered!: () => void;
+    const release = new Promise<void>((resolve) => { releaseKeyLookup = resolve; });
+    const entered = new Promise<void>((resolve) => { keyLookupEntered = resolve; });
+    let paused = false;
+    vi.spyOn(fixture.receiver.store, 'query').mockImplementation(async (...args) => {
+      const result = await query(...args);
+      if (
+        !paused
+        && typeof args[0] === 'string'
+        && args[0].includes('SELECT DISTINCT ?key ?algorithm ?peerId')
+      ) {
+        paused = true;
+        keyLookupEntered();
+        await release;
+      }
+      return result;
+    });
+
+    const resolution = fixture.receiver.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+      contextGraphId: CONTEXT_GRAPH_ID,
+    });
+    await entered;
+    await fixture.receiver.store.insert([{
+      graph: fixture.graph,
+      subject: fixture.subject,
+      predicate: D.DKG_REVOKED_AGENT,
+      object: JSON.stringify(revokedMemberAddress),
+    }]);
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+    releaseKeyLookup();
+
+    await expect(resolution).rejects.toMatchObject({
+      reason: 'chain-participant-authority-unavailable',
+    });
+  });
+
+  it('returns an approved-private SWM gate when its metadata revision stays stable', async () => {
+    const additionalMember = new ethers.Wallet(`0x${'35'.repeat(32)}`);
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [additionalMember.address],
+      peerAllowlist: 'receiver-only',
+    });
+    const handler = fixture.receiver.getOrCreateSharedMemoryHandler();
+    const oracle = Reflect.get(handler, 'contextGraphMetaOracle') as undefined | ((
+      contextGraphId: string,
+    ) => Promise<{
+      allowedAgents?: readonly string[];
+      revokedAgents?: readonly string[];
+      allowedPeers?: readonly string[];
+    } | null>);
+    if (oracle === undefined) throw new Error('shared-memory metadata oracle is not configured');
+
+    const projected = await oracle(CONTEXT_GRAPH_ID);
+
+    expect(projected?.allowedAgents?.map((address) => address.toLowerCase()))
+      .toContain(additionalMember.address.toLowerCase());
+    expect(projected?.revokedAgents?.map((address) => address.toLowerCase()))
+      .not.toContain(additionalMember.address.toLowerCase());
+    expect(projected?.allowedPeers).toEqual([fixture.receiver.peerId]);
+  });
+
+  it('retries the approved-private SWM metadata snapshot when another member is revoked', async () => {
+    const revokedMember = new ethers.Wallet(`0x${'36'.repeat(32)}`);
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [revokedMember.address],
+      peerAllowlist: 'receiver-only',
+    });
+    const handler = fixture.receiver.getOrCreateSharedMemoryHandler();
+    const oracle = Reflect.get(handler, 'contextGraphMetaOracle') as undefined | ((
+      contextGraphId: string,
+    ) => Promise<{
+      allowedAgents?: readonly string[];
+      revokedAgents?: readonly string[];
+      allowedPeers?: readonly string[];
+    } | null>);
+    if (oracle === undefined) throw new Error('shared-memory metadata oracle is not configured');
+
+    const originalOverride = fixture.receiver
+      .resolveApprovedPrivateReplicaSwmAllowedPeersOverride.bind(fixture.receiver);
+    let releaseFirstOverride!: () => void;
+    let firstOverrideEntered!: () => void;
+    const release = new Promise<void>((resolve) => { releaseFirstOverride = resolve; });
+    const entered = new Promise<void>((resolve) => { firstOverrideEntered = resolve; });
+    let calls = 0;
+    vi.spyOn(fixture.receiver, 'resolveApprovedPrivateReplicaSwmAllowedPeersOverride')
+      .mockImplementation(async (contextGraphId) => {
+        calls += 1;
+        if (calls === 1) {
+          firstOverrideEntered();
+          await release;
+        }
+        return originalOverride(contextGraphId);
+      });
+
+    const projectedPromise = oracle(CONTEXT_GRAPH_ID);
+    await entered;
+    await fixture.receiver.store.insert([{
+      graph: fixture.graph,
+      subject: fixture.subject,
+      predicate: D.DKG_REVOKED_AGENT,
+      object: JSON.stringify(revokedMember.address),
+    }]);
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+    releaseFirstOverride();
+
+    const projected = await projectedPromise;
+    expect(calls).toBe(2);
+    expect(projected?.allowedAgents?.map((address) => address.toLowerCase()))
+      .toContain(revokedMember.address.toLowerCase());
+    expect(projected?.revokedAgents?.map((address) => address.toLowerCase()))
+      .toContain(revokedMember.address.toLowerCase());
+    expect(projected?.allowedPeers).toEqual([fixture.receiver.peerId]);
+  });
+
   it('does not let secondary peer metadata widen approved-replica sender-key or host ingest authority', async () => {
     const curator = new ethers.Wallet(`0x${'35'.repeat(32)}`);
     const curatorAddress = curator.address.toLowerCase();
