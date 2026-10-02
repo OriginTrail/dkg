@@ -839,7 +839,7 @@ Recovery, per KA:
 3. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
 4. `swm/share`, then `vm/publish-async` (or `vm/publish`).
 
-Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits.
+Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits. Finalizing a replacement draft also replaces the private payload sealed under that number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Memory once its replacement is finalized (tracked in #2964).
 
 #### Retry behaviour and its knobs (`config.publisher`)
 
