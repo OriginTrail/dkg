@@ -3,15 +3,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { Logger, TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext, generateEd25519Keypair,
-  knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION, Logger, TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext,
+  generateEd25519Keypair, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '../src/workspace-snapshot-store.js';
 import { snapshotReferenceCheck } from '../src/workspace-snapshot-lifecycle.js';
 import { PublishedSnapshotRetirement } from '../src/published-snapshot-retirement.js';
 import { generateKnowledgeAssetShareMetadata } from '../src/metadata.js';
 import { storageAckOperationId } from '../src/storage-ack-ledger.js';
+import { swmKaWriteLockKey, withKeyedLocks } from '../src/keyed-lock.js';
+import { storeKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
+import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 import { makeQuads, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
 const AUTHOR = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
@@ -81,7 +84,7 @@ async function fixture(finalizedCleanupEnabled = true, enabled = true) {
     { graph: META, subject, predicate: `${DKG}publicQuadsDigest`, object: JSON.stringify(digest) },
   ];
   return {
-    store, snapshots, seed, operationRows, directory, open, path: snapshotPath(directory, digest), advance: () => { now += 1_001; },
+    store, snapshots, publisher, seed, operationRows, directory, open, path: snapshotPath(directory, digest), advance: () => { now += 1_001; },
     setFree: (bytes: number) => { free = bytes; },
   };
 }
@@ -636,4 +639,227 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     expect(order.indexOf('ack')).toBeLessThan(order.indexOf('delete-own'));
     expect(await rowsOf(f, ackSubject('own'))).toBe(0);
   });
+});
+
+describe('published snapshot cleanup: bounded by the version a publication confirmed', () => {
+  type Fixture = Awaited<ReturnType<typeof fixture>>;
+  const UAL = `did:dkg:base:8453/${AUTHOR}/61`;
+  const scope = createGraphKnowledgeAssetScope(UAL, 1);
+  const SWM = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
+  const VM = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
+  const HEAD = `${UAL}#dkg-swm-head`;
+
+  /**
+   * Shares one version through the publisher's own staging entry point (the SWM graph, the operation
+   * rows and snapshot, the head) and records the StorageACK copy a publishing core signs for it.
+   * A version has as many quads as its number, so a count tells the versions apart.
+   */
+  const share = async (f: Fixture, assertionVersion: number) => {
+    const shared = makeQuads(assertionVersion, `version-${assertionVersion}`);
+    const sharedDigest = workspacePublicQuadsDigest(shared);
+    await f.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CG, kaUal: UAL, assertionVersion, shareOperationId: `share-v${assertionVersion}`,
+      quads: shared, privateTripleCount: 0, publisherPeerId: 'peer-publisher',
+    });
+    const copyId = storageAckOperationId(UAL, assertionVersion, new Uint8Array(32).fill(assertionVersion));
+    const copy = generateKnowledgeAssetShareMetadata({
+      shareOperationId: copyId, contextGraphId: CG,
+      kaUal: UAL, assertionVersion, publicTripleCount: shared.length, privateTripleCount: 0,
+      publisherPeerId: 'peer-publisher', timestamp: new Date(0),
+    }, META);
+    copy.push({ subject: copy[0]!.subject, predicate: `${DKG}publicQuadsDigest`, object: JSON.stringify(sharedDigest), graph: META });
+    await f.store.insert(copy);
+    return { quads: shared, operation: `urn:dkg:share:${CG}:share-v${assertionVersion}`, copy: copy[0]!.subject, copyId,
+      path: snapshotPath(f.directory, sharedDigest) };
+  };
+  /** The cleanup a publication runs once `finalizedVersion` is confirmed; without one, the call a lock-holding caller makes. */
+  const confirm = (f: Fixture, finalizedVersion?: number) => f.publisher.clearPublishedKnowledgeAssetSwm(CG,
+    { kind: 'named-lifecycle', identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) } },
+    undefined, createOperationContext('publish'), UAL, finalizedVersion);
+  /** Every row of the SWM meta graph, by subject. */
+  const metaRows = async (f: Fixture) => {
+    const result = await f.store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${META}> { ?s ?p ?o } }`);
+    const rows = new Map<string, string[]>();
+    for (const row of result.type === 'bindings' ? result.bindings : []) {
+      rows.set(row['s']!, [...(rows.get(row['s']!) ?? []), `${row['p']} ${row['o']}`].sort());
+    }
+    return rows;
+  };
+
+  it('leaves version 3, its StorageACK copy and its snapshot in place when version 2 confirms after version 3 was shared', async () => {
+    const f = await fixture();
+    const v2 = await share(f, 2); // its publication is queued and waits for confirmation
+    const v3 = await share(f, 3); // shared while that confirmation is pending: the head now names version 3
+    await f.store.insert(v2.quads.map(q => ({ ...q, graph: VM }))); // version 2 confirms and is durable in VM
+    const before = await metaRows(f);
+    await confirm(f, 2);
+    const after = await metaRows(f);
+    // Version 3 is durable nowhere else: its StorageACK copy, its operation, the head and the graph stay as they were.
+    for (const subject of [v3.copy, v3.operation, HEAD]) expect(after.get(subject), subject).toEqual(before.get(subject));
+    expect(await f.store.countQuads(SWM)).toBe(v3.quads.length);
+    // Nothing above version 2 is discharged, and under a newer head nothing of version 2 either: its rows
+    // go with version 3's own cleanup or the SWM TTL.
+    expect(after).toEqual(before);
+    // No retirement was recorded, so version 3's snapshot outlives the grace period.
+    f.advance();
+    expect(await f.snapshots.collectGarbage()).toMatchObject({ finalizedSnapshots: 0, referencedSnapshots: 0, deletedSnapshots: 0 });
+    await expect(stat(v3.path)).resolves.toBeDefined();
+    expect(await f.store.countQuads(VM)).toBe(v2.quads.length);
+  });
+
+  it('waits for a share that holds the per-KA write lock, then finds its newer head and leaves it', async () => {
+    const f = await fixture();
+    await share(f, 2);
+    // Version 3's share has replaced the SWM graph and is held before it moves the head.
+    const replaceGraph = f.store.replaceGraph.bind(f.store);
+    let reached!: () => void;
+    const replaced = new Promise<void>(resolve => { reached = resolve; });
+    let resume!: () => void;
+    const held = new Promise<void>(resolve => { resume = resolve; });
+    vi.spyOn(f.store, 'replaceGraph').mockImplementationOnce(async (graph, quads) => {
+      await replaceGraph(graph, quads);
+      reached();
+      await held;
+    });
+    const sharing = share(f, 3);
+    await replaced;
+    const dropGraph = vi.spyOn(f.store, 'dropGraph');
+    const clearing = confirm(f, 2);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(dropGraph).not.toHaveBeenCalled();
+    resume();
+    const v3 = await sharing;
+    await clearing;
+    expect(dropGraph).not.toHaveBeenCalled();
+    expect(await f.store.countQuads(SWM)).toBe(v3.quads.length);
+    const rows = await metaRows(f);
+    expect(rows.get(HEAD)).toEqual(expect.arrayContaining([`${DKG}shareOperationId "share-v3"`]));
+    for (const subject of [v3.copy, v3.operation]) expect(rows.has(subject), subject).toBe(true);
+    f.advance();
+    expect(await f.snapshots.collectGarbage()).toMatchObject({ finalizedSnapshots: 0, referencedSnapshots: 0, deletedSnapshots: 0 });
+    await expect(stat(v3.path)).resolves.toBeDefined();
+  });
+
+  it('passes the version a publication from shared memory confirmed to its cleanup', async () => {
+    const f = await fixture();
+    const v2 = await share(f, 2);
+    // A later version is shared before the publication of version 2 returns.
+    let v3!: Awaited<ReturnType<typeof share>>;
+    vi.spyOn(f.publisher, 'publish').mockImplementationOnce(async () => {
+      v3 = await share(f, 3);
+      return { kaId: 1n, ual: UAL, merkleRoot: new Uint8Array(32), kaManifest: [], status: 'confirmed', publicQuads: v2.quads };
+    });
+    await f.publisher.publishFromSharedMemory(CG, 'all', {
+      sharedMemoryScope: { kind: 'named-lifecycle', identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) } },
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: UAL, assertionVersion: 2,
+      publicTripleCount: v2.quads.length, privateTripleCount: 0,
+    });
+    const rows = await metaRows(f);
+    expect(rows.get(HEAD)).toEqual(expect.arrayContaining([`${DKG}shareOperationId "share-v3"`]));
+    for (const subject of [v3.copy, v3.operation]) expect(rows.has(subject), subject).toBe(true);
+    expect(await f.store.countQuads(SWM)).toBe(v3.quads.length);
+    f.advance();
+    expect(await f.snapshots.collectGarbage()).toMatchObject({ finalizedSnapshots: 0, referencedSnapshots: 0, deletedSnapshots: 0 });
+    await expect(stat(v3.path)).resolves.toBeDefined();
+  });
+
+  it('applies the same bound to a version shared through assertionPromote while the previous one waits for confirmation', async () => {
+    const f = await fixture();
+    const NAME = 'notes';
+    const sealAndShare = async (value: string, assertionVersion: number) => {
+      await f.publisher.assertionWrite(CG, NAME, AUTHOR,
+        [{ subject: `urn:note:${value}`, predicate: 'http://schema.org/value', object: JSON.stringify(value), graph: '' }]);
+      const sealed = await finalizeRootlessAssertionForTest({
+        publisher: f.publisher, store: f.store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, assertionVersion });
+      await f.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: 'peer-publisher' });
+      return sealed;
+    };
+    // Version 1 is already in VM (not modelled here). Version 2 is shared and its publication is pending; the
+    // draft is reopened, sealed as version 3 (finalize advances past a confirmed VM version) and shared.
+    await f.publisher.assertionCreate(CG, NAME, AUTHOR);
+    const { kaUal, sharedGraphUri } = await sealAndShare('two', 2);
+    await f.publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm');
+    await sealAndShare('three', 3);
+    const promoted = createGraphKnowledgeAssetScope(kaUal, 1);
+    const confirmPromoted = (finalizedVersion: number) => f.publisher.clearPublishedKnowledgeAssetSwm(CG,
+      { kind: 'named-lifecycle', identity: { agentAddress: promoted.agentAddress, kaNumber: BigInt(promoted.kaNumber) } },
+      undefined, createOperationContext('publish'), kaUal, finalizedVersion);
+    await confirmPromoted(2);
+    expect(await f.store.countQuads(sharedGraphUri)).toBe(2);
+    expect((await metaRows(f)).get(`${kaUal}#dkg-swm-head`)).toEqual(expect.arrayContaining([`${DKG}assertionVersion ${version(3)}`]));
+    await confirmPromoted(3);
+    expect(await f.store.countQuads(sharedGraphUri)).toBe(0);
+    expect((await metaRows(f)).has(`${kaUal}#dkg-swm-head`)).toBe(false);
+  });
+
+  it.each([
+    [2, 'the version the head is at'],
+    [3, 'a version above the head'],
+  ])('clears the head, its StorageACK copy and, after grace, its snapshot when version %i confirms (%s)', async finalizedVersion => {
+    const f = await fixture();
+    const v2 = await share(f, 2);
+    await f.store.insert(v2.quads.map(q => ({ ...q, graph: VM })));
+    await confirm(f, finalizedVersion);
+    const rows = await metaRows(f);
+    for (const subject of [v2.copy, v2.operation, HEAD]) expect(rows.has(subject), subject).toBe(false);
+    expect(await f.store.countQuads(SWM)).toBe(0);
+    f.advance();
+    expect(await f.snapshots.collectGarbage()).toMatchObject({ referencedSnapshots: 0, finalizedSnapshots: 1 });
+    await expect(stat(v2.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await f.store.countQuads(VM)).toBe(v2.quads.length);
+  });
+
+  it('clears a head that names the StorageACK copy, as a core\'s own ACK of a direct update leaves it', async () => {
+    const f = await fixture();
+    const v2 = await share(f, 2);
+    await storeKnowledgeAssetWorkspaceHead({ store: f.store, graphManager: new GraphManager(f.store), contextGraphId: CG,
+      kaUal: UAL, assertionVersion: 2, shareOperationId: v2.copyId });
+    await confirm(f, 2);
+    const rows = await metaRows(f);
+    for (const subject of [v2.copy, HEAD]) expect(rows.has(subject), subject).toBe(false);
+    expect(await f.store.countQuads(SWM)).toBe(0);
+  });
+
+  it('still drops a SWM graph that no head owns', async () => {
+    const f = await fixture();
+    await f.store.insert(makeQuads(2, 'headless').map(q => ({ ...q, graph: SWM })));
+    await confirm(f, 1);
+    expect(await f.store.countQuads(SWM)).toBe(0);
+  });
+
+  it('keeps a head it cannot resolve, and reports it once', async () => {
+    const f = await fixture();
+    const v2 = await share(f, 2);
+    // A second version beside the first, as a synced copy of a peer's head row leaves it.
+    await f.store.insert([{ graph: META, subject: HEAD, predicate: `${DKG}assertionVersion`, object: version(3) }]);
+    const before = await metaRows(f);
+    const records: { level: string; message: string }[] = [];
+    Logger.setSink(record => { records.push({ level: record.level, message: record.message }); });
+    try { await confirm(f, 2); } finally { Logger.setSink(null); }
+    expect(await metaRows(f)).toEqual(before);
+    expect(await f.store.countQuads(SWM)).toBe(v2.quads.length);
+    const warnings = records.filter(record => record.level === 'warn');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.message).toContain('its head cannot be resolved');
+    f.advance();
+    expect(await f.snapshots.collectGarbage()).toMatchObject({ finalizedSnapshots: 0, referencedSnapshots: 0, deletedSnapshots: 0 });
+    await expect(stat(v2.path)).resolves.toBeDefined();
+  });
+
+  it('refuses a confirmed version that is not a positive integer, and removes nothing', async () => {
+    const f = await fixture();
+    const v2 = await share(f, 2);
+    const before = await metaRows(f);
+    await expect(confirm(f, 0)).rejects.toThrow('KA assertion version must be at least 1');
+    expect(await metaRows(f)).toEqual(before);
+    expect(await f.store.countQuads(SWM)).toBe(v2.quads.length);
+  });
+
+  it('takes no lock without a version, so a caller that holds the per-KA write lock can run it', async () => {
+    const f = await fixture();
+    await share(f, 2);
+    await withKeyedLocks(f.publisher.writeLocks, [swmKaWriteLockKey(CG, undefined, UAL)], () => confirm(f));
+    expect(await f.store.countQuads(SWM)).toBe(0);
+    expect((await metaRows(f)).has(HEAD)).toBe(false);
+  }, 5_000);
 });

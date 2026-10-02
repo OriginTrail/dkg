@@ -5488,6 +5488,7 @@ export class PublishMethods extends DKGAgentBase {
           request.subGraphName,
           ctx,
           graphScope.ual,
+          graphScope.assertionVersion,
         );
       } catch (err) {
         this.log.warn(
@@ -6132,6 +6133,7 @@ export class PublishMethods extends DKGAgentBase {
             opts?.subGraphName,
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
             graphScope.ual,
+            graphScope.assertionVersion,
           );
         } catch (err) {
           this.log.warn(

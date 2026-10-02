@@ -19,7 +19,7 @@ import {
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
-import { withKeyedLocks } from './keyed-lock.js';
+import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
@@ -2641,6 +2641,7 @@ export class DKGPublisher implements Publisher {
           options?.subGraphName,
           ctx,
           graphPublish.scope.ual,
+          graphPublish.scope.assertionVersion,
         );
       } else {
         const kaMap = skolemizeByEntity(quads);
@@ -7534,6 +7535,13 @@ export class DKGPublisher implements Publisher {
    * Drain one complete rootless KA from SWM after its VM graph is durable.
    * The named-lifecycle scope is the ownership boundary, so cleanup drops
    * only that exact graph (plus historical casing aliases for the same KA).
+   *
+   * A publication passes the assertion version it confirmed. The cleanup then
+   * holds the per-KA SWM write lock and runs only while the head it finds is
+   * at or below that version: a newer head keeps its graph, operation rows,
+   * snapshot and StorageACK copies, and so does a head that cannot be
+   * resolved. Without a version the caller must already hold that lock and
+   * have ruled out a newer head itself.
    */
   async clearPublishedKnowledgeAssetSwm(
     contextGraphId: string,
@@ -7541,6 +7549,7 @@ export class DKGPublisher implements Publisher {
     subGraphName: string | undefined,
     ctx: OperationContext,
     kaUal: string,
+    finalizedAssertionVersion?: string | number | bigint,
   ): Promise<void> {
     if (scope.kind !== 'named-lifecycle') {
       throw new Error('Graph-scoped KA SWM cleanup requires an exact named-lifecycle scope');
@@ -7552,6 +7561,57 @@ export class DKGPublisher implements Publisher {
     ) {
       throw new Error('Graph-scoped KA SWM cleanup UAL does not match the named-lifecycle scope');
     }
+    if (finalizedAssertionVersion === undefined) {
+      await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
+      return;
+    }
+    const finalizedVersion = BigInt(
+      createGraphKnowledgeAssetScope(kaUal, finalizedAssertionVersion).assertionVersion,
+    );
+    await this.withWriteLocks(
+      [swmKaWriteLockKey(contextGraphId, subGraphName, kaScope.ual)],
+      async () => {
+        const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          kaUal: kaScope.ual,
+          subGraphName,
+        });
+        // On corruption the head's version is unknown, so it cannot be shown
+        // to be at or below the finalized one: fail toward retention.
+        if (headResolution.status === 'corrupt') {
+          this.log.warn(
+            ctx,
+            `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
+              `its head cannot be resolved (${headResolution.error.message})`,
+          );
+          return;
+        }
+        if (
+          headResolution.status === 'resolved'
+          && BigInt(headResolution.head.assertionVersion) > finalizedVersion
+        ) {
+          this.log.info(
+            ctx,
+            `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
+              `its head is at version ${headResolution.head.assertionVersion}`,
+          );
+          return;
+        }
+        await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
+      },
+    );
+  }
+
+  /** The cleanup itself. The per-KA SWM write lock is held and no head above the finalized asset owns the graph. */
+  private async clearPublishedKnowledgeAssetSwmUnlocked(
+    contextGraphId: string,
+    scope: Extract<SharedMemoryGraphScope, { kind: 'named-lifecycle' }>,
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+    kaScope: GraphKnowledgeAssetScope,
+  ): Promise<void> {
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
     const headSubject = assertSafeIri(`${kaScope.ual}#dkg-swm-head`);

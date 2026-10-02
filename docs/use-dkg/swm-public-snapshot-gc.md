@@ -117,6 +117,14 @@ metadata. The background collector, on its existing five-minute interval:
    next pass after restart. Reusing a digest with `putSnapshot` cancels retirement;
    another confirmed publication starts a new grace period.
 
+A publication's cleanup is bounded by the assertion version that publication
+confirmed. It runs under the per-asset SWM write lock and first resolves the
+asset's SWM head. When the head is already at a later version (one shared or
+staged while the publication waited for confirmation), or cannot be resolved,
+the cleanup records no retirement and removes nothing: that version's SWM
+graph, operation rows, StorageACK copies and snapshot stay in place until its
+own publication confirms or the SWM TTL expires.
+
 A core that signed a StorageACK for the asset also holds that copy's operation
 row (id prefix `storage-ack-`), which carries the same snapshot digest and would
 otherwise keep the file referenced until the SWM TTL. The same cleanup boundary

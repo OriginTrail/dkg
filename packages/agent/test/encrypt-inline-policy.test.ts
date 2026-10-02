@@ -1102,6 +1102,40 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     ))).toBe(true);
   });
 
+  it('bounds the SWM cleanup of a confirmed queued VM publish by the assertion version it published', async () => {
+    const { agentLike } = makeQueuedAgentHarness({
+      peerId: 'did:dkg:agent:queued-swm-cleanup-bound',
+      ual: 'did:dkg:local/queued-swm-cleanup-bound',
+      publishStatus: 'confirmed',
+    });
+    const cleanup = recorder(async (..._args: unknown[]) => undefined);
+    agentLike.publisher.clearPublishedKnowledgeAssetSwm = cleanup;
+    const snapshotQuads = [{
+      subject: 'urn:test:queued-public-cleanup-bound',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Public"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'public-cg',
+      name: 'queued-public-ka-cleanup-bound',
+      shareOperationId: 'share-op-cleanup-bound',
+      intentByte: 'af',
+      quads: snapshotQuads,
+    });
+
+    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+      agentLike,
+      request,
+      { contextGraphId: request.contextGraphId, quads: snapshotQuads },
+    );
+
+    expect(cleanup.calls).toHaveLength(1);
+    expect(cleanup.calls[0]?.[0]).toBe(request.contextGraphId);
+    expect(cleanup.calls[0]?.[4]).toBe(request.kaUal);
+    expect(cleanup.calls[0]?.[5]).toBe(request.assertionVersion);
+  });
+
   it('keeps the V2 snapshot exact while passing a detached catalog capability', async () => {
     const realInline = recorder(async (plaintext: Uint8Array) => new Uint8Array([...plaintext, 0xaa]));
     const realChunked = recorder(async () => ({
