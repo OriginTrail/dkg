@@ -143,6 +143,12 @@ export type LocalSwmSenderKeySendState = {
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
+  /**
+   * Exact transport-route snapshot seeded for this epoch. Optional only for
+   * sender state persisted before route-aware epoch rotation was introduced;
+   * such legacy state rotates once before it can be reused.
+   */
+  recipientRouteHash?: string;
   chainKey: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
@@ -170,10 +176,10 @@ export type LocalSwmSenderKeyReceiveState = {
  * connection:open or a subsequent publish that re-resolves the
  * recipient set).
  *
- * Keyed in-memory by lowercased `recipientAgentAddress`. The triple
- * `(senderAgentAddress, recipientKeyId, epochId)` dedupes within an
- * agent's queue; newer epochs supersede older ones for the same
- * `(senderAgentAddress, recipientAgentAddress)` pair.
+ * Keyed in-memory by lowercased `recipientAgentAddress`. The tuple
+ * `(senderAgentAddress, recipientKeyId, recipientPeerId, epochId)`
+ * dedupes within an agent's queue; newer epochs supersede older ones for
+ * the same sender, recipient, context-graph, and subgraph scope.
  */
 export type PendingSenderKeyEntry = {
   /** Lower-cased EIP-55 sender agent address. */
@@ -181,6 +187,13 @@ export type PendingSenderKeyEntry = {
   /** Lower-cased EIP-55 recipient agent address (matches the map key). */
   recipientAgentAddress: string;
   recipientKeyId: string;
+  /**
+   * Exact peer route that still owes a positive setup ACK. Absent only for
+   * legacy rows and packages queued before any peer route was advertised;
+   * those drain only after the current verified recipient projection binds
+   * this exact key to a peer.
+   */
+  recipientPeerId?: string;
   epochId: string;
   contextGraphId: string;
   subGraphName?: string;

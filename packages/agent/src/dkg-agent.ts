@@ -1594,10 +1594,11 @@ export class DKGAgent extends DKGAgentBase {
       (quads, targetGraph) => {
         if (!agentRef) return;
         // #1863 — a single-graph destructive mutation (replaceSubject) passes its
-        // TARGET GRAPH so the projection is dirtied by graph (covers deleted meta
-        // rows the inserted quads wouldn't reveal); no-op for non-CG graphs.
+        // TARGET GRAPH so deleted facts are fenced, while replacement quads
+        // cover inserted authority facts.
         if (targetGraph !== undefined) {
           agentRef.contextGraphMetaProjection.markDirtyForGraph(targetGraph);
+          if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
           return;
         }
         if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);

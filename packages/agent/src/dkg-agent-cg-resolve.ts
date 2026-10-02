@@ -1718,6 +1718,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
+      /** Read/sync-only proof from this receiver's durable private approval. */
+      allowApprovedPrivateReplicaFinalizedAbsence?: boolean;
       /**
        * Scoped reads and read-only gates may consume the complete finalized
        * authority projection; mutation, admission, and encryption-roster
@@ -1757,6 +1759,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           : { durableSubscriptionBinding: options.durableSubscriptionBinding }),
         allowAcceptedRfc64FinalizedAbsence:
           options.allowAcceptedRfc64FinalizedAbsence,
+        allowApprovedPrivateReplicaFinalizedAbsence:
+          options.allowApprovedPrivateReplicaFinalizedAbsence,
       },
     );
     if (registration.kind !== 'registered') return registration;
