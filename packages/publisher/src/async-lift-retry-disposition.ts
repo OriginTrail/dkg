@@ -643,11 +643,12 @@ export const LIFT_JOB_RETRY_BLOCKER_SUMMARY: Record<LiftJobRetryBlockerCode, str
     'While the publisher runtime is running and not paused, chain recovery re-checks this job on a '
     + 'bounded backoff. It finalizes the same job if the transaction mined, and releases a CREATE for '
     + 'a re-run only once the transaction is proven never sent; an UPDATE whose transaction never '
-    + 'landed stays held, because absence is never proof for an UPDATE. When the running publisher '
-    + 'holds an observation of the latest re-check it is reported beside this text as `lastCheck`; '
-    + 'without one (no re-check yet, a restart, or no running runtime) this cannot say whether the '
-    + 'provider is unavailable, the transaction is still pending, or the proof is inconclusive. '
-    + 'Waiting is the safe move; no operator action manufactures a safe retry.',
+    + 'landed stays held, because absence is never proof for an UPDATE. On the job-detail routes, '
+    + 'when the running publisher holds an observation of the latest re-check it is reported as '
+    + '`retryState.blocker.lastCheck`; without one (no re-check yet, a restart, no running runtime, or '
+    + 'a surface that has no runtime reader) this cannot say whether the provider is unavailable, the '
+    + 'transaction is still pending, or the proof is inconclusive. Waiting is the safe move; no '
+    + 'operator action manufactures a safe retry.',
   not_auto_retryable:
     'This failure is not one the publisher retries by itself, and it persisted no transaction '
     + 'evidence. `POST /api/publisher/retry` or re-submitting the identical request re-runs it as '

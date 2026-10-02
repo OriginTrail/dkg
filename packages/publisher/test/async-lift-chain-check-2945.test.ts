@@ -42,6 +42,7 @@ describe('GH#2945 a held job reports what its latest chain re-check found', () =
     ['unrecognized', { status: 'unrecognized' }, 'unrecognized'],
     ['a bare inconclusive', { status: 'inconclusive' }, 'inconclusive'],
     ['an inconclusive that says the chain RPC could not answer', { status: 'inconclusive', reason: 'rpc-unavailable' }, 'rpc-unavailable'],
+    ['an inconclusive that says the absence is unproven', { status: 'inconclusive', reason: 'absence-unproven' }, 'absence-unproven'],
     ['an inconclusive with a reason this contract does not define', { status: 'inconclusive', reason: 'whatever-a-resolver-invents' }, 'inconclusive'],
     ['a status this contract does not define', { status: 'banana' }, 'inconclusive'],
   ] as const)('records %s as %s', async (_label, verdict, outcome) => {
@@ -74,6 +75,14 @@ describe('GH#2945 a held job reports what its latest chain re-check found', () =
     await publisher.recover();
 
     expect(publisher.lastChainProofCheck(job)).toEqual({ outcome: 'deadline', at: expect.any(Number) });
+  });
+
+  it('does not call a resolver that merely returned null a deadline', async () => {
+    const { publisher, job } = await heldJob(async () => null);
+
+    await publisher.recover();
+
+    expect(publisher.lastChainProofCheck(job)).toEqual({ outcome: 'inconclusive', at: expect.any(Number) });
   });
 
   it('keeps only the LATEST observation, with its own stamp', async () => {
@@ -149,8 +158,9 @@ describe('GH#2945 chainCheckOutcomeOf: the closed vocabulary at the boundary', (
     expect(chainCheckOutcomeOf({ status } as AsyncLiftChainProofResolution)).toBe(status);
   });
 
-  it('carries the one reason it defines, only on an inconclusive verdict', () => {
+  it('carries the reasons it defines, only on an inconclusive verdict', () => {
     expect(chainCheckOutcomeOf({ status: 'inconclusive', reason: 'rpc-unavailable' })).toBe('rpc-unavailable');
+    expect(chainCheckOutcomeOf({ status: 'inconclusive', reason: 'absence-unproven' })).toBe('absence-unproven');
     // A reason on any other verdict is not a reason.
     expect(chainCheckOutcomeOf({ status: 'not-found', reason: 'rpc-unavailable' } as never)).toBe('not-found');
   });

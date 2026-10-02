@@ -49,6 +49,7 @@ import type {
   AsyncLiftDetailedRetrier,
   AsyncLiftPublisherConfig,
   AsyncLiftChainCheckOutcome,
+  AsyncLiftChainProofInconclusiveReason,
   AsyncLiftChainProofLookup,
   AsyncLiftChainProofResolution,
   AsyncLiftLastChainCheck,
@@ -213,15 +214,27 @@ const CHAIN_PROOF_VERDICT_STATUSES: Readonly<Record<AsyncLiftChainProofResolutio
   inconclusive: true,
 };
 const CHAIN_PROOF_VERDICT_STATUS_SET: ReadonlySet<string> = new Set(Object.keys(CHAIN_PROOF_VERDICT_STATUSES));
+/** The same, for the reasons an `inconclusive` verdict may carry. */
+const CHAIN_PROOF_INCONCLUSIVE_REASONS: Readonly<Record<AsyncLiftChainProofInconclusiveReason, true>> = {
+  'rpc-unavailable': true,
+  'absence-unproven': true,
+};
+const CHAIN_PROOF_INCONCLUSIVE_REASON_SET: ReadonlySet<string> = new Set(Object.keys(CHAIN_PROOF_INCONCLUSIVE_REASONS));
 
 /**
  * GH#2945 — what a verdict is reported as in a held job's `lastCheck`. A closed vocabulary at the
- * boundary: resolvers can be third-party JS, so only the exact `rpc-unavailable` reason on an
- * `inconclusive` verdict is carried, and a status this contract does not define reads as
- * `inconclusive` instead of putting an arbitrary string on the wire.
+ * boundary: resolvers can be third-party JS, so only the exact reasons this contract defines are carried
+ * (and only on an `inconclusive` verdict), and a status it does not define reads as `inconclusive`
+ * instead of putting an arbitrary string on the wire.
  */
 export function chainCheckOutcomeOf(resolution: AsyncLiftChainProofResolution): AsyncLiftChainCheckOutcome {
-  if (resolution.status === 'inconclusive' && resolution.reason === 'rpc-unavailable') return 'rpc-unavailable';
+  if (
+    resolution.status === 'inconclusive'
+    && resolution.reason !== undefined
+    && CHAIN_PROOF_INCONCLUSIVE_REASON_SET.has(resolution.reason)
+  ) {
+    return resolution.reason;
+  }
   return CHAIN_PROOF_VERDICT_STATUS_SET.has(resolution.status) ? resolution.status : 'inconclusive';
 }
 
@@ -2581,8 +2594,9 @@ export class TripleStoreAsyncLiftPublisher
     );
     if (resolution === null) {
       // Deadline established nothing. Echo-safety is the schedule's key model (r6 3882185608):
-      // this write can only address this incarnation's own entry.
-      turn.defer('default', 'deadline');
+      // this write can only address this incarnation's own entry. A resolver that returned `null` on its
+      // own, with the pass still in time, is not a deadline: it established nothing, which is `inconclusive`.
+      turn.defer('default', deadline.signal.aborted ? 'deadline' : 'inconclusive');
       return 0;
     }
 

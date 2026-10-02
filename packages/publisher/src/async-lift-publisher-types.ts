@@ -651,27 +651,36 @@ export type AsyncLiftChainProofResolution =
 
 /**
  * Why a lookup established nothing, when the resolver KNOWS (GH#2945). Closed and optional: a resolver
- * that cannot say omits it, and the publisher copies only this exact literal. Absent means "not
+ * that cannot say omits it, and the publisher copies only these exact literals. Absent means "not
  * classified" - never "the chain RPC was fine".
+ *  - `rpc-unavailable`: the chain RPC could not answer (every endpoint failed, a bounded request timed out,
+ *    or the local request governor was full).
+ *  - `absence-unproven`: the chain has no record of the transaction, but this node could not prove it will
+ *    never mine (absence is never proof for an UPDATE; for a CREATE the signed nonce is not provably spent,
+ *    or the pinned snapshot could not be read), so nothing is released.
  */
-export type AsyncLiftChainProofInconclusiveReason = 'rpc-unavailable';
+export type AsyncLiftChainProofInconclusiveReason = 'rpc-unavailable' | 'absence-unproven';
 
 /**
  * What the most recent re-check of a held job found, as the publisher saw it (GH#2945): the chain's
- * verdict status; `rpc-unavailable` when the resolver reported that the chain RPC could not answer;
- * `deadline` when the pass's time budget ended before an answer; `error` when the lookup threw inside
- * the publisher. Codes only - provider text can carry RPC URLs or keys.
+ * verdict status, or the resolver's reason when an `inconclusive` verdict carried one; `deadline` when
+ * the pass's time budget ended before an answer; `error` when the re-check threw (the lookup, the claim
+ * transaction or applying its answer). Codes only - provider text can carry RPC URLs or keys.
  */
 export type AsyncLiftChainCheckOutcome =
   | AsyncLiftChainProofResolution['status']
-  | 'rpc-unavailable'
+  | AsyncLiftChainProofInconclusiveReason
   | 'deadline'
   | 'error';
 
 /** The latest NON-SETTLING re-check of one held job incarnation, in this process's memory only. */
 export interface AsyncLiftLastChainCheck {
   readonly outcome: AsyncLiftChainCheckOutcome;
-  /** When this node recorded it (the publisher's clock, epoch ms): the age of the observation. */
+  /**
+   * When this node recorded it - when the re-check finished, after its answer was applied or declined
+   * (the publisher's clock, epoch ms): the age of the observation. Not a liveness claim: a paused
+   * dispatcher, a pass that did not reach this job and the idle cadence all leave an older one in place.
+   */
   readonly at: number;
 }
 

@@ -52,10 +52,10 @@ export type ChainProofRetryCadence = 'awaiting-confirmations' | 'default';
 export interface ChainProofScheduleTurn {
   /**
    * Earn a backoff. `outcome` (GH#2945) is what the check that earned it found; it is kept on the entry
-   * as observability only — it never influences the cadence, the attempt count or ownership. A deferral
-   * that states none leaves the entry with no observation rather than a stale one.
+   * as observability only — it never influences the cadence, the attempt count or ownership. It is
+   * REQUIRED, so a call site cannot forget it and silently erase the observation.
    */
-  defer(cadence: ChainProofRetryCadence, outcome?: AsyncLiftChainCheckOutcome): void;
+  defer(cadence: ChainProofRetryCadence, outcome: AsyncLiftChainCheckOutcome): void;
   settled(): void;
 }
 
@@ -86,7 +86,7 @@ type ScheduleEntry =
       readonly dueAt: number;
       readonly attempts: number;
       /** The check that earned this deferral (GH#2945): in memory, tied to this incarnation, never a scheduling input. */
-      readonly lastCheck?: AsyncLiftLastChainCheck;
+      readonly lastCheck: AsyncLiftLastChainCheck;
     };
 
 export class ChainProofRetrySchedule {
@@ -124,7 +124,7 @@ export class ChainProofRetrySchedule {
         for (const { jobId, identity } of candidates) {
           if (!this.admitObservation(jobId, identity, atMs, token)) continue;
           turns.set(jobId, {
-            defer: (cadence: ChainProofRetryCadence, outcome?: AsyncLiftChainCheckOutcome) =>
+            defer: (cadence: ChainProofRetryCadence, outcome: AsyncLiftChainCheckOutcome) =>
               this.deferTurn(jobId, identity, cadence, token, outcome),
             settled: () => this.settleTurn(jobId, identity),
           });
@@ -175,7 +175,7 @@ export class ChainProofRetrySchedule {
     identity: string,
     cadence: ChainProofRetryCadence,
     token: number,
-    outcome: AsyncLiftChainCheckOutcome | undefined,
+    outcome: AsyncLiftChainCheckOutcome,
   ): void {
     const entry = this.entries.get(jobId);
     // A missing entry here means the slot was SETTLED after this turn was admitted (admission
@@ -195,7 +195,7 @@ export class ChainProofRetrySchedule {
       observedToken: Math.max(token, entry.observedToken),
       dueAt: nowMs + backoffMs + Math.floor(this.deps.rand() * backoffMs * CHAIN_PROOF_BACKOFF_JITTER),
       attempts,
-      ...(outcome === undefined ? {} : { lastCheck: { outcome, at: nowMs } }),
+      lastCheck: { outcome, at: nowMs },
     });
   }
 

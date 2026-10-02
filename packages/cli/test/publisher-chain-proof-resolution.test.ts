@@ -143,7 +143,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
         publishIdentityKaId: KA_ID.toString(),
       });
 
-      expect(resolution).toEqual({ status: 'inconclusive' });
+      expect(resolution).toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
       expect(resolution.status).not.toBe('not-found');
       expect(adapter.readFinalizedChainProofSnapshot).not.toHaveBeenCalled();
     });
@@ -178,7 +178,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(await createChainProofResolver(publishers)({
         ...lookupWithNonce,
         publishIdentityKaId: KA_ID.toString(),
-      })).toEqual({ status: 'inconclusive' });
+      })).toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
     });
 
     it('holds when no endpoint can produce the pinned pair', async () => {
@@ -190,7 +190,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(await createChainProofResolver(publishers)({
         ...lookupWithNonce,
         publishIdentityKaId: KA_ID.toString(),
-      })).toEqual({ status: 'inconclusive' });
+      })).toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
     });
 
     it('holds when the adapter has no snapshot capability, or the read throws', async () => {
@@ -202,8 +202,8 @@ describe('GH#2270 runner chain-proof resolution', () => {
       }));
       const identity = { ...lookupWithNonce, publishIdentityKaId: KA_ID.toString() };
 
-      expect(await createChainProofResolver(noRead)(identity)).toEqual({ status: 'inconclusive' });
-      expect(await createChainProofResolver(throwing)(identity)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(noRead)(identity)).toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
+      expect(await createChainProofResolver(throwing)(identity)).toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
     });
 
     it('preserves the pending PHASE across the resolver boundary — both phases, verbatim', async () => {
@@ -257,7 +257,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
         publishIdentityKaId: PINNED_KA_ID,
       });
 
-      expect(resolution).toEqual({ status: 'inconclusive' });
+      expect(resolution).toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
       expect(resolution.status).not.toBe('not-found');
     });
 
@@ -284,7 +284,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       );
 
       expect(await createChainProofResolver(publishersWith(adapter))(lookupWithNonce))
-        .toEqual({ status: 'inconclusive' });
+        .toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
       expect(adapter.readFinalizedChainProofSnapshot).not.toHaveBeenCalled();
     });
 
@@ -295,7 +295,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
       ));
       const identity = { ...lookupWithNonce, publishIdentityKaId: PINNED_KA_ID };
 
-      expect(await createChainProofResolver(publishers)(identity)).toEqual({ status: 'inconclusive' });
+      expect(await createChainProofResolver(publishers)(identity)).toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
     });
 
     it('reads BOTH proofs from exactly ONE snapshot — never from the granular pair', async () => {
@@ -509,7 +509,7 @@ describe('GH#2270 runner chain-proof resolution', () => {
 
       const resolution = await createChainProofResolver(publishersWith(adapter))(updateLookup);
 
-      expect(resolution).toEqual({ status: 'inconclusive' });
+      expect(resolution).toEqual({ status: 'inconclusive', reason: 'absence-unproven' });
       expect(resolution.status).not.toBe('not-found');
       // The absence machinery is not even consulted for an update: there is no absence question
       // it could answer safely.
@@ -904,6 +904,29 @@ describe('GH#2270 runner chain-proof resolution', () => {
       expect(await publisher.recover()).toBe(0);
       expect((await status())?.status).toBe('failed');
       expect((await status())?.status).not.toBe('accepted');
+      // GH#2945 - and the operator can see WHY it is still held: the chain said "no record", the proof
+      // of absence is not established.
+      expect(publisher.lastChainProofCheck((await status()) as never))
+        .toEqual({ outcome: 'absence-unproven', at: expect.any(Number) });
+    });
+
+    // GH#2945 - the resolver's verdicts, end to end through the real dispatcher: what a held job reports
+    // as its latest re-check, for the cases an operator actually asks about.
+    it.each([
+      ['the chain RPC could not answer', async () => { throw new RpcEndpointsExhaustedError('all endpoints failed', { rpcUrls: [] }); }, 'rpc-unavailable'],
+      ['the transaction is waiting in the mempool', async () => ({ status: 'pending-mempool' as const }), 'pending-mempool'],
+      ['the transaction is mined but not yet final', async () => ({ status: 'pending-awaiting-confirmation' as const }), 'pending-awaiting-confirmation'],
+      ['an unclassified failure', async () => { throw new Error('boom'); }, 'inconclusive'],
+    ])('reports a held job as %s through its lastCheck, and releases nothing', async (_label, lookupResult, outcome) => {
+      const { publisher, status } = await heldJobOn({
+        chainId: 'evm:31337',
+        resolvePublishTransaction: vi.fn(lookupResult),
+      }, SIGNED_NONCE);
+
+      expect(await publisher.recover()).toBe(0);
+
+      expect((await status())?.status).toBe('failed');
+      expect(publisher.lastChainProofCheck((await status()) as never)).toEqual({ outcome, at: expect.any(Number) });
     });
 
     it('releases a held job once the tx is absent AND its nonce is spent at finality', async () => {

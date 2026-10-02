@@ -173,8 +173,9 @@ export function createChainProofResolver(
       // and a LATER third-party update superseded it" (nor from "still in flight"). Releasing on
       // it re-signs and re-applies a STALE root over newer state — the ABA hazard. An update whose
       // transaction cannot be proven canonical therefore stays held, with the operator's by-id
-      // clear as the exit.
-      return { status: 'inconclusive' };
+      // clear as the exit. (GH#2945 - the chain DID answer "no record", so say that: the reason is
+      // observability only and changes no disposition.)
+      return { status: 'inconclusive', reason: 'absence-unproven' };
     }
     if (resolution.status === 'not-found') {
       // TWO independent proofs, and both must hold. Nonce consumption settles that the recorded
@@ -189,7 +190,9 @@ export function createChainProofResolver(
       // adapter reports atomically-observed facts; policy decides what they establish.
       return await isPublishProvenAbsent(lookup, adapters, options)
         ? { status: 'not-found' }
-        : { status: 'inconclusive' };
+        // GH#2945 - the chain said "no record" but the proof of absence is not established (nonce not
+        // provably spent, the snapshot unreadable, or evidence missing): say so, change nothing else.
+        : { status: 'inconclusive', reason: 'absence-unproven' };
     }
     if (resolution.status !== 'confirmed') return resolution;
     const recovery = await mapConfirmedPublishToLiftRecovery(
