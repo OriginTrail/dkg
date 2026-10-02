@@ -401,6 +401,8 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     });
     expect(cleanupCalls[0][2]).toBeUndefined();
     expect(cleanupCalls[0][4]).toBe(KA_UAL);
+    // The cleanup is bounded by the assertion version this update confirmed.
+    expect(cleanupCalls[0][5]).toBe('1');
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
     expect(legacy).toMatchObject({ type: 'boolean', value: true });

@@ -402,6 +402,7 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphUnregisteredEvidence } from './registered-context-graph-authority.js';
 import {
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
@@ -423,6 +424,8 @@ const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 export type ContextGraphRegistrationBinding =
   | {
       kind: 'unregistered';
+      /** Explicit VM non-applicability; never set by legacy lookup fallbacks. */
+      unregisteredEvidence?: ContextGraphUnregisteredEvidence;
       /** Current participant-only authority for an approved private replica. */
       approvedPrivateReplicaAuthority?: ApprovedPrivateReplicaAuthority;
     }
@@ -1198,7 +1201,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ) {
       try {
         if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
-          return { kind: 'unregistered' };
+          return { kind: 'unregistered', unregisteredEvidence: 'local-create' };
         }
       } catch (err) {
         return {
@@ -1237,7 +1240,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      * widening through merged metadata or rejecting a valid approved join.
      */
     const resolveApprovedPrivateReplicaUnregisteredBinding = async (
-      allowConfirmedRegisteredMetaFallback = false,
+      source: 'legacy-current' | 'finalized-absence',
     ):
       Promise<ContextGraphRegistrationBinding | null> => {
       if (options.allowApprovedPrivateReplicaFinalizedAbsence !== true) return null;
@@ -1303,7 +1306,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         };
       }
       if (privateResolution.kind === 'confirmed-registered-meta') {
-        return allowConfirmedRegisteredMetaFallback
+        return source === 'legacy-current'
           ? {
               kind: 'unregistered',
               approvedPrivateReplicaAuthority: privateResolution.authority,
@@ -1317,6 +1320,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       const privateAuthority: ApprovedPrivateReplicaAuthority = privateResolution.authority;
       return {
         kind: 'unregistered',
+        // The legacy adapter lane permits participant reads, but cannot prove
+        // chain absence. Only the finalized lane may exempt VM catch-up.
+        ...(source === 'legacy-current' ? {} : {
+          unregisteredEvidence: 'approved-private-replica-finalized-absence' as const,
+        }),
         approvedPrivateReplicaAuthority: privateAuthority,
       };
     };
@@ -1328,7 +1336,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (options.allowAcceptedRfc64FinalizedAbsence === true) {
         return { kind: 'unregistered' };
       }
-      return (await resolveApprovedPrivateReplicaUnregisteredBinding(true))
+      return (await resolveApprovedPrivateReplicaUnregisteredBinding('legacy-current'))
         ?? { kind: 'unregistered' };
     };
 
@@ -1469,31 +1477,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         const flightKey = repairHints === undefined
           ? `registration-binding:${contextGraphId}`
           : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}`;
-        const resolution = await finalizedAuthorityColdResolutionOf(this).read(
+        const coldResolution = finalizedAuthorityColdResolutionOf(this);
+        const resolution = await coldResolution.read(
           flightKey,
-          async (flightSignal) => {
-            try {
-              return await this.rfc64AuthorityReadCoordinatorV1.runForeground(
-                flightSignal,
-                (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
-                  [contextGraphId],
-                  {
-                    ...evidence.agentResolverReadOptions(readSignal),
-                    ...repairHints,
-                  },
-                ),
-              );
-            } finally {
-              // The index reader's drain is global — one activity set shared with
-              // the bulk catalog lane — so it must run OUTSIDE the foreground
-              // permit: holding the permit across it would make every sibling
-              // registration read wait on unrelated bulk index activity inside
-              // this boundary's policy-read budget. It stays inside the flight,
-              // so a detached resolution retires only once its physical index
-              // work has settled.
-              await indexReader.whenIdle();
-            }
-          },
+          (flightSignal) => this.rfc64AuthorityReadCoordinatorV1.runForeground(
+            flightSignal,
+            (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+              [contextGraphId],
+              {
+                ...evidence.agentResolverReadOptions(readSignal),
+                ...repairHints,
+              },
+            ),
+          ),
           {
             label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
             requestTimeoutMs: registrationResolutionTimeoutMs,
@@ -1520,7 +1516,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               !strictFinalizedDurableBindingRepair
               && options.allowAcceptedRfc64FinalizedAbsence === true
             ) {
-              return { kind: 'unregistered' };
+              return {
+                kind: 'unregistered',
+                unregisteredEvidence: 'accepted-rfc64-finalized-absence',
+              };
             }
             // A locally approved private replica may use exact finalized name
             // absence only while its current approval, metadata, membership,
@@ -1532,7 +1531,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               && options.allowApprovedPrivateReplicaFinalizedAbsence === true
             ) {
               const privateBinding =
-                await resolveApprovedPrivateReplicaUnregisteredBinding();
+                await resolveApprovedPrivateReplicaUnregisteredBinding('finalized-absence');
               if (privateBinding !== null) return privateBinding;
             }
             return {

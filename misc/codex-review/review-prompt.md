@@ -9,7 +9,7 @@ Prioritize correctness first, then maintainability and simplicity.
 - This repository is an early-stage `pnpm` + `turbo` monorepo.
 - Most packages are TypeScript-first and ESM-first.
 - It includes runtime packages, adapters, UI packages, and Solidity contracts.
-- Conventions are defined in `CLAUDE.md` and `CONTRIBUTING.md`.
+- Conventions are defined in `CLAUDE.md` and `.github/CONTRIBUTING.md`.
 
 Because the project is evolving quickly, keep review guidance general and durable.
 Do not enforce overly narrow style preferences that may soon change.

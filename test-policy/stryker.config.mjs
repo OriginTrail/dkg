@@ -1,8 +1,8 @@
 export default {
-  $schema: './node_modules/@stryker-mutator/core/schema/stryker-schema.json',
+  $schema: '../node_modules/@stryker-mutator/core/schema/stryker-schema.json',
   testRunner: 'vitest',
   plugins: ['@stryker-mutator/vitest-runner'],
-  vitest: { configFile: 'vitest.mutation.config.ts' },
+  vitest: { configFile: 'test-policy/vitest.mutation.config.ts' },
   mutate: ['packages/core/src/context-graph-join-policy.ts'],
   coverageAnalysis: 'perTest',
   concurrency: 2,

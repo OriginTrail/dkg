@@ -62,9 +62,27 @@ class ExactBatchRefusalError extends Error {
 export class ExactBatchPartialSyncError extends Error {
   readonly code = 'EXACT_BATCH_PARTIAL';
   constructor(readonly committedAssetUals: readonly string[], cause: unknown,
-    readonly refusalObservation?: ExactBatchRefusalObservation) {
+    readonly refusalObservation?: ExactBatchRefusalObservation,
+    /**
+     * The stream itself failed or ended before completion, and no local
+     * cancellation caused it. False for a refusal, for an asset this node
+     * rejected or could not store, and for a frame the receive window refused.
+     */
+    readonly streamInterrupted = false) {
     super('Exact batch stopped before verified completion', { cause });
   }
+}
+/**
+ * The stream itself failed: a read or a send rejected, or it ended before
+ * BATCH_END. Raised only where the session is used, so what the verifier, the
+ * store or the receive window reject never carries it. `cause` is the failure
+ * as the session reported it, and the only thing callers get to see.
+ */
+class ExactBatchStreamFailure extends Error {
+  constructor(cause: unknown) { super('Exact batch stream failed', { cause }); }
+}
+function withoutStreamFailureTag(failure: unknown): unknown {
+  return failure instanceof ExactBatchStreamFailure ? failure.cause : failure;
 }
 interface ExactBatchProgress {
   readonly committedAssetUals: string[];
@@ -73,9 +91,16 @@ interface ExactBatchProgress {
 function committedPrefix(progress: ExactBatchProgress): readonly string[] {
   return Object.freeze([...progress.committedAssetUals]);
 }
-function partialSyncError(progress: ExactBatchProgress, cause: unknown, signal?: AbortSignal): ExactBatchPartialSyncError {
+/**
+ * `failure` is what ended the exchange: the first thing to fail, because a
+ * read left pending rejects only later, once the stream is torn down. A
+ * cancelled session is never an interrupted stream.
+ */
+function partialSyncError(progress: ExactBatchProgress, failure: unknown, signal?: AbortSignal): ExactBatchPartialSyncError {
+  const cause = withoutStreamFailureTag(failure);
   return new ExactBatchPartialSyncError(committedPrefix(progress), cause,
-    cause instanceof ExactBatchRefusalError && !signal?.aborted ? progress.refusalObservation : undefined);
+    cause instanceof ExactBatchRefusalError && !signal?.aborted ? progress.refusalObservation : undefined,
+    failure instanceof ExactBatchStreamFailure && !signal?.aborted);
 }
 const META_GRAPH_SUFFIX = '/_meta';
 const MAX_PARSED_HEAP = 32 * 1024 * 1024;
@@ -168,11 +193,14 @@ async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, op
   let stopped = false, batchEnded = false, acknowledgedAssets = 0;
   let wake: (() => void) | undefined;
   const notify = () => { const waiting = wake; wake = undefined; waiting?.(); };
+  const onStream = async <T>(io: () => Promise<T>): Promise<T> => {
+    try { return await io(); } catch (cause) { throw new ExactBatchStreamFailure(cause); }
+  };
   const reader = (async () => {
     while (!stopped) {
-      const incoming = await session.next();
+      const incoming = await onStream(() => session.next());
       if (stopped) return;
-      if (!incoming) throw new Error('Exact batch ended without explicit completion');
+      if (!incoming) throw new ExactBatchStreamFailure(new Error('Exact batch ended without explicit completion'));
       window.accept(incoming); notify();
       if (incoming.kind === K.REFUSE) throw new ExactBatchRefusalError(window.refusal!, window.startedCount, window.atAssetBoundary);
       if (incoming.kind === K.BATCH_END) { batchEnded = true; notify(); return; }
@@ -184,7 +212,7 @@ async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, op
       const asset = window.takeReady();
       if (!asset) { await new Promise<void>(resolve => { wake = resolve; }); continue; }
       const acknowledged = await window.commitAsset(asset, commit, { signal });
-      await session.send(acknowledged);
+      await onStream(() => session.send(acknowledged));
       acknowledgedAssets += 1;
     }
   })();
@@ -192,7 +220,8 @@ async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, op
     await Promise.all([reader, committer]);
     if (!batchEnded || !window.complete) throw new Error('Exact batch did not reach verified completion');
     return Object.freeze({ complete: true, committedAssetUals: committedPrefix(progress) });
-  } catch (cause) {
+  } catch (failure) {
+    const cause = withoutStreamFailureTag(failure);
     stopped = true; cancellation.abort(cause); notify();
     await window.close();
     const prefix = progress.committedAssetUals;
@@ -206,7 +235,8 @@ async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, op
       : undefined;
     // The owning public boundary normalizes the error after its physical
     // settlement, so a later close failure can replace refusal classification.
-    throw cause;
+    // It also reads, and removes, the stream-failure tag.
+    throw failure;
   } finally {
     stopped = true; notify();
     await window.close(); // physically await any verifier/write still running

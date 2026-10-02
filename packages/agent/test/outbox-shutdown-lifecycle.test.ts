@@ -13,6 +13,7 @@ import {
   ContextGraphMembershipPersistScheduler,
   ContextGraphMembershipPersistShutdownTimeoutError,
 } from '../src/context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from '../src/context-graph-subscription-persist-scheduler.js';
 import {
   VmReconcileQueueClosedError,
   VmReconcileShutdownTimeoutError,
@@ -37,6 +38,9 @@ function syntheticShutdownAgent(): any {
   // owners that stop() fences before dependency teardown.
   agent.rfc64BackgroundWorkDispatcherV1 = new Rfc64BackgroundWorkDispatcherV1();
   agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  // stop() closes and drains this scheduler unconditionally: production always
+  // constructs it, so the fixture does too.
+  agent.contextGraphSubscriptionPersistence = new ContextGraphSubscriptionPersistScheduler();
   return agent;
 }
 

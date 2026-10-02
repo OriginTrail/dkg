@@ -55,7 +55,7 @@ and streams back.** No memory, no tools, no skill package.
 | `packages/cli/src/daemon/routes/index.ts` (or the dispatcher that calls `handleHermesRoutes`) | Register `handlePrimeAgentRoutes` |
 | `packages/cli/src/cli.ts` | `registerPrimeAgentCommand` |
 | `packages/cli/src/commands/prime-agent.ts` **(new)** | `setup/verify/status/doctor/disconnect/reconnect/uninstall`, mirroring `commands/hermes.ts` |
-| `pnpm-workspace.yaml`, root `package.json`, `knip.json` | Register the new workspace package |
+| `pnpm-workspace.yaml`, root `package.json`, `.github/knip.json` | Register the new workspace package |
 | **No change** to `packages/cli/src/config.ts` | `transport.kind` is an unconstrained `string` (`config.ts:388-393`) |
 
 ### Stage 1 tests

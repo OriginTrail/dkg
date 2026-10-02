@@ -438,6 +438,14 @@ describe('approved private bare-name replica authorization', () => {
       source: 'rfc64-private',
       reason: 'rfc64-participant',
     });
+    // The compatibility read fallback is allowed even though authenticated
+    // metadata says registered. It is NOT evidence that VM is inapplicable.
+    const bootstrap = await fixture.receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      { callerAgentAddress: fixture.memberAddress, allowSubscriptionFallback: false },
+    );
+    expect(bootstrap).toMatchObject({ outcome: 'allowed', source: 'rfc64-private' });
+    expect(bootstrap).not.toHaveProperty('registration');
   });
 
   it('does not downgrade registered metadata before a finalized-capable adapter checks its name index', async () => {
@@ -697,7 +705,7 @@ describe('approved private bare-name replica authorization', () => {
         callerAgentAddress: fixture.memberAddress,
         allowSubscriptionFallback: false,
       },
-    )).resolves.toMatchObject(expectedAuthority);
+    )).resolves.toMatchObject({ ...expectedAuthority, registration: 'unregistered' });
 
     await expect(fixture.receiver.resolveContextGraphReadAuthority(CONTEXT_GRAPH_ID, {
       callerAgentAddress: fixture.memberAddress,
@@ -745,6 +753,7 @@ describe('approved private bare-name replica authorization', () => {
       outcome: 'allowed',
       source: 'rfc64-private',
       reason: 'rfc64-participant',
+      registration: 'unregistered',
     });
     await expect(fixture.receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
       .resolves.toBe(true);
@@ -1645,7 +1654,7 @@ describe('approved private bare-name replica authorization', () => {
         callerAgentAddress: fixture.memberAddress,
         allowSubscriptionFallback: false,
       },
-    )).resolves.toMatchObject({ outcome: 'allowed', source: 'rfc64-private' });
+    )).resolves.toMatchObject({ outcome: 'allowed', source: 'rfc64-private', registration: 'unregistered' });
 
     await fixture.receiver.store.insert([{
       graph: fixture.graph,

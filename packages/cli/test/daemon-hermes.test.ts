@@ -34,6 +34,7 @@ import {
 } from '../src/daemon/local-agents.js';
 import { handleHermesRoutes } from '../src/daemon/routes/hermes.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const disconnectHermesProfileMock = vi.hoisted(() => vi.fn());
 const resolveHermesProfileMock = vi.hoisted(() => vi.fn(() => ({
@@ -1150,6 +1151,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         res,
         config,
         path: '/api/local-agent-integrations/hermes',
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
       } as any);
     } finally {
       if (previousDkgHome === undefined) delete process.env.DKG_HOME;
@@ -1199,6 +1201,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         res,
         config,
         path: '/api/local-agent-integrations/hermes',
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
       } as any);
     } finally {
       if (previousDkgHome === undefined) delete process.env.DKG_HOME;
@@ -1243,6 +1246,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         res,
         config,
         path: '/api/local-agent-integrations/hermes',
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
       } as any);
     } finally {
       if (previousDkgHome === undefined) delete process.env.DKG_HOME;
