@@ -1469,7 +1469,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         const flightKey = repairHints === undefined
           ? `registration-binding:${contextGraphId}`
           : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}`;
-        const resolution = await finalizedAuthorityColdResolutionOf(this).read(
+        const coldResolution = finalizedAuthorityColdResolutionOf(this);
+        const resolution = await coldResolution.read(
           flightKey,
           async (flightSignal) => {
             try {
@@ -1484,14 +1485,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
                 ),
               );
             } finally {
-              // The index reader's drain is global — one activity set shared with
-              // the bulk catalog lane — so it must run OUTSIDE the foreground
-              // permit: holding the permit across it would make every sibling
-              // registration read wait on unrelated bulk index activity inside
-              // this boundary's policy-read budget. It stays inside the flight,
-              // so a detached resolution retires only once its physical index
-              // work has settled.
-              await indexReader.whenIdle();
+              // This GLOBAL drain includes unrelated bulk catalog activity.
+              // Neither the foreground permit nor a completed read's result
+              // may wait for it. Retain it under the cold owner's shutdown
+              // fence instead; stop still drains physical index work before
+              // tearing down the store, without turning valid bindings into
+              // request-deadline failures. No result is memoized by this owner.
+              coldResolution.retainDrain(indexReader.whenIdle());
             }
           },
           {

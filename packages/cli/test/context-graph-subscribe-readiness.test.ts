@@ -6,6 +6,15 @@ import { requestAuthentication } from './_helpers/request-authentication.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
 
+interface TestAuthorityDecision {
+  outcome: 'allowed' | 'denied' | 'unavailable';
+  source: 'registered-chain' | 'legacy-local';
+  reason: string;
+  metadataBootstrap: 'eligible' | 'forbidden';
+  onChainId?: bigint;
+  registration?: 'unregistered';
+}
+
 function cleanEmptyResult(): CatchupJobResult {
   return {
     connectedPeers: 1,
@@ -151,13 +160,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     metadataBootstrapWaitFor?: Promise<void>;
     onMetadataBootstrapStarted?: () => void;
     onCatchupRun?: () => void;
-    authorityDecision?: {
-      outcome: 'allowed' | 'denied' | 'unavailable';
-      source: 'registered-chain' | 'legacy-local';
-      reason: string;
-      metadataBootstrap: 'eligible' | 'forbidden';
-      onChainId?: bigint;
-    };
+    authorityDecision?: TestAuthorityDecision;
+    authorityAfterCatchup?: TestAuthorityDecision;
     readiness?: {
       version: number;
       durableVerified: boolean;
@@ -218,7 +222,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
-      resolveContextGraphSubscriptionBootstrapAuthority: async () => opts.authorityDecision ?? ({
+      resolveContextGraphSubscriptionBootstrapAuthority: async () => (
+        runCalls > 0 ? opts.authorityAfterCatchup ?? opts.authorityDecision : opts.authorityDecision
+      ) ?? ({
         outcome: 'allowed' as const,
         source: 'legacy-local' as const,
         reason: 'test-public',
@@ -1088,6 +1094,81 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       durableVerified: false,
       sharedMemoryVerified: true,
     });
+  });
+
+  const unregisteredAuthority = {
+    outcome: 'allowed' as const,
+    source: 'legacy-local' as const,
+    reason: 'approved-private-replica',
+    metadataBootstrap: 'eligible' as const,
+    registration: 'unregistered' as const,
+  };
+
+  it('completes an authoritatively unregistered private SWM graph without inventing VM proof', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      result: privateSharedMemoryOnlyResult(),
+    });
+    expect(result.job).toMatchObject({ status: 'done', durablePlane: 'not-applicable' });
+    expect(result.job.error).toBeUndefined();
+    expect(result.statusResponse.durablePlane).toBe('not-applicable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: true });
+  });
+
+  it('re-derives VM applicability for the already-ready shortcut after restart', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      readiness: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+      initial: { subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true },
+    });
+    expect(result.runCalls).toBe(0);
+    expect(result.job).toMatchObject({ status: 'done', durablePlane: 'not-applicable' });
+    expect(result.readiness?.durableVerified).toBe(false);
+  });
+
+  it('requires VM when the graph registers during catch-up', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      authorityAfterCatchup: {
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+        metadataBootstrap: 'eligible', onChainId: 42n,
+      },
+      result: privateSharedMemoryOnlyResult(),
+    });
+    expect(result.job).toMatchObject({ status: 'unreachable', durablePlane: 'required' });
+    expect(result.readiness?.durableVerified).toBe(false);
+  });
+
+  it.each(['denied', 'unavailable'] as const)('does not carry unregistered readiness through authority becoming %s', async (outcome) => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      authorityAfterCatchup: {
+        outcome, source: 'registered-chain', reason: 'authority-lost', metadataBootstrap: 'forbidden',
+      },
+      result: privateSharedMemoryOnlyResult(),
+    });
+    expect(result.job.status).toBe(outcome === 'denied' ? 'denied' : 'unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state.synced).toBe(false);
+  });
+
+  it('does not turn metadata-only private SWM into readiness even when VM is inapplicable', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      result: privateMetaOnlyResult(),
+    });
+    expect(result.job.status).toBe('unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
   });
 
   it('only returns synthetic done when all ready flags include metaSynced=true', async () => {

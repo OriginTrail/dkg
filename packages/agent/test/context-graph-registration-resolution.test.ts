@@ -8,8 +8,42 @@ import {
   NAME_HASH,
   selectedFixture,
 } from './context-graph-registration-binding.fixture.js';
+import { finalizedAuthorityColdResolutionOf } from '../src/finalized-authority-cold-resolution.js';
 
 describe('Context Graph registration resolution deadlines', () => {
+  it('returns finalized binding without waiting for unrelated global index activity, but retains its drain', async () => {
+    vi.useFakeTimers();
+    let releaseDrain!: () => void;
+    const globalDrain = new Promise<void>((resolve) => { releaseDrain = resolve; });
+    const fixture = selectedFixture();
+    const resolveFinalized = vi.fn(async () => 42n);
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
+        whenIdle: vi.fn(() => globalDrain),
+      },
+    });
+    try {
+      const binding = fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+        registrationTimeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+      });
+      await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+      await expect(binding).resolves.toMatchObject({ kind: 'registered', onChainId: 42n });
+      let drained = false;
+      const drain = finalizedAuthorityColdResolutionOf(fixture.agent).whenIdle()
+        .then(() => { drained = true; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drained).toBe(false);
+      releaseDrain();
+      await drain;
+      expect(drained).toBe(true);
+    } finally {
+      releaseDrain();
+      await finalizedAuthorityColdResolutionOf(fixture.agent).whenIdle();
+      vi.useRealTimers();
+    }
+  });
+
   it('marks only a positive cold reverse-name-hash RPC result as pool evidence', async () => {
     const positive = selectedFixture();
     const markPositive = vi.fn();

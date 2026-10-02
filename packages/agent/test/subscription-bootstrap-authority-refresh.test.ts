@@ -95,6 +95,26 @@ const resolveBootstrap = (agent: DKGAgent) => (
 );
 
 describe('subscription bootstrap finalized-generation refresh', () => {
+  it('carries explicit unregistered applicability only from the canonical allowed authority read', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({ kind: 'unregistered' });
+    Reflect.set(agent, 'hasAcceptedRfc64PublicUnregisteredAuthorityV1', () => true);
+    const decision = await resolveBootstrap(agent);
+    expect(decision).toMatchObject({
+      outcome: 'allowed', source: 'rfc64-public', registration: 'unregistered',
+    });
+    expect(registeredAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('does not attach unregistered applicability to a private non-member denial', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({ kind: 'unregistered' });
+    Reflect.set(agent, 'resolveRfc64PrivateReadRosterV1', () => []);
+    const decision = await resolveBootstrap(agent);
+    expect(decision.outcome).toBe('denied');
+    expect(decision).not.toHaveProperty('registration');
+  });
+
   it('refuses admission when the finalized refresh returns no entry for the graph', async () => {
     const { agent, reconcile, refresh, registeredAuthority } = createBootstrapAgent({
       refresh: async () => new Map(),

@@ -35,6 +35,12 @@ interface ContextGraphReadAuthorityDecisionFields {
   reason: string;
   metadataBootstrap: 'eligible' | 'forbidden';
   onChainId?: bigint;
+  /**
+   * Subscription bootstrap's canonical read established unregistered authority
+   * AND allowed the caller. Never inferred from missing RDF or a missing id;
+   * transient evidence, not a durable readiness proof.
+   */
+  registration?: 'unregistered';
 }
 
 /** An authoritative answer: the read is allowed or denied. */

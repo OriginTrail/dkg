@@ -133,6 +133,7 @@ import {
   classifyNameHashOnlyCatchup,
   readContextGraphReadiness,
   writeContextGraphReadiness,
+  type ContextGraphCatchupReadinessClassification,
 } from '../../context-graph-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -2108,6 +2109,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         readiness: readinessBeforeCatchup,
         includeSharedMemory: shouldSyncSharedMemory,
         hasConfirmedMeta: hasConfirmedExistingMeta,
+        registration: readAuthority.registration,
       });
       if (existingReadiness.alreadyReady && !forceCatchup) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
@@ -2141,6 +2143,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             contextGraphId,
             includeWorkspace: shouldSyncSharedMemory,
             status: "done",
+            durablePlane: readAuthority.registration === 'unregistered' ? 'not-applicable' : 'required',
             queuedAt: Date.now(),
             startedAt: Date.now(),
             finishedAt: Date.now(),
@@ -2318,15 +2321,41 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           const isPrivate = hasConfirmedMeta
             ? await agent.isPrivateContextGraph(targetContextGraphId).catch(() => true)
             : false;
-          const classification = classifyContextGraphCatchupReadiness({
-            result,
-            includeSharedMemory: shouldSyncSharedMemory,
-            hasConfirmedMeta,
-            isPrivate,
-            readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
-              ? readinessBeforeCatchup
-              : readContextGraphReadiness(dashDb, targetContextGraphId),
-          });
+          // A catch-up can outlive its admission's absence proof or member
+          // delegation. Re-derive unregistered applicability at completion;
+          // registration, revocation, and outages must not reuse an old N/A.
+          const completionAuthority = readAuthority.registration === 'unregistered'
+            ? await agent.resolveContextGraphSubscriptionBootstrapAuthority(targetContextGraphId, {
+              callerAgentAddress: callerAddr,
+              allowSubscriptionFallback: false,
+            }).catch(() => ({ outcome: 'unavailable' as const, registration: undefined }))
+            : readAuthority;
+          job.durablePlane = completionAuthority.outcome === 'allowed'
+            && completionAuthority.registration === 'unregistered'
+            ? 'not-applicable' : 'required';
+          const classification: ContextGraphCatchupReadinessClassification =
+            completionAuthority.outcome !== 'allowed'
+            ? {
+              jobStatus: completionAuthority.outcome === 'denied' ? 'denied' : 'unreachable',
+              error: completionAuthority.outcome === 'denied'
+                ? 'Context-graph authority denied access at catch-up completion.'
+                : 'Context-graph authority is unavailable at catch-up completion. Retry after authority recovers.',
+              statePatch: {
+                synced: false, sharedMemorySynced: false,
+                metaSynced: hasConfirmedMeta, pendingMeta: !hasConfirmedMeta,
+              },
+              readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+            }
+            : classifyContextGraphCatchupReadiness({
+              result,
+              includeSharedMemory: shouldSyncSharedMemory,
+              hasConfirmedMeta,
+              isPrivate,
+              registration: completionAuthority.registration,
+              readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
+                ? readinessBeforeCatchup
+                : readContextGraphReadiness(dashDb, targetContextGraphId),
+            });
 
           job.status = classification.jobStatus;
           job.error = classification.error;

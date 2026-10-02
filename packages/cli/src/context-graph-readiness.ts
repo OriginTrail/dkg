@@ -245,7 +245,7 @@ export function missingMetadataReadinessPatches(): MissingMetadataReadinessPatch
 interface ContextGraphPlaneReadinessVerdict {
   /** Compatibility/write-readiness: either persisted usable plane opens the graph. */
   readonly writeReady: boolean;
-  /** Catch-up completion: durable VM plus SWM when the caller requested it. */
+  /** Catch-up completion: applicable VM plus SWM when the caller requested it. */
   readonly requestedPlanesVerified: boolean;
   readonly missingRequestedDurable: boolean;
   readonly missingRequestedSharedMemory: boolean;
@@ -255,8 +255,9 @@ function contextGraphPlaneReadinessVerdict(input: {
   durableVerified: boolean;
   sharedMemoryVerified: boolean;
   includeSharedMemory: boolean;
+  registration?: 'unregistered';
 }): ContextGraphPlaneReadinessVerdict {
-  const missingRequestedDurable = !input.durableVerified;
+  const missingRequestedDurable = input.registration !== 'unregistered' && !input.durableVerified;
   const missingRequestedSharedMemory =
     input.includeSharedMemory && !input.sharedMemoryVerified;
   return {
@@ -273,6 +274,7 @@ export function classifyExistingContextGraphReadiness(input: {
   readiness: ContextGraphReadinessProvenance;
   includeSharedMemory: boolean;
   hasConfirmedMeta: boolean;
+  registration?: 'unregistered';
 }): {
   alreadyReady: boolean;
   statePatch?: ContextGraphSubscriptionStatePatch;
@@ -288,6 +290,7 @@ export function classifyExistingContextGraphReadiness(input: {
     durableVerified,
     sharedMemoryVerified,
     includeSharedMemory: input.includeSharedMemory,
+    registration: input.registration,
   });
   const alreadyReady =
     input.hasConfirmedMeta &&
@@ -514,6 +517,8 @@ export function classifyContextGraphCatchupReadiness(input: {
   hasConfirmedMeta: boolean;
   isPrivate: boolean;
   readinessBeforeCatchup: ContextGraphReadinessProvenance;
+  /** Current allowed bootstrap authority, never persisted or inferred from metadata. */
+  registration?: 'unregistered';
 }): ContextGraphCatchupReadinessClassification {
   const { result } = input;
   const durableDataProgress = result.dataSynced > 0;
@@ -585,14 +590,15 @@ export function classifyContextGraphCatchupReadiness(input: {
       durableVerified: durableVerifiedPersisted,
       sharedMemoryVerified: sharedMemoryVerifiedPersisted,
       includeSharedMemory: input.includeSharedMemory,
+      registration: input.registration,
     });
-    // Use the same requested-plane contract as the pre-catch-up fast path so
-    // SWM-only provenance can never synthesize or terminate a `done` job while
-    // finalized VM remains unverified.
+    // Both paths use current authoritative applicability. Exempting an
+    // unregistered graph never manufactures durableVerified provenance.
     const planeReadiness = contextGraphPlaneReadinessVerdict({
       durableVerified,
       sharedMemoryVerified,
       includeSharedMemory: input.includeSharedMemory,
+      registration: input.registration,
     });
     const {
       missingRequestedDurable,
@@ -622,7 +628,9 @@ export function classifyContextGraphCatchupReadiness(input: {
       } else if (input.isPrivate && missingRequestedDurable) {
         error = 'Shared-memory context-graph data synchronized, but durable VM catch-up did not complete. Retry to finish finalized VM synchronization.';
       } else if (input.isPrivate) {
-        error = 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
+        error = input.registration === 'unregistered'
+          ? 'Durable VM is not applicable to this unregistered context graph, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.'
+          : 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
       } else {
         error = 'Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.';
       }

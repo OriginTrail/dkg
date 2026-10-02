@@ -849,21 +849,32 @@ export class QueryMethods extends DKGAgentBase {
         async (signal) => {
           const boundedOpts = { ...opts, signal };
           const resolve = async () => {
-            const authority = await resolveContextGraphReadAuthorityDecision(
-              QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
-                this,
-                contextGraphId,
-                boundedOpts,
-                {
-                  registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-                  authorityReadMode: 'live-current',
-                  hasAcceptedRfc64PublicPolicy:
-                    this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
-                      ? true
-                      : undefined,
-                },
-              ),
+            const input = QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+              this,
+              contextGraphId,
+              boundedOpts,
+              {
+                registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+                authorityReadMode: 'live-current',
+                hasAcceptedRfc64PublicPolicy:
+                  this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                    ? true
+                    : undefined,
+              },
             );
+            // Carry applicability from the SAME canonical registration read
+            // that authorizes this caller. A nullable id or local RDF marker
+            // cannot substitute for it. Do not persist this absence: the next
+            // admission/catch-up completion must resolve it afresh.
+            let unregistered = false;
+            const authority = await resolveContextGraphReadAuthorityDecision({
+              ...input,
+              getRegisteredAuthority: async () => {
+                const registered = await input.getRegisteredAuthority();
+                unregistered = registered.kind === 'unregistered';
+                return registered;
+              },
+            });
             // A remote graph can be visible before its new chain binding is
             // indexed and before its local definition arrives. During that
             // interval the legacy fallback can mistake absent local policy
@@ -886,7 +897,9 @@ export class QueryMethods extends DKGAgentBase {
                 'local-state',
               );
             }
-            return authority;
+            return authority.outcome === 'allowed' && unregistered
+              ? { ...authority, registration: 'unregistered' as const }
+              : authority;
           };
           const initial = await resolve();
           if (
