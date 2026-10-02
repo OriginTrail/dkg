@@ -6,7 +6,7 @@ import {
   loadMerkleVerifiedSharedMemorySlice,
 } from '../src/index.js';
 import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
-import { AUTHOR_A_MIXED, AUTHOR_A, AUTHOR_B, keys } from './graph-manager-swm-fixtures.js';
+import { AUTHOR_A_MIXED, AUTHOR_A, AUTHOR_B, keys, seedGraphs } from './graph-manager-swm-fixtures.js';
 
 describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', () => {
   const SOURCES = {
@@ -235,7 +235,7 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
     }
   });
 
-  it('enumerates an unrestricted complete family only inside the read snapshot', async () => {
+  it('lists the complete family only inside the snapshot when its verdict follows no candidate', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('fb-complete-one-inventory');
     const root = 'urn:fb:complete-one-inventory';
@@ -246,15 +246,84 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       query: store.query.bind(store),
       listGraphs: outerListGraphs,
       withReadSnapshot: async (fn: (value: typeof snapshotRead) => Promise<unknown>) => fn(snapshotRead),
-    } as unknown as Parameters<typeof loadSelectedSharedMemoryQuads>[0];
+    } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
     try {
       await store.insert([{ subject: root, predicate: 'urn:p', object: '"value"', graph: swm }]);
-      const quads = await loadSelectedSharedMemoryQuads(
-        snapshotted, swm, { rootEntities: [root] },
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        snapshotted, swm, { rootEntities: [root] }, undefined,
+        { sources: SOURCES, createAccept: async () => (candidate) => candidate },
       );
       expect(quads.map((quad) => quad.object)).toEqual(['"value"']);
+      expect(accepted?.map((quad) => quad.object)).toEqual(['"value"']);
+      // One inventory, taken at the commit point the verdict is read from.
       expect(outerListGraphs).not.toHaveBeenCalled();
       expect(snapshotListGraphs).toHaveBeenCalledTimes(1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  // The StorageACK recompute and the publisher read a complete family through
+  // the plain loader. On Blazegraph an in-snapshot listing scans every named
+  // graph in the store, so these reads keep the catalog's graph set.
+  it('reads a small complete family from the catalog without opening a snapshot', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-plain-small-family');
+    const root = 'urn:fb:plain-small-family';
+    const outerListGraphs = vi.fn(store.listGraphs.bind(store));
+    const withReadSnapshot = vi.fn();
+    const snapshotted = {
+      query: store.query.bind(store),
+      listGraphs: outerListGraphs,
+      withReadSnapshot,
+    } as unknown as Parameters<typeof loadSelectedSharedMemoryQuads>[0];
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"bucket"', graph: swm },
+        { subject: root, predicate: 'urn:p', object: '"child"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+      ]);
+      const quads = await loadSelectedSharedMemoryQuads(snapshotted, swm, { rootEntities: [root] });
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"bucket"', '"child"']);
+      expect(outerListGraphs).toHaveBeenCalledTimes(1);
+      expect(withReadSnapshot).not.toHaveBeenCalled();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('pins a large plain read to one snapshot and keeps the catalog graph set', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-plain-large-family');
+    const root = 'urn:fb:plain-large-family';
+    const graphs = Array.from({ length: 130 }, (_, i) =>
+      `${swm}/${AUTHOR_A_MIXED}/${String(i + 1).padStart(3, '0')}`);
+    const outerListGraphs = vi.fn(store.listGraphs.bind(store));
+    const snapshotListGraphs = vi.fn(store.listGraphs.bind(store));
+    const snapshotQuery = vi.fn(store.query.bind(store));
+    const outerQuery = vi.fn(store.query.bind(store));
+    const withReadSnapshot = vi.fn(async (
+      fn: (value: { query: typeof snapshotQuery; listGraphs: typeof snapshotListGraphs }) => Promise<unknown>,
+    ) => fn({ query: snapshotQuery, listGraphs: snapshotListGraphs }));
+    const snapshotted = {
+      query: outerQuery,
+      listGraphs: outerListGraphs,
+      withReadSnapshot,
+    } as unknown as Parameters<typeof loadSelectedSharedMemoryQuads>[0];
+    try {
+      await seedGraphs(store, graphs);
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"first"', graph: graphs[0]! },
+        { subject: root, predicate: 'urn:p', object: '"last"', graph: graphs[129]! },
+      ]);
+      const quads = await loadSelectedSharedMemoryQuads(snapshotted, swm, { rootEntities: [root] });
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"first"', '"last"']);
+      expect(withReadSnapshot).toHaveBeenCalledTimes(1);
+      expect(outerListGraphs).toHaveBeenCalledTimes(1);
+      expect(snapshotListGraphs).not.toHaveBeenCalled();
+      // Every chunk is read at the pinned commit point, none from the outer store.
+      expect(snapshotQuery.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g')).length)
+        .toBeGreaterThan(1);
+      expect(outerQuery.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g'))).toHaveLength(0);
     } finally {
       await store.close();
     }

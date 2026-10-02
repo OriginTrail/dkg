@@ -165,6 +165,23 @@ type SharedMemoryGraphReadResult =
   | { status: 'admitted'; quads: Quad[] }
   | Extract<SharedMemoryGraphAdmission, { status: 'deferred' }>;
 
+/**
+ * Where a read takes its graph set from.
+ *
+ * `catalog`: the outer store's graph catalog, sampled once before the read
+ * (the freshness contract on `resolveSharedMemoryReadGraphs`). Every plain
+ * read uses it, as it did before reads were chunked. A snapshot, when one is
+ * opened, only pins the chunk queries to one commit point.
+ *
+ * `snapshot`: the complete family is listed again inside the pinned snapshot.
+ * Only the complete read behind the candidate protocol needs this. The
+ * candidates before it already read from the catalog and no wider read
+ * follows, so a stale catalog there would report a complete family as
+ * unmatched. On Blazegraph the listing scans every named graph in the store,
+ * so no other read pays for it.
+ */
+type SwmGraphInventory = 'catalog' | 'snapshot';
+
 function unrestrictedQuads(result: SharedMemoryGraphReadResult): Quad[] {
   if (result.status === 'admitted') return result.quads;
   throw new Error('Unexpected graph admission deferral in an unrestricted shared-memory read');
@@ -704,6 +721,9 @@ async function runSharedMemorySliceCandidates(
       { ...loadOptions, querySource: completeSource },
       { kind: 'complete-family' },
       maxCompleteFamilyGraphs,
+      // No wider read follows this one, so its verdict must not rest on a
+      // catalog that was sampled outside the backend snapshot.
+      'snapshot',
     ));
   if (complete.status === 'deferred') {
     // An unverified candidate is never promoted. The finalization caller can
@@ -783,6 +803,7 @@ async function loadSharedMemoryQuadsInternal(
     | { kind: 'bounded'; bound: SwmKaGraphBound }
     | SharedMemoryGraphScope,
   maxGraphsToRead?: number,
+  inventory: SwmGraphInventory = 'catalog',
 ): Promise<SharedMemoryGraphReadResult> {
   const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
@@ -805,38 +826,40 @@ async function loadSharedMemoryQuadsInternal(
   };
 
   const snapshot = asReadSnapshotCapability(store);
-  let initialGraphs: NonEmptyGraphList | undefined;
-  if (!(graphScope.kind === 'complete-family' && snapshot && maxGraphsToRead === undefined)) {
-    // An unrestricted complete-family read discovers its authoritative graph
-    // set only inside the snapshot. Limited reads can reject a known oversized
-    // family before opening a snapshot or issuing any materialization query.
-    initialGraphs = await traceSlowSwmReadStage('selected.resolve-initial', queryOptions, () =>
+  const listInSnapshot = inventory === 'snapshot'
+    && graphScope.kind === 'complete-family'
+    && snapshot !== null;
+  let catalogGraphs: NonEmptyGraphList | undefined;
+  if (!(listInSnapshot && maxGraphsToRead === undefined)) {
+    // An unlimited in-snapshot listing needs no second inventory. Every other
+    // read starts from the catalog, and a limited one can reject a known
+    // oversized family before opening a snapshot or issuing any read.
+    catalogGraphs = await traceSlowSwmReadStage('selected.resolve-initial', queryOptions, () =>
       resolveGraphs(store, queryOptions));
-    const preflight = admitSharedMemoryGraphCount(initialGraphs.length, maxGraphsToRead);
+    const preflight = admitSharedMemoryGraphCount(catalogGraphs.length, maxGraphsToRead);
     if (preflight.status === 'deferred') return preflight;
   }
   const graphsPerQuery = options.resultBudget
     ? BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY : SHARED_MEMORY_GRAPHS_PER_QUERY;
-  if (initialGraphs && graphScope.kind !== 'complete-family' && initialGraphs.length <= graphsPerQuery) {
+  if (catalogGraphs && !listInSnapshot && catalogGraphs.length <= graphsPerQuery) {
+    // One query is its own snapshot: no transaction and no second listing.
+    const graphs = catalogGraphs;
     return traceSlowSwmReadStage('selected.materialize', queryOptions, () =>
-      read(store, initialGraphs, queryOptions));
+      read(store, graphs, queryOptions));
   }
   if (snapshot) {
-    // A complete-family outer catalog can be stale even when it fits in one
-    // query. Resolve the authoritative graph set in the same snapshot used for
-    // materialization; scoped multi-query reads also use one snapshot.
     return snapshot.withReadSnapshot(async (snapshotStore) => {
-      const graphs = await traceSlowSwmReadStage('selected.resolve-snapshot', queryOptions, () =>
-        resolveGraphs(snapshotStore, queryOptions));
+      const graphs = listInSnapshot || !catalogGraphs
+        ? await traceSlowSwmReadStage('selected.resolve-snapshot', queryOptions, () =>
+          resolveGraphs(snapshotStore, queryOptions))
+        // The snapshot pins the chunk queries; the graph set stays the catalog's.
+        : catalogGraphs;
       return traceSlowSwmReadStage('selected.materialize-snapshot', queryOptions, () =>
         read(snapshotStore, graphs, queryOptions));
     }, queryOptions?.signal);
   }
-  if (!initialGraphs) throw new Error('Missing graph inventory for non-snapshot shared-memory read');
-  if (initialGraphs.length <= graphsPerQuery) {
-    return traceSlowSwmReadStage('selected.materialize', queryOptions, () =>
-      read(store, initialGraphs, queryOptions));
-  }
+  if (!catalogGraphs) throw new Error('Missing graph inventory for non-snapshot shared-memory read');
+  const initialGraphs = catalogGraphs;
   const revision = asGraphWriteRevisionSource(store);
   if (revision?.writeRevisionCoverage !== 'all-writers') {
     // One backend query has its own snapshot on SPARQL stores. Backends with

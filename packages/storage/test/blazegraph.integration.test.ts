@@ -26,7 +26,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import { loadSelectedSharedMemoryQuads } from '../src/graph-manager.js';
+import {
+  loadSelectedSharedMemoryQuads,
+  loadSharedMemorySliceWithKaBoundFallback,
+} from '../src/graph-manager.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { ChangelogStore } from '../src/changelog-store.js';
 import { SharedMemoryLiteralBlobStore, EXTERNAL_LITERAL_REF_DATATYPE } from '../src/shared-memory-literal-blob-store.js';
@@ -172,8 +175,9 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       expect(throughCatalog.map((quad) => [quad.subject, quad.predicate, quad.object].join('|')).sort())
         .toEqual(fresh.map((quad) => [quad.subject, quad.predicate, quad.object].join('|')).sort());
 
-      // Remove a graph after the read transaction starts but before family
-      // enumeration. Both membership and selected triples must remain pinned.
+      // Remove a graph right after the read transaction starts. The graph is in
+      // the set sampled for this read and every chunk is pinned, so its triples
+      // must still be returned.
       let removedGraph = false;
       const membershipRequests = vi.spyOn(globalThis, 'fetch');
       membershipRequests.mockImplementation(async (input, init) => {
@@ -240,6 +244,56 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       await blob.delete([large]).catch(() => {});
       await store.delete(decoys).catch(() => {});
       await rm(blobDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('serves a plain complete-family read from the graph catalog in one request', async () => {
+    const swm = contextGraphSharedMemoryUri(`swm-catalog-${RUN}`);
+    const root = `urn:swm-catalog:${RUN}:root`;
+    const author = '0xabcdef0123456789abcdef0123456789abcdef01';
+    const listed: Quad[] = [
+      { subject: root, predicate: PRED, object: '"listed"', graph: `${swm}/${author}/1` },
+      { subject: `urn:swm-catalog:${RUN}:other`, predicate: PRED, object: '"other"', graph: `${swm}/${author}/2` },
+    ];
+    // Written past the catalog, as another process on a shared store would.
+    const unlisted: Quad = {
+      subject: root, predicate: PRED, object: '"unlisted"', graph: `${swm}/${author}/3`,
+    };
+    const inventory = 'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }';
+    const indexed = new GraphSetIndexStore(store, { revalidateMs: 60_000 });
+    try {
+      await indexed.insert(listed);
+      await indexed.listGraphsByPrefix(`${swm}/`);
+      const requests = vi.spyOn(globalThis, 'fetch');
+
+      // The StorageACK recompute shape: one materialization query, with no
+      // read transaction and no listing of every named graph in the store.
+      const plain = await loadSelectedSharedMemoryQuads(indexed, swm, { rootEntities: [root] });
+      expect(plain.map((quad) => quad.object)).toEqual(['"listed"']);
+      expect(requests.mock.calls).toHaveLength(1);
+      const [input, init] = requests.mock.calls[0]!;
+      expect(String(input)).not.toContain('timestamp=');
+      expect(String(init?.body)).toContain('VALUES ?g');
+
+      await store.insert([unlisted]);
+      requests.mockClear();
+      // The complete read behind the candidate protocol returns a final
+      // verdict, so it lists the family inside its snapshot and finds a graph
+      // the catalog has not learned about.
+      const verdict = await loadSharedMemorySliceWithKaBoundFallback(
+        indexed, swm, { rootEntities: [root] }, undefined,
+        {
+          sources: { bounded: 'test.bounded', widened: 'test.widened', unbounded: 'test.unbounded' },
+          createAccept: async () => (quads) => quads,
+        },
+      );
+      expect(verdict.quads.map((quad) => quad.object).sort()).toEqual(['"listed"', '"unlisted"']);
+      expect(requests.mock.calls.some(([url]) => String(url).endsWith('/tx?timestamp=-1'))).toBe(true);
+      expect(requests.mock.calls.some(([url, request]) =>
+        String(url).includes('?timestamp=') && String(request?.body) === inventory)).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+      await store.delete([...listed, unlisted]).catch(() => {});
     }
   }, 60_000);
 
