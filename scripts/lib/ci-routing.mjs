@@ -276,6 +276,9 @@ export const WORKSPACE_OWNING_EVM_SCOPES = Object.freeze({
 const BLAZEGRAPH_ARM64_PATTERNS = [
   /^blazegraph-image\.json$/,
   /^packages\/cli\/blazegraph-image-metadata\.cjs$/,
+  // The namespace contract the metadata parser loads, which the arm64 job's
+  // contract check runs.
+  /^packages\/storage\/blazegraph-namespace-contract\.cjs$/,
   /^packages\/cli\/(?:src|test)\/.*blazegraph.*\.(?:[cm]?[jt]s|json)$/i,
 ];
 
@@ -309,6 +312,75 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
 // belong in this table, never as special cases inside planCi.
 // ci-delta-routing.test.mjs follows every relative reference from the files
 // each lane runs and fails when a file it reaches does not select that lane.
+// What pnpm install runs in every job, inside the package workspaces: the one
+// table the planner and the load-closure test both read, as explicit
+// variants that installDependency builds and checks:
+// - entrypoint(path): a file an install hook runs or loads;
+// - repositoryRead(reader, name, path): a file `reader` reads as `name` from
+//   a directory it builds at run time, which is the repository's `path`;
+// - exemption(reader, name, reason): such a read that names no repository
+//   input, and why.
+// The planner reads only INSTALL_HOOK_INPUTS, the entrypoints' and repository
+// reads' paths: a change to one needs full CI, as a change to an install hook
+// does. The routing test checks the install scripts read exactly what the
+// reads and exemptions say.
+const nonEmpty = (value, field) => {
+  if (typeof value !== 'string' || value === '') throw new Error(`an install dependency needs a ${field}`);
+  return value;
+};
+export const installDependency = Object.freeze({
+  entrypoint: (path) => Object.freeze({ kind: 'entrypoint', path: nonEmpty(path, 'path') }),
+  repositoryRead: (reader, name, path) => Object.freeze({
+    kind: 'repositoryRead', reader: nonEmpty(reader, 'reader'), name: nonEmpty(name, 'name'), path: nonEmpty(path, 'path'),
+  }),
+  exemption: (reader, name, reason) => Object.freeze({
+    kind: 'exemption', reader: nonEmpty(reader, 'reader'), name: nonEmpty(name, 'name'), reason: nonEmpty(reason, 'reason'),
+  }),
+});
+const { entrypoint, repositoryRead, exemption } = installDependency;
+const MARKITDOWN_BUNDLER = 'packages/cli/scripts/bundle-markitdown-binaries.mjs';
+export const INSTALL_HOOK_DEPENDENCIES = Object.freeze([
+  // The root and CLI preinstall, the CLI postinstall, and what they load.
+  entrypoint('packages/cli/scripts/verify-node-sqlite-runtime.mjs'),
+  entrypoint(MARKITDOWN_BUNDLER),
+  entrypoint('packages/cli/scripts/markitdown-bundle-validation.mjs'),
+  entrypoint('packages/cli/markitdown-build-info.json'),
+  // What they read from directories they build at run time.
+  repositoryRead(MARKITDOWN_BUNDLER, 'markitdown-targets.json', 'packages/cli/markitdown-targets.json'),
+  repositoryRead(MARKITDOWN_BUNDLER, 'scripts/markitdown-entry.py', 'packages/cli/scripts/markitdown-entry.py'),
+  repositoryRead(MARKITDOWN_BUNDLER, 'project.json', 'project.json'),
+  // The postinstall skips the release download only in a workspace checkout,
+  // which it tells by the CLI's tsconfig.json (isWorkspaceCheckout): without
+  // it, every job's install downloads a binary for its platform. The CLI's
+  // markitdown test packs the CLI to check the published package leaves it
+  // out.
+  repositoryRead(MARKITDOWN_BUNDLER, 'tsconfig.json', 'packages/cli/tsconfig.json'),
+  exemption(
+    MARKITDOWN_BUNDLER,
+    'package.json',
+    "the CLI's version, which names the release binary an installed package downloads; the manifest fields an install reads (install hooks, dependencies, engines) already route to full CI",
+  ),
+  exemption(MARKITDOWN_BUNDLER, 'Scripts/python.exe', 'the Python virtual environment a source build creates, outside the repository'),
+  exemption('packages/cli/scripts/verify-node-sqlite-runtime.mjs', '../package.json', "the CLI's engines.node range; an engines change already routes to full CI"),
+]);
+// The files whose change needs full CI because an install runs or reads them:
+// the entrypoints' and repository reads' paths. A dependency of another kind
+// throws, so the planner never skips one.
+export function installHookInputs(dependencies) {
+  return Object.freeze([...new Set(dependencies.flatMap((dependency) => {
+    switch (dependency.kind) {
+      case 'entrypoint':
+      case 'repositoryRead':
+        return [dependency.path];
+      case 'exemption':
+        return [];
+      default:
+        throw new Error(`unknown install dependency: ${JSON.stringify(dependency)}`);
+    }
+  }))]);
+}
+export const INSTALL_HOOK_INPUTS = installHookInputs(INSTALL_HOOK_DEPENDENCIES);
+
 export const PATH_TRIGGERS = Object.freeze([
   {
     patterns: BLAZEGRAPH_ARM64_PATTERNS,
@@ -379,7 +451,8 @@ export const PATH_TRIGGERS = Object.freeze([
 
 // Repository areas outside the package workspaces, in first-match order. An
 // entry with `full` keeps full CI with its own reason (the CI control plane,
-// unknown workflow paths, devnet install inputs). Every other entry selects
+// unknown workflow paths, devnet install inputs, repository scripts outside
+// the known families). Every other entry selects
 // the lanes that actually load the area in CI (a CI job running it, or a
 // package referencing it, directly or through another support file; the
 // routing tests follow those imports) plus the shared build job's own checks
@@ -387,7 +460,135 @@ export const PATH_TRIGGERS = Object.freeze([
 // repository-script tests and test-inventory checks cover these files, and for
 // routes with no lanes they are the only CI consumer (the suites are manual or
 // have their own workflow).
+// Repository scripts known to run only in the shared build job or by hand, by
+// family: exact script names, file-name prefixes with the extensions they
+// take, and whole directories under scripts/. The load-closure test fails if
+// a lane reads or runs one, or assembles a script path it cannot resolve, and
+// an inventory test requires every name to exist and every prefix and
+// directory to be the first route for an existing script.
+export const BUILD_ONLY_SCRIPTS = Object.freeze([
+  {
+    reason: 'devnet suites and operations run by hand, checked by the shared build job',
+    prefixes: [{ prefix: 'devnet-', extensions: ['sh', 'mjs'] }],
+    files: [
+      '_devnet-full-sweep.sh',
+      'dkg-claude.sh',
+      'epcis-smoke-test.sh',
+      'libp2p-soak-test.sh',
+      'publisher-smoke-test.sh',
+      'seed-demo.sh',
+      'swm-soak-orchestrate.sh',
+      'swm-soak-test.sh',
+      'two-laptop-test.sh',
+      'v10-rc-validation.sh',
+    ],
+  },
+  {
+    reason: 'repository checks the shared build job runs',
+    prefixes: [{ prefix: 'audit-', extensions: ['mjs', 'test.mjs'] }],
+    files: ['check-npm-metadata.mjs', 'release-packages.mjs', 'verify-w1-packet.mjs'],
+  },
+  {
+    reason: 'operator and data tools run by hand, checked by the shared build job',
+    prefixes: [
+      { prefix: 'debug-neuroweb', extensions: ['ts'] },
+      { prefix: 'dkg-v10-', extensions: ['mjs'] },
+      { prefix: 'import-', extensions: ['mjs'] },
+      { prefix: 'publisher-epoch-snapshot', extensions: ['ts'] },
+    ],
+    files: [
+      'backfill-rs-percgid-meta.mjs',
+      'chain-analysis.ts',
+      'distribute-publisher-trac.ts',
+      'drain-swm-duplicates.mjs',
+      'epoch-snapshot.ts',
+      'generate-aggregates.ts',
+      'generate-random-findings-nt.mjs',
+      'redistribute-memory.mjs',
+      'register-laptop2-agent.mjs',
+      'seed-dkg-code-project.mjs',
+      'update-repo-refs.js',
+      'verify-addresses.ts',
+      'verify-agent-provenance-deployment.mjs',
+    ],
+    directories: ['load', 'repro', 'testnet-publish-stress'],
+  },
+]);
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// The route pattern for scripts under scripts/: an exact name, a prefix
+// followed by word characters or hyphens and one of its extensions, or
+// anything under a directory.
+export function scriptsPattern({ files = [], prefixes = [], directories = [] }) {
+  const alternatives = [
+    ...files.map(escapeRegExp),
+    ...prefixes.map(({ prefix, extensions }) => `${escapeRegExp(prefix)}[\\w-]*\\.(?:${extensions.map(escapeRegExp).join('|')})`),
+    ...directories.map((directory) => `${escapeRegExp(directory)}\\/.+`),
+  ];
+  return new RegExp(`^scripts\\/(?:${alternatives.join('|')})$`);
+}
+
 export const SUPPORT_PATH_ROUTES = Object.freeze([
+  {
+    // The repository-script tests (and their helpers and fixtures) run only in
+    // the shared build job's script-test step.
+    pattern: /^scripts\/lib\/__tests__\//,
+    lanes: [],
+    reason: 'repository script tests run in the shared build job',
+  },
+  {
+    // CI tooling (planner-adjacent scripts, lane runners, shared CI libraries)
+    // and the fixtures package tests declare as shared inputs: every lane can
+    // depend on them.
+    pattern: /^scripts\/(?:ci|lib|testing)\//,
+    full: 'Global CI input changed',
+  },
+  {
+    // The EVM integration runner every EVM scope uses, and the runtime-asset
+    // copy the CLI package's build and prepack run, which everything using the
+    // built CLI depends on.
+    pattern: scriptsPattern({ files: ['test-evm-integration.sh', 'run-evm-integration.mjs', 'copy-cli-runtime-assets.mjs'] }),
+    full: 'Global CI input changed',
+  },
+  {
+    // The devnet bootstrap: the browser suite's Playwright setup, the devnet
+    // harnesses and the CLI's Blazegraph smoke fixture (which sources it) run it.
+    pattern: /^scripts\/devnet\.sh$/,
+    lanes: ['kosava_node_ui_e2e', 'tornado_agent', 'bura_cli'],
+    reason: 'the browser suite, the devnet harnesses and the CLI Blazegraph smoke fixture run the devnet bootstrap',
+  },
+  {
+    pattern: /^scripts\/devnet-publish-helpers\.sh$/,
+    lanes: ['bura_cli'],
+    reason: 'the CLI devnet-publish smoke test runs the publish helpers',
+  },
+  {
+    // packages/chain/test/sync-chain-abis.unit.test.ts runs a copy of it against
+    // temporary ABI directories.
+    pattern: /^scripts\/sync-chain-abis\.mjs$/,
+    lanes: ['tornado_core'],
+    reason: 'the chain lane runs the ABI sync script against temporary directories',
+  },
+  ...BUILD_ONLY_SCRIPTS.map((family) => ({ pattern: scriptsPattern(family), lanes: [], reason: family.reason })),
+  {
+    // Any other script, including a new one: its consumers are not known, so it
+    // fails closed (the build, install hooks and other workflows' scripts too).
+    pattern: /^scripts\//,
+    full: 'Repository script outside the known build-only families changed',
+  },
+  {
+    // Coverage baselines, read by the root vitest.coverage.ts every lane uses.
+    pattern: /^test-policy\/coverage-baselines\.json$/,
+    full: 'Global CI input changed',
+  },
+  {
+    // The disabled-test allowlist and test routes, read by the build job's lint
+    // and test inventory.
+    pattern: /^test-policy\//,
+    lanes: [],
+    reason: 'test policy is checked by the shared build job',
+  },
   {
     // Workflows whose jobs, conditions and gates define what "CI gate" means.
     // Other top-level workflows run (or are linted) on their own.
