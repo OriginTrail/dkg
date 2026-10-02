@@ -139,7 +139,6 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
-  createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -4076,19 +4075,18 @@ export class DKGAgent extends DKGAgentBase {
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
         // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
+        // The hook classifies its own pointer stamp (canonical durable-finalization
+        // boundary): a failure never reports success, and a replay of this same
+        // committed operation repairs it.
         if (promotedAllRoots) {
-          try {
-            await agent.afterDurableSwmPromotionV1({
-              contextGraphId,
-              subGraphName: opts?.subGraphName,
-              assertionCoordinate: name,
-              lifecycleAgentAddress: promoteAgentAddress,
-              shareOperationId: shareOperationId ?? null,
-              ctx: createOperationContext('share'),
-            });
-          } catch (error) {
-            throw createPromotePostCommitFailure(error);
-          }
+          await agent.afterDurableSwmPromotionV1({
+            contextGraphId,
+            subGraphName: opts?.subGraphName,
+            assertionCoordinate: name,
+            lifecycleAgentAddress: promoteAgentAddress,
+            shareOperationId: shareOperationId ?? null,
+            ctx: createOperationContext('share'),
+          });
         }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the

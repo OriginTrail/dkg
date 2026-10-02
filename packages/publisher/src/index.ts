@@ -459,6 +459,7 @@ export {
   getPromoteReplaySafeErrorDiagnostic,
   getPromoteFailureDisposition,
   isPromoteReplaySafeError,
+  runPromoteCommittedFinalization,
   type PromoteFailureDisposition,
   type PromoteReplaySafeErrorDiagnostic,
 } from './promote-replay-safety.js';
