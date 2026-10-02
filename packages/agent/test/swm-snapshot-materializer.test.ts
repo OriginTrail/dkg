@@ -41,7 +41,13 @@ import {
   workspacePublicQuadsDigest,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  OxigraphStore,
+  OxigraphWorkerStore,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import {
   canonicalGraphScopedSnapshotManifestQuads,
   materializeGraphScopedSwmRecoveryAsset,
@@ -155,13 +161,13 @@ function countingStore(inner: TripleStore) {
 /**
  * Presents `inner` as a store whose revision source sees every writer but
  * whose generation never moves. A memo miss on it cannot be explained by the
- * generation check.
+ * generation check; `stable` lets a test hold the revision unstable.
  */
-function fixedRevisionStore(inner: TripleStore): TripleStore {
+function fixedRevisionStore(inner: TripleStore, stable: () => boolean = () => true): TripleStore {
   return new Proxy(inner, {
     get(target, prop, receiver) {
       if (prop === 'writeRevisionCoverage') return 'all-writers';
-      if (prop === 'getWriteRevision') return () => ({ generation: 0, stable: true });
+      if (prop === 'getWriteRevision') return () => ({ generation: 0, stable: stable() });
       return Reflect.get(target, prop, receiver);
     },
   }) as TripleStore;
@@ -307,6 +313,65 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
         // The store now holds v2. A memoized answer would still say v1.
         expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('meets the data-loss error of a crashed in-memory worker store instead of a memoized answer', async () => {
+      // Without a path, OxigraphWorkerStore keeps its data in the worker
+      // thread. When that thread dies the contents are gone and the store
+      // fails closed. A memo hit here would report the lost graph as present.
+      const store = new OxigraphWorkerStore();
+      try {
+        await store.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { materializer } = materializerFor(store);
+        const descriptor = descriptorFor(v1);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+
+        // An unexpected exit of the idle worker, as an out-of-memory kill would cause.
+        await (store as unknown as { worker: { terminate(): Promise<number> } }).worker.terminate();
+
+        await expect(materializer.isGraphAssetMaterialized(descriptor))
+          .rejects.toThrow(/IN-MEMORY store's worker crashed/);
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('neither keeps nor uses a memo entry while the revision is unstable', async () => {
+      // An unstable revision means a write is pending or its outcome is unknown,
+      // so an unchanged generation proves nothing.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { store, constructs, countQueries } = countingStore(inner);
+        let stable = false;
+        const { materializer } = materializerFor(fixedRevisionStore(store, () => stable));
+        const descriptor = descriptorFor(v1);
+
+        // Unstable: a validation is not kept, so the second check validates again.
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(2);
+        expect(constructs()).toBe(2);
+
+        // Stable: one validation seeds the memo and the next check uses it.
+        stable = true;
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(3);
+        expect(constructs()).toBe(3);
+
+        // Unstable again: the stored entry is bypassed.
+        stable = false;
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(4);
+        expect(constructs()).toBe(4);
       } finally {
         now.mockRestore();
         vi.unstubAllEnvs();
