@@ -80,6 +80,16 @@ type RootRegisteredAuthorityUnavailableReason = import(
 type LegacyDeepRegisteredAuthority = import(
   '@origintrail-official/dkg-agent/dist/dkg-agent-cg-resolve.js'
 ).RegisteredContextGraphAuthority;
+type PrePeerGateApprovedReplicaAuthority = {
+  kind: 'unregistered';
+  approvedPrivateReplicaAuthority: {
+    approvedAgentAddress: string;
+    ownerAddress: string;
+    requestGeneration: string;
+    curatorPeerId: string;
+    memberAddresses: readonly string[];
+  };
+};
 type ExpectedLegacyRegisteredAuthority =
   | { kind: 'unregistered' }
   | { kind: 'public'; onChainId: bigint }
@@ -131,6 +141,12 @@ type LegacyAuthorityMatchesExpected = AssertTrue<
 >;
 type ExpectedAuthorityMatchesLegacy = AssertTrue<
   ExpectedLegacyRegisteredAuthority extends LegacyDeepRegisteredAuthority ? true : false
+>;
+type PrePeerGateApprovedReplicaMatchesRoot = AssertTrue<
+  PrePeerGateApprovedReplicaAuthority extends RootRegisteredAuthority ? true : false
+>;
+type PrePeerGateApprovedReplicaMatchesLegacy = AssertTrue<
+  PrePeerGateApprovedReplicaAuthority extends LegacyDeepRegisteredAuthority ? true : false
 >;
 type LivePolicyUnavailableMatchesExpected = AssertTrue<
   RootLivePolicyUnavailable extends ExpectedLivePolicyUnavailable ? true : false
@@ -188,6 +204,8 @@ export type {
   ExpectedAuthorityMatchesRoot,
   LegacyAuthorityMatchesExpected,
   ExpectedAuthorityMatchesLegacy,
+  PrePeerGateApprovedReplicaMatchesRoot,
+  PrePeerGateApprovedReplicaMatchesLegacy,
   LivePolicyUnavailableMatchesExpected,
   ExpectedMatchesLivePolicyUnavailable,
   LivePolicyReasonMatchesExpected,

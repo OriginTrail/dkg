@@ -14,7 +14,7 @@ import type {
   UpdateOptions,
 } from '../triple-store.js';
 import {
-  formatCanonicalRdfLiteralTerm,
+  formatCanonicalRdfTerm,
   parseRdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
@@ -34,6 +34,7 @@ import {
   type Rfc64AuthorCommitCasUpdateV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
+import { sparqlStatements } from './sparql-statements.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -45,6 +46,9 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+
+/** Every SPARQL statement this adapter builds by interpolation. */
+const statements = sparqlStatements('oxigraph');
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -377,9 +381,10 @@ export class OxigraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string): Promise<void> {
-    this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
+    const plan = statements.dropGraph(graphUri);
+    this.store.update(plan.update);
     this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+    this.writeGen.recordWrite(plan.scope);
   }
 
   async replaceGraph(graphUri: string, quads: DKGQuad[]): Promise<void> {
@@ -531,13 +536,12 @@ export class OxigraphStore implements TripleStore {
     graphUri: string,
     prefix: string,
   ): Promise<number> {
+    const plan = statements.deleteBySubjectPrefix(graphUri, prefix);
     const before = this.store.size;
-    this.store.update(
-      `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
-    );
+    this.store.update(plan.update);
     const removed = before - this.store.size;
     if (removed > 0) this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+    this.writeGen.recordWrite(plan.scope);
     return removed;
   }
 
@@ -678,34 +682,7 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
 }
 
 function termToString(t: OxTerm): string {
-  if (t.termType === 'Literal') {
-    const lit = t as oxigraph.Literal;
-    if (lit.language) {
-      return formatCanonicalRdfLiteralTerm({
-        kind: 'language',
-        value: lit.value,
-        language: lit.language,
-      });
-    }
-    if (lit.datatype) {
-      return formatCanonicalRdfLiteralTerm({
-        kind: 'typed',
-        value: lit.value,
-        datatype: lit.datatype.value,
-      });
-    }
-    return formatCanonicalRdfLiteralTerm({ kind: 'plain', value: lit.value });
-  }
-  if (t.termType === 'BlankNode') return `_:${t.value}`;
-  return t.value;
-}
-
-function escapeUri(uri: string): string {
-  return uri.replace(/[<>"{}|\\^`]/g, '');
-}
-
-function escapeString(s: string): string {
-  return s.replace(/[\\"]/g, '\\$&');
+  return formatCanonicalRdfTerm(t);
 }
 
 registerTripleStoreAdapter('oxigraph', async () => new OxigraphStore());

@@ -1,5 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+
+/** Counts whole-bucket canonicalizations; the wrapped function is the real one. */
+const bucketCanonicalizations = vi.hoisted(() => ({ count: 0 }));
+vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
+  return {
+    ...actual,
+    canonicalizeSignedAuthorCatalogBucketEnvelopeBytesV1: (
+      ...args: Parameters<typeof actual.canonicalizeSignedAuthorCatalogBucketEnvelopeBytesV1>
+    ) => {
+      bucketCanonicalizations.count += 1;
+      return actual.canonicalizeSignedAuthorCatalogBucketEnvelopeBytesV1(...args);
+    },
+  };
+});
 
 import {
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
@@ -35,6 +50,7 @@ import {
   computeAuthorAgentDelegationEvidenceDigestV1,
   computeAuthorCatalogAgentScopeDigestV1,
   readVerifiedAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogBucketRowAuthorshipsV1,
   verifyAuthorCatalogRowAuthorshipV1,
   type AuthorAgentDelegationEvidenceV1,
   type AuthorCatalogAgentScopeV1,
@@ -107,6 +123,10 @@ interface FixtureOptions {
   readonly targetKaId?: string;
   readonly assertionCoordinate?: string;
   readonly duplicateTarget?: boolean;
+  /** Sign a bucket of this many rows, the target first; one row by default. */
+  readonly rowCount?: number;
+  /** The kaId of the bucket's last row, when the bucket has more than one. */
+  readonly lastRowKaId?: string;
   readonly bucketIdOverride?: string;
   readonly delegationPayloadOverride?: Record<string, unknown>;
   readonly headPayloadOverride?: Record<string, unknown>;
@@ -568,6 +588,116 @@ describe('RFC-64 exact target row and capability closure', () => {
   });
 });
 
+function bucketInput(
+  input: VerifyAuthorCatalogRowAuthorshipInputV1,
+): Parameters<typeof verifyAuthorCatalogBucketRowAuthorshipsV1>[0] {
+  const { targetKaId: _target, ...closure } = input;
+  return closure;
+}
+
+function errorCodeOf(operation: () => unknown): string | null {
+  try {
+    operation();
+    return null;
+  } catch (error) {
+    expect(error).toBeInstanceOf(AuthorCatalogRowAuthorshipErrorV1);
+    return (error as AuthorCatalogRowAuthorshipErrorV1).code;
+  }
+}
+
+describe('RFC-64 bucket row authorship verification (#2812)', () => {
+  it('mints, in bucket order, the same capabilities as verifying each row on its own', async () => {
+    const fixture = await buildFixture({ rowCount: 8 });
+    const rows = fixture.bucket.payload.rows;
+
+    const batch = verifyAuthorCatalogBucketRowAuthorshipsV1(bucketInput(fixture.input));
+    const single = rows.map((row) =>
+      verifyAuthorCatalogRowAuthorshipV1({ ...fixture.input, targetKaId: row.kaId }));
+
+    expect(Object.isFrozen(batch)).toBe(true);
+    expect(batch.map((capability) => readVerifiedAuthorCatalogRowAuthorshipV1(capability).row.kaId))
+      .toEqual(rows.map((row) => row.kaId));
+    expect(batch.map(readVerifiedAuthorCatalogRowAuthorshipV1))
+      .toEqual(single.map(readVerifiedAuthorCatalogRowAuthorshipV1));
+    for (const [index, capability] of batch.entries()) {
+      const own = readVerifiedAuthorCatalogRowAuthorshipV1(single[index]);
+      const other = readVerifiedAuthorCatalogRowAuthorshipV1(single[(index + 1) % single.length]);
+      expect(() => assertVerifiedAuthorCatalogRowAuthorshipForTargetV1(
+        capability,
+        own.catalogRowDigest,
+        own.transferIdentityDigest,
+      )).not.toThrow();
+      expectCode(() => assertVerifiedAuthorCatalogRowAuthorshipForTargetV1(
+        capability,
+        other.catalogRowDigest,
+        other.transferIdentityDigest,
+      ), 'AUTHORSHIP_CAPABILITY_INVALID');
+    }
+  });
+
+  it('verifies the bucket closure once, not once per row', async () => {
+    const small = await buildFixture({ rowCount: 2 });
+    const large = await buildFixture({ rowCount: 16 });
+    const countFor = (operation: () => unknown): number => {
+      bucketCanonicalizations.count = 0;
+      operation();
+      return bucketCanonicalizations.count;
+    };
+
+    const perRowSingle = countFor(() => verifyAuthorCatalogRowAuthorshipV1(small.input));
+    expect(perRowSingle).toBeGreaterThan(0);
+    expect(countFor(() => verifyAuthorCatalogBucketRowAuthorshipsV1(bucketInput(small.input)))).toBe(perRowSingle);
+    expect(countFor(() => verifyAuthorCatalogBucketRowAuthorshipsV1(bucketInput(large.input)))).toBe(perRowSingle);
+  });
+
+  it.each([
+    ['direct issuance with parent evidence', async () => {
+      const direct = await buildFixture({ mode: 'direct', rowCount: 3 });
+      const delegated = await buildFixture();
+      return { ...direct.input, parentAuthorAgentEvidence: delegated.parentEvidence };
+    }],
+    ['inconsistent evidence branch', async () => (await buildFixture({ evidenceDigestOverride: null, rowCount: 3 })).input],
+    ['bucket signed by another issuer', async () => (await buildFixture({ bucketSigner: thirdWallet, rowCount: 3 })).input],
+    ['wrong bucket id', async () => (await buildFixture({ bucketIdOverride: '1', rowCount: 3 })).input],
+    ['a later row packed with another author', async () => (await buildFixture({
+      rowCount: 3,
+      lastRowKaId: WRONG_AUTHOR_KA_ID,
+    })).input],
+  ] as const)('fails with the code each row fails with on its own: %s', async (_label, build) => {
+    const input = await build() as VerifyAuthorCatalogRowAuthorshipInputV1;
+    const rows = input.catalogBucket.payload.rows;
+
+    const batchCode = errorCodeOf(() => verifyAuthorCatalogBucketRowAuthorshipsV1(bucketInput(input)));
+    expect(batchCode).not.toBeNull();
+    // Every failure here is shared by the whole bucket, so each row fails alone with the same code.
+    for (const row of rows) {
+      expect(errorCodeOf(() => verifyAuthorCatalogRowAuthorshipV1({ ...input, targetKaId: row.kaId })))
+        .toBe(batchCode);
+    }
+  });
+
+  it('snapshots its closure input like the row verifier', async () => {
+    const fixture = await buildFixture({ rowCount: 2 });
+    const closure = bucketInput(fixture.input);
+
+    expectCode(() => verifyAuthorCatalogBucketRowAuthorshipsV1({
+      ...closure,
+      targetKaId: TARGET_KA_ID,
+    } as unknown as Parameters<typeof verifyAuthorCatalogBucketRowAuthorshipsV1>[0]), 'AUTHORSHIP_INPUT_INVALID');
+    expectCode(() => verifyAuthorCatalogBucketRowAuthorshipsV1({
+      ...closure,
+      catalogBucket: null,
+    } as unknown as Parameters<typeof verifyAuthorCatalogBucketRowAuthorshipsV1>[0]), 'AUTHORSHIP_DEPENDENCY_MISSING');
+    const { catalogHead: _head, ...withoutHead } = closure;
+    expectCode(() => verifyAuthorCatalogBucketRowAuthorshipsV1(
+      withoutHead as unknown as Parameters<typeof verifyAuthorCatalogBucketRowAuthorshipsV1>[0],
+    ), 'AUTHORSHIP_DEPENDENCY_MISSING');
+    expectCode(() => verifyAuthorCatalogBucketRowAuthorshipsV1(
+      'not an input' as unknown as Parameters<typeof verifyAuthorCatalogBucketRowAuthorshipsV1>[0],
+    ), 'AUTHORSHIP_INPUT_INVALID');
+  });
+});
+
 async function buildFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const mode = options.mode ?? 'delegated';
   const contextGraphId = options.contextGraphId ?? CONTEXT_GRAPH_ID;
@@ -652,7 +782,15 @@ async function buildFixture(options: FixtureOptions = {}): Promise<Fixture> {
       projectionId: 'cg-shared-v1',
     },
   };
-  const rows = options.duplicateTarget ? [row, structuredClone(row)] : [row];
+  const extraRowCount = Math.max(0, (options.rowCount ?? 1) - 1);
+  const extraRows = Array.from({ length: extraRowCount }, (_, index) => ({
+    ...structuredClone(row),
+    assertionCoordinate: `fixture-${index + 1}` as AuthorCatalogRowV1['assertionCoordinate'],
+    kaId: (index === extraRowCount - 1 && options.lastRowKaId !== undefined
+      ? options.lastRowKaId
+      : (BigInt(kaId) + BigInt(index + 1)).toString()) as KaIdV1,
+  }));
+  const rows = options.duplicateTarget ? [row, structuredClone(row)] : [row, ...extraRows];
   const bucketPayload = {
     bucketCount: '1',
     bucketId: options.bucketIdOverride ?? '0',

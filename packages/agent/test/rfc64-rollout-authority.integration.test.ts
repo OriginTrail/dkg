@@ -35,6 +35,10 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
+  isRfc64TransientAuthorityRefreshFailureV1,
+  RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1,
+} from '../src/dkg-agent-rfc64-catalog.js';
+import {
   computeFlatKCRootV10,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
@@ -5324,6 +5328,102 @@ describe('RFC-64 rollout authority integration', () => {
     expect(status?.authorityState).not.toBe('blocked');
   });
 
+  it('classifies an unresolved private roster as transient, not as a denial', () => {
+    // This decision is what keeps the curator authoring: a denial parks the
+    // graph `blocked`, closing the only root-scope SWM lane a catalog-selected
+    // graph has.
+    expect(isRfc64TransientAuthorityRefreshFailureV1('registered-private-roster-unresolved')).toBe(true);
+    expect(isRfc64TransientAuthorityRefreshFailureV1('registered-authority-unfinalized')).toBe(true);
+    // Genuine denials must still fail closed.
+    for (const denial of [
+      'registered-authority-binding-mismatch',
+      'registered-authority-adapter-unsupported',
+      'unregistered-owner-unresolved',
+      'access-policy-unresolved',
+      'catalog-service-unavailable',
+      'authority-resolution-failed',
+    ]) {
+      expect(isRfc64TransientAuthorityRefreshFailureV1(denial)).toBe(false);
+    }
+  });
+
+  /**
+   * On a PRIVATE graph the refresh additionally requires a locally verified
+   * lifecycle roster. When that roster is not resolvable YET the refresh used
+   * to throw a bare `Error`, which is classified as a denial and parks the
+   * graph as `blocked`. That closes the curator's own authoring fence — and on
+   * a catalog-selected graph the catalog lane is the ONLY delivery path for
+   * root-scope SWM (legacy apply is deliberately closed), so the curator
+   * authored zero catalog rows and an RFC-64 matrix cell converged 0/50 SWM
+   * rather than slowly. `null` means "not resolvable yet"; a genuine
+   * revocation arrives as a resolved, smaller roster and still fails closed.
+   */
+  it('treats an unresolved private roster as retryable, keeping the author\'s catalog lane open', async () => {
+    const contextGraphId = `${AUTHOR}/private-roster-author`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    // The helper defaults to a PRIVATE graph, which is what this needs.
+    const indexed = {
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      nameHash: expectedNameHash,
+    };
+    const readSnapshots = vi.fn(async () => new Map([['9', indexed]]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const author = await startAgent({
+      name: 'private-roster-author',
+      config: { chainAdapter },
+    });
+    (author as any).localContextGraphProvenance.recordLocalCreate(contextGraphId);
+    author.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    author.subscribeToContextGraph(contextGraphId);
+    await author.whenRfc64CatalogResponsibilitiesIdleV1();
+    const signal = new AbortController().signal;
+
+    // A resolvable authenticated roster is a precondition of acceptance on a
+    // private graph; this fixture has no durable member state of its own.
+    const roster = vi
+      .spyOn(author as any, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValue([AUTHOR.toLowerCase()]);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .resolves.toMatchObject({ source: 'finalized-chain' });
+    const accepted = (author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    expect(accepted).not.toBeNull();
+
+    // The authenticated roster stops resolving locally.
+    roster.mockResolvedValue(null);
+    const request = (await author.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toMatchObject({ code: 'registered-private-roster-unresolved' });
+    expect(roster).toHaveBeenCalled();
+
+    // The accepted lineage survives the failed refresh rather than being
+    // cleared, which is what keeps the author's catalog lane usable. (This
+    // fixture does not select the graph, so the fence projection itself is
+    // asserted by the public sibling above; what is new here is the typed,
+    // retryable classification.)
+    expect((author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
+  });
+
   it('keeps a replica fail-closed but retryable through the same finality lag (no retained seed, not parked)', async () => {
     const contextGraphId = `${AUTHOR}/unfinalized-replica`;
     const expectedNameHash = ethers.keccak256(
@@ -5645,7 +5745,7 @@ describe('RFC-64 rollout authority integration', () => {
     })).resolves.toBe(false);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
     const confirmedMeta = vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(false);
-    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryGate')
+    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryRosterSource')
       .mockResolvedValue([AUTHOR, MEMBER]);
     await expect(edge.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
       .resolves.toBeNull();
@@ -5685,7 +5785,7 @@ describe('RFC-64 rollout authority integration', () => {
       { agentAddress: MEMBER },
     ] as ReturnType<DKGAgent['listLocalAgents']>);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryGate')
+    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryRosterSource')
       .mockResolvedValue([MEMBER]);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
 
@@ -5810,7 +5910,7 @@ describe('RFC-64 rollout authority integration', () => {
     (edge as any).defaultAgentAddress = MEMBER;
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([AUTHOR, MEMBER]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([AUTHOR, MEMBER]);
     vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1788482000000');
     vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
       .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
@@ -5930,7 +6030,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([localMember]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([localMember]);
     vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1');
 
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
@@ -5956,7 +6056,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([AUTHOR]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([AUTHOR]);
     vi.spyOn(edge, 'getCgMeta').mockResolvedValue({
       ...(await edge.getCgMeta(contextGraphId)),
       revokedAgents: [MEMBER],
@@ -6080,6 +6180,199 @@ describe('RFC-64 rollout authority integration', () => {
         stableReason: null,
       }),
     );
+  });
+
+  /**
+   * A private unregistered graph whose authority this node has already
+   * accepted, plus the reads that let a test move local authority facts while
+   * one composition is in flight.
+   */
+  async function acceptedPrivateAuthorityFixture(name: string) {
+    const contextGraphId = `${AUTHOR}/${name}` as ContextGraphIdV1;
+    const curator = await startAgent({
+      name,
+      config: {
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    });
+    (curator as any).defaultAgentAddress = AUTHOR;
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name,
+      accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    await curator.whenRfc64CatalogResponsibilitiesIdleV1();
+    const accepted = () => (curator as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    const rosterMembers = (snapshot: { roster: { members: readonly { agentAddress: string }[] } | null }) => (
+      snapshot.roster?.members.map(({ agentAddress }) => agentAddress.toLowerCase()) ?? []
+    );
+    return {
+      contextGraphId,
+      curator,
+      accepted,
+      rosterMembers,
+      projection: Reflect.get(curator, 'contextGraphMetaProjection') as {
+        markDirty(contextGraphId: string): void;
+        markDirtyForGraph(graphUri: string): void;
+      },
+    };
+  }
+
+  it.each([
+    ['its own metadata changes', (f: Awaited<ReturnType<typeof acceptedPrivateAuthorityFixture>>) => (
+      f.projection.markDirty(f.contextGraphId)
+    )],
+    // Any single-graph write moves the node-wide authority-facts revision, also
+    // one that cannot change this graph's owner, policy or members.
+    ['an unrelated graph is written', (f: Awaited<ReturnType<typeof acceptedPrivateAuthorityFixture>>) => (
+      f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph')
+    )],
+  ] as const)('never accepts an unregistered roster read while %s, and composes again from the current facts', async (_case, move) => {
+    const f = await acceptedPrivateAuthorityFixture('private-roster-revision-fence');
+    const acceptedBefore = f.accepted();
+    expect(f.rosterMembers(acceptedBefore)).toEqual([AUTHOR.toLowerCase()]);
+    let releaseVersion!: () => void;
+    let versionEntered!: () => void;
+    const versionGate = new Promise<void>((resolve) => { releaseVersion = resolve; });
+    const versionRead = new Promise<void>((resolve) => { versionEntered = resolve; });
+    // Only the first composition sees this roster and version: they stand for
+    // facts read before the change. The composition after it reads the real ones.
+    vi.spyOn(f.curator, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValueOnce([AUTHOR, MEMBER]);
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementationOnce(async () => {
+        versionEntered();
+        await versionGate;
+        return '9';
+      });
+
+    const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await versionRead;
+    move(f);
+    releaseVersion();
+
+    const authority = await refresh;
+    expect(authority).not.toBeNull();
+    expect(f.rosterMembers(authority!)).toEqual([AUTHOR.toLowerCase()]);
+    expect(authority!.roster?.version).not.toBe('9');
+    expect(f.rosterMembers(f.accepted())).toEqual([AUTHOR.toLowerCase()]);
+    expect(f.accepted().policyDigest).toBe(acceptedBefore.policyDigest);
+    // The graph is not left `resolving` until the next periodic refresh pass.
+    expect((await f.curator.readRfc64CatalogOperationalStatusV1())
+      .find((status) => status.contextGraphId === f.contextGraphId))
+      .toMatchObject({ authorityState: 'accepted', policyDigest: acceptedBefore.policyDigest });
+  });
+
+  it('composes an unregistered authority generation again when metadata changes during the policy read', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-policy-revision-fence');
+    const acceptedBefore = f.accepted();
+    let releasePolicy!: () => void;
+    let policyEntered!: () => void;
+    const policyGate = new Promise<void>((resolve) => { releasePolicy = resolve; });
+    const policyRead = new Promise<void>((resolve) => { policyEntered = resolve; });
+    const explicitPolicy = vi.spyOn(f.curator, 'getExplicitAccessPolicy')
+      .mockImplementationOnce(async () => {
+        policyEntered();
+        await policyGate;
+        return 'private';
+      });
+
+    const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await policyRead;
+    // Simulate an owner/policy authority-fact generation landing after the
+    // old owner was read but before this blocked policy read completes.
+    f.projection.markDirty(f.contextGraphId);
+    const policyReadsWhenMoved = explicitPolicy.mock.calls.length;
+    releasePolicy();
+
+    await expect(refresh).resolves.toMatchObject({ policyDigest: acceptedBefore.policyDigest });
+    // The policy was read again after the change instead of being reused.
+    expect(explicitPolicy.mock.calls.length).toBeGreaterThan(policyReadsWhenMoved);
+    expect(f.accepted().policyDigest).toBe(acceptedBefore.policyDigest);
+  });
+
+  it('gives up after its bounded retries while local authority facts never stop moving', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-authority-facts-never-settle');
+    const acceptedBefore = f.accepted();
+    const warnings: string[] = [];
+    vi.spyOn(Reflect.get(f.curator, 'log') as { warn(ctx: unknown, message: string): void }, 'warn')
+      .mockImplementation((_ctx, message) => { warnings.push(message); });
+    let compositions = 0;
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementation(async () => {
+        compositions += 1;
+        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        return '9';
+      });
+
+    await expect(f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId))
+      .resolves.toBeNull();
+
+    expect(compositions).toBe(RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1.length + 1);
+    expect(f.accepted()).toEqual(acceptedBefore);
+    expect(warnings.filter((message) => message.includes('local authority facts kept changing')))
+      .toHaveLength(1);
+  }, 20_000);
+
+  it('leaves the outcome to a refresh that starts while it waits to compose again', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-authority-newer-refresh');
+    let compositions = 0;
+    let newerRefreshStarted = false;
+    let compositionsAfterNewerRefresh = 0;
+    let thirdDiscard!: () => void;
+    const thirdDiscarded = new Promise<void>((resolve) => { thirdDiscard = resolve; });
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementation(async () => {
+        compositions += 1;
+        if (newerRefreshStarted) {
+          compositionsAfterNewerRefresh += 1;
+          return '9';
+        }
+        // Every composition of the first refresh is discarded.
+        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        if (compositions === 3) thirdDiscard();
+        return '9';
+      });
+
+    const first = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await thirdDiscarded;
+    // The first refresh now waits before a fourth composition. Let its third
+    // one return, then start a newer refresh inside that wait.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    newerRefreshStarted = true;
+    const newer = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+
+    await expect(newer).resolves.toMatchObject({ roster: { version: '9' } });
+    await expect(first).resolves.toBeNull();
+    // Only the newer refresh composed after it started.
+    expect(compositionsAfterNewerRefresh).toBe(1);
+    expect(f.accepted().roster.version).toBe('9');
+  });
+
+  it('propagates cancellation while it waits to compose again', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-authority-cancelled-wait');
+    const acceptedBefore = f.accepted();
+    const owner = new AbortController();
+    const cancelled = new Error('authority refresh owner stopped');
+    let compositions = 0;
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementation(async () => {
+        compositions += 1;
+        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        // The second discard is followed by a real wait; cancel inside it.
+        if (compositions === 2) setTimeout(() => owner.abort(cancelled), 5);
+        return '9';
+      });
+
+    await expect(f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId, owner.signal))
+      .rejects.toBe(cancelled);
+    expect(compositions).toBe(2);
+    expect(f.accepted()).toEqual(acceptedBefore);
   });
 
   it('keeps a blocked authority disabled throughout a stalled retry', async () => {
@@ -6535,6 +6828,10 @@ describe('RFC-64 rollout authority integration', () => {
         },
       },
     });
+    expect(stopped.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)
+      .legacySyncAllowed).toBe(false);
+    expect(stopped.canUseLegacySharedMemorySyncForContextGraphV1(CONTEXT_GRAPH_ID)).toBe(true);
+    await expect(stopped.canUseLegacyDurableSyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
     expect(stopped.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
     expect(stopped.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();

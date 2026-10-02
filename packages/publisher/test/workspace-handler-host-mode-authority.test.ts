@@ -180,6 +180,37 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
     expect(verdict.accepted).toBe(true);
   });
 
+  it('reads projected authority once across the agent and peer gates', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let metaLookups = 0;
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      contextGraphMetaOracle: async () => {
+        metaLookups += 1;
+        return {
+          allowedAgents: [allowed.address],
+          participantAgents: [],
+          revokedAgents: [],
+          allowedPeers: [PUBLISHER_PEER_ID],
+        };
+      },
+    });
+
+    const raw = workspaceMessage('Host Auth Projected Once', 'op-host-auth-projected-once');
+    const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+    const wire = await signWorkspaceMessage(allowed, encrypted);
+
+    const verdict = await handler.verifyHostModeEnvelopeAuthority(
+      wire,
+      CONTEXT_GRAPH_ID,
+      PUBLISHER_PEER_ID,
+    );
+
+    expect(verdict.accepted).toBe(true);
+    expect(metaLookups).toBe(1);
+  });
+
   it('accepts when there is no peer allowlist (agent gate is the only requirement)', async () => {
     // Curated CGs with an agent gate but no peer-gate are valid;
     // any libp2p peer may relay as long as the signing agent is

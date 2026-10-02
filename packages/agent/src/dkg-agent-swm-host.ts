@@ -10,6 +10,9 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
+import { VmRecoveryPassAuthority, type VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
+import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { performance } from 'node:perf_hooks';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -96,7 +99,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, withDefaultStoreWorkPriority, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -124,6 +127,9 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   readMaterializedVersion, shouldApplyMaterialization, withMaterializationLock,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  resolveKnowledgeAssetWorkspaceHead,
   type MaterializedVersion,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -138,6 +144,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import {
   isCoreHostedPublicCgRecorded,
   resolveCoreHostedPublicCgLocalId,
+  type CoreHostedPublicCgRecordOutcome,
 } from './core-hosted-public-cg-record-decision.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -239,7 +246,12 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import {
+  FinalizationHandler,
+  KEEP_ROOT_COPY_PREDICATE,
+  type ChainReconcileLocalCandidate,
+  type ChainReconciledKCOutcome,
+} from './finalization-handler.js';
 import {
   reconcileContextGraph,
   VmReconcileSchedulingRuntime,
@@ -248,6 +260,7 @@ import {
   type OrdinalOutcome,
   type PendingOrdinalRecoveryResult,
   type OrdinalRecoveryTarget,
+  type ReconcilePassTimings,
 } from './chain-reconciler.js';
 import {
   ContextGraphOnChainIdUnresolvedError,
@@ -257,27 +270,51 @@ import {
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+import { type VmRecoveryFootprintObservation } from './vm-recovery-footprint.js';
 import {
-  planVmRecoveryMicrobatch,
-  type VmRecoveryTargetFootprint,
-} from './vm-recovery-microbatch.js';
-import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
+  VmRecoveryPhaseRecorder,
+  describeVmRecoveryRpcSince,
+  formatVmRecoveryPhases,
+  markVmRecoveryRpc,
+  noteVmReconcilePassEnd,
+  observeVmRecoveryTiming,
+  vmReconcilePassGapMs,
+} from './vm-recovery-phase-timing.js';
+import {
+  existingVmRecoveryPreparation,
+  formatVmRecoveryPreparationStats,
+  resolveVmRecoveryPrefetchEnabled,
+  vmRecoveryPreparationFor,
+  vmRecoveryRetryDelay,
+  type VmRecoveryPreparationScope,
+} from './vm-recovery-preparation.js';
+import { planVmRecoveryTransport, VM_EXACT_MICROBATCH_LIMITS } from './vm-recovery-transport-plan.js';
+import { EXACT_BATCH_STREAM_PROTOCOL } from './sync/exact-batch-stream-contract.js';
+import { exactBatchStreamUnsupported } from './sync/exact-batch-stream-capability.js';
 import {
   VmRecoveryProviderPolicy,
   type VmRecoveryProviderAttempt,
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
 import {
-  encodeExactAssetUals,
-  MAX_EXACT_SYNC_ASSETS,
-} from './sync/exact-assets.js';
-import {
   MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
   ExactAssetFetchLifecycleClosedError,
+  ExactAssetVersionBehindError,
+  exactAssetFetchPeerWindow,
   runExactAssetFetch,
   type ContextGraphAssetFetchResult,
   type ExactAssetFetchEvidence,
 } from './sync/exact-asset-fetch.js';
+import type {
+  VmRefreshAttempt,
+  VmRefreshDue,
+  VmRefreshQueue,
+  VmRefreshTarget,
+} from './vm-refresh.js';
+import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
+
+/** Graph-scoped KA metadata marker; its presence names the metadata graph. */
+const GRAPH_KA_CONTENT_SCOPE_VERSION_PREDICATE = 'http://dkg.io/ontology/contentScopeVersion';
 
 function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
   return {
@@ -514,11 +551,12 @@ import type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
-import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+import { resolveExactBatchStreamEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
 import { finalizedContextGraphSnapshotMismatchV1 } from
   './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withOwnedRpcRequestContext,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
 
@@ -575,6 +613,8 @@ function vmReconcileDeploymentMatches(value: unknown, expected: string): boolean
 type VmReconcileExecution = {
   identityCursor: CursorState;
   persistWatermark: (localCgId: string, watermark: number) => void;
+  /** Observation only; forwarded to the engine's pass-timing hook. */
+  observePassTimings?: ChainReconcilerDeps['observePassTimings'];
 };
 
 type VmReconcileOrdinalOptions = {
@@ -588,6 +628,13 @@ type VmReconcileOrdinalOptions = {
   revalidateTarget?: () => Promise<boolean>;
   /** Collect the missing KA for one batch fetch instead of fetching inline. */
   deferActiveFetch?: boolean;
+  /**
+   * Take the coherent version snapshot that lets a re-run of this ordinal at
+   * the same finalized block skip its chain reads. A forward catch-up walk
+   * never re-runs a historical ordinal, so it skips the snapshot (several
+   * RPC requests per endpoint) there. Default true.
+   */
+  rememberFinalizedEvidence?: boolean;
 };
 
 /**
@@ -600,27 +647,13 @@ type VmReconcileOrdinalOptions = {
  */
 const HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS = 5_000;
 
-// Exact VM data responses are page-only and capped at 64 rows per page. Keep
-// one recovery microbatch near 64 non-empty pages so a single large graph does
-// not monopolize the global sync admission. This is a soft scheduling/fairness
-// cap, not a wire or correctness limit: an individually larger KA is still
-// admitted alone and remains bounded by the exact executor's hard guards.
-const VM_EXACT_MICROBATCH_PAGE_FAIRNESS_LEAVES = 4_096n;
-
-const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
-  // Executor capability: the current exact-sync envelope accepts at most ten.
-  maxAssets: MAX_EXACT_SYNC_ASSETS,
-  // Soft recovery-window targets. A single public KA may exceed either; it is
-  // still admitted alone while the exact executor's own hard byte/quad guards
-  // remain authoritative.
-  targetBytes: 24n * 1024n * 1024n,
-  targetLeaves: VM_EXACT_MICROBATCH_PAGE_FAIRNESS_LEAVES,
-  fixedBytesPerAsset: 64n * 1024n,
-  bytesPerLeafOverhead: 128n,
-  byteSizeMultiplierBps: 11_500n,
-  // Hard exact-selector cap, evaluated with the executor's real encoder.
-  maxSelectorBytes: 16 * 1024,
-});
+/**
+ * Recovery-target root of an ordinal whose KA the node holds nowhere locally:
+ * the sweep queues it without reading the chain root. Exact recovery fetches
+ * by UAL, so the root only keys the target's rotation record, and every visit
+ * that still finds nothing local presents the same key.
+ */
+const VM_RECONCILE_UNREAD_MERKLE_ROOT = '';
 
 interface VmRecoveryPreparedEntry {
   readonly index: number;
@@ -641,6 +674,7 @@ interface VmRecoveryBatchAttempt {
 type VmRecoveryBatchExecutionResult =
   | { readonly kind: 'not-started-stale' }
   | { readonly kind: 'stale-after-attempt' }
+  | { readonly kind: 'local-admission-deferred' }
   | {
     readonly kind: 'completed';
     readonly outcomes: readonly (readonly [number, OrdinalOutcome])[];
@@ -651,6 +685,7 @@ type VmRecoveryBatchExecutionResult =
       readonly [string, VmRecoveryUalDisposition]
     )[];
   };
+
 
 function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
@@ -693,6 +728,18 @@ async function raceVmReconcileAbort<T>(
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
 }
+
+/** `peerIds` started `offset` places in, wrapping. */
+function rotatePeerIds(peerIds: readonly string[], offset: number): string[] {
+  if (peerIds.length === 0) return [];
+  const start = offset % peerIds.length;
+  return [...peerIds.slice(start), ...peerIds.slice(0, start)];
+}
+
+/** What a provider attempt reports when its plan sized nothing (a probe that stayed on the legacy wire). */
+const NO_SIZING_OBSERVATION: VmRecoveryFootprintObservation = Object.freeze({
+  requested: 0, prepared: 0, resolved: 0, timedOut: 0, aborted: 0, invalid: 0, failed: 0, elapsedMs: 0,
+});
 
 /** Track the raw dependency even if an abort race releases its caller first. */
 function trackVmReconcilePhysicalRun<T>(runs: Set<Promise<unknown>>, run: Promise<T>): Promise<T> {
@@ -2279,7 +2326,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (!authOk) {
       try {
-        const allowedPeers = await this.getContextGraphAllowedPeers(req.contextGraphId);
+        const allowedPeers = await this.resolveSwmAllowedPeersForCurrentAuthority(
+          req.contextGraphId,
+        );
         if (allowedPeers !== null) {
           anyAuthorityFound = true;
           if (allowedPeers.includes(fromPeerId)) authOk = true;
@@ -2647,6 +2696,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Inverse of {@link bindSubscriptionOnChainId}: drop a local CG's on-chain
+   * id together with every piece of reconcile progress made against it. The
+   * persisted watermark and the in-memory cursor count ordinals of the graph
+   * that id named, so neither may survive the id. The canonical setter
+   * persists the unbound row.
+   */
+  unbindSubscriptionOnChainId(this: DKGAgent, localCgId: string): void {
+    const sub = this.subscribedContextGraphs.get(localCgId);
+    if (sub === undefined) return;
+    this.forceClearVmReconcileStateForContextGraph(localCgId);
+    this.setContextGraphSubscription(localCgId, { ...sub, onChainId: undefined, lastReconciledOrdinal: 0 });
+  }
+
+  /**
    * Install a reverse-derived VM candidate without promoting it to the shared
    * authoritative `onChainId` field. The candidate is process-local and every
    * VM use revalidates it against the current complete name-hash inventory.
@@ -2755,35 +2818,82 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Phase D (Cores fill their own gaps) — invoked from the StorageACK
-   * pre-sign hook. When this Core signs an ACK for a PUBLIC CG it becomes a
-   * storage node for it; mark the CG `coreHosted` (persisted) so the
+   * Phase D (Cores fill their own gaps) — the StorageACK finality gate awaits
+   * this before a Core signs an ACK for a PUBLIC CG: signing makes the Core a
+   * storage node for it, so mark the CG `coreHosted` (persisted) so the
    * chain-driven VM reconciler runs for it across restarts even without a
    * member subscription. A Core that was offline during the *next* publish
    * then learns the missed KA from chain on restart and pulls it core-first.
    *
-   * Public-only by design: curated CGs are hosted as opaque ciphertext, which
-   * a Core cannot promote to plaintext VM — their coverage stays on the
-   * host-mode reconciler + LU-11 chunk-backfill path. Best-effort + idempotent.
+   * The row is keyed by the SWM namespace holding the ACK copy (see
+   * {@link resolveCoreHostedPublicCgLocalId}); an existing row there is merged
+   * into, never replaced, and a persisted row that has not been rehydrated yet
+   * is left alone. Public-only by design: a Core never receives a curated
+   * CG's plaintext, so there is nothing to promote to VM; its curated
+   * obligation is the verified `<cg>/_catalog` the catalog ACK persists.
+   * Idempotent. With `durable`, `recorded`/`already-recorded` also mean the
+   * row has been written through the strict subscription-store path;
+   * `nudge: false` leaves the first reconcile to the periodic sweep.
    */
-  async recordCoreHostedPublicCg(this: DKGAgent, cgId: string, swmGraphId?: string): Promise<void> {
-    if (this.coreHostRecordingsClosed) return;
-    if (!this.vmReconcileEnabled()) return;
+  async recordCoreHostedPublicCg(
+    this: DKGAgent,
+    cgId: string,
+    swmGraphId?: string,
+    options: {
+      durable?: boolean;
+      nudge?: boolean;
+      /**
+       * The caller verified on chain that this namespace names `cgId` (the
+       * StorageACK gate checks the committed name hash). A member row of the
+       * namespace that has no on-chain binding yet (a freshly registered
+       * graph) is then bound from the ACK instead of waiting for a binding.
+       */
+      namespaceVerified?: boolean;
+    } = {},
+  ): Promise<CoreHostedPublicCgRecordOutcome> {
+    if (this.coreHostRecordingsClosed) return 'closed';
+    if (!this.vmReconcileEnabled()) return 'vm-reconcile-disabled';
     const recordingGeneration = this.coreHostRecordingGeneration;
     let numeric: bigint;
     try {
       numeric = BigInt(cgId);
     } catch {
-      return; // non-numeric id can't be reconciled against the chain ordinal list
+      return 'invalid-id'; // non-numeric id can't be reconciled against the chain ordinal list
     }
-    if (numeric <= 0n) return;
+    if (numeric <= 0n) return 'invalid-id';
 
     const numericStr = numeric.toString();
-    const resolveLocalCgId = () => resolveCoreHostedPublicCgLocalId({
-      onChainId: numeric,
-      swmGraphId,
-      mappedLocalId: this.resolveLocalCgIdByOnChainId(numeric) ?? undefined,
-    });
+    const localCgId = resolveCoreHostedPublicCgLocalId({ onChainId: numeric, swmGraphId });
+    const alreadyRecorded = () => options.durable === true
+      ? this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
+      : Promise.resolve('already-recorded' as const);
+    // Pre-read guards that need no chain: a dormant persisted row, and a
+    // member subscription whose own binding is missing or points elsewhere.
+    const blocked = (): CoreHostedPublicCgRecordOutcome | undefined => {
+      // A cleartext namespace for a graph whose committed name hash this node
+      // already holds (a #2744 name-hash placeholder, or a bound cleartext
+      // row) must be that name; anything else would split the graph across
+      // namespaces. The placeholder is then left alone.
+      if (localCgId !== numericStr) {
+        const mapped = this.resolveLocalCgIdByOnChainId(numeric);
+        const committed = mapped === null ? undefined : this.subscribedContextGraphs.get(mapped)?.onChainHash;
+        if (
+          committed !== undefined
+          && this.contextGraphWireId(committed) !== this.contextGraphNameCommitment(localCgId)
+        ) {
+          return 'namespace-conflict';
+        }
+      }
+      const existing = this.subscribedContextGraphs.get(localCgId);
+      if (existing === undefined) {
+        return this.contextGraphSubscriptionDormancyById.has(localCgId) ? 'dormant' : undefined;
+      }
+      if (!existing.subscribed) return undefined;
+      if (existing.onChainId === undefined) {
+        return options.namespaceVerified === true || localCgId === numericStr ? undefined : 'binding-pending';
+      }
+      return existing.onChainId === numericStr ? undefined : 'namespace-conflict';
+    };
 
     // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
     // StorageACK sign, so checking "already recorded" only after the liveness +
@@ -2793,32 +2903,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // row is left untouched whatever the chain says now. Every path that can
     // still RECORD a graph falls through to the fresh reads below.
     if (isCoreHostedPublicCgRecorded(
-      this.subscribedContextGraphs.get(resolveLocalCgId()),
+      this.subscribedContextGraphs.get(localCgId),
       numericStr,
-    )) return;
+    )) return alreadyRecorded();
+    const blockedBeforeRead = blocked();
+    if (blockedBeforeRead !== undefined) return blockedBeforeRead;
 
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
     // this specific CG registration is live enough for host tracking.
     const policy = await this.readCoreHostedPublicCgAccessPolicy(numericStr);
-    if (this.coreHostRecordingGeneration !== recordingGeneration) return;
-    if (policy !== 0) return; // curated / unknown / not-live — not the public VM-promote path
+    if (this.coreHostRecordingGeneration !== recordingGeneration) return 'closed';
+    if (policy === 1) return 'curated'; // not the public VM-promote path
+    if (policy !== 0) return 'policy-unknown'; // unknown / not-live right now
 
-    // Pick the local CG id to key the host-only record under. Prefer an
-    // existing local mapping; otherwise use the publisher-supplied cleartext
-    // `swmGraphId` (the local CG name for a public/cleartext publish). On the
-    // FIRST ACK for a CG we only host (never subscribed to),
-    // `resolveLocalCgIdByOnChainId()` is still empty — falling back to the
-    // numeric id would persist the row under `did:dkg:context-graph:<numeric>`,
-    // a namespace that doesn't hold the hosted SWM snapshot, so after restart
-    // the reconciler + active-fetch would sync/promote against the wrong graph
-    // and miss the KA this core already ACKed. The cleartext hint keeps the
-    // row under the same id the reconciler uses.
-    // Re-resolved after the await: the local mapping may have changed, and a
-    // concurrent first ACK for the same CG may have recorded it meanwhile.
-    const localCgId = resolveLocalCgId();
+    // Re-checked after the await: a concurrent first ACK may have recorded it,
+    // or rehydration may have activated the namespace's persisted row.
     const existing = this.subscribedContextGraphs.get(localCgId);
-    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return;
+    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return alreadyRecorded();
+    const blockedAfterRead = blocked();
+    if (blockedAfterRead !== undefined) return blockedAfterRead;
+    if (existing?.onChainId !== undefined && existing.onChainId !== numericStr) {
+      // A host-only row for another graph still owes that graph's copies in
+      // this namespace. Rebind only once that graph is gone from the chain
+      // (a re-registration under the same name).
+      const previousLive = await this.isCoreHostedGraphStillLive(existing.onChainId);
+      if (this.coreHostRecordingGeneration !== recordingGeneration) return 'closed';
+      if (previousLive) return 'namespace-conflict';
+    }
 
     let next: ContextGraphSub;
     if (existing) {
@@ -2842,34 +2954,80 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.setContextGraphSubscription(localCgId, next);
     this.log.info(
       createOperationContext('system'),
-      `Phase D: marked public cg=${numericStr} as core-hosted (will chain-reconcile to VM across restarts)`,
+      `Phase D: marked public cg=${numericStr} as core-hosted under "${localCgId}" ` +
+      '(will chain-reconcile to VM across restarts)',
     );
+    const outcome = options.durable === true
+      ? await this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
+      : 'recorded';
     // Nudge a reconcile now so the first hosted publish lands promptly; the
     // periodic sweep is the safety net.
-    if (this.vmReconcileScheduling) void this.vmReconcileScheduling.triggerLive(localCgId);
+    if (options.nudge !== false && this.vmReconcileScheduling) {
+      void this.vmReconcileScheduling.triggerLive(localCgId);
+    }
+    return outcome === 'already-recorded' ? 'recorded' : outcome;
   }
 
-  trackCoreHostRecording(this: DKGAgent, start: () => Promise<void>): void {
-    if (this.coreHostRecordingsClosed) return;
-    let recording: Promise<void>;
+  /**
+   * Whether a previously hosted graph is still live on chain. Unknown counts
+   * as live: an unanswered read must not let another graph take over the
+   * namespace.
+   */
+  async isCoreHostedGraphStillLive(this: DKGAgent, onChainId: string): Promise<boolean> {
+    const isActive = this.chain.isContextGraphActiveOnChain;
+    if (typeof isActive !== 'function') return true;
+    let numericId: bigint;
     try {
-      recording = start();
-    } catch (err) {
-      this.log.warn(
-        createOperationContext('system'),
-        `Phase D: recordCoreHostedPublicCg failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return;
+      numericId = BigInt(onChainId);
+    } catch {
+      return false;
     }
-    const tracked = recording.catch((err) => {
-      this.log.warn(
-        createOperationContext('system'),
-        `Phase D: recordCoreHostedPublicCg failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }).finally(() => {
-      this.coreHostRecordings.delete(tracked);
-    });
-    this.coreHostRecordings.add(tracked);
+    try {
+      return await isActive.call(this.chain, numericId) !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Write a core-hosted row through the strict subscription-store path, once
+   * per (graph, on-chain id) and process. The ordinary setter persists in the
+   * background and only logs a failed write, which is not enough for a row a
+   * StorageACK signature depends on. A concurrent writer replacing the row
+   * between snapshot and write is retried against the current row.
+   */
+  async persistCoreHostedPublicCgStrict(
+    this: DKGAgent,
+    localCgId: string,
+    onChainId: string,
+    recordingGeneration: number,
+  ): Promise<'already-recorded' | 'persist-failed' | 'closed'> {
+    const durableKey = `${localCgId}\0${onChainId}`;
+    if (this.coreHostedDurableRecords.has(durableKey)) return 'already-recorded';
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (this.coreHostRecordingGeneration !== recordingGeneration) return 'closed';
+      if (!isCoreHostedPublicCgRecorded(this.subscribedContextGraphs.get(localCgId), onChainId)) {
+        return 'persist-failed';
+      }
+      try {
+        await this.persistContextGraphSubscriptionProjectionStrict({
+          contextGraphId: localCgId,
+          requireDurableMemberIntent: false,
+          operation: 'core hosting',
+        });
+        this.coreHostedDurableRecords.add(durableKey);
+        return 'already-recorded';
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    this.log.warn(
+      createOperationContext('system'),
+      `Phase D: could not persist core-hosted cg=${onChainId} ("${localCgId}"): ` +
+      `${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    );
+    return 'persist-failed';
   }
 
   async drainCoreHostRecordings(this: DKGAgent): Promise<void> {
@@ -2936,13 +3094,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * True iff the chain adapter exposes the per-CG registration-ordinal reads
-   * the reconciler needs. Gates the live nudge, the sweep timer, and the
-   * coalescer so non-V10 / no-chain nodes pay nothing.
+   * True iff the operator has not switched chain-driven VM reconciliation off
+   * (`vmReconcilerEnabled` / DKG_VM_RECONCILER_ENABLED) and the chain adapter
+   * exposes the per-CG registration-ordinal reads the reconciler needs. Gates
+   * core-hosted recording, the live nudge, the sweep timer and the coalescer,
+   * so non-V10 / no-chain nodes pay nothing. The periodic peer-sync switch
+   * (`syncReconcilerEnabled`) deliberately does not participate: cores that
+   * contained peer sync must keep promoting the data they ACK.
    */
   vmReconcileEnabled(this: DKGAgent): boolean {
     return (
-      resolveSyncReconcilerEnabled(this.config.syncReconcilerEnabled)
+      resolveVmReconcilerEnabled(this.config.vmReconcilerEnabled)
       &&
       this.chain.chainId !== 'none' &&
       typeof this.chain.getContextGraphKCCount === 'function' &&
@@ -3039,10 +3201,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (targetOnChainId !== undefined && resolved.onChainId !== String(targetOnChainId)) return null;
     if (resolved.provenance !== 'reverse-name-hash') {
       try {
-        await this.persistContextGraphSubscriptionStrict(
+        // An on-demand subscription binds in memory only; durable rows are
+        // saved before the binding becomes visible.
+        await this.persistContextGraphSyncStateStrict(
           localCgId,
           { ...sub, onChainId: resolved.onChainId },
-          undefined,
+          'on-chain id binding',
           isSubscriptionCurrent,
         );
       } catch {
@@ -3139,8 +3303,655 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.vmReconcileScheduling && isLifecycleCurrent()) {
       signal?.throwIfAborted();
       void this.vmReconcileScheduling.triggerLive(localCgId);
+      // Core-hosted rows are keyed by the SWM namespace of their ACK copies,
+      // so one on-chain graph can have several; each promotes its own copies.
+      for (const [otherCgId, other] of this.subscribedContextGraphs) {
+        if (otherCgId === localCgId || other.coreHosted !== true) continue;
+        if (other.onChainId !== targetOnChain?.toString()) continue;
+        void this.vmReconcileScheduling.triggerLive(otherCgId);
+      }
     }
     return localCgId;
+  }
+
+  /**
+   * #2858 — body of the live `KnowledgeAssetUpdated` nudge.
+   *
+   * An update keeps the KA id and moves its latest root. The ordinal sweep
+   * never revisits a settled ordinal, and a node whose only copy is a
+   * confirmed VM copy (a member of a catalog graph, a core outside the update's
+   * ACK set) has no other lane that brings the new version. This decides from
+   * local state alone, with no chain read, for every VM-reconcile target graph
+   * that holds a confirmed copy of the KA; a queued target gets a reconcile
+   * pass, whose refresh worker reads the chain and fetches the current version
+   * ({@link startVmRefreshWorker}).
+   *
+   * - A copy at another root is queued for a refresh.
+   * - A copy already at the event's root is skipped when it reflects the
+   *   update: the event's own transaction confirmed it (the publisher), or it
+   *   was materialized from a chain view at or after the event's block (a
+   *   replayed event). Otherwise it may be an older version with the same
+   *   content, so a version check is queued.
+   * - When the workspace already stages a newer version than the confirmed
+   *   copy (the publisher mid-update, a core holding the update's ACK copy, a
+   *   member that recovered its curator's shared memory), the target waits
+   *   `VM_REFRESH_STAGED_GRACE_MS` for the lane that staged it; on a member no
+   *   lane promotes it, and the refresh does.
+   *
+   * The event's root is only a trigger: an older or superseded event is
+   * settled by the worker's chain read, never materialized. Every no-op is
+   * logged at debug. A store read that fails, or a full target set, throws, so
+   * the event lane holds the event and dispatches it again after its failure
+   * backoff instead of losing it.
+   *
+   * Returns the refresh targets newly queued.
+   */
+  async handleKAUpdatedNudge(
+    this: DKGAgent,
+    kaId: bigint,
+    merkleRoot: Uint8Array,
+    ctx: OperationContext,
+    options: {
+      readonly blockNumber?: number;
+      readonly logIndex?: number;
+      readonly blockHash?: string;
+      readonly txHash?: string;
+      readonly signal?: AbortSignal;
+    } = {},
+  ): Promise<VmRefreshTarget[]> {
+    const { signal } = options;
+    const blockNumber = options.blockNumber !== undefined
+      && Number.isSafeInteger(options.blockNumber)
+      && options.blockNumber >= 0
+      ? options.blockNumber
+      : undefined;
+    const eventTxHash = typeof options.txHash === 'string' && options.txHash.length > 0
+      ? options.txHash.toLowerCase()
+      : undefined;
+    const logIndex = options.logIndex !== undefined
+      && Number.isSafeInteger(options.logIndex)
+      && options.logIndex >= 0
+      ? options.logIndex
+      : undefined;
+    const blockHash = typeof options.blockHash === 'string' && options.blockHash.length > 0
+      ? options.blockHash.toLowerCase()
+      : undefined;
+    signal?.throwIfAborted();
+    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
+      && !signal?.aborted
+      && !lifecycleSignal?.aborted
+      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+    if (!isLifecycleCurrent() || kaId <= 0n || merkleRoot.length !== 32) return [];
+    this.expireVmRefreshTargets(ctx);
+    const update = `update${blockNumber === undefined ? '' : ` at block ${blockNumber}`}`;
+
+    let ual: string;
+    let holders: string[];
+    try {
+      const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
+        ? await this.chain.getDKGKnowledgeAssetsAddress()
+        : undefined;
+      if (!storageAddr) return [];
+      ual = buildReconciledKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+      holders = await this.localGraphsDescribingKnowledgeAsset(ual);
+    } catch (err) {
+      throw new Error(
+        `VM refresh: could not read which local graphs hold KA ${kaId} for its ${update}: `
+          + `${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+
+    const eventRoot = ethers.hexlify(merkleRoot).toLowerCase();
+    const queued: VmRefreshTarget[] = [];
+    if (holders.length === 0) {
+      this.log.debug(ctx, `VM refresh: no local graph holds ${ual}; nothing to refresh`);
+    }
+    for (const localCgId of holders) {
+      if (!isLifecycleCurrent()) break;
+      if (!this.isVmReconcileTargetSelected(localCgId)) {
+        this.log.debug(
+          ctx,
+          `VM refresh: "${localCgId}" holds ${ual} but is not a VM reconcile target; not queued`,
+        );
+        continue;
+      }
+      let local: Awaited<ReturnType<DKGAgent['readVmRefreshLocalState']>>;
+      let coversUpdate = false;
+      try {
+        local = await this.readVmRefreshLocalState(localCgId, ual);
+        if (local.kind === 'confirmed' && local.merkleRoot === eventRoot) {
+          coversUpdate = await this.vmRefreshCopyCoversUpdate(
+            localCgId,
+            ual,
+            local.transactionHash,
+            eventTxHash,
+            blockNumber,
+            blockHash,
+          );
+        }
+      } catch (err) {
+        throw new Error(
+          `VM refresh: could not read the copy of ${ual} in "${localCgId}" for its ${update}: `
+            + `${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
+      if (local.kind !== 'confirmed') {
+        this.log.debug(ctx, `VM refresh: ${ual} in "${localCgId}" not queued: no confirmed copy`);
+        continue;
+      }
+      const sameRoot = local.merkleRoot === eventRoot;
+      if (coversUpdate) {
+        this.log.debug(
+          ctx,
+          `VM refresh: ${ual} in "${localCgId}" not queued: the copy holds this update`,
+        );
+        continue;
+      }
+      if (!isLifecycleCurrent()) break;
+      const target: VmRefreshTarget = {
+        localCgId,
+        ual,
+        kaId,
+        merkleRoot: eventRoot,
+        ...(blockNumber === undefined ? {} : { blockNumber }),
+        ...(logIndex === undefined ? {} : { logIndex }),
+        ...(blockHash === undefined ? {} : { blockHash }),
+        ...(eventTxHash === undefined ? {} : { txHash: eventTxHash }),
+        ...(sameRoot ? { checkVersion: true } : {}),
+      };
+      const delayMs = local.staged ? DKGAgentBase.VM_REFRESH_STAGED_GRACE_MS : 0;
+      // A replayed event (a lane re-scan) leaves the held target and its
+      // backoff alone.
+      const offered = this.vmRefreshQueue.offer(target, delayMs);
+      if (offered === 'held') {
+        this.log.debug(ctx, `VM refresh: ${ual} in "${localCgId}" already has this or a newer update queued`);
+        continue;
+      }
+      if (offered === 'full') {
+        throw new Error(
+          `VM refresh: ${this.vmRefreshQueue.size} targets are held, the most allowed, so the `
+            + `${update} of ${ual} in "${localCgId}" waits for some to settle`,
+        );
+      }
+      queued.push(target);
+      if (sameRoot) {
+        this.log.debug(
+          ctx,
+          `VM refresh: ${ual} in "${localCgId}" holds its update's root; version check queued`,
+        );
+      } else if (local.staged) {
+        this.log.info(
+          ctx,
+          `VM refresh: ${ual} in "${localCgId}" does not hold its update's root and stages a newer `
+            + `version; refresh queued in ${Math.round(delayMs / 1000)}s unless that version is promoted first`,
+        );
+      } else {
+        this.log.info(
+          ctx,
+          `VM refresh: ${ual} in "${localCgId}" does not hold its update's root; refresh queued`,
+        );
+      }
+      // A delayed target is not due yet: the graph's next reconcile pass
+      // starts the worker.
+      if (delayMs === 0 && this.vmReconcileScheduling && isLifecycleCurrent()) {
+        this.vmReconcileScheduling.triggerLive(localCgId);
+      }
+    }
+    return queued;
+  }
+
+  /**
+   * #2858 — whether a copy at an update's root already reflects that update:
+   * the update's own transaction confirmed it, or it was materialized from a
+   * chain view at or after the update's block, which already held the update.
+   * Neither fact proves fork lineage when the event carries a block hash,
+   * because the same transaction can be included on a replacement fork.
+   */
+  async vmRefreshCopyCoversUpdate(
+    this: DKGAgent,
+    localCgId: string,
+    ual: string,
+    copyTxHash: string | undefined,
+    eventTxHash: string | undefined,
+    eventBlock: number | undefined,
+    eventBlockHash: string | undefined,
+  ): Promise<boolean> {
+    if (eventBlockHash !== undefined) return false;
+    if (eventTxHash !== undefined && copyTxHash === eventTxHash) return true;
+    if (eventBlock === undefined) return false;
+    const materialized = await readMaterializedVersion(
+      this.store,
+      contextGraphMetaUri(localCgId),
+      ual,
+      { source: 'agent.vmRefresh.materializedVersion', priority: 'background' },
+    );
+    return materialized !== null && materialized.blockNumber >= eventBlock;
+  }
+
+  /** #2858 — give up the refresh targets held past `VM_REFRESH_MAX_AGE_MS`, with a warning each. */
+  expireVmRefreshTargets(this: DKGAgent, ctx: OperationContext): void {
+    // Narrow test agents built without the base constructor have no queue.
+    const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
+    if (queue === undefined) return;
+    for (const given of queue.expire()) {
+      this.log.warn(
+        ctx,
+        `VM refresh: gave up on ${given.ual} in "${given.localCgId}" after `
+          + `${Math.round(given.heldMs / 60_000)} min and ${given.failures} failed attempt(s) `
+          + `(${queue.givenUpTotal} given up so far); its copy waits for the KA's next update `
+          + 'or an asset fetch',
+      );
+    }
+  }
+
+  /**
+   * #2858 — highest block the update event lane may persist as scanned: just
+   * below the oldest held target's event, so a restart replays that event and
+   * its target is recorded again. Targets held past their maximum age are
+   * given up first, so one that never settles cannot hold the cursor for good.
+   */
+  vmRefreshPersistCeiling(this: DKGAgent): number | undefined {
+    this.expireVmRefreshTargets(createOperationContext('system'));
+    const oldest = (this.vmRefreshQueue as VmRefreshQueue | undefined)?.oldestBlockNumber();
+    return oldest === undefined ? undefined : oldest - 1;
+  }
+
+  /** #2858 — the refresh lane's state, for `/api/status`. */
+  getVmRefreshStatus(this: DKGAgent): {
+    heldTargets: number;
+    persistCeiling: number | null;
+    givenUpTotal: number;
+    refusedTotal: number;
+  } {
+    const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
+    const oldest = queue?.oldestBlockNumber();
+    return {
+      heldTargets: queue?.size ?? 0,
+      persistCeiling: oldest === undefined ? null : oldest - 1,
+      givenUpTotal: queue?.givenUpTotal ?? 0,
+      refusedTotal: queue?.refusedTotal ?? 0,
+    };
+  }
+
+  /**
+   * Local graphs whose root metadata graph describes this graph-scoped KA.
+   * One subject-bound read; the caller filters them to reconcile targets.
+   */
+  async localGraphsDescribingKnowledgeAsset(this: DKGAgent, ual: string): Promise<string[]> {
+    const result = await this.store.query(
+      `SELECT DISTINCT ?g WHERE { GRAPH ?g { <${assertSafeIri(ual)}> `
+        + `<${GRAPH_KA_CONTENT_SCOPE_VERSION_PREDICATE}> ?version } }`,
+      { source: 'agent.vmRefresh.holders', priority: 'background' },
+    );
+    if (result.type !== 'bindings') return [];
+    const prefix = 'did:dkg:context-graph:';
+    const suffix = '/_meta';
+    const holders = new Set<string>();
+    for (const row of result.bindings) {
+      const graph = row['g'];
+      if (typeof graph !== 'string' || !graph.startsWith(prefix) || !graph.endsWith(suffix)) {
+        continue;
+      }
+      const localCgId = graph.slice(prefix.length, graph.length - suffix.length);
+      if (localCgId.length > 0 && contextGraphMetaUri(localCgId) === graph) holders.add(localCgId);
+    }
+    return [...holders];
+  }
+
+  /**
+   * What the refresh lane decides on for one KA in one graph: the root and
+   * assertion version the confirmed graph-scoped copy recorded, the
+   * transaction that confirmed it when it is receipt-backed, and whether the
+   * workspace stages a newer version than that copy. A staged version only
+   * delays the refresh (see `VM_REFRESH_STAGED_GRACE_MS`). A head at the
+   * confirmed version or older stages nothing newer; a corrupt one is read
+   * past by the exact fetch.
+   */
+  async readVmRefreshLocalState(
+    this: DKGAgent,
+    localCgId: string,
+    ual: string,
+  ): Promise<
+    | { readonly kind: 'none' }
+    | {
+      readonly kind: 'confirmed';
+      readonly merkleRoot: string;
+      readonly assertionVersion: bigint;
+      readonly transactionHash?: string;
+      readonly staged: boolean;
+    }
+  > {
+    const read = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+      contextGraphId: localCgId,
+      ual,
+    });
+    if (read.state !== 'confirmed') return { kind: 'none' };
+    let staged = false;
+    try {
+      const head = await resolveKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager: new GraphManager(this.store),
+        contextGraphId: localCgId,
+        kaUal: ual,
+        ...(read.envelope.subGraphName ? { subGraphName: read.envelope.subGraphName } : {}),
+      });
+      staged = head !== undefined
+        && BigInt(head.assertionVersion) > BigInt(read.envelope.assertionVersion);
+    } catch (err) {
+      if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
+    }
+    const transactionHash = read.envelope.transactionHash?.trim().toLowerCase();
+    return {
+      kind: 'confirmed',
+      merkleRoot: ethers.hexlify(read.envelope.merkleRoot).toLowerCase(),
+      assertionVersion: BigInt(read.envelope.assertionVersion),
+      ...(transactionHash ? { transactionHash } : {}),
+      staged,
+    };
+  }
+
+  /**
+   * #2858 — start this graph's refresh worker when it has due targets and
+   * none is running. The worker runs beside the reconcile pass that starts
+   * it, in the background RPC class and store lane, so the pass never waits
+   * on a peer for a refresh. At most `VM_REFRESH_MAX_WORKERS` run at once; a
+   * graph left waiting starts on its next pass or when a running worker ends.
+   * Returns the graph's running worker, if any.
+   */
+  startVmRefreshWorker(
+    this: DKGAgent,
+    localCgId: string,
+    onChainId: string,
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<void> | undefined {
+    // Narrow test agents built without the base constructor have neither.
+    const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
+    const workers = this.vmRefreshWorkers as Map<string, Promise<void>> | undefined;
+    if (queue === undefined || workers === undefined) return undefined;
+    const running = workers.get(localCgId);
+    if (running !== undefined) return running;
+    if (signal?.aborted || !isTargetCurrent() || !queue.hasDue(localCgId)) return undefined;
+    if (workers.size >= DKGAgentBase.VM_REFRESH_MAX_WORKERS) {
+      this.log.debug(
+        createOperationContext('system'),
+        `VM refresh for "${localCgId}" waits for a free worker`,
+      );
+      return undefined;
+    }
+    const worker: Promise<void> = withOwnedRpcRequestContext(
+      { requestClass: 'background', ...(signal ? { signal } : {}) },
+      () => withDefaultStoreWorkPriority(
+        'background',
+        () => this.runVmRefreshesForCg(localCgId, onChainId, isTargetCurrent, signal),
+      ),
+    ).catch((err: unknown) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `VM refresh worker for "${localCgId}" stopped: `
+          + `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }).finally(() => {
+      if (workers.get(localCgId) === worker) workers.delete(localCgId);
+      if (signal?.aborted || this.vmReconcileRotationClosed) return;
+      // Hand the freed slot on: this graph past its per-run bound, or a graph
+      // that found every slot taken. Their passes start the workers.
+      let free = DKGAgentBase.VM_REFRESH_MAX_WORKERS - workers.size;
+      for (const dueCgId of queue.dueContextGraphIds()) {
+        if (free <= 0) break;
+        if (workers.has(dueCgId)) continue;
+        if (!this.isVmReconcileTargetSelected(dueCgId)) {
+          // The graph left VM reconciliation; no pass will work its targets.
+          queue.clearContextGraph(dueCgId);
+          continue;
+        }
+        void this.vmReconcileScheduling?.triggerLive(dueCgId);
+        free -= 1;
+      }
+    });
+    workers.set(localCgId, worker);
+    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, worker);
+    return worker;
+  }
+
+  /**
+   * Work off up to `VM_REFRESH_MAX_PER_PASS` of this graph's due refresh
+   * targets. Each attempt is bounded by `VM_REFRESH_ATTEMPT_TIMEOUT_MS` and
+   * its peer steps by `VM_REFRESH_PEER_STEP_TIMEOUT_MS`, and every outcome is
+   * settled and logged: an attempt that fails, times out or finds no holder
+   * backs off and asks the next peer window when it is due again. A closing
+   * lifecycle or a replaced reconcile target keeps the target for the next
+   * worker. Never throws.
+   */
+  async runVmRefreshesForCg(
+    this: DKGAgent,
+    localCgId: string,
+    onChainId: string,
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    // Narrow test agents built without the base constructor have no queue.
+    const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
+    if (queue === undefined) return;
+    const due = queue.due(localCgId, DKGAgentBase.VM_REFRESH_MAX_PER_PASS);
+    if (due.length === 0) return;
+    const ctx = createOperationContext('system');
+    const stopped = (target: VmRefreshTarget): boolean => {
+      if (!signal?.aborted && isTargetCurrent()) return false;
+      this.log.debug(
+        ctx,
+        `VM refresh of ${target.ual} in "${localCgId}" deferred: its reconcile target closed`,
+      );
+      return true;
+    };
+    for (const target of due) {
+      if (stopped(target)) return;
+      let attempt: VmRefreshAttempt;
+      let failed = false;
+      try {
+        attempt = await runBoundedOperation(
+          (attemptSignal) => this.refreshConfirmedVmCopy(
+            target,
+            onChainId,
+            isTargetCurrent,
+            attemptSignal,
+          ),
+          {
+            timeoutMs: DKGAgentBase.VM_REFRESH_ATTEMPT_TIMEOUT_MS,
+            label: `VM refresh of ${target.ual}`,
+            ...(signal ? { signal } : {}),
+          },
+        );
+      } catch (err) {
+        if (stopped(target)) return;
+        failed = true;
+        attempt = {
+          outcome: 'retry',
+          detail: isBoundedOperationTimeoutError(err)
+            ? err.message
+            : `failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      if (stopped(target)) return;
+      const retryAt = queue.settle(target, attempt.outcome);
+      const subject = `${target.ual} in "${localCgId}"`;
+      if (attempt.outcome === 'refreshed') {
+        this.log.info(ctx, `VM refresh: ${subject} now holds the current version (${attempt.detail})`);
+      } else if (attempt.outcome === 'retry') {
+        const retry = retryAt === undefined
+          ? 'retrying on a later pass'
+          : `retrying in ${Math.max(0, Math.round((retryAt - Date.now()) / 1000))}s`;
+        const message = `VM refresh of ${subject} did not complete (${attempt.detail}); ${retry}`;
+        if (failed) this.log.warn(ctx, message);
+        else this.log.info(ctx, message);
+      } else {
+        this.log.debug(ctx, `VM refresh of ${subject} settled as ${attempt.outcome}: ${attempt.detail}`);
+      }
+    }
+  }
+
+  /**
+   * One refresh attempt: settle from local state when the copy already holds
+   * the event's root, otherwise read the chain's current root. A copy at that
+   * root is current (the event was older or superseded — nothing is rolled
+   * back); a different one is fetched as the exact current version, which
+   * replaces the older assertion in place. `signal` is the attempt's own: it
+   * stops the fetch at the attempt deadline.
+   */
+  async refreshConfirmedVmCopy(
+    this: DKGAgent,
+    target: VmRefreshDue,
+    onChainId: string,
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<VmRefreshAttempt> {
+    const local = await this.readVmRefreshLocalState(target.localCgId, target.ual);
+    if (local.kind === 'none') {
+      return { outcome: 'not-applicable', detail: 'no confirmed copy is held any more' };
+    }
+    // A version still staged here was not promoted by the lane that staged it
+    // (or nothing on this node promotes it). The exact fetch below verifies it
+    // against the chain like any other copy, and a staged version newer than
+    // the chain's stays in the workspace: the fetch writes only Verifiable
+    // Memory.
+    // A copy at the update's root is current, unless the nudge found it
+    // there already: then only the chain's version can tell (a repeated root).
+    if (!target.checkVersion && local.merkleRoot === target.merkleRoot) {
+      return { outcome: 'current', detail: 'the copy holds the update root' };
+    }
+    if (typeof this.chain.getLatestMerkleRoot !== 'function') {
+      return { outcome: 'not-applicable', detail: 'the chain adapter reads no latest root' };
+    }
+    let chainRoot = ethers.hexlify(
+      await this.chain.getLatestMerkleRoot(target.kaId, { signal }),
+    ).toLowerCase();
+    if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+    let chainVersion: bigint | undefined;
+    if (chainRoot === local.merkleRoot) {
+      // An older or superseded event, a read that has not seen the update yet
+      // (a lagging endpoint, a confirmation depth above one), or an update
+      // that repeated the copy's root. Settle only on a coherent view at or
+      // after the update's block, by version as well as root.
+      const confirmed = await this.confirmVmRefreshCurrentAtEventBlock(
+        target,
+        local,
+        isTargetCurrent,
+        signal,
+      );
+      if (confirmed.kind === 'settled') return confirmed.attempt;
+      // The pinned view names a newer version: fetch it.
+      chainRoot = confirmed.chainRoot;
+      chainVersion = confirmed.rootCount;
+    }
+
+    let result: ContextGraphAssetFetchResult;
+    try {
+      result = await this.runExactAssetFetchForContextGraph(target.localCgId, [target.ual], {
+        isCurrent: () => isTargetCurrent() && !signal?.aborted,
+        ...(signal ? { signal } : {}),
+        expectedOnChainId: onChainId,
+        maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+        // Each retry asks the next window of candidates, so a holder outside
+        // the first few peers is still reached.
+        peerWindowIndex: target.failures,
+        // An update keeps the UAL. Its old responder session can outlive the
+        // previous version, so every refresh attempt needs a new snapshot.
+        forceFreshExactSession: true,
+        // A candidate that cannot be reached (after a restart, the curator
+        // is often not connected yet) yields to the next one.
+        peerStepTimeoutMs: DKGAgentBase.VM_REFRESH_PEER_STEP_TIMEOUT_MS,
+        // Evidence that has not seen the update would settle on the old version.
+        ...((target.proofBlockNumber ?? target.blockNumber) === undefined
+          ? {} : { minVersionBlock: target.proofBlockNumber ?? target.blockNumber }),
+      });
+    } catch (err) {
+      // This adapter cannot prove an exact version at all. Anything else,
+      // including a conflict such as a version snapshot the endpoints did
+      // not agree on, is retried after backoff.
+      if (err instanceof VmReconcileUnavailableError) {
+        return { outcome: 'not-applicable', detail: 'this adapter cannot prove an exact version' };
+      }
+      if (err instanceof ExactAssetVersionBehindError) {
+        return { outcome: 'retry', detail: err.message };
+      }
+      throw err;
+    }
+    const status = result.items[0]?.status;
+    if (status === 'materialized' || status === 'fetched') {
+      return { outcome: 'refreshed', detail: `${status} after ${result.peerAttempts} peer attempt(s)` };
+    }
+    if (status === 'already-present') {
+      return { outcome: 'current', detail: 'the exact inspection found the current version' };
+    }
+    // The exact inspection can refuse a refreshed copy while a workspace head
+    // names another version (an older one, or one staged ahead of the chain);
+    // the confirmed copy itself is the answer here.
+    const after = await this.readVmRefreshLocalState(target.localCgId, target.ual);
+    if (
+      after.kind === 'confirmed'
+      && after.merkleRoot === chainRoot
+      && (chainVersion === undefined || after.assertionVersion >= chainVersion)
+    ) {
+      return { outcome: 'refreshed', detail: 'the confirmed copy holds the chain root' };
+    }
+    return {
+      outcome: 'retry',
+      detail: `no peer served the current version; ${result.peerAttempts} peer attempt(s)`,
+    };
+  }
+
+  /**
+   * #2858 — the copy holds the root a live chain read returned. That read can
+   * predate the update (a lagging endpoint, a confirmation depth above one),
+   * and a root names content, not a version: an update may repeat an earlier
+   * root. So settle from a coherent view at or after the event's block:
+   * `current` when it holds the copy's root at a version no newer than the
+   * copy's, `retry` while it has not reached that block, and the root and
+   * version it shows otherwise, which the caller then fetches. On an adapter
+   * that reads no pinned view, the live read settles it.
+   */
+  async confirmVmRefreshCurrentAtEventBlock(
+    this: DKGAgent,
+    target: VmRefreshDue,
+    local: { readonly merkleRoot: string; readonly assertionVersion: bigint },
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<
+    | { readonly kind: 'settled'; readonly attempt: VmRefreshAttempt }
+    | { readonly kind: 'newer'; readonly chainRoot: string; readonly rootCount: bigint }
+  > {
+    const current = {
+      kind: 'settled',
+      attempt: { outcome: 'current', detail: 'the copy holds the chain root and version' },
+    } as const;
+    if (typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function') return current;
+    const view = await this.chain.readKnowledgeAssetVersionSnapshot(target.kaId, { signal });
+    if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+    if (view === null) {
+      return {
+        kind: 'settled',
+        attempt: { outcome: 'retry', detail: 'no coherent chain view confirms the copy' },
+      };
+    }
+    const proofBlock = target.proofBlockNumber ?? target.blockNumber;
+    if (proofBlock !== undefined && view.blockNumber < proofBlock) {
+      return {
+        kind: 'settled',
+        attempt: {
+          outcome: 'retry',
+          detail: `the chain view at block ${view.blockNumber} is behind the update's block `
+            + `${proofBlock}`,
+        },
+      };
+    }
+    const viewRoot = view.latestRoot.toLowerCase();
+    return viewRoot === local.merkleRoot && view.rootCount <= local.assertionVersion
+      ? current
+      : { kind: 'newer', chainRoot: viewRoot, rootCount: view.rootCount };
   }
 
   /**
@@ -3218,6 +4029,68 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) throw new ContextGraphNotFoundError(localCgId);
+    // Bound through the prototype, as narrow hosts that borrow this operator
+    // method do not carry the shared tail.
+    return SwmHostModeMethods.prototype.runExactAssetFetchForContextGraph.call(
+      this,
+      localCgId,
+      requestedUals,
+      {
+        isCurrent,
+        ...(signal ? { signal } : {}),
+        ...(options.peerIds === undefined ? {} : { peerIds: options.peerIds }),
+        ...(subscription.onChainId ? { expectedOnChainId: subscription.onChainId } : {}),
+      },
+    );
+  }
+
+  /**
+   * The exact-asset fetch once its caller has proved read authority and owns
+   * the lifecycle: chain evidence, local inspection against the current root
+   * and version, a bounded peer traversal, and re-inspection. Shared by the
+   * operator fetch above and the VM refresh lane ({@link refreshConfirmedVmCopy}).
+   */
+  async runExactAssetFetchForContextGraph(
+    this: DKGAgent,
+    localCgId: string,
+    requestedUals: readonly string[],
+    options: {
+      isCurrent: () => boolean;
+      signal?: AbortSignal;
+      peerIds?: readonly string[];
+      expectedOnChainId?: string;
+      maxPeers?: number;
+      /**
+       * Retry number of the caller. Curators head every window, since on a
+       * curated graph they may be the only holders; the curator and the
+       * ordinary tiers each start past the peers earlier windows asked.
+       */
+      peerWindowIndex?: number;
+      /** See `runExactAssetFetch`: evidence older than this block is refused. */
+      minVersionBlock?: number;
+      /**
+       * Wall clock for curator resolution and for each candidate's
+       * preparation (connect, protocol probe, admission). A candidate past it
+       * is skipped for the next one; resolution past it falls back to the
+       * preferred and connected peers. Unset leaves both to `signal`.
+       */
+      peerStepTimeoutMs?: number;
+      /** Start a new exact-asset snapshot for this update refresh attempt. */
+      forceFreshExactSession?: boolean;
+    },
+  ): Promise<ContextGraphAssetFetchResult> {
+    const { isCurrent, signal, peerStepTimeoutMs } = options;
+    /** One network step, under `peerStepTimeoutMs` when the caller set it. */
+    const runPeerStep = <T>(
+      label: string,
+      step: (stepSignal: AbortSignal | undefined) => Promise<T>,
+    ): Promise<T> => (peerStepTimeoutMs === undefined
+      ? step(signal)
+      : runBoundedOperation(step, {
+        timeoutMs: peerStepTimeoutMs,
+        label,
+        ...(signal ? { signal } : {}),
+      }));
     if (
       typeof this.chain.getKAContextGraphId !== 'function'
       || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
@@ -3234,7 +4107,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       contextGraphId: localCgId,
       requestedUals,
       ...(options.peerIds === undefined ? {} : { peerIds: options.peerIds }),
-      ...(subscription.onChainId ? { expectedOnChainId: subscription.onChainId } : {}),
+      ...(options.expectedOnChainId ? { expectedOnChainId: options.expectedOnChainId } : {}),
+      ...(options.maxPeers === undefined ? {} : { maxPeers: options.maxPeers }),
+      ...(options.minVersionBlock === undefined
+        ? {}
+        : { minVersionBlock: options.minVersionBlock }),
     }, {
       chainId: this.chain.chainId,
       signal,
@@ -3276,40 +4153,71 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return 'missing';
       },
       resolvePeerIds: async () => {
-        const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId, {
-          maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
-          signal,
-          isCurrent,
-        }).catch(() => ({ peerIds: [] as string[] }));
+        const curatorResolution = await runPeerStep(
+          `Curator resolution for "${localCgId}"`,
+          (stepSignal) => this.resolveCuratorPeerIdsForCg(localCgId, {
+            maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+            signal: stepSignal,
+            isCurrent,
+          }),
+        ).catch((error: unknown) => {
+          if (isBoundedOperationTimeoutError(error)) {
+            this.log.info(ctx, `Exact asset fetch: ${error.message}; asking connected peers`);
+          }
+          return { peerIds: [] as string[] };
+        });
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
         const connectedPeerIds = this.node?.libp2p?.getConnections?.()
           ?.map((connection) => connection.remotePeer.toString()) ?? [];
-        return [...new Set([
-          ...curatorResolution.peerIds,
-          this.preferredSyncPeers.get(localCgId),
-          ...connectedPeerIds,
-        ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))];
+        const usable = (peerId: string | undefined): peerId is string =>
+          Boolean(peerId && peerId !== this.peerId);
+        const curators = [...new Set(curatorResolution.peerIds.filter(usable))];
+        const curatorSet = new Set(curators);
+        const ordinary = [...new Set(
+          [this.preferredSyncPeers.get(localCgId), ...connectedPeerIds].filter(usable),
+        )].filter((peerId) => !curatorSet.has(peerId));
+        const windowIndex = options.peerWindowIndex !== undefined
+          && Number.isSafeInteger(options.peerWindowIndex)
+          && options.peerWindowIndex > 0
+          ? options.peerWindowIndex
+          : 0;
+        const windowSize = exactAssetFetchPeerWindow(options.maxPeers);
+        const curatorSlots = Math.min(curators.length, windowSize);
+        return [
+          ...rotatePeerIds(curators, windowIndex * curatorSlots),
+          ...rotatePeerIds(ordinary, windowIndex * (windowSize - curatorSlots)),
+        ];
       },
-      preparePeer: async (peerId) => {
-        await this.ensurePeerConnected(peerId, { signal });
+      // A step past its bound rejects; the traversal logs it and moves on to
+      // the next candidate.
+      preparePeer: (peerId) => runPeerStep('Peer preparation', async (stepSignal) => {
+        await this.ensurePeerConnected(peerId, { signal: stepSignal });
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
         const remotePeer = this.node.libp2p.getConnections()
           .find((connection) => connection.remotePeer.toString() === peerId)
           ?.remotePeer;
-        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, signal))) return false;
+        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, stepSignal))) return false;
         return this.ensurePeerAdmittedForRecovery(
           peerId,
           ctx,
           'Exact asset fetch peer',
-          signal,
+          stepSignal,
         );
-      },
+      }),
       fetchFromPeer: async (peerId, uals) => {
         await this.syncExactKnowledgeAssetsFromPeerDetailed(
           peerId,
           localCgId,
           [...uals],
-          { signal, isCurrent },
+          {
+            signal,
+            isCurrent,
+            // The same UAL can move to a new root while the responder still
+            // holds its older exact-asset page session. A refresh must start
+            // from a new snapshot on every attempt; its pages still share one
+            // session within this invocation.
+            forceFreshExactSession: options.forceFreshExactSession === true,
+          },
         );
       },
       flush: async () => {
@@ -3342,6 +4250,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       scheduling = new VmReconcileSchedulingRuntime(
         (localCgId, source) => this.executeVmReconcileForCg(localCgId, source),
         (localCgId, err) => {
+          // Retired name-hash id: not a failure, nothing retries it
+          // (see supersedingContextGraphIdFor).
+          const supersedingId = this.supersedingContextGraphIdFor?.(localCgId);
+          if (supersedingId) {
+            this.log.debug(
+              createOperationContext('system'),
+              `VM reconcile for "${localCgId}" stopped: superseded by cleartext adoption of "${supersedingId}"`,
+            );
+            return;
+          }
           this.log.warn(
             createOperationContext('system'),
             `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
@@ -3351,8 +4269,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
           concurrency: DKGAgentBase.VM_RECONCILE_CONCURRENCY,
           maxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
+          discoveryBatchSize: DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
+          periodicBoundBatchSize: DKGAgentBase.VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE,
         },
-        DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
       );
       this.vmReconcileScheduling = scheduling;
     }
@@ -3370,15 +4289,36 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
-    const physicalRun = (async (): Promise<ContextGraphReconcileResult> => {
+    // Retired name-hash id: it names no local graph any more, the answer target
+    // resolution would give without a chain read (see supersedingContextGraphIdFor).
+    if (this.supersedingContextGraphIdFor?.(localCgId)) throw new ContextGraphNotFoundError(localCgId);
+    // Automatic passes (the historical catch-up walk above all) run in the
+    // background RPC class and store lane, so they cannot take the capacity
+    // reserved for publishing, StorageACKs and API reads. An operator's
+    // manual request keeps the caller's class.
+    const runInLane = <T>(work: () => Promise<T>): Promise<T> => source === 'manual'
+      ? work()
+      : withOwnedRpcRequestContext(
+        { requestClass: 'background', ...(lifecycleSignal ? { signal: lifecycleSignal } : {}) },
+        () => withDefaultStoreWorkPriority('background', work),
+      );
+    const physicalRun = runInLane(async (): Promise<ContextGraphReconcileResult> => {
+      const passStartedAt = performance.now();
+      const passGapMs = vmReconcilePassGapMs(this, localCgId, passStartedAt);
       const target = await this.resolveVmReconcileTarget(
         localCgId,
         isLifecycleCurrent,
         lifecycleSignal,
       );
+      const resolveTargetMs = performance.now() - passStartedAt;
       const isTargetCurrent = () => isLifecycleCurrent()
         && this.isVmReconcileTargetCurrent(localCgId, target, lifecycleGeneration);
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+      // #2858 — confirmed copies behind an on-chain update. The ordinal cursor
+      // never revisits a settled ordinal, so a worker beside this pass
+      // refreshes them. The pass never waits on it, and a slice that fails
+      // does not hold it back.
+      this.startVmRefreshWorker(localCgId, target.onChainId, isTargetCurrent, lifecycleSignal);
 
       // Reconcile on a private cursor snapshot. The caller-facing abort race may
       // finish before an adapter physically settles; a stale continuation must
@@ -3389,35 +4329,60 @@ export class SwmHostModeMethods extends DKGAgentBase {
         scanOrdinal: target.cursor.scanOrdinal,
       };
       let pendingWatermark: number | undefined;
-      const result = await reconcileContextGraph(
-        this.createVmReconcileDeps(
+      let result: VmReconcileEngineResult;
+      let engineTimings: ReconcilePassTimings | undefined;
+      try {
+        result = await reconcileContextGraph(
+          this.createVmReconcileDeps(
+            localCgId,
+            lifecycleGeneration,
+            target,
+            lifecycleSignal,
+            {
+              identityCursor: target.cursor,
+              persistWatermark: (_lcg, watermark) => { pendingWatermark = watermark; },
+              observePassTimings: (timings) => { engineTimings = timings; },
+            },
+          ),
+          workingCursor,
           localCgId,
-          lifecycleGeneration,
-          target,
-          lifecycleSignal,
-          {
-            identityCursor: target.cursor,
-            persistWatermark: (_lcg, watermark) => { pendingWatermark = watermark; },
-          },
-        ),
-        workingCursor,
-        localCgId,
-        target.onChainCgId,
-      );
+          target.onChainCgId,
+        );
+      } catch (err) {
+        // A rejected pass keeps what it proved (see `reconcileContextGraph`):
+        // its held completions and scan position move to the live cursor, so
+        // the retry neither re-verifies settled ordinals nor restarts the
+        // slice. The watermark and its persistence stay with a successful pass.
+        if (isTargetCurrent()) {
+          for (const [heldOrdinal, observedBlock] of workingCursor.ahead) {
+            if (heldOrdinal >= target.cursor.watermark && !target.cursor.ahead.has(heldOrdinal)) {
+              target.cursor.ahead.set(heldOrdinal, observedBlock);
+            }
+          }
+          target.cursor.scanOrdinal = Math.max(target.cursor.watermark, workingCursor.scanOrdinal);
+        }
+        throw err;
+      }
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+      let flushMs = 0;
       if (result.reconciled > 0 || pendingWatermark !== undefined) {
+        const flushStartedAt = performance.now();
         await this.store.flush?.({
           priority: 'background',
           source: 'agent.vmReconcile.materialization.flush',
         });
+        flushMs = performance.now() - flushStartedAt;
         if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
       }
+      let watermarkMs = 0;
       if (pendingWatermark !== undefined) {
+        const watermarkStartedAt = performance.now();
         await this.persistVmReconcileWatermark(
           localCgId,
           pendingWatermark,
           target,
         );
+        watermarkMs = performance.now() - watermarkStartedAt;
         if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
       }
       target.cursor.watermark = workingCursor.watermark;
@@ -3425,10 +4390,30 @@ export class SwmHostModeMethods extends DKGAgentBase {
       target.cursor.scanOrdinal = workingCursor.scanOrdinal;
       const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
       this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
+      observeVmRecoveryTiming(() => {
+        const timings = engineTimings;
+        this.log.info(
+          createOperationContext('system'),
+          `VM reconcile pass timing for "${localCgId}": source=${source} `
+            + `gapSincePreviousPassMs=${passGapMs === undefined ? '-' : Math.round(passGapMs)} `
+            + `resolveTargetMs=${Math.round(resolveTargetMs)} `
+            + `headReadMs=${Math.round(timings?.headReadMs ?? 0)} blockReadMs=${Math.round(timings?.blockReadMs ?? 0)} `
+            + `scanMs=${Math.round(timings?.scanMs ?? 0)} recoverMs=${Math.round(timings?.recoverMs ?? 0)} `
+            + `engineMs=${Math.round(timings?.totalMs ?? 0)} flushMs=${Math.round(flushMs)} `
+            + `watermarkMs=${Math.round(watermarkMs)} totalMs=${Math.round(performance.now() - passStartedAt)} `
+            + `processed=${result.processed} reconciled=${result.reconciled} pending=${result.pending} `
+            + `continue=${result.shouldContinueImmediately ? 1 : 0}`,
+        );
+      });
       // The reconciler owns the continuation policy: productive slices, stale
       // bindings, and explicit provider rotations continue immediately, while
       // pending-only historical inventory yields to the periodic sweep.
-      if (isLifecycleCurrent() && result.shouldContinueImmediately) {
+      if (isTargetCurrent() && result.localAdmissionDeferred) {
+        this.vmReconcileScheduling?.retryLocalAdmission(localCgId, {
+          signal: lifecycleSignal,
+          isCurrent: isTargetCurrent,
+        });
+      } else if (isLifecycleCurrent() && result.shouldContinueImmediately) {
         this.vmReconcileScheduling?.triggerLive(localCgId);
       } else if (isTargetCurrent()) {
         // RS heal is bounded, best-effort maintenance. Run it only after the
@@ -3455,8 +4440,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
         if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
       }
+      noteVmReconcilePassEnd(this, localCgId, performance.now());
       return response;
-    })();
+    });
     trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
     return raceVmReconcileAbort(physicalRun, lifecycleSignal);
   }
@@ -3945,11 +4931,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
         return headBlock;
       },
-      reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
+      reconcileOrdinal: (lcg, ocg, ordinal, headBlock, context) =>
         this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock, {
           isTargetCurrent,
           revalidateTarget,
           deferActiveFetch: true,
+          rememberFinalizedEvidence: context === undefined
+            || context.headOrdinal - ordinal <= DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
         }),
       recoverPendingOrdinals: (lcg, ocg, targets, headBlock) =>
         this.recoverVmReconcileBatch(
@@ -3996,6 +4984,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       },
       confirmationDepth: DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH,
       log: (msg) => this.log.info(createOperationContext('system'), msg),
+      ...(execution?.observePassTimings ? { observePassTimings: execution.observePassTimings } : {}),
     };
   }
 
@@ -4049,10 +5038,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
       return;
     }
-    await this.persistContextGraphSubscriptionStrict(
+    // Authoritative progress follows the subscription's own lifetime. A durable
+    // row (always-on member intent, or a Core's host-only obligation) is saved
+    // before the live cursor moves. An on-demand subscription writes nothing:
+    // like the subscription itself, its progress lives only in this process.
+    await this.persistContextGraphSyncStateStrict(
       localCgId,
       { ...sub, lastReconciledOrdinal: watermark },
-      undefined,
+      'VM reconcile cursor',
       isTargetCurrent,
     );
     if (!isTargetCurrent()) return;
@@ -4492,7 +5485,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   async collectVmReconcileSwmCandidateNamespaces(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmNamespace[]> {
     const graphManager = new GraphManager(this.store);
-    const subGraphNamespaces = (await graphManager.listSubGraphs(localCgId))
+    // `listSubGraphs` finds sub-graphs by their data or `_meta` graphs; a
+    // hosted-only core holds only `<cg>/<sub>/_shared_memory*` copies, which
+    // its StorageACK ledger names.
+    const subGraphs = [...new Set([
+      ...await graphManager.listSubGraphs(localCgId),
+      ...await this.storageAckLedgerNamespaceSubGraphs(localCgId),
+    ])];
+    const subGraphNamespaces = subGraphs
       .map((sg) => ({
         metaGraph: graphManager.sharedMemoryMetaUri(localCgId, sg),
         dataGraph: graphManager.sharedMemoryUri(localCgId, sg),
@@ -4548,7 +5548,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const peerId = peer.toString();
           return {
             peerId,
-            core: this.knownCorePeerIds.has(peerId),
+            core: this.peerCapabilityRegistry.supportsCore(peerId),
           };
         }),
       });
@@ -4926,6 +5926,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.pruneVmReconcileState();
   }
 
+  initializeVmReconcilePublicCoreTransportPreferencePolicy(this: DKGAgent): void {
+    this.vmReconcilePublicCoreTransportPreferencePolicy ??= new VmRecoveryCoreTransportPreferencePolicy({
+      now: () => this.vmReconcileRotationNow(),
+      connectionKey: peerId => this.getSyncReconcilerConnectionKey(peerId),
+      supportsCore: peerId => this.peerCapabilityRegistry.supportsCore(peerId),
+      holderReuseEnabled: resolveExactBatchStreamEnabled,
+      captureScope: (localCgId, candidatePeerIds) => typeof this.chain.deploymentId === 'string' ? {
+        deploymentId: this.chain.deploymentId,
+        lifecycleGeneration: this.vmReconcileLifecycleGeneration,
+        bindingGeneration: this.contextGraphBindingState.capture(localCgId),
+        selectedBindingGeneration: this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration,
+        candidatePeerIds: [...candidatePeerIds],
+      } : undefined,
+      scopeIsCurrent: (localCgId, scope) => this.chain.deploymentId === scope.deploymentId
+        && this.vmReconcileLifecycleGeneration === scope.lifecycleGeneration
+        && !this.vmReconcileRotationClosed
+        && this.contextGraphBindingState.capture(localCgId) === scope.bindingGeneration
+        && this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration === scope.selectedBindingGeneration
+        && this.vmReconcilePeerMembershipMatches(
+          new Set(scope.candidatePeerIds),
+          this.vmReconcileObservedCandidatePeerIds(localCgId),
+        ),
+    }, {
+      ttlMs: DKGAgentBase.VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS,
+      maxEntries: DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES,
+    });
+  }
+
   vmReconcileRotationNow(this: DKGAgent): number {
     return performance.now();
   }
@@ -5274,12 +6302,28 @@ export class SwmHostModeMethods extends DKGAgentBase {
     record: VmReconcileRotationRecord | undefined,
     fallbackCandidatePeerIds: readonly string[],
     policy: VmRecoveryProviderPolicy,
+    binding?: { localCgId: string; onChainCgId: string; experimentalStreamPeerIds?: ReadonlySet<string> },
   ): string | undefined {
     const uncreditedCandidateOrder = record
       ? this.vmReconcileUncreditedCandidateOrder(record)
       : fallbackCandidatePeerIds;
+    const preferredPeerId = binding
+      ? this.vmReconcilePublicCoreTransportPreferencePolicy.preferredPeer(
+          binding.localCgId, binding.onChainCgId, uncreditedCandidateOrder,
+        )
+      : undefined;
+    // Reorder only the already capped, uncredited transport list. Never add a
+    // hinted peer to curator membership or earn a clean-absence/presence credit.
+    const ordinaryTransportOrder = preferredPeerId
+      ? [preferredPeerId, ...uncreditedCandidateOrder.filter((peerId) => peerId !== preferredPeerId)]
+      : uncreditedCandidateOrder;
+    const streamCandidates = uncreditedCandidateOrder.filter((peerId) =>
+      binding?.experimentalStreamPeerIds?.has(peerId));
+    const transportOrder = streamCandidates.length === 0
+      ? ordinaryTransportOrder
+      : [...streamCandidates, ...ordinaryTransportOrder.filter((peerId) => !streamCandidates.includes(peerId))];
     return policy.selectNextCandidate(
-      uncreditedCandidateOrder,
+      transportOrder,
       DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
     );
   }
@@ -5364,6 +6408,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (key.startsWith(prefix)) this.vmReconcileRotationState.delete(key);
     }
     this.vmReconcileRotationAdmissionCursorByCg.delete(localCgId);
+    this.vmReconcilePublicCoreTransportPreferencePolicy?.forgetContextGraph(localCgId);
+    existingVmRecoveryPreparation(this)?.discard(localCgId);
   }
 
   closeVmReconcileRotationState(this: DKGAgent): void {
@@ -5379,6 +6425,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
     this.vmReconcileExactPeerCapabilities?.clear();
+    this.vmReconcilePublicCoreTransportPreferencePolicy?.clear();
+    this.vmRefreshQueue?.clear();
+    // Cancel speculative sizing reads and let shutdown wait for them to settle.
+    const preparation = existingVmRecoveryPreparation(this);
+    if (preparation && this.vmReconcilePhysicalRuns) {
+      trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, preparation.close());
+    } else {
+      void preparation?.close();
+    }
   }
 
   openVmReconcileRotationState(this: DKGAgent): void {
@@ -5609,6 +6664,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
     this.clearRecentVmReconcileStateForContextGraph(localCgId);
+    this.vmRefreshQueue?.clearContextGraph(localCgId);
   }
 
   clearRecentVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
@@ -5738,10 +6794,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Execute one already-admitted provider attempt. The caller owns
-   * roster/admission, packing, and provider affinity; this executor owns the
-   * exact request or cached legacy fallback, per-UAL chain revalidation, and
-   * rotation settlement.
+   * Execute one provider after connection/network readiness. The caller owns
+   * roster, packing, and provider affinity; local sync admission starts the
+   * physical attempt before rotation marks are installed. This executor owns
+   * exact or cached legacy work, per-UAL chain revalidation, and settlement.
    * Returns immutable evidence for the caller to merge. A stale lifecycle is
    * discriminated by whether the physical attempt had already been admitted;
    * only the pre-admission variant guarantees zero attempt side effects.
@@ -5757,6 +6813,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
+    exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+    /**
+     * The owning pass's own fresh positive registered-public answer, for the exchange's
+     * pre-flight to rely on instead of reading it a second time. Only this exchange gets it.
+     */
+    registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+    /** Observation only: charged for the exchange and the post-fetch revalidation. */
+    phases?: VmRecoveryPhaseRecorder;
   }): Promise<VmRecoveryBatchExecutionResult> {
     const {
       localCgId,
@@ -5769,6 +6833,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       isRecoveryCurrent,
       revalidateTarget,
       ctx,
+      exactRecoveryTransportMode = 'stream-preferred',
+      registeredPublicEvidence,
+      phases,
     } = input;
     const unavailablePeerIdSet = new Set(unavailablePeerIds);
 
@@ -5777,39 +6844,45 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // until this exact lifecycle has been re-proved at the ownership boundary.
     if (!isRecoveryCurrent()) return { kind: 'not-started-stale' };
 
-    const useCachedLegacyFallback = this.vmReconcileExactFilterUnsupported(peerId);
+    const useCachedLegacyFallback = exactRecoveryTransportMode !== 'stream-required'
+      && this.vmReconcileExactFilterUnsupported(peerId);
 
     const handledOrdinals: number[] = [];
     const attemptedOrdinals: number[] = [];
     const outcomes: Array<readonly [number, OrdinalOutcome]> = [];
-
-    for (const attempt of attempts) {
-      const batchTarget = attempt.entry.target;
-      handledOrdinals.push(batchTarget.ordinal);
-      attemptedOrdinals.push(batchTarget.ordinal);
-      if (attempt.installedRecord) {
-        attempt.installedRecord.lastAttemptedPeerId = peerId;
-        attempt.installedRecord.attemptedPeerIds.add(peerId);
-        attempt.installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
-          + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
-        this.touchVmReconcileRotationRecord(
-          this.vmReconcileRotationSlotKey(batchTarget),
-          attempt.installedRecord,
-        );
+    let workStarted = false;
+    const onWorkStarted = (): void => {
+      if (workStarted || !isRecoveryCurrent()) return;
+      workStarted = true;
+      for (const attempt of attempts) {
+        const batchTarget = attempt.entry.target;
+        handledOrdinals.push(batchTarget.ordinal);
+        attemptedOrdinals.push(batchTarget.ordinal);
+        const record = attempt.installedRecord;
+        const slotKey = this.vmReconcileRotationSlotKey(batchTarget);
+        if (record && this.vmReconcileRotationState.get(slotKey) === record
+          && record.fingerprint === this.vmReconcileRotationFingerprint(batchTarget)) {
+          record.lastAttemptedPeerId = peerId;
+          record.attemptedPeerIds.add(peerId);
+          record.collectionDeadlineAt = this.vmReconcileRotationNow()
+            + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+          this.touchVmReconcileRotationRecord(slotKey, record);
+        }
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'fetch',
+          ordinal: batchTarget.ordinal,
+          kaId: batchTarget.kaId,
+          ual: batchTarget.ual,
+          detail: useCachedLegacyFallback
+            ? 'legacy-sync'
+            : attempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
+        });
       }
-      this.emitReplication({
-        contextGraphId: localCgId,
-        onChainCgId: onChainCgId.toString(),
-        action: 'fetch',
-        ordinal: batchTarget.ordinal,
-        kaId: batchTarget.kaId,
-        ual: batchTarget.ual,
-        detail: useCachedLegacyFallback
-          ? 'legacy-sync'
-          : attempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
-      });
-    }
+    };
     let disposition: VmRecoveryUalDisposition = 'incomplete';
+    let localAdmissionDeferred = false;
     const runLegacyFallback = async (): Promise<void> => {
       try {
         const fallback = await this.runLegacyDurableSyncDetailed(
@@ -5823,10 +6896,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
             stopOnBackoffWorthyFailure: true,
             priority: 1_000,
             source: 'vm-recovery',
+            onWorkStarted,
             signal,
             isCurrent: isRecoveryCurrent,
           },
         );
+        if (fallback.admission === 'work-started') onWorkStarted();
+        // An admitted exact request retains its attempt through a refused
+        // fallback. Only the original never-started operation can defer.
+        localAdmissionDeferred = !workStarted && fallback.admission === 'local-admission-deferred';
         this.log.info(
           ctx,
           `VM legacy fallback for "${localCgId}" from ${peerId.slice(-8)}: fetched=${fallback.result.fetchedDataTriples + fallback.result.fetchedMetaTriples} inserted=${fallback.result.insertedTriples} failed=${fallback.result.failedPeers + fallback.result.failedPhases}`,
@@ -5838,6 +6916,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
       }
     };
+    const exchangeInterval = phases?.begin();
     try {
       if (useCachedLegacyFallback) {
         await runLegacyFallback();
@@ -5846,11 +6925,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
           peerId,
           localCgId,
           attempts.map(({ entry }) => entry.target.ual),
-          { signal, isCurrent: isRecoveryCurrent },
+          {
+            signal, isCurrent: isRecoveryCurrent, onWorkStarted, exactRecoveryTransportMode,
+            ...(registeredPublicEvidence ? { registeredPublicEvidence } : {}),
+          },
         );
         const { result } = detailed;
         disposition = detailed.disposition;
-        if (detailed.responderCapability === 'legacy-filter-unsupported') {
+        // A fresh capability response is physical peer evidence even when
+        // its later ordinary fallback cannot acquire local capacity.
+        if (detailed.admission === 'work-started' || detailed.responderCapability !== undefined) onWorkStarted();
+        localAdmissionDeferred = !workStarted && detailed.admission === 'local-admission-deferred';
+        if (exactRecoveryTransportMode !== 'stream-required' && detailed.responderCapability === 'legacy-filter-unsupported') {
           this.rememberVmReconcileExactFilterUnsupported(peerId);
           if (isRecoveryCurrent() && disposition === 'incomplete') {
             await runLegacyFallback();
@@ -5867,12 +6953,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
         `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
+    if (phases && exchangeInterval) phases.chargeSince('exchange', exchangeInterval.startedAt, exchangeInterval.before);
+    if (!isRecoveryCurrent()) return { kind: workStarted ? 'stale-after-attempt' : 'not-started-stale' };
+    if (localAdmissionDeferred) return { kind: 'local-admission-deferred' };
 
     const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
+    const postFetch = <T>(run: () => Promise<T>): Promise<T> => (
+      phases ? phases.measure('post-fetch', run) : run());
     for (const attempt of attempts) {
       const batchTarget = attempt.entry.target;
-      const outcome = await this.reconcileChainOrdinal(
+      const outcome = await postFetch(() => this.reconcileChainOrdinal(
         localCgId,
         onChainCgId,
         batchTarget.ordinal,
@@ -5882,7 +6972,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           revalidateTarget,
           deferActiveFetch: true,
         },
-      );
+      ));
       if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
       outcomes.push([batchTarget.ordinal, outcome]);
       const perTargetDisposition: VmRecoveryUalDisposition = (
@@ -5894,6 +6984,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           : 'incomplete';
       perUalDispositions.set(batchTarget.ual, perTargetDisposition);
       if (outcome.status === 'pending' && outcome.recovery) {
+        if (!workStarted) continue;
         const batchRecord = attempt.installedRecord;
         if (!batchRecord || this.vmReconcileRotationClosed) continue;
         if (
@@ -5955,6 +7046,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && this.vmReconcileLifecycleGeneration === rotationGeneration
       && isTargetCurrent();
     const ctx = createOperationContext('system');
+    // Advisory sizing preparation (opt-in, default off). Created lazily and
+    // owned by this host; every hint is bound to this exact recovery operation.
+    const readUpdateContextForPreparation = this.chain.getKnowledgeAssetUpdateContext;
+    const preparation = resolveVmRecoveryPrefetchEnabled(this.config.vmRecoveryPrefetchEnabled)
+      ? vmRecoveryPreparationFor(
+        this,
+        typeof readUpdateContextForPreparation === 'function'
+          ? { readUpdateContext: (id, readOptions) => readUpdateContextForPreparation.call(this.chain, id, readOptions) }
+          : null,
+      )
+      : undefined;
+    const preparationScope: VmRecoveryPreparationScope = {
+      localCgId,
+      onChainCgId,
+      generation: rotationGeneration,
+      ...(signal ? { signal } : {}),
+      isCurrent: isRecoveryCurrent,
+    };
+    // Observation only: none of these values is consulted by a recovery decision.
+    const phases = new VmRecoveryPhaseRecorder();
+    const passStartedAt = performance.now();
+    let executedBatches = 0;
+    let executedAssets = 0;
     const noRecovery = (
       continuationOrdinal?: number,
       cooldownOnly = false,
@@ -6104,7 +7218,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ...(this.vmReconcileCuratorPeersByCg.get(localCgId) ?? []),
     ];
     const curatorPageCursor = this.vmReconcileCuratorPageCursorByCg.get(localCgId);
-    const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId, {
+    const curatorResolution = await phases.measure('roster', () => this.resolveCuratorPeerIdsForCg(localCgId, {
       maxPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
       // Once overflow is proven, expose exactly one new ordered peer per pass.
       // One target can spend only one peer attempt, so advancing by more would
@@ -6119,7 +7233,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         curatorIsLocal: false,
         legacyTripleResolved: false,
         lookupFailed: true,
-      }));
+      })));
     if (!isRecoveryCurrent()) return staleRecovery();
     const allResolvedCuratorPeerIds = [...new Set(curatorResolution.peerIds
       .filter((peerId) => peerId && peerId !== this.peerId))]
@@ -6178,7 +7292,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let legacyPreferredPeerId: string | undefined;
     if (resolutionSucceeded && !curatorResolution.curatorIsLocal
       && resolvedCuratorPeerIds.length === 0) {
-      legacyPreferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
+      legacyPreferredPeerId = await phases.measure(
+        'roster',
+        () => this.resolvePreferredSyncPeerId(localCgId),
+      );
     }
     if (!isRecoveryCurrent()) return staleRecovery();
     const authoritativeCuratorPeerIds = resolutionSucceeded
@@ -6213,9 +7330,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
       this.vmReconcileCuratorPageCursorByCg.set(localCgId, legacyPagination.nextPageAfterPeerId);
     }
-    if (!curatorResolution.curatorIsLocal && curatorPeerIds.length > 0) {
-      this.vmReconcileCuratorPeersByCg.delete(localCgId);
-      this.vmReconcileCuratorPeersByCg.set(localCgId, curatorPeerIds);
+    if (!curatorResolution.curatorIsLocal) {
+      if (curatorPeerIds.length > 0) {
+        this.vmReconcileCuratorPeersByCg.delete(localCgId);
+        this.vmReconcileCuratorPeersByCg.set(localCgId, curatorPeerIds);
+      } else {
+        // Without the durable phonebook an empty curator tier usually means
+        // the owner's profile was never fetched, and this pass can only ask
+        // peers it is already connected to. One bounded phonebook fetch serves
+        // every graph; its completion re-schedules this graph's recovery.
+        this.requestOnDemandAgentsPhonebook(localCgId, 'vm-reconcile');
+      }
     }
     this.pruneVmReconcileState();
 
@@ -6227,6 +7352,71 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Curator resolution may connect a missing peer, but it must not substitute
     // a different ranking algorithm and invalidate an otherwise stable roster.
     const orderedPeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
+    // Only an explicit experimental run may reorder these existing capped
+    // transport candidates. The proof roster and every target's independent
+    // attempted/absence credits stay unchanged. Identify does not prove data.
+    const experimentalStreamPeerIds = new Set<string>();
+    // Observation only: why this pass did or did not choose the stream wire.
+    let streamAdvertisedCount = 0;
+    const advertisedStreamPeers = new Set<string>();
+    // The registered-public answer that gates the stream wire. Retry eligibility, the wire
+    // choice and the log label all derive from this one typed observation.
+    const passAuthority = new VmRecoveryPassAuthority();
+    const readRegisteredPublicAuthority = async (): Promise<void> => {
+      await phases.measure('authority', () => passAuthority.read(() => this.resolveRegisteredContextGraphAuthority(localCgId, {
+        authorityReadMode: 'finalized-index-or-live', signal,
+      })));
+      if (passAuthority.isPublic && isRecoveryCurrent()) {
+        for (const advertisedPeerId of advertisedStreamPeers) experimentalStreamPeerIds.add(advertisedPeerId);
+      }
+    };
+    let entryPrepared = false;
+    const prepareThisPassTargets = (): void => {
+      if (!preparation || entryPrepared || orderedPeerIds.length === 0) return;
+      entryPrepared = true;
+      // The planner sizes this pass's own targets as soon as a provider is chosen.
+      // Start that early, but never ahead of the registered-authority read that gates
+      // the wire: a miss there costs far more than the sizing it would overlap. The
+      // first target keeps its own live read (a probe sizes its single asset itself),
+      // so preparing never adds a read the unprepared path would not make. Pure
+      // metadata: nothing is marked handled or attempted.
+      preparation.prepare(preparationScope, currentTargets
+        .slice(1)
+        .map((candidate) => ({ kaId: candidate.kaId })));
+    };
+    if (resolveExactBatchStreamEnabled()) {
+      const transportInterval = phases.begin();
+      const advertised = await Promise.all(orderedPeerIds
+        .filter((peerId) => connectedByPeerId.has(peerId)
+          && this.peerCapabilityRegistry.supportsCore(peerId)
+          && !exactBatchStreamUnsupported(this, peerId, this.getSyncReconcilerConnectionKey(peerId), Date.now(),
+            this.captureExperimentalExactBatchRefusalScope(localCgId)))
+        .map(async (peerId) => {
+          try { return (await this.getPeerProtocols(peerId)).includes(EXACT_BATCH_STREAM_PROTOCOL) ? peerId : undefined; }
+          catch { return undefined; }
+        }));
+      phases.chargeSince('transport', transportInterval.startedAt, transportInterval.before);
+      streamAdvertisedCount = advertised.filter((peerId) => peerId !== undefined).length;
+      if (streamAdvertisedCount > 0) {
+        for (const advertisedPeerId of advertised) {
+          if (advertisedPeerId !== undefined) advertisedStreamPeers.add(advertisedPeerId);
+        }
+        await readRegisteredPublicAuthority();
+        if (!isRecoveryCurrent()) return staleRecovery();
+        prepareThisPassTargets();
+        if (preparation && passAuthority.missed) {
+          // A miss here is usually the shared local request budget, not the graph: the
+          // read's detached resolution keeps warming the projection cache after its
+          // deadline. Give it a short, bounded moment and ask once more before the
+          // pass commits to the legacy singleton wire for every provider it tries.
+          await phases.measure('authority', () => vmRecoveryRetryDelay(preparation.limits.authorityRetryMinIntervalMs, signal));
+          if (!isRecoveryCurrent()) return staleRecovery();
+          await readRegisteredPublicAuthority();
+          if (!isRecoveryCurrent()) return staleRecovery();
+        }
+      }
+    }
+    prepareThisPassTargets();
 
     // Curator preparation may have grown or shrunk the connected candidate
     // set. Re-evaluate every target against that observed change. Any roster
@@ -6306,12 +7496,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const providerPolicy = new VmRecoveryProviderPolicy();
     const handledBatchOrdinals = new Set<number>();
     let recoveryWorkRan = false;
+    let localAdmissionDeferred = false;
 
     for (let eligibleIndex = 0; eligibleIndex < eligible.length; eligibleIndex += 1) {
       if (!isRecoveryCurrent()) break;
       const entry = eligible[eligibleIndex]!;
       const { target } = entry;
       if (handledBatchOrdinals.has(target.ordinal)) continue;
+      const iterationStartedAt = performance.now();
+      const iterationRpcMark = markVmRecoveryRpc();
+      // A transport plan sizes once, so there is at most one observation per provider attempt.
+      let sizingObservation: VmRecoveryFootprintObservation | undefined;
+      const recordSizing = (observation: VmRecoveryFootprintObservation): void => {
+        sizingObservation = observation;
+      };
       const record = entry.prepared.record;
       const installedRecord = record
         && this.vmReconcileRotationState.get(this.vmReconcileRotationSlotKey(target)) === record
@@ -6327,31 +7525,39 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // uncredited, but consume this target's turn so another missing KA gets
       // the next physical peer slot in the same bounded pass.
       let peerId: string | undefined;
+      if (
+        preparation
+        && advertisedStreamPeers.size > 0
+        && passAuthority.retryDue(preparation.limits.authorityRetryMinIntervalMs)
+      ) {
+        // One pass can try several providers over minutes, and every wire choice below
+        // follows this single registered-public observation. A transient miss at pass
+        // start (the read shares a saturated local request budget; its detached
+        // resolution keeps warming the projection cache) would otherwise pin every
+        // later provider of the pass to the legacy singleton wire. Read it again, at
+        // most once per interval, before choosing the next provider.
+        await readRegisteredPublicAuthority();
+        if (!isRecoveryCurrent()) return staleRecovery();
+      }
       const candidatePeerId = this.selectVmReconcileExactCandidate(
         installedRecord,
         orderedPeerIds,
         providerPolicy,
+        { localCgId, onChainCgId: expectedOnChainCgId, experimentalStreamPeerIds },
+      );
+      // One policy capture owns every later transition and token fence.
+      const preferenceAttempt = this.vmReconcilePublicCoreTransportPreferencePolicy.capture(
+        localCgId, expectedOnChainCgId, orderedPeerIds,
       );
       if (candidatePeerId) {
-        attemptedOrdinals.add(target.ordinal);
-        if (installedRecord) {
-          installedRecord.lastAttemptedPeerId = candidatePeerId;
-          installedRecord.attemptedPeerIds.add(candidatePeerId);
-          installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
-            + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
-          this.touchVmReconcileRotationRecord(
-            this.vmReconcileRotationSlotKey(target),
-            installedRecord,
-          );
-        }
         let connectedPeer = connectedByPeerId.get(candidatePeerId);
         if (!connectedPeer) {
-          await this.ensurePeerConnected(candidatePeerId, { signal }).catch((error) => {
+          await phases.measure('peer-ready', () => this.ensurePeerConnected(candidatePeerId, { signal }).catch((error) => {
             this.log.info(
               ctx,
               `VM exact fetch could not connect candidate peer ${candidatePeerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
             );
-          });
+          }));
           if (!isRecoveryCurrent()) return staleRecovery();
           const connection = this.node.libp2p.getConnections()
             .find((candidate) => candidate.remotePeer.toString() === candidatePeerId);
@@ -6360,7 +7566,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
         recoveryWorkRan = true;
         const protocolReady = connectedPeer
-          ? await this.waitForSyncProtocol(connectedPeer, signal)
+          ? await phases.measure('peer-ready', () => this.waitForSyncProtocol(connectedPeer!, signal))
           : false;
         if (!isRecoveryCurrent()) return staleRecovery();
         if (!connectedPeer || !protocolReady) {
@@ -6369,18 +7575,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
           // Network boundary: a merely-connected peer is not necessarily
           // admitted to this DKG network. Never send an authenticated exact
           // request to an unverified or rejected peer.
-          const peerAdmitted = await this.ensurePeerAdmittedForRecovery(
+          const peerAdmitted = await phases.measure('peer-ready', () => this.ensurePeerAdmittedForRecovery(
             candidatePeerId,
             ctx,
             'VM exact fetch',
             signal,
-          );
+          ));
           if (!isRecoveryCurrent()) return staleRecovery();
           if (!peerAdmitted) providerPolicy.markUnavailable(candidatePeerId);
           else peerId = candidatePeerId;
         }
       }
       if (!peerId) {
+        if (candidatePeerId) {
+          this.vmReconcilePublicCoreTransportPreferencePolicy.revoke(preferenceAttempt, candidatePeerId);
+        }
+        // A failed connection/protocol/network-admission probe still consumes
+        // its bounded provider turn. A ready peer is marked only by the exact
+        // executor after local sync capacity admits its physical work.
+        if (candidatePeerId) {
+          attemptedOrdinals.add(target.ordinal);
+          if (installedRecord) {
+            installedRecord.lastAttemptedPeerId = candidatePeerId;
+            installedRecord.attemptedPeerIds.add(candidatePeerId);
+            installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
+              + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+            this.touchVmReconcileRotationRecord(this.vmReconcileRotationSlotKey(target), installedRecord);
+          }
+        }
         if (installedRecord) {
           this.settleVmReconcileRotationAttempt(
             target,
@@ -6393,21 +7615,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
         continue;
       }
+      const carriedHolder = this.vmReconcilePublicCoreTransportPreferencePolicy.canReuse(
+        preferenceAttempt, peerId, candidatePeerIds,
+      );
+      if (carriedHolder) providerPolicy.seedProvenHolder(peerId);
       const providerAttempt = providerPolicy.beginAttempt(peerId);
       if (!providerAttempt) continue;
-
-      let batchAttempts: VmRecoveryBatchAttempt[] = [{
-        entry,
-        installedRecord,
-        candidatePeerIds,
-      }];
-
-      // The first exact request to a peer remains a single-KA probe. Once that
-      // probe has proved the peer is a holder, pack a stable compatible prefix
-      // by authoritative size hints. Unknown footprints stay singleton; the
-      // exact-sync protocol's ten-UAL cap remains the hard upper bound.
-      if (providerAttempt.kind === 'proven-holder-reuse') {
-        const compatible: VmRecoveryBatchAttempt[] = [];
+      const admittedConnectionKey = this.getSyncReconcilerConnectionKey(peerId);
+      // Choose the admitted singleton probe or rotation-compatible holder
+      // prefix before sizing; one pipeline owns its selection and wire mode.
+      const candidateAttempts: VmRecoveryBatchAttempt[] = [];
+      if (providerAttempt.kind === 'probe') {
+        candidateAttempts.push({ entry, installedRecord, candidatePeerIds });
+      } else {
         for (let candidateIndex = eligibleIndex; candidateIndex < eligible.length; candidateIndex += 1) {
           const candidateEntry = eligible[candidateIndex]!;
           const candidateTarget = candidateEntry.target;
@@ -6419,15 +7639,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
             ) === candidateRecord
             ? candidateRecord
             : undefined;
-          // The current target was selected and marked attempted before the
-          // connection/admission boundary. Later candidates must still prove
+          // The current target already passed connection/network admission.
+          // Later candidates must still prove
           // this peer remains uncredited in their independent rotation record.
           const peerEligible = candidateIndex === eligibleIndex
             || (candidateInstalledRecord
               ? this.vmReconcileUncreditedCandidateOrder(candidateInstalledRecord).includes(peerId)
               : orderedPeerIds.includes(peerId));
           if (!peerEligible) break;
-          compatible.push({
+          candidateAttempts.push({
             entry: candidateEntry,
             installedRecord: candidateInstalledRecord,
             candidatePeerIds: candidateInstalledRecord
@@ -6435,91 +7655,127 @@ export class SwmHostModeMethods extends DKGAgentBase {
               : orderedPeerIds,
           });
         }
-        // Only candidates that survived rotation/admission are sized. Keeping
-        // this hint local to the planner avoids broadening the canonical chain
-        // ordinal target and does not waste bounded RPC reads on ineligible
-        // prefixes. Missing/failed hints remain conservative singletons.
-        const readVmRecoveryUpdateContext = this.chain.getKnowledgeAssetUpdateContext;
-        const sizedCandidates = await enrichVmRecoveryFootprints(
-          compatible.map((attempt) => ({
-            attempt,
-            kaId: attempt.entry.target.kaId,
+      }
+      const streamEligibleProvider = passAuthority.isPublic && experimentalStreamPeerIds.has(peerId)
+        && !exactBatchStreamUnsupported(this, peerId, admittedConnectionKey, Date.now(),
+          this.captureExperimentalExactBatchRefusalScope(localCgId));
+      let transportPlan: Awaited<ReturnType<typeof planVmRecoveryTransport<VmRecoveryBatchAttempt>>>;
+      try {
+        transportPlan = await phases.measure('sizing', () => planVmRecoveryTransport({
+          candidates: candidateAttempts.map(attempt => ({
+            attempt, kaId: attempt.entry.target.kaId, assetUal: attempt.entry.target.ual,
           })),
-          onChainCgId,
-          {
-            resolvePublicAccess: async (contextGraphId) => (
-              await withRpcUsageSite(
-                CG_AUTH_RPC_SITES.vmSizing,
-                // Sizing a recovery batch: this decides how much to READ, not
-                // who may. A bound stale by one index tick changes a batch
-                // size, and the next pass corrects it. Inert unless the
-                // operator enables `chain.boundedAuthorityReads`.
-                () => this.readLiveOnChainAccessPolicy(
-                  contextGraphId.toString(), ctx, { freshness: 'bounded' },
-                ),
-              )
-            ) === 0,
-            sizing: typeof readVmRecoveryUpdateContext === 'function'
-              ? {
-                  readUpdateContext: (kaId, readOptions) =>
-                    readVmRecoveryUpdateContext.call(this.chain, kaId, readOptions),
-                }
-              : null,
+          providerAttemptKind: providerAttempt.kind, onChainCgId,
+          streamEligible: streamEligibleProvider, registeredPublicAccess: passAuthority.isPublic,
+          signal, isCurrent: isRecoveryCurrent,
+          observeSizing: recordSizing,
+          // Start reads in candidate order with a small bound so each read's
+          // deadline measures its own round trip, not its wait in the local
+          // RPC governor behind earlier candidates.
+          ...(preparation
+            ? {
+              sizingReadConcurrency: preparation.limits.planningReadConcurrency,
+              sizingReadTimeoutMs: preparation.limits.planningReadTimeoutMs,
+            }
+            : {}),
+        }, {
+          createSizingReader: () => {
+            const readContext = this.chain.getKnowledgeAssetUpdateContext;
+            return typeof readContext === 'function'
+              ? { readUpdateContext: (kaId, readOptions) => readContext.call(this.chain, kaId, readOptions) }
+              : null;
           },
-          {
-            maxContextReads: MAX_EXACT_SYNC_ASSETS,
-            signal,
-            isCurrent: isRecoveryCurrent,
-          },
+          resolvePublicAccess: async contextGraphId => (await withRpcUsageSite(
+            CG_AUTH_RPC_SITES.vmSizing,
+            // This bounded observation controls soft sizing only. Canonical
+            // root/version/binding authority is still checked per asset.
+            () => this.readLiveOnChainAccessPolicy(
+              contextGraphId.toString(), ctx, { freshness: 'bounded' },
+            ),
+          )) === 0,
+          ...(preparation ? { preparedHints: preparation.hintsFor(preparationScope) } : {}),
+        }));
+      } finally {
+        // Whatever a holder plan did not take is discarded and its slot freed.
+        if (providerAttempt.kind !== 'probe') preparation?.release(preparationScope);
+      }
+      if (!isRecoveryCurrent()) return providerAttempt.kind === 'probe' ? staleRecovery() : noRecovery();
+      const {
+        attempts: batchAttempts, transportMode: exactRecoveryTransportMode,
+        publicAccessEvidence: publicRecoveryAccessVerified, packing,
+      } = transportPlan;
+      if (batchAttempts.length === 0) {
+        this.vmReconcilePublicCoreTransportPreferencePolicy.revoke(preferenceAttempt, peerId);
+        this.log.warn(
+          ctx,
+          `VM exact recovery selector for "${localCgId}" exceeds the executor cap; `
+            + `ordinal=${target.ordinal} selectorCap=${VM_EXACT_MICROBATCH_LIMITS.maxSelectorBytes}`,
         );
-        if (!isRecoveryCurrent()) return noRecovery();
-        const plannableTargets = sizedCandidates.map(({ attempt, recoveryFootprint }) => ({
-          attempt,
-          recoveryFootprint,
-        } satisfies VmRecoveryTargetFootprint & { attempt: VmRecoveryBatchAttempt }));
-        const plan = planVmRecoveryMicrobatch(
-          plannableTargets,
-          VM_EXACT_MICROBATCH_LIMITS,
-          (plannedTargets) => Buffer.byteLength(
-            encodeExactAssetUals(plannedTargets.map(
-              ({ attempt }) => attempt.entry.target.ual,
-            )),
-            'utf8',
-          ),
-        );
-        if (plan.targets.length === 0) {
-          this.log.warn(
-            ctx,
-            `VM exact recovery selector for "${localCgId}" exceeds the executor cap; `
-              + `ordinal=${target.ordinal} selectorCap=${VM_EXACT_MICROBATCH_LIMITS.maxSelectorBytes}`,
-          );
-          if (installedRecord) {
-            this.settleVmReconcileRotationAttempt(
-              target,
-              undefined,
-              'incomplete',
-              candidatePeerIds,
-              installedRecord,
-              providerPolicy.unavailablePeerIds(),
-            );
-          }
-          providerPolicy.finishAttempt(
-            providerAttempt,
+        if (installedRecord) {
+          this.settleVmReconcileRotationAttempt(
+            target,
+            undefined,
             'incomplete',
-            new Map<string, VmRecoveryUalDisposition>([[target.ual, 'incomplete']]),
+            candidatePeerIds,
+            installedRecord,
+            providerPolicy.unavailablePeerIds(),
           );
-          continue;
         }
-        batchAttempts = plan.targets.map(({ attempt }) => attempt);
+        providerPolicy.finishAttempt(
+          providerAttempt,
+          'incomplete',
+          new Map<string, VmRecoveryUalDisposition>([[target.ual, 'incomplete']]),
+        );
+        continue;
+      }
+      observeVmRecoveryTiming(() => this.log.info(
+        ctx,
+        `VM exact recovery transport for "${localCgId}" from ${peerId.slice(-8)}: kind=${providerAttempt.kind} `
+          + `transport=${exactRecoveryTransportMode} assets=${batchAttempts.length} `
+          + `streamAdvertised=${streamAdvertisedCount} streamPeers=${experimentalStreamPeerIds.size} `
+          + `registeredAuthority=${passAuthority.label}`,
+      ));
+      if (preparation) {
+        // The candidates after this batch are the next batch's work. Resolved hints
+        // are retained, unresolved ones are read while this batch transfers. Pure
+        // metadata: nothing is marked handled and no candidate is skipped.
+        preparation.prepare(preparationScope, providerAttempt.kind === 'probe'
+          ? eligible
+            .slice(eligibleIndex + 1)
+            .filter((candidate) => !handledBatchOrdinals.has(candidate.target.ordinal))
+            .map((candidate) => ({ kaId: candidate.target.kaId }))
+          : transportPlan.unplanned.map(({ attempt, recoveryFootprint }) => ({
+            kaId: attempt.entry.target.kaId,
+            ...(recoveryFootprint ? { footprint: recoveryFootprint } : {}),
+          })));
+      }
+      if (packing !== undefined) {
         this.log.info(
           ctx,
           `VM exact recovery plan for "${localCgId}" from ${peerId.slice(-8)}: `
-            + `assets=${batchAttempts.length} estimatedBytes=${plan.estimatedBytes} `
-            + `estimatedLeaves=${plan.estimatedLeaves} `
-            + `completeFootprints=${plan.completeFootprints}`,
+            + `assets=${batchAttempts.length} estimatedBytes=${packing.estimatedBytes} `
+            + `estimatedLeaves=${packing.estimatedLeaves} `
+            + `completeFootprints=${packing.completeFootprints} transport=${exactRecoveryTransportMode}`,
         );
       }
 
+      if (carriedHolder && !this.vmReconcilePublicCoreTransportPreferencePolicy.revalidateReuse(
+        preferenceAttempt, peerId, admittedConnectionKey,
+      )) {
+        // Sizing outlived the captured holder proof; the next slice must probe.
+        if (activeFetchCooldownOwner !== undefined) {
+          this.clearVmReconcileActiveFetchCooldown(localCgId, activeFetchCooldownOwner);
+        }
+        return {
+          outcomes, attemptedOrdinals: [...attemptedOrdinals],
+          continuationOrdinal: target.ordinal, hasImmediateRecoveryWork: true, cooldownOnly: false,
+        };
+      }
+      // Only while preparation is on: the exchange may rely on this pass's own fresh positive
+      // answer instead of reading it again. The handle dies with the exchange.
+      const registeredPublicEvidence = preparation
+        ? passAuthority.evidence({ contextGraphId: localCgId, signal, isCurrent: isRecoveryCurrent })
+        : undefined;
       const execution = await this.executeVmRecoveryBatch({
         localCgId,
         onChainCgId,
@@ -6531,8 +7787,35 @@ export class SwmHostModeMethods extends DKGAgentBase {
         isRecoveryCurrent,
         revalidateTarget,
         ctx,
+        exactRecoveryTransportMode,
+        ...(registeredPublicEvidence ? { registeredPublicEvidence } : {}),
+        phases,
+      }).finally(() => registeredPublicEvidence?.revoke());
+      if (execution.kind === 'local-admission-deferred') {
+        // Capacity is node-local, so trying other providers would burn their
+        // turns under the same refusal. Retain all peer evidence and yield the
+        // whole slice for the scheduler's bounded local retry.
+        localAdmissionDeferred = true;
+        break;
+      }
+      if (execution.kind !== 'completed' || !isRecoveryCurrent()) return staleRecovery();
+      executedBatches += 1;
+      executedAssets += batchAttempts.length;
+      observeVmRecoveryTiming(() => {
+        const sizing = sizingObservation ?? NO_SIZING_OBSERVATION;
+        this.log.info(
+          ctx,
+          `VM recovery batch timing for "${localCgId}" from ${peerId.slice(-8)}: `
+            + `assets=${batchAttempts.length} candidates=${eligible.length - eligibleIndex} kind=${providerAttempt.kind} `
+            + `transport=${exactRecoveryTransportMode} streamAdvertised=${streamAdvertisedCount} `
+            + `streamPeers=${experimentalStreamPeerIds.size} registeredAuthority=${passAuthority.label} `
+            + `totalMs=${Math.round(performance.now() - iterationStartedAt)} `
+            + `${formatVmRecoveryPhases(phases.take())} `
+            + `sizingRequested=${sizing.requested} sizingPrepared=${sizing.prepared} sizingResolved=${sizing.resolved} sizingTimedOut=${sizing.timedOut} `
+            + `sizingAborted=${sizing.aborted} sizingInvalid=${sizing.invalid} sizingFailed=${sizing.failed} `
+            + `${describeVmRecoveryRpcSince(iterationRpcMark)}`,
+        );
       });
-      if (execution.kind !== 'completed') return staleRecovery();
       for (const [ordinal, outcome] of execution.outcomes) outcomes.set(ordinal, outcome);
       for (const ordinal of execution.handledOrdinals) handledBatchOrdinals.add(ordinal);
       for (const ordinal of execution.attemptedOrdinals) attemptedOrdinals.add(ordinal);
@@ -6541,6 +7824,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
         execution.providerDisposition,
         new Map(execution.perUalDispositions),
       );
+      const completelyVerified = execution.providerDisposition === 'found'
+        && execution.perUalDispositions.length === batchAttempts.length
+        && execution.perUalDispositions.every(([, disposition]) => disposition === 'found');
+      const preferenceSettlement = this.vmReconcilePublicCoreTransportPreferencePolicy.settle(preferenceAttempt, {
+        peerId, connectionKey: admittedConnectionKey, completelyVerified,
+        publicAccessVerified: publicRecoveryAccessVerified,
+        reusedHolder: providerAttempt.kind === 'proven-holder-reuse', carriedHolder,
+      });
+      if (preferenceSettlement.yield) {
+        this.log.info(ctx, `VM exact recovery yield: reason=verified-core-turn assets=${batchAttempts.length} `
+          + `publicSizingAccess=${publicRecoveryAccessVerified === undefined ? 'unknown' : publicRecoveryAccessVerified} `
+          + `holderCreditPresent=${preferenceSettlement.holderCreditPresent}`);
+        break;
+      }
     }
 
     const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));
@@ -6576,6 +7873,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Once every retained provider cycle is exhausted, the ordinary cooldown /
     // negative backoff applies exactly as before.
     if (!isRecoveryCurrent()) return staleRecovery();
+    if (localAdmissionDeferred) {
+      if (activeFetchCooldownOwner !== undefined) {
+        this.clearVmReconcileActiveFetchCooldown(localCgId, activeFetchCooldownOwner);
+      }
+      return {
+        outcomes,
+        attemptedOrdinals: [...attemptedOrdinals],
+        continuationOrdinal: unattemptedContinuationOrdinal,
+        hasImmediateRecoveryWork: false,
+        cooldownOnly: false,
+        localAdmissionDeferred: true,
+      };
+    }
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
     if (
@@ -6594,6 +7904,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ) {
         this.installVmReconcileActiveFetchCooldown(localCgId, Date.now());
       }
+    }
+    if (executedBatches > 0) {
+      observeVmRecoveryTiming(() => this.log.info(
+        ctx,
+        `VM recovery pass timing for "${localCgId}": batches=${executedBatches} assets=${executedAssets} `
+          + `eligible=${eligible.length} totalMs=${Math.round(performance.now() - passStartedAt)} `
+          + `${formatVmRecoveryPhases(phases.cumulative())}`
+          + (preparation ? ` ${formatVmRecoveryPreparationStats(preparation.stats())}` : ''),
+      ));
     }
     return {
       outcomes,
@@ -6618,6 +7937,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * same-finalized-block shortcut; a new block always reads again. `headBlock`
    * remains the independent cursor observation for the reorg-depth gate. See
    * {@link OrdinalOutcome} for the status contract.
+   *
+   * Local first: before any root, publisher or version read, the handler
+   * classifies what the store holds for the KA. A confirmed VM copy with
+   * nothing else to promote settles as `already`, and in the deferred mode an
+   * asset held nowhere locally goes straight to the exact-recovery queue, both
+   * without chain reads. Only local state whose outcome depends on the root
+   * takes the chain-backed path below.
    */
   async reconcileChainOrdinal(this: DKGAgent,
     localCgId: string,
@@ -6634,19 +7960,97 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { status: 'skip' };
     }
 
+    const unresolvable = (err: unknown): OrdinalOutcome => {
+      // RPC lag / unknown kaId — leave for the next sweep.
+      this.log.info(ctx, `Phase B: ordinal ${ordinal} of cg ${onChainCgId} not resolvable yet: ${err instanceof Error ? err.message : String(err)}`);
+      return { status: 'pending' };
+    };
     let kaId: bigint;
-    let merkleRoot: Uint8Array;
-    let publisherAddress: string;
-    let finalizedSlotBlock: number | undefined;
+    let storageAddr: string | undefined;
     let ual: string;
-    let cacheKey = '';
     try {
       kaId = await this.chain.getContextGraphKCAt!(onChainCgId, BigInt(ordinal));
-      const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
+      storageAddr = this.chain.getDKGKnowledgeAssetsAddress
         ? await this.chain.getDKGKnowledgeAssetsAddress()
         : undefined;
       if (!storageAddr) return { status: 'skip' };
       ual = buildReconciledKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+    } catch (err) {
+      return unresolvable(err);
+    }
+
+    const fh = this.getOrCreateFinalizationHandler();
+    // A core that holds only its StorageACK copy of a sub-graph KA has no
+    // lifecycle or VM metadata naming the sub-graph; its ledger does.
+    const ledgerSubGraphName = await this.storageAckLedgerSubGraphName(localCgId, ual);
+    const targetMayMaterialize = async (): Promise<boolean> => {
+      if (options.isTargetCurrent && !options.isTargetCurrent()) return false;
+      if (!options.revalidateTarget) return true;
+      try {
+        return await options.revalidateTarget();
+      } catch {
+        return false;
+      }
+    };
+
+    // Handlers without the classifier (older hosts, narrow test doubles) keep
+    // the chain-backed path for every ordinal.
+    const localCandidate: ChainReconcileLocalCandidate =
+      typeof fh.classifyChainReconcileLocalCandidate === 'function'
+        ? await fh.classifyChainReconcileLocalCandidate({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          ual,
+          kaId,
+          batchId: kaId,
+          ...(ledgerSubGraphName ? { subGraphName: ledgerSubGraphName } : {}),
+        }, ctx)
+        : { kind: 'present' };
+    if (localCandidate.kind === 'confirmed-vm') {
+      // Trusted at the root the copy was confirmed at, with no chain read. An
+      // update to it reaches VM through the `KnowledgeAssetUpdated` refresh
+      // (`handleKAUpdatedNudge`), not through this walk: a settled ordinal is
+      // never visited again.
+      if (!(await targetMayMaterialize())) return { status: 'skip' };
+      this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
+      this.emitReplication({
+        contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
+        action: 'already', ordinal, kaId: kaId.toString(), ual, detail: 'local-vm',
+      });
+      return { status: 'already', blockNumber: headBlock ?? 0 };
+    }
+    if (localCandidate.kind === 'none' && options.deferActiveFetch) {
+      // Nothing local can match any root, so the chain-backed path could only
+      // answer `no-swm`. Queue the same exact-recovery target it would; the
+      // recovery batch keeps its rotation backoff, cooldown and peer gating.
+      // The inline mode keys its negative cache by the root and keeps reading it.
+      if (!(await targetMayMaterialize())) return { status: 'skip' };
+      this.emitReplication({
+        contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
+        action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: 'no-local-copy',
+      });
+      return {
+        status: 'pending',
+        recovery: {
+          localCgId,
+          onChainCgId: onChainCgId.toString(),
+          ordinal,
+          ual,
+          merkleRoot: VM_RECONCILE_UNREAD_MERKLE_ROOT,
+          kaId: kaId.toString(),
+          reason: 'no-swm',
+        },
+      };
+    }
+    if (options.isTargetCurrent && !options.isTargetCurrent()) {
+      return { status: 'skip' };
+    }
+
+    let merkleRoot: Uint8Array;
+    let publisherAddress: string;
+    let finalizedSlotBlock: number | undefined;
+    let cacheKey = '';
+    try {
       finalizedSlotBlock = this.vmReconcileFinalizedBlockAtHead(headBlock);
       if (finalizedSlotBlock !== undefined) {
         const finalizedSlotKey = this.vmReconcileFinalizedSlotKey(
@@ -6708,15 +8112,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ? await this.chain.getLatestMerkleRootPublisher(kaId)
         : '') ?? '';
     } catch (err) {
-      // RPC lag / unknown kaId — leave for the next sweep.
-      this.log.info(ctx, `Phase B: ordinal ${ordinal} of cg ${onChainCgId} not resolvable yet: ${err instanceof Error ? err.message : String(err)}`);
-      return { status: 'pending' };
+      return unresolvable(err);
     }
 
     if (options.isTargetCurrent && !options.isTargetCurrent()) {
       return { status: 'skip' };
     }
-    const fh = this.getOrCreateFinalizationHandler();
     const reconcileInput = {
       contextGraphId: localCgId,
       onChainCgId: onChainCgId.toString(),
@@ -6727,15 +8128,32 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // V10 context-graph inventory stores one packed KA per batch.
       batchId: kaId,
       versionBlock,
+      ...(ledgerSubGraphName ? { subGraphName: ledgerSubGraphName } : {}),
     };
 
-    const targetMayMaterialize = async (): Promise<boolean> => {
-      if (options.isTargetCurrent && !options.isTargetCurrent()) return false;
-      if (!options.revalidateTarget) return true;
+    // The sweep fails its whole pass on the first ordinal that throws. A
+    // corrupt SWM head is one KA's local damage: report it and leave only this
+    // ordinal pending, so the rest of the graph keeps reconciling.
+    const reconcileKnowledgeAsset = async (): Promise<ChainReconciledKCOutcome | undefined> => {
       try {
-        return await options.revalidateTarget();
-      } catch {
-        return false;
+        return await fh.handleChainReconciledKC(reconcileInput, ctx);
+      } catch (err) {
+        if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
+        this.log.warn(
+          ctx,
+          `Phase B: corrupt graph-scoped SWM head for ${ual} (ordinal ${ordinal} of cg ${onChainCgId}); `
+            + `leaving it for the next sweep: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'defer',
+          ordinal,
+          kaId: kaId.toString(),
+          ual,
+          detail: 'corrupt-swm-head',
+        });
+        return undefined;
       }
     };
 
@@ -6744,7 +8162,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let activeFetchHadUsableResponse = false;
     const cleanMissPeerIds = new Set<string>();
     if (!(await targetMayMaterialize())) return { status: 'skip' };
-    let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
+    let outcome = await reconcileKnowledgeAsset();
+    if (outcome === undefined) return { status: 'pending' };
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
       if (options.deferActiveFetch) {
         this.emitReplication({
@@ -6844,7 +8263,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             break;
           }
           if (!(await targetMayMaterialize())) return { status: 'skip' };
-          outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
+          outcome = await reconcileKnowledgeAsset();
+          if (outcome === undefined) return { status: 'pending' };
         }
         if (outcome === 'no-swm') {
           swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
@@ -6867,6 +8287,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // pinned version block orders materialized metadata but must not shorten
     // the independent reconciliation confirmation-depth gate.
     const completionBlock = headBlock ?? 0;
+    const rememberSlotBlock = options.rememberFinalizedEvidence === false
+      ? undefined
+      : finalizedSlotBlock;
     switch (outcome) {
       case 'promoted':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
@@ -6877,7 +8300,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           localCgId,
           onChainCgId,
           ordinal,
-          finalizedSlotBlock,
+          rememberSlotBlock,
           kaId,
           merkleRoot,
           publisherAddress,
@@ -6895,7 +8318,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           localCgId,
           onChainCgId,
           ordinal,
-          finalizedSlotBlock,
+          rememberSlotBlock,
           kaId,
           merkleRoot,
           publisherAddress,
@@ -6914,7 +8337,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           localCgId,
           onChainCgId,
           ordinal,
-          finalizedSlotBlock,
+          rememberSlotBlock,
           kaId,
           merkleRoot,
           publisherAddress,
@@ -7189,7 +8612,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // on nodes that have persisted the CG's `allowedPeers`; host-only
     // cores never see it.
     try {
-      const allowedPeers = await this.getContextGraphAllowedPeers(req.contextGraphId);
+      const allowedPeers = await this.resolveSwmAllowedPeersForCurrentAuthority(
+        req.contextGraphId,
+      );
       if (allowedPeers !== null) {
         anyAuthoritySourceFound = true;
         if (allowedPeers.includes(fromPeerId)) {
@@ -7446,9 +8871,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Contact reliable Core hosts first. This serial loop still reaches
     // every candidate, but Cores first means faster time-to-first-data
     // and a better resume-seqno baseline before any flaky edge is tried.
-    const candidates = orderCatchupPeers(rawCandidates, undefined, false, this.knownCorePeerIds)
+    const candidates = orderCatchupPeers(rawCandidates, undefined, false, this.peerCapabilityRegistry.snapshotCorePeerIds())
       .map((p) => p.toString());
-    const coreCount = candidates.filter((id) => this.knownCorePeerIds.has(id)).length;
+    const coreCount = candidates.filter((id) => this.peerCapabilityRegistry.supportsCore(id)).length;
     this.log.info(
       ctx,
       `host-catchup peer order for "${contextGraphId}": cores=${coreCount} total=${candidates.length}`,

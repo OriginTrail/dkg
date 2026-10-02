@@ -29,7 +29,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
-import { mapWithConcurrency } from '../map-with-concurrency.js';
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   './public-catalog-successor-producer-v1.js';
 import {
@@ -63,9 +62,11 @@ export class Rfc64SwmInventoryCatalogReconcilerErrorV1 extends Error {
 
 export interface PrepareRfc64SwmInventoryCatalogTargetInputV1 {
   readonly snapshot: SwmAuthorInventorySnapshotV1;
+  readonly signal?: AbortSignal;
   /** Resolve the exact durable shared projection and seal named by one signed row. */
   readonly resolveAsset: (
     row: Readonly<SwmAuthorInventoryRowV1>,
+    signal: AbortSignal,
   ) => Promise<Rfc64PublicCatalogSuccessorAssetInputV1>;
 }
 
@@ -112,13 +113,14 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
     ...inventoryScope,
     bucketCount: '1',
   }) as AuthorCatalogScopeV1;
-  const assets = await mapWithConcurrency(
+  const assets = await resolveCatalogAssetsWithDrainV1(
     snapshot.rows,
-    RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1,
-    async (row): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> => {
+    async (row, signal): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> => {
       let resolved: Rfc64PublicCatalogSuccessorAssetInputV1;
       try {
-        resolved = await input.resolveAsset(row);
+        signal.throwIfAborted();
+        resolved = await input.resolveAsset(row, signal);
+        signal.throwIfAborted();
       } catch (cause) {
         fail(
           'swm-catalog-reconcile-resolution',
@@ -130,6 +132,7 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
       assertAssetBindsInventoryRow(asset, row);
       return asset;
     },
+    input.signal,
   );
 
   return Object.freeze({
@@ -138,6 +141,46 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
     catalogScope,
     assets: Object.freeze(assets),
   });
+}
+
+/** Failed repairs retain ownership of admitted reads until physical retirement. */
+async function resolveCatalogAssetsWithDrainV1<T>(
+  rows: readonly SwmAuthorInventoryRowV1[],
+  resolve: (row: Readonly<SwmAuthorInventoryRowV1>, signal: AbortSignal) => Promise<T>,
+  externalSignal?: AbortSignal,
+): Promise<T[]> {
+  externalSignal?.throwIfAborted();
+  const controller = new AbortController();
+  const results: T[] = [];
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  const stop = (error: unknown) => {
+    if (failed) return;
+    failed = true;
+    failure = error;
+    controller.abort(error);
+  };
+  const onAbort = () => stop(externalSignal!.reason);
+  externalSignal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    await Promise.all(Array.from({
+      length: Math.min(rows.length, RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1),
+    }, async () => {
+      while (!failed && next < rows.length) {
+        const index = next++;
+        try {
+          results[index] = await resolve(rows[index]!, controller.signal);
+        } catch (error) {
+          stop(error);
+        }
+      }
+    }));
+  } finally {
+    externalSignal?.removeEventListener('abort', onAbort);
+  }
+  if (failed) throw failure;
+  return results;
 }
 
 function snapshotInventory(input: unknown): SwmAuthorInventorySnapshotV1 {

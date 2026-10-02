@@ -54,8 +54,15 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
+import {
+  isNonexistentContextGraphStorageRevert,
+  readContextGraphStorageRangeV1,
+} from './evm-context-graph-storage-enumeration.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
+/** Fixed ContextGraphStorage address the mock reports for its enumeration. */
+export const MOCK_CONTEXT_GRAPH_STORAGE_ADDRESS = '0x' + 'c6'.repeat(20);
 
 export interface MockChainAdapterOptions {
   /** Seed the first CG allocation for fixtures that model an existing registry. */
@@ -121,6 +128,8 @@ interface MockContextGraph {
   publishAuthority?: string;
   publishAuthorityAccountId: bigint;
   active: boolean;
+  /** Creation time in unix seconds, as `ContextGraphStorage` records it. */
+  createdAt?: number;
   batches: bigint[];
   // OT-RFC-38 / LU-6 Phase B — curator-committed wire id.
   // `null` indicates the curator opted out at create time.
@@ -662,9 +671,10 @@ export class MockChainAdapter implements ChainAdapter {
       // Codex PR #241 iter-7: `await` an async WAL hook.
       await params.onBroadcast?.({ txHash: mockUpdateTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 
@@ -834,6 +844,55 @@ export class MockChainAdapter implements ChainAdapter {
 
   async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
     return false;
+  }
+
+  /** The mock's registry scans above always return nothing, as on mainnet. */
+  async hasContextGraphNameRegistry(): Promise<boolean> {
+    return false;
+  }
+
+  /**
+   * ContextGraphStorage id enumeration over the in-memory graphs, through the
+   * same range semantics as the EVM adapter. The anchor is the last mined block.
+   */
+  async readContextGraphStorageRange(
+    options: import('./chain-adapter.js').ContextGraphStorageRangeOptions,
+  ): Promise<import('./chain-adapter.js').ContextGraphStorageRange> {
+    const anchorBlockNumber = Math.max(0, this.nextBlock - 1);
+    const latestId = this.nextContextGraphId - 1n;
+    const nonexistent = (contextGraphId: bigint) => Object.assign(
+      new Error(`ERC721NonexistentToken(${contextGraphId})`),
+      {
+        code: 'CALL_EXCEPTION',
+        revert: { name: 'ERC721NonexistentToken', args: [contextGraphId] },
+      },
+    );
+    return readContextGraphStorageRangeV1({
+      storageAddress: MOCK_CONTEXT_GRAPH_STORAGE_ADDRESS,
+      readAnchor: async () => ({
+        number: anchorBlockNumber,
+        hash: mockBlockHash(anchorBlockNumber),
+      }),
+      readLatestId: async () => latestId,
+      readContextGraph: async (contextGraphId) => {
+        const cg = this.contextGraphs.get(contextGraphId);
+        if (!cg) throw nonexistent(contextGraphId);
+        return [
+          cg.manager,
+          cg.participantAgents,
+          cg.metadataBatchId,
+          cg.active,
+          BigInt(cg.createdAt ?? 0),
+          cg.accessPolicy,
+          cg.publishPolicy,
+          cg.publishAuthority ?? ethers.ZeroAddress,
+          cg.publishAuthorityAccountId,
+        ];
+      },
+      readNameHash: async (contextGraphId) =>
+        this.contextGraphs.get(contextGraphId)?.nameHash ?? ethers.ZeroHash,
+      isNonexistentContextGraph: isNonexistentContextGraphStorageRevert,
+    }, options);
   }
 
   // --- V10 Publishing Conviction NFT (DKGPublishingConvictionNFT) ---
@@ -1330,6 +1389,7 @@ export class MockChainAdapter implements ChainAdapter {
       publishAuthority,
       publishAuthorityAccountId,
       active: true,
+      createdAt: Math.floor(Date.now() / 1000),
       batches: [],
       nameHash,
       ownershipEra: 0n,
@@ -2132,9 +2192,10 @@ export class MockChainAdapter implements ChainAdapter {
       // completion before the mock "broadcasts".
       await params.onBroadcast?.({ txHash: mockPublishTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before createKnowledgeAssets broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 

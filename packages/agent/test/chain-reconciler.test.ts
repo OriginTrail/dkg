@@ -595,6 +595,106 @@ describe('reconcileContextGraph — sweep', () => {
     ]);
   });
 
+  it.each([
+    {
+      lane: 'recent-first recovery',
+      recentOrdinalsPerPass: 7,
+      inspectedOrdinals: [30, 31, 32, 93, 94, 95, 96, 97, 98, 99],
+      recoveryOrdinals: [99, 98, 97, 96, 95, 94, 93, 30, 31, 32],
+      nextScanOrdinal: 33,
+    },
+    {
+      lane: 'historical-only recovery',
+      recentOrdinalsPerPass: 0,
+      inspectedOrdinals: [30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+      recoveryOrdinals: [30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+      nextScanOrdinal: 40,
+    },
+  ])('retries an admission-deferred historical slice in a larger backlog with $lane', async ({
+    recentOrdinalsPerPass,
+    inspectedOrdinals,
+    recoveryOrdinals,
+    nextScanOrdinal,
+  }) => {
+    const inspections: number[][] = [[], []];
+    const recoveryCalls: number[][] = [];
+    const fetchAttempts: number[] = [];
+    let pass = 0;
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 100,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        inspections[pass]!.push(ordinal);
+        return { status: 'pending', recovery: recoveryTarget(ordinal) };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map(({ ordinal }) => ordinal);
+        recoveryCalls.push(ordinals);
+        if (pass === 0) {
+          return {
+            outcomes: new Map(),
+            attemptedOrdinals: [],
+            continuationOrdinal: targets[0]?.ordinal,
+            hasImmediateRecoveryWork: false,
+            localAdmissionDeferred: true,
+          };
+        }
+        fetchAttempts.push(...ordinals);
+        return {
+          outcomes: new Map(ordinals.map((ordinal) => [
+            ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          attemptedOrdinals: ordinals,
+          continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+    state.scanOrdinal = 30;
+
+    const refused = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(refused).toMatchObject({
+      head: 100,
+      processed: 10,
+      reconciled: 0,
+      pending: 100,
+      watermark: 0,
+      localAdmissionDeferred: true,
+      hasMore: false,
+      shouldContinueImmediately: false,
+    });
+    expect(inspections[0]).toEqual(inspectedOrdinals);
+    expect(recoveryCalls).toEqual([recoveryOrdinals]);
+    expect(fetchAttempts).toEqual([]);
+    expect(state.scanOrdinal).toBe(30);
+    expect(state.ahead.size).toBe(0);
+    expect(persisted).toEqual([]);
+
+    pass = 1;
+    const admitted = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    // Unvisited candidates remain beyond this pass; refusal must not skip the
+    // historical slice merely because its recent-first continuation is near head.
+    expect(inspections).toEqual([inspectedOrdinals, inspectedOrdinals]);
+    expect(recoveryCalls).toEqual([recoveryOrdinals, recoveryOrdinals]);
+    expect(fetchAttempts).toEqual(recoveryOrdinals);
+    expect(admitted).toMatchObject({
+      processed: 10,
+      reconciled: 10,
+      pending: 90,
+      watermark: 0,
+      hasMore: true,
+      shouldContinueImmediately: true,
+    });
+    expect(state.scanOrdinal).toBe(nextScanOrdinal);
+    expect(state.ahead.size).toBe(10);
+    expect(persisted).toEqual([]);
+  });
+
   it('keeps the fair scan moving when recovery finds no eligible peer', async () => {
     const attempts: number[][] = [[], []];
     let pass = 0;
@@ -815,6 +915,70 @@ describe('reconcileContextGraph — sweep', () => {
     expect(attempted).toEqual([0, 1]);
     expect(completed).toEqual([1]);
     expect(state.watermark).toBe(0);
+  });
+
+  it('keeps what a rejected pass proved: its completions and the scan past what it dispatched', async () => {
+    const attempts: number[][] = [];
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 8,
+      maxOrdinalsPerPass: 4,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[attempts.length - 1]!.push(ordinal);
+        if (ordinal === 1) throw new Error('ordinal 1 exploded');
+        return { status: 'already', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+    const pass = async () => {
+      attempts.push([]);
+      return reconcileContextGraph(deps, state, 'cg', 1n).then(
+        (result) => `ok:${result.watermark}`,
+        (error: Error) => `failed:${error.message}`,
+      );
+    };
+
+    const outcomes = [await pass(), await pass(), await pass(), await pass()];
+
+    expect(outcomes).toEqual([
+      'failed:ordinal 1 exploded',
+      'ok:1',
+      'ok:1',
+      'failed:ordinal 1 exploded',
+    ]);
+    // The settled ordinal 0 is never re-read; the throwing ordinal is retried
+    // with the next cycle like any other gap instead of pinning its slice.
+    expect(attempts).toEqual([[0, 1], [2, 3, 4, 5], [6, 7], [1]]);
+    expect(state.watermark).toBe(1);
+    expect([...state.ahead.keys()].sort((a, b) => a - b)).toEqual([2, 3, 4, 5, 6, 7]);
+    expect(persisted).toEqual([{ cg: 'cg', watermark: 1 }]);
+  });
+
+  it('keeps worker completions when batch recovery rejects under the same binding', async () => {
+    let current = true;
+    let flipBindingDuringRecovery = false;
+    const { deps } = makeDeps({
+      getKCCount: async () => 3,
+      isTargetCurrent: async () => current,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ordinal === 1
+        ? { status: 'pending', recovery: recoveryTarget(1) }
+        : { status: 'reconciled', blockNumber: 0 },
+      recoverPendingOrdinals: async () => {
+        if (flipBindingDuringRecovery) current = false;
+        throw new Error('recovery transport failed');
+      },
+    });
+
+    const kept = createCursorState(0);
+    await expect(reconcileContextGraph(deps, kept, 'cg', 1n)).rejects.toThrow('recovery transport failed');
+    expect([...kept.ahead.keys()]).toEqual([0, 2]);
+    expect(kept.watermark).toBe(0);
+    expect(kept.scanOrdinal).toBe(3);
+
+    flipBindingDuringRecovery = true;
+    const discarded = createCursorState(0);
+    await expect(reconcileContextGraph(deps, discarded, 'cg', 1n)).rejects.toThrow('recovery transport failed');
+    expect(discarded.ahead.size).toBe(0);
+    expect(discarded.scanOrdinal).toBe(0);
   });
 });
 

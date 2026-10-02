@@ -7,6 +7,21 @@ import type { RegisteredContextGraphAuthority } from
 
 export type RegisteredParticipantMutationOperation = 'add' | 'remove';
 
+/**
+ * The read options for the authority behind a registered participant
+ * mutation's idempotence filter — the ones `resolveAuthority` must pass when
+ * it declares `rosterFreshness: 'live'` (see
+ * {@link prepareRegisteredParticipantMutation}). Every option that decides
+ * where the answer comes from is pinned rather than left to a default, so no
+ * default can route this read to the roster cache, the finalized authority
+ * projection or a bounded (index-served) current-state read.
+ */
+export const LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ = Object.freeze({
+  allowCachedRoster: false,
+  authorityReadMode: 'live-current',
+  freshness: 'live',
+} as const);
+
 interface PreparedRegisteredParticipantMutationBase {
   operation: RegisteredParticipantMutationOperation;
   contextGraphId: string;

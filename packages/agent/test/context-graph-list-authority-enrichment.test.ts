@@ -62,6 +62,8 @@ function listingAgent(input: {
     // rather than through the agent's owner-backed accessor.
     rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
     subscribedContextGraphs: new Map(),
+    wireIdToLocalCgId: new Map(),
+    onChainContextGraphFacts: new Map(),
     store: {
       query: async () => ({
         type: 'bindings' as const,
@@ -272,6 +274,8 @@ describe('context graph list authority enrichment', () => {
       // Listing enrichment runs under the shared authority governor.
       rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
       subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainContextGraphFacts: new Map(),
       contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {
@@ -332,6 +336,8 @@ describe('context graph list authority enrichment', () => {
       // Listing enrichment runs under the shared authority governor.
       rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
       subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainContextGraphFacts: new Map(),
       contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {

@@ -47,8 +47,13 @@ export function retryableSchedulerBusyFailure(): StoreSchedulerBusyError {
   );
 }
 
-export function createAsyncPromoteWorkerFixture(): AsyncPromoteWorkerFixture {
-  const store = new OxigraphStore();
+export function createAsyncPromoteWorkerFixture(options: {
+  maxRetries?: number;
+  leaseMs?: number;
+  /** Inject a store (e.g. a fault-injecting subclass); defaults to a fresh in-memory one. */
+  store?: OxigraphStore;
+} = {}): AsyncPromoteWorkerFixture {
+  const store = options.store ?? new OxigraphStore();
   const logs: string[] = [];
   let currentNow = 1_700_000_000_000;
   let idCounter = 0;
@@ -66,7 +71,8 @@ export function createAsyncPromoteWorkerFixture(): AsyncPromoteWorkerFixture {
     now: clock.now,
     idGenerator: () => `job-${++idCounter}`,
     backoff: () => 60_000,
-    maxRetries: 3,
+    maxRetries: options.maxRetries ?? 3,
+    ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
   });
   const makeRequest = (overrides: Partial<PromoteRequest> = {}): PromoteRequest => ({
     contextGraphId: 'graphify',

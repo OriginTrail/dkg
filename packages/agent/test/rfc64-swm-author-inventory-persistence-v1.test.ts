@@ -76,6 +76,80 @@ afterEach(() => {
 });
 
 describe('RFC-64 restart-safe SWM author inventory persistence', () => {
+  it('reads only the local head digest without materializing inventory rows', () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
+    const inventory = new CandidateInventoryV1(database);
+    try {
+      const genesis = snapshot([ROW_A]);
+      inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: genesis,
+        mutation: { kind: 'upsert', row: ROW_A },
+        expectedCurrentHeadDigest: null,
+      });
+      const prepare = vi.spyOn(database, 'prepare');
+      try {
+        expect(inventory.readSwmAuthorInventoryHeadDigestV1(SCOPE_DIGEST, AUTHOR))
+          .toBe(genesis.head.objectDigest);
+        expect(prepare.mock.calls.map(([sql]) => sql))
+          .toEqual([INVENTORY_V1_STATEMENT_SQL.getSwmAuthorHead]);
+      } finally {
+        prepare.mockRestore();
+      }
+    } finally {
+      inventory.close();
+    }
+  });
+
+  it('tracks absent, changed and deleted head digests through the fenced facade', async () => {
+    const persistence = await openRfc64PersistenceV1(temporaryDirectory(), {
+      yieldAfterPurgeBatch: async () => {},
+    });
+    const inventory = persistence.swmAuthorInventory;
+    try {
+      expect(inventory.readSwmAuthorInventoryHeadDigestV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+      const genesis = snapshot([ROW_A]);
+      inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: genesis, mutation: { kind: 'upsert', row: ROW_A },
+        expectedCurrentHeadDigest: null,
+      });
+      const successor = snapshot([ROW_A, ROW_B], genesis);
+      inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: successor, mutation: { kind: 'upsert', row: ROW_B },
+        expectedCurrentHeadDigest: genesis.head.objectDigest,
+      });
+      expect(inventory.readSwmAuthorInventoryHeadDigestV1(SCOPE_DIGEST, AUTHOR))
+        .toBe(successor.head.objectDigest);
+      inventory.deleteSwmAuthorInventoryV1({
+        inventoryScopeDigest: SCOPE_DIGEST, authorAddress: AUTHOR,
+        expectedCurrentHeadDigest: successor.head.objectDigest,
+      });
+      expect(inventory.readSwmAuthorInventoryHeadDigestV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+    } finally {
+      await persistence.close();
+    }
+    expect(() => inventory.readSwmAuthorInventoryHeadDigestV1(SCOPE_DIGEST, AUTHOR))
+      .toThrow('RFC-64 persistence owner is closed');
+  });
+
+  it('rejects malformed persisted head digests at the lightweight read boundary', () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
+    const inventory = new CandidateInventoryV1(database);
+    try {
+      const genesis = snapshot([ROW_A]);
+      inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: genesis, mutation: { kind: 'upsert', row: ROW_A },
+        expectedCurrentHeadDigest: null,
+      });
+      database.exec("PRAGMA ignore_check_constraints = ON; UPDATE rfc64_swm_author_inventory_heads_v1 SET current_head_digest = X'01'");
+      expect(() => inventory.readSwmAuthorInventoryHeadDigestV1(SCOPE_DIGEST, AUTHOR))
+        .toThrowError(expect.objectContaining({ code: 'swm-inventory-database-corrupt' }));
+    } finally {
+      inventory.close();
+    }
+  });
+
   it('deletes the exact SWM author head and cascades its persisted rows', async () => {
     const directory = temporaryDirectory();
     const inventory = await openInventoryV1(directory);

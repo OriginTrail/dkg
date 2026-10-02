@@ -21,9 +21,10 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, StoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { catalogRepairDiagnosticV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 
 import {
   resolveRfc64ConfirmedVmRepairCatalogAssetV1,
@@ -60,6 +61,18 @@ beforeEach(async () => {
 });
 
 describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
+  it('attributes an actual strict-seal queue timeout without leaking the asset identity', async () => {
+    const cause = new StoreSchedulerBusyError('queue_wait_timeout', 'background', 'private-test-source');
+    vi.spyOn(store, 'query').mockRejectedValueOnce(cause);
+    const error = await resolve('public').catch((failure: unknown) => failure);
+    expect(catalogRepairDiagnosticV1(error)).toEqual({
+      kind: 'queue_wait', stage: 'seal',
+      source: 'agent.rfc64.swmInventory.catalogReconcile.seal', stageElapsedMs: expect.any(Number),
+    });
+    expect(JSON.stringify(catalogRepairDiagnosticV1(error))).not.toContain(seal.kaUal);
+    expect(error).toHaveProperty('cause', cause);
+  });
+
   it('accepts an inventory operation id retained as an equivalent head alias', async () => {
     const graphManager = new GraphManager(store);
     const selectedAlias = 'newer-storage-ack-alias';

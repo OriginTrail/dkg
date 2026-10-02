@@ -28,14 +28,14 @@ describe('network admission when the peer connects mid-probe', () => {
     for (const agent of agents.splice(0)) await agent.stop().catch(() => {});
   });
 
-  async function startAgent(name: string, networkId: string): Promise<DKGAgent> {
+  async function startAgent(name: string, networkId: string, genesisId = DEFAULT_GENESIS_ID): Promise<DKGAgent> {
     const agent = await DKGAgent.create({
       name,
       listenHost: '127.0.0.1',
       listenPort: 0,
       store: new OxigraphStore(),
       networkIdentity: {
-        genesisId: DEFAULT_GENESIS_ID,
+        genesisId,
         networkId,
         chainId: 'chain:1',
       },
@@ -83,4 +83,38 @@ describe('network admission when the peer connects mid-probe', () => {
     expect(b.networkAdmission.isAcceptedPeer(a.peerId)).toBe(true);
     expect(b.networkAdmission.getRetryableProbeBackoff(a.peerId)).toBeUndefined();
   }, 20_000);
+
+  it('refuses redials after a real signed network-identity mismatch', async () => {
+    const local = await startAgent('RejectedDialLocal', await computeNetworkId(DEFAULT_GENESIS_ID));
+    const foreignGenesisId = 'gnosis-mainnet';
+    const foreign = await startAgent(
+      'RejectedDialForeign',
+      await computeNetworkId(foreignGenesisId),
+      foreignGenesisId,
+    );
+    const foreignPeer = peerIdFromString(foreign.peerId);
+    const address = foreign.multiaddrs.find((entry) => entry.includes('/tcp/') && !entry.includes('/p2p-circuit'));
+    expect(address).toBeDefined();
+
+    // The first connection is allowed so identity admission can ask for a
+    // signed proof. Production admission then closes it and installs the
+    // transport refusal before libp2p's reconnect machinery reacts.
+    await local.node.libp2p.dial(multiaddr(address!)).catch(() => undefined);
+    expect(await local.networkAdmissionCoordinator.ensureAdmitted(
+      foreign.peerId,
+      createOperationContext('connect'),
+    )).toBe(false);
+    const deadline = Date.now() + 10_000;
+    while (!local.networkAdmissionCoordinator.isRejectedPeer(foreign.peerId)) {
+      if (Date.now() >= deadline) throw new Error('signed mismatch was not rejected');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(local.node.libp2p.getConnections(foreignPeer)).toHaveLength(0);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(local.node.libp2p.dial(multiaddr(address!)))
+        .rejects.toMatchObject({ name: 'DialDeniedError' });
+      expect(local.node.libp2p.getConnections(foreignPeer)).toHaveLength(0);
+    }
+  }, 25_000);
 });

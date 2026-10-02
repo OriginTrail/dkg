@@ -7,7 +7,7 @@
  * 1:1 move from the original module.
  */
 import {
-  DEFAULT_REPLENISH_TARGET_ALLOWANCE,
+  DEFAULT_REPLENISH_TARGET_MULTIPLE,
   DEFAULT_REFILL_BELOW_FRACTION,
   type ApprovalPolicy,
 } from './chain-adapter.js';
@@ -56,6 +56,31 @@ function clampApprovalFraction(value: number): number {
 }
 
 /**
+ * Normalizes `ApprovalPolicy.targetAllowanceMultiple` for the relative
+ * `replenishing` ceiling. Legal values are integers >= 1.
+ *
+ * Operator-supplied values are rejected loudly one layer up, in
+ * `resolveApprovalPolicy` (CLI config), matching how `finalityConfirmations`
+ * and `refillBelowFraction` fail fast at startup. This function is the
+ * in-adapter backstop for programmatic callers that construct an
+ * `ApprovalPolicy` directly, and follows this module's existing convention
+ * for those (`clampApprovalFraction`): normalize, never throw — an approval
+ * decision on the publish hot path must not become a new failure mode.
+ *
+ * A multiple below 1 is the interesting case: it would put the ceiling
+ * under the publish floor on *every* call, so the floor clamp would fire
+ * every time and `replenishing` would silently degrade into `per-publish`.
+ * Falling back to the default keeps the configured mode meaningful.
+ */
+function normalizeApprovalMultiple(value: number | undefined): bigint {
+  if (value === undefined) return BigInt(DEFAULT_REPLENISH_TARGET_MULTIPLE);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    return BigInt(DEFAULT_REPLENISH_TARGET_MULTIPLE);
+  }
+  return BigInt(value);
+}
+
+/**
  * Computes the approval action for one V10 publish / update, dispatched
  * by `ApprovalPolicy.mode`.
  *
@@ -71,11 +96,58 @@ function clampApprovalFraction(value: number): number {
  *     a misconfigured `replenishing` target gets raised to the on-chain
  *     minimum so the immediate publish succeeds.
  *   - `needsApprove` is monotone in `currentAllowance` — strictly more
- *     existing allowance never flips a `false` to `true`.
+ *     existing allowance never flips a `false` to `true`. Both the target
+ *     and the refill threshold are functions of `(policy, tokenAmount)`
+ *     alone; `currentAllowance` enters only through the final `<`.
+ *
+ * ## `replenishing` sizing, and what the defaults mean
+ *
+ * With no absolute `targetAllowance`, the ceiling is relative to the
+ * publish that triggered the refill:
+ *
+ *     C         = effectivePublishAllowance(tokenAmount)   // this publish
+ *     target    = C × targetAllowanceMultiple              // default 20×
+ *     threshold = max(target × refillBelowFraction, C)     // default 2×C
+ *
+ * Approve to `20 × C`, then skip the approve until the standing allowance
+ * falls under `2 × C`. For a node whose publishes all cost about `C`, the
+ * allowance walks `20C, 19C, … , 2C` and only the next one re-approves:
+ * **one approve per 19 publishes** (generally `multiple × (1 - fraction)
+ * + 1`). That ratio is scale-free — it holds at any publish price, which
+ * is the point of sizing relatively rather than flat.
+ *
+ * ## Honest limits when publish costs vary
+ *
+ * Nothing here is persisted: `target` and `threshold` are recomputed from
+ * whatever *this* publish costs. Only the on-chain allowance carries over.
+ * So the standing exposure is set by the most expensive recent publish,
+ * not by the typical one, and two cases behave worse than a flat ceiling:
+ *
+ *   - **One outlier publish raises the ceiling.** A publish costing 100×
+ *     the node's usual price approves `20 × 100C = 2000C` and the node
+ *     then coasts on that allowance across many ordinary publishes. A
+ *     flat `targetAllowance` bounds exposure by an absolute number no
+ *     matter what gets published; this does not. Operators who need a
+ *     hard TRAC cap should set `targetAllowance` — it overrides the
+ *     multiple precisely so that bound stays available.
+ *   - **Repeated sharp increases cost approvals.** A publish at `C/100`
+ *     approves only `20C/100`, so an immediate ordinary publish refills.
+ *     Repeating that upward pattern — each publish roughly 10× the one
+ *     that last established the ceiling at the defaults — can approach
+ *     `per-publish` gas. A wide spread alone does not: after an expensive
+ *     publish sets a large ceiling, alternating or descending cheaper
+ *     publishes keep amortising against it. The refill always self-corrects
+ *     to the current cost and the floor clamp keeps the publish viable.
+ *
+ * Relative sizing is the better default for a node with a stable price
+ * profile, and it removes the "1000 TRAC is wrong for my volume" problem
+ * in both directions. It is not uniformly better than a flat ceiling: an
+ * ascending price run costs gas, and an outlier costs blast radius.
  *
  * See {@link ApprovalPolicy} in `chain-adapter.ts` for the mode
  * semantics; see `evm-adapter.unit.test.ts` for the pinned-down behaviour
- * under every combination of `(mode, tokenAmount, currentAllowance)`.
+ * under every combination of `(mode, tokenAmount, currentAllowance,
+ * targetAllowanceMultiple)`.
  */
 export function computeApprovalAction(
   policy: ApprovalPolicy,
@@ -95,12 +167,26 @@ export function computeApprovalAction(
       };
     }
     case 'replenishing': {
-      // Approve a configurable ceiling once, then refill when current drops
-      // below `target × fraction`. Raise the target to at least the publish
-      // floor so a misconfigured low `targetAllowance` doesn't brick the
-      // publish — the bigger of (operator's intent, what we need right now).
-      const requestedTarget =
-        policy.targetAllowance ?? DEFAULT_REPLENISH_TARGET_ALLOWANCE;
+      // Approve a ceiling once, then refill when current drops below
+      // `target × fraction`.
+      //
+      // Precedence: an ABSOLUTE `targetAllowance` wins over the relative
+      // `targetAllowanceMultiple`. An operator who wrote a TRAC number
+      // meant that number, it is the only way to cap standing exposure
+      // absolutely, and honouring it keeps every pre-existing config
+      // behaving exactly as it did before relative sizing existed.
+      // The multiple is the DEFAULT sizing, not an override.
+      const multiple = normalizeApprovalMultiple(policy.targetAllowanceMultiple);
+      // `publishFloor >= 1n` and `multiple >= 1n`, so the derived target is
+      // itself always >= publishFloor — the clamp below is load-bearing only
+      // for an explicit too-low `targetAllowance`. Zero-cost publish: floor
+      // 1n × 20 = 20n wei-TRAC, dust, and the threshold is 2n, so a
+      // zero-cost chain approves once and never again (allowance never
+      // decreases). Strictly fewer approves than `per-publish` there.
+      const requestedTarget = policy.targetAllowance ?? publishFloor * multiple;
+      // Raise the target to at least the publish floor so a misconfigured
+      // low `targetAllowance` doesn't brick the publish — the bigger of
+      // (operator's intent, what we need right now).
       const target = requestedTarget > publishFloor ? requestedTarget : publishFloor;
       const fraction = clampApprovalFraction(
         policy.refillBelowFraction ?? DEFAULT_REFILL_BELOW_FRACTION,

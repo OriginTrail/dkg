@@ -573,9 +573,11 @@ describe('discoverContextGraphsFromStore', () => {
     releaseFirstQuery();
 
     await expect(Promise.all([first, second])).resolves.toEqual([1, 1]);
-    expect(discoveryQueries).toBe(3);
+    // One pass reads ontology definitions, `_meta` bindings, ontology bindings
+    // and `_meta` definitions.
+    expect(discoveryQueries).toBe(4);
     await expect(agent.discoverContextGraphsFromStore()).resolves.toBe(0);
-    expect(discoveryQueries).toBe(6);
+    expect(discoveryQueries).toBe(8);
   }, 15000);
 
   it('does not re-discover already known contextGraphs', async () => {
@@ -3746,9 +3748,12 @@ describe('runImmediatePostApprovalSync', () => {
       refreshOpts?: {
         trustedCuratorPeerId?: string;
         force?: boolean;
-        memberProof?: {
-          approvedAgentAddress: string;
-          expectedDelegateePeerId?: string;
+        approvedMember?: {
+          proof: {
+            approvedAgentAddress: string;
+            expectedDelegateePeerId?: string;
+          };
+          accessPolicy: 'public' | 'unproven';
         };
       },
     ) => {
@@ -3756,8 +3761,8 @@ describe('runImmediatePostApprovalSync', () => {
         cg,
         peer: refreshOpts?.trustedCuratorPeerId,
         force: refreshOpts?.force,
-        approvedAgentAddress: refreshOpts?.memberProof?.approvedAgentAddress,
-        expectedDelegateePeerId: refreshOpts?.memberProof?.expectedDelegateePeerId,
+        approvedAgentAddress: refreshOpts?.approvedMember?.proof.approvedAgentAddress,
+        expectedDelegateePeerId: refreshOpts?.approvedMember?.proof.expectedDelegateePeerId,
       });
       const outcome = opts.refreshMetaResults?.[calls.refreshMetaCalls.length - 1] ?? true;
       if (outcome instanceof Error) throw outcome;
@@ -3765,6 +3770,12 @@ describe('runImmediatePostApprovalSync', () => {
       return outcome;
     };
     (a as any).hasConfirmedMetaState = async () => metaConfirmed;
+    // A refresh that succeeded stored the member proof it required, which is
+    // what join completion confirms.
+    (a as any).hasConfirmedApprovedMemberMetaState = async () => metaConfirmed;
+    // The real acceptance resolver builds the member proof; only the
+    // transport read behind its policy is stubbed.
+    (a as any).resolveSwmTransportAuthority = async () => ({ kind: 'plaintext' });
     (a as any).refreshMetaSyncedFlags = async () => undefined;
     (a as any).runCatchupOverPeers = async (
       cg: string,

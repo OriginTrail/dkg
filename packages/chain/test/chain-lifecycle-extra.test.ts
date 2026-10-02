@@ -43,6 +43,7 @@ import {
   HARDHAT_KEYS,
 } from './evm-test-context.js';
 import { mintTokens } from './hardhat-harness.js';
+import type { ChainEvent } from '../src/chain-adapter.js';
 import {
   buildAuthorAttestationTypedData,
   buildUpdateAuthorAttestationTypedData,
@@ -311,6 +312,27 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       const wrongPub = new Wallet(HARDHAT_KEYS.EXTRA2).address;
       const notVerified = await adapter.verifyKAUpdate(updateResult.hash, kaId, wrongPub);
       expect(notVerified.verified).toBe(false);
+
+      // --- the update reaches the event lane the VM refresh nudge reads (#2858) ---
+      const updates: ChainEvent[] = [];
+      for await (const event of adapter.listenForEvents({
+        eventTypes: ['KnowledgeAssetUpdated'],
+        fromBlock: updateResult.blockNumber,
+        toBlock: updateResult.blockNumber,
+      })) {
+        updates.push(event);
+      }
+      expect(updates).toEqual([{
+        type: 'KnowledgeAssetUpdated',
+        blockNumber: updateResult.blockNumber,
+        data: expect.objectContaining({
+          kaId: kaId.toString(),
+          batchId: kaId.toString(),
+          merkleRoot: ethers.hexlify(newMerkleRoot),
+          author: coreOp.address,
+          txHash: updateResult.hash,
+        }),
+      }]);
     }, 120_000);
 
     // #831 regression test: a metadata update with `newByteSize > currentByteSize`

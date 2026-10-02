@@ -1,0 +1,156 @@
+{
+  "fixtureProvenance": "Anonymized legacy confirmed-public metadata shape; no payload body included.",
+  "contextGraphId": "0x1111111111111111111111111111111111111111/public-recovery-fixture",
+  "assetUal": "did:dkg:base:8453/0x1111111111111111111111111111111111111111/1",
+  "bindings": [
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/contextGraph"
+      },
+      "object": {
+        "type": "uri",
+        "value": "did:dkg:context-graph:0x1111111111111111111111111111111111111111/public-recovery-fixture"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/merkleRoot"
+      },
+      "object": {
+        "type": "literal",
+        "value": "abababababababababababababababababababababababababababababababab"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/publishedAt"
+      },
+      "object": {
+        "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+        "type": "literal",
+        "value": "2024-01-01T00:00:00.000Z"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/status"
+      },
+      "object": {
+        "type": "literal",
+        "value": "confirmed"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/assertionGraph"
+      },
+      "object": {
+        "type": "uri",
+        "value": "did:dkg:context-graph:0x1111111111111111111111111111111111111111/public-recovery-fixture/_verifiable_memory/0x1111111111111111111111111111111111111111/1"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/batchId"
+      },
+      "object": {
+        "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+        "type": "literal",
+        "value": "12345"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/transactionHash"
+      },
+      "object": {
+        "type": "literal",
+        "value": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/materializedVersion"
+      },
+      "object": {
+        "type": "literal",
+        "value": "100:0"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/assertionVersion"
+      },
+      "object": {
+        "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+        "type": "literal",
+        "value": "1"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/contentScopeVersion"
+      },
+      "object": {
+        "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+        "type": "literal",
+        "value": "2"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/kaUal"
+      },
+      "object": {
+        "type": "uri",
+        "value": "did:dkg:base:8453/0x1111111111111111111111111111111111111111/1"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/privateTripleCount"
+      },
+      "object": {
+        "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+        "type": "literal",
+        "value": "0"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/publicTripleCount"
+      },
+      "object": {
+        "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+        "type": "literal",
+        "value": "10000"
+      }
+    },
+    {
+      "predicate": {
+        "type": "uri",
+        "value": "http://dkg.io/ontology/confirmationKind"
+      },
+      "object": {
+        "type": "literal",
+        "value": "transaction"
+      }
+    }
+  ],
+  "readOnly": true,
+  "privateCommitmentsKnownZero": true,
+  "bodyQueriesPerformed": false
+}

@@ -172,7 +172,7 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
     expect(isHeldForChainProof(held)).toBe(true);
 
     expect(publisher.describeConfiguredRetryState(held))
-      .toEqual({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
+      .toMatchObject({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
     expect(await publisher.retryDetailed())
       .toEqual({ retried: 0, blockedPendingRecovery: 1, skipped: 0 });
     // The bot's scenario: a re-submit must not mint a replacement job for this KA.
