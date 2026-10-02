@@ -106,6 +106,7 @@
     "test:devnet:mixed-version": "vitest run --config devnet/mixed-version/vitest.config.ts",
     "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
     "test:devnet:rpc-quiet-window": "vitest run --config devnet/rpc-quiet-window/vitest.config.ts",
+    "test:devnet:snapshot-finalized-cleanup": "vitest run --config devnet/snapshot-finalized-cleanup/vitest.config.ts",
     "test:devnet:storage-ack-store-outage": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts",
     "test:devnet:subscription-persist-restart": "vitest run --config devnet/subscription-persist-restart/vitest.config.ts",
     "test:devnet:status-store-outage": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts -t 'status reports a real managed-store outage and recovery'",

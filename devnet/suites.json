@@ -34,6 +34,7 @@
     "rfc51-publishing-allocation",
     "rich-scenario",
     "rpc-quiet-window",
+    "snapshot-finalized-cleanup",
     "storage-ack-store-outage",
     "subscription-persist-restart",
     "v10-core-flows",
