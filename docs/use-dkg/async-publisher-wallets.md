@@ -35,7 +35,7 @@ By contrast, a **transient RPC failure raised while the publish transaction was 
 
 | `blocker.code` | What it says | Can an operator supply it? |
 |---|---|---|
-| `chain_recheck_pending` | The record is complete and this node can settle it. While the publisher runtime is running and not paused, recovery re-checks on a bounded backoff, finalizes the **same job** if the transaction mined, and releases a CREATE for a re-run only once the transaction is proven never sent (an UPDATE whose transaction never landed stays held). The latest lookup outcome (provider unavailable, transaction pending or awaiting confirmations, proof inconclusive) is not retained, so it is not named. | Nothing to supply. Wait; restore RPC access if the provider is the problem. |
+| `chain_recheck_pending` | The record is complete and this node can settle it. While the publisher runtime is running and not paused, recovery re-checks on a bounded backoff, finalizes the **same job** if the transaction mined, and releases a CREATE for a re-run only once the transaction is proven never sent (an UPDATE whose transaction never landed stays held). What the latest re-check found is reported as `blocker.lastCheck` when the running publisher holds an observation of it (below); without one it is not named. | Nothing to supply. Wait; restore RPC access if the provider is the problem. |
 | `recovery_not_configured` | The record is complete, but this node has no chain-recovery capability for the job's wallet and operation (no resolver, the chain adapter cannot answer, or the publisher runtime is not running). | Restore chain access, the adapter capability or the runtime. A retry is refused while a transaction may exist. |
 | `no_transaction_hash`, `no_signer_wallet` | Nothing can be asked about the job at all. | No supported control writes evidence into a job. The best-effort journal (`GET /api/publisher/journal`, named-KA jobs on the daemon) may still hold the hash; inspect the transaction on a block explorer. |
 | `claim_or_validation_missing`, `publish_identity_unpinned` | The chain can be asked, but a mined transaction cannot be turned into this job's finalization or recognized as its effect. | No. Inspect the transaction yourself. |
@@ -44,6 +44,26 @@ By contrast, a **transient RPC failure raised while the publish transaction was 
 | `intended_root_missing` (UPDATE) | Recovery cannot recognize the effect. Absence is never proof for an UPDATE: a later third-party update would make a replay write a stale root over newer state, so recovery never releases one. | No. |
 
 `blocker.missing` lists **every** gap of an incomplete record, so you are not sent to fix one and then meet the next.
+
+#### What the latest chain re-check found (`blocker.lastCheck`)
+
+For a `chain_recheck_pending` job, the job-detail routes (`GET /api/publisher/job`, `job-payload` and the legacy `jobs/<id>` shapes) add `blocker.lastCheck: { outcome, at }` when the running publisher holds an observation of the latest re-check of that exact job. `at` is epoch milliseconds on the daemon's clock, taken when the re-check finished. `outcome` is a closed set of codes (never provider text, which can carry RPC URLs or keys):
+
+| `outcome` | What the latest re-check found |
+|---|---|
+| `pending-mempool` | The chain has the transaction in its mempool. |
+| `pending-awaiting-confirmation` | The transaction is mined but not yet confirmed to the configured depth. |
+| `rpc-unavailable` | The chain RPC could not answer: every endpoint failed, a bounded request timed out, or the local request governor was full. It does not by itself mean the provider is down. |
+| `absence-unproven` | The chain has no record of the transaction, but the proof that would let this node release the job is not established, so nothing is released. For an UPDATE absence is never proof; for a CREATE it is any of: the signed nonce is not provably spent, the pinned identity is already minted (a replacement transaction may have published) or its state could not be read, no identity is pinned, or the pinned snapshot could not be read. Do not assume it is only an RPC problem. |
+| `inconclusive` | Nothing was established and the cause is not classified (an adapter that cannot answer, a confirmation this node cannot map to evidence, another failure). It never means the provider is fine. |
+| `unrecognized` | A mined CREATE transaction carries no publish this node can parse (an UPDATE is verified against its intended root instead). |
+| `recovered` | The chain confirmed the transaction but this node did not apply it (yet): finalization declined, or the pass ran out of time between the answer and applying it. |
+| `reverted` | A job holding an earlier attempt's hash on an UPDATE: a revert proves that transaction had no effect, but an UPDATE is never re-run from it (a replay could write a stale root over newer state), so it stays held. |
+| `not-found` | Only a third-party resolver reports it for an UPDATE (the built-in resolver reports `absence-unproven` instead); an UPDATE is never released by absence. |
+| `deadline` | The pass's time budget ended before the lookup answered. |
+| `error` | The re-check threw: the lookup, the claim transaction or applying its answer. |
+
+It is observability only and changes nothing about when a job is re-checked or what is done with the answer. It lives in the running daemon's memory, so there is none before the first re-check and after a restart; a paused dispatcher (`DKG_PUBLISHER_START_PAUSED`), a pass that did not reach the job (each pass asks at most 25 jobs within 15 seconds) and the idle 60-second cadence all leave an older one in place, so read `at` against the clock. The `503 LIFT_JOB_PENDING_CHAIN_PROOF` body carries the same `blocker` without `lastCheck`.
 
 Retryable jobs that carry no transaction evidence get a blocker too. `not_auto_retryable`: the failure is not one the publisher retries by itself, and `POST /api/publisher/retry` or re-submitting the identical request re-runs it as the same job. `auto_retry_disabled` and `retry_not_scheduled`: a retry that was already scheduled fires again once `autoRetryEnabled` is switched back on, but a job recorded while automatic retry was off was never scheduled and is not released by switching it on, so re-run it by hand. `retry_budget_spent`: re-submitting the identical `vm/publish-async` request re-arms a full budget on the same job. While the daemon reports the publisher runtime unavailable, `waitingReason` reads `operator` and no blocker is added: `GET /api/status` names that reason.
 

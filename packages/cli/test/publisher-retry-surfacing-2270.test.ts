@@ -368,6 +368,75 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     expect((await statusOf(control, heldJobId)).status).toBe('failed');
   });
 
+  // GH#2945 - what the running publisher's latest chain re-check found, attached to a held job's blocker.
+  // The control instance this route reads through has no schedule, so the answer comes from the RUNTIME
+  // publisher, and only for the one blocker it explains.
+  describe('the latest chain re-check, from the running publisher (GH#2945)', () => {
+    const OBSERVATION = { outcome: 'rpc-unavailable', at: 1_234_567 } as const;
+
+    async function heldJob(capable: boolean): Promise<{ control: Control; jobId: string }> {
+      const store = new OxigraphStore();
+      stores.push(store);
+      const control = createPublisherControlFromStore(store, { chainProofCapableForWallet: () => capable });
+      const jobId = await claimedAndValidated(control, 'rpc');
+      await control.update(jobId, 'broadcast', {
+        broadcast: { txHash: TX_HASH, walletId: 'wallet-rpc', operationKind: 'create', nonce: 7 },
+      });
+      await control.recordPublishFailure(jobId, {
+        error: new Error('RPC endpoint temporarily unavailable'),
+        failedFromState: 'broadcast',
+        errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+      });
+      return { control, jobId };
+    }
+
+    const runtimeWith = (lastChainProofCheck: ((job: { jobId: string }) => unknown) | undefined) => ({
+      publisher: lastChainProofCheck === undefined ? {} : { lastChainProofCheck },
+    });
+
+    it('attaches it to a chain_recheck_pending blocker on every route shape, leaving the rest untouched', async () => {
+      const { control, jobId } = await heldJob(true);
+      const asked: string[] = [];
+      const runtime = runtimeWith((job) => { asked.push(job.jobId); return OBSERVATION; });
+      const configured = control.describeConfiguredRetryState((await statusOf(control, jobId)) as never);
+      expect(configured.blocker?.code).toBe('chain_recheck_pending');
+
+      const wrapped = await request(control, 'GET', `/api/publisher/job?id=${jobId}`, '', { available: true }, runtime);
+      const legacy = await request(control, 'GET', `/api/publisher/jobs/${jobId}`, '', { available: true }, runtime);
+
+      expect(wrapped.body.retryState).toEqual({ ...configured, blocker: { ...configured.blocker, lastCheck: OBSERVATION } });
+      expect(legacy.body.retryState).toEqual(wrapped.body.retryState);
+      expect(wrapped.body.retryState.blocker.summary).toBe(configured.blocker?.summary);
+      expect(asked).toEqual([jobId, jobId]);
+    });
+
+    it.each([
+      ['no observation for this incarnation', () => runtimeWith(() => undefined)],
+      ['a publisher that has no such capability', () => runtimeWith(undefined)],
+      ['no runtime at all', () => null],
+    ])('leaves the blocker exactly as derived with %s', async (_label, makeRuntime) => {
+      const { control, jobId } = await heldJob(true);
+      const configured = control.describeConfiguredRetryState((await statusOf(control, jobId)) as never);
+
+      const { body } = await request(control, 'GET', `/api/publisher/job?id=${jobId}`, '', { available: true }, makeRuntime());
+
+      expect(body.retryState).toEqual(configured);
+      expect('lastCheck' in body.retryState.blocker).toBe(false);
+    });
+
+    it('does not attach it to a different blocker, even when the runtime has an observation', async () => {
+      const { control, jobId } = await heldJob(false);
+      const configured = control.describeConfiguredRetryState((await statusOf(control, jobId)) as never);
+      expect(configured.blocker?.code).toBe('recovery_not_configured');
+
+      const { body } = await request(
+        control, 'GET', `/api/publisher/job?id=${jobId}`, '', { available: true }, runtimeWith(() => OBSERVATION),
+      );
+
+      expect(body.retryState).toEqual(configured);
+    });
+  });
+
   it('serves retryState on the job-payload and both legacy job routes too', async () => {
     const control = newControl();
     const jobId = await failAfterRecordedTxHash(control);
@@ -404,6 +473,7 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     path: string,
     rawBody = '',
     availability: AsyncPublisherAvailability = { available: true },
+    runtime: unknown = null,
   ): Promise<{ status: number; body: any }> {
     const url = new URL(`http://127.0.0.1${path}`);
     const req = Readable.from([]);
@@ -423,7 +493,7 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
       res: res as unknown as ServerResponse,
       agent: {} as RequestContext['agent'],
       publisherControl,
-      publisherState: { runtime: null, availability },
+      publisherState: { runtime, availability },
       config: {} as RequestContext['config'],
       startedAt: 0,
       dashDb: {} as RequestContext['dashDb'],
