@@ -8,6 +8,7 @@ import { ProtocolRouter } from '../src/protocol-router.js';
 import {
   EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL as PROTOCOL,
   exchangeExperimentalExactBatch, registerExperimentalExactBatchResponder,
+  ExactBatchResponderRefusal,
   type ExactBatchTransportOptions,
   type ExactBatchTransportSession,
 } from '../src/experimental-exact-batch-stream.js';
@@ -104,6 +105,28 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
     await entered.promise; await outcome; await responded.promise;
     expect(clientStream.status).toBe('aborted');
     await vi.waitFor(() => expect(serverStream.status).not.toBe('open'));
+    expect(getEventListeners(f.a.stopSignal!, 'abort')).toHaveLength(0);
+  }, 15000);
+
+  it('delivers a refusal raised before authorization as one frame, then ends the stream cleanly', async () => {
+    const f = await pair(), respond = vi.fn(async () => {});
+    registerExperimentalExactBatchResponder(f.routerB, options,
+      async () => { throw new ExactBatchResponderRefusal('BUSY'); }, respond);
+    let clientStream!: Stream;
+    const received = await exchangeExperimentalExactBatch(f.routerA, f.b.peerId, start(),
+      { ...options, assetUals: UALS }, async session => {
+        clientStream = physical(session);
+        const frames: ExactBatchFrame[] = [];
+        // Read to the end: the refusal must arrive whole before the responder's half-close.
+        for (let item = await session.next(); item; item = await session.next()) frames.push(item);
+        return frames;
+      });
+    expect(received).toEqual([frame(K.REFUSE, 255, 0, enc.encode('BUSY'))]);
+    expect(respond).not.toHaveBeenCalled();
+    expect(clientStream.status).toBe('closed');
+    const connections = f.a.libp2p.getConnections().filter(c => c.remotePeer.toString() === f.b.peerId);
+    expect(connections).toHaveLength(1);
+    await vi.waitFor(() => expect(connections[0]!.streams.filter(s => s.protocol === PROTOCOL)).toHaveLength(0));
     expect(getEventListeners(f.a.stopSignal!, 'abort')).toHaveLength(0);
   }, 15000);
 

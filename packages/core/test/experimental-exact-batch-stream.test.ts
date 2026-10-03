@@ -7,7 +7,7 @@ import type { PeerResolver } from '../src/network/peer-resolver.js';
 import { ProtocolRouter } from '../src/protocol-router.js';
 import {
   exchangeExperimentalExactBatch, registerExperimentalExactBatchResponder,
-  ExperimentalExactBatchUnsupportedError, ExactBatchTransportSession, type ExactBatchTransportOptions,
+  ExperimentalExactBatchUnsupportedError, ExactBatchResponderRefusal, ExactBatchTransportSession, type ExactBatchTransportOptions,
   EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL, type ExactBatchTransportEvent,
 } from '../src/experimental-exact-batch-stream.js';
 import { EXACT_BATCH_FRAME_KIND as K, encodeExactBatchFrame, type ExactBatchFrame } from '../src/experimental-exact-batch-wire.js';
@@ -197,6 +197,38 @@ describe('experimental exact-batch dedicated duplex transport', () => {
     await expect(exchangeExperimentalExactBatch(f.routerClient, PEER, start(), { ...options, assetUals: UALS }, s => s.next()))
       .rejects.toThrow(); await f.settled();
     expect(exportAsset).not.toHaveBeenCalled(); expect(f.server.sentKinds).toEqual([]);
+  });
+
+  it.each(['authorization', 'response'] as const)('answers a refusal raised during %s with its closed code, and closes instead of aborting', async stage => {
+    const f = fixture();
+    // The cause stays on the responder: only the wire code is sent.
+    const refusal = () => new ExactBatchResponderRefusal('BUSY', { cause: new Error('private limiter detail') });
+    const respond = vi.fn(async () => { if (stage === 'response') throw refusal(); });
+    registerExperimentalExactBatchResponder(f.routerServer, options, async () => {
+      if (stage === 'authorization') throw refusal();
+      return { assetUals: UALS, context: undefined };
+    }, respond);
+    const received: ExactBatchFrame[] = [];
+    await exchangeExperimentalExactBatch(f.routerClient, PEER, start(), { ...options, assetUals: UALS }, async session => {
+      for (let item = await session.next(); item; item = await session.next()) received.push(item);
+    });
+    await f.settled();
+    expect(received).toEqual([frame(K.REFUSE, 255, 0, text.encode('BUSY'))]);
+    expect(f.server.sentKinds).toEqual([K.REFUSE]);
+    expect(respond).toHaveBeenCalledTimes(stage === 'authorization' ? 0 : 1);
+    expect(f.server.aborts).toBe(0); expect(f.client.aborts).toBe(0);
+    expect(f.server.status).toBe('closed'); expect(f.client.status).toBe('closed');
+  });
+
+  it('sends no refusal into a scope that was cancelled while the responder worked', async () => {
+    const f = fixture(), respond = vi.fn(async () => {});
+    registerExperimentalExactBatchResponder(f.routerServer, options, async () => {
+      f.serverStop.abort(new Error('node stopping'));
+      throw new ExactBatchResponderRefusal('BUSY');
+    }, respond);
+    await expect(exchangeExperimentalExactBatch(f.routerClient, PEER, start(), { ...options, assetUals: UALS }, s => s.next()))
+      .rejects.toThrow(); await f.settled();
+    expect(f.server.sentKinds).toEqual([]); expect(respond).not.toHaveBeenCalled();
   });
 
   it('outbound rejection performs no address resolution, stream reuse or physical dial', async () => {

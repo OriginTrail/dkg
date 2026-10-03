@@ -243,6 +243,7 @@ export {
   exchangeExperimentalExactBatch,
   registerExperimentalExactBatchResponder,
   ExperimentalExactBatchUnsupportedError,
+  ExactBatchResponderRefusal,
   type ExactBatchTransportSession,
   type ExactBatchTransportOptions,
   type ExactBatchTransportEvent,
