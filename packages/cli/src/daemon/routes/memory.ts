@@ -1173,7 +1173,13 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
   // OT-RFC-38 LU-6 -- dedicated host-catchup endpoint.
   //
   // POST /api/shared-memory/host-catchup
-  // Body: { contextGraphId: string, peerId?: string, sinceSeqno?: number, maxRounds?: number }
+  // Body: { contextGraphId: string, peerId?: string, sinceSeqno?: number, maxRounds?: number,
+  //         maxEntriesPerRound?: number, includeEntries?: boolean }
+  //
+  // `maxEntriesPerRound` sets the page size asked of each host. The agent
+  // signs and sends the value capped at the protocol's limit of 1024 entries.
+  // `includeEntries` adds, per peer, the seqno and SHA-256 of every envelope
+  // that peer served, in order: the evidence of what a host holds.
   //
   // Pulls opaque ciphertext envelopes from cores that have been
   // hosting the curated CG's SWM substrate and re-applies each
@@ -1193,6 +1199,11 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const peerIdParam = typeof parsed.peerId === 'string' ? parsed.peerId.trim() : undefined;
     const sinceSeqno = typeof parsed.sinceSeqno === 'number' && parsed.sinceSeqno >= 0 ? Math.floor(parsed.sinceSeqno) : 0;
     const maxRounds = typeof parsed.maxRounds === 'number' && parsed.maxRounds > 0 ? Math.min(64, Math.floor(parsed.maxRounds)) : 8;
+    // Left undefined unless asked for, so the host's own default page applies.
+    const maxEntriesPerRound = typeof parsed.maxEntriesPerRound === 'number' && parsed.maxEntriesPerRound >= 1
+      ? Math.floor(parsed.maxEntriesPerRound)
+      : undefined;
+    const reportEntries = parsed.includeEntries === true;
     if (typeof (agent as any).catchupSwmFromConnectedHosts !== 'function') {
       return jsonResponse(res, 501, { error: 'Host-catchup is not supported on this agent build' });
     }
@@ -1201,6 +1212,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         peers: peerIdParam ? [peerIdParam] : undefined,
         sinceSeqno,
         maxRounds,
+        ...(maxEntriesPerRound !== undefined ? { maxEntriesPerRound } : {}),
+        ...(reportEntries ? { reportEntries } : {}),
       });
       // Codex PR #610 R2: report triples (`appliedTriples`) as the
       // user-facing total; keep envelope count alongside as

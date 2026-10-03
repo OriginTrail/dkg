@@ -43,3 +43,4 @@ packages:
   - "devnet/public-cg-hash-subscription"
   - "devnet/issue-2052-system-records"
   - "devnet/node-store-persistence"
+  - "devnet/swm-host-store-durability"
