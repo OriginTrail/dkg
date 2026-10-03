@@ -10,6 +10,8 @@ import {
   encodeFinalizationMessage,
   knowledgeAssetLayerGraphUri,
   type FinalizationMessageMsg,
+  Logger,
+  type LogRecord,
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
@@ -4912,6 +4914,46 @@ describe('graph-scoped finalization handler', () => {
 
       await expect(classify(handler)).resolves.toEqual({ kind: 'confirmed-vm', layout: 'legacy' });
       await expect(reconcileAt(handler, UNRELATED_ROOT)).resolves.toBe('already-confirmed');
+    });
+
+    it('answers no-swm, without the marker shortcut, when the lifecycle metadata of the KA is ambiguous', async () => {
+      trustBinding(handler);
+      const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+      await store.insert([
+        { subject: 'urn:dkg:lifecycle:first', predicate: 'http://dkg.io/ontology/reservedUal', object: `"${UAL}"`, graph: metaGraph },
+        { subject: 'urn:dkg:lifecycle:second', predicate: 'http://dkg.io/ontology/reservedUal', object: `"${UAL}"`, graph: metaGraph },
+        { subject: UAL, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: metaGraph },
+      ]);
+      const entries: LogRecord[] = [];
+      Logger.setSink((entry) => entries.push(entry));
+      try {
+        await expect(classify(handler)).resolves.toEqual({ kind: 'present' });
+        await expect(reconcileAt(handler, UNRELATED_ROOT)).resolves.toBe('no-swm');
+      } finally {
+        Logger.setSink(null);
+      }
+      expect(entries.map((entry) => entry.message))
+        .toContain(`Chain-reconcile: lifecycle metadata for ${UAL} is ambiguous`);
+    });
+
+    it('answers no-swm for a named KA whose graph-scoped metadata has neither a workspace head nor a confirmed copy', async () => {
+      trustBinding(handler);
+      const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+      await store.insert([
+        { subject: 'urn:dkg:lifecycle:only', predicate: 'http://dkg.io/ontology/reservedUal', object: `"${UAL}"`, graph: metaGraph },
+        { subject: UAL, predicate: 'http://dkg.io/ontology/kaUal', object: `"${UAL}"`, graph: metaGraph },
+      ]);
+      const entries: LogRecord[] = [];
+      Logger.setSink((entry) => entries.push(entry));
+      try {
+        await expect(classify(handler)).resolves.toEqual({ kind: 'present' });
+        await expect(reconcileAt(handler, UNRELATED_ROOT)).resolves.toBe('no-swm');
+      } finally {
+        Logger.setSink(null);
+      }
+      expect(entries.map((entry) => entry.message)).toContain(
+        `Chain-reconcile: graph-scoped metadata exists for ${UAL} but its durable workspace head is missing`,
+      );
     });
 
     it('does not count historical workspace operations as a local candidate', async () => {
