@@ -727,7 +727,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     expect(resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects an approved-private metadata gate revoked during its transport recheck', async () => {
+  it('re-reads an approved-private metadata gate revoked during its transport recheck', async () => {
     const revokedMember = ethers.Wallet.createRandom();
     let metadataRevision = 11;
     let transportReads = 0;
@@ -747,6 +747,34 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       getCgMeta: vi.fn(async () => ({
         allowedAgents: [revokedMember.address],
         participantAgents: [],
+        revokedAgents: metadataRevision > 11 ? [revokedMember.address] : [],
+      })),
+      subscribedContextGraphs: new Map(),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
+      host as never,
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ kind: 'available', agentAddresses: [] });
+    expect(resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+    expect(host.getCgMeta).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed when the metadata authority keeps changing during gate reads', async () => {
+    const member = ethers.Wallet.createRandom();
+    let metadataRevision = 11;
+    const resolveSwmTransportAuthority = vi.fn(async () => {
+      metadataRevision += 1;
+      return { kind: 'approved-private-replica' as const, allowedPeers: [] as string[] };
+    });
+    const host = {
+      contextGraphMetaProjection: {
+        get readAuthorityFactsRevision() { return metadataRevision; },
+      },
+      resolveSwmTransportAuthority,
+      getCgMeta: vi.fn(async () => ({
+        allowedAgents: [member.address],
+        participantAgents: [],
         revokedAgents: [],
       })),
       subscribedContextGraphs: new Map(),
@@ -755,12 +783,12 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     await expect(WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
       host as never,
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({
+    )).resolves.toMatchObject({
       kind: 'unavailable',
       reason: 'local-existence-unavailable',
-      detail: `Context graph "${CONTEXT_GRAPH_ID}" metadata authority changed while resolving its agent gate`,
     });
-    expect(resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+    expect(host.getCgMeta).toHaveBeenCalledTimes(3);
+    expect(resolveSwmTransportAuthority).toHaveBeenCalledTimes(6);
   });
 
   it('rechecks the SWM agent gate when private authority activates during metadata', async () => {

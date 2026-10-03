@@ -5412,6 +5412,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
           resolveDeployment,
           requiresAppliedHeadPrecommit: (announcement) => {
+            // An exact applied head can precede a late legacy SWM root marker.
+            // Replaying that authenticated head retires the marker under the
+            // native receiver lease; treating the head as satisfied would
+            // leave the graph permanently known-incomplete despite row parity.
+            if (readRfc64LegacySwmBoundaryCountV1(
+              this,
+              announcement.contextGraphId,
+            ) > 0) return true;
             const accepted = this.requireRfc64PublicCatalogServiceV1()
               .acceptedPolicySnapshotForCatalogScope(
                 clients.resolveTrustedCatalogScope(announcement),
