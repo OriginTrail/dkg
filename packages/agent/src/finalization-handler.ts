@@ -96,15 +96,6 @@ import {
 } from './finalization-recovery-eligibility.js';
 
 /**
- * Predicate for the durable per-root keep-root-copy signal the publisher
- * persists into SWM workspace meta at publish time. Nothing in this release
- * reads it: the gossip envelope carries the same decision as
- * `keepRootCopyOnLabel`. It is still written for peers on releases whose
- * chain reconcile promotes from workspace operations.
- */
-export const KEEP_ROOT_COPY_PREDICATE = `${DKG_NS}keepRootCopyOnLabel`;
-
-/**
  * Resolves a local context-graph id (the topic/CG name used in gossip) to
  * its on-chain numeric id. Returns `null`/`undefined` for CGs that aren't
  * registered on-chain. Used as a fallback when a peer-finalization gossip
