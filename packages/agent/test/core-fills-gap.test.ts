@@ -326,20 +326,37 @@ async function seedSwmSnapshotInSubGraph(
 
 const STAGED_KA_AUTHOR = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
 
-/**
- * Stage one KA's shared-memory copy in its own graph, with its workspace
- * head, and register the KA on chain under the root of that content.
- */
-async function stageRegisteredKnowledgeAsset(
-  store: TripleStore,
+/** Register one KA on chain under the root of a single name triple. */
+function registerKnowledgeAsset(
   chain: MockChainAdapter,
-  localCgId: string,
   onChainCgId: bigint,
   kaNumber: bigint,
   entity: string,
   value: string,
-): Promise<bigint> {
+): bigint {
   chain.getLatestMerkleRootAuthor = async () => STAGED_KA_AUTHOR;
+  const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: STAGED_KA_AUTHOR, kaNumber });
+  chain.__registerKC({
+    kaId,
+    contextGraphId: onChainCgId,
+    merkleRootHex: ethers.hexlify(computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    )),
+    chunks: [],
+  });
+  return kaId;
+}
+
+/** Stage that KA's shared-memory copy in its own graph, with its workspace head. */
+async function stageKnowledgeAssetSharedMemory(
+  store: TripleStore,
+  chain: MockChainAdapter,
+  localCgId: string,
+  kaNumber: bigint,
+  entity: string,
+  value: string,
+): Promise<void> {
   const scope = createGraphKnowledgeAssetScope(
     buildKnowledgeAssetUal(chain.chainId, STAGED_KA_AUTHOR, kaNumber),
     '1',
@@ -350,13 +367,6 @@ async function stageRegisteredKnowledgeAsset(
     object: `"${value}"`,
     graph: knowledgeAssetLayerGraphUri(localCgId, MemoryLayer.SharedWorkingMemory, scope),
   }];
-  const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: STAGED_KA_AUTHOR, kaNumber });
-  chain.__registerKC({
-    kaId,
-    contextGraphId: onChainCgId,
-    merkleRootHex: ethers.hexlify(computeFlatKCRootV10(quads.map((quad) => ({ ...quad, graph: '' })), [])),
-    chunks: [],
-  });
   const graphManager = new GraphManager(store);
   const shareOperationId = `staged-share-${kaNumber}`;
   await store.insert(quads);
@@ -379,6 +389,20 @@ async function stageRegisteredKnowledgeAsset(
     kaUal: scope.ual,
     assertionVersion: scope.assertionVersion,
   });
+}
+
+/** Register a KA on chain and stage its shared-memory copy. */
+async function stageRegisteredKnowledgeAsset(
+  store: TripleStore,
+  chain: MockChainAdapter,
+  localCgId: string,
+  onChainCgId: bigint,
+  kaNumber: bigint,
+  entity: string,
+  value: string,
+): Promise<bigint> {
+  const kaId = registerKnowledgeAsset(chain, onChainCgId, kaNumber, entity, value);
+  await stageKnowledgeAssetSharedMemory(store, chain, localCgId, kaNumber, entity, value);
   return kaId;
 }
 
@@ -2189,6 +2213,34 @@ describe('Phase D - VM reconcile damping', () => {
     expect(cacheKeys).toHaveLength(2);
     expect(cacheKeys.some((key) => key.includes('11'.repeat(32)))).toBe(true);
     expect(cacheKeys.some((key) => key.includes('22'.repeat(32)))).toBe(true);
+  });
+
+  it('promotes per-KA shared memory that arrives while its miss is cached', async () => {
+    const internals = await boot();
+    const { contextGraphId } = await internals.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1 });
+    const localCgId = contextGraphId.toString();
+    const entity = 'urn:fact:late-arrival';
+    const value = 'Arrived during backoff';
+    registerKnowledgeAsset(internals.chain, contextGraphId, 1n, entity, value);
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+    const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, unknown>;
+
+    await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(fetch.calls).toHaveLength(1);
+    expect(negativeCache.size).toBe(1);
+
+    await stageKnowledgeAssetSharedMemory(internals.store, internals.chain, localCgId, 1n, entity, value);
+
+    await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, undefined))
+      .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch.calls).toHaveLength(1);
+    expect(negativeCache.size).toBe(0);
+    await expect(internals.store.query(
+      `ASK { GRAPH ?vm { <${entity}> <http://schema.org/name> "${value}" } `
+        + 'FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }',
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
   it('tries again when workspace data arrives without operation-meta changes', async () => {
