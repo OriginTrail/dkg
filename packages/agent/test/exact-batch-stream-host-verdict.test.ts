@@ -25,7 +25,7 @@ import { createDurableSyncAccumulator, finalizeDurableSyncCompletion } from '../
 import { createChallengePinnedExactAssetSelection, createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_PROTOCOL, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
 import { EXACT_BATCH_RESOURCE_REFUSAL_TTL_MS, exactBatchStreamUnsupported } from '../src/sync/exact-batch-stream-capability.js';
-import { EXACT_BATCH_STREAM_RETRY } from '../src/sync/requester/exact-batch-stream-driver.js';
+import { EXACT_BATCH_STREAM_BUSY_RETRY, EXACT_BATCH_STREAM_RETRY } from '../src/sync/requester/exact-batch-stream-driver.js';
 import type { ExactBatchAgentSession } from '../src/sync/requester/exact-batch-stream.js';
 import * as exactBatchRequester from '../src/sync/requester/exact-batch-stream.js';
 import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
@@ -151,7 +151,19 @@ function resourceLimitRefusal(): ExactBatchFrame {
   return { kind: K.REFUSE, assetIndex: 255, sequence: 0, payload: new TextEncoder().encode('RESOURCE_LIMIT') };
 }
 
-function requesterLogs(f: ReturnType<typeof fixture>, kind: 'failure' | 'retry') {
+function busyRefusal(): ExactBatchFrame {
+  return { kind: K.REFUSE, assetIndex: 255, sequence: 0, payload: new TextEncoder().encode('BUSY') };
+}
+
+/** What each exchange of the run asked the transport for. */
+function requestedExchanges(f: ReturnType<typeof fixture>) {
+  return vi.mocked(exchangeExperimentalExactBatch).mock.calls.map(([, peer, start, transport]) => ({
+    peer, assetUals: transport.assetUals,
+    start: ContextGraphResolveMethods.prototype.parseSyncRequest.call(f.host, start.payload).assetUals,
+  }));
+}
+
+function requesterLogs(f: ReturnType<typeof fixture>, kind: 'failure' | 'retry' | 'refusal') {
   return f.host.log.info.mock.calls.map(([, message]: [unknown, string]) => message)
     .filter((message: string) => message.startsWith(`Exact batch requester ${kind} `));
 }
@@ -160,12 +172,13 @@ type StreamBreak = 'read-rejects' | 'ends-early' | 'ack-rejects';
 
 /**
  * Script the next exchanges, one entry each. An exchange serves the fixture
- * items it names, in window order, and then either completes the batch or
- * breaks once the requester has acknowledged `afterAcks` assets.
+ * items it names, in window order, and then either completes the batch,
+ * breaks once the requester has acknowledged `afterAcks` assets, or (`busy`)
+ * answers with a BUSY refusal.
  */
 function scriptExchanges(f: ReturnType<typeof fixture>, scripts: ReadonlyArray<{
   readonly items: readonly number[];
-  readonly ending: 'complete' | StreamBreak;
+  readonly ending: 'complete' | 'busy' | StreamBreak;
   readonly afterAcks?: number;
   /** Runs at the moment of the break, before the stream reports it. */
   readonly atBreak?: () => void;
@@ -201,6 +214,7 @@ function scriptExchanges(f: ReturnType<typeof fixture>, scripts: ReadonlyArray<{
           if (script.ending === 'complete') return undefined;
           await acked(breakAfterAcks);
           script.atBreak?.();
+          if (script.ending === 'busy') return busyRefusal();
           if (script.ending === 'read-rejects') throw new Error('Fixture stream reset');
           if (script.ending === 'ends-early') return undefined;
           return new Promise<never>(() => {}); // the ACK is what fails
@@ -764,13 +778,8 @@ describe('experimental exact batch actual host completion verdict', () => {
       expect(outcome).toMatchObject({ exactFetchDisposition: 'found', committedExactAssetUals: f.selection.assetUals,
         result: { complete: true, completedPhases: 1, failedPhases: 0, insertedDataTriples: 3 } });
       for (const item of f.items) expect(await storedRows(f.store, item.graph)).toBe(1);
-      const requested = vi.mocked(exchangeExperimentalExactBatch).mock.calls
-        .map(([, peer, start, transport]) => ({
-          peer, assetUals: transport.assetUals,
-          start: ContextGraphResolveMethods.prototype.parseSyncRequest.call(f.host, start.payload).assetUals,
-        }));
       // Same peer both times; the second START names only what was still missing.
-      expect(requested).toEqual([
+      expect(requestedExchanges(f)).toEqual([
         { peer: 'fixture-source', assetUals: f.selection.assetUals, start: f.selection.assetUals },
         { peer: 'fixture-source', assetUals: f.selection.assetUals.slice(applied), start: f.selection.assetUals.slice(applied) },
       ]);
@@ -968,6 +977,185 @@ describe('experimental exact batch actual host completion verdict', () => {
         expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
         expect(f.host.ensurePeerConnected).toHaveBeenCalledOnce();
       });
+    });
+  });
+
+  describe('a responder that answers BUSY', () => {
+    const [firstBackoffMs, secondBackoffMs, thirdBackoffMs] = EXACT_BATCH_STREAM_BUSY_RETRY.backoffMs;
+    /**
+     * Resolves once `count` exchanges were refused as busy. The driver logs the
+     * refusal in the same synchronous run that starts its pause, so the pause
+     * is running by then. Real event-loop turns: the driver clock stays put.
+     */
+    const untilBusyAnswers = async (f: ReturnType<typeof fixture>, count: number) => {
+      // Bounded by the wall clock, which the driver clock does not fake: an
+      // exchange that first applies an asset waits on the real verify worker.
+      const startedAt = performance.now();
+      while (requesterLogs(f, 'refusal').length < count && performance.now() - startedAt < 30_000) {
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      expect(requesterLogs(f, 'refusal')).toHaveLength(count);
+    };
+
+    it('is asked again after the backoff, on the stream and with no other peer or wire', async () => {
+      const f = fixture(2);
+      scriptExchanges(f, [
+        { items: [], ending: 'busy' },
+        { items: [0, 1], ending: 'complete' },
+      ]);
+      await withDriverClock(async () => {
+        let settled = false;
+        const outcome = f.run(f.selection, 'stream-required').finally(() => { settled = true; });
+        await untilBusyAnswers(f, 1);
+        await vi.advanceTimersByTimeAsync(firstBackoffMs - 1);
+        expect(exchangeExperimentalExactBatch).toHaveBeenCalledTimes(1);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ exactFetchDisposition: 'found', exactStreamOutcome: 'complete',
+          committedExactAssetUals: f.selection.assetUals,
+          result: { complete: true, completedPhases: 1, failedPhases: 0, insertedDataTriples: 2 } });
+      });
+      // Same peer and the same selection both times: BUSY applied nothing.
+      expect(requestedExchanges(f)).toEqual([
+        { peer: 'fixture-source', assetUals: f.selection.assetUals, start: f.selection.assetUals },
+        { peer: 'fixture-source', assetUals: f.selection.assetUals, start: f.selection.assetUals },
+      ]);
+      for (const item of f.items) expect(await storedRows(f.store, item.graph)).toBe(1);
+      expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+      // A busy peer answered over a live connection: there is nothing to reconnect.
+      expect(f.host.ensurePeerConnected).not.toHaveBeenCalled();
+      expect(requesterLogs(f, 'refusal')).toEqual([
+        'Exact batch requester refusal code=BUSY startedAssets=0 committedAssets=0 acknowledgedAssets=0 atAssetBoundary=1 verifiedPrefix=0',
+      ]);
+      expect(requesterLogs(f, 'failure')).toEqual([
+        expect.stringMatching(/^Exact batch requester failure assetCount=2 committedAssets=0 origin=refusal /),
+      ]);
+      expect(requesterLogs(f, 'retry')).toEqual([
+        `Exact batch requester retry reason=responder-busy committedAssets=0 outstandingAssets=2 backoffMs=${firstBackoffMs}`,
+      ]);
+      // BUSY is not a capability verdict: the stream stays selectable for this peer.
+      expect(exactBatchStreamUnsupported(f.host, 'fixture-source', 'fixture-connection', Date.now(),
+        f.host.captureExperimentalExactBatchRefusalScope(CG))).toBe(false);
+    });
+
+    it('waits longer before each further exchange, then settles incomplete and names the busy peer', async () => {
+      const f = fixture(2);
+      scriptExchanges(f, [
+        ...EXACT_BATCH_STREAM_BUSY_RETRY.backoffMs.map(() => ({ items: [], ending: 'busy' as const })),
+        { items: [], ending: 'busy' },
+        // Never opened: the retries are used up.
+        { items: [0, 1], ending: 'complete' },
+      ]);
+      await withDriverClock(async () => {
+        const outcome = f.run(f.selection, 'stream-required');
+        for (const [index, backoffMs] of [firstBackoffMs, secondBackoffMs, thirdBackoffMs].entries()) {
+          await untilBusyAnswers(f, index + 1);
+          await vi.advanceTimersByTimeAsync(backoffMs - 1);
+          expect(exchangeExperimentalExactBatch).toHaveBeenCalledTimes(index + 1);
+          await vi.advanceTimersByTimeAsync(1);
+        }
+        expect(await outcome).toMatchObject({ exactFetchDisposition: 'incomplete', exactStreamOutcome: 'responder-busy',
+          committedExactAssetUals: [], result: { complete: false, failedPhases: 1, insertedTriples: 0 } });
+      });
+      expect(exchangeExperimentalExactBatch).toHaveBeenCalledTimes(EXACT_BATCH_STREAM_BUSY_RETRY.backoffMs.length + 1);
+      expect(requesterLogs(f, 'retry')).toEqual([firstBackoffMs, secondBackoffMs, thirdBackoffMs].map(backoffMs =>
+        `Exact batch requester retry reason=responder-busy committedAssets=0 outstandingAssets=2 backoffMs=${backoffMs}`));
+      expect([firstBackoffMs < secondBackoffMs, secondBackoffMs < thirdBackoffMs]).toEqual([true, true]);
+      expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+    });
+
+    it('is not waited for when the pause would leave less fetch time than another exchange needs', async () => {
+      const f = fixture(2);
+      scriptExchanges(f, [
+        { items: [], ending: 'busy' },
+        { items: [0, 1], ending: 'complete' },
+      ]);
+      await withDriverClock(async () => {
+        // One millisecond short of the pause plus the time kept for an exchange.
+        const outcome = await f.run(f.selection, 'stream-required',
+          { operationFetchDeadline: Date.now() + firstBackoffMs + EXACT_BATCH_STREAM_RETRY.minRemainingMs - 1 });
+        expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete', exactStreamOutcome: 'responder-busy',
+          committedExactAssetUals: [] });
+      });
+      expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+      expect(requesterLogs(f, 'retry')).toEqual([]);
+    });
+
+    it('stops being waited for at once when the fetch is cancelled, and settles as a cancellation', async () => {
+      const f = fixture(2);
+      scriptExchanges(f, [
+        { items: [], ending: 'busy' },
+        { items: [0, 1], ending: 'complete' },
+      ]);
+      const owner = new AbortController();
+      const outcome = f.run(f.selection, 'stream-required', { signal: owner.signal });
+      await untilBusyAnswers(f, 1);
+      owner.abort(new Error('Fixture cancellation'));
+      // Real timers: this settles long before the first pause could end.
+      const settled = await outcome;
+      expect(settled).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [] });
+      expect(settled).not.toHaveProperty('exactStreamOutcome');
+      expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+      expect(requesterLogs(f, 'retry')).toEqual([]);
+    });
+
+    it('keeps what an earlier exchange applied and asks only for the rest, after a break and after BUSY', async () => {
+      const f = fixture(3);
+      scriptExchanges(f, [
+        { items: [0], ending: 'read-rejects', afterAcks: 1 },
+        { items: [], ending: 'busy' },
+        { items: [1, 2], ending: 'complete' },
+      ]);
+      await withDriverClock(async () => {
+        const outcome = f.run(f.selection, 'stream-required');
+        await untilBusyAnswers(f, 1);
+        await vi.advanceTimersByTimeAsync(firstBackoffMs);
+        expect(await outcome).toMatchObject({ exactFetchDisposition: 'found', exactStreamOutcome: 'complete',
+          committedExactAssetUals: f.selection.assetUals, result: { complete: true, insertedDataTriples: 3 } });
+      });
+      const outstanding = f.selection.assetUals.slice(1);
+      expect(requestedExchanges(f)).toEqual([
+        { peer: 'fixture-source', assetUals: f.selection.assetUals, start: f.selection.assetUals },
+        { peer: 'fixture-source', assetUals: outstanding, start: outstanding },
+        { peer: 'fixture-source', assetUals: outstanding, start: outstanding },
+      ]);
+      expect(requesterLogs(f, 'retry')).toEqual([
+        expect.stringMatching(/^Exact batch requester retry reason=stream-interrupted committedAssets=1 outstandingAssets=2 reconnectMs=\d+$/),
+        `Exact batch requester retry reason=responder-busy committedAssets=1 outstandingAssets=2 backoffMs=${firstBackoffMs}`,
+      ]);
+      expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the outcome names a setback only when the stop says nothing about the peer\'s data', () => {
+    it('names the interruption when the stream broke again after its one retry', async () => {
+      const f = fixture(2);
+      scriptExchanges(f, [
+        { items: [], ending: 'read-rejects' },
+        { items: [], ending: 'read-rejects' },
+      ]);
+      expect(await f.run(f.selection, 'stream-required')).toMatchObject({
+        exactFetchDisposition: 'incomplete', exactStreamOutcome: 'stream-interrupted', committedExactAssetUals: [] });
+    });
+
+    it('names nothing for another refusal, for an asset this node cannot authenticate, or once everything was applied', async () => {
+      const refused = fixture();
+      refused.frames.splice(0, refused.frames.length, resourceLimitRefusal());
+      expect(await refused.run(refused.selection, 'stream-required')).not.toHaveProperty('exactStreamOutcome');
+
+      const rejected = fixture();
+      rejected.host.chain.getKAContextGraphId.mockImplementation(async (id: bigint) => id === rejected.items[1]!.kaId ? 15n : 14n);
+      const partial = await rejected.run();
+      expect(partial).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [rejected.items[0]!.ual] });
+      expect(partial).not.toHaveProperty('exactStreamOutcome');
+
+      // Every asset was applied and acknowledged before the stream broke: nothing is left to come back for.
+      const applied = fixture(1);
+      scriptExchanges(applied, [{ items: [0], ending: 'read-rejects', afterAcks: 1 }]);
+      const settled = await applied.run(applied.selection, 'stream-required');
+      expect(settled).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: applied.selection.assetUals });
+      expect(settled).not.toHaveProperty('exactStreamOutcome');
+      expect(applied.host.ensurePeerConnected).not.toHaveBeenCalled();
     });
   });
 
