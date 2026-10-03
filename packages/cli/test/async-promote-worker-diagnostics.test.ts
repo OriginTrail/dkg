@@ -1,0 +1,345 @@
+/**
+ * Async-promote diagnostic and hostile-logger coverage.
+ *
+ * These cases are kept separate from the queue orchestration matrix so the
+ * privacy, ordering, and sink-isolation contract has one focused home.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
+import {
+  type AsyncPromoteQueue,
+  type PromoteTerminalJobClearer,
+} from '@origintrail-official/dkg-publisher';
+import {
+  normalizePromoteWorkerLogger,
+  runPromoteJob,
+  type PromoteWorkerLogger,
+} from '../src/daemon/worker/async-promote-worker.js';
+import {
+  createAsyncPromoteWorkerFixture,
+  deferred,
+  promoteFailureDiagnostics,
+  type AsyncPromoteWorkerFixture,
+} from './_helpers/async-promote-worker-fixture.js';
+
+describe('runPromoteJob diagnostics', () => {
+  let fixture: AsyncPromoteWorkerFixture;
+  let queue: AsyncPromoteQueue;
+  let logs: string[];
+  let enqueueAndClaim: AsyncPromoteWorkerFixture['enqueueAndClaim'];
+
+  beforeEach(() => {
+    fixture = createAsyncPromoteWorkerFixture();
+    ({ queue, logs, enqueueAndClaim } = fixture);
+  });
+
+  it('logs bounded tagged failure evidence that survives terminal cleanup without leaking the message', async () => {
+    const job = await enqueueAndClaim();
+    const sensitiveMessage = 'query failed for secret-sentinel and https://rpc.example/private-key';
+    const failure = Object.assign(
+      new Error(`[promote:assertionScopedQuads] ${sensitiveMessage}`),
+      { name: 'CuratorRejectedError', code: 'CURATOR_REJECTED' },
+    );
+    const order: string[] = [];
+    let diagnosticPresentWhenFailBegan = false;
+    const fail = queue.fail.bind(queue);
+    queue.fail = async (jobId, claimToken, error) => {
+      order.push('queue.fail.begin');
+      diagnosticPresentWhenFailBegan = promoteFailureDiagnostics(logs).length === 1;
+      await fail(jobId, claimToken, error);
+      order.push('queue.fail.end');
+    };
+
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw failure;
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => {
+        order.push('diagnostic');
+        logs.push(message);
+      },
+    });
+
+    expect(result.outcome).toBe('failed_terminal');
+    expect(order).toEqual(['diagnostic', 'queue.fail.begin', 'queue.fail.end']);
+    expect(diagnosticPresentWhenFailBegan).toBe(true);
+    const diagnostics = promoteFailureDiagnostics(logs);
+    expect(diagnostics).toEqual([
+      {
+        event: 'async_promote_attempt_failed',
+        schemaVersion: 1,
+        jobId: job.jobId,
+        attempt: 1,
+        maxAttempts: 3,
+        promoteStartedMarkerPersisted: true,
+        swmCommitObserved: false,
+        stage: 'assertionScopedQuads',
+        classification: 'fatal',
+        retryable: false,
+        errorName: 'CuratorRejectedError',
+        errorCode: 'CURATOR_REJECTED',
+      },
+    ]);
+    expect(diagnostics[0]).not.toHaveProperty('messageFingerprint');
+    expect(logs.join('\n')).not.toContain('secret-sentinel');
+    expect(logs.join('\n')).not.toContain('rpc.example');
+
+    const clearer = queue as AsyncPromoteQueue & PromoteTerminalJobClearer;
+    await expect(clearer.clearTerminalJob(job.jobId)).resolves.toEqual({ outcome: 'cleared' });
+    await expect(queue.getStatus(job.jobId)).resolves.toBeNull();
+    expect(promoteFailureDiagnostics(logs)).toEqual(diagnostics);
+  });
+
+  it('sanitizes caller-controlled error identity at the worker logging boundary', async () => {
+    const job = await enqueueAndClaim();
+    const secretToken = 'AKIAIOSFODNN7EXAMPLE';
+    const failure = Object.assign(new Error('[promote:callerControlled] secret-sentinel failure'), {
+      name: `Error${secretToken}`,
+      code: secretToken,
+    });
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw failure;
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    expect(result.outcome).toBe('failed_terminal');
+    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({
+      stage: 'unknown', errorName: 'unknown', errorCode: 'unknown',
+      classification: 'fatal', retryable: false,
+    })]);
+    expect(promoteFailureDiagnostics(logs)[0]).not.toHaveProperty('messageFingerprint');
+    expect(logs.join('\n')).not.toContain(secretToken);
+    expect(logs.join('\n')).not.toContain('secret-sentinel');
+    expect(logs.join('\n')).not.toContain('callerControlled');
+    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+  });
+
+  it('keeps fail-closed queue bookkeeping intact when the diagnostic logger throws', async () => {
+    const job = await enqueueAndClaim();
+
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: () => {
+        throw new Error('logger unavailable');
+      },
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'failed_terminal',
+      error: { classification: 'fatal', retryable: false },
+    });
+    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+  });
+
+  it('does not wait for an unresolved logger before queue.fail reaches terminal state', async () => {
+    const job = await enqueueAndClaim();
+    const pendingLog = deferred<void>();
+    let loggerSettled = false;
+    void pendingLog.promise.then(() => {
+      loggerSettled = true;
+    });
+
+    const fail = queue.fail.bind(queue);
+    let failCompleted = false;
+    queue.fail = async (jobId, claimToken, error) => {
+      await fail(jobId, claimToken, error);
+      failCompleted = true;
+    };
+
+    const resultPromise = runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: () => pendingLog.promise,
+    });
+    let runSettled = false;
+    void resultPromise.then(
+      () => {
+        runSettled = true;
+      },
+      () => {
+        runSettled = true;
+      },
+    );
+
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(loggerSettled).toBe(false);
+      expect(failCompleted).toBe(true);
+      expect(runSettled).toBe(true);
+      expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+    } finally {
+      pendingLog.resolve();
+    }
+
+    await expect(resultPromise).resolves.toMatchObject({
+      outcome: 'failed_terminal',
+      error: { classification: 'fatal', retryable: false },
+    });
+  });
+
+  it('does not await an async diagnostic logger and absorbs its rejection', async () => {
+    const job = await enqueueAndClaim();
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      const result = await runPromoteJob({
+        job,
+        queue,
+        workerId: 'worker-test',
+        runPromote: async (_request, markPromoteStarted) => {
+          await markPromoteStarted();
+          throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
+        },
+        now: fixture.clock.now,
+        heartbeatIntervalMs: 0,
+        log: async () => {
+          throw new Error('async logger unavailable');
+        },
+      });
+
+      expect(result).toMatchObject({
+        outcome: 'failed_terminal',
+        error: { classification: 'fatal', retryable: false },
+      });
+      expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+
+  it('logs a failing memoryGraphChanged emit and still reports the promote as succeeded', async () => {
+    const job = await enqueueAndClaim();
+
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        return { promotedCount: 2 };
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => { logs.push(message); },
+      emitMemoryGraphChanged: () => {
+        throw new Error('event stream closed');
+      },
+    });
+
+    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(logs).toContain(`memoryGraphChanged emit failed for ${job.jobId}: event stream closed`);
+  });
+
+  it('logs a heartbeat that fails for a reason other than a cleared lease', async () => {
+    const job = await enqueueAndClaim();
+    const heartbeatFailed = deferred();
+    const failingQueue = Object.create(queue) as AsyncPromoteQueue;
+    failingQueue.heartbeat = async () => {
+      heartbeatFailed.resolve();
+      throw new Error('store unavailable');
+    };
+
+    const result = await runPromoteJob({
+      job,
+      queue: failingQueue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        // Hold the promote open until one heartbeat has failed.
+        await heartbeatFailed.promise;
+        return { promotedCount: 1 };
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 1,
+      log: (message) => { logs.push(message); },
+    });
+
+    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(logs).toContain(`Heartbeat error for ${job.jobId}: store unavailable`);
+  });
+
+});
+
+// Worker code calls the normalized logger directly, so this function is the
+// one place a failing sink is contained.
+describe('normalizePromoteWorkerLogger', () => {
+  const hostileSinks: ReadonlyArray<{ failure: string; sink: PromoteWorkerLogger }> = [
+    { failure: 'throws', sink: () => { throw new Error('sink down'); } },
+    { failure: 'rejects', sink: async () => { throw new Error('sink down'); } },
+    { failure: 'never settles', sink: () => new Promise<void>(() => {}) },
+  ];
+
+  it.each(hostileSinks)('contains a sink that $failure', async ({ sink }) => {
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      const log = normalizePromoteWorkerLogger(sink);
+
+      expect(log('diagnostic')).toBeUndefined();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+
+  it('writes to console.warn when no sink is configured', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      normalizePromoteWorkerLogger(undefined)('diagnostic');
+
+      expect(warn).toHaveBeenCalledWith('[promote-worker] diagnostic');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('passes each message to the configured sink', () => {
+    const messages: string[] = [];
+    const log = normalizePromoteWorkerLogger((message) => { messages.push(message); });
+
+    log('first');
+    log('second');
+
+    expect(messages).toEqual(['first', 'second']);
+  });
+});
