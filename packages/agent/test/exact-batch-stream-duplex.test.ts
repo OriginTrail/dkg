@@ -1,19 +1,32 @@
 import { createHash } from 'node:crypto';
 import { getEventListeners } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { metrics } from '@opentelemetry/api';
+import {
+  AggregationTemporality, InMemoryMetricExporter, MeterProvider, PeriodicExportingMetricReader,
+} from '@opentelemetry/sdk-metrics';
 import type { Stream } from '@libp2p/interface';
 import type { DKGNode } from '@origintrail-official/dkg-core';
 import type { Network } from '@origintrail-official/dkg-core';
 import type { PeerResolver } from '@origintrail-official/dkg-core';
-import { ProtocolRouter } from '@origintrail-official/dkg-core';
+import { ProtocolRouter, rebuildMetrics } from '@origintrail-official/dkg-core';
 import {
   exchangeExperimentalExactBatch, registerExperimentalExactBatchResponder,
   type ExactBatchTransportOptions,
 } from '@origintrail-official/dkg-core';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import {
   EXACT_BATCH_FRAME_KIND as K, ExactBatchReceiveWindow, ExactBatchSendWindow,
   decodeExactBatchAsset, type ExactBatchFrame,
 } from '../src/sync/exact-batch-stream-contract.js';
+import {
+  exactBatchStartFrame, exactBatchTransportOptions, exchangeExactBatchVerified,
+  type ExactBatchVerifiedReceiverOptions,
+} from '../src/sync/requester/exact-batch-stream.js';
+import { createExactBatchResponderBinding } from '../src/sync/responder/exact-batch-stream.js';
+import { registerSyncHandler, type ExperimentalExactBatchResponderResources } from '../src/sync/responder/sync-handler.js';
 import { encodeNegotiatedExactSyncResponse, EXACT_SYNC_GZIP_ENCODING } from '../src/sync/wire-compression.js';
 
 const PEER = '12D3KooWBzj7Hg2cKCdsKL6QcjC5UbLztKTvzCZQHaT4P4ZyJEAA';
@@ -171,4 +184,181 @@ describe('experimental exact-batch dedicated duplex transport', () => {
     expect(f.resolved).toHaveBeenCalledBefore(f.dial);
   });
 
+});
+
+const BUSY_CG = 'busy-responder-public';
+/** `SYNC_RESPONDER_MAX_QUEUE_WAIT_MS` of the responder limiter. */
+const QUEUE_WAIT_MS = 10_000;
+type Stage = 'pre-authorization' | 'response';
+
+/**
+ * The real responder limiter and stream binding behind the real routers. The
+ * requester is the real verified receiver. Authorization and the public-graph
+ * read are fixture ports, and the store is a stub no test here may reach.
+ */
+async function busyFixture() {
+  const info = vi.fn((_context: unknown, _message: string) => {});
+  const store = { queryResponseLimitMode: 'pre-materialization',
+    query: async () => { throw new Error('Fixture store must not be read'); } } as unknown as TripleStore;
+  const parse = (bytes: Uint8Array) => ContextGraphResolveMethods.prototype.parseSyncRequest.call({
+    parsePipeDelimitedSyncRequest: ContextGraphResolveMethods.prototype.parsePipeDelimitedSyncRequest,
+  } as never, bytes);
+  const authorize = vi.fn(async () => true), isPublic = vi.fn(async () => true);
+  let resources!: ExperimentalExactBatchResponderResources;
+  registerSyncHandler({ register: () => {}, protocolSync: '/fixture/legacy-sync', syncDeniedResponse: 'denied', syncPageSize: 500,
+    sharedMemoryTtlMs: 0, store, peerId: 'source', parseSyncRequest: parse, authorizeSyncRequest: authorize,
+    logWarn: () => {}, logInfo: info, logDebug: () => {}, onExperimentalExactBatchResources: captured => { resources = captured; } });
+  // Each stage asks the limiter synchronously, so a recorded stage is already running or queued.
+  const asked: Stage[] = [];
+  const binding = createExactBatchResponderBinding({ localPeerId: 'source', store, exportCache: resources.exportCache,
+    parseSyncRequest: parse, authorizeSyncRequest: authorize, isPublicContextGraph: isPublic,
+    admission: {
+      withPreAuthorizationAdmission: (peer, signal, work) => {
+        asked.push('pre-authorization'); return resources.withPreAuthorizationAdmission(peer, signal, work);
+      },
+      withAuthorizedResponseAdmission: (peer, graph, signal, work) => {
+        asked.push('response'); return resources.withAuthorizedResponseAdmission(peer, graph, signal, work);
+      },
+    } });
+  const assetUals = [UALS[0]!];
+  const unused = async () => { throw new Error('A refused START needs no identity, signature or verification'); };
+  const request = await buildSyncRequestEnvelope({ contextGraphId: BUSY_CG, offset: 0, limit: 500, includeSharedMemory: false,
+    targetPeerId: 'source', requesterPeerId: PEER, phase: 'data', assetUals, needsAuth: false,
+    getIdentityId: unused, computeSyncDigest: () => { throw new Error('unused'); }, signMessage: unused });
+  const receiver = { contextGraphId: BUSY_CG, assetUals, ctx: { operationId: 'busy-fixture', operationName: 'sync' },
+    parseAndFilter: unused, processDurableBatchInWorker: unused, storeGraphScopedAsset: unused,
+    authenticationDeadline: () => Date.now() + 30_000 } as unknown as ExactBatchVerifiedReceiverOptions;
+  /** One real exchange over its own stream; `settled` resolves with how the requester saw it end. */
+  const exchange = () => {
+    const wire = fixture();
+    registerExperimentalExactBatchResponder(wire.routerServer, exactBatchTransportOptions(120_000), binding.authorizeRequest, binding.respond);
+    const settled = exchangeExactBatchVerified(consume => exchangeExperimentalExactBatch(wire.routerClient, PEER,
+      exactBatchStartFrame(request), { ...exactBatchTransportOptions(120_000), assetUals }, consume), receiver)
+      .then(() => 'complete' as const, (error: unknown) => error);
+    return { wire, settled };
+  };
+  /** Take one responder slot for `peer` until released. */
+  const hold = (peer: string) => {
+    const held = gate();
+    const running = resources.withPreAuthorizationAdmission(peer, new AbortController().signal, () => held.promise);
+    return async () => { held.resolve(); await running; };
+  };
+  /** Let real asynchronous work run, also while the timers are faked, until `stage` has asked the limiter. */
+  const untilAsked = async (stage: Stage) => {
+    for (let turn = 0; turn < 1_000 && !asked.includes(stage); turn += 1) await new Promise<void>(resolve => setImmediate(resolve));
+    expect(asked).toContain(stage);
+  };
+  const busyLines = () => info.mock.calls.map(([, message]) => message);
+  return { resources, authorize, isPublic, exchange, hold, untilAsked, busyLines };
+}
+
+/** `dkg.sync.response.total{outcome="busy"}`, read through a real in-memory exporter. */
+function busyResponseMetric() {
+  const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+  const provider = new MeterProvider({ readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })] });
+  metrics.setGlobalMeterProvider(provider); rebuildMetrics();
+  return { provider, async read() {
+    await provider.forceFlush();
+    let count = 0;
+    // Cumulative: the last export carries the running total.
+    for (const scope of exporter.getMetrics().at(-1)?.scopeMetrics ?? [])
+      for (const metric of scope.metrics)
+        if (metric.descriptor.name === 'dkg.sync.response.total')
+          for (const point of metric.dataPoints as Array<{ attributes: Record<string, unknown>; value: number }>)
+            if (point.attributes.outcome === 'busy') count += point.value;
+    return count;
+  } };
+}
+
+describe('exact-batch stream request the responder limiter does not admit', () => {
+  let provider: MeterProvider | undefined;
+  afterEach(async () => {
+    vi.useRealTimers();
+    await provider?.shutdown().catch(() => {}); provider = undefined;
+    metrics.disable(); rebuildMetrics();
+  });
+
+  it('is answered BUSY once the queue wait is over, logged and counted once, and the next request is admitted when a slot frees', async () => {
+    const metric = busyResponseMetric(); provider = metric.provider;
+    const f = await busyFixture();
+    // Three other peers hold every responder slot for longer than the queue wait.
+    const releases = ['peer-a', 'peer-b', 'peer-c'].map(f.hold);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let settled = false;
+    const refused = f.exchange();
+    void refused.settled.finally(() => { settled = true; });
+    await f.untilAsked('pre-authorization');
+    await vi.advanceTimersByTimeAsync(QUEUE_WAIT_MS - 1);
+    expect(settled).toBe(false); expect(refused.wire.server.sentKinds).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    const failure = await refused.settled; await refused.wire.settled();
+    vi.useRealTimers();
+
+    // The requester reads a refusal, not a broken stream.
+    expect(failure).toMatchObject({ code: 'EXACT_BATCH_PARTIAL', committedAssetUals: [], streamInterrupted: false,
+      refusalObservation: { code: 'BUSY', startedAssets: 0, committedAssets: 0 } });
+    expect(refused.wire.server.sentKinds).toEqual([K.REFUSE]);
+    // Nothing of the request was worked on, and nothing of it is logged.
+    expect(f.authorize).not.toHaveBeenCalled(); expect(f.isPublic).not.toHaveBeenCalled();
+    expect(f.busyLines()).toEqual([
+      `Exact batch responder busy stage=pre-authorization peer=${PEER.slice(-8)} reason="sync responder queue wait exceeded" running=3 queued=0`,
+    ]);
+    expect(await metric.read()).toBe(1);
+
+    for (const release of releases) await release();
+    f.authorize.mockResolvedValueOnce(false);
+    // Admitted now: it reaches authorization, which this fixture denies.
+    expect(await f.exchange().settled).toMatchObject({ code: 'EXACT_BATCH_PARTIAL', refusalObservation: undefined });
+    expect(f.authorize).toHaveBeenCalledOnce();
+    expect(f.busyLines()).toHaveLength(1); expect(await metric.read()).toBe(1);
+  });
+
+  it('is answered BUSY when the response, after an admitted authorization, finds no slot', async () => {
+    const metric = busyResponseMetric(); provider = metric.provider;
+    const f = await busyFixture();
+    const releases: Array<() => Promise<void>> = [];
+    // While this request is being authorized, three other peers ask for slots:
+    // two run beside it and the third takes its slot when authorization ends.
+    f.isPublic.mockImplementationOnce(async () => { releases.push(...['peer-a', 'peer-b', 'peer-c'].map(f.hold)); return true; });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const refused = f.exchange();
+    await f.untilAsked('response');
+    await vi.advanceTimersByTimeAsync(QUEUE_WAIT_MS);
+    expect(await refused.settled).toMatchObject({ code: 'EXACT_BATCH_PARTIAL', streamInterrupted: false, refusalObservation: { code: 'BUSY' } });
+    await refused.wire.settled();
+    vi.useRealTimers();
+    expect(f.authorize).toHaveBeenCalledOnce();
+    expect(refused.wire.server.sentKinds).toEqual([K.REFUSE]);
+    expect(f.busyLines()).toEqual([
+      `Exact batch responder busy stage=response peer=${PEER.slice(-8)} reason="sync responder queue wait exceeded" running=3 queued=0`,
+    ]);
+    expect(await metric.read()).toBe(1);
+    for (const release of releases) await release();
+  });
+
+  it('is answered BUSY at once when the peer already has its share of the queue', async () => {
+    const metric = busyResponseMetric(); provider = metric.provider;
+    const f = await busyFixture();
+    // One request of this peer runs and four wait: its queue share is used up.
+    const releases = Array.from({ length: 5 }, () => f.hold(PEER));
+    const refused = f.exchange();
+    expect(await refused.settled).toMatchObject({ code: 'EXACT_BATCH_PARTIAL', refusalObservation: { code: 'BUSY' } });
+    await refused.wire.settled();
+    expect(f.busyLines()).toEqual([
+      `Exact batch responder busy stage=pre-authorization peer=${PEER.slice(-8)} reason="sync responder peer queue full" running=1 queued=4`,
+    ]);
+    expect(await metric.read()).toBe(1);
+    for (const release of releases) await release();
+  });
+
+  it('leaves a failure of the admitted work what it was', async () => {
+    const metric = busyResponseMetric(); provider = metric.provider;
+    const f = await busyFixture();
+    const failure = new Error('Fixture failure inside the admitted stage');
+    await expect(f.resources.withPreAuthorizationAdmission('peer-a', new AbortController().signal, async () => { throw failure; }))
+      .rejects.toBe(failure);
+    await expect(f.resources.withAuthorizedResponseAdmission('peer-a', BUSY_CG, new AbortController().signal, async () => { throw failure; }))
+      .rejects.toBe(failure);
+    expect(f.busyLines()).toEqual([]); expect(await metric.read()).toBe(0);
+  });
 });

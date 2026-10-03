@@ -3329,6 +3329,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
       servingWithheld: (contextGraphId) => this.contextGraphServingWithheld(contextGraphId),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logInfo: (ctx, message) => this.log.info(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
       snapshotBudget: snapshotPolicy.budget,
       contextGraphPriorities: this.config.syncContextGraphPriorities,
