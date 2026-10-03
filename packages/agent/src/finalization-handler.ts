@@ -1,8 +1,4 @@
 import {
-  SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE,
-  SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE,
-} from './finalization-annotations.js';
-import {
   decodeFinalizationMessage,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphDataUri, contextGraphMetaUri,
@@ -26,7 +22,6 @@ import {
 import {
   deleteByPatternWithoutCount,
   GraphManager,
-  loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   asGraphWriteRevisionSource,
   resolveGraphScopedOrLegacyMetadata,
@@ -78,7 +73,6 @@ const SWM_SLICE_SOURCE = 'agent.finalization.sharedMemorySlice';
 const SWM_SLICE_SOURCE_BOUNDED = `${SWM_SLICE_SOURCE}.bounded`;
 const SWM_SLICE_SOURCE_WIDENED = `${SWM_SLICE_SOURCE}.fallbackUnbounded`;
 import { ethers } from 'ethers';
-import { createHash } from 'node:crypto';
 import { deriveSwmKaGraphBound } from './swm-ka-bound.js';
 import {
   FinalizationLifecycleLogger,
@@ -133,49 +127,12 @@ import {
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
- * persists into SWM workspace meta at publish time (the chain-driven
- * reconcile path's equivalent of the gossip envelope's `keepRootCopyOnLabel`).
- * Shared with `DKGAgent` so the write and read sites can't drift.
+ * persists into SWM workspace meta at publish time. Nothing in this release
+ * reads it: the gossip envelope carries the same decision as
+ * `keepRootCopyOnLabel`. It is still written for peers on releases whose
+ * chain reconcile promotes from workspace operations.
  */
 export const KEEP_ROOT_COPY_PREDICATE = `${DKG_NS}keepRootCopyOnLabel`;
-
-/**
- * Reader-maintained memo (#1609): the flat-KC merkle root a WorkspaceOperation's
- * SWM snapshot hashes to, paired with `SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE` (a
- * cheap digest of the exact content that produced it), stamped onto the op subject
- * (`urn:dkg:share:<cg>:<id>`) the first time `findSwmSnapshotInNamespace` computes
- * it. Lets a chain-reconcile lookup (a) resolve a *present* KA's op by root
- * directly (fast path), and (b) skip the expensive `computeFlatKCRoot` recompute
- * for an op whose content is unchanged (the digest still matches) — the recompute
- * that dominates beacon reconcile load when a KA published elsewhere forces a full
- * O(#WorkspaceOperations) scan to conclude "not here".
- *
- * This memo is a bridge, NOT the durable fix (see OT-RFC-60): a WorkspaceOperation
- * is assembled incrementally (data quads and private roots arrive over time via
- * *entity-keyed* writes that do NOT rewrite the op subject), so the stamp can go
- * stale without a structural invalidation. Correctness therefore does NOT rely on
- * the stamp being fresh:
- *   - `verifyMerkleMatch` stays authoritative on the fast path — a stale stamp can
- *     only ever cause a *missed* promotion, never a wrong one.
- *   - the fallback scan re-reads EVERY op (it never excludes on stamp-presence) and
- *     trusts the memoized root only when the content digest still matches; any
- *     content change flips the digest → full recompute → the op is re-evaluated and
- *     re-stamped. An op can never be stranded by a stale stamp.
- * The durable fix (OT-RFC-60) makes the root a write-maintained, indexed property
- * stamped once when an op becomes complete-and-immutable, removing both the
- * recompute AND the staleness by construction.
- *
- * Deliberately invisible to the sibling VM-reconcile negative cache: its
- * `readVmReconcileSwmGen` / `vmReconcileWorkspaceOperationPattern` fingerprints
- * select only `rootEntity`/`publishedAt` on the op subject (plus the separate data
- * graph), so stamping these predicates into the meta graph does not perturb the
- * generation signal the negative cache keys on — the two mechanisms don't fight.
- */
-export {
-  SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE,
-  SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE,
-} from './finalization-annotations.js';
-
 
 /**
  * Resolves a local context-graph id (the topic/CG name used in gossip) to
@@ -279,24 +236,6 @@ function swmKaBoundDisabled(): boolean {
   return process.env.DKG_DISABLE_SWM_KA_BOUND === '1';
 }
 
-/**
- * TTL cap on the in-memory negative reconcile memo (#1609) — the longest a
- * "no local SWM snapshot" verdict may be trusted without a fresh scan even
- * when no write-generation change was observed. Bounds the exposure to any
- * SWM writer invisible to the adapter's write-generation counter (e.g. a
- * second process mutating a shared oxigraph-server) to "≤ TTL late", never
- * "never". Read per call (like `swmKaBoundDisabled`) so ops and tests can
- * retune it without a redeploy.
- */
-const VM_RECONCILE_NEGATIVE_TTL_MS_DEFAULT = 600_000;
-function vmReconcileNegativeTtlMs(): number {
-  const raw = Number(process.env['DKG_VM_RECONCILE_NEGATIVE_TTL_MS']);
-  return Number.isFinite(raw) && raw > 0 ? raw : VM_RECONCILE_NEGATIVE_TTL_MS_DEFAULT;
-}
-
-/** LRU cap for the negative reconcile memo — bounds memory across CGs × roots. */
-const VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES = 4096;
-
 const FINALIZATION_SWM_PAGE_ROWS_DEFAULT = 1_000;
 const FINALIZATION_SWM_MAX_ROWS_DEFAULT = 250_000;
 const FINALIZATION_SWM_MAX_BYTES_DEFAULT = 128 * 1024 * 1024;
@@ -316,14 +255,6 @@ function finalizationSwmResultBudget(): SharedMemoryResultBudget {
     ),
   };
 }
-
-type NegativeSnapshotMemoEntry = {
-  /** Write generation for the CG's graph prefix observed BEFORE the scan. */
-  writeGen: number;
-  recordedAt: number;
-  /** Catalog-floor eligibility at scan time — a policy flip changes what can match. */
-  allowGeneratedCatalogFloor: boolean;
-};
 
 export interface FinalizationHandlerOptions {
   eventBus?: EventBus;
@@ -427,7 +358,7 @@ const LOCAL_CANDIDATE_PRESENT: ChainReconcileLocalCandidate = Object.freeze({ ki
 
 interface ExactChainReconcileDecision {
   outcome: ChainReconciledKCOutcome;
-  legacyEligible: boolean;
+  legacyMarkerEligible: boolean;
   input: ChainReconciledKCInput;
 }
 
@@ -475,24 +406,9 @@ export class FinalizationHandler {
   // POSITIVE-ONLY. A 0/miss is NEVER cached: caching a miss before the on-chain
   // KA->CG binding lands would pin finalization to the legacy fallback forever.
   private readonly chainCgIdByLookupId = new Map<string, string>();
-  // #1609 (2026-07-11/12 testnet incident): the write-generation source backing
-  // the negative reconcile memo below. `null` when the store's adapter doesn't
-  // track write generations — the memo is then DISABLED and every reconcile
-  // scans (fail-open), matching pre-memo behavior.
+  /** Write-generation source for the finalization slice single-flight key; `null` when the adapter tracks none. */
   private readonly graphWriteGen: GraphWriteRevisionSource | null;
-  // Negative memo for `findSwmSnapshotForMerkleRoot`: "this (cg, namespace,
-  // root) had NO matching local SWM snapshot at write generation G". Unlike
-  // `chainCgIdByLookupId` above, caching the negative here is sound BECAUSE it
-  // is generation-gated: the verdict is only replayed while the store proves
-  // no local write has touched the CG since the scan. LRU, in-memory only —
-  // a restart clears it (fail-open).
-  private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
-  /** Legacy WorkspaceOperation presence per (cg, namespace), gated the same way. */
-  private readonly legacySwmOperationsMemo = new Map<
-    string,
-    { writeGen: number; recordedAt: number; present: boolean }
-  >();
-  /** Equivalent finalization/reconcile reads share one promise until it settles. */
+  /** Equivalent finalization slice reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
   private readonly recoveryWorker: FinalizationRecoveryWorker;
   private readonly finalizationRecoveryEligibility: FinalizationRecoveryEligibility;
@@ -1697,8 +1613,8 @@ export class FinalizationHandler {
 
   /**
    * Resolve and promote the exact graph-scoped SWM assertion for a chain-known
-   * KA. `undefined` means no V2 head exists and the caller may try the legacy
-   * root-operation recovery path; every other result is authoritative for V2.
+   * KA. `undefined` means no V2 head exists and the caller answers `no-swm`;
+   * every other result is authoritative for V2.
    */
   private async reconcileGraphScopedKC(input: {
     contextGraphId: string;
@@ -1739,9 +1655,8 @@ export class FinalizationHandler {
       subGraphName,
       trustedAssertionEvidence,
     } = input;
-    // Historical UAL shapes can be valid inputs to the legacy root-scoped
-    // recovery code but cannot name a V2 per-KA graph. Do not let the strict
-    // V2 parser turn those into a terminal "corrupt head" result.
+    // Historical UAL shapes cannot name a V2 per-KA graph. Do not let the
+    // strict V2 parser turn those into a terminal "corrupt head" result.
     try {
       createGraphKnowledgeAssetScope(ual, 1);
     } catch {
@@ -1770,8 +1685,7 @@ export class FinalizationHandler {
         // post-fetch check runs. Re-read the immutable confirmed envelope and
         // verify the exact VM graph against current chain truth. This remains
         // fail-closed: absent, invalid, stale, or root-mismatched VM state is
-        // still reported as no-swm, and the legacy all-workspace scan stays
-        // disabled for exact fetch callers.
+        // still reported as no-swm.
         return (await this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
           contextGraphId,
           ual,
@@ -2961,28 +2875,8 @@ export class FinalizationHandler {
     });
   }
 
-  /** Complete (unbounded) SWM read for the chain-reconcile backstop. */
-  private async getSharedMemoryQuadsForRoots(
-    contextGraphId: string,
-    rootEntities: string[],
-    subGraphName?: string,
-  ): Promise<Quad[]> {
-    const safeRoots = rootEntities.filter(isSafeIri);
-    if (safeRoots.length === 0) return [];
-    return loadSelectedSharedMemoryQuads(
-      this.store,
-      this.finalizationSwmBucketUri(contextGraphId, subGraphName),
-      { rootEntities: safeRoots },
-      {
-        querySource: SWM_SLICE_SOURCE,
-        queryOptions: { priority: 'background' },
-        resultBudget: finalizationSwmResultBudget(),
-      },
-    );
-  }
-
   private runScanSingleFlight<T>(key: string, work: () => Promise<T>): Promise<T> {
-    const scope = key.startsWith('finalization\u0000') ? 'finalization' : 'reconcile';
+    const scope = 'finalization';
     const existing = this.scanSingleFlights.get(key) as Promise<T> | undefined;
     if (existing) {
       getMetrics().storeScanSingleFlightJoinsTotal.add(1, { scope });
@@ -3144,53 +3038,6 @@ export class FinalizationHandler {
       }
     } catch { /* metadata may not exist */ }
     return roots;
-  }
-
-  /**
-   * Recover the publisher's `keepRootCopyOnLabel` decision for these roots from
-   * SWM workspace meta. The publisher persists `<root> dkg:keepRootCopyOnLabel
-   * "true"|"false"` at publish time — the durable equivalent of the gossip
-   * envelope flag — and it replicates to subscribers alongside the per-root
-   * `privateMerkleRoot`. Returns:
-   *   - `true`      — a matched root explicitly kept the root-label copy,
-   *   - `false`     — explicitly dropped (remap / explicit-subCG publish),
-   *   - `undefined` — no signal persisted (legacy publish); the caller defaults
-   *                   to per-cgId-only so a dropped root copy is never re-added.
-   * An explicit `true` wins over `false` across the matched roots: a same-graph
-   * publish demands the root copy exist.
-   */
-  private async getKeepRootCopySignal(
-    contextGraphId: string,
-    rootEntities: string[],
-    subGraphName?: string,
-  ): Promise<boolean | undefined> {
-    const graphManager = new GraphManager(this.store);
-    const wsMetaGraph = subGraphName
-      ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
-      : contextGraphWorkspaceMetaGraphUri(contextGraphId);
-    const safeRoots = rootEntities.filter(isSafeIri);
-    if (safeRoots.length === 0) return undefined;
-
-    const values = safeRoots.map(r => `<${r}>`).join(' ');
-    const sparql = `SELECT ?v WHERE {
-      GRAPH <${assertSafeIri(wsMetaGraph)}> {
-        VALUES ?root { ${values} }
-        ?root <${KEEP_ROOT_COPY_PREDICATE}> ?v .
-      }
-    }`;
-    try {
-      const result = await this.store.query(sparql, { source: 'agent.finalization.keepRootCopySignal' });
-      if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
-      let sawFalse = false;
-      for (const row of result.bindings) {
-        const v = String(row['v']).replace(/^"(.*)".*$/, '$1');
-        if (v === 'true') return true;
-        if (v === 'false') sawFalse = true;
-      }
-      return sawFalse ? false : undefined;
-    } catch {
-      return undefined;
-    }
   }
 
   private async getPublisherPeerIdFromMeta(contextGraphId: string, rootEntities: string[], subGraphName?: string): Promise<string | undefined> {
@@ -3404,17 +3251,14 @@ export class FinalizationHandler {
     }
   }
 
-  /**
-   * Constant-time exact graph-scoped reconciliation. This method never enters
-   * the legacy workspace-operation scan.
-   */
+  /** Constant-time exact graph-scoped reconciliation. */
   private async reconcileExactChainRegisteredKC(
     rawInput: ChainReconciledKCInput,
     ctx: OperationContext,
   ): Promise<ExactChainReconcileDecision> {
     const resolvedInput = await this.resolveExactChainReconcileInput(rawInput, ctx);
     if (!resolvedInput) {
-      return { outcome: 'no-swm', legacyEligible: false, input: rawInput };
+      return { outcome: 'no-swm', legacyMarkerEligible: false, input: rawInput };
     }
     const input = resolvedInput;
     const {
@@ -3428,7 +3272,7 @@ export class FinalizationHandler {
         ctx,
         `Chain-reconcile: chain CG binding for ${ual} (ka=${kaId}) not confirmed against cg ${onChainCgId}; deferring to sweep retry`,
       );
-      return { outcome: 'unverified', legacyEligible: false, input };
+      return { outcome: 'unverified', legacyMarkerEligible: false, input };
     }
 
     const journalReplay = await this.replayMatchingRecoveryEntries(input, ctx);
@@ -3436,10 +3280,10 @@ export class FinalizationHandler {
     // inspection must therefore verify the resulting local assertion version
     // below instead of treating a same-root replay as sufficient on its own.
     if (journalReplay === 'recovered' && assertionVersion === undefined) {
-      return { outcome: 'already-confirmed', legacyEligible: false, input };
+      return { outcome: 'already-confirmed', legacyMarkerEligible: false, input };
     }
     if (journalReplay === 'retry-pending' && assertionVersion === undefined) {
-      return { outcome: 'receipt-revalidation-pending', legacyEligible: false, input };
+      return { outcome: 'receipt-revalidation-pending', legacyMarkerEligible: false, input };
     }
     if (journalReplay === 'invalidated') {
       this.log.info(
@@ -3466,20 +3310,17 @@ export class FinalizationHandler {
       trustedAssertionEvidence,
     }, ctx);
     if (graphScopedOutcome !== undefined) {
-      return { outcome: graphScopedOutcome, legacyEligible: false, input };
+      return { outcome: graphScopedOutcome, legacyMarkerEligible: false, input };
     }
     if (await this.hasGraphScopedMetadata(contextGraphId, ual)) {
       this.log.info(
         ctx,
         `Chain-reconcile: graph-scoped metadata exists for ${ual} but its durable workspace head is missing`,
       );
-      return { outcome: 'no-swm', legacyEligible: false, input };
+      return { outcome: 'no-swm', legacyMarkerEligible: false, input };
     }
-    this.log.info(
-      ctx,
-      `Chain-reconcile: exact graph-scoped state is absent for ${ual}; legacy scan is not part of the exact operation`,
-    );
-    return { outcome: 'no-swm', legacyEligible: true, input };
+    this.log.info(ctx, `Chain-reconcile: no local graph-scoped state for ${ual}`);
+    return { outcome: 'no-swm', legacyMarkerEligible: true, input };
   }
 
   /**
@@ -3494,92 +3335,31 @@ export class FinalizationHandler {
   }
 
   /**
-   * Normal chain reconciliation composes the exact operation with the legacy
-   * workspace scan. The scan remains available only through this ordinary path.
+   * Normal chain reconciliation: the exact operation, then the historical
+   * confirmed marker of a KA materialized before per-KA graphs. A KA with no
+   * local graph-scoped state answers `no-swm` and the caller fetches it from
+   * peers; historical workspace operations are never searched for it.
    */
   async handleChainReconciledKC(
     rawInput: ChainReconciledKCInput,
     ctx: OperationContext,
   ): Promise<ChainReconciledKCOutcome> {
     const exact = await this.reconcileExactChainRegisteredKC(rawInput, ctx);
-    if (!exact.legacyEligible) return exact.outcome;
-    const {
-      contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
-      kaId, batchId, versionBlock, authorAddress, subGraphName,
-    } = exact.input;
-    const ctxGraphId = onChainCgId.length > 0 ? onChainCgId : undefined;
-    const targetMetaGraph = ctxGraphId
-      ? contextGraphMetaUri(contextGraphId, ctxGraphId)
-      : `did:dkg:context-graph:${contextGraphId}/_meta`;
+    if (!exact.legacyMarkerEligible) return exact.outcome;
+    const { contextGraphId, onChainCgId, ual } = exact.input;
+    const rootMetaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const targetMetaGraph = onChainCgId.length > 0
+      ? contextGraphMetaUri(contextGraphId, onChainCgId)
+      : rootMetaGraph;
 
     // The ordinary compatibility path may retain the historical confirmed
     // marker shortcut. Exact RFC-64 fetch cannot use this marker because it
     // proves neither the current assertion version nor the current chain root.
-    if (await this.isAlreadyConfirmed(
-      ual,
-      targetMetaGraph,
-      `did:dkg:context-graph:${contextGraphId}/_meta`,
-    )) {
+    if (await this.isAlreadyConfirmed(ual, targetMetaGraph, rootMetaGraph)) {
       this.log.info(ctx, `Chain-reconcile: legacy ${ual} already confirmed in VM, skipping`);
       return 'already-confirmed';
     }
-
-    // Recover the published roots from the legacy local SWM snapshot. This is
-    // the only operation that may scan historical workspace operations.
-    const snapshot = await this.findSwmSnapshotForMerkleRoot(
-      contextGraphId,
-      merkleRoot,
-      subGraphName,
-      onChainCgId,
-    );
-    if (!snapshot) {
-      this.log.info(
-        ctx,
-        `Chain-reconcile: no local SWM snapshot matches the published merkleRoot for ${ual}; deferring to sweep retry`,
-      );
-      return 'no-swm';
-    }
-    const { rootEntities, sharedMemoryQuads } = snapshot;
-    const resolvedSubGraphName = snapshot.subGraphName ?? subGraphName;
-    const finalizationVersion: MaterializedVersion = { blockNumber: versionBlock, txIndex: 0 };
-    const keepRootCopyOnLabel = await this.getKeepRootCopySignal(
-      contextGraphId,
-      rootEntities,
-      resolvedSubGraphName,
-    );
-    const isDualWrite = keepRootCopyOnLabel === true && !!ctxGraphId && !resolvedSubGraphName;
-    const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
-
-    const outcome = await this.applyVerifiedFinalization({
-      contextGraphId,
-      sharedMemoryQuads,
-      ual,
-      rootEntities,
-      publisherAddress,
-      txHash: '',
-      blockNumber: versionBlock,
-      startKAId: kaId,
-      endKAId: kaId,
-      batchId,
-      ctxGraphId,
-      subGraphName: resolvedSubGraphName,
-      authorAddress,
-      finalizationVersion,
-      targetMetaGraph,
-      defaultMeta,
-      isDualWrite,
-      ctx,
-    });
-
-    if (outcome === 'stale-target') {
-      this.log.info(ctx, `Chain-reconcile: a newer update is already materialised for ${ual}, skipping`);
-      return 'stale-target';
-    }
-    this.log.info(
-      ctx,
-      `Chain-reconcile: promoted SWM snapshot to VM for ${ual} (ka=${kaId}, cg=${onChainCgId})`,
-    );
-    return 'promoted';
+    return exact.outcome;
   }
 
   /**
@@ -3599,8 +3379,7 @@ export class FinalizationHandler {
    *  4. graph-scoped metadata without a head or confirmed copy;
    *  5. the legacy confirmed marker, which that path answers
    *     `already-confirmed` without reading the root;
-   *  6. legacy workspace operations, the root-matched scan: with none in the
-   *     namespaces it searches, nothing local can match any root, so `none`.
+   *  6. nothing else is searched, so everything left is `none`.
    *
    * `confirmed-vm` trusts the root the local copy was confirmed at; a newer
    * on-chain version is not looked for here, which keeps the walk free of
@@ -3680,9 +3459,7 @@ export class FinalizationHandler {
     if (await this.isAlreadyConfirmed(ual, targetMetaGraph, rootMetaGraph)) {
       return { kind: 'confirmed-vm', layout: 'legacy' };
     }
-    return await this.hasLegacySwmOperations(contextGraphId, subGraphName)
-      ? LOCAL_CANDIDATE_PRESENT
-      : { kind: 'none' };
+    return { kind: 'none' };
   }
 
   /**
@@ -3711,61 +3488,6 @@ export class FinalizationHandler {
     return result.type !== 'boolean' || result.value;
   }
 
-  /**
-   * Whether the root-matched legacy scan (`findSwmSnapshotForMerkleRoot`) has
-   * any WorkspaceOperation to look at: the given namespace, or the root and
-   * every listed sub-graph when none is known. Memoized per CG write
-   * generation, like that scan's negative memo, so a quiet graph answers from
-   * memory for the whole sweep.
-   */
-  private async hasLegacySwmOperations(
-    contextGraphId: string,
-    subGraphName: string | undefined,
-  ): Promise<boolean> {
-    const memoKey = `${contextGraphId}\0${subGraphName ?? ''}`;
-    const revision = this.graphWriteGen?.getWriteRevision(`${contextGraphDataUri(contextGraphId)}/`);
-    if (revision?.stable) {
-      const memo = this.legacySwmOperationsMemo.get(memoKey);
-      if (
-        memo
-        && memo.writeGen === revision.generation
-        && Date.now() - memo.recordedAt < vmReconcileNegativeTtlMs()
-      ) {
-        return memo.present;
-      }
-    }
-    const graphManager = new GraphManager(this.store);
-    const metaGraphs = subGraphName
-      ? [graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)]
-      : [
-          contextGraphWorkspaceMetaGraphUri(contextGraphId),
-          ...(await graphManager.listSubGraphs(contextGraphId))
-            .map((name) => graphManager.sharedMemoryMetaUri(contextGraphId, name)),
-        ];
-    const result = await this.store.query(
-      `ASK { ${metaGraphs
-        .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ?op <${DKG_NS}rootEntity> ?root } }`)
-        .join(' UNION ')} }`,
-      { source: 'agent.finalization.localCandidate.legacySwmOperations' },
-    );
-    const present = result.type !== 'boolean' || result.value;
-    if (revision?.stable) {
-      // Recorded at the pre-probe generation: a racing write flips the gate.
-      this.legacySwmOperationsMemo.delete(memoKey);
-      this.legacySwmOperationsMemo.set(memoKey, {
-        writeGen: revision.generation,
-        recordedAt: Date.now(),
-        present,
-      });
-      while (this.legacySwmOperationsMemo.size > VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES) {
-        const oldest = this.legacySwmOperationsMemo.keys().next().value;
-        if (oldest === undefined) break;
-        this.legacySwmOperationsMemo.delete(oldest);
-      }
-    }
-    return present;
-  }
-
   private async verifyChainCgBinding(kaId: bigint, onChainCgId: string, ctx: OperationContext): Promise<boolean> {
     if (!this.chain || this.chain.chainId === 'none' || typeof this.chain.getKAContextGraphId !== 'function') {
       return false;
@@ -3777,384 +3499,6 @@ export class FinalizationHandler {
       this.log.info(ctx, `Chain-reconcile: getKAContextGraphId(${kaId}) failed (RPC lag?): ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
-  }
-
-  /**
-   * Find the local SWM snapshot whose KC merkle root matches the chain
-   * `merkleRoot`, returning its root entities + shared-memory quads.
-   *
-   * SWM workspace meta is written at share-time (before publish), so it carries
-   * no merkle root to look up by — only `?op a dkg:WorkspaceOperation ;
-   * dkg:rootEntity <root>`. We therefore enumerate the candidate operations,
-   * gather each one's SWM quads + private roots, recompute the flat-KC root
-   * (`computeFlatKCRoot`, the same function the gossip path verifies against),
-   * and return the first operation whose computed root equals the chain root.
-   * A match is an authoritative merkle verification.
-   *
-   * Returns `null` when no local operation matches — either the snapshot hasn't
-   * been synced yet (the caller's active-fetch missed / is in flight) or this
-   * KA belongs to a publish this node never shared. Either way the B.2 sweep
-   * retries later.
-   *
-   * Cost note (#1609): the recompute is memoized (`SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE`
-   * + content digest). A *present* KA is resolved by its stamped root directly (fast
-   * path, no scan); the fallback still enumerates every op — it must, because ops
-   * assemble incrementally — but reuses each op's memoized root whenever its content
-   * digest is unchanged, skipping the expensive `computeFlatKCRoot`. So steady-state
-   * reconcile pays one bounded read + a cheap digest per op instead of a full merkle
-   * recompute per op. This is a bridge; OT-RFC-60 makes the root a write-maintained,
-   * indexed property (stamped once at op completion) so the fallback disappears
-   * entirely. The generated-catalog-floor variant keeps the exhaustive recompute
-   * (its match is over quads+floor, not the op's intrinsic stamped root).
-   *
-   * READ memo (#1609, 2026-07-11/12 testnet incident): the #1612 digest memo skips
-   * only the merkle recompute — a never-match KA (a publish this node never shared,
-   * exactly the beacon shape) still paid O(#ops) unbounded SWM CONSTRUCTs on EVERY
-   * sweep tick, forever, stalling the event loop and dropping storage-ACK streams
-   * on big stores. This wrapper adds a write-generation-gated NEGATIVE memo over
-   * the whole scan (floor retry included): a "no match" verdict is replayed
-   * without touching the store while (a) the adapter's write generation for the
-   * CG's graph prefix is unchanged — new SWM only arrives via local writes
-   * (gossip receive, publish share, active fetch), all of which pass the adapter
-   * choke points and bump the generation, so the next call rescans — (b) the
-   * catalog-floor eligibility is unchanged, and (c) the entry is younger than
-   * `vmReconcileNegativeTtlMs()`. A MATCH is never memoized. Stores without the
-   * write-generation capability disable the memo entirely (always scan), and a
-   * restart clears it — every failure mode degrades to a rescan, never a miss.
-   */
-  private async findSwmSnapshotForMerkleRoot(
-    contextGraphId: string,
-    merkleRoot: Uint8Array,
-    subGraphName?: string,
-    onChainCgId?: string,
-  ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[]; subGraphName?: string } | null> {
-    const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, onChainCgId);
-
-    // Every graph the scan reads — root/sub-graph SWM buckets, their per-KA
-    // under-graphs and `_shared_memory_meta` (op rows, `privateMerkleRoot`,
-    // stamps) — lives under the CG's URI subtree, so one prefix covers all
-    // namespaces of this call. Broader than strictly needed (any CG-local
-    // write invalidates) — that only costs an extra rescan.
-    const memoKey = `${contextGraphId}\0${subGraphName ?? ''}\0${ethers.hexlify(merkleRoot)}`;
-    const swmWritePrefix = `${contextGraphDataUri(contextGraphId)}/`;
-    const preScanRevision = this.graphWriteGen?.getWriteRevision(swmWritePrefix);
-    const preScanGen = preScanRevision?.generation;
-    if (preScanRevision?.stable) {
-      const memo = this.negativeSnapshotMemo.get(memoKey);
-      if (memo) {
-        if (
-          memo.writeGen === preScanGen &&
-          memo.allowGeneratedCatalogFloor === allowGeneratedCatalogFloor &&
-          Date.now() - memo.recordedAt < vmReconcileNegativeTtlMs()
-        ) {
-          // Refresh LRU recency; recordedAt stays — the TTL runs from the scan.
-          this.negativeSnapshotMemo.delete(memoKey);
-          this.negativeSnapshotMemo.set(memoKey, memo);
-          return null;
-        }
-        this.negativeSnapshotMemo.delete(memoKey);
-      }
-    }
-
-    const hit = await this.runScanSingleFlight(
-      ['reconcile', memoKey, String(allowGeneratedCatalogFloor), String(preScanGen ?? 'unknown')].join('\u0000'),
-      () => this.scanForSwmSnapshot(
-        contextGraphId,
-        merkleRoot,
-        subGraphName,
-        allowGeneratedCatalogFloor,
-      ),
-    );
-    if (hit) return hit;
-
-    if (preScanRevision?.stable) {
-      // Record at the PRE-scan generation: any write that raced the scan (or
-      // the scan's own best-effort restamps) flips the gate above, so the next
-      // call rescans rather than replaying a verdict that may predate the write.
-      this.negativeSnapshotMemo.set(memoKey, {
-        writeGen: preScanRevision.generation,
-        recordedAt: Date.now(),
-        allowGeneratedCatalogFloor,
-      });
-      while (this.negativeSnapshotMemo.size > VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES) {
-        const oldest = this.negativeSnapshotMemo.keys().next().value;
-        if (oldest === undefined) break;
-        this.negativeSnapshotMemo.delete(oldest);
-      }
-    }
-    return null;
-  }
-
-  /** The authoritative full scan behind {@link findSwmSnapshotForMerkleRoot}. */
-  private async scanForSwmSnapshot(
-    contextGraphId: string,
-    merkleRoot: Uint8Array,
-    subGraphName: string | undefined,
-    allowGeneratedCatalogFloor: boolean,
-  ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[]; subGraphName?: string } | null> {
-    // Caller knows the exact namespace → search only that one.
-    if (subGraphName) {
-      const hit = await this.findSwmSnapshotInNamespace(
-        contextGraphId,
-        merkleRoot,
-        subGraphName,
-        allowGeneratedCatalogFloor,
-      );
-      return hit ? { ...hit, subGraphName } : null;
-    }
-
-    // No namespace supplied (the chain-driven path never knows it). Try the
-    // root workspace first, then fall back to every registered sub-graph —
-    // otherwise a KA published into a named sub-graph would stay `no-swm`
-    // forever because its SWM snapshot lives under a sub-graph meta graph,
-    // not the root workspace meta. Return the namespace we matched in so the
-    // caller promotes into the correct data graph.
-    const rootHit = await this.findSwmSnapshotInNamespace(
-      contextGraphId,
-      merkleRoot,
-      undefined,
-      allowGeneratedCatalogFloor,
-    );
-    if (rootHit) return { ...rootHit, subGraphName: undefined };
-
-    let subGraphNames: string[] = [];
-    try {
-      subGraphNames = await new GraphManager(this.store).listSubGraphs(contextGraphId);
-    } catch { /* no sub-graphs / store can't enumerate */ }
-    for (const sg of subGraphNames) {
-      const hit = await this.findSwmSnapshotInNamespace(
-        contextGraphId,
-        merkleRoot,
-        sg,
-        allowGeneratedCatalogFloor,
-      );
-      if (hit) return { ...hit, subGraphName: sg };
-    }
-    return null;
-  }
-
-  /**
-   * Search a single SWM namespace (root workspace when `subGraphName` is
-   * undefined, otherwise the named sub-graph's shared-memory meta) for a
-   * WorkspaceOperation whose recomputed flat-KC root matches `merkleRoot`.
-   */
-  private async findSwmSnapshotInNamespace(
-    contextGraphId: string,
-    merkleRoot: Uint8Array,
-    subGraphName?: string,
-    allowGeneratedCatalogFloor = false,
-  ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[] } | null> {
-    const graphManager = new GraphManager(this.store);
-    const wsMetaGraph = subGraphName
-      ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
-      : contextGraphWorkspaceMetaGraphUri(contextGraphId);
-
-    // The generated-catalog-floor variant matches over quads+floor rather than an
-    // op's intrinsic root, so it cannot be resolved by the stamped intrinsic root —
-    // those CGs (a stable per-CG access policy) keep the exhaustive recompute scan.
-    const useStampIndex = !allowGeneratedCatalogFloor;
-
-    // FAST PATH — resolve a *present* KA whose op is stamped with the target root via
-    // one indexed lookup (verified authoritatively), instead of recomputing every op's
-    // root. On a miss it falls through to the memoized fallback scan below.
-    if (useStampIndex) {
-      const stamped = await this.findStampedSwmSnapshot(contextGraphId, wsMetaGraph, merkleRoot, subGraphName);
-      if (stamped) return stamped;
-    }
-
-    // Enumerate EVERY op with its memoized (root, content-digest) stamp. We never
-    // exclude on stamp-presence: a WorkspaceOperation is assembled incrementally via
-    // entity-keyed data / private-root writes that don't rewrite the op subject, so a
-    // stamp can be stale. The digest below makes reuse safe without a full recompute —
-    // reuse the memoized root only when the op's current content still hashes to the
-    // same cheap digest; any content change flips the digest → full recompute → the
-    // op is re-evaluated and re-stamped. No op can be stranded by a stale stamp.
-    type OpMemo = { roots: string[]; memoRoot?: string; memoDigest?: string };
-    const opsBySubject = new Map<string, OpMemo>();
-    try {
-      const memoPatterns = useStampIndex
-        ? `OPTIONAL { ?op <${SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE}> ?memoRoot . }
-          OPTIONAL { ?op <${SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE}> ?memoDigest . }`
-        : '';
-      const result = await this.store.query(
-        `SELECT ?op ?root ?memoRoot ?memoDigest WHERE {
-          GRAPH <${assertSafeIri(wsMetaGraph)}> {
-            ?op <${DKG_NS}rootEntity> ?root .
-            ${memoPatterns}
-          }
-        }`,
-        { source: 'agent.finalization.swmSnapshotCandidates' },
-      );
-      if (result.type === 'bindings') {
-        for (const row of result.bindings) {
-          const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
-          const root = typeof row['root'] === 'string' ? row['root'].replace(/^<(.*)>$/, '$1') : '';
-          if (!op || !isSafeIri(root)) continue;
-          const memo = opsBySubject.get(op) ?? { roots: [] };
-          if (!memo.roots.includes(root)) memo.roots.push(root);
-          if (memo.memoRoot === undefined && typeof row['memoRoot'] === 'string') {
-            memo.memoRoot = row['memoRoot'].replace(/^"(.*)".*$/, '$1');
-          }
-          if (memo.memoDigest === undefined && typeof row['memoDigest'] === 'string') {
-            memo.memoDigest = row['memoDigest'].replace(/^"(.*)".*$/, '$1');
-          }
-          opsBySubject.set(op, memo);
-        }
-      }
-    } catch { /* SWM meta may not exist yet */ }
-
-    if (opsBySubject.size === 0) return null;
-
-    const opsSorted = [...opsBySubject.entries()].sort(
-      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
-    );
-    // Ops whose content changed (or were never stamped) get a fresh (root, digest)
-    // memo written after the loop — best-effort: a store hiccup on the memo must
-    // never fail reconcile (correctness comes from the recompute here).
-    const restamp = new Map<string, { root: string; digest: string }>();
-    const targetHex = ethers.hexlify(merkleRoot);
-    let hit: { rootEntities: string[]; sharedMemoryQuads: Quad[] } | null = null;
-    for (const [op, memo] of opsSorted) {
-      const roots = memo.roots;
-      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
-      if (sharedMemoryQuads.length === 0) continue;
-      const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
-      if (useStampIndex) {
-        const digest = this.swmContentDigest(sharedMemoryQuads, privateRoots);
-        let computedHex: string;
-        if (memo.memoRoot !== undefined && memo.memoDigest === digest) {
-          // Content unchanged since the memo was written → reuse the root and skip
-          // the expensive computeFlatKCRoot. The digest is a pure function of the
-          // same (quads, privateRoots) computeFlatKCRoot consumes, so digest-equal
-          // ⇒ root-equal.
-          computedHex = memo.memoRoot;
-        } else {
-          computedHex = this.computeOpMerkleRoot(sharedMemoryQuads, privateRoots);
-          restamp.set(op, { root: computedHex, digest });
-        }
-        if (computedHex === targetHex) {
-          hit = { rootEntities: roots, sharedMemoryQuads };
-          break;
-        }
-      } else {
-        const merkleMatchedQuads = this.sharedMemoryQuadsMatchingMerkle(
-          contextGraphId,
-          sharedMemoryQuads,
-          privateRoots,
-          merkleRoot,
-          allowGeneratedCatalogFloor,
-        );
-        if (merkleMatchedQuads) {
-          return { rootEntities: roots, sharedMemoryQuads: merkleMatchedQuads };
-        }
-      }
-    }
-    await this.persistSwmStamps(wsMetaGraph, restamp);
-    return hit;
-  }
-
-  /**
-   * Cheap content fingerprint of an op's SWM snapshot — a pure function of the same
-   * `(sharedMemoryQuads, privateRoots)` that `computeFlatKCRoot` consumes, but a
-   * plain sorted-sha256 rather than the full skolemize + merkle construction. Used
-   * only to decide whether a memoized root is still valid (digest-equal ⇒ the
-   * content, hence its flat-KC root, is unchanged), never as an authoritative root.
-   */
-  /**
-   * The op's intrinsic flat-KC merkle root (hex) — the expensive recompute the
-   * content-digest memo lets us skip for unchanged ops. A named seam so callers and
-   * tests can attribute the cost.
-   */
-  private computeOpMerkleRoot(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[]): string {
-    return ethers.hexlify(computeFlatKCRoot(sharedMemoryQuads, privateRoots));
-  }
-
-  private swmContentDigest(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[]): string {
-    // Unambiguous encoding (NUL field-sep, NL row-sep) matching the SWM-generation
-    // fingerprint convention in `readVmReconcileSwmGen`, so distinct contents cannot
-    // collide to the same digest and cause a wrong memoized-root reuse.
-    const quadLines = sharedMemoryQuads
-      .map((q) => [q.subject, q.predicate, typeof q.object === 'string' ? q.object : String(q.object), q.graph ?? ''].join('\0'))
-      .sort();
-    const privateLines = privateRoots.map((r) => ethers.hexlify(r)).sort();
-    const payload = `${quadLines.join('\n')}\0\0private\0\0${privateLines.join('\n')}`;
-    return createHash('sha256').update(payload, 'utf8').digest('hex');
-  }
-
-  /**
-   * Replace the (root, content-digest) memo for each op — delete-then-insert so an
-   * op never accumulates duplicate/stale stamp triples. Best-effort; a failure here
-   * leaves the memo absent (next pass recomputes), never wrong.
-   */
-  private async persistSwmStamps(wsMetaGraph: string, restamp: Map<string, { root: string; digest: string }>): Promise<void> {
-    if (restamp.size === 0) return;
-    try {
-      const quads: Quad[] = [];
-      for (const [op, { root, digest }] of restamp) {
-        await deleteByPatternWithoutCount(this.store, { graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE });
-        await deleteByPatternWithoutCount(this.store, { graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE });
-        quads.push(
-          { subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: `"${root}"`, graph: wsMetaGraph },
-          { subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE, object: `"${digest}"`, graph: wsMetaGraph },
-        );
-      }
-      await this.store.insert(quads);
-    } catch { /* memo is best-effort; the recompute is the source of truth */ }
-  }
-
-  /**
-   * Fast path for `findSwmSnapshotInNamespace`: resolve the WorkspaceOperation
-   * whose stamped intrinsic root equals `merkleRoot` without recomputing every
-   * op's root. Re-verifies with `verifyMerkleMatch` (authoritative) so a stale
-   * stamp can never promote the wrong snapshot; a stamp that no longer verifies is
-   * dropped so the op falls back into the recompute scan this same pass.
-   */
-  private async findStampedSwmSnapshot(
-    contextGraphId: string,
-    wsMetaGraph: string,
-    merkleRoot: Uint8Array,
-    subGraphName?: string,
-  ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[] } | null> {
-    const targetHex = ethers.hexlify(merkleRoot);
-    const rootsByOp = new Map<string, string[]>();
-    try {
-      const result = await this.store.query(
-        `SELECT ?op ?root WHERE {
-          GRAPH <${assertSafeIri(wsMetaGraph)}> {
-            ?op <${SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE}> "${targetHex}" .
-            ?op <${DKG_NS}rootEntity> ?root .
-          }
-        }`,
-        { source: 'agent.finalization.stampedSwmSnapshot' },
-      );
-      if (result.type === 'bindings') {
-        for (const row of result.bindings) {
-          const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
-          const root = typeof row['root'] === 'string' ? row['root'].replace(/^<(.*)>$/, '$1') : '';
-          if (!op || !isSafeIri(root)) continue;
-          const list = rootsByOp.get(op) ?? [];
-          list.push(root);
-          rootsByOp.set(op, list);
-        }
-      }
-    } catch { return null; }
-
-    for (const [op, roots] of rootsByOp) {
-      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
-      if (sharedMemoryQuads.length > 0) {
-        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
-        if (this.verifyMerkleMatch(sharedMemoryQuads, privateRoots, merkleRoot)) {
-          return { rootEntities: roots, sharedMemoryQuads };
-        }
-      }
-      // The stamp no longer reflects the op's content — drop the whole (root, digest)
-      // memo so the recompute scan re-evaluates and re-stamps it this pass.
-      try {
-        await deleteByPatternWithoutCount(this.store, { graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE });
-        await deleteByPatternWithoutCount(this.store, { graph: wsMetaGraph, subject: op, predicate: SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE });
-      } catch { /* best-effort self-heal */ }
-    }
-    return null;
   }
 
   private async verifyOnChain(

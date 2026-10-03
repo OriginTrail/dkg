@@ -249,7 +249,7 @@ export default defineConfig({
       "test/vm-recovery-microbatch-host.test.ts",
       "test/vm-recovery-footprint-bridge.test.ts",
       "test/vm-recovery-footprint-bridge-adversarial.test.ts",
-      "test/finalization-reconcile-negative-memo.test.ts",
+      "test/finalization-reconcile-local-state.test.ts",
       "test/startup-jitter.test.ts",
       "test/finalization-lifecycle-logger.test.ts",
       "test/finalization-handler.test.ts",

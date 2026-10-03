@@ -7122,14 +7122,12 @@ export class PublishMethods extends DKGAgentBase {
       }
 
       // Durable keep-root signal. The gossip envelope's `keepRootCopyOnLabel`
-      // only reaches peers online for the broadcast; a subscriber that missed
-      // it later recovers the publish via the chain-driven reconcile sweep,
-      // which has no wire to learn the dual-write intent from. Persist the same
-      // decision per root into SWM workspace meta — co-located with the per-root
-      // `privateMerkleRoot` that already replicates to subscribers — so the
-      // reconcile path can mirror the gossip dual-write decision. Read back by
-      // `FinalizationHandler.getKeepRootCopySignal`. Updates reuse a root
-      // entity, so replace any prior value rather than accumulate.
+      // only reaches peers online for the broadcast. Persist the same decision
+      // per root into SWM workspace meta, co-located with the per-root
+      // `privateMerkleRoot` that already replicates to subscribers. Peers on
+      // releases whose chain reconcile promotes from workspace operations read
+      // it there; this release's chain reconcile does not. Updates reuse a
+      // root entity, so replace any prior value rather than accumulate.
       try {
         const gm = new GraphManager(this.store);
         const wsMetaGraph = options?.subGraphName

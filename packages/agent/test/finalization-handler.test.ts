@@ -14,10 +14,7 @@ import {
   type EventBus,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import {
-  computeFlatKCRootV10,
-  generatedPrivateCatalogFloorQuads,
-} from '@origintrail-official/dkg-publisher';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   FinalizationHandler,
   type MarkContextGraphMetaDirtyFromQuads,
@@ -504,43 +501,37 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
     };
   }
 
-  it('promotes a chain-registered KC when the CG binding + recomputed merkle match', async () => {
+  it('answers no-swm for a root that a workspace operation matches, without reading shared memory', async () => {
     const store = new OxigraphStore();
     const merkleRoot = await seedSwmSnapshot(store);
-    const queryOptions: QueryOptions[] = [];
-    const graphDiscoveryOptions: QueryOptions[] = [];
+    const sharedMemoryReads: QueryOptions[] = [];
+    const operationReads: string[] = [];
     const origQuery = store.query.bind(store);
     store.query = (async (sparql: string, options?: QueryOptions) => {
-      if (options?.source === 'agent.finalization.sharedMemorySlice') {
-        queryOptions.push(options);
-      }
+      if (options?.source?.startsWith('agent.finalization.sharedMemorySlice')) sharedMemoryReads.push(options);
+      if (sparql.includes('http://dkg.io/ontology/rootEntity')) operationReads.push(sparql);
       return origQuery(sparql, options);
     }) as typeof store.query;
     const origListGraphs = store.listGraphs.bind(store);
     store.listGraphs = async (options?: QueryOptions) => {
-      if (options?.source === 'agent.finalization.sharedMemorySlice') {
-        graphDiscoveryOptions.push(options);
-      }
+      if (options?.source?.startsWith('agent.finalization.sharedMemorySlice')) sharedMemoryReads.push(options);
       return origListGraphs(options);
     };
     const handler = new FinalizationHandler(store, makeBindingChain(42n));
 
     const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
-    expect(outcome).toBe('promoted');
-    expect(queryOptions.length).toBeGreaterThan(0);
-    expect(graphDiscoveryOptions.length).toBeGreaterThan(0);
-    expect([...queryOptions, ...graphDiscoveryOptions].every(
-      (options) => options.priority === 'background',
-    )).toBe(true);
+    expect(outcome).toBe('no-swm');
+    expect(sharedMemoryReads).toHaveLength(0);
+    expect(operationReads).toHaveLength(0);
 
     const perCgGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}`;
     const promoted = await store.query(
       `ASK { GRAPH <${perCgGraph}> { <${ENTITY}> <http://schema.org/name> "Reconciled" } }`,
     );
-    expect(promoted.type === 'boolean' && promoted.value).toBe(true);
+    expect(promoted.type === 'boolean' && promoted.value).toBe(false);
   });
 
-  it('does not enter the legacy workspace scan during an exact RFC64 check', async () => {
+  it('does not read shared memory during an exact RFC64 check', async () => {
     const store = new OxigraphStore();
     const sharedMemoryReads: QueryOptions[] = [];
     const originalQuery = store.query.bind(store);
@@ -616,187 +607,6 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
     expect(staleVmStillPresent.type === 'boolean' && staleVmStillPresent.value).toBe(true);
   });
 
-  it('chain-reconcile regenerates generated private-CG catalog floor for merkle match without adding it as a root', async () => {
-    const store = new OxigraphStore();
-    await seedSwmSnapshot(store);
-    const catalogFloor = generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH);
-    const merkleRoot = computeFlatKCRootV10(
-      [
-        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
-        ...catalogFloor,
-      ],
-      [],
-    );
-    const handler = new FinalizationHandler(store, makeBindingChain(42n));
-
-    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
-    expect(outcome).toBe('promoted');
-
-    const perCgGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}`;
-    const cgDid = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
-    const catalogPromoted = await store.query(
-      `ASK { GRAPH <${perCgGraph}> { <${cgDid}> <http://purl.org/dc/terms/accessRights> <http://publications.europa.eu/resource/authority/access-right/RESTRICTED> } }`,
-    );
-    expect(catalogPromoted.type === 'boolean' && catalogPromoted.value).toBe(true);
-
-    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}/_meta`;
-    const catalogManifestRoot = await store.query(
-      `ASK { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/rootEntity> <${cgDid}> } }`,
-    );
-    expect(catalogManifestRoot.type === 'boolean' && catalogManifestRoot.value).toBe(false);
-  });
-
-  it('uses one finalized creation pair for private catalog regeneration', async () => {
-    const store = new OxigraphStore();
-    await seedSwmSnapshot(store);
-    const merkleRoot = computeFlatKCRootV10(
-      [
-        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
-        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
-      ],
-      [],
-    );
-    const chain = makeBindingChain(42n) as ChainAdapter & Record<string, unknown>;
-    let nameReads = 0;
-    let policyReads = 0;
-    chain.getContextGraphFinalizedCreation = async () => ({
-      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
-      accessPolicy: 1,
-    });
-    chain.getContextGraphNameHash = async () => {
-      nameReads += 1;
-      throw new Error('split name read');
-    };
-    chain.getContextGraphAccessPolicy = async () => {
-      policyReads += 1;
-      throw new Error('split policy read');
-    };
-    const handler = new FinalizationHandler(store, chain);
-
-    await expect(handler.handleChainReconciledKC(
-      input(merkleRoot),
-      createOperationContext('system'),
-    )).resolves.toBe('promoted');
-    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
-  });
-
-  it('fails closed without split reads when the finalized creation proof fails', async () => {
-    const store = new OxigraphStore();
-    await seedSwmSnapshot(store);
-    const merkleRoot = computeFlatKCRootV10(
-      [
-        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
-        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
-      ],
-      [],
-    );
-    const chain = makeBindingChain(42n) as ChainAdapter & Record<string, unknown>;
-    let nameReads = 0;
-    let policyReads = 0;
-    chain.getContextGraphFinalizedCreation = async () => {
-      throw new Error('lineage changed');
-    };
-    chain.getContextGraphNameHash = async () => {
-      nameReads += 1;
-      return ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
-    };
-    chain.getContextGraphAccessPolicy = async () => {
-      policyReads += 1;
-      return 1;
-    };
-    const handler = new FinalizationHandler(store, chain);
-
-    await expect(handler.handleChainReconciledKC(
-      input(merkleRoot),
-      createOperationContext('system'),
-    )).resolves.toBe('no-swm');
-    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
-  });
-
-  it('does not regenerate the private-CG catalog floor for public on-chain access policy', async () => {
-    const store = new OxigraphStore();
-    await seedSwmSnapshot(store);
-    const merkleRoot = computeFlatKCRootV10(
-      [
-        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
-        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
-      ],
-      [],
-    );
-    const handler = new FinalizationHandler(store, makeBindingChain(42n, 0));
-
-    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
-    expect(outcome).toBe('no-swm');
-  });
-
-  it('does not regenerate the private-CG catalog floor when live name hash does not match the local CG', async () => {
-    const store = new OxigraphStore();
-    await seedSwmSnapshot(store);
-    const merkleRoot = computeFlatKCRootV10(
-      [
-        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
-        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
-      ],
-      [],
-    );
-    const staleNameHash = `0x${'11'.repeat(32)}`;
-    const handler = new FinalizationHandler(store, makeBindingChain(42n, 1, staleNameHash));
-
-    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
-    expect(outcome).toBe('no-swm');
-  });
-
-  it('mirrors the keep-root dual-write when the publisher persisted keepRootCopyOnLabel=true', async () => {
-    // Regression: a same-graph publish recovered via the chain sweep (gossip
-    // missed) must still land a root `<cg>` label copy, else label-scoped reads
-    // miss it. The durable signal lives in SWM workspace meta.
-    const store = new OxigraphStore();
-    const merkleRoot = await seedSwmSnapshot(store);
-    await store.insert([
-      { subject: ENTITY, predicate: 'http://dkg.io/ontology/keepRootCopyOnLabel', object: '"true"', graph: contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH) },
-    ]);
-    const handler = new FinalizationHandler(store, makeBindingChain(42n));
-
-    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
-    expect(outcome).toBe('promoted');
-
-    const rootLabelGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
-    const inRootLabel = await store.query(
-      `ASK { GRAPH <${rootLabelGraph}> { <${ENTITY}> <http://schema.org/name> "Reconciled" } }`,
-    );
-    expect(inRootLabel.type === 'boolean' && inRootLabel.value).toBe(true);
-  });
-
-  it('does NOT dual-write to the root label when no keep-root signal is persisted (legacy / remap)', async () => {
-    // Absent signal → per-cgId only, so a remap publish's deliberately-dropped
-    // root copy is never re-added (data-isolation guard).
-    const store = new OxigraphStore();
-    const merkleRoot = await seedSwmSnapshot(store);
-    const handler = new FinalizationHandler(store, makeBindingChain(42n));
-
-    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
-    expect(outcome).toBe('promoted');
-
-    const rootLabelGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
-    const inRootLabel = await store.query(
-      `ASK { GRAPH <${rootLabelGraph}> { <${ENTITY}> ?p ?o } }`,
-    );
-    expect(inRootLabel.type === 'boolean' && inRootLabel.value).toBe(false);
-  });
-
-  it('returns no-swm when no local SWM snapshot matches the published merkleRoot', async () => {
-    const store = new OxigraphStore();
-    await seedSwmSnapshot(store);
-    const handler = new FinalizationHandler(store, makeBindingChain(42n));
-
-    // Ask for a different (unmatched) merkle root.
-    const outcome = await handler.handleChainReconciledKC(
-      input(new Uint8Array(32).fill(0xff)),
-      createOperationContext('system'),
-    );
-    expect(outcome).toBe('no-swm');
-  });
-
   it('returns unverified when the chain CG binding cannot be confirmed (no chain wired)', async () => {
     const store = new OxigraphStore();
     const merkleRoot = await seedSwmSnapshot(store);
@@ -850,47 +660,5 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
 
     const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
     expect(outcome).toBe('already-confirmed');
-  });
-
-  /**
-   * Seed an SWM snapshot whose ONLY copy lives under a named sub-graph's
-   * shared-memory namespace (not the root workspace). Registers the sub-graph
-   * so it is discoverable via `listSubGraphs`.
-   */
-  async function seedSwmSnapshotInSubGraph(store: OxigraphStore, subGraphName: string): Promise<Uint8Array> {
-    const gm = new GraphManager(store);
-    await store.insert([
-      // A benign marker registers the sub-graph data graph so listSubGraphs()
-      // can discover it — distinct from ENTITY so the promotion assertion is
-      // meaningful (ENTITY must NOT already be in the sub-graph data graph).
-      { subject: 'urn:test:subgraph-marker', predicate: 'http://schema.org/name', object: '"marker"', graph: gm.subGraphUri(CONTEXT_GRAPH, subGraphName) },
-      // The SWM snapshot copy + op→root live under the sub-graph SWM namespace.
-      { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: gm.sharedMemoryUri(CONTEXT_GRAPH, subGraphName) },
-      { subject: 'urn:dkg:share:test:op-1', predicate: 'http://dkg.io/ontology/rootEntity', object: ENTITY, graph: gm.sharedMemoryMetaUri(CONTEXT_GRAPH, subGraphName) },
-    ]);
-    return computeFlatKCRootV10(
-      [{ subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' }],
-      [],
-    );
-  }
-
-  it('falls back to sub-graph SWM namespaces when the caller supplies no subGraphName', async () => {
-    // Regression: the chain-driven path never knows the sub-graph, so a KA
-    // published into a named sub-graph used to stay no-swm forever.
-    const store = new OxigraphStore();
-    const merkleRoot = await seedSwmSnapshotInSubGraph(store, 'code');
-    const handler = new FinalizationHandler(store, makeBindingChain(42n));
-
-    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
-    expect(outcome).toBe('promoted');
-
-    // Promotion must land in the resolved sub-graph data graph, not the root
-    // per-cgId partition (proves we used the namespace where the snapshot lived).
-    const subGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/code`;
-    const rootCgGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}`;
-    const inSub = await store.query(`ASK { GRAPH <${subGraph}> { <${ENTITY}> <http://schema.org/name> "Reconciled" } }`);
-    const inRoot = await store.query(`ASK { GRAPH <${rootCgGraph}> { <${ENTITY}> <http://schema.org/name> "Reconciled" } }`);
-    expect(inSub.type === 'boolean' && inSub.value).toBe(true);
-    expect(inRoot.type === 'boolean' && inRoot.value).toBe(false);
   });
 });
