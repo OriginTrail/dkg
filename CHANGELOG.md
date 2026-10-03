@@ -38,7 +38,7 @@ package, `@origintrail-official/dkg-node-store`.
 | A share whose pointer stamp fails after the commit is reported (#2901, #2959) | A synchronous `/swm/share` can answer a retryable 503 with `Retry-After`, or a post-commit failure, where 10.0.20 answered success and left the asset without its `swmCurrentAssertion` pointer. An async share job shows `failed_retrying`, or `failed` until the recovery sweep requeues it | Retry: the replay is idempotent and keeps the share's operation id. Do not clear a `failed` share job that carries a post-commit diagnostic; it is requeued automatically |
 | Async publish jobs explain why they are not moving (#2942, #2944, #2945, #2952) | Additive. `retryState` gains `blocker { code, summary, missing? }`, and a job that waits for a chain re-check carries `blocker.lastCheck { outcome, at }`. The `503 LIFT_JOB_PENDING_CHAIN_PROOF` body carries the blocker without `lastCheck`. `dkg publisher job` prints `retryState` | None. `clear-job` on a held job abandons this node's tracking only: it neither cancels a sent transaction nor proves that none was sent |
 | A publish that failed before its transaction was recorded retries as the same job (#2940, #2941, #2942, #2944) | Such a failure is recorded as `workspace_unavailable` and retried on backoff within the job's retry budget, where 10.0.20 recorded `tx_submit_timeout` or `rpc_unavailable` and waited for an operator | Jobs stranded on 10.0.20 are not healed: retry them with `POST /api/publisher/retry` |
-| `wm/discard` of a shared or published asset answers 409 (#1425, #2581) | `409` with `KA_WM_LIFECYCLE_REQUIRED` where 10.0.20 answered 500 | Treat it as "no working draft to discard" |
+| `wm/discard` and `wm/write` on a shared or published asset answer 409 (#1425, #2581) | `409` with `KA_WM_LIFECYCLE_REQUIRED` where 10.0.20 answered 500. The asset is not reopened and nothing is written | Treat it as "no working draft": open a new draft with `wm/pull-from` before writing |
 | Finalized snapshot cleanup is available, off by default (#2906, #2930) | With `sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled: true`, the snapshot file of a completed graph-scoped publish is deleted after a grace period (`finalizedRetentionMs`, 24 hours by default) once no operation references it. Published Verifiable Memory is not touched. It covers publishes completed after it is enabled, not the existing backlog and not legacy entity-scoped publishes. Under hard disk pressure a marked file becomes eligible before its grace period ends | Optional. Enable it on one node first and read `docs/use-dkg/swm-public-snapshot-gc.md`. Use one daemon per snapshot directory |
 | Protocol persistence stores move to `@origintrail-official/dkg-node-store` (#2927) | A new published package that `@origintrail-official/dkg` and `@origintrail-official/dkg-node-ui` depend on. Same `node-ui.db`, same schema version, no migration. `dkg-node-ui` re-exports every moved class from its entry point and from its former deep paths | None for operators. Embedders can keep their imports |
 | Store adapters report SPARQL terms that fail validation (#2763) | Nothing is rendered or sent differently. A malformed IRI, literal or blank-node label in an adapter statement is counted in `dkg.store.sparql_invalid_terms_total` and logged at most once a minute per adapter, operation, position and kind, with its length and a fingerprint, never the term | Watch the counter. A later release rejects such terms instead of rendering them as before |
@@ -177,9 +177,10 @@ package, `@origintrail-official/dkg-node-store`.
   A query that really outlives the client deadline is still reclaimed, and an
   abandoned answer with more than 1 MiB left to read is cancelled and still
   ends in a restart at the deadline.
-- **`wm/discard` of a shared or published Knowledge Asset answers 409**
-  (#1425, #2581): such an asset has no working draft to discard. The route
-  returned the engine's `KA_WM_LIFECYCLE_REQUIRED` as an unclassified 500.
+- **`wm/discard` and `wm/write` on a shared or published Knowledge Asset
+  answer 409** (#1425, #2581): such an asset has no working draft. The routes
+  returned the engine's `KA_WM_LIFECYCLE_REQUIRED` as an unclassified 500;
+  they now answer 409 with that code, and the asset stays as it was.
 - **An agent restarted in place keeps receiving gossip** (#2934): `stop()`
   followed by `start()` on one `DKGAgent` built a new gossip manager but kept
   the records of what was subscribed on the old one, so the restarted agent
@@ -235,8 +236,36 @@ package, `@origintrail-official/dkg-node-store`.
   trusted SELECT results decode about 10% faster in a 1,000-row benchmark,
   and canonical literal escaping is 13% to 27% faster in its microbenchmark.
   Outputs are identical.
-- The publisher decides how a failed execution is recorded in one pure
-  function (#2943, #2950). No behaviour change.
+- **Store adapters also report relative and RFC 3987-invalid IRIs** (#2797):
+  the counter above saw only terms with characters that break SPARQL. A
+  relative IRI, such as the datatype in `"42"^^<integer>`, is resolved by
+  Oxigraph server and Blazegraph against their own endpoint URL, so what is
+  stored depends on the node; an IRI that RFC 3987 rejects fails the write on
+  Oxigraph and is stored as is on Blazegraph. Both are now counted, as
+  `kind=relative-iri` or `kind=rfc3987-iri` (with `position=datatype` for a
+  literal's datatype), on every adapter write: inserts, graph and subject
+  replacement and the RFC-64 author commit. Still observe mode: nothing is
+  sent differently. Raw `update(sparql)` statements are not covered.
+- **Shared Working Memory materialization skips an unchanged assertion graph**
+  (#1963, #2624): a successful validation is remembered by assertion graph,
+  expected digest and expected quad count, so an unchanged non-empty
+  descriptor needs neither the count nor the read-back again. Only on the
+  embedded Oxigraph backends, where the node observes every write; at most
+  1,024 entries, for 30 s each.
+- **A sync page is decoded once** (#1665, #2611): an accepted response body
+  was decoded by retry validation and again before parsing. A rejected busy
+  attempt also no longer stays in scope of a later accepted page.
+- **A failed network admission probe is warned once** (#1578, #2615): the
+  connection-open wrapper repeated the warning the admission coordinator had
+  already logged, which doubled warning volume under routine peer churn.
+- No behaviour change: the chain adapter's name-registry scan policies are
+  decided per scan mode in one place (#1484, #2613); the catch-up proof
+  model has its own module (#2008, #2598); the RFC-64 author-catalog path
+  verifier normalizes path nodes once (#2631); the async publish failure
+  mapper is an ordered rule table (#1974, #2617); the async-promote worker
+  normalizes its log sink once at its boundary (#2315, #2629); and the
+  publisher decides how a failed execution is recorded in one pure function
+  (#2943, #2950).
 - Repository layout: one-off data and old tooling moved to `misc/`, and more
   root files moved next to what they configure (#2924, #2957). Anyone who
   keeps a `<chain>_distribution_ledger.json` under the former root
