@@ -570,6 +570,60 @@ describe('a widen that still mismatches defers exactly as today (T6c)', () => {
   });
 });
 
+describe('huge unmatched SWM families defer to payload sync', () => {
+  afterEach(() => {
+    Logger.setSink(null);
+    delete process.env.DKG_FINALIZATION_SWM_MAX_FALLBACK_GRAPHS;
+  });
+
+  it('does not promote an unverified candidate or materialize the complete family', async () => {
+    process.env.DKG_FINALIZATION_SWM_MAX_FALLBACK_GRAPHS = '2';
+    const store = new OxigraphStore();
+    const root = 'urn:test:large-family:root';
+    const offRangeGraphs = [10, 11, 12].map((number) => swmGraph(AUTHOR_B, number));
+    await store.insert([
+      { subject: root, predicate: 'http://schema.org/name', object: '"candidate"', graph: swmGraph(AUTHOR_A, 9) },
+      ...offRangeGraphs.map((graph, n) => ({
+        subject: `urn:test:large-family:decoy-${n}`,
+        predicate: 'http://schema.org/name', object: '"decoy"', graph,
+      })),
+    ]);
+    const wrongRoot = new Uint8Array(32).fill(7);
+    const packed = packKnowledgeAssetIdFromIdentity({ agentAddress: AUTHOR_A, kaNumber: 9 });
+    const msg = makeMsg({
+      startKAId: packed, endKAId: packed, kcMerkleRoot: wrongRoot, rootEntities: [root],
+    });
+    const logs: string[] = [];
+    Logger.setSink((record: LogRecord) => logs.push(record.message));
+    const dataReads: Array<{ sparql: string; source: string | undefined }> = [];
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: QueryOptions) => {
+      if (/SELECT DISTINCT \?s \?p \?o WHERE/i.test(sparql)) {
+        dataReads.push({ sparql, source: options?.source });
+      }
+      return originalQuery(sparql, options);
+    }) as typeof store.query;
+    const sources = captureQuerySources(store);
+    const handler = new FinalizationHandler(store, makeVerifyingChain({
+      blockNumber: 100, txHash: msg.txHash, merkleRoot: wrongRoot,
+      publisher: AUTHOR_A, startKAId: packed, endKAId: packed,
+    }));
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CG);
+
+    expect(await promotedTo(store, root)).toBe(false);
+    expect(logs.some((message) => message.includes('event=finalization_payload_sync_required'))).toBe(true);
+    expect(logs.some((message) => message.includes('event=finalization_applied'))).toBe(false);
+    expect(sources).not.toContain(SLICE_WIDENED);
+    expect(dataReads).toHaveLength(1);
+    expect(dataReads[0]?.source).toBe(SLICE_BOUNDED);
+    expect(dataReads[0]?.sparql).toContain(`<${swmGraph(AUTHOR_A, 9)}>`);
+    for (const graph of offRangeGraphs) {
+      expect(dataReads[0]?.sparql).not.toContain(`<${graph}>`);
+    }
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // T5c — the advertised defer→accept improvement, end to end.
 //

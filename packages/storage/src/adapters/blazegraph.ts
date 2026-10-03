@@ -11,6 +11,9 @@ import type {
   ConstructResult,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { withBlazegraphReadSnapshot } from './blazegraph-read-snapshot.js';
+import type { ReadSnapshotStore } from '../read-snapshot-capability.js';
+
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
@@ -49,7 +52,7 @@ import {
   type SparqlUpdatePlan,
 } from './sparql-statements.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
-import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
+import { parseBlazegraphConstructNQuads } from './blazegraph-construct-result.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 import type { StoreOperation, StoreOperationOutcome } from '../store-operation-outcome.js';
 import {
@@ -57,6 +60,8 @@ import {
   RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1,
   type Rfc64HttpProjectionRequestV1,
 } from '../rfc64-http-shared-projection-runner.js';
+
+type BlazegraphReadQueryOptions = TripleStoreQueryOptions & { readSnapshotTimestamp?: string };
 
 /** Every SPARQL statement this adapter builds by interpolation. */
 const statements = sparqlStatements('blazegraph');
@@ -256,6 +261,21 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         `Blazegraph construct failed (${status}): ${excerpt}`,
       ),
     }, RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1);
+  }
+
+  /** Run related reads at one Blazegraph commit point and release its pin. */
+  async withReadSnapshot<T>(
+    read: (snapshot: ReadSnapshotStore) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return withBlazegraphReadSnapshot(this.url, this.operationTimeoutMs, (timestamp) =>
+      read({
+        query: (sparql, options) => this.queryWithOperation(sparql, { ...options, readSnapshotTimestamp: timestamp }),
+        listGraphs: (options) => this.listGraphsInternal({ ...options, readSnapshotTimestamp: timestamp }),
+        listGraphsByPrefix: (prefix, options) => this.listGraphsByPrefixInternal(
+          prefix, { ...options, readSnapshotTimestamp: timestamp },
+        ),
+      }), signal);
   }
 
   private runStreamingConstruct<T>(
@@ -555,7 +575,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 
   private async queryWithOperation(
     sparql: string,
-    options: TripleStoreQueryOptions | undefined,
+    options: BlazegraphReadQueryOptions | undefined,
     storeOperation?: StoreOperation,
   ): Promise<QueryResult> {
     const trimmed = sparql.trim();
@@ -589,6 +609,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         deadline,
         options?.maxResponseBytes,
         'query',
+        options?.readSnapshotTimestamp,
       );
 
       const text = options?.maxResponseBytes === undefined
@@ -620,8 +641,9 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     deadline: StoreOperationDeadline,
     errorResponseByteCeiling: number | undefined,
     failureLabel: 'query' | 'construct',
+    readSnapshotTimestamp?: string,
   ): Promise<Response> {
-    const res = await this.postReadRequest(sparql, accept, deadline);
+    const res = await this.postReadRequest(sparql, accept, deadline, readSnapshotTimestamp);
     if (!res.ok) {
       const text = await deadline.waitFor((errorResponseByteCeiling === undefined
         ? res.text()
@@ -636,8 +658,14 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     sparql: string,
     accept: string,
     deadline: StoreOperationDeadline,
+    readSnapshotTimestamp?: string,
   ): Promise<Response> {
-    return deadline.waitFor(fetch(this.url, {
+    if (readSnapshotTimestamp !== undefined && !/^-?\d+$/.test(readSnapshotTimestamp)) {
+      throw new Error('Invalid Blazegraph read snapshot timestamp');
+    }
+    const url = new URL(this.url);
+    if (readSnapshotTimestamp !== undefined) url.searchParams.set('timestamp', readSnapshotTimestamp);
+    return deadline.waitFor(fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
@@ -652,7 +680,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   private async queryConstruct(
     sparql: string,
     deadline: StoreOperationDeadline,
-    options?: TripleStoreQueryOptions,
+    options?: BlazegraphReadQueryOptions,
   ): Promise<ConstructResult> {
     const res = await this.postReadQuery(
       sparql,
@@ -660,6 +688,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       deadline,
       options?.maxResponseBytes,
       'construct',
+      options?.readSnapshotTimestamp,
     );
     const text = await deadline.waitFor(options?.maxResponseBytes === undefined
       ? res.text()
@@ -687,6 +716,10 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
+    return this.listGraphsInternal(options);
+  }
+
+  private async listGraphsInternal(options?: BlazegraphReadQueryOptions): Promise<string[]> {
     const r = await this.queryWithOperation(
       'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
       options,
@@ -696,6 +729,18 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     return r.bindings
       .map((b) => b.g)
       .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+  }
+
+  async listGraphsByPrefix(prefix: string, options?: TripleStoreQueryOptions): Promise<string[]> {
+    return this.listGraphsByPrefixInternal(prefix, options);
+  }
+
+  private async listGraphsByPrefixInternal(prefix: string, options?: BlazegraphReadQueryOptions): Promise<string[]> {
+    // Blazegraph's prefix-filtered GRAPH ?g / FILTER EXISTS shape repeatedly
+    // timed out on a large live namespace, while its plain graph inventory
+    // completed. Keep the same pinned snapshot/options and filter that inventory
+    // locally so callers still see only non-empty, non-staging graphs.
+    return (await this.listGraphsInternal(options)).filter((graph) => graph.startsWith(prefix));
   }
 
   // -------------------------------------------------------------------
@@ -797,64 +842,6 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
  */
 function quadToBlazegraphNQuad(q: DKGQuad): string {
   return toBlazegraphAsciiSafeNQuads(quadToNQuad(q));
-}
-
-/**
- * Parse a Blazegraph CONSTRUCT body and reject one that the engine cut short.
- *
- * Blazegraph commits `200 OK` and starts streaming before it knows whether the
- * query will finish. If the query is then killed — by the server-side deadline,
- * or by an engine error mid-result — the error text is appended to the
- * already-committed body. The historical parser skips any line it cannot
- * match, so without an integrity check that body parses into a short,
- * structurally valid, silently-incomplete quad set: a sync page that looks
- * whole and is not.
- *
- * The check is deliberately narrow — it looks for *truncation*, not for any
- * unparseable line — so it cannot start rejecting the odd-but-harmless
- * serialisations the tolerant parser has always accepted:
- *
- *  - the final non-comment line must parse as a complete N-Quad statement
- *  - Blazegraph's appended failure text carries a Java exception marker
- *
- * Parsing and final-line validation consume {@link scanNQuadLines}, so line
- * normalization and parse-failure metadata have one shared definition.
- * Interior unparseable lines retain the adapter's historical tolerant
- * behaviour; an unparseable final statement is the truncation signal that
- * must fail closed.
- */
-function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
-  const quads: DKGQuad[] = [];
-  let finalStatement: NQuadLineScan | undefined;
-
-  for (const scanned of scanNQuadLines(text)) {
-    const { line } = scanned;
-
-    // Both alternatives are line-start anchored on purpose. The engine
-    // appends failure text as standalone lines, while the same words inside a
-    // stored literal occur after the subject and predicate on a valid N-Quad.
-    const javaError = /^(?:[\w.$]+\.)?(?:\w*Exception|\w*Error)\b|^\s*at com\.bigdata\./.exec(line);
-    if (javaError) {
-      throw new Error(
-        'Blazegraph returned a truncated CONSTRUCT result: the response body carries an engine '
-        + `error (${javaError[0].slice(0, 120)}). Treating this as a failure rather than as an `
-        + 'empty/partial result — see parseBlazegraphConstructNQuads.',
-      );
-    }
-
-    finalStatement = scanned;
-    if (scanned.parsed) quads.push(scanned.quad);
-  }
-
-  if (finalStatement && !finalStatement.parsed) {
-    throw new Error(
-      'Blazegraph returned a truncated CONSTRUCT result: the final statement is incomplete '
-      + `(${JSON.stringify(finalStatement.line.slice(-120))}). Treating this as a failure rather `
-      + 'than as a partial result — see parseBlazegraphConstructNQuads.',
-    );
-  }
-
-  return quads;
 }
 
 // =====================================================================

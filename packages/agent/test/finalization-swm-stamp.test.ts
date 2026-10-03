@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type ReadSnapshotStore } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
@@ -24,6 +24,14 @@ import { FinalizationHandler, SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE } from '../src/
 const LOCAL_CG = 'fun-facts';
 const ON_CHAIN_CG = 77n;
 const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(LOCAL_CG);
+
+/** Static-fixture snapshot facade to exercise the Blazegraph-only bounded path. */
+function withReadSnapshotForTest(store: OxigraphStore): OxigraphStore {
+  Object.assign(store, {
+    withReadSnapshot: async <T>(read: (snapshot: ReadSnapshotStore) => Promise<T>): Promise<T> => read(store),
+  });
+  return store;
+}
 
 /** Seed a local SWM snapshot for one KA and return its flat-KC merkle root. */
 async function seedSwmSnapshot(store: OxigraphStore, entity: string, value: string): Promise<Uint8Array> {
@@ -81,6 +89,152 @@ async function isInVm(store: OxigraphStore, entity: string, value: string): Prom
 }
 
 describe('#1609 — SWM snapshot-root memo (finalization reconcile)', () => {
+  it('defers an oversized unstamped legacy family before SWM materialization', async () => {
+    vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', '2');
+    try {
+      const store = withReadSnapshotForTest(new OxigraphStore());
+      const chain = new MockChainAdapter();
+      const fh = new FinalizationHandler(store, chain);
+      const wsGraph = contextGraphWorkspaceGraphUri(LOCAL_CG);
+      await seedSwmSnapshot(store, 'urn:fact:local', 'locally shared');
+      await store.insert([1, 2].map((n) => ({
+        subject: `urn:fact:other:${n}`,
+        predicate: 'http://schema.org/name',
+        object: `"other ${n}"`,
+        graph: `${wsGraph}/author/${n}`,
+      })));
+      const absent = rootFor('urn:fact:absent', 'published elsewhere');
+      chain.__registerKC({ kaId: 9903n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(absent), chunks: [] });
+      const queries = vi.spyOn(store, 'query');
+
+      expect(await reconcileOne(chain, fh, 9903n)).toBe('no-swm');
+      expect(queries.mock.calls.some(([sparql]) =>
+        /SELECT DISTINCT \?s \?p \?o[\s\S]*VALUES \?g\s*\{/i.test(sparql))).toBe(false);
+      expect((await readStamps(store)).size).toBe(0);
+      queries.mockRestore();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('defers too many legacy operation rows before graph-family inventory', async () => {
+    vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_OP_ROWS', '2');
+    try {
+      const store = withReadSnapshotForTest(new OxigraphStore());
+      const chain = new MockChainAdapter();
+      const fh = new FinalizationHandler(store, chain);
+      await store.insert([1, 2, 3].map((n) => ({
+        subject: `urn:dkg:share:large-${n}`,
+        predicate: 'http://dkg.io/ontology/rootEntity',
+        object: `urn:fact:large-${n}`,
+        graph: wsMetaGraph,
+      })));
+      const absent = rootFor('urn:fact:absent-large', 'published elsewhere');
+      chain.__registerKC({ kaId: 9907n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(absent), chunks: [] });
+      const queries = vi.spyOn(store, 'query');
+      const graphLists = vi.spyOn(store, 'listGraphs');
+
+      expect(await reconcileOne(chain, fh, 9907n)).toBe('no-swm');
+      expect(queries.mock.calls.some(([sparql, options]) =>
+        options?.source === 'agent.finalization.swmSnapshotCandidates'
+        && /LIMIT 3\b/.test(sparql))).toBe(true);
+      expect(graphLists.mock.calls.some(([options]) =>
+        options?.source === 'agent.finalization.legacySnapshotScan.preflight')).toBe(false);
+      expect((await readStamps(store)).size).toBe(0);
+      graphLists.mockRestore();
+      queries.mockRestore();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('still promotes a Merkle-verified stamped operation in an oversized family', async () => {
+    vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', '2');
+    try {
+      const store = withReadSnapshotForTest(new OxigraphStore());
+      const chain = new MockChainAdapter();
+      const fh = new FinalizationHandler(store, chain);
+      const wsGraph = contextGraphWorkspaceGraphUri(LOCAL_CG);
+      const root = await seedSwmSnapshot(store, 'urn:fact:hit-large', 'verified content');
+      await store.insert([
+        { subject: 'urn:dkg:share:urn:fact:hit-large', predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: `"${ethers.hexlify(root)}"`, graph: wsMetaGraph },
+        ...[1, 2].map((n) => ({
+          subject: `urn:fact:other:${n}`, predicate: 'http://schema.org/name',
+          object: `"other ${n}"`, graph: `${wsGraph}/author/${n}`,
+        })),
+      ]);
+      chain.__registerKC({ kaId: 9904n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(root), chunks: [] });
+
+      expect(await reconcileOne(chain, fh, 9904n)).toBe('promoted');
+      expect(await isInVm(store, 'urn:fact:hit-large', 'verified content')).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps a mismatched stamp intact when its oversized family cannot be verified', async () => {
+    vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', '2');
+    try {
+      const store = withReadSnapshotForTest(new OxigraphStore());
+      const chain = new MockChainAdapter();
+      const fh = new FinalizationHandler(store, chain);
+      const wsGraph = contextGraphWorkspaceGraphUri(LOCAL_CG);
+      await seedSwmSnapshot(store, 'urn:fact:stale-large', 'old content');
+      const target = rootFor('urn:fact:stale-large', 'new content');
+      await store.insert([
+        { subject: 'urn:dkg:share:urn:fact:stale-large', predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: `"${ethers.hexlify(target)}"`, graph: wsMetaGraph },
+        ...[1, 2].map((n) => ({
+          subject: `urn:fact:other:${n}`, predicate: 'http://schema.org/name',
+          object: `"other ${n}"`, graph: `${wsGraph}/author/${n}`,
+        })),
+      ]);
+      chain.__registerKC({ kaId: 9905n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(target), chunks: [] });
+
+      expect(await reconcileOne(chain, fh, 9905n)).toBe('no-swm');
+      expect((await readStamps(store)).get('urn:dkg:share:urn:fact:stale-large')).toBe(ethers.hexlify(target));
+      expect(await isInVm(store, 'urn:fact:stale-large', 'old content')).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('checks later stamped operations after an oversized stale candidate defers', async () => {
+    vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', '2');
+    try {
+      const store = withReadSnapshotForTest(new OxigraphStore());
+      const chain = new MockChainAdapter();
+      const fh = new FinalizationHandler(store, chain);
+      const wsGraph = contextGraphWorkspaceGraphUri(LOCAL_CG);
+      const rootEntity = 'urn:fact:later-valid';
+      const extraEntity = 'urn:fact:earlier-stale';
+      const expectedRoot = rootFor(rootEntity, 'verified content');
+      const stamp = `"${ethers.hexlify(expectedRoot)}"`;
+      const staleOp = 'urn:dkg:share:0-stale';
+      const validOp = 'urn:dkg:share:1-valid';
+      await store.insert([
+        { subject: rootEntity, predicate: 'http://schema.org/name', object: '"verified content"', graph: wsGraph },
+        { subject: extraEntity, predicate: 'http://schema.org/name', object: '"new content"', graph: wsGraph },
+        { subject: staleOp, predicate: 'http://dkg.io/ontology/rootEntity', object: rootEntity, graph: wsMetaGraph },
+        { subject: staleOp, predicate: 'http://dkg.io/ontology/rootEntity', object: extraEntity, graph: wsMetaGraph },
+        { subject: staleOp, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: stamp, graph: wsMetaGraph },
+        { subject: validOp, predicate: 'http://dkg.io/ontology/rootEntity', object: rootEntity, graph: wsMetaGraph },
+        { subject: validOp, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: stamp, graph: wsMetaGraph },
+        ...[1, 2].map((n) => ({
+          subject: `urn:fact:decoy:${n}`, predicate: 'http://schema.org/name',
+          object: `"decoy ${n}"`, graph: `${wsGraph}/author/${n}`,
+        })),
+      ]);
+      chain.__registerKC({ kaId: 9906n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(expectedRoot), chunks: [] });
+
+      expect(await reconcileOne(chain, fh, 9906n)).toBe('promoted');
+      expect(await isInVm(store, rootEntity, 'verified content')).toBe(true);
+      expect(await isInVm(store, extraEntity, 'new content')).toBe(false);
+      expect((await readStamps(store)).get(staleOp)).toBe(ethers.hexlify(expectedRoot));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('stamps every recomputed op with the exact computeFlatKCRoot value on an absent-KA miss', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter();

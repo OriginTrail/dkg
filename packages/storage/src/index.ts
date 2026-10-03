@@ -45,6 +45,11 @@ export {
   type SparqlEndpoint,
 } from './triple-store.js';
 export {
+  asReadSnapshotCapability,
+  type ReadSnapshotCapability,
+  type ReadSnapshotStore,
+} from './read-snapshot-capability.js';
+export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   assertSubjectReplacementPayload,
   buildAtomicGraphAndSubjectReplaceUpdate,
@@ -262,9 +267,12 @@ export {
 export {
   ContextGraphManager,
   GraphManager,
+  admitSharedMemoryGraphCount,
+  type SharedMemoryGraphAdmission,
   loadSelectedSharedMemoryQuads,
   loadSharedMemoryQuadsForScope,
   loadSharedMemorySliceWithKaBoundFallback,
+  loadMerkleVerifiedSharedMemorySlice,
   canonicalSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeGraphs,
   resolveSharedMemoryScopeWriteGraph,
@@ -274,6 +282,7 @@ export {
   type LoadSelectedSharedMemoryQuadsOptions,
   type SharedMemoryResultBudget,
   SharedMemoryResultBudgetError,
+  SharedMemoryReadConsistencyError,
   type LoadSelectedVerifiableMemoryQuadsOptions,
   type NonEmptyGraphList,
   type NamedKnowledgeAssetGraphIdentity,
@@ -282,6 +291,7 @@ export {
   type SwmKaGraphBound,
   type SwmSliceSourceTags,
   type LoadSharedMemorySliceWithKaBoundFallbackOptions,
+  type LoadMerkleVerifiedSharedMemorySliceOptions,
 } from './graph-manager.js';
 export {
   PrivateContentStore,

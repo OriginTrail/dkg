@@ -144,7 +144,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, asReadSnapshotCapability, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type ReadSnapshotCapability, type ReadSnapshotStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -510,10 +510,19 @@ export function createListContextGraphsCacheInvalidatingStore(
     === 'function'
     ? innerStore as TripleStore & SortedGraphSetSource
     : null;
+  const readSnapshot = asReadSnapshotCapability(innerStore);
   const wrapper: TripleStore
     & Partial<SortedGraphSetSource>
+    & Partial<ReadSnapshotCapability>
     & { readonly innerStore: TripleStore } = {
     innerStore,
+    // This decorator only invalidates caches after mutations; its reads are
+    // unchanged. Preserve the inner snapshot facade so multi-query SWM reads
+    // stay pinned instead of falling back to one enormous VALUES query.
+    ...(readSnapshot ? {
+      withReadSnapshot: <T>(read: (snapshot: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal) =>
+        readSnapshot.withReadSnapshot(read, signal),
+    } : {}),
     get queryCancellation() {
       return innerStore.queryCancellation;
     },

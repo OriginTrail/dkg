@@ -16,6 +16,7 @@ import type {
   UpdateOptions,
 } from './triple-store.js';
 import { deleteByPatternWithoutCount } from './triple-store.js';
+import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
@@ -241,6 +242,9 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
+  readonly withReadSnapshot?: <T>(
+    read: (snapshot: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal,
+  ) => Promise<T>;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;
@@ -280,6 +284,21 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.now = options.now ?? (() => performance.now());
     this.onMutation = options.onMutation;
     this.onDiagnostic = (options as GraphSetIndexStoreInternalOptions).onDiagnostic;
+    const snapshot = asReadSnapshotCapability(inner);
+    if (snapshot) this.withReadSnapshot = <T>(
+      read: (readStore: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal,
+    ) => {
+      // Retain staging-graph visibility rules through the pinned facade.
+      const visible = (graphs: string[]) => graphs.filter((graph) =>
+        !isAtomicGraphReplaceStagingGraph(graph));
+      return snapshot.withReadSnapshot((innerRead) => read({
+        query: (sparql, queryOptions) => innerRead.query(sparql, queryOptions),
+        listGraphs: async (queryOptions) => visible(await innerRead.listGraphs(queryOptions)),
+        listGraphsByPrefix: async (prefix, queryOptions) => visible(innerRead.listGraphsByPrefix
+          ? await innerRead.listGraphsByPrefix(prefix, queryOptions)
+          : (await innerRead.listGraphs(queryOptions)).filter((graph) => graph.startsWith(prefix))),
+      }), signal);
+    };
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {

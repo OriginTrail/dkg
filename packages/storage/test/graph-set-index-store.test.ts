@@ -29,6 +29,7 @@ import {
   emptyBindings,
   q,
 } from './graph-set-index-store-harness.js';
+import { asReadSnapshotCapability } from '../src/read-snapshot-capability.js';
 
 class FailingMaintenanceStore extends CountingStore {
   failHasGraph = false;
@@ -295,6 +296,35 @@ describe('GraphSetIndexStore', () => {
       expect.arrayContaining(['did:dkg:context-graph:alpha', 'did:dkg:context-graph:beta']),
     );
     expect(counting.listGraphsCalls).toBe(1);
+  });
+
+  it('uses a snapshot read facade through a stale graph catalog', async () => {
+    const prefix = 'did:dkg:context-graph:snapshot/';
+    const ordinary = `${prefix}ordinary`;
+    const pinned = `${prefix}pinned`;
+    const inner = new OxigraphStore();
+    await inner.insert([q(ordinary)]);
+    const snapshotPrefix = vi.fn(async () => [pinned]);
+    Object.assign(inner, {
+      withReadSnapshot: async <T>(read: (snapshot: {
+        query: typeof inner.query;
+        listGraphs: typeof inner.listGraphs;
+        listGraphsByPrefix: typeof snapshotPrefix;
+      }) => Promise<T>): Promise<T> => read({
+        query: inner.query.bind(inner),
+        listGraphs: inner.listGraphs.bind(inner),
+        listGraphsByPrefix: snapshotPrefix,
+      }),
+    });
+    const store = new GraphSetIndexStore(inner, { revalidateMs: 100_000 });
+    await expect(store.listGraphsByPrefix(prefix)).resolves.toEqual([ordinary]);
+    const capability = asReadSnapshotCapability(store);
+    expect(capability).not.toBeNull();
+    await expect(capability!.withReadSnapshot((snapshot) =>
+      snapshot.listGraphsByPrefix!(prefix))).resolves.toEqual([pinned]);
+    expect(snapshotPrefix).toHaveBeenCalledWith(prefix, undefined);
+    await expect(store.listGraphsByPrefix(prefix)).resolves.toEqual([ordinary]);
+    await inner.close();
   });
 
   it('maintains one immutable code-point-sorted catalog across batched mutations', async () => {

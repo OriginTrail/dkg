@@ -24,12 +24,14 @@ import {
   sparqlString,
 } from '@origintrail-official/dkg-core';
 import {
+  admitSharedMemoryGraphCount,
   deleteByPatternWithoutCount,
   GraphManager,
-  loadSelectedSharedMemoryQuads,
-  loadSharedMemorySliceWithKaBoundFallback,
+  loadMerkleVerifiedSharedMemorySlice,
+  asReadSnapshotCapability,
   asGraphWriteRevisionSource,
   resolveGraphScopedOrLegacyMetadata,
+  resolveSharedMemoryReadGraphs,
   resolveSharedMemoryScopeGraphs,
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
@@ -77,6 +79,9 @@ const CHAIN_FINALIZED_RECONCILE_PEER_ID = 'chain-finalized-reconcile-v1';
 const SWM_SLICE_SOURCE = 'agent.finalization.sharedMemorySlice';
 const SWM_SLICE_SOURCE_BOUNDED = `${SWM_SLICE_SOURCE}.bounded`;
 const SWM_SLICE_SOURCE_WIDENED = `${SWM_SLICE_SOURCE}.fallbackUnbounded`;
+const SWM_SLICE_SOURCE_ROOT_INDEXED = `${SWM_SLICE_SOURCE}.rootIndexed`;
+const SWM_SLICE_SOURCE_CACHED_GRAPH_SET = `${SWM_SLICE_SOURCE}.cachedGraphSet`;
+const LEGACY_SWM_SCAN_SOURCE = 'agent.finalization.legacySnapshotScan';
 import { ethers } from 'ethers';
 import { createHash } from 'node:crypto';
 import { deriveSwmKaGraphBound } from './swm-ka-bound.js';
@@ -494,6 +499,7 @@ export class FinalizationHandler {
   >();
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
+  private lastLegacySwmDeferralWarningAt = 0;
   private readonly recoveryWorker: FinalizationRecoveryWorker;
   private readonly finalizationRecoveryEligibility: FinalizationRecoveryEligibility;
 
@@ -946,24 +952,26 @@ export class FinalizationHandler {
         return 'already-confirmed';
       }
 
-      // #1549: read this KA's per-author SWM under-graphs first, widening to today's
-      // unbounded read on empty-or-mismatch. All of the bound/widen policy — and the
+      // #1549: read this KA's per-author SWM under-graphs first, widening on
+      // mismatch when the complete family is within the graph budget. A huge
+      // unmatched family defers to payload sync without promoting partial data.
+      // All of the bound/widen policy — and the
       // reasoning for why it is safe — lives in storage's
-      // `loadSharedMemorySliceWithKaBoundFallback`, which owns the widen.
+      // `loadMerkleVerifiedSharedMemorySlice`, which owns the widen.
       const { quads: sharedMemoryQuads, matched: merkleMatchedQuads } = await this.loadFinalizationSwmSlice(
         contextGraphId,
         msg.rootEntities,
         subGraphName,
         swmKaBoundDisabled() ? undefined : deriveSwmKaGraphBound(startKAId, endKAId),
         msg.kcMerkleRoot,
-        async () => {
+        async (merkleRoot) => {
           const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities, subGraphName);
           const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, ctxGraphId);
           return (quads) => this.sharedMemoryQuadsMatchingMerkle(
             contextGraphId,
             quads,
             privateRoots,
-            msg.kcMerkleRoot,
+            merkleRoot,
             allowGeneratedCatalogFloor,
           );
         },
@@ -2904,11 +2912,11 @@ export class FinalizationHandler {
 
   /**
    * Read the finalization SWM slice, preferring this KA's per-author under-graphs
-   * and widening to the complete read on empty-or-mismatch (#1549). The widen — and
+   * and widening or deferring on empty-or-mismatch (#1549). That policy — and
    * the reasoning for why the bound is a safe pure accelerator (INV-1 is refuted
    * under root recurrence, so the bounded read may miss and must widen before the
    * caller records anything) — lives in storage's
-   * `loadSharedMemorySliceWithKaBoundFallback`. This method only resolves the bucket
+   * `loadMerkleVerifiedSharedMemorySlice`. This method only resolves the bucket
    * URI and the accept predicate; it is a thin finalization-specific adapter.
    *
    * #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
@@ -2922,7 +2930,7 @@ export class FinalizationHandler {
     subGraphName: string | undefined,
     kaGraphBound: SwmKaGraphBound | undefined,
     expectedMerkleRoot: Uint8Array,
-    createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+    createMerkleAccept: (expectedMerkleRoot: Uint8Array) => Promise<(quads: Quad[]) => Quad[] | null>,
   ): Promise<{ quads: Quad[]; matched: Quad[] | null }> {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return { quads: [], matched: null };
@@ -2941,7 +2949,7 @@ export class FinalizationHandler {
         : 'unknown',
     ].join('\u0000');
     return this.runScanSingleFlight(key, async () => {
-      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+      const result = await loadMerkleVerifiedSharedMemorySlice(
         this.store,
         this.finalizationSwmBucketUri(contextGraphId, subGraphName),
         { rootEntities: safeRoots },
@@ -2951,34 +2959,77 @@ export class FinalizationHandler {
             bounded: SWM_SLICE_SOURCE_BOUNDED,
             widened: SWM_SLICE_SOURCE_WIDENED,
             unbounded: SWM_SLICE_SOURCE,
+            rootIndexed: SWM_SLICE_SOURCE_ROOT_INDEXED,
+            cachedGraphSet: SWM_SLICE_SOURCE_CACHED_GRAPH_SET,
           },
-          createAccept,
+          expectedMerkleRoot,
+          createMerkleAccept,
           queryOptions: { priority: 'background' },
           resultBudget: finalizationSwmResultBudget(),
+          maxCompleteFamilyGraphs: positiveIntegerEnv('DKG_FINALIZATION_SWM_MAX_FALLBACK_GRAPHS', 512),
         },
       );
-      return { quads, matched: accepted };
+      switch (result.status) {
+        case 'verified': return { quads: result.quads, matched: result.accepted };
+        case 'complete-unmatched': return { quads: result.quads, matched: null };
+        case 'deferred': return { quads: [], matched: null };
+      }
     });
   }
 
-  /** Complete (unbounded) SWM read for the chain-reconcile backstop. */
+  /** Merkle-checked root-index candidate, followed by the complete chain backstop on mismatch. */
   private async getSharedMemoryQuadsForRoots(
     contextGraphId: string,
     rootEntities: string[],
+    expectedMerkleRoot: Uint8Array,
+    allowGeneratedCatalogFloor: boolean,
     subGraphName?: string,
-  ): Promise<Quad[]> {
+  ): Promise<
+    | { status: 'verified'; quads: Quad[]; matched: Quad[]; privateRoots: Uint8Array[] }
+    | { status: 'complete-unmatched'; quads: Quad[]; privateRoots: Uint8Array[] }
+    | { status: 'deferred' }
+  > {
     const safeRoots = rootEntities.filter(isSafeIri);
-    if (safeRoots.length === 0) return [];
-    return loadSelectedSharedMemoryQuads(
+    if (safeRoots.length === 0) return { status: 'complete-unmatched', quads: [], privateRoots: [] };
+    let privateRoots: Uint8Array[] | undefined;
+    const result = await loadMerkleVerifiedSharedMemorySlice(
       this.store,
       this.finalizationSwmBucketUri(contextGraphId, subGraphName),
       { rootEntities: safeRoots },
+      undefined,
       {
-        querySource: SWM_SLICE_SOURCE,
+        sources: {
+          bounded: `${LEGACY_SWM_SCAN_SOURCE}.bounded`,
+          widened: `${LEGACY_SWM_SCAN_SOURCE}.fallbackUnbounded`,
+          unbounded: LEGACY_SWM_SCAN_SOURCE,
+          rootIndexed: `${LEGACY_SWM_SCAN_SOURCE}.rootIndexed`,
+          cachedGraphSet: `${LEGACY_SWM_SCAN_SOURCE}.cachedGraphSet`,
+        },
+        expectedMerkleRoot,
+        createMerkleAccept: async (merkleRoot) => {
+          privateRoots ??= await this.getPrivateRootsFromMeta(contextGraphId, safeRoots, subGraphName);
+          return (candidate) => this.sharedMemoryQuadsMatchingMerkle(
+            contextGraphId, candidate, privateRoots!, merkleRoot, allowGeneratedCatalogFloor,
+          );
+        },
         queryOptions: { priority: 'background' },
         resultBudget: finalizationSwmResultBudget(),
+        maxCompleteFamilyGraphs: asReadSnapshotCapability(this.store)
+          ? positiveIntegerEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', 512)
+          : undefined,
       },
     );
+    // Incomplete candidates remain inside storage and cannot reach promotion.
+    switch (result.status) {
+      case 'verified': return {
+        status: 'verified', quads: result.quads, matched: result.accepted,
+        privateRoots: privateRoots ?? [],
+      };
+      case 'complete-unmatched': return {
+        status: 'complete-unmatched', quads: result.quads, privateRoots: privateRoots ?? [],
+      };
+      case 'deferred': return { status: 'deferred' };
+    }
   }
 
   private runScanSingleFlight<T>(key: string, work: () => Promise<T>): Promise<T> {
@@ -3535,7 +3586,7 @@ export class FinalizationHandler {
     if (!snapshot) {
       this.log.info(
         ctx,
-        `Chain-reconcile: no local SWM snapshot matches the published merkleRoot for ${ual}; deferring to sweep retry`,
+        `Chain-reconcile: no verified local SWM snapshot available for ${ual}; deferring to peer recovery or sweep retry`,
       );
       return 'no-swm';
     }
@@ -3791,10 +3842,9 @@ export class FinalizationHandler {
    * and return the first operation whose computed root equals the chain root.
    * A match is an authoritative merkle verification.
    *
-   * Returns `null` when no local operation matches — either the snapshot hasn't
-   * been synced yet (the caller's active-fetch missed / is in flight) or this
-   * KA belongs to a publish this node never shared. Either way the B.2 sweep
-   * retries later.
+   * Returns `null` when no local operation matches or a large legacy family
+   * exceeds the bounded scan limit. The caller can fetch from peers and the
+   * B.2 sweep retries later; no unverified candidate is promoted.
    *
    * Cost note (#1609): the recompute is memoized (`SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE`
    * + content digest). A *present* KA is resolved by its stamped root directly (fast
@@ -3812,7 +3862,7 @@ export class FinalizationHandler {
    * exactly the beacon shape) still paid O(#ops) unbounded SWM CONSTRUCTs on EVERY
    * sweep tick, forever, stalling the event loop and dropping storage-ACK streams
    * on big stores. This wrapper adds a write-generation-gated NEGATIVE memo over
-   * the whole scan (floor retry included): a "no match" verdict is replayed
+   * the whole scan (floor retry included): a "no verified local snapshot" verdict is replayed
    * without touching the store while (a) the adapter's write generation for the
    * CG's graph prefix is unchanged — new SWM only arrives via local writes
    * (gossip receive, publish share, active fetch), all of which pass the adapter
@@ -3885,7 +3935,7 @@ export class FinalizationHandler {
     return null;
   }
 
-  /** The authoritative full scan behind {@link findSwmSnapshotForMerkleRoot}. */
+  /** The authoritative scan behind {@link findSwmSnapshotForMerkleRoot}, bounded on large snapshot-capable stores. */
   private async scanForSwmSnapshot(
     contextGraphId: string,
     merkleRoot: Uint8Array,
@@ -3969,6 +4019,14 @@ export class FinalizationHandler {
     // reuse the memoized root only when the op's current content still hashes to the
     // same cheap digest; any content change flips the digest → full recompute → the
     // op is re-evaluated and re-stamped. No op can be stranded by a stale stamp.
+    // On snapshot-capable stores, bound this *legacy fallback* before reading
+    // every metadata row. An over-limit result is deferred whole: never scan a
+    // truncated operation set or promote from it. The stamped fast path above
+    // has already had its chance to verify an exact candidate.
+    const boundedLegacyScan = asReadSnapshotCapability(this.store) !== null;
+    const maxCandidateRows = boundedLegacyScan
+      ? Math.min(positiveIntegerEnv('DKG_LEGACY_SWM_MAX_FALLBACK_OP_ROWS', 512), Number.MAX_SAFE_INTEGER - 1)
+      : undefined;
     type OpMemo = { roots: string[]; memoRoot?: string; memoDigest?: string };
     const opsBySubject = new Map<string, OpMemo>();
     try {
@@ -3982,10 +4040,18 @@ export class FinalizationHandler {
             ?op <${DKG_NS}rootEntity> ?root .
             ${memoPatterns}
           }
-        }`,
+        }${maxCandidateRows === undefined ? '' : ` LIMIT ${maxCandidateRows + 1}`}`,
         { source: 'agent.finalization.swmSnapshotCandidates' },
       );
       if (result.type === 'bindings') {
+        if (maxCandidateRows !== undefined && result.bindings.length > maxCandidateRows) {
+          const now = Date.now();
+          if (now - this.lastLegacySwmDeferralWarningAt >= 60_000) {
+            this.lastLegacySwmDeferralWarningAt = now;
+            console.warn(`[swm-read] deferring legacy operation scan with >${maxCandidateRows} metadata rows to peer recovery`);
+          }
+          return null;
+        }
         for (const row of result.bindings) {
           const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
           const root = typeof row['root'] === 'string' ? row['root'].replace(/^<(.*)>$/, '$1') : '';
@@ -4005,6 +4071,29 @@ export class FinalizationHandler {
 
     if (opsBySubject.size === 0) return null;
 
+    // The historical operation scan has no exact KA→operation index. On large
+    // families, reading the complete family for every candidate can monopolize
+    // the background store slot for minutes. Leave that recovery pending for
+    // peer fetch instead; matching stamped operations were tried above. The
+    // operator can raise this bound for an isolated recovery run.
+    if (boundedLegacyScan) {
+      const graphLimit = positiveIntegerEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', 512);
+      const familyGraphs = await resolveSharedMemoryReadGraphs(
+        this.store,
+        this.finalizationSwmBucketUri(contextGraphId, subGraphName),
+        { priority: 'background', source: `${LEGACY_SWM_SCAN_SOURCE}.preflight` },
+      );
+      const admission = admitSharedMemoryGraphCount(familyGraphs.length, graphLimit);
+      if (admission.status === 'deferred') {
+        const now = Date.now();
+        if (now - this.lastLegacySwmDeferralWarningAt >= 60_000) {
+          this.lastLegacySwmDeferralWarningAt = now;
+          console.warn(`[swm-read] deferring legacy operation scan with ${admission.graphCount} graphs (limit=${admission.limit}) to peer recovery`);
+        }
+        return null;
+      }
+    }
+
     const opsSorted = [...opsBySubject.entries()].sort(
       ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
     );
@@ -4016,9 +4105,14 @@ export class FinalizationHandler {
     let hit: { rootEntities: string[]; sharedMemoryQuads: Quad[] } | null = null;
     for (const [op, memo] of opsSorted) {
       const roots = memo.roots;
-      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
+      const swmResult = await this.getSharedMemoryQuadsForRoots(
+          contextGraphId, roots, merkleRoot, allowGeneratedCatalogFloor, subGraphName,
+        );
+      if (swmResult.status === 'deferred') return null;
+      const sharedMemoryQuads = swmResult.quads;
+      const privateRoots = swmResult.privateRoots;
+      const merkleMatchedQuads = swmResult.status === 'verified' ? swmResult.matched : null;
       if (sharedMemoryQuads.length === 0) continue;
-      const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
       if (useStampIndex) {
         const digest = this.swmContentDigest(sharedMemoryQuads, privateRoots);
         let computedHex: string;
@@ -4037,13 +4131,6 @@ export class FinalizationHandler {
           break;
         }
       } else {
-        const merkleMatchedQuads = this.sharedMemoryQuadsMatchingMerkle(
-          contextGraphId,
-          sharedMemoryQuads,
-          privateRoots,
-          merkleRoot,
-          allowGeneratedCatalogFloor,
-        );
         if (merkleMatchedQuads) {
           return { rootEntities: roots, sharedMemoryQuads: merkleMatchedQuads };
         }
@@ -4139,11 +4226,17 @@ export class FinalizationHandler {
       }
     } catch { return null; }
 
-    for (const [op, roots] of rootsByOp) {
-      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
+    for (const [op, roots] of [...rootsByOp].sort(([a], [b]) => a.localeCompare(b))) {
+      const swmResult = await this.getSharedMemoryQuadsForRoots(
+        contextGraphId, roots, merkleRoot, false, subGraphName,
+      );
+      // This stamp is still plausible: the graph cap prevented verification.
+      // Another stamped operation may have a smaller, verifiable slice.
+      if (swmResult.status === 'deferred') continue;
+      const sharedMemoryQuads = swmResult.quads;
+      const merkleMatchedQuads = swmResult.status === 'verified' ? swmResult.matched : null;
       if (sharedMemoryQuads.length > 0) {
-        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
-        if (this.verifyMerkleMatch(sharedMemoryQuads, privateRoots, merkleRoot)) {
+        if (merkleMatchedQuads) {
           return { rootEntities: roots, sharedMemoryQuads };
         }
       }

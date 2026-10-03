@@ -13,6 +13,7 @@ import type {
   TripleStoreDecorator,
 } from './triple-store.js';
 import { deleteByPatternWithoutCount } from './triple-store.js';
+import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
@@ -55,6 +56,9 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   readonly innerStore: TripleStore;
+  readonly withReadSnapshot?: <T>(
+    read: (snapshot: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal,
+  ) => Promise<T>;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -74,6 +78,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
     });
+    const snapshot = asReadSnapshotCapability(inner);
+    if (snapshot) this.withReadSnapshot = <T>(
+      read: (readStore: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal,
+    ) => snapshot.withReadSnapshot((innerRead) => read({
+      query: (sparql, queryOptions) => this.queryFrom(innerRead, sparql, queryOptions),
+      listGraphs: (queryOptions) => innerRead.listGraphs(queryOptions),
+      listGraphsByPrefix: (prefix, queryOptions) => innerRead.listGraphsByPrefix
+        ? innerRead.listGraphsByPrefix(prefix, queryOptions)
+        : innerRead.listGraphs(queryOptions).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix))),
+    }), signal);
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -215,15 +229,23 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    return this.queryFrom(this.inner, sparql, options);
+  }
+
+  private async queryFrom(
+    readStore: Pick<TripleStore, 'query'>,
+    sparql: string,
+    options?: QueryOptions,
+  ): Promise<QueryResult> {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
-      const result = await this.inner.query(sparql, options);
+      const result = await readStore.query(sparql, options);
       return this.hydrateQueryResult(result);
     }
 
     const [original, placeholder] = await Promise.all([
-      this.inner.query(sparql, options),
-      this.inner.query(rewritten, options),
+      readStore.query(sparql, options),
+      readStore.query(rewritten, options),
     ]);
     return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
   }

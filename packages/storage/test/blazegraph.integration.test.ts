@@ -21,8 +21,18 @@
  * BLAZEGRAPH_TEST_URL example:
  *   http://127.0.0.1:9999/bigdata/namespace/kb/sparql
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import {
+  loadSelectedSharedMemoryQuads,
+  loadSharedMemorySliceWithKaBoundFallback,
+} from '../src/graph-manager.js';
+import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
+import { ChangelogStore } from '../src/changelog-store.js';
+import { SharedMemoryLiteralBlobStore, EXTERNAL_LITERAL_REF_DATATYPE } from '../src/shared-memory-literal-blob-store.js';
 import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
 import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
 import type {
@@ -37,6 +47,7 @@ import {
   projectCanonicalGraphScopedAuthorSealRowsV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
+  contextGraphSharedMemoryUri,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphIdV1,
@@ -84,6 +95,207 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
   afterAll(async () => {
     if (store) await store.dropGraph(GRAPH).catch(() => {});
   });
+
+  it('reads complete SWM graph families in bounded queries with a recurring root', async () => {
+    const swm = contextGraphSharedMemoryUri(`swm-chunks-${RUN}`);
+    const root = `urn:swm-chunks:${RUN}:root`;
+    const child = `${root}/.well-known/genid/child`;
+    const quads: Quad[] = Array.from({ length: 130 }, (_, i) => ({
+      subject: `urn:swm-chunks:${RUN}:decoy:${i}`,
+      predicate: PRED,
+      object: '"decoy"',
+      graph: `${swm}/0xabcdef0123456789abcdef0123456789abcdef01/${String(i + 1).padStart(3, '0')}`,
+    }));
+    quads.push(
+      { subject: root, predicate: PRED, object: '"same"', graph: quads[0]!.graph },
+      { subject: root, predicate: PRED, object: '"same"', graph: quads[129]!.graph },
+      { subject: child, predicate: PRED, object: '"child"', graph: quads[129]!.graph },
+    );
+    try {
+      await store.insert(quads);
+      const originalFetch = globalThis.fetch;
+      const requests = vi.spyOn(globalThis, 'fetch');
+      const pinnedGraphs = await store.withReadSnapshot((snapshot) =>
+        snapshot.listGraphsByPrefix!(swm));
+      expect(pinnedGraphs.sort()).toEqual(quads.slice(0, 130).map((quad) => quad.graph).sort());
+      expect(requests.mock.calls.some(([input, init]) =>
+        String(input).includes('?timestamp=')
+        && String(init?.body) === 'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      )).toBe(true);
+      const selected = await loadSelectedSharedMemoryQuads(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { resultBudget: { pageRows: 1, maxRows: 2, maxBytesEstimate: 1024 * 1024 } },
+      );
+      expect(selected.map((q) => [q.subject, q.predicate, q.object].join('|')).sort()).toEqual([
+        `${child}|${PRED}|"child"`,
+        `${root}|${PRED}|"same"`,
+      ].sort());
+      const unpaged = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] });
+      expect(unpaged.map((q) => [q.subject, q.predicate, q.object].join('|')).sort())
+        .toEqual(selected.map((q) => [q.subject, q.predicate, q.object].join('|')).sort());
+      const chunkRequests = requests.mock.calls.filter(([, init]) => String(init?.body).includes('VALUES ?g'));
+      expect(chunkRequests.some(([, init]) => String(init?.body).includes(`<${quads[0]!.graph}>`)
+        && !String(init?.body).includes(`<${quads[129]!.graph}>`))).toBe(true);
+      expect(chunkRequests.some(([, init]) => String(init?.body).includes(`<${quads[129]!.graph}>`)
+        && !String(init?.body).includes(`<${quads[0]!.graph}>`))).toBe(true);
+      expect(chunkRequests.every(([input]) => String(input).includes('?timestamp='))).toBe(true);
+
+      // A write between serial SELECT chunks must not leak into the pinned
+      // read. A fresh transaction immediately afterwards must see it.
+      const added: Quad = {
+        subject: root, predicate: `${PRED}:later`, object: '"later"', graph: quads[129]!.graph,
+      };
+      let inserted = false;
+      requests.mockImplementation(async (input, init) => {
+        const result = await originalFetch(input, init);
+        if (!inserted && String(init?.body).includes('VALUES ?g')
+          && String(init?.body).includes(`<${quads[0]!.graph}>`)) {
+          inserted = true;
+          await store.insert([added]);
+          quads.push(added);
+        }
+        return result;
+      });
+      const pinned = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(inserted).toBe(true);
+      expect(pinned.some((quad) => quad.predicate === added.predicate)).toBe(false);
+      requests.mockRestore();
+      const fresh = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(fresh.some((quad) => quad.predicate === added.predicate)).toBe(true);
+      const indexed = new GraphSetIndexStore(store, { revalidateMs: 60_000 });
+      const throughCatalog = await loadSelectedSharedMemoryQuads(indexed, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(throughCatalog.map((quad) => [quad.subject, quad.predicate, quad.object].join('|')).sort())
+        .toEqual(fresh.map((quad) => [quad.subject, quad.predicate, quad.object].join('|')).sort());
+
+      // Remove a graph right after the read transaction starts. The graph is in
+      // the set sampled for this read and every chunk is pinned, so its triples
+      // must still be returned.
+      let removedGraph = false;
+      const membershipRequests = vi.spyOn(globalThis, 'fetch');
+      membershipRequests.mockImplementation(async (input, init) => {
+        const result = await originalFetch(input, init);
+        if (!removedGraph && String(input).endsWith('/tx?timestamp=-1')) {
+          removedGraph = true;
+          await store.dropGraph(quads[129]!.graph);
+        }
+        return result;
+      });
+      const retained = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(removedGraph).toBe(true);
+      expect(retained.some((quad) => quad.subject === child)).toBe(true);
+      membershipRequests.mockRestore();
+    } finally {
+      vi.restoreAllMocks();
+      await store.delete(quads).catch(() => {});
+    }
+  }, 60_000);
+
+  it('hydrates large literals through decorated pinned multi-chunk reads', async () => {
+    const swm = contextGraphSharedMemoryUri(`swm-decorated-${RUN}`);
+    const root = `urn:swm-decorated:${RUN}:root`;
+    const decoys: Quad[] = Array.from({ length: 130 }, (_, i) => ({
+      subject: `urn:swm-decorated:${RUN}:decoy:${i}`,
+      predicate: PRED,
+      object: '"decoy"',
+      graph: `${swm}/0xabcdef0123456789abcdef0123456789abcdef01/${String(i + 1).padStart(3, '0')}`,
+    }));
+    const large: Quad = {
+      subject: root,
+      predicate: PRED,
+      object: `"${'hydrated-literal-'.repeat(12)}"`,
+      graph: decoys[129]!.graph,
+    };
+    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-pinned-blob-'));
+    const blob = new SharedMemoryLiteralBlobStore(store, { blobDir, thresholdBytes: 16 });
+    try {
+      await store.insert(decoys);
+      await blob.insert([large]);
+      const raw = await store.query(`CONSTRUCT { <${root}> <${PRED}> ?o } WHERE {
+        GRAPH <${large.graph}> { <${root}> <${PRED}> ?o }
+      }`);
+      expect(raw.type).toBe('quads');
+      if (raw.type === 'quads') expect(raw.quads[0]?.object).toContain(EXTERNAL_LITERAL_REF_DATATYPE);
+
+      const decorated = new ChangelogStore(
+        new GraphSetIndexStore(blob, { revalidateMs: 60_000 }),
+      );
+      for (const options of [
+        undefined,
+        { resultBudget: { pageRows: 1, maxRows: 1, maxBytesEstimate: 1024 * 1024 } },
+      ]) {
+        const selected = await loadSelectedSharedMemoryQuads(
+          decorated, swm, { rootEntities: [root] }, options,
+        );
+        expect(selected).toMatchObject([{
+          subject: root, predicate: PRED, object: large.object,
+        }]);
+      }
+    } finally {
+      await blob.delete([large]).catch(() => {});
+      await store.delete(decoys).catch(() => {});
+      await rm(blobDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('serves a plain complete-family read from the graph catalog in one request', async () => {
+    const swm = contextGraphSharedMemoryUri(`swm-catalog-${RUN}`);
+    const root = `urn:swm-catalog:${RUN}:root`;
+    const author = '0xabcdef0123456789abcdef0123456789abcdef01';
+    const listed: Quad[] = [
+      { subject: root, predicate: PRED, object: '"listed"', graph: `${swm}/${author}/1` },
+      { subject: `urn:swm-catalog:${RUN}:other`, predicate: PRED, object: '"other"', graph: `${swm}/${author}/2` },
+    ];
+    // Written past the catalog, as another process on a shared store would.
+    const unlisted: Quad = {
+      subject: root, predicate: PRED, object: '"unlisted"', graph: `${swm}/${author}/3`,
+    };
+    const inventory = 'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }';
+    const indexed = new GraphSetIndexStore(store, { revalidateMs: 60_000 });
+    try {
+      await indexed.insert(listed);
+      await indexed.listGraphsByPrefix(`${swm}/`);
+      const requests = vi.spyOn(globalThis, 'fetch');
+
+      // The StorageACK recompute shape: one materialization query, with no
+      // read transaction and no listing of every named graph in the store.
+      const plain = await loadSelectedSharedMemoryQuads(indexed, swm, { rootEntities: [root] });
+      expect(plain.map((quad) => quad.object)).toEqual(['"listed"']);
+      expect(requests.mock.calls).toHaveLength(1);
+      const [input, init] = requests.mock.calls[0]!;
+      expect(String(input)).not.toContain('timestamp=');
+      expect(String(init?.body)).toContain('VALUES ?g');
+
+      await store.insert([unlisted]);
+      requests.mockClear();
+      // The complete read behind the candidate protocol returns a final
+      // verdict, so it lists the family inside its snapshot and finds a graph
+      // the catalog has not learned about.
+      const verdict = await loadSharedMemorySliceWithKaBoundFallback(
+        indexed, swm, { rootEntities: [root] }, undefined,
+        {
+          sources: { bounded: 'test.bounded', widened: 'test.widened', unbounded: 'test.unbounded' },
+          createAccept: async () => (quads) => quads,
+        },
+      );
+      expect(verdict.quads.map((quad) => quad.object).sort()).toEqual(['"listed"', '"unlisted"']);
+      expect(requests.mock.calls.some(([url]) => String(url).endsWith('/tx?timestamp=-1'))).toBe(true);
+      expect(requests.mock.calls.some(([url, request]) =>
+        String(url).includes('?timestamp=') && String(request?.body) === inventory)).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+      await store.delete([...listed, unlisted]).catch(() => {});
+    }
+  }, 60_000);
 
   it('runs live requests under the configured deadline and recovers after pre-dispatch cancellation', async () => {
     const deadlineStore = new BlazegraphStore(BLAZEGRAPH_URL as string, { timeout: 5_000 });

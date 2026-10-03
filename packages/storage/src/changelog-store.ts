@@ -5,6 +5,7 @@ import {
 } from './graph-set-index-store.js';
 import { SortedGraphCatalogProjection } from './sorted-graph-catalog-projection.js';
 import { deleteByPatternWithoutCount, findTripleStoreCapability } from './triple-store.js';
+import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import type {
   Quad,
   QueryOptions,
@@ -233,6 +234,9 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
+  readonly withReadSnapshot?: <T>(
+    read: (snapshot: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal,
+  ) => Promise<T>;
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
@@ -268,6 +272,19 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     );
     this.onAppend = options.onAppend;
     this.eraGuard = options.eraGuard;
+    const snapshot = asReadSnapshotCapability(inner);
+    if (snapshot) this.withReadSnapshot = <T>(
+      read: (readStore: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal,
+    ) => {
+      const visible = (graphs: string[]) => graphs.filter((graph) => !this.isReservedGraph(graph));
+      return snapshot.withReadSnapshot((innerRead) => read({
+        query: (sparql, queryOptions) => innerRead.query(sparql, queryOptions),
+        listGraphs: async (queryOptions) => visible(await innerRead.listGraphs(queryOptions)),
+        listGraphsByPrefix: async (prefix, queryOptions) => visible(innerRead.listGraphsByPrefix
+          ? await innerRead.listGraphsByPrefix(prefix, queryOptions)
+          : (await innerRead.listGraphs(queryOptions)).filter((graph) => graph.startsWith(prefix))),
+      }), signal);
+    };
   }
 
   // ------------------------------------------------------------------
