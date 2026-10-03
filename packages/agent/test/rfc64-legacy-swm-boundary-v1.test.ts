@@ -9,6 +9,9 @@ import {
   contextGraphSharedMemoryMetaUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
@@ -24,6 +27,7 @@ import {
   prepareRfc64LateLegacySwmBoundaryV1,
   markRfc64LegacySwmRepublishedV1,
   readRfc64LegacySwmBoundaryCountV1,
+  retireRfc64LegacySwmAfterFinalizedVmV1,
   resolveRfc64LegacySwmColdBootstrapOmissionsV1,
 } from '../src/rfc64/legacy-swm-boundary-v1.js';
 import { legacySwmBoundaryFixtureQuadsV1 } from
@@ -63,6 +67,51 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       recursive: true,
       force: true,
     })));
+  });
+
+  it('retires a finalized VM twin marker only after its physical SWM root and head are gone', async () => {
+    const root = await secureTempRoot(roots);
+    const store = new OxigraphStore();
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+    const prepared = prepareRfc64LateLegacySwmBoundaryV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, 'vm-twin-one', '1',
+    );
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL_ONE, '1'),
+    );
+    const swmQuad = {
+      graph: swmGraph, subject: 'urn:test:vm-twin',
+      predicate: 'urn:test:content', object: '"verified"',
+    };
+    const headQuad = {
+      graph: contextGraphSharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+      subject: `${UAL_ONE}#dkg-swm-head`,
+      predicate: 'urn:test:version', object: '"1"',
+    };
+    await store.insert([...prepared.quads, swmQuad, headQuad]);
+    prepared.settle(true);
+
+    expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
+    )).toBe(false);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+
+    await store.delete([swmQuad]);
+    expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
+    )).toBe(false);
+    await store.delete([headQuad]);
+    expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
+    )).toBe(true);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
+
+    const restartedOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(restartedOwner, root, store);
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
   });
 
   it('captures once, remains private by count, and retires only after explicit republish', async () => {

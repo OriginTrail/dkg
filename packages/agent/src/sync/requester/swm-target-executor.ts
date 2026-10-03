@@ -78,6 +78,12 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
+  readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
+    contextGraphId: string;
+    kaUal: string;
+    assertionVersion: string;
+    subGraphName?: string;
+  }>) => Promise<void>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -290,6 +296,14 @@ export class SwmTargetExecutorV1 {
           descriptor,
           retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
         });
+        if (retirement === 'retired' || retirement === 'already-retired-finalized') {
+          await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
+            contextGraphId,
+            kaUal: descriptor.kaUal,
+            assertionVersion: descriptor.assertionVersion,
+            subGraphName: descriptor.subGraphName,
+          });
+        }
         if (retirement === 'retired') {
           this.#ports.invalidateListContextGraphsCache();
           this.#ports.logInfo(

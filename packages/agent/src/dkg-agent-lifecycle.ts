@@ -852,6 +852,7 @@ import { reconcileRfc64CatalogAuthorityPlanV1 } from
 import {
   initializeRfc64LegacySwmBoundaryV1,
   prepareRfc64LateLegacySwmBoundaryV1,
+  retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
 
@@ -2058,6 +2059,24 @@ type StructuralCuratorPeerLookup =
     };
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  async retireLegacySwmAfterVerifiedVmTwin(
+    this: DKGAgent,
+    input: Readonly<{
+      contextGraphId: string;
+      kaUal: string;
+      assertionVersion: string | bigint;
+      subGraphName?: string;
+    }>,
+  ): Promise<void> {
+    await retireRfc64LegacySwmAfterFinalizedVmV1(
+      this,
+      input.contextGraphId,
+      input.kaUal,
+      String(input.assertionVersion),
+      input.subGraphName,
+    );
+  }
+
   async retireFinalizedSwmTwinCandidate(
     candidate: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
@@ -6469,6 +6488,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
               });
               if (retirement === 'retired') {
+                await this.retireLegacySwmAfterVerifiedVmTwin({
+                  contextGraphId: asset.contextGraphId,
+                  kaUal: asset.ual,
+                  assertionVersion: asset.assertionVersion,
+                });
                 this.invalidateListContextGraphsCache();
                 this.log.info(
                   ctx,
