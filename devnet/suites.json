@@ -37,6 +37,7 @@
     "snapshot-finalized-cleanup",
     "storage-ack-store-outage",
     "subscription-persist-restart",
+    "transport-error-fail-fast",
     "v10-core-flows",
     "v10-end-to-end",
     "v10-rs-prune",

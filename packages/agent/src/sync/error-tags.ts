@@ -1,6 +1,6 @@
 import {
   isOversizedRdfLiteralError,
-  isRecoverableSendError,
+  isRetryableLaterSendError,
 } from '@origintrail-official/dkg-core';
 import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
@@ -127,8 +127,10 @@ function syncErrorMessage(error: unknown): string {
  * A retryable interruption of the DKG peer transport itself.
  *
  * The explicit tag is authoritative. Untagged errors delegate to Core's
- * canonical recoverable-send classifier so Messenger, ProtocolRouter and sync
- * cannot drift onto separate libp2p/router message lists. Negative evidence
+ * canonical send-error classifier (`isRetryableLaterSendError`: the router's
+ * recoverable errors plus a peer that refuses the protocol, which may still be
+ * booting) so Messenger, ProtocolRouter and sync cannot drift onto separate
+ * libp2p/router message lists. Negative evidence
  * wins: a response-side rejection, chain RPC/local request construction
  * failure, or caller abort must never be reclassified by message.
  */
@@ -149,7 +151,7 @@ export function isKnownRetryableSyncTransportInterruption(error: unknown): boole
   // used for caller cancellation and transport deadlines.
   if (error instanceof Error && error.name === 'AbortError') return false;
 
-  return isRecoverableSendError(error);
+  return isRetryableLaterSendError(error);
 }
 
 /**
@@ -189,7 +191,7 @@ export function isSyncBackoffWorthyError(error: unknown): boolean {
   if (
     isSyncTransportFailure(error)
     || isChainRpcTransportError(error)
-    || isRecoverableSendError(error)
+    || isRetryableLaterSendError(error)
   ) return true;
 
   const message = syncErrorMessage(error);

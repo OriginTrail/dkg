@@ -1533,12 +1533,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       // `/dkg/10.0.1/swm-update` protocol — sendReliable to
       // them errors with `"Protocol selection failed - could
       // not negotiate /dkg/10.0.1/swm-update"`, which
-      // `isRecoverableSendError` matches via the
-      // `"could not negotiate"` substring and queues for
-      // perpetual retry. (The classifier rule itself is
-      // correct for transient connection-warmup negotiation
-      // failures; pre-filtering at enumeration is the
-      // surgical fix.)
+      // the Messenger's retry classifier
+      // (`isRetryableLaterSendError`) accepts as an
+      // unsupported-protocol refusal and queues for
+      // perpetual retry. (Queuing is correct for transient
+      // connection-warmup negotiation failures; pre-filtering
+      // at enumeration is the surgical fix.)
       //
       // Surfaced by the PR-K verification soak (2026-05-18,
       // post-restart with PR-K tier 1 only): all 4 queued
