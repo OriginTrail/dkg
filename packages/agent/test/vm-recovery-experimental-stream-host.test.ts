@@ -287,12 +287,13 @@ describe('experimental public Core streaming recovery host', () => {
 
 /**
  * Stream-capable Cores among peers that only speak the ordinary wire. A stream
- * answer is scripted per Core, `complete` when its script is empty; the other
- * peers never hold the asset, and each of their probes takes `legacyProbeMs`
- * of the recovery clock, which nothing else moves.
+ * answer is scripted per Core, `complete` when its script is empty. Of the
+ * other peers only `legacyHolders` hold the assets, and each of their probes
+ * takes `legacyProbeMs` of the recovery clock, which nothing else moves.
  */
 async function streamHolderHarness(options: {
   legacyPeers?: readonly string[];
+  legacyHolders?: readonly string[];
   streamPeers?: readonly string[];
   legacyProbeMs?: number;
   targetCount?: number;
@@ -311,9 +312,13 @@ async function streamHolderHarness(options: {
       kaId: String(ordinal), merkleRoot: `root-${ordinal}`, reason: 'no-swm' as const,
       ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}` }),
     onFetch: (peer, targets, recovered) => {
-      if (!streamPeers.includes(peer)) { clock.now += clock.legacyProbeMs; return 'clean-absent'; }
-      lastAnswer = alwaysBusy.has(peer) ? 'responder-busy' : answers.get(peer)!.shift() ?? 'complete';
-      if (lastAnswer !== 'complete') return 'incomplete';
+      if (!streamPeers.includes(peer)) {
+        clock.now += clock.legacyProbeMs;
+        if (!options.legacyHolders?.includes(peer)) return 'clean-absent';
+      } else {
+        lastAnswer = alwaysBusy.has(peer) ? 'responder-busy' : answers.get(peer)!.shift() ?? 'complete';
+        if (lastAnswer !== 'complete') return 'incomplete';
+      }
       for (const target of targets) recovered.add(target.ordinal);
       return 'found';
     },
@@ -369,8 +374,11 @@ describe('a stream Core whose attempt ended without a verdict on its data', () =
       [core, 1, 'stream-preferred'],
       [core, 10, 'stream-required'],
     ]);
-    // The asset of the refused probe kept its turn at the Core; the other peer's answer is recorded as usual.
+    // The asset of the refused probe kept its turn at the Core, with the setback noted on it;
+    // the other peer's answer is recorded as usual.
     expect([...h.record(0)!.attemptedPeerIds]).toEqual([]);
+    expect([...h.record(0)!.streamSetbackPeerIds!]).toEqual([core]);
+    expect(h.record(1)!.streamSetbackPeerIds).toBeUndefined();
     expect([...h.record(1)!.attemptedPeerIds]).toEqual([older]);
     expect([...h.record(1)!.cleanAbsentPeerIds]).toEqual([older]);
     expect(h.setbackLines()).toEqual([
@@ -411,6 +419,21 @@ describe('a stream Core whose attempt ended without a verdict on its data', () =
     // Its turn at the Core is still open: the cycle did not complete, so it is not backing off.
     expect(h.record(0)).toMatchObject({ phase: 'collecting' });
     expect(h.record(0)!.attemptedPeerIds.has(core)).toBe(false);
+  });
+
+  it('reaches a peer without the stream that holds the asset while two stream Cores stay busy', async () => {
+    const otherCore = '12D3KooWYYStreamCore';
+    const h = await streamHolderHarness({
+      legacyPeers: [older], legacyHolders: [older], streamPeers: [otherCore, core], targetCount: 1 });
+    h.alwaysBusy.add(otherCore); h.alwaysBusy.add(core);
+    for (let pass = 0; pass < 6 && h.recovered.size === 0; pass += 1) {
+      await h.runPending();
+      // Every pass starts with no Core held off, so only the order decides whom the asset asks.
+      h.clock.now += holdOffMs;
+    }
+    // Each busy Core once, then the holder: the two Cores must not take turns keeping it out.
+    expect(h.askedFor(0)).toEqual([otherCore, core, older]);
+    expect(h.recovered.has(0)).toBe(true);
   });
 
   it('goes to another stream Core that has served instead of back to the busy one', async () => {
@@ -476,6 +499,8 @@ describe('a stream Core whose attempt ended without a verdict on its data', () =
     expect(peersOf(await h.runPending())).toEqual([core]);
     expect(h.record(last)!.attemptedPeerIds.has(core)).toBe(true);
     expect(h.record(last)).toMatchObject({ phase: 'backoff', backoffKind: 'incomplete-cycle' });
+    // The attempt that spent the turn replaces the earlier setback note.
+    expect([...h.record(last)!.streamSetbackPeerIds!]).toEqual([]);
     expect(h.askedFor(last)).toEqual([core, older, core, olderB, core]);
     expect(h.setbackLines().map(line => /keepsTurn=(\d)/.exec(line)![1]))
       .toEqual([...Array.from({ length: maxInterruptedInStreak }, () => '1'), '0']);

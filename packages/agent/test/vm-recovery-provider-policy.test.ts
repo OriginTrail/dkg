@@ -134,29 +134,41 @@ describe('VM recovery provider policy — adversarial transitions', () => {
     expect(() => policy.releaseAttempt(attempt)).toThrow(/not active/);
   });
 
-  it('keeps a reserved peer inside the considered-peer cap while the others are tried', () => {
-    const waiting = '12D3KooWReservedWaiting';
+  it('passes over a deferred peer and keeps it a place inside the considered-peer cap', () => {
+    const waiting = '12D3KooWDeferredWaiting';
     const others = ['12D3KooWOtherA', '12D3KooWOtherB', '12D3KooWOtherC'];
     const policy = new VmRecoveryProviderPolicy();
+    const deferred = new Set([waiting]);
 
-    policy.reserve(waiting, 3);
-    // Two more peers fit beside the reserved one; the third does not.
+    // First in the order, yet not selected while deferred. Two more peers fit beside it; the third does not.
     for (const peerId of others.slice(0, 2)) {
-      expect(policy.selectNextCandidate(others, 3)).toBe(peerId);
+      expect(policy.selectNextCandidate([waiting, ...others], 3, deferred)).toBe(peerId);
       policy.markUnavailable(peerId);
     }
-    expect(policy.selectNextCandidate(others, 3)).toBeUndefined();
-    // The reserved peer is still attemptable once it is offered.
+    expect(policy.selectNextCandidate([waiting, ...others], 3, deferred)).toBeUndefined();
+    // No longer deferred: it is attemptable, in the place that was kept for it.
     expect(policy.selectNextCandidate([waiting, ...others], 3)).toBe(waiting);
     expect(policy.beginAttempt(waiting)?.kind).toBe('probe');
   });
 
-  it('does not let a reservation exceed the considered-peer cap', () => {
+  it('keeps a place only for a deferred peer that is among the candidates offered', () => {
+    const policy = new VmRecoveryProviderPolicy();
+    const others = ['12D3KooWOtherA', '12D3KooWOtherB', '12D3KooWOtherC'];
+    // Deferred, but not a candidate of this selection: all three places stay free.
+    for (const peerId of others) {
+      expect(policy.selectNextCandidate(others, 3, new Set(['12D3KooWNotACandidate']))).toBe(peerId);
+      policy.markUnavailable(peerId);
+    }
+  });
+
+  it('does not let a deferred peer exceed the considered-peer cap', () => {
+    const late = '12D3KooWLate';
     const policy = new VmRecoveryProviderPolicy();
     expect(policy.selectNextCandidate(['12D3KooWFirst'], 1)).toBe('12D3KooWFirst');
-    policy.reserve('12D3KooWLate', 1);
     policy.markUnavailable('12D3KooWFirst');
-    expect(policy.selectNextCandidate(['12D3KooWLate'], 1)).toBeUndefined();
+    // The cap was used up before the peer was deferred: no place is kept for it.
+    expect(policy.selectNextCandidate([late], 1, new Set([late]))).toBeUndefined();
+    expect(policy.selectNextCandidate([late], 1)).toBeUndefined();
   });
 
   it('reuses an already-considered proven holder without widening the peer cap', () => {

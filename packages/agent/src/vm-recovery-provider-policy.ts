@@ -18,6 +18,8 @@ interface VmRecoveryPeerState {
   phase: VmRecoveryProviderPhase;
 }
 
+const NO_DEFERRED_PEERS: ReadonlySet<string> = new Set();
+
 /** One recovery slice's explicit provider-affinity state machine. */
 export class VmRecoveryProviderPolicy {
   readonly #peers = new Map<string, VmRecoveryPeerState>();
@@ -37,10 +39,26 @@ export class VmRecoveryProviderPolicy {
     return kind === 'fresh' || kind === 'holder-reusable';
   }
 
-  selectNextCandidate(candidatePeerIds: readonly string[], maxPeers: number): string | undefined {
+  /**
+   * `deferredPeerIds` names candidates that cannot be attempted yet. They are
+   * passed over, and each keeps a place among the peers this slice may
+   * consider, so the peers tried meanwhile cannot crowd it out of the slice.
+   */
+  selectNextCandidate(
+    candidatePeerIds: readonly string[],
+    maxPeers: number,
+    deferredPeerIds: ReadonlySet<string> = NO_DEFERRED_PEERS,
+  ): string | undefined {
+    for (const peerId of candidatePeerIds) {
+      if (deferredPeerIds.has(peerId) && !this.#consideredPeerIds.has(peerId)
+        && this.#consideredPeerIds.size < maxPeers) {
+        this.#consideredPeerIds.add(peerId);
+      }
+    }
+    const attemptablePeerIds = candidatePeerIds.filter((peerId) => !deferredPeerIds.has(peerId));
     const ordered = [
-      ...candidatePeerIds.filter((peerId) => this.#peers.get(peerId)?.phase.kind === 'holder-reusable'),
-      ...candidatePeerIds.filter((peerId) => this.#peers.get(peerId)?.phase.kind !== 'holder-reusable'),
+      ...attemptablePeerIds.filter((peerId) => this.#peers.get(peerId)?.phase.kind === 'holder-reusable'),
+      ...attemptablePeerIds.filter((peerId) => this.#peers.get(peerId)?.phase.kind !== 'holder-reusable'),
     ];
     for (const peerId of ordered) {
       if (!this.#canAttempt(peerId)) continue;
@@ -51,16 +69,6 @@ export class VmRecoveryProviderPolicy {
       return peerId;
     }
     return undefined;
-  }
-
-  /**
-   * Keep a place among the peers this slice may consider for a peer that
-   * cannot be attempted yet, so the peers tried meanwhile cannot crowd it out.
-   */
-  reserve(peerId: string, maxPeers: number): void {
-    if (!this.#consideredPeerIds.has(peerId) && this.#consideredPeerIds.size < maxPeers) {
-      this.#consideredPeerIds.add(peerId);
-    }
   }
 
   markUnavailable(peerId: string): void {
