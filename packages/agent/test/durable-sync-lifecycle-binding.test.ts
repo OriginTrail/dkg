@@ -592,6 +592,25 @@ describe('durable sync lifecycle chain binding', () => {
     expect(detailed).toEqual({ result: physicalResult, disposition: 'clean-absent' });
   });
 
+  it('forwards a caller deadline through the real exact-sync lifecycle boundary', async () => {
+    const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+      result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+      exactFetchDisposition: 'incomplete' as const,
+    }));
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+      { runLegacyDurableSyncDetailed } as any,
+      '12D3KooWExactRecoveryPeer',
+      '0x1111111111111111111111111111111111111111/public-recovery',
+      { kind: 'ual-only', assetUals: ['did:dkg:base:84532/0x1111111111111111111111111111111111111111/1'] },
+      { totalTimeoutMs: 120_000 },
+    );
+    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
+      totalTimeoutMs: 120_000,
+      stopOnBackoffWorthyFailure: true,
+      source: 'vm-recovery',
+    });
+  });
+
   it('projects the public exact-sync result from the detailed implementation', async () => {
     const result = {} as Awaited<ReturnType<typeof runDurableSync>>;
     const syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async () => ({

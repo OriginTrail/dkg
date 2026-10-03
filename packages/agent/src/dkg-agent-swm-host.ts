@@ -6407,6 +6407,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     for (const key of this.vmReconcileRotationState.keys()) {
       if (key.startsWith(prefix)) this.vmReconcileRotationState.delete(key);
     }
+    this.vmReconcileTransportBudgetPolicy.forgetContextGraph(localCgId);
     this.vmReconcileRotationAdmissionCursorByCg.delete(localCgId);
     this.vmReconcilePublicCoreTransportPreferencePolicy?.forgetContextGraph(localCgId);
     existingVmRecoveryPreparation(this)?.discard(localCgId);
@@ -6421,6 +6422,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // without running the base constructor. Shutdown must remain best-effort
     // for that supported test seam and never mask later teardown failures.
     this.vmReconcileRotationState?.clear();
+    this.vmReconcileTransportBudgetPolicy?.clear();
     this.vmReconcileRotationAdmissionCursorByCg?.clear();
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
@@ -6814,6 +6816,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
     exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+    /** Bound legacy peers only while a public stream-capable alternative exists. */
+    legacyAttemptTimeoutMs?: number;
     /**
      * The owning pass's own fresh positive registered-public answer, for the exchange's
      * pre-flight to rely on instead of reading it a second time. Only this exchange gets it.
@@ -6834,6 +6838,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       revalidateTarget,
       ctx,
       exactRecoveryTransportMode = 'stream-preferred',
+      legacyAttemptTimeoutMs,
       registeredPublicEvidence,
       phases,
     } = input;
@@ -6856,6 +6861,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       workStarted = true;
       for (const attempt of attempts) {
         const batchTarget = attempt.entry.target;
+        this.vmReconcileTransportBudgetPolicy.recordAdmitted(batchTarget, peerId);
         handledOrdinals.push(batchTarget.ordinal);
         attemptedOrdinals.push(batchTarget.ordinal);
         const record = attempt.installedRecord;
@@ -6883,7 +6889,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     };
     let disposition: VmRecoveryUalDisposition = 'incomplete';
     let localAdmissionDeferred = false;
+    const legacyAttemptStartedAt = Date.now();
+    const remainingLegacyAttemptMs = (): number | undefined => legacyAttemptTimeoutMs === undefined
+      ? undefined
+      : Math.max(0, legacyAttemptTimeoutMs - (Date.now() - legacyAttemptStartedAt));
     const runLegacyFallback = async (): Promise<void> => {
+      const remainingMs = remainingLegacyAttemptMs();
+      // Both the exact-filter probe and a full-scan fallback belong to one
+      // provider turn. Do not grant a fresh long deadline after the probe has
+      // already spent the bounded legacy window.
+      if (remainingMs !== undefined && remainingMs < SYNC_MIN_GRAPH_BUDGET_MS) {
+        this.log.info(ctx, `VM legacy fallback for "${localCgId}" from ${peerId.slice(-8)} skipped: attempt budget exhausted`);
+        return;
+      }
       try {
         const fallback = await this.runLegacyDurableSyncDetailed(
           ctx,
@@ -6899,6 +6917,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             onWorkStarted,
             signal,
             isCurrent: isRecoveryCurrent,
+            ...(remainingMs === undefined ? {} : { totalTimeoutMs: remainingMs }),
           },
         );
         if (fallback.admission === 'work-started') onWorkStarted();
@@ -6927,6 +6946,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           attempts.map(({ entry }) => entry.target.ual),
           {
             signal, isCurrent: isRecoveryCurrent, onWorkStarted, exactRecoveryTransportMode,
+            ...(legacyAttemptTimeoutMs === undefined ? {} : { totalTimeoutMs: legacyAttemptTimeoutMs }),
             ...(registeredPublicEvidence ? { registeredPublicEvidence } : {}),
           },
         );
@@ -7667,6 +7687,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           })),
           providerAttemptKind: providerAttempt.kind, onChainCgId,
           streamEligible: streamEligibleProvider, registeredPublicAccess: passAuthority.isPublic,
+          legacyAttemptTimeoutMs: this.vmReconcileTransportBudgetPolicy.timeoutFor({
+            target, peerId, providerAttemptKind: providerAttempt.kind,
+            registeredPublicAccess: passAuthority.isPublic,
+            competingStreamAvailable: experimentalStreamPeerIds.size > 0
+              && !experimentalStreamPeerIds.has(peerId),
+            streamEligible: streamEligibleProvider,
+          }),
           signal, isCurrent: isRecoveryCurrent,
           observeSizing: recordSizing,
           // Start reads in candidate order with a small bound so each read's
@@ -7702,7 +7729,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!isRecoveryCurrent()) return providerAttempt.kind === 'probe' ? staleRecovery() : noRecovery();
       const {
         attempts: batchAttempts, transportMode: exactRecoveryTransportMode,
-        publicAccessEvidence: publicRecoveryAccessVerified, packing,
+        publicAccessEvidence: publicRecoveryAccessVerified, packing, legacyAttemptTimeoutMs,
       } = transportPlan;
       if (batchAttempts.length === 0) {
         this.vmReconcilePublicCoreTransportPreferencePolicy.revoke(preferenceAttempt, peerId);
@@ -7788,6 +7815,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         revalidateTarget,
         ctx,
         exactRecoveryTransportMode,
+        ...(legacyAttemptTimeoutMs === undefined ? {} : { legacyAttemptTimeoutMs }),
         ...(registeredPublicEvidence ? { registeredPublicEvidence } : {}),
         phases,
       }).finally(() => registeredPublicEvidence?.revoke());

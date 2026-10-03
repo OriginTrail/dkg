@@ -40,6 +40,8 @@ export interface VmRecoveryTransportPlanningOptions<T> {
   readonly onChainCgId: bigint;
   readonly streamEligible: boolean;
   readonly registeredPublicAccess: boolean;
+  /** Budget selected by transport policy for this probe and its full-scan fallback. */
+  readonly legacyAttemptTimeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly isCurrent: () => boolean;
   /** Observation only: outcome counts of this plan's sizing, never consulted by a decision. */
@@ -71,6 +73,7 @@ export interface VmRecoveryUnplannedCandidate<T> {
 export interface VmRecoveryTransportPlan<T> {
   readonly attempts: readonly T[];
   readonly transportMode: ExactRecoveryTransportMode;
+  readonly legacyAttemptTimeoutMs?: number;
   /** Unobserved probes cannot create reusable public-holder credit. */
   readonly publicAccessEvidence: boolean | undefined;
   readonly packing: Readonly<Omit<VmRecoveryMicrobatchPlan<unknown>, 'targets'>> | undefined;
@@ -84,11 +87,13 @@ function freezePlan<T>(
   publicAccessEvidence: boolean | undefined,
   packing?: VmRecoveryTransportPlan<T>['packing'],
   unplanned: readonly VmRecoveryUnplannedCandidate<T>[] = [],
+  legacyAttemptTimeoutMs?: number,
 ): VmRecoveryTransportPlan<T> {
   // Attempt records remain owned by the host; only the planning decision and
   // its selected order are frozen, without freezing mutable rotation state.
   return Object.freeze({
     attempts: Object.freeze([...attempts]), transportMode, publicAccessEvidence,
+    ...(legacyAttemptTimeoutMs === undefined ? {} : { legacyAttemptTimeoutMs }),
     packing: packing === undefined ? undefined : Object.freeze({ ...packing }),
     unplanned: Object.freeze([...unplanned]),
   });
@@ -102,7 +107,8 @@ export async function planVmRecoveryTransport<T>(
   const probe = options.providerAttemptKind === 'probe';
   const candidates = probe ? options.candidates.slice(0, 1) : options.candidates;
   if (probe && !options.streamEligible) {
-    return freezePlan(candidates.map(({ attempt }) => attempt), 'legacy', undefined);
+    return freezePlan(candidates.map(({ attempt }) => attempt), 'legacy', undefined,
+      undefined, [], options.legacyAttemptTimeoutMs);
   }
 
   let publicAccessEvidence: boolean | undefined;

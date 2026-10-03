@@ -2,6 +2,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from '../../src/vm-recovery-core-transport-preference.js';
+import type { VmRecoveryTransportBudgetPolicy } from '../../src/vm-recovery-transport-budget-policy.js';
 import type { DurableSyncAdmissionOutcome } from '../../src/sync/requester/admission-boundary.js';
 
 import type {
@@ -34,6 +35,7 @@ interface ExactFetchResult {
     deferredBackpressure: number;
   };
   disposition: VmRecoveryUalDisposition;
+  responderCapability?: 'legacy-filter-unsupported';
 }
 
 /**
@@ -66,6 +68,8 @@ export interface VmRecoveryHostInternals {
   openVmReconcileRotationState(): void;
   clearNetworkRejectedPeerState(peerId: string): void;
   vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
+  vmReconcileRotationAdmissionCursorByCg: Map<string, number>;
+  vmReconcileTransportBudgetPolicy: VmRecoveryTransportBudgetPolicy;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
@@ -99,6 +103,7 @@ export interface VmRecoveryHostInternals {
     selection: readonly string[] | ExactAssetSelection,
     options?: { signal?: AbortSignal; isCurrent?: () => boolean; onWorkStarted?: () => void;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+      totalTimeoutMs?: number;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
@@ -130,6 +135,8 @@ export interface VmRecoveryHostInternals {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
+    exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+    legacyAttemptTimeoutMs?: number;
     registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
   }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' | 'local-admission-deferred' }>;
   recoverVmReconcileBatch(

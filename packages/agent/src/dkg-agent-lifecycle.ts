@@ -6039,6 +6039,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+      totalTimeoutMs?: number;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -6052,6 +6053,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+      totalTimeoutMs?: number;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -6065,6 +6067,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+      totalTimeoutMs?: number;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
@@ -6083,6 +6086,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
+        ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',

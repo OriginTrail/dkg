@@ -36,6 +36,15 @@ describe('VM recovery transport planning pipeline', () => {
     expect(f.readUpdateContext).not.toHaveBeenCalled();
   });
 
+  it('carries the selected legacy budget into the execution plan only for a legacy probe', async () => {
+    const f = fixture();
+    const plan = await planVmRecoveryTransport({ ...f.options, providerAttemptKind: 'probe',
+      legacyAttemptTimeoutMs: 120_000 }, f.ports);
+    expect(plan).toMatchObject({ transportMode: 'legacy', legacyAttemptTimeoutMs: 120_000 });
+    expect((await planVmRecoveryTransport({ ...f.options,
+      legacyAttemptTimeoutMs: 120_000 }, f.ports)).legacyAttemptTimeoutMs).toBeUndefined();
+  });
+
   it('uses one sizing read for a streaming probe without granting holder evidence', async () => {
     const f = fixture();
     const plan = await planVmRecoveryTransport({ ...f.options, providerAttemptKind: 'probe',
