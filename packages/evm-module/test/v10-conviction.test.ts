@@ -34,6 +34,7 @@ import {
   Profile,
   RandomSamplingStorage,
   StakingStorage,
+  StakingRewardSettlement,
   StakingV10,
   Token,
 } from '../typechain';
@@ -130,14 +131,14 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
 
   // Mint a fresh profile via `Profile.createProfile`. Mirrors the unit-test
   // helper in `test/unit/DKGStakingConvictionNFT.test.ts`.
-  const createProfile = async () => {
+  const createProfile = async (initialOperatorFee = 0) => {
     const nodeId = '0x' + randomBytes(32).toString('hex');
     const tx = await ProfileContract.connect(accounts[1]).createProfile(
       accounts[0].address,
       [],
       `Node ${Math.floor(Math.random() * 1_000_000)}`,
       nodeId,
-      0,
+      initialOperatorFee,
     );
     const receipt = await tx.wait();
     const identityId = Number(receipt!.logs[0].topics[1]);
@@ -329,6 +330,507 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     const pos = await ConvictionStakingStorageContract.getPosition(1);
     expect(pos.raw).to.equal(amount + expectedReward);
     expect(pos.cumulativeRewardsClaimed).to.equal(expectedReward);
+  });
+
+  it('claim: a late epoch-pool credit is included for the next staker (PCA settlement)', async () => {
+    const { identityId } = await createProfile();
+    const amount = hre.ethers.parseEther('1000');
+    await mintAndApprove(accounts[0], amount);
+    await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+
+    await Token.mint(accounts[1].address, amount);
+    await Token.connect(accounts[1]).approve(await StakingV10Contract.getAddress(), amount);
+    await NFT.connect(accounts[1]).createConviction(identityId, amount, 0);
+
+    const creationEpoch = await ChronosContract.getCurrentEpoch();
+    const epochLength = await ChronosContract.epochLength();
+    const scorePerStake36 = hre.ethers.parseEther('0.001');
+    const nodeScore18 = hre.ethers.parseEther('100');
+    const epochPool = hre.ethers.parseEther('1000');
+    const latePool = hre.ethers.parseEther('1000');
+
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      creationEpoch,
+      identityId,
+      scorePerStake36,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      creationEpoch,
+      identityId,
+      nodeScore18,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      creationEpoch,
+      nodeScore18,
+    );
+    // Seed the initial pool before the epoch closes. A permissionless PCA
+    // settlement may add to this same epoch after an earlier claim.
+    const EpochStorageContract = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      creationEpoch,
+      creationEpoch,
+      epochPool,
+    );
+
+    const firstReward = (amount * scorePerStake36) / SCALE18;
+    const secondReward = (firstReward * (epochPool + latePool)) / nodeScore18;
+    const initialReward = (firstReward * epochPool) / nodeScore18;
+    // Direct EpochStorage writes do not move TRAC. Back both positions' final
+    // entitlement explicitly so the test cannot consume staked principal.
+    await Token.mint(
+      await ConvictionStakingStorageContract.getAddress(),
+      secondReward * 2n,
+    );
+
+    await time.increase(Number(epochLength));
+    await expect(NFT.connect(accounts[0]).claim(1))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(1n, initialReward);
+
+    // Relock burns token 1 and creates token 3. Its reward receipt lineage
+    // must follow the live position even though RSS keeps the old token key.
+    await expect(NFT.connect(accounts[0]).relock(1, 0))
+      .to.emit(NFT, 'PositionRelocked')
+      .withArgs(1n, 3n, 0n);
+
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      creationEpoch,
+      creationEpoch,
+      latePool,
+    );
+
+    await expect(NFT.connect(accounts[1]).claim(2))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(2n, secondReward);
+    expect((await ConvictionStakingStorageContract.getPosition(2)).raw).to.equal(
+      amount + secondReward,
+    );
+
+    // A third party may have advanced token 1's cursor through claimFor before
+    // PCA settlement. The receipt ledger still pays its exact late delta.
+    await expect(StakingV10Contract.connect(accounts[2]).claimRewardDeltas(3, 0, 1))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(3n, secondReward - initialReward);
+    expect((await ConvictionStakingStorageContract.getPosition(3)).raw).to.equal(
+      amount + secondReward,
+    );
+
+    // The receipt is idempotent and cannot be claimed twice.
+    expect(
+      await StakingV10Contract.connect(accounts[2]).claimRewardDeltas.staticCall(3, 0, 1),
+    ).to.equal(0n);
+
+    // Full withdrawals prove that every compounded reward was backed; no
+    // position can silently consume another position's principal.
+    await NFT.connect(accounts[0]).withdraw(3);
+    await NFT.connect(accounts[1]).withdraw(2);
+    expect(
+      await Token.balanceOf(await ConvictionStakingStorageContract.getAddress()),
+    ).to.equal(0n);
+  });
+
+  it('claim: late settlement preserves gross-first fee rounding without double-paying', async () => {
+    const operatorFeePercentage = 3_333;
+    const { identityId } = await createProfile(operatorFeePercentage);
+    const amount = hre.ethers.parseEther('1000');
+    await mintAndApprove(accounts[0], amount);
+    await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+    await mintAndApprove(accounts[1], amount);
+    await NFT.connect(accounts[1]).createConviction(identityId, amount, 0);
+
+    const creationEpoch = await ChronosContract.getCurrentEpoch();
+    const epochLength = await ChronosContract.epochLength();
+    const scorePerStake36 = hre.ethers.parseEther('0.001');
+    const delegatorScore18 = (amount * scorePerStake36) / SCALE18;
+    const nodeScore18 = delegatorScore18 * 2n;
+    const allNodesScore18 = delegatorScore18 * 3n;
+    const initialPool = 10n;
+    const latePool = 11n;
+
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      creationEpoch,
+      identityId,
+      scorePerStake36,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      creationEpoch,
+      identityId,
+      nodeScore18,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      creationEpoch,
+      allNodesScore18,
+    );
+    const EpochStorageContract = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      creationEpoch,
+      creationEpoch,
+      initialPool,
+    );
+
+    // gross=floor(10*2/3)=6; fee=floor(6*3333/10000)=1;
+    // each of the two equal positions receives floor(5/2)=2.
+    await Token.mint(await ConvictionStakingStorageContract.getAddress(), 14n);
+    await time.increase(Number(epochLength));
+    await expect(NFT.connect(accounts[0]).claim(1))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(1n, 2n);
+    expect(
+      await ConvictionStakingStorageContract.getOperatorFeeBalance(identityId),
+    ).to.equal(1n);
+
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      creationEpoch,
+      creationEpoch,
+      latePool,
+    );
+
+    // gross=floor(21*2/3)=14; fee=floor(14*3333/10000)=4;
+    // each position's full entitlement is floor((14-4)/2)=5.
+    await expect(NFT.connect(accounts[1]).claim(2))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(2n, 5n);
+    await expect(StakingV10Contract.connect(accounts[2]).claimRewardDeltas(1, 0, 1))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(1n, 3n);
+    expect(
+      await ConvictionStakingStorageContract.getOperatorFeeBalance(identityId),
+    ).to.equal(4n);
+
+    await NFT.connect(accounts[0]).withdraw(1);
+    await NFT.connect(accounts[1]).withdraw(2);
+    // All delegator liabilities withdrew; the exact final operator fee remains.
+    expect(
+      await Token.balanceOf(await ConvictionStakingStorageContract.getAddress()),
+    ).to.equal(4n);
+  });
+
+  it('claim: a late pool credit after a zero-pool first touch is materialized', async () => {
+    const { identityId } = await createProfile();
+    const amount = hre.ethers.parseEther('1000');
+    await mintAndApprove(accounts[0], amount);
+    await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+
+    await Token.mint(accounts[1].address, amount);
+    await Token.connect(accounts[1]).approve(await StakingV10Contract.getAddress(), amount);
+    await NFT.connect(accounts[1]).createConviction(identityId, amount, 0);
+
+    const creationEpoch = await ChronosContract.getCurrentEpoch();
+    const epochLength = await ChronosContract.epochLength();
+    const scorePerStake36 = hre.ethers.parseEther('0.001');
+    const nodeScore18 = hre.ethers.parseEther('100');
+    const latePool = hre.ethers.parseEther('1000');
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      creationEpoch,
+      identityId,
+      scorePerStake36,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      creationEpoch,
+      identityId,
+      nodeScore18,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      creationEpoch,
+      nodeScore18,
+    );
+
+    // The first staker touches the closed epoch before PCA has funded it.
+    await time.increase(Number(epochLength));
+    await NFT.connect(accounts[0]).claim(1);
+
+    const EpochStorageContract = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      creationEpoch,
+      creationEpoch,
+      latePool,
+    );
+    const expectedReward =
+      ((amount * scorePerStake36) / SCALE18 * latePool) / nodeScore18;
+    await Token.mint(
+      await ConvictionStakingStorageContract.getAddress(),
+      expectedReward * 2n,
+    );
+
+    await expect(NFT.connect(accounts[1]).claim(2))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(2n, expectedReward);
+    await expect(StakingV10Contract.connect(accounts[2]).claimRewardDeltas(1, 0, 1))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(1n, expectedReward);
+    expect((await ConvictionStakingStorageContract.getPosition(1)).raw).to.equal(
+      amount + expectedReward,
+    );
+  });
+
+  it('claim: a late reward remains payable after the original position withdrew', async () => {
+    const { identityId } = await createProfile();
+    const amount = hre.ethers.parseEther('1000');
+    await mintAndApprove(accounts[0], amount);
+    await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+    await mintAndApprove(accounts[1], amount);
+    await NFT.connect(accounts[1]).createConviction(identityId, amount, 0);
+
+    const creationEpoch = await ChronosContract.getCurrentEpoch();
+    const epochLength = await ChronosContract.epochLength();
+    const scorePerStake36 = hre.ethers.parseEther('0.001');
+    const nodeScore18 = hre.ethers.parseEther('100');
+    const epochPool = hre.ethers.parseEther('1000');
+    const latePool = hre.ethers.parseEther('1000');
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      creationEpoch,
+      identityId,
+      scorePerStake36,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      creationEpoch,
+      identityId,
+      nodeScore18,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      creationEpoch,
+      nodeScore18,
+    );
+    const EpochStorageContract = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      creationEpoch,
+      creationEpoch,
+      epochPool,
+    );
+
+    const score = (amount * scorePerStake36) / SCALE18;
+    const initialReward = (score * epochPool) / nodeScore18;
+    const finalReward = (score * (epochPool + latePool)) / nodeScore18;
+    await Token.mint(
+      await ConvictionStakingStorageContract.getAddress(),
+      finalReward * 2n,
+    );
+
+    await time.increase(Number(epochLength));
+    await NFT.connect(accounts[0]).claim(1);
+    await NFT.connect(accounts[0]).withdraw(1);
+
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      creationEpoch,
+      creationEpoch,
+      latePool,
+    );
+    await NFT.connect(accounts[1]).claim(2);
+
+    const settlement = await hre.ethers.getContract<StakingRewardSettlement>(
+      'StakingRewardSettlement',
+    );
+    const recipientBefore = await Token.balanceOf(accounts[0].address);
+    await expect(settlement.connect(accounts[2]).claimClosedRewardDeltas(1, 0, 1))
+      .to.emit(settlement, 'RewardDeltaPaid')
+      .withArgs(1n, finalReward - initialReward, true);
+    expect(await Token.balanceOf(accounts[0].address)).to.equal(
+      recipientBefore + finalReward - initialReward,
+    );
+    expect(
+      await settlement.connect(accounts[2]).claimClosedRewardDeltas.staticCall(1, 0, 1),
+    ).to.equal(0n);
+
+    await NFT.connect(accounts[1]).withdraw(2);
+    expect(
+      await Token.balanceOf(await ConvictionStakingStorageContract.getAddress()),
+    ).to.equal(0n);
+  });
+
+  it('claimRewardDeltas: settles the score cursor before compounding into raw', async () => {
+    // Regression: `claimRewardDeltas` raises `raw` at `block.timestamp`, so it
+    // must settle the CURRENT epoch's delegator-score cursor first (like
+    // stake/relock/redelegate/claim). Without that, the part of the epoch that
+    // already accrued at the OLD stake is re-integrated at the NEW stake, the
+    // delegator score overshoots the node score, and every later claim reverts
+    // `DelegatorRewardInvariant` — bricking the position.
+    const { identityId } = await createProfile();
+    const amount = hre.ethers.parseEther('1000');
+    await mintAndApprove(accounts[0], amount);
+    await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+
+    const epochE = await ChronosContract.getCurrentEpoch();
+    const epochLength = await ChronosContract.epochLength();
+    const EpochStorageContract =
+      await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+
+    // ---- epoch E: one proof; the sole delegator owns the whole node score.
+    const spsE = hre.ethers.parseUnits('0.001', 18);
+    const scoreE = (amount * spsE) / SCALE18;
+    const poolE = hre.ethers.parseEther('100');
+    const latePoolE = hre.ethers.parseEther('100');
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      epochE,
+      identityId,
+      spsE,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      epochE,
+      identityId,
+      scoreE,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      epochE,
+      scoreE,
+    );
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      epochE,
+      epochE,
+      poolE,
+    );
+    // Back every reward this test compounds so no principal is consumed.
+    await Token.mint(
+      await ConvictionStakingStorageContract.getAddress(),
+      hre.ethers.parseEther('1000'),
+    );
+
+    await time.increase(Number(epochLength));
+    const epochF = await ChronosContract.getCurrentEpoch();
+    expect(epochF).to.equal(epochE + 1n);
+
+    await NFT.connect(accounts[0]).claim(1);
+    const rawAfterClaim = (await ConvictionStakingStorageContract.getPosition(1)).raw;
+    expect(rawAfterClaim).to.equal(amount + poolE);
+
+    // ---- epoch F, proof A lands at the post-claim stake.
+    const spsA = hre.ethers.parseUnits('0.001', 18);
+    const scoreA = (rawAfterClaim * spsA) / SCALE18;
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      epochF,
+      identityId,
+      spsA,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      epochF,
+      identityId,
+      scoreA,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      epochF,
+      scoreA,
+    );
+
+    // ---- a late PCA credit lands on epoch E and is compounded mid-epoch-F.
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      epochE,
+      epochE,
+      latePoolE,
+    );
+    await expect(StakingV10Contract.connect(accounts[2]).claimRewardDeltas(1, 0, 1))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(1n, latePoolE);
+    const rawAfterDelta = (await ConvictionStakingStorageContract.getPosition(1)).raw;
+    expect(rawAfterDelta).to.equal(amount + poolE + latePoolE);
+
+    // The compounding must NOT have been credited to the already-accrued part
+    // of epoch F: the delegator's settled score is still the pre-delta score.
+    expect(
+      await RandomSamplingStorageContract.getEpochNodeDelegatorScore(
+        epochF,
+        identityId,
+        tokenIdKey(1),
+      ),
+    ).to.equal(scoreA);
+
+    // ---- proof B lands after the compounding, at the higher stake.
+    const spsB = hre.ethers.parseUnits('0.001', 18);
+    const scoreB = (rawAfterDelta * spsB) / SCALE18;
+    const nodeScoreF = scoreA + scoreB;
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      epochF,
+      identityId,
+      spsA + spsB,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      epochF,
+      identityId,
+      nodeScoreF,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      epochF,
+      nodeScoreF,
+    );
+    const poolF = hre.ethers.parseEther('100');
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      epochF,
+      epochF,
+      poolF,
+    );
+
+    // ---- the next claim must succeed and pay exactly the node's net reward.
+    await time.increase(Number(epochLength));
+    await expect(NFT.connect(accounts[0]).claim(1))
+      .to.emit(StakingV10Contract, 'RewardsClaimed')
+      .withArgs(1n, poolF);
+    expect((await ConvictionStakingStorageContract.getPosition(1)).raw).to.equal(
+      rawAfterDelta + poolF,
+    );
+  });
+
+  it('claim: refuses a pre-10.0.7 net-without-gross reward cache instead of swallowing the delta', async () => {
+    // A cached net reward without its gross baseline is impossible for
+    // 10.0.7+: the two are always written together and `net <= gross`. It can
+    // only be state left by an older StakingV10, where adopting the current
+    // pool as the baseline would silently swallow the late delta and re-pay
+    // the operator fee. Refuse it.
+    const { identityId } = await createProfile();
+    const amount = hre.ethers.parseEther('1000');
+    await mintAndApprove(accounts[0], amount);
+    await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+
+    const epochE = await ChronosContract.getCurrentEpoch();
+    const epochLength = await ChronosContract.epochLength();
+    const sps36 = hre.ethers.parseUnits('0.001', 18);
+    const nodeScore18 = (amount * sps36) / SCALE18;
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      epochE,
+      identityId,
+      sps36,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      epochE,
+      identityId,
+      nodeScore18,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      epochE,
+      nodeScore18,
+    );
+    const EpochStorageContract =
+      await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      epochE,
+      epochE,
+      hre.ethers.parseEther('100'),
+    );
+
+    // Plant legacy state: fee flag set + net cached, gross never written.
+    await ConvictionStakingStorageContract.connect(
+      accounts[0],
+    ).setIsOperatorFeeClaimedForEpoch(identityId, epochE, true);
+    await ConvictionStakingStorageContract.connect(
+      accounts[0],
+    ).setNetNodeEpochRewards(identityId, epochE, hre.ethers.parseEther('50'));
+
+    await time.increase(Number(epochLength));
+    const settlement = await hre.ethers.getContract<StakingRewardSettlement>(
+      'StakingRewardSettlement',
+    );
+    await expect(NFT.connect(accounts[0]).claim(1)).to.be.revertedWithCustomError(
+      settlement,
+      'LegacyRewardCacheUnsupported',
+    );
   });
 
   // --------------------------------------------------------------------------

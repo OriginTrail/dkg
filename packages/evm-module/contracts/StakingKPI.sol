@@ -29,7 +29,14 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     //           simulator) remain V8 stake-base keyed; they are accurate for
     //           V8 archive queries but return 0 for V10 nodes. A V10
     //           tokenId-keyed equivalent is a separate follow-up PR.
-    string private constant _VERSION = "10.0.2";
+    //   10.0.3 — `getNetNodeRewards` no longer short-circuits on the cached
+    //           `netNodeEpochRewards` once the operator-fee flag is set. The
+    //           cache is a baseline that a late epoch-pool credit (lazy PCA
+    //           settlement) moves, so the preview must always recompute from
+    //           the current pool. MUST be redeployed together with
+    //           ConvictionStakingStorage 10.0.7, StakingV10 10.0.7 and
+    //           StakingRewardSettlement 10.0.8.
+    string private constant _VERSION = "10.0.3";
     uint256 public constant SCALE18 = 1e18;
 
     IdentityStorage public identityStorage;
@@ -213,11 +220,6 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 identityId,
         uint256 epoch
     ) public view profileExists(identityId) returns (uint256) {
-        // D3+D13 — post-V10 these flags live on ConvictionStakingStorage.
-        if (convictionStakingStorage.isOperatorFeeClaimedForEpoch(identityId, epoch)) {
-            return convictionStakingStorage.netNodeEpochRewards(identityId, epoch);
-        }
-
         uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(epoch, identityId);
         if (nodeScore18 == 0) return 0;
 

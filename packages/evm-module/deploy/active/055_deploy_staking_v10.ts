@@ -33,6 +33,7 @@ func.dependencies = [
   'Hub',
   'StakingStorage',
   'ConvictionStakingStorage',
+  'StakingRewardSettlement',
   'Chronos',
   'RandomSamplingStorage',
   'ShardingTableStorage',
@@ -45,5 +46,4 @@ func.dependencies = [
   // withdrawal request/finalize/cancel API.
   'IdentityStorage',
   'Token',
-  'EpochStorage',
 ];
