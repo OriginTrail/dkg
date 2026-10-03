@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { isSafeIri } from '@origintrail-official/dkg-core';
+import { isAbsoluteRfc3987IriV1 } from '@origintrail-official/dkg-rdf-utils';
 import { decodeSparqlJsonQueryResult, parseSparqlJsonSelectResponse } from '../src/sparql-json-query-result.js';
 
 // RFC 3987 `absolute-IRI = scheme ":" ihier-part [ "?" iquery ]` lets the
 // ihier-part be empty, so `a:` is an IRI that Oxigraph and Blazegraph store
 // and return from SELECT. The decoder accepts that bare-scheme shape; every
-// other value keeps core isSafeIri's answer.
+// other value must satisfy both the interpolation-safe and RFC 3987 policies.
 
 type Bindings = Array<Record<string, string>>;
 const select = (vars: string[], bindings: Array<Record<string, unknown>>) => ({ head: { vars }, results: { bindings } });
@@ -72,7 +73,7 @@ describe('bare-scheme IRIs in SPARQL JSON results', () => {
     }
   });
 
-  it('accepts exactly what isSafeIri accepts plus a bare scheme', () => {
+  it('accepts the RFC-valid intersection of safe IRIs plus a bare scheme', () => {
     const characters = [
       ...Array.from({ length: 0x80 }, (_, code) => String.fromCharCode(code)),
       '\u0085', '\u00a0', '\u00e9', '\u2028', '\u2029', '\u3000', '\ufeff', '\ufffd',
@@ -84,7 +85,8 @@ describe('bare-scheme IRIs in SPARQL JSON results', () => {
     const widened = new Set<string>();
     for (const c of characters) {
       for (const value of [c, `${c}:`, `a${c}:`, `${c}a:`, `a:${c}`, `a:${c}b`]) {
-        const expected = isSafeIri(value) || isBareScheme(value);
+        const expected = (isSafeIri(value) || isBareScheme(value))
+          && isAbsoluteRfc3987IriV1(value);
         if (expected && !isSafeIri(value)) widened.add(value);
         for (const term of [uri(value), typed(value)]) {
           for (const decode of decodeBoth(column([term]))) {

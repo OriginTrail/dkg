@@ -20,7 +20,8 @@ import oxigraph from 'oxigraph';
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 
 function escapeLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    .replace(/\t/g, '\\t').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 }
 
 function termToNT(t: oxigraph.Term): string {
@@ -113,6 +114,9 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
         const rows = (Array.isArray(result) ? result : []) as Map<string, oxigraph.Term>[];
         const vars = new Set<string>();
         for (const row of rows) for (const k of row.keys()) vars.add(k);
+        // This embedded engine does not expose Oxigraph's HTTP serializer.
+        // Always return JSON here; TSV compatibility is covered by checked-in
+        // wire captures from the repository-pinned oxigraph_server binary.
         const bindings = rows.map((row) => {
           const obj: Record<string, Record<string, string>> = {};
           for (const [k, v] of row.entries()) obj[k] = termToJson(v);

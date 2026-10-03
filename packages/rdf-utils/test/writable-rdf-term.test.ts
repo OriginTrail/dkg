@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseRdfLiteralTerm, parseWritableRdfTerm } from '../src/index.js';
+import {
+  parseRdfLiteralTerm,
+  parseSparqlTsvHeaderVariable,
+  parseSparqlTsvResultTerm,
+  parseWritableRdfTerm,
+} from '../src/index.js';
 
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const kindOf = (term: string) => parseWritableRdfTerm(term)?.kind ?? null;
@@ -60,8 +65,39 @@ describe('parseWritableRdfTerm blank nodes', () => {
     },
   );
 
-  it.each(['_:', '_:b.', '_:a b', '_:-b', '_:b\n', '_:b>', ' _:b0', '_:b0 '])('rejects %j', (term) => {
+  it.each([
+    '_:', '_:b.', '_:a b', '_:-b', '_:b\n', '_:b>', ' _:b0', '_:b0 ',
+    String.raw`_:\u0061`, '_:\ud800',
+  ])('rejects %j', (term) => {
     expect(kindOf(term)).toBeNull();
+  });
+
+  it.each([
+    [0x00d6, true],
+    [0x00d7, false],
+    [0x00d8, true],
+    [0x037d, true],
+    [0x037e, false],
+    [0x037f, true],
+    [0xd7ff, true],
+    [0xf900, true],
+    [0xfdcf, true],
+    [0xfdd0, false],
+    [0xfdf0, true],
+    [0xfffd, true],
+    [0xfffe, false],
+    [0x10000, true],
+    [0xeffff, true],
+    [0xf0000, false],
+  ])('keeps raw name consumers in parity at U+%s', (codePoint, accepted) => {
+    const character = String.fromCodePoint(codePoint);
+    expect(parseSparqlTsvHeaderVariable(`?${character}`) !== null).toBe(accepted);
+    expect(parseWritableRdfTerm(`_:${character}`) !== null).toBe(accepted);
+  });
+
+  it('does not preprocess escapes in raw result names', () => {
+    expect(parseSparqlTsvHeaderVariable(String.raw`?\u0061`)).toBeNull();
+    expect(parseSparqlTsvHeaderVariable('?\ud800')).toBeNull();
   });
 });
 
@@ -123,4 +159,53 @@ describe('parseWritableRdfTerm literals', () => {
     // Datatype policy belongs to the callers of the canonical parser.
     expect(parseRdfLiteralTerm('"42"^^<integer>')).toEqual({ kind: 'typed', value: '42', datatype: 'integer' });
   });
+});
+
+describe('parseSparqlTsvResultTerm', () => {
+  it.each([
+    ["'plain'", { kind: 'literal', value: { kind: 'plain', value: 'plain' } }],
+    ["'bonjour'@fr", { kind: 'literal', value: { kind: 'language', value: 'bonjour', language: 'fr' } }],
+    ["'7'^^<urn:test:type>", { kind: 'literal', value: { kind: 'typed', value: '7', datatype: 'urn:test:type' } }],
+    ['<urn:test:\\u0061>', { kind: 'iri', value: 'urn:test:a' }],
+    ['42', { kind: 'literal', value: { kind: 'typed', value: '42', datatype: XSD_INTEGER } }],
+  ])('accepts TSV result term %j', (term, expected) => {
+    expect(parseSparqlTsvResultTerm(term)).toEqual(expected);
+  });
+
+  it.each([
+    ['"plain"', "'plain'"],
+    ['"bonjour"@fr', "'bonjour'@fr"],
+    ['"7"^^<urn:test:type>', "'7'^^<urn:test:type>"],
+    ['<urn:test:a>', '<urn:test:\\u0061>'],
+  ])('normalizes optimized and fallback spellings identically', (fast, fallback) => {
+    expect(parseSparqlTsvResultTerm(fast)).toEqual(parseSparqlTsvResultTerm(fallback));
+  });
+
+  it.each([
+    'urn:test:bare',
+    '"x"^^urn:test:bare',
+    "'unterminated",
+    "'bad \\q'",
+    '<relative>',
+    '"x"^^<relative>',
+  ])('rejects non-TSV/result-only spelling %j', (term) => {
+    expect(parseSparqlTsvResultTerm(term)).toBeNull();
+  });
+});
+
+describe('parseSparqlTsvHeaderVariable', () => {
+  it.each([
+    ['?v', 'v'],
+    ['?9value', '9value'],
+    ['?café', 'café'],
+    ['?变量', '变量'],
+    ['?𐀀value', '𐀀value'],
+  ])('accepts complete SPARQL VARNAME %j', (cell, expected) => {
+    expect(parseSparqlTsvHeaderVariable(cell)).toBe(expected);
+  });
+
+  it.each(['', '?', '$v', '?bad-name', '?bad.name', '?bad value', '?bad\tvalue'])
+    ('rejects malformed TSV header cell %j', (cell) => {
+      expect(parseSparqlTsvHeaderVariable(cell)).toBeNull();
+    });
 });
