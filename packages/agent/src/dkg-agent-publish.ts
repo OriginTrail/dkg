@@ -5609,7 +5609,15 @@ export class PublishMethods extends DKGAgentBase {
           `Failed to clear published SWM graph after confirmed queued ${label} of <${lifecycleUri}>: ` +
             (err instanceof Error ? err.message : String(err)),
         );
+        return;
       }
+      await this.retireLegacySwmAfterConfirmedLocalPublish(
+        request.contextGraphId,
+        graphScope.ual,
+        graphScope.assertionVersion,
+        request.subGraphName,
+        ctx,
+      );
     };
     const clearRemainingSharedMemory = async (): Promise<void> => {
       try {
@@ -6248,6 +6256,13 @@ export class PublishMethods extends DKGAgentBase {
             graphScope.ual,
             graphScope.assertionVersion,
           );
+          await this.retireLegacySwmAfterConfirmedLocalPublish(
+            contextGraphId,
+            graphScope.ual,
+            graphScope.assertionVersion,
+            opts?.subGraphName,
+            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          );
         } catch (err) {
           this.log.warn(
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
@@ -6551,6 +6566,31 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<void> {
     if (input.status !== 'confirmed') return;
     await this.observeRfc64ConfirmedVmV1(input);
+  }
+
+  /** The local confirmed publisher has already written VM and drained this exact SWM root. */
+  private async retireLegacySwmAfterConfirmedLocalPublish(
+    this: DKGAgent,
+    contextGraphId: string,
+    kaUal: string,
+    assertionVersion: string,
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+  ): Promise<void> {
+    try {
+      await this.retireLegacySwmAfterVerifiedVmTwin({
+        contextGraphId,
+        kaUal,
+        assertionVersion,
+        subGraphName,
+      });
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to retire the legacy SWM boundary after confirmed local VM publish: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
   }
 
   /**
@@ -7044,6 +7084,21 @@ export class PublishMethods extends DKGAgentBase {
       encryptInlinePayload,
       encryptInlineChunked,
     });
+
+    if (
+      graphScopedPublish
+      && result.status === 'confirmed'
+      && options?.kaUal !== undefined
+      && options.assertionVersion !== undefined
+    ) {
+      await this.retireLegacySwmAfterConfirmedLocalPublish(
+        contextGraphId,
+        options.kaUal,
+        String(options.assertionVersion),
+        options.subGraphName,
+        ctx,
+      );
+    }
 
     span.setAttribute('dkg.publish_status', result.status);
     if (result.status === 'failed') {
