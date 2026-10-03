@@ -19,15 +19,14 @@ function fakeResponse() {
 describe('knowledge-assets mutation error mapping', () => {
   it('maps an inactive WM discard precondition to a typed conflict', () => {
     const { record, res } = fakeResponse();
-    respondAssertionError(res, {
-      code: 'KA_WM_LIFECYCLE_REQUIRED',
-      message: 'Knowledge Asset has no active Working Memory draft',
-    });
+    // The message the engine throws (assertWorkingMemoryLifecycleMutable).
+    const message = 'Assertion "shared-ka" is not an active Working Memory draft; reopen it before mutating it';
+    respondAssertionError(res, { code: 'KA_WM_LIFECYCLE_REQUIRED', message });
 
     expect(record.status).toBe(409);
     expect(record.ended).toBe(true);
     expect(JSON.parse(record.body)).toEqual({
-      error: 'Knowledge Asset has no active Working Memory draft',
+      error: message,
       code: 'KA_WM_LIFECYCLE_REQUIRED',
     });
   });
