@@ -2,10 +2,152 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [10.0.21] - 2026-10-03
+
+A release about getting data onto a node faster and keeping busy nodes
+responsive. A cold node can recover the Verifiable Memory of a registered
+public graph through a new, opt-in batch stream: a Core that serves it sends
+whole Knowledge Assets, compressed, up to ten per exchange, and the receiver
+still verifies and authenticates every asset before it stores it. Cores under
+store pressure do less background work per pass and no longer restart their
+own managed Oxigraph because a caller stopped waiting. An asynchronous publish
+that fails before its transaction could have been sent retries by itself as
+the same job, and a job that is held for a chain re-check says what it is
+waiting for.
+
+It also fixes the 10.0.20 known issue that kept an approved member of a
+private graph that was never registered on chain from subscribing, a
+Knowledge Asset that could no longer be updated after an abandoned finalized
+update, and a share whose pointer stamp failed silently after the commit. The
+dashboard receives the node-operator token only on trusted local requests,
+and node-wide operations require a node-admin token.
+**No smart-contract, ABI or deployment registry changes are required.** The
+batch stream is a new protocol that nodes use only with peers that advertise
+it; every existing protocol is unchanged. The release adds one published
+package, `@origintrail-official/dkg-node-store`.
+
+### Upgrading from 10.0.20
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| The batch stream for public-graph Verifiable Memory recovery is opt-in (#2939, #2956) | Off by default on every node. With `DKG_EXACT_BATCH_STREAM_ENABLED=1` a Core serves the stream for graphs registered as public, and any node requests it from Cores that advertise it. Peers without it are asked over the ordinary sync protocol as before. The switch's first name, `DKG_EXPERIMENTAL_EXACT_BATCH_STREAM`, is still read when the current one is not set | Set `DKG_EXACT_BATCH_STREAM_ENABLED=1` on Cores that should serve recovery and on nodes that recover large public graphs. Set it on more than one Core that holds a graph: a recovery that cannot finish an exchange falls back to the ordinary protocol on the other holders |
+| Recovery preparation is opt-in (#2947, #2956) | With `DKG_VM_RECOVERY_PREFETCH_ENABLED=1`, or `vmRecoveryPrefetchEnabled: true` in the agent configuration, a recovering node sizes its next batch in advance and reads the graph's registered-public state once per pass instead of twice. It changes how work is packed, never what is accepted. Off by default | Set it together with the stream switch on nodes that recover large public graphs |
+| The dashboard embeds the node-operator token only for trusted local requests (#2764) | `GET /ui` still loads for everyone. The token is embedded only when the client socket is loopback, the `Host` header names the loopback interface and the request carries no proxy forwarding header (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, `Via`). Any other caller gets the same page without a token, and the dashboard asks for one | On the node host, `http://127.0.0.1:<port>/ui` signs in as before. Behind a reverse proxy or under another host name, enter the node-operator token; it is kept for the browser tab. A same-host proxy that forwards a loopback `Host` and adds none of those headers still counts as local, so keep authentication in front of it |
+| Node-wide operations require a node-admin token (#2764) | An agent-scoped token receives `403` on `POST /api/shutdown`, `/api/identity/ensure`, `/api/register-adapter`, `/api/random-sampling/backfill-percgid-meta`, `/api/publisher/cancel`, `/api/publisher/clear`, `/api/publisher/retry`, `/api/agent/register`, `POST /api/local-agent-integrations/connect`, `PUT /api/local-agent-integrations/:id`, `POST /api/local-agent-integrations/:id/refresh`, the shared-memory TTL `PUT`, `PUT /api/settings/llm`, `/api/settings/telemetry` and `/api/settings/retention`, and `GET /api/logs` and `/api/node-log`. The node-operator token and auth-disabled mode keep full access | Call these routes with the node-operator token |
+| An update draft takes its number from the asset's confirmed version, and a draft sealed under any other number is refused (#2958, #2961) | `wm/finalize` returns `assertionVersion` and `kaUal`. `vm/publish` and `vm/publish-async` answer `409 PUBLISH_INTENT_STALE` for a stale seal, where 10.0.20 answered 500 or queued a job that retried a deterministic error | For an asset already stuck: `POST /api/publisher/clear-job` for the failed job, then `wm/pull-from` (`layer: "swm"`), `wm/finalize`, `swm/share`, `vm/publish-async` |
+| A share whose pointer stamp fails after the commit is reported (#2901, #2959) | A synchronous `/swm/share` can answer a retryable 503 with `Retry-After`, or a post-commit failure, where 10.0.20 answered success and left the asset without its `swmCurrentAssertion` pointer. An async share job shows `failed_retrying`, or `failed` until the recovery sweep requeues it | Retry: the replay is idempotent and keeps the share's operation id. Do not clear a `failed` share job that carries a post-commit diagnostic; it is requeued automatically |
+| Async publish jobs explain why they are not moving (#2942, #2944, #2945, #2952) | Additive. `retryState` gains `blocker { code, summary, missing? }`, and a job that waits for a chain re-check carries `blocker.lastCheck { outcome, at }`. The `503 LIFT_JOB_PENDING_CHAIN_PROOF` body carries the blocker without `lastCheck`. `dkg publisher job` prints `retryState` | None. `clear-job` on a held job abandons this node's tracking only: it neither cancels a sent transaction nor proves that none was sent |
+| A publish that failed before its transaction was recorded retries as the same job (#2940, #2941, #2942, #2944) | Such a failure is recorded as `workspace_unavailable` and retried on backoff within the job's retry budget, where 10.0.20 recorded `tx_submit_timeout` or `rpc_unavailable` and waited for an operator | Jobs stranded on 10.0.20 are not healed: retry them with `POST /api/publisher/retry` |
+| `wm/discard` and `wm/write` on a shared or published asset answer 409 (#1425, #2581) | `409` with `KA_WM_LIFECYCLE_REQUIRED` where 10.0.20 answered 500. The asset is not reopened and nothing is written | Treat it as "no working draft": open a new draft with `wm/pull-from` before writing |
+| Finalized snapshot cleanup is available, off by default (#2906, #2930) | With `sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled: true`, the snapshot file of a completed graph-scoped publish is deleted after a grace period (`finalizedRetentionMs`, 24 hours by default) once no operation references it. Published Verifiable Memory is not touched. It covers publishes completed after it is enabled, not the existing backlog and not legacy entity-scoped publishes. Under hard disk pressure a marked file becomes eligible before its grace period ends | Optional. Enable it on one node first and read `docs/use-dkg/swm-public-snapshot-gc.md`. Use one daemon per snapshot directory |
+| Protocol persistence stores move to `@origintrail-official/dkg-node-store` (#2927) | A new published package that `@origintrail-official/dkg` and `@origintrail-official/dkg-node-ui` depend on. Same `node-ui.db`, same schema version, no migration. `dkg-node-ui` re-exports every moved class from its entry point and from its former deep paths | None for operators. Embedders can keep their imports |
+| Store adapters report SPARQL terms that fail validation (#2763) | Nothing is rendered or sent differently. A malformed IRI, literal or blank-node label in an adapter statement is counted in `dkg.store.sparql_invalid_terms_total` and logged at most once a minute per adapter, operation, position and kind, with its length and a fingerprint, never the term | Watch the counter. A later release rejects such terms instead of rendering them as before |
+| The periodic Verifiable Memory sweep admits at most eight bound graphs per tick (#2820, #2923) | A node bound to many graphs works through them round-robin over several ticks, which leaves the background store slot to live finalization. An explicit full sweep keeps its complete rotation | None |
+| `DKGAgent.stop()` drains Context Graph subscription writes (#2935) | A daemon shutdown with a stuck subscription write can take up to 5 s longer. For SDK embedders, `stop()` can also reject with `ContextGraphSubscriptionPersistShutdownTimeoutError` (`CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT`), which blocks `start()` until `stop()` is retried | Embedders: retry `stop()` on that error |
+
+### Known issues
+
+- **RFC-64 catalog replay loop**: replays that come back incomplete repeat on
+  every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
+  set.
+- **Recovery through the batch stream depends on the Cores that serve it**:
+  only Cores with the switch set serve the stream. A stream that breaks is
+  opened once more with the same Core (#2979); a stream that stalls without
+  closing, or breaks a second time, is not. The assets of an exchange that
+  could not be completed are then asked from other holders over the ordinary
+  protocol. Each such attempt is bounded to two minutes while a stream-capable
+  Core is connected (#2978), but large assets still take minutes each there.
+  Serve the stream from more than one Core that holds the graph.
+- **Two peers that connect while both are still starting do not sync with each
+  other until they reconnect** (#2854): a node learns a peer's protocols when
+  the connection opens. Two nodes that both connected before either
+  registered its handlers recover on reconnect.
+- **A member added to a private Context Graph only by wallet address does not
+  receive its Shared Working Memory until it joins** (#2862): the member needs
+  the graph's metadata, which the curator sends on an approved join request.
+  Have the member send a signed join request; a pre-authorized member is
+  approved automatically.
+- **A restarted member Edge may not reconnect to its private graph's curator
+  Edge** (#2865): it reconnects to bootstrap Cores, which do not serve the
+  graph's private content. Its Shared Working Memory recovery and Verifiable
+  Memory refresh retry until it reaches the curator. Connect it to the
+  curator's multiaddr with `POST /api/connect`.
+- **Copies already stale before the upgrade may wait for another update**
+  (#2866): the update lane initially replays about 500 blocks. Older stale
+  copies, and refresh targets given up after 24 hours, need the next update
+  or an explicit asset fetch. The rate-limited backfill is not in this
+  release.
+- **The successor of an abandoned shared update draft is shared under the same
+  number** (#2964): peers' share gate, the RFC-64 catalog and curator
+  confirmation (`swmAwaitCuratorAck`) do not replace a draft with another of
+  the same number, so peers may keep showing the earlier draft until the
+  update is published, and the replacement replaces the private payload
+  sealed under that number.
+- **A catalog authority refresh can wait for the next five-minute pass on a
+  node with constant store writes** (#2968): a refresh that is composed while
+  the node's authority facts change is composed again, up to six more times
+  within about four seconds. On a node whose unrelated writes never pause,
+  every attempt can be discarded, and a newly approved member then receives
+  the catalog only after the next periodic pass.
+- **Some lifecycle pointer stamps are still only logged when they fail**
+  (#2962): the Verifiable Memory stamps after a confirmed publish, and the
+  shared pointer stamp of `publishAsync` between its share and its publish.
 
 ### Fixed
 
+- **An approved member can subscribe to a private graph that was never
+  registered on chain** (#2871, #2955, #2967): the member held the curator's
+  approval and the graph's metadata, but its node had no accepted authority
+  for the graph, so `/api/subscribe` answered
+  `CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE` and reads and sync were refused. The
+  member's node now accepts a proof scoped to itself: the current durable
+  approval, the curator and owner, the private single-owner metadata, its own
+  membership and delegation, the graph's peer allowlist and the name's proven
+  absence from the finalized chain index. Only query, bootstrap and Shared
+  Working Memory read, host and sync paths use it. Registration, publication
+  and mutation still fail closed, registered chain authority and an accepted
+  signed policy keep precedence, and private Shared Working Memory stays
+  encrypted to the full roster. Fixes the 10.0.20 known issue.
+- **Catch-up of an authorized graph that is not registered on chain is no
+  longer judged by Verifiable Memory it cannot have** (#2966): readiness
+  takes "not applicable" from the same authority read that admits the caller
+  and reports `durablePlane: "not-applicable"`. Nothing is recorded as
+  durably verified, and a graph that is registered later needs Verifiable
+  Memory again. A finalized registration lookup that has resolved also no
+  longer waits for unrelated work of the chain index reader, which made it
+  time out. Short authority read timeouts can still occur.
+- **A store rejection before a publish transaction was sent no longer strands
+  the job** (#2940, #2941): on 10.0.20 a publish whose pre-send bookkeeping
+  was refused by a busy store (`Store scheduler queue wait timeout`) was
+  recorded as `tx_submit_timeout`, "a transaction may be on chain, check it",
+  for a job with no transaction to check. Nothing could resolve it, and it
+  waited at `waitingReason=operator`. When the node can prove that no publish
+  transaction was recorded, the failure is now `workspace_unavailable` and
+  the same job retries on backoff within its retry budget. A failure after
+  the transaction was recorded is still held for a chain check.
+- **A transient RPC failure while the publish transaction is prepared retries
+  as the same job** (#2942, #2944): when every RPC endpoint failed during
+  estimation, population or signing, or the chain reads before
+  acknowledgement collection failed, the job was recorded as
+  `tx_submit_timeout` or `rpc_unavailable` and waited for an operator,
+  although nothing had been sent. It is now retried like the store rejection
+  above. The same error after the transaction was recorded, or one that names
+  a transaction hash, stays held.
+- **Configured RPC URLs no longer appear in publish error messages** (#2945,
+  #2948): a provider's HTTP error quotes the request URL, which can carry an
+  API key, and the write path passed that text on to HTTP clients, logs and
+  persisted job failures. Messages are reduced to host names where they are
+  produced and again where a failure is persisted, for every failure code.
+  The original error stays reachable as `cause`.
+- **A share whose pointer stamp fails after the commit is retried instead of
+  reported as success** (#2901, #2959): a store failure while the
+  `swmCurrentAssertion` pointer was stamped, after the Shared Working Memory
+  commit, was logged and swallowed. The share returned `publishReady: true`,
+  the async job succeeded, and nothing stamped the pointer again. The stamp
+  now rethrows. A failure the store proves never started is retried directly
+  (`failed_retrying` with `nextRetryAt`, or a retryable 503 for a synchronous
+  caller); any other failure is requeued by the recovery sweep. The replay
+  repairs the pointer under the original share operation id.
 - **A Knowledge Asset whose earlier update was finalized but never published
   can be updated again** (#2958, #2961): a draft of an already-published
   Knowledge Asset is now numbered one above its latest *confirmed* version
@@ -23,12 +165,189 @@ All notable changes to the DKG V10 node are documented here. The format is based
   do not yet replace, so peers may keep showing the earlier draft until the
   update is published; and the replacement replaces the private payload sealed
   under that number.
-
+- **A caller that stops waiting no longer gets a healthy managed Oxigraph
+  restarted** (#2933): on the daemon-managed `oxigraph-server` backend, a
+  read whose caller gave up after the request was sent was handed to the
+  deadline coordinator, which killed and restarted Oxigraph 30 s later even
+  when the query had long finished. Any read with its own budget could do
+  this, such as an API client that disconnects from `/api/query` or the
+  per-row reads of the Context Graph list, and queries failed with
+  `STORE_OPERATION_TIMEOUT` during the restart. The abandoned request now
+  runs to its end and the restart is withdrawn when its answer ends cleanly.
+  A query that really outlives the client deadline is still reclaimed, and an
+  abandoned answer with more than 1 MiB left to read is cancelled and still
+  ends in a restart at the deadline.
+- **`wm/discard` and `wm/write` on a shared or published Knowledge Asset
+  answer 409** (#1425, #2581): such an asset has no working draft. The routes
+  returned the engine's `KA_WM_LIFECYCLE_REQUIRED` as an unclassified 500;
+  they now answer 409 with that code, and the asset stays as it was.
+- **An agent restarted in place keeps receiving gossip** (#2934): `stop()`
+  followed by `start()` on one `DKGAgent` built a new gossip manager but kept
+  the records of what was subscribed on the old one, so the restarted agent
+  subscribed nothing and stayed deaf to Shared Working Memory, registration
+  and finalization gossip until the process restarted. The daemon starts one
+  agent per process and was not affected; SDK embedders were.
+- **`stop()` waits for Context Graph subscription writes** (#2935): a
+  subscription write issued just before shutdown could still be running
+  while the daemon closed its stores. `stop()` now drains them, bounded to
+  5 s, and `start()` reopens admission. If the drain times out, the daemon
+  keeps its stores open and retries, as it does for its other drains.
 - **`@origintrail-official/dkg-core/dist/absolute-rfc3987-iri.js` resolves
   again** (#2926): 10.0.19 moved `isAbsoluteRfc3987IriV1` to
   `@origintrail-official/dkg-rdf-utils`, which removed this published
   deep-import path. The old path now re-exports the rdf-utils function; new
   code should import it from rdf-utils.
+
+### Changed
+
+- **The dashboard receives the node-operator token only on trusted local
+  requests, and node-wide operations require a node-admin token** (#2764):
+  the served dashboard page carried the token for every caller that could
+  reach `/ui`. It is now embedded only for a loopback client that names the
+  loopback interface in `Host` and sends no proxy forwarding header; every
+  other caller loads the same page and is asked for a token, which every
+  dashboard API client then uses. Node-wide mutations and reads of node-wide
+  operational data require the same node-admin scope as the other
+  operator-only routes: an agent-scoped token receives `403`, the
+  node-operator token and auth-disabled mode keep full access. The upgrade
+  table lists the routes.
+- **Cores do less store work in the background** (#2820, #2908, #2919,
+  #2923): the Verifiable Memory promotion audit checks 64 signed copies with
+  one query, where a pass over 1,000 copies issued one query per copy. The
+  periodic chain-promote sweep admits at most eight bound graphs per tick and
+  continues round-robin, so graphs that keep deferring no longer crowd out
+  live finalization on the single background store slot. The six store-wide
+  counts behind the dashboard are cached for 30 s and shared by concurrent
+  callers.
+- **A store queue timeout names the work that held the slots** (#2922):
+  `Store scheduler queue wait timeout` named only the operation that waited.
+  The daemon now also logs up to three of the oldest operations admitted at
+  that moment, at most 16 warnings a minute. They are an observation, not a
+  proven cause. The error contract and the 503 body are unchanged.
+- **Store adapters format SPARQL terms through one validated serializer, in
+  observe mode** (#2763): the Oxigraph, SPARQL-HTTP and Blazegraph adapters
+  each built statements by string interpolation, and a malformed IRI lost
+  its breaking characters instead of being rejected, which silently pointed
+  the triple at another resource. All three now use one serializer. A term
+  it rejects is counted (`dkg.store.sparql_invalid_terms_total`) and logged
+  without its content, then rendered exactly as before; well-formed terms
+  render byte-identically. A later release turns the rejection on.
+- **Faster SPARQL result decoding and literal escaping** (#2909, #2910):
+  trusted SELECT results decode about 10% faster in a 1,000-row benchmark,
+  and canonical literal escaping is 13% to 27% faster in its microbenchmark.
+  Outputs are identical.
+- **Store adapters also report relative and RFC 3987-invalid IRIs** (#2797):
+  the counter above saw only terms with characters that break SPARQL. A
+  relative IRI, such as the datatype in `"42"^^<integer>`, is resolved by
+  Oxigraph server and Blazegraph against their own endpoint URL, so what is
+  stored depends on the node; an IRI that RFC 3987 rejects fails the write on
+  Oxigraph and is stored as is on Blazegraph. Both are now counted, as
+  `kind=relative-iri` or `kind=rfc3987-iri` (with `position=datatype` for a
+  literal's datatype), on every adapter write: inserts, graph and subject
+  replacement and the RFC-64 author commit. Still observe mode: nothing is
+  sent differently. Raw `update(sparql)` statements are not covered.
+- **Shared Working Memory materialization skips an unchanged assertion graph**
+  (#1963, #2624): a successful validation is remembered by assertion graph,
+  expected digest and expected quad count, so an unchanged non-empty
+  descriptor needs neither the count nor the read-back again. Only on the
+  embedded Oxigraph backends, where the node observes every write; at most
+  1,024 entries, for 30 s each.
+- **A sync page is decoded once** (#1665, #2611): an accepted response body
+  was decoded by retry validation and again before parsing. A rejected busy
+  attempt also no longer stays in scope of a later accepted page.
+- **A failed network admission probe is warned once** (#1578, #2615): the
+  connection-open wrapper repeated the warning the admission coordinator had
+  already logged, which doubled warning volume under routine peer churn.
+- No behaviour change: the chain adapter's name-registry scan policies are
+  decided per scan mode in one place (#1484, #2613); the catch-up proof
+  model has its own module (#2008, #2598); the RFC-64 author-catalog path
+  verifier normalizes path nodes once (#2631); the async publish failure
+  mapper is an ordered rule table (#1974, #2617); the async-promote worker
+  normalizes its log sink once at its boundary (#2315, #2629); and the
+  publisher decides how a failed execution is recorded in one pure function
+  (#2943, #2950).
+- Repository layout: one-off data and old tooling moved to `misc/`, and more
+  root files moved next to what they configure (#2924, #2957). Anyone who
+  keeps a `<chain>_distribution_ledger.json` under the former root
+  `snapshots/` must move it to `misc/snapshots/` before running
+  `distribute-publisher-trac.ts` again.
+
+### Added
+
+- **Verifiable Memory of a registered public graph can be recovered through a
+  batch stream** (#2939, #2956, #2978, #2979): a node fetched each missing
+  Knowledge Asset as small exact pages over the sync protocol, and the
+  serving node repeated store reads for every page. A serving node can now
+  export a whole asset once, bounded and compressed, and send up to ten
+  assets over one duplex stream, two ahead of the receiver's
+  acknowledgements. The receiver verifies each asset against its chain-bound
+  root, authenticates it and stores it atomically before it acknowledges it,
+  as on the ordinary path, and what it stored before a failure stays stored.
+  The stream is opt-in with `DKG_EXACT_BATCH_STREAM_ENABLED`: a Core serves
+  it, any node requests it, only for graphs registered as public and only
+  from peers that advertise the protocol. A stream that breaks is opened once
+  more with the same peer for the assets not yet stored, after waiting up to
+  15 s for the peer to be connected again; a refusal, an asset the node
+  rejects, a cancellation and a second break are not retried. While a
+  stream-capable Core is connected, an attempt on a peer without the stream
+  is bounded to two minutes; proven holders and every fourth attempt for an
+  asset on a peer keep the ordinary budget. Every exchange that stops early
+  logs one `Exact batch requester failure` line with where the failure came
+  from (`origin=stream`, `refusal`, `cancelled` or `other`) and the last
+  stage that completed.
+- **A recovering node can prepare its next batch** (#2946, #2947, #2954,
+  #2956): around each exchange a recovery pass reads how large its targets
+  are and whether the graph is registered as public, and those chain reads
+  wait for the node's background request budget. Sizing reads that timed out
+  there cut a ten-asset batch to three or four, and one missed
+  registered-public read moved a whole pass off the stream. With
+  `DKG_VM_RECOVERY_PREFETCH_ENABLED=1` (or `vmRecoveryPrefetchEnabled: true`)
+  the node sizes the next batch in advance with at most two reads in flight,
+  keeps those hints for at most 60 s and uses them only to decide how much to
+  fetch. It asks once more for the registered-public answer when that was
+  unavailable and a stream-capable peer is connected, and reads it once per
+  pass instead of twice. Every asset is still authenticated with its own
+  reads when it is stored. Independently of the switch, recovery no longer
+  reads the block header of each publish receipt, which it never used. On an
+  earlier build of this change, one full cold run of a 564-asset graph
+  against the live network, with the stream on in both runs, recovered all
+  564 assets in about 100 minutes with preparation and 193 in two hours
+  without.
+- **Recovery reports where its time goes** (#2947): every exact recovery
+  batch and pass logs its phases (roster, transport, authority, peer
+  readiness, sizing, exchange, post-fetch) with the background chain requests
+  each made and how long they waited, and one line per attempt names the wire
+  it chose. The chain adapter keeps bounded histograms of local admission
+  wait and endpoint latency per request class. Always on; observation only.
+- **Finalized snapshots can be cleaned up after a grace period** (#2906,
+  #2930): a completed graph-scoped publish removed its Shared Working Memory
+  graphs but left its snapshot file, which was collected only under disk
+  pressure. With `sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled`
+  the publish records a retirement marker that survives restart, and the
+  background collector deletes the file and its page index after
+  `finalizedRetentionMs` (24 hours by default) once no operation references
+  the digest. A failed, missing or timed-out reference check keeps the file.
+  A Core's own StorageACK copy rows for the published asset no longer keep
+  the file referenced. The collector's position survives restarts, and under
+  hard disk pressure a marked file becomes eligible before its grace period
+  ends. Off by default; see `docs/use-dkg/swm-public-snapshot-gc.md`.
+- **An async publish job says why it is not moving** (#2942, #2944, #2945,
+  #2952): `retryState` gains a derived `blocker { code, summary, missing? }`.
+  For a held job it names every gap of the record (hash, signer, claim,
+  pinned identity, operation marker, CREATE nonce, UPDATE intended root) or
+  whether this node can act on a complete one (`recovery_not_configured`,
+  `chain_recheck_pending`); for a retryable job without a transaction it says
+  why nothing automatic moves it (`not_auto_retryable`, `auto_retry_disabled`,
+  `retry_not_scheduled`); and `retry_budget_spent`. A job that waits for a
+  chain re-check also carries `lastCheck { outcome, at }`: the chain's latest
+  verdict, or a reason such as `rpc-unavailable` or `absence-unproven`, kept
+  in memory per running daemon. `dkg publisher job` prints `retryState`. See
+  *Held jobs* in `docs/use-dkg/async-publisher-wallets.md`.
+- **`@origintrail-official/dkg-node-store`** (#2927): the daemon's protocol
+  persistence (outbox, message idempotency, sync checkpoints, changelog
+  cursors and era guard, Knowledge Asset numbers, the chain-event log and its
+  cursors) moves out of the dashboard package into its own package. No
+  behaviour change: the stores still use `node-ui.db` and its schema.
 
 ## [10.0.20] - 2026-09-28
 
