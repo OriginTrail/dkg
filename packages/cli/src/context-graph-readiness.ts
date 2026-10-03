@@ -16,11 +16,11 @@ import {
   catchupPlaneProvenBySelectedScope,
   catchupPlaneProvenByUnanimousEmpty,
   catchupPlaneReady,
-  type CatchupJobResult,
   type CatchupPlaneCompletionEvidence,
-} from './catchup-runner.js';
+} from './catchup-proof.js';
+import type { CatchupJobResult } from './catchup-runner.js';
 
-export { catchupPlaneCompletedWithoutFailure } from './catchup-runner.js';
+export { catchupPlaneCompletedWithoutFailure } from './catchup-proof.js';
 
 export const CONTEXT_GRAPH_READINESS_VERSION = 1;
 

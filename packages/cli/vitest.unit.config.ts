@@ -127,6 +127,7 @@ export default defineConfig({
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',
+          'test/catchup-proof.test.ts',
           'test/catchup-runner.test.ts',
           'test/catchup-runner-worker-impl.test.ts',
           'test/catchup-runner-worker-lifecycle.test.ts',
@@ -156,6 +157,8 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          // #2315 — privacy-bounded diagnostics and hostile logger isolation.
+          'test/async-promote-worker-diagnostics.test.ts',
           'test/async-promote-error-classification.test.ts',
           'test/async-promote-publisher-recovery.test.ts',
           'test/async-promote-swm-pointer-recovery.test.ts',

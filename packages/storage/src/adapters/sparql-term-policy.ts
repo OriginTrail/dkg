@@ -12,6 +12,10 @@
  * term is rendered exactly as before validation existed. Until the
  * hard-reject flip, that still means stripping characters from a malformed
  * IRI.
+ *
+ * On top of core's grammar, storage requires every IRI, a literal's datatype
+ * included, to be an absolute RFC 3987 IRI (see {@link absoluteIriFailure}).
+ * Such a term passes the grammar, so observe mode sends its rendering as is.
  */
 import { createHmac, randomBytes } from 'node:crypto';
 import {
@@ -22,10 +26,25 @@ import {
   type SparqlTermKind,
   type SparqlTermPosition,
 } from '@origintrail-official/dkg-core';
+import {
+  isAbsoluteRfc3987IriV1,
+  parseRdfLiteralLexicalTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 import type { StoreOperation } from '../store-operation-outcome.js';
 
-/** Metric position label: a term position, or a `deleteBySubjectPrefix` prefix. */
-export type ObservedTermPosition = SparqlTermPosition | 'subject-prefix';
+/**
+ * Metric position label: a term position, a typed literal's `datatype`, or a
+ * `deleteBySubjectPrefix` prefix.
+ */
+export type ObservedTermPosition = SparqlTermPosition | 'datatype' | 'subject-prefix';
+
+/**
+ * Metric kind label: the kind of term core's grammar rejected, or the storage
+ * absolute-IRI rule broken by a term the grammar accepted: `relative-iri` (no
+ * scheme) or `rfc3987-iri` (a scheme, but not RFC 3987). See
+ * {@link absoluteIriFailure}.
+ */
+export type ObservedTermKind = SparqlTermKind | 'relative-iri' | 'rfc3987-iri';
 
 /** The positions an adapter statement fills only with an IRI. */
 export type IriTermPosition = 'graph' | 'subject' | 'predicate';
@@ -58,7 +77,7 @@ export type SparqlTermEnforcement = 'observe' | 'reject';
 export interface InvalidSparqlTerm {
   readonly site: SparqlTermSite;
   readonly position: ObservedTermPosition;
-  readonly kind: SparqlTermKind;
+  readonly kind: ObservedTermKind;
   readonly enforcement: SparqlTermEnforcement;
   readonly length: number;
   readonly fingerprint: string;
@@ -89,9 +108,17 @@ export interface SparqlTermRenderer {
   rdf(term: string, position: 'subject' | 'object', blankNodes: 'allow' | 'reject'): string;
   /**
    * A `deleteBySubjectPrefix` prefix. Pre-validation form: a string literal
-   * that escapes only `\` and `"`.
+   * that escapes only `\` and `"`. A prefix is not a whole IRI, so the
+   * absolute-IRI rule does not apply to it.
    */
   prefix(prefix: string): string;
+  /**
+   * Only the absolute-IRI rule, for a term written without this renderer: by
+   * a builder that checks the rest of its syntax itself (atomic replace,
+   * RFC-64 commit) or by an N-Quads load. Renders nothing, so the write is
+   * unchanged.
+   */
+  checkIri(term: string, position: SparqlTermPosition): void;
 }
 
 export interface SparqlTermPolicy {
@@ -105,22 +132,21 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
     enforcement,
     renderer(site, onInvalidTerm) {
       /**
-       * A term failed validation: tell the observer, then render its
-       * pre-validation form or, in reject mode, throw. Any error other than a
-       * {@link SparqlTermValidationError} is a bug, not a bad term, and
-       * propagates.
+       * Tell the observer about an invalid term and, in reject mode, throw.
+       * The error keeps core's term kinds: `termKind` is the kind of term that
+       * failed, which for an absolute-IRI failure is the IRI, or the literal
+       * whose datatype it is.
        */
       function invalid(
-        error: unknown,
+        kind: ObservedTermKind,
+        termKind: SparqlTermKind,
         term: string,
         position: ObservedTermPosition,
-        legacy: (term: string) => string,
-      ): string {
-        if (!(error instanceof SparqlTermValidationError)) throw error;
+      ): void {
         const invalidTerm: InvalidSparqlTerm = {
           site,
           position,
-          kind: error.kind,
+          kind,
           enforcement,
           length: term.length,
           fingerprint: invalidTermFingerprint(term),
@@ -129,16 +155,41 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
         if (enforcement === 'reject') {
           // A fresh error, without `cause`: the validator's message quotes the term.
           throw new SparqlTermValidationError(
-            `${site.adapter}.${site.operation}: invalid ${invalidTerm.kind} in SPARQL ${position} ` +
+            `${site.adapter}.${site.operation}: invalid ${kind} in SPARQL ${position} ` +
               `position (${describeInvalidTerm(invalidTerm)})`,
-            invalidTerm.kind,
+            termKind,
           );
         }
+      }
+
+      /**
+       * A term failed core's grammar: report it, then render its
+       * pre-validation form. Any error other than a
+       * {@link SparqlTermValidationError} is a bug, not a bad term, and
+       * propagates.
+       */
+      function failed(
+        error: unknown,
+        term: string,
+        position: ObservedTermPosition,
+        legacy: (term: string) => string,
+      ): string {
+        if (!(error instanceof SparqlTermValidationError)) throw error;
+        invalid(error.kind, error.kind, term, position);
         return legacy(term);
+      }
+
+      /** Report the IRI a term names if it breaks {@link absoluteIriFailure}'s rule. */
+      function checkIri(term: string, position: SparqlTermPosition): void {
+        const named = namedIri(term, position);
+        if (named === null) return;
+        const kind = absoluteIriFailure(named.iri);
+        if (kind !== null) invalid(kind, named.termKind, term, named.position);
       }
 
       return {
         iri(term, position) {
+          let rendered: string;
           try {
             // Never a literal, even if an untyped caller passes the object position.
             if (term.startsWith('"')) {
@@ -149,25 +200,31 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
             if (position === 'graph' && unwrapIri(term) !== term) {
               throw new SparqlTermValidationError('A storage graph name must be a bare IRI', 'iri');
             }
-            return formatSparqlTerm(term, { position });
+            rendered = formatSparqlTerm(term, { position });
           } catch (error) {
-            return invalid(error, term, position, legacyStrippedIri);
+            return failed(error, term, position, legacyStrippedIri);
           }
+          checkIri(term, position);
+          return rendered;
         },
         rdf(term, position, blankNodes) {
+          let rendered: string;
           try {
-            return formatSparqlTerm(term, { position, blankNodes });
+            rendered = formatSparqlTerm(term, { position, blankNodes });
           } catch (error) {
-            return invalid(error, term, position, legacyRdfTerm);
+            return failed(error, term, position, legacyRdfTerm);
           }
+          checkIri(term, position);
+          return rendered;
         },
         prefix(prefix) {
           try {
             return formatIriPrefix(prefix);
           } catch (error) {
-            return invalid(error, prefix, 'subject-prefix', legacyStringLiteral);
+            return failed(error, prefix, 'subject-prefix', legacyStringLiteral);
           }
         },
+        checkIri,
       };
     },
   };
@@ -180,9 +237,48 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
  * `dkg.store.sparql_invalid_terms_total` staying at zero, make this
  * `createSparqlTermPolicy('reject')` and delete the legacy renderers. Before
  * flipping, audit callers that pass `<…>`-wrapped graph names: the graph
- * position accepts only a bare IRI.
+ * position accepts only a bare IRI. The flip also makes the atomic-replace,
+ * RFC-64 and N-Quads writes reject a relative or RFC 3987-invalid IRI before
+ * sending it (`checkIris` in `sparql-statements.ts`).
  */
 export const ADAPTER_SPARQL_TERM_POLICY = createSparqlTermPolicy('observe');
+
+// RFC 3986 §3.1: a letter, then letters, digits, `+`, `-` or `.`, then `:`.
+const IRI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+
+/**
+ * The storage rule on top of core's grammar: an IRI must be an absolute RFC
+ * 3987 IRI. Returns the kind an IRI fails as, or null.
+ * - `relative-iri`: no scheme. SPARQL accepts it, and the endpoint resolves
+ *   it against its own URL: oxigraph-server stores `"42"^^<integer>` as
+ *   `"42"^^<http://127.0.0.1:7920/integer>`, so every node stores different
+ *   data. N-Quads loads reject it.
+ * - `rfc3987-iri`: a scheme, but RFC 3987 rejects the rest (`…/%zz`). Oxigraph
+ *   fails the write; Blazegraph stores it verbatim.
+ */
+function absoluteIriFailure(iri: string): 'relative-iri' | 'rfc3987-iri' | null {
+  if (isAbsoluteRfc3987IriV1(iri)) return null;
+  return IRI_SCHEME.test(iri) ? 'rfc3987-iri' : 'relative-iri';
+}
+
+/**
+ * The IRI a term names, where, and the kind of term holding it: the term
+ * itself, bare or bracketed, or a typed literal's datatype. A blank node, or
+ * any other literal, names none.
+ */
+function namedIri(
+  term: string,
+  position: SparqlTermPosition,
+): { iri: string; position: ObservedTermPosition; termKind: SparqlTermKind } | null {
+  if (term.startsWith('_:')) return null;
+  if (term.startsWith('"')) {
+    const suffix = parseRdfLiteralLexicalTerm(term)?.suffix;
+    return suffix?.kind === 'datatype'
+      ? { iri: suffix.datatype, position: 'datatype', termKind: 'literal' }
+      : null;
+  }
+  return { iri: unwrapIri(term), position, termKind: 'iri' };
+}
 
 // A fingerprint keyed per process lets an operator match repeats in one
 // node's logs, but it cannot be checked against guessed values or correlated
