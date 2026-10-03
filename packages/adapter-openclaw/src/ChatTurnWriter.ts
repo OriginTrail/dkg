@@ -861,10 +861,11 @@ export class ChatTurnWriter {
       // valid pair, the older pairs come from a conversation the adapter
       // never observed: OpenClaw retains the channel transcript across
       // sessions while DKG state can be wiped independently. Walking those
-      // historical pairs replays them; the daemon does not idempotently
-      // dedupe (each storeChatExchange mints fresh userMsg/assistantMsg
-      // UUIDs even when turnId matches), so each replayed pair bloats the
-      // chat-turns assertion by ~20 triples. Persist only the latest pair;
+      // historical pairs replays them. The daemon dedupes a resent
+      // (sessionId, turnId), but a wiped DKG home holds no earlier turn to
+      // match, so each replayed pair is a new turn and its storeChatExchange
+      // mints fresh userMsg/assistantMsg UUIDs, bloating the chat-turns
+      // assertion by ~20 triples. Persist only the latest pair;
       // bumpWatermark advances to its index and MAX semantics implicitly
       // claim earlier indices as done. Historical pairs remain in the
       // OpenClaw transcript for context-window recall — they just do not

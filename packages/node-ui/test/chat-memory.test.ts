@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { isSafeIri } from '@origintrail-official/dkg-core';
 import { ChatMemoryManager, decodeRdfStringLiteral } from '../src/chat-memory.js';
 
 interface TrackingFn {
@@ -196,7 +197,10 @@ describe('ChatMemoryManager', () => {
   });
 
   it('records chat turn persistence transitions without appending messages', async () => {
-    mockQuery.returns.push({ bindings: [] });
+    // The second answer is the lookup of the turn's subject: a turn stored
+    // before session-scoped subjects sits under `turn:<turnId>` and keeps
+    // receiving its transitions there.
+    mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: 'urn:dkg:chat:turn:turn-1' }] });
 
     await manager.recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', {
       assistantReply: 'Final reply',
@@ -772,6 +776,7 @@ describe('ChatMemoryManager', () => {
       {
         bindings: [
           {
+            turn: 'urn:dkg:chat:turn:t2',
             tid: '"t2"',
             ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
           },
@@ -838,7 +843,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -865,7 +870,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -892,7 +897,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -990,7 +995,7 @@ describe('ChatMemoryManager WM write discipline', () => {
 
   it('recordChatTurnPersistenceTransition writes to chat-turns with the manager agentAddress', async () => {
     const manager = createManager();
-    mockQuery.returns.push({ bindings: [] });
+    mockQuery.returns.push({ bindings: [] }, { bindings: [] });
 
     await manager.recordChatTurnPersistenceTransition('s-transition', 'turn-9', 'stored');
 
@@ -1107,5 +1112,538 @@ describe('ChatMemoryManager WM write discipline', () => {
 
     expect(mockWriteAssertion.calls.length).toBe(2);
     expect(mockShare.calls).toHaveLength(0);
+  });
+});
+
+// A turn id is only unique inside its session, and the durable state of a turn
+// (persistence state, message links, transitions) hangs off the turn's subject.
+// A new turn is therefore written under one subject per (sessionId, turnId),
+// while turns stored before that (`urn:dkg:chat:turn:<turnId>`) stay where they
+// are and are found through their session link. The cross-session behavior
+// against a real store lives in packages/cli's openclaw-persist-turn e2e.
+describe('ChatMemoryManager chat-turn identity: one subject per session and turn id', () => {
+  const CHAT = 'urn:dkg:chat:';
+  const DKG = 'http://dkg.io/ontology/';
+  const SCHEMA_ORG = 'http://schema.org/';
+  const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+  const LEGACY_TURN_PREFIX = `${CHAT}turn:`;
+  const SCOPED_TURN_PREFIX = `${CHAT}session-turn:`;
+  const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+  const XSD_DATETIME_IRI = 'http://www.w3.org/2001/XMLSchema#dateTime';
+
+  let mockQuery: TrackingFn;
+  let mockWriteAssertion: TrackingFn;
+
+  beforeEach(() => {
+    mockQuery = trackFn(undefined);
+    mockWriteAssertion = trackFn({ written: 0 });
+  });
+
+  function createManager() {
+    return new ChatMemoryManager(
+      {
+        query: mockQuery,
+        createAssertion: trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false }),
+        writeAssertion: mockWriteAssertion,
+        createContextGraph: trackFn(undefined),
+        listContextGraphs: trackFn([{ id: 'agent-context', name: 'Agent Context' }]),
+      },
+      { apiKey: '' },
+      { agentAddress: 'did:dkg:agent:test' },
+    );
+  }
+
+  type Quad = { subject: string; predicate: string; object: string };
+  const lastWrittenQuads = (): Quad[] => mockWriteAssertion.calls.at(-1)![2] as Quad[];
+
+  /** Write one turn through the manager and hand back the quads it wrote. */
+  async function storeTurn(sessionId: string, turnId: string): Promise<Quad[]> {
+    mockQuery.returns.push({ bindings: [] });
+    await createManager().storeChatExchange(sessionId, 'question', 'answer', undefined, { turnId });
+    return lastWrittenQuads();
+  }
+
+  /** The subject the manager names the turn's ChatTurn resource. */
+  const turnSubjectOf = (quads: Quad[]): string =>
+    quads.find((quad) => quad.predicate === RDF_TYPE_IRI && quad.object === `${DKG}ChatTurn`)!.subject;
+
+  describe('a new turn', () => {
+    it('is named after its session and turn id, in a namespace no legacy turn subject can share', async () => {
+      const quads = await storeTurn('session-1', 'turn-1');
+      const subject = turnSubjectOf(quads);
+
+      expect(subject.startsWith(SCOPED_TURN_PREFIX)).toBe(true);
+      expect(subject.slice(SCOPED_TURN_PREFIX.length)).toMatch(/^[0-9a-f]{64}$/);
+      expect(subject.startsWith(LEGACY_TURN_PREFIX)).toBe(false);
+      expect(subject).not.toContain('turn-1');
+    });
+
+    it('carries every fact of the turn on that one subject, and keeps the caller-visible ids as literals', async () => {
+      const quads = await storeTurn('session-1', 'turn-1');
+      const subject = turnSubjectOf(quads);
+      const onTurn = quads.filter((quad) => quad.subject === subject);
+
+      expect(onTurn.map((quad) => quad.predicate).sort()).toEqual([
+        `${DKG}hasAssistantMessage`,
+        `${DKG}hasUserMessage`,
+        `${DKG}persistenceState`,
+        `${DKG}turnId`,
+        RDF_TYPE_IRI,
+        `${SCHEMA_ORG}dateCreated`,
+        `${SCHEMA_ORG}isPartOf`,
+      ].sort());
+      expect(onTurn.find((quad) => quad.predicate === `${SCHEMA_ORG}isPartOf`)?.object).toBe(`${CHAT}session:session-1`);
+      expect(onTurn.find((quad) => quad.predicate === `${DKG}turnId`)?.object).toBe('"turn-1"');
+      // The messages keep the plain turn id, which is what getSession joins on.
+      const messages = quads.filter((quad) => quad.predicate === RDF_TYPE_IRI && quad.object === `${SCHEMA_ORG}Message`);
+      expect(messages).toHaveLength(2);
+      for (const message of messages) {
+        expect(quads.find((quad) => quad.subject === message.subject && quad.predicate === `${DKG}turnId`)?.object).toBe('"turn-1"');
+      }
+      // Nothing is left under a subject named after the bare turn id.
+      expect(quads.some((quad) => quad.subject === `${LEGACY_TURN_PREFIX}turn-1`)).toBe(false);
+    });
+
+    it('gets the same subject for the same session and turn id, a different one for a different session or turn', async () => {
+      const first = turnSubjectOf(await storeTurn('session-a', 'turn-1'));
+      const again = turnSubjectOf(await storeTurn('session-a', 'turn-1'));
+      const padded = turnSubjectOf(await storeTurn('session-a', '  turn-1 '));
+      const otherSession = turnSubjectOf(await storeTurn('session-b', 'turn-1'));
+      const otherTurn = turnSubjectOf(await storeTurn('session-a', 'turn-2'));
+
+      expect(again).toBe(first);
+      expect(padded).toBe(first);
+      expect(otherSession).not.toBe(first);
+      expect(otherTurn).not.toBe(first);
+      expect(otherSession).not.toBe(otherTurn);
+    });
+
+    it('never shares a subject between two (sessionId, turnId) pairs, and is always a safe IRI', async () => {
+      const pairs: Array<[string, string]> = [
+        ['a:b', 'c'],
+        ['a', 'b:c'],
+        ['a\n', 'b'],
+        ['a', '\nb'],
+        ['s', 't"<>{}|^` \\'],
+        ['s ', 't'],
+        ['s', 't'],
+        ['s\ud800', 't'],
+        ['s\ud801', 't'],
+        ['openclaw:dkg-ui', 'turn:1'],
+        ['openclaw', 'dkg-ui:turn:1'],
+        ['', 't'],
+      ];
+      const subjects = new Set<string>();
+      for (const [sessionId, turnId] of pairs) {
+        const subject = turnSubjectOf(await storeTurn(sessionId, turnId));
+        expect(isSafeIri(subject), `${JSON.stringify([sessionId, turnId])}`).toBe(true);
+        subjects.add(subject);
+      }
+      expect(subjects.size).toBe(pairs.length);
+    });
+
+    it('is found by the reads through the session link and turn id literal, never by a subject named after the id', async () => {
+      const manager = createManager();
+      mockQuery.returns.push({ bindings: [] }, { bindings: [] }, { bindings: [] });
+
+      await manager.getChatTurnPersistenceState('session-1', ' turn-1 ');
+      await manager.hasChatTurn('session-1', 'turn-1');
+      const reads = mockQuery.calls.slice(-2).map((call) => String(call[0]));
+
+      expect(reads).toHaveLength(2);
+      for (const read of reads) {
+        expect(read).toContain(`<${SCHEMA_ORG}isPartOf> <${CHAT}session:session-1>`);
+        expect(read).toContain(`<${DKG}turnId> "turn-1"`);
+        expect(read).not.toContain(LEGACY_TURN_PREFIX);
+        expect(read).not.toContain(SCOPED_TURN_PREFIX);
+      }
+    });
+  });
+
+  describe('getChatTurnPersistenceState', () => {
+    const SESSION = `${CHAT}session:session-1`;
+    const OTHER_SESSION = `${CHAT}session:session-2`;
+    const LEGACY = `${LEGACY_TURN_PREFIX}turn-1`;
+    const SCOPED = `${SCOPED_TURN_PREFIX}${'ab'.repeat(32)}`;
+
+    /** The state the manager reports for `(session-1, turn-1)` when the store answers `rows`. */
+    async function stateFor(rows: Array<Record<string, string>>) {
+      mockQuery.returns.push({ bindings: [] }, { bindings: rows });
+      return createManager().getChatTurnPersistenceState('session-1', 'turn-1');
+    }
+
+    it('asks which sessions the turn subject is linked to', async () => {
+      await stateFor([]);
+
+      expect(String(mockQuery.calls.at(-1)![0])).toContain(`?turn <${SCHEMA_ORG}isPartOf> ?linkedSession`);
+    });
+
+    it('reports the state of a subject only this session is linked to, legacy or session-scoped', async () => {
+      expect(await stateFor([{ turn: LEGACY, linkedSession: SESSION, persistenceState: '"pending"' }])).toBe('pending');
+      expect(await stateFor([{ turn: `<${SCOPED}>`, linkedSession: `<${SESSION}>`, persistenceState: '"failed"', transitionState: '"stored"' }]))
+        .toBe('stored');
+    });
+
+    it('reports nothing for a legacy subject another session is linked to as well', async () => {
+      // One row per (linked session, state): the subject holds both sessions' states.
+      const shared = [SESSION, OTHER_SESSION].flatMap((linkedSession) =>
+        ['"stored"', '"pending"'].map((persistenceState) => ({ turn: LEGACY, linkedSession, persistenceState })));
+
+      expect(await stateFor(shared)).toBeNull();
+    });
+
+    it('reads the session-scoped subject and ignores the shared legacy one beside it', async () => {
+      expect(await stateFor([
+        { turn: LEGACY, linkedSession: SESSION, persistenceState: '"stored"' },
+        { turn: LEGACY, linkedSession: OTHER_SESSION, persistenceState: '"stored"' },
+        { turn: SCOPED, linkedSession: SESSION, persistenceState: '"pending"' },
+      ])).toBe('pending');
+    });
+  });
+
+  describe('recordChatTurnPersistenceTransition', () => {
+    const transitionTarget = (): string =>
+      lastWrittenQuads().find((quad) => quad.predicate === `${DKG}updatesTurn`)!.object;
+
+    it('attaches the transition to the session-scoped subject a new turn was written under', async () => {
+      const scoped = turnSubjectOf(await storeTurn('session-1', 'turn-1'));
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: scoped }] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', { assistantReply: 'done' });
+
+      expect(transitionTarget()).toBe(scoped);
+    });
+
+    it('attaches the transition to the legacy subject a turn stored before the scheme sits under', async () => {
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: `${LEGACY_TURN_PREFIX}turn-1` }] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', { assistantReply: 'done' });
+
+      expect(transitionTarget()).toBe(`${LEGACY_TURN_PREFIX}turn-1`);
+    });
+
+    it('looks the subject up through the session and the trimmed turn id, so another session that reuses the id is never targeted', async () => {
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: `${LEGACY_TURN_PREFIX}turn-1` }] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', ' turn-1 ', 'stored');
+      const lookup = String(mockQuery.calls.at(-1)![0]);
+
+      expect(lookup).toContain(`<${RDF_TYPE_IRI}> <${DKG}ChatTurn>`);
+      expect(lookup).toContain(`<${SCHEMA_ORG}isPartOf> <${CHAT}session:session-1>`);
+      expect(lookup).toContain(`<${DKG}turnId> "turn-1"`);
+      expect(lookup).toContain('LIMIT 1');
+      expect(mockQuery.calls.at(-1)![1]).toMatchObject({ view: 'working-memory', assertionName: 'chat-turns' });
+    });
+
+    it('falls back to the subject a new turn of that session would get when the turn does not exist', async () => {
+      const wouldBe = turnSubjectOf(await storeTurn('session-1', 'turn-1'));
+      mockQuery.returns.push({ bindings: [] }, { bindings: [] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored');
+
+      expect(transitionTarget()).toBe(wouldBe);
+    });
+
+    it('does not follow a lookup answer that is not a safe IRI', async () => {
+      const wouldBe = turnSubjectOf(await storeTurn('session-1', 'turn-1'));
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: 'not an iri<' }] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored');
+
+      expect(transitionTarget()).toBe(wouldBe);
+    });
+
+    it('writes nothing, and looks nothing up, for a blank turn id', async () => {
+      mockQuery.returns.push({ bindings: [] });
+      mockWriteAssertion.calls.length = 0;
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', '   ', 'stored');
+
+      expect(mockWriteAssertion.calls).toHaveLength(0);
+      expect(mockQuery.calls).toHaveLength(1);
+    });
+  });
+
+  describe('getSessionGraphDelta', () => {
+    const integer = (n: number) => `"${n}"^^<${XSD_INTEGER}>`;
+    const dateTime = (iso: string) => `"${iso}"^^<${XSD_DATETIME_IRI}>`;
+
+    /** The store's answers to a delta request for turn `t2`, whose subject the first lookup names. */
+    function pushDeltaAnswers(turnSubject: string | undefined) {
+      mockQuery.returns.push(
+        { bindings: [] },
+        { bindings: [{ c: integer(2) }] },
+        { bindings: [{ ...(turnSubject ? { turn: turnSubject } : {}), tid: '"t2"', ts: dateTime('2026-03-08T10:00:10Z') }] },
+        { bindings: [{ latestTurnId: '"t2"', latestTs: dateTime('2026-03-08T10:00:10Z') }] },
+        { bindings: [{ previousTurnId: '"t1"' }] },
+        { bindings: [{ c: integer(2) }] },
+        { bindings: [{ user: `${CHAT}msg:user-2`, assistant: `${CHAT}msg:assistant-2` }] },
+        { bindings: [{ s: `${CHAT}msg:user-2` }, { s: `${CHAT}msg:assistant-2` }] },
+        { quads: [{ subject: turnSubject ?? '', predicate: `${DKG}turnId`, object: '"t2"' }] },
+      );
+    }
+
+    it.each([
+      ['a session-scoped subject', `${SCOPED_TURN_PREFIX}${'ab'.repeat(32)}`],
+      ['a legacy subject', `${LEGACY_TURN_PREFIX}t2`],
+    ])('follows the subject the turn is stored under: %s', async (_label, subject) => {
+      pushDeltaAnswers(subject);
+
+      const delta = await createManager().getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+      const queries = mockQuery.calls.map((call) => String(call[0]));
+
+      expect(delta.mode).toBe('delta');
+      expect(delta.watermark.appliedTurnId).toBe('t2');
+      // Found through the session link and the turn id, not built from the id.
+      expect(queries[2]).toContain(`<${SCHEMA_ORG}isPartOf> <${CHAT}session:s-graph>`);
+      expect(queries[2]).toContain(`<${DKG}turnId> "t2"`);
+      expect(queries[2]).not.toContain(LEGACY_TURN_PREFIX);
+      // ...and then used for everything that hangs off the turn.
+      expect(queries[6]).toContain(`<${subject}> <${DKG}hasUserMessage> ?user`);
+      expect(queries[6]).toContain(`<${subject}> <${DKG}hasAssistantMessage> ?assistant`);
+      expect(queries[7]).toContain(`BIND(<${subject}> AS ?s)`);
+      expect(queries[8]).toContain(`<${subject}>`);
+    });
+
+    // One case per test: `beforeEach` gives each a fresh mock, so the lookup a
+    // case reads is the one it queued, not an answer an earlier case left over.
+    it.each([
+      ['no subject', undefined],
+      ['a subject that is not an IRI', 'not an iri<'],
+    ])('asks for a full refresh when the store names no usable subject for the turn: %s', async (_label, subject) => {
+      pushDeltaAnswers(subject);
+
+      const delta = await createManager().getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+
+      expect(delta).toMatchObject({ mode: 'full_refresh_required', reason: 'turn_not_found', triples: [] });
+      // The lookup did find turn t2, so the refresh comes from the subject it
+      // named: nothing was read through that subject.
+      expect(String(mockQuery.calls[2]![0])).toContain(`<${DKG}turnId> "t2"`);
+      expect(mockQuery.calls).toHaveLength(4);
+    });
+  });
+});
+
+// A turn that reported `pending` or `failed` and completed later is recorded as a
+// `stored` transition carrying the final reply, not as a second exchange, so the
+// assistant Message keeps the reply of the first report. `getSession` resolves
+// the reply from the transition; the session list (`getRecentChats`, behind
+// GET /api/memory/sessions) has to as well, through the same resolver. The real
+// store, and the two routes side by side, are covered in packages/cli's
+// openclaw-persist-turn e2e.
+describe('ChatMemoryManager.getRecentChats: replies of turns completed by transition', () => {
+  const CHAT = 'urn:dkg:chat:';
+  const DKG = 'http://dkg.io/ontology/';
+  const SESSION_A = `${CHAT}session:s-a`;
+  const SESSION_B = `${CHAT}session:s-b`;
+  const stamp = (n: number) => `"2026-03-08T10:00:${String(n).padStart(2, '0')}Z"`;
+
+  let mockQuery: TrackingFn;
+
+  beforeEach(() => {
+    mockQuery = trackFn(undefined);
+  });
+
+  function createManager() {
+    return new ChatMemoryManager(
+      {
+        query: mockQuery,
+        createAssertion: trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false }),
+        writeAssertion: trackFn({ written: 0 }),
+        createContextGraph: trackFn(undefined),
+        listContextGraphs: trackFn([{ id: 'agent-context', name: 'Agent Context' }]),
+      },
+      { apiKey: '' },
+      { agentAddress: 'did:dkg:agent:test' },
+    );
+  }
+
+  /** The URI of the message `message(session, ..., n)` returns. */
+  const uriOf = (session: string, n: number) => `${CHAT}msg:${session.slice(-1)}-${n}`;
+  /** One row of the list query for a message; `n` orders it and names its URI. */
+  const message = (session: string, author: 'user' | 'agent', text: string, n: number) => ({
+    session,
+    m: uriOf(session, n),
+    author: `${CHAT}actor:${author}`,
+    text: JSON.stringify(text),
+    ts: stamp(n),
+  });
+  /** The same message joined to one transition of the turn it completes. */
+  const completedBy = (row: ReturnType<typeof message>, state: string, reply: string) => ({
+    ...row,
+    transitionState: JSON.stringify(state),
+    transitionAssistantReply: JSON.stringify(reply),
+  });
+
+  /** The store's answers: known sessions, the session list, then the one query for messages and completed turns. */
+  function answers(sessions: string[], rows: unknown[]) {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: sessions.map((s) => ({ s, sid: JSON.stringify(s.slice(`${CHAT}session:`.length)) })) },
+      { bindings: rows },
+    );
+  }
+
+  it('shows the reply of the stored transition, and keeps one exchange per turn', async () => {
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'question', 1),
+      completedBy(message(SESSION_A, 'agent', 'working on it', 2), 'stored', 'the final answer'),
+      message(SESSION_A, 'user', 'and another', 3),
+      message(SESSION_A, 'agent', 'stored at once', 4),
+    ]);
+
+    const chats = await createManager().getRecentChats(10);
+
+    expect(chats).toEqual([{
+      session: 's-a',
+      messages: [
+        { author: 'user', text: 'question', ts: '2026-03-08T10:00:01Z' },
+        { author: 'agent', text: 'the final answer', ts: '2026-03-08T10:00:02Z' },
+        { author: 'user', text: 'and another', ts: '2026-03-08T10:00:03Z' },
+        { author: 'agent', text: 'stored at once', ts: '2026-03-08T10:00:04Z' },
+      ],
+    }]);
+  });
+
+  it('lists a message with several transitions once, and the stored one completes it wherever it sits', async () => {
+    const agentMessage = message(SESSION_A, 'agent', 'working', 2);
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q', 1),
+      completedBy(agentMessage, 'failed', 'a failed retry'),
+      completedBy(agentMessage, 'stored', 'the final answer'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages.map((m) => m.text)).toEqual(['q', 'the final answer']);
+  });
+
+  it('decodes the transition reply like the message text, so markdown survives', async () => {
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q', 1),
+      completedBy(message(SESSION_A, 'agent', 'working', 2), 'stored', '# Title\n\n- a "quoted" item\n\n```ts\nconst a = 1;\n```'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages[1].text).toBe('# Title\n\n- a "quoted" item\n\n```ts\nconst a = 1;\n```');
+  });
+
+  it('only a stored transition completes a turn: a failed or pending one leaves the first reply', async () => {
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q1', 1),
+      completedBy(message(SESSION_A, 'agent', 'first reply 1', 2), 'failed', 'a failed retry'),
+      message(SESSION_A, 'user', 'q2', 3),
+      completedBy(message(SESSION_A, 'agent', 'first reply 2', 4), 'pending', 'a pending retry'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages.map((m) => m.text)).toEqual(['q1', 'first reply 1', 'q2', 'first reply 2']);
+  });
+
+  it('completes the agent message of a turn only, never a user message, and never another session\'s', async () => {
+    answers([SESSION_A, SESSION_B], [
+      message(SESSION_A, 'user', 'a asks', 1),
+      completedBy(message(SESSION_A, 'agent', 'a working', 2), 'stored', 'a final'),
+      // Even a row that names a user message (a malformed link) does not rewrite it.
+      completedBy(message(SESSION_B, 'user', 'b asks', 3), 'stored', 'rewrites the question?'),
+      message(SESSION_B, 'agent', 'b working', 4),
+    ]);
+
+    const chats = await createManager().getRecentChats(10);
+
+    expect(chats.map((chat) => [chat.session, chat.messages.map((m) => m.text)])).toEqual([
+      ['s-a', ['a asks', 'a final']],
+      ['s-b', ['b asks', 'b working']],
+    ]);
+  });
+
+  it('the latest stored transition of a turn wins', async () => {
+    const agentMessage = message(SESSION_A, 'agent', 'working', 2);
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'the question', 1),
+      completedBy(agentMessage, 'stored', 'earlier'),
+      completedBy(agentMessage, 'stored', 'later'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages.map((m) => m.text)).toEqual(['the question', 'later']);
+  });
+
+  it('counts each message once toward the 100 a session lists, however many transitions it comes back with', async () => {
+    const first = message(SESSION_A, 'user', 'm0', 0);
+    const messages = Array.from({ length: 101 }, (_, i) => message(SESSION_A, i % 2 === 0 ? 'user' : 'agent', `m${i}`, i));
+    const agentMessage = messages[1];
+    answers([SESSION_A], [
+      first,
+      ...Array.from({ length: 5 }, () => completedBy(agentMessage, 'failed', 'x')),
+      completedBy(agentMessage, 'stored', 'final'),
+      ...messages.slice(2),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages).toHaveLength(100);
+    expect(chat.messages[1].text).toBe('final');
+    expect(chat.messages[99].text).toBe('m99');
+  });
+
+  it('asks once for messages and completed turns together, without a UNION, for the listed sessions, through each turn\'s own session link', async () => {
+    answers([SESSION_A, SESSION_B], [message(SESSION_A, 'user', 'a asks', 1), message(SESSION_B, 'user', 'b asks', 3)]);
+
+    await createManager().getRecentChats(10);
+    const queries = mockQuery.calls.map((call) => String(call[0]));
+
+    // known sessions, the session list, and the one query for the rest
+    expect(queries).toHaveLength(3);
+    const list = queries[2];
+    // A read of the working-memory view that spans several graphs refuses a
+    // UNION combined with ORDER BY, which would leave the list empty.
+    expect(list).not.toMatch(/\bUNION\b/i);
+    expect(list.match(/VALUES \?session \{ <urn:dkg:chat:session:s-a> <urn:dkg:chat:session:s-b> \}/g)).toHaveLength(1);
+    expect(list.match(/VALUES \?turnSession \{ <urn:dkg:chat:session:s-a> <urn:dkg:chat:session:s-b> \}/g)).toHaveLength(1);
+    expect(list).toContain('?m <http://schema.org/isPartOf> ?session');
+    expect(list).toContain('?turn <http://schema.org/isPartOf> ?turnSession');
+    expect(list).toContain(`<${DKG}updatesTurn> ?turn`);
+    expect(list).toContain(`<${DKG}hasAssistantMessage> ?m`);
+    expect(list).toContain('OPTIONAL');
+    expect(mockQuery.calls[2][1]).toMatchObject({ view: 'working-memory', assertionName: 'chat-turns' });
+  });
+
+  it('never leaks a message URI or a transition field into the listed messages', async () => {
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q', 1),
+      completedBy(message(SESSION_A, 'agent', 'a', 2), 'stored', 'final'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    for (const listed of chat.messages) expect(Object.keys(listed).sort()).toEqual(['author', 'text', 'ts']);
+  });
+
+  it('agrees with getSession on the reply of the same completed turn', async () => {
+    const finalReply = 'Line one\n\n**Line two**';
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q', 1),
+      completedBy(message(SESSION_A, 'agent', 'working', 2), 'stored', finalReply),
+    ]);
+    const fromList = (await createManager().getRecentChats(10))[0].messages[1].text;
+
+    mockQuery = trackFn(undefined);
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          { m: `${CHAT}msg:u`, author: `${CHAT}actor:user`, text: JSON.stringify('q'), ts: stamp(1), turnId: '"t1"', persistenceState: '"pending"', transitionState: '"stored"', transitionAssistantReply: JSON.stringify(finalReply) },
+          { m: `${CHAT}msg:a`, author: `${CHAT}actor:agent`, text: JSON.stringify('working'), ts: stamp(2), turnId: '"t1"', persistenceState: '"pending"', transitionState: '"stored"', transitionAssistantReply: JSON.stringify(finalReply) },
+        ],
+      },
+    );
+    const fromSession = (await createManager().getSession('s-a'))!.messages.find((m) => m.author === 'agent')!.text;
+
+    expect(fromList).toBe(finalReply);
+    expect(fromSession).toBe(finalReply);
   });
 });

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
@@ -176,6 +177,39 @@ const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_I
 const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
+
+/**
+ * The subject a NEW chat turn is written under: one per `(sessionId, turnId)`.
+ *
+ * A turn id is only unique inside its session (an adapter numbers the turns of
+ * each conversation, Prime Agent uses a request's correlation id), and the
+ * turn's durable state lives on this subject: `persistenceState`, the message
+ * links, `isPartOf`, and the transitions that point at it. Turns written
+ * before this scheme (and any that a caller wrote straight to the store) sit
+ * under `urn:dkg:chat:turn:<turnId>`, which two sessions that reused an id
+ * shared, so one session's state, duplicate check and completed reply were
+ * read as the other's. Those subjects are neither rewritten nor migrated:
+ * every read goes through the turn's session link and `turnId` literal rather
+ * than the subject's name, so both shapes are found, and a transition is
+ * attached to whichever subject the turn already has (`resolveChatTurnUri`).
+ *
+ * One legacy shape is not trusted: a subject that more than one session is
+ * linked to. Its state cannot be attributed to either session, so
+ * `getChatTurnPersistenceState` reports nothing for it and the session's next
+ * report is written as a new turn under the session's own subject, the way it
+ * was written before turns were deduplicated. The shared subject stays as it
+ * is. From then on the session's state is read from its own subject.
+ *
+ * The suffix is a hash of the JSON form of the pair, so the subject is
+ * injective in `(sessionId, turnId)` whatever characters either holds (a `:`
+ * in a Hermes id, a lone surrogate in a free-form OpenClaw session id), stays
+ * a safe IRI, and its `session-turn:` namespace cannot collide with a legacy
+ * `turn:<turnId>` subject, whatever that turn id looks like.
+ */
+function chatTurnUri(sessionId: string, turnId: string): string {
+  const digest = createHash('sha256').update(JSON.stringify([sessionId, turnId])).digest('hex');
+  return `${CHAT_NS}session-turn:${digest}`;
+}
 const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> = {
   skipped: 1,
   pending: 2,
@@ -225,6 +259,33 @@ function choosePersistenceStatus(
   if (!candidate) return current;
   if (!current) return candidate;
   return PERSISTENCE_STATUS_RANK[candidate] > PERSISTENCE_STATUS_RANK[current] ? candidate : current;
+}
+
+/**
+ * The reply a turn's agent message shows once the turn completed, or `undefined`
+ * when this row does not complete it.
+ *
+ * A turn that first reported `pending` or `failed` and completed later is not
+ * written a second time: a `stored` transition records the completion and
+ * carries the final reply, and the assistant Message keeps the `schema:text`
+ * of the first report. Every reader that returns a turn's reply has to resolve
+ * it through here, so `getSession` and `getRecentChats` cannot disagree about
+ * which reply a turn ended with. `row` is one result row of a query that joins
+ * a turn to its transitions.
+ *
+ * The transition's `assistantReply` is written with `JSON.stringify`, exactly
+ * like the base `schema:text`, so it needs the same decode. Without it a
+ * stored turn (the dominant path on reload) would replace the correctly decoded
+ * base text with a literal-`\n` string and markdown would break after a refresh.
+ */
+function completedTurnReply(row: {
+  transitionState?: string;
+  persistenceState?: string;
+  transitionAssistantReply?: string;
+}): string | undefined {
+  const status = normalizePersistenceStatus(row.transitionState ?? row.persistenceState ?? '');
+  const reply = String(row.transitionAssistantReply ?? '');
+  return status === 'stored' && reply ? decodeRdfStringLiteral(reply) : undefined;
 }
 
 function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
@@ -616,7 +677,7 @@ export class ChatMemoryManager {
     const failureReason = typeof opts?.failureReason === 'string'
       ? opts.failureReason.trim()
       : (opts?.failureReason === null ? null : undefined);
-    const turnUri = turnId ? `${CHAT_NS}turn:${turnId}` : undefined;
+    const turnUri = turnId ? chatTurnUri(sessionId, turnId) : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
 
@@ -716,10 +777,11 @@ export class ChatMemoryManager {
     if (!trimmedTurnId) return null;
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
-      `SELECT ?persistenceState ?transitionState WHERE {
+      `SELECT ?turn ?linkedSession ?persistenceState ?transitionState WHERE {
         ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
         ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
         ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        ?turn <${SCHEMA}isPartOf> ?linkedSession .
         OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
         OPTIONAL {
           ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
@@ -729,8 +791,21 @@ export class ChatMemoryManager {
       }`,
       this.wmReadOpts(),
     );
-    const states = (result.bindings ?? [])
-      .flatMap((binding: Record<string, string>) => [
+    const bindings: Array<Record<string, string>> = result.bindings ?? [];
+    // A legacy `turn:<turnId>` subject that two sessions reused carries the
+    // states and transitions of both, and nothing on it says whose is whose.
+    // What it holds is no evidence about this session's turn, so it is left
+    // out: the caller then writes the report instead of dropping it as a
+    // duplicate of the other session's turn (see `chatTurnUri`).
+    const iri = (value: string | undefined): string => String(value ?? '').replace(/[<>]/g, '');
+    const sharedTurns = new Set(
+      bindings
+        .filter((binding) => binding.linkedSession !== undefined && iri(binding.linkedSession) !== sessionUri)
+        .map((binding) => iri(binding.turn)),
+    );
+    const states = bindings
+      .filter((binding) => !sharedTurns.has(iri(binding.turn)))
+      .flatMap((binding) => [
         stripRdfLiteral(binding.transitionState ?? '').trim(),
         stripRdfLiteral(binding.persistenceState ?? '').trim(),
       ]);
@@ -738,6 +813,29 @@ export class ChatMemoryManager {
     if (states.includes('failed')) return 'failed';
     if (states.includes('pending')) return 'pending';
     return null;
+  }
+
+  /**
+   * The subject `(sessionId, turnId)` is stored under: found through the turn's
+   * session link and `turnId` literal, so a turn written under the legacy
+   * `turn:<turnId>` subject keeps receiving its transitions there, and a turn
+   * of another session that reuses the id is never touched. When the turn does
+   * not exist yet, the subject it would be created under. A session that has
+   * both a subject of its own and a legacy one gets its own: `session-turn:`
+   * sorts before `turn:`.
+   */
+  private async resolveChatTurnUri(sessionId: string, turnId: string): Promise<string> {
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?turn WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(turnId)} .
+      } ORDER BY ?turn LIMIT 1`,
+      this.wmReadOpts(),
+    );
+    const found = String(result.bindings?.[0]?.turn ?? '').replace(/[<>]/g, '');
+    return found && isSafeIri(found) ? found : chatTurnUri(sessionId, turnId);
   }
 
   async recordChatTurnPersistenceTransition(
@@ -755,7 +853,7 @@ export class ChatMemoryManager {
     const trimmedTurnId = turnId.trim();
     if (!trimmedTurnId) return;
     const transitionId = crypto.randomUUID().slice(0, 8);
-    const turnUri = `${CHAT_NS}turn:${trimmedTurnId}`;
+    const turnUri = await this.resolveChatTurnUri(sessionId, trimmedTurnId);
     const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
     const now = new Date().toISOString();
     const failureReason = typeof opts?.failureReason === 'string'
@@ -1133,15 +1231,9 @@ export class ChatMemoryManager {
           messagesByUri.set(key, message);
         }
         const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
-        const transitionAssistantReply = String(mb.transitionAssistantReply ?? '');
-        if (message.author === 'agent' && candidateStatus === 'stored' && transitionAssistantReply) {
-          // The transition `assistantReply` is written via `JSON.stringify`
-          // (see opts.assistantReply quad) exactly like the base
-          // `schema:text`, so it needs the same decode — otherwise a
-          // stored turn (the dominant path on reload) overwrites the
-          // correctly-decoded base text with a literal-`\n` string and
-          // markdown breaks after refresh again.
-          message.text = decodeRdfStringLiteral(transitionAssistantReply);
+        const completedReply = completedTurnReply(mb);
+        if (message.author === 'agent' && completedReply !== undefined) {
+          message.text = completedReply;
         }
         const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
         if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {
@@ -1204,34 +1296,99 @@ export class ChatMemoryManager {
         .map((entry: { sessionUri: string; sessionId: string }) => `<${entry.sessionUri}>`)
         .join(' ');
 
+      // One round trip for both: the messages of the listed sessions, and the
+      // turns among them that completed by a `stored` transition. Such a turn
+      // keeps the reply of its first report on its assistant Message and carries
+      // the final one on the transition, so each message is joined to the
+      // transitions of the turn it is the assistant Message of (through the
+      // turn's `hasAssistantMessage` link), and `completedTurnReply`, the
+      // resolver `getSession` uses, decides which reply wins. The turn is matched
+      // to its transitions through its own session link, so a turn of another
+      // session that reuses the id never contributes.
+      //
+      // A legacy turn subject that two sessions share links the assistant
+      // Message of both, and a transition on it does not say whose completion
+      // it is. Such a subject contributes no completion here, so the list keeps
+      // each session's reply as it was written and never shows one session the
+      // other's (see `chatTurnUri`).
+      //
+      // The completed turns are an independent subquery over the listed
+      // sessions' turns, joined to the messages on the assistant Message. The
+      // query must not use a UNION: a read of the working-memory view can span
+      // more than one graph (a by-name read also includes the assertion's scoped
+      // child graphs, and an agent address can have several candidate layer
+      // graphs), and the query engine refuses a UNION combined with ORDER BY
+      // across graphs, so the whole list would come back empty. An OPTIONAL
+      // join of `turnId` onto every message would cost more on this query, and
+      // would pair a message that has no `turnId` with the transitions of the
+      // session's other turns.
       const allMsgs = await this.tools.query(
-        `SELECT ?session ?author ?text ?ts WHERE {
+        `SELECT ?session ?author ?text ?ts ?m ?transitionState ?transitionAssistantReply WHERE {
           VALUES ?session { ${values} }
           ?m <${SCHEMA}isPartOf> ?session .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
-        } ORDER BY ?session ?ts`,
+          OPTIONAL {
+            {
+              SELECT ?m ?transitionState ?transitionAssistantReply ?transitionTs WHERE {
+                VALUES ?turnSession { ${values} }
+                ?turn <${SCHEMA}isPartOf> ?turnSession .
+                ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+                ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+                ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+                ?transition <${DKG_ONT}persistenceState> ?transitionState .
+                ?transition <${DKG_ONT}assistantReply> ?transitionAssistantReply .
+                ?turn <${DKG_ONT}hasAssistantMessage> ?m .
+                OPTIONAL { ?transition <${SCHEMA}dateCreated> ?transitionTs }
+                FILTER NOT EXISTS {
+                  ?turn <${SCHEMA}isPartOf> ?otherSession .
+                  FILTER(?otherSession != ?turnSession)
+                }
+              }
+            }
+          }
+        } ORDER BY ?session ?ts ?transitionTs`,
         this.wmReadOpts(),
       );
 
-      const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
+      const bySession = new Map<string, Array<{ uri: string; author: string; text: string; ts: string }>>();
+      // A message with several transitions comes back once per transition, in
+      // transition order (the rows of one message are adjacent and ordered by
+      // `transitionTs`), so the first row lists the message and the latest
+      // completion wins.
+      const listedMessages = new Set<string>();
+      const completedReplies = new Map<string, string>();
       for (const row of allMsgs.bindings ?? []) {
+        const uri = String(row.m ?? '').replace(/[<>]/g, '');
+        if (uri && row.transitionAssistantReply) {
+          const reply = completedTurnReply(row);
+          if (reply !== undefined) completedReplies.set(uri, reply);
+        }
+        if (uri && listedMessages.has(uri)) continue;
+        if (uri) listedMessages.add(uri);
         const sessionUri = String(row.session ?? '').replace(/[<>]/g, '');
         if (!sessionUri) continue;
         if (!bySession.has(sessionUri)) bySession.set(sessionUri, []);
         const msgs = bySession.get(sessionUri)!;
         if (msgs.length >= 100) continue;
         msgs.push({
+          uri,
           author: row.author?.includes('user') ? 'user' : 'agent',
           text: decodeRdfStringLiteral(row.text ?? ''),
           ts: stripRdfLiteral(row.ts ?? ''),
         });
       }
+      for (const msgs of bySession.values()) {
+        for (const msg of msgs) {
+          const completedReply = msg.author === 'agent' ? completedReplies.get(msg.uri) : undefined;
+          if (completedReply !== undefined) msg.text = completedReply;
+        }
+      }
 
       return sessionEntries.map((entry: { sessionUri: string; sessionId: string }) => ({
         session: entry.sessionId,
-        messages: bySession.get(entry.sessionUri) ?? [],
+        messages: (bySession.get(entry.sessionUri) ?? []).map(({ author, text, ts }) => ({ author, text, ts })),
       }));
     } catch {
       return [];
@@ -1272,19 +1429,23 @@ export class ChatMemoryManager {
       };
     }
 
-    const turnUri = `${CHAT_NS}turn:${turnId}`;
+    // The turn's subject is found through its session link and `turnId`, not
+    // built from the id: a turn is stored under a session-scoped subject, or
+    // under the legacy `turn:<turnId>` one (see `chatTurnUri`).
     const currentTurnResult = await this.tools.query(
-      `SELECT ?tid ?ts WHERE {
-        <${turnUri}> <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
-        <${turnUri}> <${DKG_ONT}turnId> ?tid .
-        OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
-      } LIMIT 1`,
+      `SELECT ?turn ?tid ?ts WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(turnId)} .
+        ?turn <${DKG_ONT}turnId> ?tid .
+        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
+      } ORDER BY ?turn LIMIT 1`,
       this.wmReadOpts(),
     );
     const currentTurn = (currentTurnResult.bindings ?? [])[0];
     const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
     const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
+    const turnUri = String(currentTurn?.turn ?? '').replace(/[<>]/g, '');
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
         ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
@@ -1295,7 +1456,7 @@ export class ChatMemoryManager {
       this.wmReadOpts(),
     );
     const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
-    if (!currentTurnId || currentTurnId !== turnId) {
+    if (!currentTurnId || currentTurnId !== turnId || !isSafeIri(turnUri)) {
       return {
         mode: 'full_refresh_required',
         reason: 'turn_not_found',
@@ -1423,12 +1584,19 @@ export class ChatMemoryManager {
       };
     }
 
+    // The turn's transitions are part of it: a turn that completes after it was
+    // first written keeps its messages and records the new state and the final
+    // reply on a transition (`recordChatTurnPersistenceTransition`).
     const relatedSubjectsResult = await this.tools.query(
       `SELECT DISTINCT ?s WHERE {
         VALUES ?msg { <${userMsgUri}> <${assistantMsgUri}> }
         { BIND(<${sessionUri}> AS ?s) }
         UNION { BIND(<${turnUri}> AS ?s) }
         UNION { BIND(?msg AS ?s) }
+        UNION {
+          ?s <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+          ?s <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> <${turnUri}> .
+        }
         UNION { <${assistantMsgUri}> <${DKG_ONT}usedTool> ?s }
         UNION { ?s <${DKG_ONT}mentionedIn> ?msg }
         UNION {
