@@ -5795,7 +5795,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           }
         }
       } catch {
-        // Persistence is an accelerator only. Fail open to an authoritative scan.
+        // Persistence is an accelerator only. Fail open to an authoritative reconcile.
       }
     }
     if (!cached) return false;

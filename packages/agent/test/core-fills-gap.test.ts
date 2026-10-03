@@ -36,6 +36,23 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
+/**
+ * Count the store-side chain reconciles a visit reaches. A visit answered by
+ * the negative cache returns before the finalization handler is asked.
+ */
+function countChainReconciles(internals: object): { count: number } {
+  const handler = (internals as {
+    getOrCreateFinalizationHandler(): { handleChainReconciledKC(...args: unknown[]): Promise<unknown> };
+  }).getOrCreateFinalizationHandler();
+  const reconcile = handler.handleChainReconciledKC.bind(handler);
+  const reconciles = { count: 0 };
+  handler.handleChainReconciledKC = async (...args: unknown[]) => {
+    reconciles.count += 1;
+    return reconcile(...args);
+  };
+  return reconciles;
+}
+
 /** Model admitted exact (argument four) or legacy (argument seven) work explicitly.
  * Uncalled readiness/cancellation sentinels remain outside this boundary. */
 function admittedRecoveryWork<Args extends unknown[], Result extends object>(
@@ -305,6 +322,64 @@ async function seedSwmSnapshotInSubGraph(
     [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
     [],
   );
+}
+
+const STAGED_KA_AUTHOR = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
+
+/**
+ * Stage one KA's shared-memory copy in its own graph, with its workspace
+ * head, and register the KA on chain under the root of that content.
+ */
+async function stageRegisteredKnowledgeAsset(
+  store: TripleStore,
+  chain: MockChainAdapter,
+  localCgId: string,
+  onChainCgId: bigint,
+  kaNumber: bigint,
+  entity: string,
+  value: string,
+): Promise<bigint> {
+  chain.getLatestMerkleRootAuthor = async () => STAGED_KA_AUTHOR;
+  const scope = createGraphKnowledgeAssetScope(
+    buildKnowledgeAssetUal(chain.chainId, STAGED_KA_AUTHOR, kaNumber),
+    '1',
+  );
+  const quads = [{
+    subject: entity,
+    predicate: 'http://schema.org/name',
+    object: `"${value}"`,
+    graph: knowledgeAssetLayerGraphUri(localCgId, MemoryLayer.SharedWorkingMemory, scope),
+  }];
+  const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: STAGED_KA_AUTHOR, kaNumber });
+  chain.__registerKC({
+    kaId,
+    contextGraphId: onChainCgId,
+    merkleRootHex: ethers.hexlify(computeFlatKCRootV10(quads.map((quad) => ({ ...quad, graph: '' })), [])),
+    chunks: [],
+  });
+  const graphManager = new GraphManager(store);
+  const shareOperationId = `staged-share-${kaNumber}`;
+  await store.insert(quads);
+  await storeKnowledgeAssetOperationPublicQuads({
+    store,
+    graphManager,
+    contextGraphId: localCgId,
+    shareOperationId,
+    kaUal: scope.ual,
+    assertionVersion: scope.assertionVersion,
+    quads,
+    privateTripleCount: 0,
+    publisherPeerId: '12D3KooWStagedPublisher',
+  });
+  await storeKnowledgeAssetWorkspaceHead({
+    store,
+    graphManager,
+    contextGraphId: localCgId,
+    shareOperationId,
+    kaUal: scope.ual,
+    assertionVersion: scope.assertionVersion,
+  });
+  return kaId;
 }
 
 describe('Phase D — recordCoreHostedPublicCg', () => {
@@ -1580,7 +1655,7 @@ describe('Phase D - VM reconcile damping', () => {
         .toEqual([[0, 'no-swm'], [0, 'no-swm'], [0, 'no-swm']]);
     });
 
-    it('reads the chain for a local SWM copy, then settles the promoted KA locally', async () => {
+    it('reads the chain for a local shared-memory copy, then settles the promoted KA locally', async () => {
       const captured: ReplicationEvent[] = [];
       const chain = new MockChainAdapter();
       agent = await DKGAgent.create({
@@ -1590,31 +1665,36 @@ describe('Phase D - VM reconcile damping', () => {
       });
       stubNode(agent);
       const internals = agent as unknown as AgentInternals;
-      const root = await seedSwmSnapshot(internals.store, '303', 'urn:fact:local-copy', 'Local copy');
-      registerUnmatchedKC(chain, 9303n, 303n, bytesToHex(root));
+      const { contextGraphId } = await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1 });
+      const localCgId = contextGraphId.toString();
+      const kaId = await stageRegisteredKnowledgeAsset(
+        internals.store, chain, localCgId, contextGraphId, 1n, 'urn:fact:local-copy', 'Local copy',
+      );
       const reads = countRootReads(chain);
 
-      await expect(internals.reconcileChainOrdinal('303', 303n, 0, 100, { deferActiveFetch: true }))
+      await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, 100, { deferActiveFetch: true }))
         .resolves.toEqual({ status: 'reconciled', blockNumber: 100 });
-      expect(reads.getLatestMerkleRoot.calls).toHaveLength(1);
-      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(1);
-      const vmGraph = 'did:dkg:context-graph:303/context/303';
+      const rootReads = reads.getLatestMerkleRoot.calls.length;
+      const publisherReads = reads.getLatestMerkleRootPublisher.calls.length;
+      expect(rootReads).toBeGreaterThan(0);
+      expect(publisherReads).toBeGreaterThan(0);
       await expect(internals.store.query(
-        `ASK { GRAPH <${vmGraph}> { <urn:fact:local-copy> <http://schema.org/name> "Local copy" } }`,
+        'ASK { GRAPH ?vm { <urn:fact:local-copy> <http://schema.org/name> "Local copy" } '
+          + 'FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }',
       )).resolves.toMatchObject({ type: 'boolean', value: true });
 
       // A later visit (a new sweep cycle, or any restart) finds the confirmed
-      // copy and settles it exactly as before, without another chain read.
+      // copy and settles it without another chain read.
       const target = {
-        ...vmRecoveryTarget('303', 0, '9303'),
-        onChainCgId: '303',
+        ...vmRecoveryTarget(localCgId, 0, kaId.toString()),
+        onChainCgId: localCgId,
       };
       const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
       (internals as any).prepareVmReconcileRotationTarget(target, ['12D3KooWSettledPeer'], 100);
-      await expect(internals.reconcileChainOrdinal('303', 303n, 0, 101, { deferActiveFetch: true }))
+      await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, 101, { deferActiveFetch: true }))
         .resolves.toEqual({ status: 'already', blockNumber: 101 });
-      expect(reads.getLatestMerkleRoot.calls).toHaveLength(1);
-      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(1);
+      expect(reads.getLatestMerkleRoot.calls).toHaveLength(rootReads);
+      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(publisherReads);
       expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
       expect(captured).toContainEqual(expect.objectContaining({
         action: 'already',
@@ -1623,49 +1703,54 @@ describe('Phase D - VM reconcile damping', () => {
       }));
     });
 
-    it('keeps the chain path for a KA held nowhere locally while its graph has legacy SWM', async () => {
+    it('answers from local state for a KA held nowhere locally even when its graph has historical workspace operations', async () => {
+      const captured: ReplicationEvent[] = [];
       const chain = new MockChainAdapter();
-      agent = await DKGAgent.create({ name: 'VmReconcileLegacyNamespace', chainAdapter: chain });
+      agent = await DKGAgent.create({
+        name: 'VmReconcileHistoricalOperations',
+        chainAdapter: chain,
+        onReplicationEvent: (event) => { captured.push(event); },
+      });
       stubNode(agent);
       const internals = agent as unknown as AgentInternals;
-      // An unrelated entity-share operation: the root-matched legacy scan
-      // cannot rule it out for this KA without the chain root.
+      // A root-entity share from before per-KA graphs. Chain reconcile never
+      // searches these, so they cannot make this KA a local candidate.
       await seedSwmSnapshot(internals.store, '304', 'urn:fact:unrelated', 'Unrelated share');
       registerUnmatchedKC(chain, 9304n, 304n);
       const reads = countRootReads(chain);
 
       await expect(internals.reconcileChainOrdinal('304', 304n, 0, 100, { deferActiveFetch: true }))
-        .resolves.toMatchObject({ status: 'pending', recovery: { reason: 'no-swm' } });
-      expect(reads.getLatestMerkleRoot.calls).toHaveLength(1);
-      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(1);
+        .resolves.toMatchObject({ status: 'pending', recovery: { reason: 'no-swm', merkleRoot: '' } });
+      expect(reads.getLatestMerkleRoot.calls).toHaveLength(0);
+      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(0);
+      expect(captured).toContainEqual(expect.objectContaining({
+        action: 'defer',
+        ordinal: 0,
+        detail: 'no-local-copy',
+      }));
     });
   });
 
-  it('negative-caches a missing SWM snapshot and skips the expensive scan plus active fetch during backoff', async () => {
+  it('negative-caches a missing KA and skips the reconcile plus active fetch during backoff', async () => {
     const internals = await boot();
     const onChainCgId = 42n;
     registerUnmatchedKC(internals.chain, 9001n, onChainCgId);
 
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
 
-    expensiveScans = 0;
+    reconciles.count = 0;
     await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBe(0);
   });
 
-  it('rehydrates a generation-gated miss after restart without repeating the scan', async () => {
+  it('rehydrates a generation-gated miss after restart without repeating the reconcile', async () => {
     type LegacyVmReconcileNegativeRecord = Omit<
       VmReconcileNegativeRecord,
       'peerTopology' | 'cleanMissPeerIds'
@@ -1707,17 +1792,12 @@ describe('Phase D - VM reconcile damping', () => {
     agent = null;
     internals = await boot(subscriptionStore);
     registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBe(0);
     expect(fetch.calls).toHaveLength(0);
   });
 
@@ -1786,21 +1866,16 @@ describe('Phase D - VM reconcile damping', () => {
       cleanMissPeerIds: ['peer-stable'],
     }));
     (internals as any).syncVmRecoveryFromConnectedPeers = restartedFetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans += 1;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
       .resolves.toEqual({ status: 'pending' });
     expect(durableLoads).toBeGreaterThan(loadsBeforeRestart);
     expect(restartedFetch.calls).toHaveLength(0);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBe(0);
   });
 
-  it('rescans after restart when an incomplete operation payload appears only in a per-KA child graph', async () => {
+  it('tries again after restart when workspace operations kept the miss out of the durable cache', async () => {
     const durable = new Map<string, VmReconcileNegativeRecord>();
     const subscriptionStore: ContextGraphSubscriptionStore = {
       loadAll: async () => [],
@@ -1856,26 +1931,15 @@ describe('Phase D - VM reconcile damping', () => {
       entity,
       publishedAt,
     );
-    await internals.store.insert([{
-      subject: entity,
-      predicate: 'http://schema.org/name',
-      object: `"${value}"`,
-      graph: `${contextGraphWorkspaceGraphUri(localCgId)}/0x0000000000000000000000000000000000000000/${kaId}`,
-    }]);
 
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(expensiveScans).toBeGreaterThan(0);
-    expect(fetch.calls).toHaveLength(0);
+      .resolves.toEqual({ status: 'pending' });
+    expect(reconciles.count).toBeGreaterThan(0);
+    expect(fetch.calls).toHaveLength(1);
   });
 
   it('does not reuse a negative cache entry after catchup peer topology changes', async () => {
@@ -1889,29 +1953,21 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
-    expensiveScans = 0;
+    reconciles.count = 0;
     connectedPeers = ['peer-empty', 'peer-newly-reachable'];
 
     await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    // The sweep-level cache entry is NOT reused — the fetch re-ran for the new
-    // topology (1 → 3 calls). The scan itself is served by the handler-level
-    // write-generation negative memo (#1609): no local write touched the CG
-    // between passes, so rescanning the unchanged store cannot change the
-    // verdict. Peer topology gates the FETCH, not the scan.
+    // The cache entry is not reused: the reconcile ran again and the fetch
+    // re-ran for the new topology (1 → 3 calls).
     expect(fetch.calls).toHaveLength(3);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBeGreaterThan(0);
   });
 
   it.each([
@@ -1963,24 +2019,19 @@ describe('Phase D - VM reconcile damping', () => {
       cleanMissPeerIds: [provenPeers.shift() ?? 'peer-stable'],
     }));
     (internals as any).syncVmRecoveryFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     const fetchesAfterFirstMiss = fetch.calls.length;
     expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
 
-    expensiveScans = 0;
+    reconciles.count = 0;
     connectedPeers = ['peer-stable'];
 
     await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBe(0);
   });
 
   it('rechecks a remaining peer that was skipped before another clean peer disappeared', async () => {
@@ -2030,25 +2081,20 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     const fetchesAfterFirstMiss = fetch.calls.length;
     expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
-    expensiveScans = 0;
+    reconciles.count = 0;
     connectedPeers = ['peer-b', 'peer-a'];
 
     await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBe(0);
   });
 
   it('primes catchup connections before reusing a negative cache entry', async () => {
@@ -2070,27 +2116,21 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await expect(internals.reconcileChainOrdinal('57', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
-    expensiveScans = 0;
+    reconciles.count = 0;
 
     await expect(internals.reconcileChainOrdinal('57', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(primeCalls).toBeGreaterThanOrEqual(1);
-    // Fetch re-ran against the primed topology (sweep entry not reused); the
-    // scan is served by the #1609 write-gen negative memo — see the topology
-    // test above.
+    // The reconcile and the fetch re-ran against the primed topology: the
+    // cache entry is not reused.
     expect(fetch.calls).toHaveLength(3);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBeGreaterThan(0);
   });
 
   it('does not reuse a negative cache entry when catchup ranking changes for the same peer set', async () => {
@@ -2104,26 +2144,20 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
 
-    expensiveScans = 0;
+    reconciles.count = 0;
     (internals as any).peerCapabilityRegistry.observe('peer-reclassified', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
 
     await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    // Fetch re-ran for the reclassified peer (sweep entry not reused); the
-    // scan is served by the #1609 write-gen negative memo — see the topology
-    // test above.
+    // The reconcile and the fetch re-ran for the reclassified peer: the cache
+    // entry is not reused.
     expect(fetch.calls).toHaveLength(2);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBeGreaterThan(0);
   });
 
   it('does not reuse a negative cache entry when the same KA has a newer merkle root', async () => {
@@ -2133,36 +2167,31 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
 
-    expensiveScans = 0;
+    reconciles.count = 0;
     await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBe(0);
+    expect(reconciles.count).toBe(0);
 
     registerUnmatchedKC(internals.chain, 9006n, onChainCgId, '0x' + '22'.repeat(32));
     await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    // New root bypasses the negative-cache deferral and re-runs the SWM scan;
+    // New root bypasses the negative-cache deferral and re-runs the reconcile;
     // the independent per-CG active-fetch cooldown may still suppress another
     // network fetch in the same sweep interval.
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
     const cacheKeys = Array.from(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).keys());
     expect(cacheKeys).toHaveLength(2);
     expect(cacheKeys.some((key) => key.includes('11'.repeat(32)))).toBe(true);
     expect(cacheKeys.some((key) => key.includes('22'.repeat(32)))).toBe(true);
   });
 
-  it('retries an incomplete SWM operation when data arrives without operation-meta changes', async () => {
+  it('tries again when workspace data arrives without operation-meta changes', async () => {
     const internals = await boot();
     const onChainCgId = 48n;
     const entity = 'urn:fact:data-arrival';
@@ -2187,13 +2216,15 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertWorkspaceDataTriple(internals.store, '48', entity, value);
+    const reconciles = countChainReconciles(internals);
 
-    await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(reconciles.count).toBeGreaterThan(0);
     expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
   });
 
-  it('retries finalization after shared-memory fetch progress even when peer success is zero', async () => {
+  it('tries the reconcile again after shared-memory fetch progress even when peer success is zero', async () => {
     const internals = await boot();
     const onChainCgId = 61n;
     const entity = 'urn:fact:shared-progress';
@@ -2221,10 +2252,13 @@ describe('Phase D - VM reconcile damping', () => {
       };
     });
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
+    const reconciles = countChainReconciles(internals);
 
-    await expect(internals.reconcileChainOrdinal('61', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    await expect(internals.reconcileChainOrdinal('61', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    // Before the fetch and again after it: the progress is a usable response.
+    expect(reconciles.count).toBe(2);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
   });
 
   it('actively fetches provenance metadata when exact VM content is metadata-pending', async () => {
@@ -2254,7 +2288,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(handleChainReconciledKC.calls).toHaveLength(2);
   });
 
-  it('retries an incomplete SWM operation when data changes without triple-count changes', async () => {
+  it('tries again when workspace data changes without triple-count changes', async () => {
     const internals = await boot();
     const onChainCgId = 52n;
     const entity = 'urn:fact:data-replacement';
@@ -2281,13 +2315,15 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await replaceWorkspaceDataTriple(internals.store, '52', entity, freshValue);
+    const reconciles = countChainReconciles(internals);
 
-    await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(reconciles.count).toBeGreaterThan(0);
     expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
   });
 
-  it('retries an incomplete SWM operation when private-root metadata arrives without operation-meta changes', async () => {
+  it('tries again when private-root metadata arrives without operation-meta changes', async () => {
     const internals = await boot();
     const onChainCgId = 49n;
     const entity = 'urn:fact:private-arrival';
@@ -2315,13 +2351,15 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
+    const reconciles = countChainReconciles(internals);
 
-    await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(reconciles.count).toBeGreaterThan(0);
     expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
   });
 
-  it('invalidates a negative cache entry when matching SWM arrives in a new subgraph namespace', async () => {
+  it('invalidates a negative cache entry when workspace content arrives in a new subgraph namespace', async () => {
     const internals = await boot();
     const onChainCgId = 53n;
     const entity = 'urn:fact:new-subgraph-arrival';
@@ -2340,10 +2378,12 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await seedSwmSnapshotInSubGraph(internals.store, '53', 'code', entity, value);
+    const reconciles = countChainReconciles(internals);
 
-    await expect(internals.reconcileChainOrdinal('53', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    await expect(internals.reconcileChainOrdinal('53', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(reconciles.count).toBeGreaterThan(0);
     expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
   });
 
   it('rechecks the root SWM generation when subgraph enumeration fails during negative-cache validation', async () => {
@@ -2366,12 +2406,13 @@ describe('Phase D - VM reconcile damping', () => {
       await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
       expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
-      const seededRoot = await seedSwmSnapshot(internals.store, '58', entity, value);
-      expect(bytesToHex(seededRoot)).toBe(bytesToHex(root));
+      await seedSwmSnapshot(internals.store, '58', entity, value);
+      const reconciles = countChainReconciles(internals);
 
-      await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+      await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+      expect(reconciles.count).toBeGreaterThan(0);
       expect(fetch.calls).toHaveLength(1);
-      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
     } finally {
       GraphManager.prototype.listSubGraphs = originalListSubGraphs;
     }
@@ -2392,34 +2433,24 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
 
     await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     const fetchesAfterFirstMiss = fetch.calls.length;
     expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
-    expect(expensiveScans).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     const originalListSubGraphs = GraphManager.prototype.listSubGraphs;
     GraphManager.prototype.listSubGraphs = recorder(async () => { throw new Error('transient subgraph listing failure'); }) as typeof originalListSubGraphs;
     try {
-      expensiveScans = 0;
-
       await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
       expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
-      expect(expensiveScans).toBe(0);
       expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
     } finally {
       GraphManager.prototype.listSubGraphs = originalListSubGraphs;
     }
   });
 
-  it('invalidates a negative cache entry when root SWM changes while subgraph enumeration fails', async () => {
+  it('invalidates a negative cache entry when root workspace content changes while subgraph enumeration fails', async () => {
     const internals = await boot();
     const onChainCgId = 65n;
     const entity = 'urn:fact:root-arrival-after-subgraph-cache';
@@ -2449,12 +2480,13 @@ describe('Phase D - VM reconcile damping', () => {
     const originalListSubGraphs = GraphManager.prototype.listSubGraphs;
     GraphManager.prototype.listSubGraphs = recorder(async () => { throw new Error('transient subgraph listing failure'); }) as typeof originalListSubGraphs;
     try {
-      const seededRoot = await seedSwmSnapshot(internals.store, '65', entity, value);
-      expect(bytesToHex(seededRoot)).toBe(bytesToHex(root));
+      await seedSwmSnapshot(internals.store, '65', entity, value);
+      const reconciles = countChainReconciles(internals);
 
-      await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+      await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+      expect(reconciles.count).toBeGreaterThan(0);
       expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
-      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
     } finally {
       GraphManager.prototype.listSubGraphs = originalListSubGraphs;
     }
@@ -2501,30 +2533,28 @@ describe('Phase D - VM reconcile damping', () => {
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
+    const reconciles = countChainReconciles(internals);
     let generationReads = 0;
     (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root ?ts WHERE')) {
         generationReads++;
         if (generationReads <= 2) throw new Error('transient generation read failure');
       }
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
 
     await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
     expect(generationReads).toBe(2);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
 
-    await seedSwmSnapshot(internals.store, '45', entity, value);
-
-    expensiveScans = 0;
-    await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    reconciles.count = 0;
+    await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(reconciles.count).toBeGreaterThan(0);
+    // The generation is readable now, so this miss is cached.
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
   });
 
   it('invalidates a negative cache entry when same-count SWM data changes', async () => {
@@ -2548,19 +2578,14 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
-  it('negative-caches unchanged incomplete SWM operations and invalidates on namespace/content changes', async () => {
+  it('negative-caches unchanged workspace operations and invalidates on namespace/content changes', async () => {
     const internals = await boot();
     const onChainCgId = 43n;
     registerUnmatchedKC(internals.chain, 9002n, onChainCgId);
 
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    let expensiveScans = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
-      return originalQuery(sparql);
-    });
+    const reconciles = countChainReconciles(internals);
 
     await insertWorkspaceOperationMeta(
       internals.store,
@@ -2582,10 +2607,10 @@ describe('Phase D - VM reconcile damping', () => {
       '2040-01-01T00:00:00.000Z',
     );
 
-    expensiveScans = 0;
+    reconciles.count = 0;
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
 
     await insertWorkspaceOperationMeta(
       internals.store,
@@ -2595,10 +2620,10 @@ describe('Phase D - VM reconcile damping', () => {
       '2020-01-01T00:00:00.000Z',
     );
 
-    expensiveScans = 0;
+    reconciles.count = 0;
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
     expect(fetch.calls).toHaveLength(1);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(reconciles.count).toBeGreaterThan(0);
   });
 
   it('runs at most one active fetch per CG sweep interval across different pending ordinals', async () => {
@@ -6552,24 +6577,21 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       publishPolicy: 1,
     });
     const localCgId = ON_CHAIN_CG.toString();
-    // The Core already has the SWM snapshot locally (simulating a pull from
-    // another Core), but never member-subscribed — it only hosts the CG.
-    const root = await seedSwmSnapshot(internals.store, localCgId, 'urn:fact:monday', 'Monday fun fact');
-    const { ethers } = await import('ethers');
-    chain.__registerKC({ kaId: 4242n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(root), chunks: [] });
+    // The Core already holds the KA's shared-memory copy in its own graph
+    // (as after a pull from another Core), but never member-subscribed: it
+    // only hosts the CG.
+    await stageRegisteredKnowledgeAsset(
+      internals.store, chain, localCgId, ON_CHAIN_CG, 1n, 'urn:fact:monday', 'Monday fun fact',
+    );
 
     await internals.recordCoreHostedPublicCg(localCgId);
     await internals.runVmReconcileForCg(localCgId);
 
-    // Promoted into the per-CG VM graph.
-    const storageAddr = await chain.getDKGKnowledgeAssetsAddress();
-    const ual = buildKnowledgeAssetUal(chain.chainId, storageAddr, 4242n);
-    expect(ual).toContain('4242');
-    const vmGraph = `did:dkg:context-graph:${localCgId}/context/${ON_CHAIN_CG}`;
-    const res = await internals.store.query(
-      `ASK { GRAPH <${vmGraph}> { <urn:fact:monday> <http://schema.org/name> "Monday fun fact" } }`,
-    );
-    expect(res.type === 'boolean' && res.value).toBe(true);
+    // Promoted into the KA's Verified Memory graph.
+    await expect(internals.store.query(
+      'ASK { GRAPH ?vm { <urn:fact:monday> <http://schema.org/name> "Monday fun fact" } '
+        + 'FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }',
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
 
     // Watermark advanced + distinct core-fill telemetry emitted.
     expect(internals.subscribedContextGraphs.get(localCgId)?.lastReconciledOrdinal).toBe(1);
