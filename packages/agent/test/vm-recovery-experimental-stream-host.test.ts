@@ -407,6 +407,23 @@ describe('a stream Core whose attempt ended without a verdict on its data', () =
     expect((await h.runPending())[0]).toEqual([core, 1, 'stream-preferred']);
   });
 
+  it('is asked again in the same pass, once its hold-off is over, by an asset whose other peers the pass has no room for', async () => {
+    const h = await streamHolderHarness({ legacyPeers: [older, olderB, olderC], targetCount: 4 });
+    // The Core proves itself on the first asset, then answers busy for the batch of the other three.
+    h.coreAnswers.push('complete', 'responder-busy');
+    expect(await h.runPending()).toEqual([[core, 1, 'stream-preferred'], [core, 3, 'stream-required']]);
+
+    // The next pass starts inside the hold-off. Two assets ask a peer each (a minute each), which
+    // fills the pass together with the Core's kept place. The third asset still has an unasked peer,
+    // but the pass has no room for it: it goes to the Core, whose hold-off is over by then.
+    expect(await h.runPending()).toEqual([
+      [older, 1, 'legacy'],
+      [olderB, 1, 'legacy'],
+      [core, 1, 'stream-preferred'],
+    ]);
+    expect(h.asked.map(([peer]) => peer)).not.toContain(olderC);
+  });
+
   it('lets an asset ask its other peers before it returns to a Core that stays busy', async () => {
     const h = await streamHolderHarness({ targetCount: 1 });
     h.alwaysBusy.add(core);

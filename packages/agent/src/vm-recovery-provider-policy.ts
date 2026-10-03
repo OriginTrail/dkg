@@ -63,7 +63,9 @@ export class VmRecoveryProviderPolicy {
     for (const peerId of ordered) {
       if (!this.#canAttempt(peerId)) continue;
       if (!this.#consideredPeerIds.has(peerId)) {
-        if (this.#consideredPeerIds.size >= maxPeers) return undefined;
+        // The cap excludes this peer. One that already has a place (it kept
+        // one while deferred, or was released) may still follow it.
+        if (this.#consideredPeerIds.size >= maxPeers) continue;
         this.#consideredPeerIds.add(peerId);
       }
       return peerId;

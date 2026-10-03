@@ -151,6 +151,28 @@ describe('VM recovery provider policy — adversarial transitions', () => {
     expect(policy.beginAttempt(waiting)?.kind).toBe('probe');
   });
 
+  it.each(['kept a place while deferred', 'was released after an attempt'] as const)(
+    'still selects a peer that %s when a candidate the cap excludes comes before it', (how) => {
+      const waiting = '12D3KooWBehindTheCap';
+      const [first, second, excluded] = ['12D3KooWOtherA', '12D3KooWOtherB', '12D3KooWOtherC'];
+      const policy = new VmRecoveryProviderPolicy();
+      if (how === 'kept a place while deferred') {
+        expect(policy.selectNextCandidate([waiting, first], 3, new Set([waiting]))).toBe(first);
+      } else {
+        expect(policy.selectNextCandidate([waiting], 3)).toBe(waiting);
+        policy.releaseAttempt(policy.beginAttempt(waiting)!);
+        expect(policy.selectNextCandidate([first], 3)).toBe(first);
+      }
+      policy.markUnavailable(first);
+      expect(policy.selectNextCandidate([second], 3)).toBe(second);
+      policy.markUnavailable(second);
+
+      // The three places are taken. `excluded` cannot be added, and it must not hide the peer behind it.
+      expect(policy.selectNextCandidate([first, second, excluded, waiting], 3)).toBe(waiting);
+      // The cap itself holds: without the waiting peer nothing is selectable.
+      expect(policy.selectNextCandidate([first, second, excluded], 3)).toBeUndefined();
+    });
+
   it('keeps a place only for a deferred peer that is among the candidates offered', () => {
     const policy = new VmRecoveryProviderPolicy();
     const others = ['12D3KooWOtherA', '12D3KooWOtherB', '12D3KooWOtherC'];
