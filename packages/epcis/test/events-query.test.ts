@@ -96,6 +96,7 @@ describe('handleEventsQuery', () => {
 
     const event = eventList[0];
     expect(event.type).toBe('ObjectEvent');
+    expect(event.eventID).toBe('urn:uuid:event-1');
     expect(event['dkg:ual']).toBe('did:dkg:mock:31337/42');
     expect(event.configurationId).toBe('CFG-001');
     expect(event.shipmentId).toBe('SHIP-001');
@@ -292,6 +293,22 @@ describe('handleEventsQuery', () => {
     expect(body.epcisBody.queryResults.resultsBody.eventList).toHaveLength(10);
     expect(headers?.link).toBeDefined();
     expect(headers!.link).toContain('rel="next"');
+  });
+
+  it.each(['', '_:blank', 'relative-event', 'https://example.org/event>'])('rejects an unusable stored event subject with 502: %s', async (event) => {
+    const { engine } = createTrackingQueryEngine([makeBindings({ event })]);
+    await expect(handleEventsQuery(new URLSearchParams(), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 502 });
+  });
+
+  it('rejects a query result that has no event subject with 502', async () => {
+    const binding = makeBindings();
+    delete binding.event;
+    const { engine } = createTrackingQueryEngine([binding]);
+    await expect(handleEventsQuery(new URLSearchParams(), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 502 });
   });
 
   it('Link header URL preserves original query params and adds nextPageToken', async () => {
