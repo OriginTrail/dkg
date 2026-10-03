@@ -234,10 +234,6 @@ export interface DkgMetrics {
   backpressureQueueWaitMs: Histogram;
   /** admitted-work duration by bounded scheduler, lane, and outcome */
   backpressureActiveDurationMs: Histogram;
-  /** scope={finalization|reconcile} */
-  storeScanSingleFlightJoinsTotal: Counter;
-  /** active unique scans by scope */
-  storeScanSingleFlightActive: UpDownCounter;
   /** bounded materialized result rows by static source */
   storeQueryResultRows: Histogram;
   /** conservative bounded materialized bytes by static source */
@@ -470,12 +466,6 @@ function buildMetrics(): DkgMetrics {
       unit: 'ms',
       description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
-    }),
-    storeScanSingleFlightJoinsTotal: meter.createCounter('dkg.store.scan_singleflight_joins_total', {
-      description: 'Equivalent expensive scans joined to an already running promise',
-    }),
-    storeScanSingleFlightActive: meter.createUpDownCounter('dkg.store.scan_singleflight_active', {
-      description: 'Currently running unique expensive scans',
     }),
     storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
       description: 'Rows retained by bounded expensive store reads',

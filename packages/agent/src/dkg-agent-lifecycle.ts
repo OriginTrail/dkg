@@ -1,4 +1,4 @@
-import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
+import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
@@ -520,7 +520,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -1732,6 +1732,8 @@ export interface ExactKnowledgeAssetSyncResult {
   readonly authenticatedAssets?: readonly ChallengePinnedGraphScopedAsset[];
   /** Physically applied by the experimental stream, even if final transport close failed. */
   readonly committedExactAssetUals?: readonly string[];
+  /** Present only when the exact-batch stream settled this fetch with one of these outcomes. */
+  readonly streamOutcome?: ExactBatchStreamOutcome;
 }
 
 type PhysicalDurableSyncResult = {
@@ -1740,6 +1742,7 @@ type PhysicalDurableSyncResult = {
   readonly exactResponderCapability?: ExactAssetResponderCapability;
   readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
   readonly committedExactAssetUals?: readonly string[];
+  readonly exactStreamOutcome?: ExactBatchStreamOutcome;
 };
 
 type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
@@ -3329,6 +3332,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
       servingWithheld: (contextGraphId) => this.contextGraphServingWithheld(contextGraphId),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logInfo: (ctx, message) => this.log.info(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
       snapshotBudget: snapshotPolicy.budget,
       contextGraphPriorities: this.config.syncContextGraphPriorities,
@@ -5814,6 +5818,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let exactResponderCapability: ExactAssetResponderCapability | undefined;
     const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
     const committedExactAssetUals: string[] = [];
+    // What the stream established about this peer for one graph. A run over
+    // several graphs has no single answer, so it reports none.
+    let exactStreamOutcome: ExactBatchStreamOutcome | undefined;
     const markExactFetchIncomplete = () => {
       if (exactAssetUals === undefined) return;
       exactFetchDisposition = mergeExactDurableFetchDisposition(
@@ -5870,6 +5877,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             if (detailed.committedExactAssetUals !== undefined) {
               committedExactAssetUals.push(...detailed.committedExactAssetUals);
             }
+            if (orderedContextGraphIds.length === 1) exactStreamOutcome = detailed.exactStreamOutcome;
             return durableSyncAccumulatorFromResult(detailed.result);
           },
         })),
@@ -5942,6 +5950,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ...(committedExactAssetUals.length === 0
           ? {}
           : { committedExactAssetUals: Object.freeze([...committedExactAssetUals]) }),
+        ...(exactStreamOutcome === undefined ? {} : { exactStreamOutcome }),
       };
     };
 
@@ -6108,6 +6117,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(detailed.committedExactAssetUals === undefined
         ? {}
         : { committedExactAssetUals: detailed.committedExactAssetUals }),
+      ...(detailed.exactStreamOutcome === undefined
+        ? {}
+        : { streamOutcome: detailed.exactStreamOutcome }),
     };
   }
 

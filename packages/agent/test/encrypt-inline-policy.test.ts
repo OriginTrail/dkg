@@ -770,7 +770,12 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
   it('passes derived same-CG on-chain id as binding-only and publisher chain target', async () => {
     const agentLike = makeSwmPublishAgentLike('1');
 
-    await (DKGAgent.prototype as any).publishFromSharedMemory.call(agentLike, 'sports', 'all');
+    await (DKGAgent.prototype as any).publishFromSharedMemory.call(
+      agentLike,
+      'sports',
+      'all',
+      { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
+    );
 
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
       'sports',
@@ -803,7 +808,7 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
       agentLike,
       'sports',
       'all',
-      { subContextGraphId: '1' },
+      { subContextGraphId: '1', contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
     );
 
     expect(agentLike.getContextGraphOnChainId.calls).toEqual([]);
@@ -861,33 +866,40 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
     }));
   });
 
-  it('keeps local-meta catalog mutation for legacy private SWM publishes', async () => {
+  it.each([
+    ['no options', undefined],
+    ['no scope version', { subContextGraphId: '1' }],
+    ['scope version 0', { contentScopeVersion: 0 }],
+    ['the root-entity scope version', { contentScopeVersion: 1 }],
+  ])('refuses a publish with %s before any chain, store or publisher work', async (_name, options) => {
     const agentLike = makeSwmPublishAgentLike('4');
-    agentLike.isPrivateContextGraph = recorder(async () => true);
-    agentLike._ensureCuratedCatalogInSwm = recorder(async (
-      _contextGraphId: string,
-      selection: 'all' | { rootEntities: string[] },
-    ) => selection);
 
-    await (DKGAgent.prototype as any).publishFromSharedMemory.call(
+    await expect((DKGAgent.prototype as any).publishFromSharedMemory.call(
       agentLike,
       'private-cg',
       'all',
-    );
+      options,
+    )).rejects.toMatchObject({
+      name: 'LegacyKnowledgeAssetReadOnlyError',
+      code: 'LEGACY_KA_READ_ONLY',
+    });
 
-    expect(agentLike.isPrivateContextGraph.calls).toEqual([['private-cg']]);
-    expect(agentLike._ensureCuratedCatalogInSwm.calls.at(-1)?.slice(0, 2)).toEqual([
+    expect(agentLike.getContextGraphOnChainId.calls).toEqual([]);
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([]);
+    expect(agentLike.createV10ACKProvider.calls).toEqual([]);
+    expect(agentLike.publisher.publishFromSharedMemory.calls).toEqual([]);
+  });
+
+  it('rejects a content scope version it does not know', async () => {
+    const agentLike = makeSwmPublishAgentLike('4');
+
+    await expect((DKGAgent.prototype as any).publishFromSharedMemory.call(
+      agentLike,
       'private-cg',
       'all',
-    ]);
-    expect(agentLike.publisher.publishFromSharedMemory.calls.at(-1)).toEqual([
-      'private-cg',
-      'all',
-      expect.objectContaining({
-        onChainContextGraphId: '4',
-        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys('private-cg'),
-      }),
-    ]);
+      { contentScopeVersion: 3 },
+    )).rejects.toThrow('Unsupported KA content scope version 3');
+    expect(agentLike.publisher.publishFromSharedMemory.calls).toEqual([]);
   });
 });
 
