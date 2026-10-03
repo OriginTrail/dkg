@@ -68,19 +68,15 @@ function admittedRecoveryWork<Args extends unknown[], Result extends object>(
 import {
   KnowledgeAssetWorkspaceHeadCorruptError,
   computeFlatKCRootV10,
-  storeKnowledgeAssetOperationPublicQuads,
-  storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import {
   DKG_ONTOLOGY,
-  MemoryLayer,
   PROTOCOL_STORAGE_ACK,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
   createGraphKnowledgeAssetScope,
-  knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import type {
@@ -98,6 +94,11 @@ import {
   type PendingOrdinalRecoveryResult,
 } from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
+import {
+  graphHoldsTriple,
+  knowledgeAssetVerifiedMemoryGraph,
+  stageKnowledgeAssetInSharedMemory,
+} from './_helpers/staged-knowledge-asset.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
 import { createVmReconcilePeerTopology } from '../src/vm-reconcile-peer-topology.js';
 import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js';
@@ -348,8 +349,28 @@ function registerKnowledgeAsset(
   return kaId;
 }
 
+const nameTriple = (entity: string, value: string) => ({
+  subject: entity,
+  predicate: 'http://schema.org/name',
+  object: `"${value}"`,
+});
+
+function stagedKnowledgeAssetScope(chain: MockChainAdapter, kaNumber: bigint, author = STAGED_KA_AUTHOR) {
+  return createGraphKnowledgeAssetScope(buildKnowledgeAssetUal(chain.chainId, author, kaNumber), '1');
+}
+
+/** The Verified Memory graph a promotion of that KA must land in. */
+function stagedVerifiedMemoryGraph(
+  chain: MockChainAdapter,
+  localCgId: string,
+  kaNumber: bigint,
+  author = STAGED_KA_AUTHOR,
+): string {
+  return knowledgeAssetVerifiedMemoryGraph(localCgId, stagedKnowledgeAssetScope(chain, kaNumber, author));
+}
+
 /** Stage that KA's shared-memory copy in its own graph, with its workspace head. */
-async function stageKnowledgeAssetSharedMemory(
+function stageKnowledgeAssetSharedMemory(
   store: TripleStore,
   chain: MockChainAdapter,
   localCgId: string,
@@ -357,37 +378,12 @@ async function stageKnowledgeAssetSharedMemory(
   entity: string,
   value: string,
 ): Promise<void> {
-  const scope = createGraphKnowledgeAssetScope(
-    buildKnowledgeAssetUal(chain.chainId, STAGED_KA_AUTHOR, kaNumber),
-    '1',
-  );
-  const quads = [{
-    subject: entity,
-    predicate: 'http://schema.org/name',
-    object: `"${value}"`,
-    graph: knowledgeAssetLayerGraphUri(localCgId, MemoryLayer.SharedWorkingMemory, scope),
-  }];
-  const graphManager = new GraphManager(store);
-  const shareOperationId = `staged-share-${kaNumber}`;
-  await store.insert(quads);
-  await storeKnowledgeAssetOperationPublicQuads({
+  return stageKnowledgeAssetInSharedMemory({
     store,
-    graphManager,
     contextGraphId: localCgId,
-    shareOperationId,
-    kaUal: scope.ual,
-    assertionVersion: scope.assertionVersion,
-    quads,
-    privateTripleCount: 0,
-    publisherPeerId: '12D3KooWStagedPublisher',
-  });
-  await storeKnowledgeAssetWorkspaceHead({
-    store,
-    graphManager,
-    contextGraphId: localCgId,
-    shareOperationId,
-    kaUal: scope.ual,
-    assertionVersion: scope.assertionVersion,
+    scope: stagedKnowledgeAssetScope(chain, kaNumber),
+    triples: [nameTriple(entity, value)],
+    shareOperationId: `staged-share-${kaNumber}`,
   });
 }
 
@@ -1702,10 +1698,11 @@ describe('Phase D - VM reconcile damping', () => {
       const publisherReads = reads.getLatestMerkleRootPublisher.calls.length;
       expect(rootReads).toBeGreaterThan(0);
       expect(publisherReads).toBeGreaterThan(0);
-      await expect(internals.store.query(
-        'ASK { GRAPH ?vm { <urn:fact:local-copy> <http://schema.org/name> "Local copy" } '
-          + 'FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }',
-      )).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(graphHoldsTriple(
+        internals.store,
+        stagedVerifiedMemoryGraph(chain, localCgId, 1n),
+        nameTriple('urn:fact:local-copy', 'Local copy'),
+      )).resolves.toBe(true);
 
       // A later visit (a new sweep cycle, or any restart) finds the confirmed
       // copy and settles it without another chain read.
@@ -2237,10 +2234,11 @@ describe('Phase D - VM reconcile damping', () => {
       .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
     expect(fetch.calls).toHaveLength(1);
     expect(negativeCache.size).toBe(0);
-    await expect(internals.store.query(
-      `ASK { GRAPH ?vm { <${entity}> <http://schema.org/name> "${value}" } `
-        + 'FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }',
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(graphHoldsTriple(
+      internals.store,
+      stagedVerifiedMemoryGraph(internals.chain, localCgId, 1n),
+      nameTriple(entity, value),
+    )).resolves.toBe(true);
   });
 
   it('tries again when workspace data arrives without operation-meta changes', async () => {
@@ -6639,11 +6637,12 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     await internals.recordCoreHostedPublicCg(localCgId);
     await internals.runVmReconcileForCg(localCgId);
 
-    // Promoted into the KA's Verified Memory graph.
-    await expect(internals.store.query(
-      'ASK { GRAPH ?vm { <urn:fact:monday> <http://schema.org/name> "Monday fun fact" } '
-        + 'FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }',
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    // Promoted into the KA's own Verified Memory graph.
+    await expect(graphHoldsTriple(
+      internals.store,
+      stagedVerifiedMemoryGraph(chain, localCgId, 1n),
+      nameTriple('urn:fact:monday', 'Monday fun fact'),
+    )).resolves.toBe(true);
 
     // Watermark advanced + distinct core-fill telemetry emitted.
     expect(internals.subscribedContextGraphs.get(localCgId)?.lastReconciledOrdinal).toBe(1);
@@ -6694,7 +6693,6 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       lastReconciledOrdinal: 0,
     });
     chain.getLatestMerkleRootAuthor = async () => author;
-    const graphManager = new GraphManager(internals.store);
     const kinds = ['deferred', 'already', 'promotable', 'already', 'deferred', 'promotable'] as const;
     const assets = kinds.map((kind, ordinal) => {
       const kaNumber = BigInt(ordinal + 1);
@@ -6712,39 +6710,15 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       });
       return { ordinal, kind, kaId, kaNumber, entity };
     });
-    const stageSharedMemory = async (asset: typeof assets[number]): Promise<void> => {
-      const scope = createGraphKnowledgeAssetScope(
-        buildKnowledgeAssetUal(chain.chainId, author, asset.kaNumber),
-        '1',
-      );
-      const swmGraph = knowledgeAssetLayerGraphUri(localCgId, MemoryLayer.SharedWorkingMemory, scope);
-      const quads = [{
-        subject: asset.entity,
-        predicate: 'http://schema.org/name',
-        object: `"${asset.kind}"`,
-        graph: swmGraph,
-      }];
-      await internals.store.insert(quads);
-      await storeKnowledgeAssetOperationPublicQuads({
+    const stageSharedMemory = (asset: typeof assets[number]): Promise<void> =>
+      stageKnowledgeAssetInSharedMemory({
         store: internals.store,
-        graphManager,
         contextGraphId: localCgId,
+        scope: stagedKnowledgeAssetScope(chain, asset.kaNumber, author),
+        triples: [nameTriple(asset.entity, asset.kind)],
         shareOperationId: `mixed-share-${asset.ordinal}`,
-        kaUal: scope.ual,
-        assertionVersion: scope.assertionVersion,
-        quads,
-        privateTripleCount: 0,
         publisherPeerId: '12D3KooWMixedPublisher',
       });
-      await storeKnowledgeAssetWorkspaceHead({
-        store: internals.store,
-        graphManager,
-        contextGraphId: localCgId,
-        shareOperationId: `mixed-share-${asset.ordinal}`,
-        kaUal: scope.ual,
-        assertionVersion: scope.assertionVersion,
-      });
-    };
     const recoveryTargets: OrdinalRecoveryTarget[] = [];
     internals.recoverVmReconcileBatch = async (_lcg, _ocg, targets) => {
       recoveryTargets.push(...targets);
@@ -6783,9 +6757,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(readKinds(getLatestMerkleRoot.calls as Array<[bigint]>)).toEqual(['promotable']);
     expect(readKinds(getLatestMerkleRootPublisher.calls as Array<[bigint]>)).toEqual(['promotable']);
     for (const asset of assets.filter((candidate) => candidate.kind !== 'deferred')) {
-      await expect(internals.store.query(
-        `ASK { GRAPH ?vm { <${asset.entity}> ?p ?o } FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }`,
-      )).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(graphHoldsTriple(
+        internals.store,
+        stagedVerifiedMemoryGraph(chain, localCgId, asset.kaNumber, author),
+        nameTriple(asset.entity, asset.kind),
+      )).resolves.toBe(true);
     }
     expect(recoveryTargets.map((target) => [target.ordinal, target.reason, target.merkleRoot]))
       .toEqual([[0, 'no-swm', ''], [4, 'no-swm', '']]);

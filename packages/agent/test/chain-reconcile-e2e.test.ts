@@ -1,16 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
-  computeFlatKCRootV10,
-  storeKnowledgeAssetOperationPublicQuads,
-  storeKnowledgeAssetWorkspaceHead,
-} from '@origintrail-official/dkg-publisher';
-import {
-  MemoryLayer,
   createGraphKnowledgeAssetScope,
   createOperationContext,
-  knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { FinalizationHandler } from '../src/finalization-handler.js';
@@ -24,6 +18,11 @@ import {
   buildReconciledKnowledgeAssetUal,
   packKnowledgeAssetIdFromIdentity,
 } from '../src/ka-identity.js';
+import {
+  graphHoldsTriple,
+  knowledgeAssetVerifiedMemoryGraph,
+  stageKnowledgeAssetInSharedMemory,
+} from './_helpers/staged-knowledge-asset.js';
 
 /**
  * Phase B end-to-end: drive the real sweep orchestrator (`reconcileContextGraph`)
@@ -40,46 +39,31 @@ const LOCAL_CG = 'fun-facts';
 const AUTHOR = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
 const NAME = 'http://schema.org/name';
 
+const fact = (entity: string, value: string) => ({ subject: entity, predicate: NAME, object: `"${value}"` });
+
 function rootFor(entity: string, value: string): Uint8Array {
-  return computeFlatKCRootV10([{ subject: entity, predicate: NAME, object: `"${value}"`, graph: '' }], []);
+  return computeFlatKCRootV10([{ ...fact(entity, value), graph: '' }], []);
+}
+
+function scopeOf(chain: MockChainAdapter, kaNumber: bigint) {
+  return createGraphKnowledgeAssetScope(buildKnowledgeAssetUal(chain.chainId, AUTHOR, kaNumber), '1');
 }
 
 /** Stage one KA's shared-memory copy in its own graph, with its workspace head. */
-async function stageSharedMemory(
+function stageSharedMemory(
   store: OxigraphStore,
   chain: MockChainAdapter,
   kaNumber: bigint,
   entity: string,
   value: string,
 ): Promise<void> {
-  const scope = createGraphKnowledgeAssetScope(buildKnowledgeAssetUal(chain.chainId, AUTHOR, kaNumber), '1');
-  const quads = [{
-    subject: entity,
-    predicate: NAME,
-    object: `"${value}"`,
-    graph: knowledgeAssetLayerGraphUri(LOCAL_CG, MemoryLayer.SharedWorkingMemory, scope),
-  }];
-  const graphManager = new GraphManager(store);
-  const shareOperationId = `e2e-share-${kaNumber}`;
-  await store.insert(quads);
-  await storeKnowledgeAssetOperationPublicQuads({
+  return stageKnowledgeAssetInSharedMemory({
     store,
-    graphManager,
     contextGraphId: LOCAL_CG,
-    shareOperationId,
-    kaUal: scope.ual,
-    assertionVersion: scope.assertionVersion,
-    quads,
-    privateTripleCount: 0,
+    scope: scopeOf(chain, kaNumber),
+    triples: [fact(entity, value)],
+    shareOperationId: `e2e-share-${kaNumber}`,
     publisherPeerId: '12D3KooWE2ePublisher',
-  });
-  await storeKnowledgeAssetWorkspaceHead({
-    store,
-    graphManager,
-    contextGraphId: LOCAL_CG,
-    shareOperationId,
-    kaUal: scope.ual,
-    assertionVersion: scope.assertionVersion,
   });
 }
 
@@ -156,7 +140,23 @@ function makeDeps(
   };
 }
 
-async function isInVm(store: OxigraphStore, entity: string, value: string): Promise<boolean> {
+/** Whether the Verified Memory graph of this KA, and no other graph, is asked for the fact. */
+function isInVmOf(
+  store: OxigraphStore,
+  chain: MockChainAdapter,
+  kaNumber: bigint,
+  entity: string,
+  value: string,
+): Promise<boolean> {
+  return graphHoldsTriple(
+    store,
+    knowledgeAssetVerifiedMemoryGraph(LOCAL_CG, scopeOf(chain, kaNumber)),
+    fact(entity, value),
+  );
+}
+
+/** Whether any Verified Memory graph holds the fact: for proving nothing was promoted. */
+async function isAnywhereInVm(store: OxigraphStore, entity: string, value: string): Promise<boolean> {
   const res = await store.query(
     `ASK { GRAPH ?vm { <${entity}> <${NAME}> "${value}" } FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }`,
   );
@@ -185,8 +185,11 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
     expect(res.watermark).toBe(2);
     expect(res.reconciled).toBe(2);
     expect(persisted).toEqual([2]);
-    expect(await isInVm(store, 'urn:fact:a', 'Honey never spoils')).toBe(true);
-    expect(await isInVm(store, 'urn:fact:b', 'Octopuses have three hearts')).toBe(true);
+    expect(await isInVmOf(store, chain, 1n, 'urn:fact:a', 'Honey never spoils')).toBe(true);
+    expect(await isInVmOf(store, chain, 2n, 'urn:fact:b', 'Octopuses have three hearts')).toBe(true);
+    // Each KA's content is in its own graph and not in the other's.
+    expect(await isInVmOf(store, chain, 1n, 'urn:fact:b', 'Octopuses have three hearts')).toBe(false);
+    expect(await isInVmOf(store, chain, 2n, 'urn:fact:a', 'Honey never spoils')).toBe(false);
   });
 
   it('does not materialize a chain-backed reconcile when the head block read fails', async () => {
@@ -210,7 +213,7 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
 
     expect(res).toMatchObject({ head: 1, watermark: 0, reconciled: 0, pending: 1 });
     expect(persisted).toEqual([]);
-    expect(await isInVm(store, 'urn:fact:headfail', 'Chain heads matter')).toBe(false);
+    expect(await isAnywhereInVm(store, 'urn:fact:headfail', 'Chain heads matter')).toBe(false);
   });
 
   it('holds the watermark at a gap and fills it on a later sweep (late shared-memory arrival)', async () => {
@@ -231,8 +234,8 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
     const r1 = await reconcileContextGraph(deps, cursor, LOCAL_CG, chain.onChainCg);
     expect(r1.watermark).toBe(1);
     expect(persisted).toEqual([1]);
-    expect(await isInVm(store, 'urn:fact:0', 'A day on Venus is longer than its year')).toBe(true);
-    expect(await isInVm(store, 'urn:fact:1', 'Bananas are berries')).toBe(false);
+    expect(await isInVmOf(store, chain, 1n, 'urn:fact:0', 'A day on Venus is longer than its year')).toBe(true);
+    expect(await isAnywhereInVm(store, 'urn:fact:1', 'Bananas are berries')).toBe(false);
 
     // The missing KA lands locally (simulating the active core-first fetch).
     await stageSharedMemory(store, chain, 2n, 'urn:fact:1', 'Bananas are berries');
@@ -241,7 +244,8 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
     const r2 = await reconcileContextGraph(deps, cursor, LOCAL_CG, chain.onChainCg);
     expect(r2.watermark).toBe(2);
     expect(persisted).toEqual([1, 2]);
-    expect(await isInVm(store, 'urn:fact:1', 'Bananas are berries')).toBe(true);
+    expect(await isInVmOf(store, chain, 2n, 'urn:fact:1', 'Bananas are berries')).toBe(true);
+    expect(await isInVmOf(store, chain, 1n, 'urn:fact:1', 'Bananas are berries')).toBe(false);
   });
 
   it('leaves a KA held nowhere pending even when a historical workspace operation matches its root', async () => {
@@ -270,6 +274,6 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
 
     expect(res).toMatchObject({ head: 1, watermark: 0, reconciled: 0, pending: 1 });
     expect(persisted).toEqual([]);
-    expect(await isInVm(store, entity, value)).toBe(false);
+    expect(await isAnywhereInVm(store, entity, value)).toBe(false);
   });
 });
