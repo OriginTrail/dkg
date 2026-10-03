@@ -10,7 +10,10 @@ public graph through a new, opt-in batch stream: a Core that serves it sends
 whole Knowledge Assets, compressed, up to ten per exchange, and the receiver
 still verifies and authenticates every asset before it stores it. Cores under
 store pressure do less background work per pass and no longer restart their
-own managed Oxigraph because a caller stopped waiting. An asynchronous publish
+own managed Oxigraph because a caller stopped waiting. A Core also stops
+searching its old workspace operations for every asset it lacks, a search that
+kept the stores of Cores on busy graphs occupied for hours, and fetches such
+assets from peers instead. An asynchronous publish
 that fails before its transaction could have been sent retries by itself as
 the same job, and a job that is held for a chain re-check says what it is
 waiting for.
@@ -23,8 +26,9 @@ dashboard receives the node-operator token only on trusted local requests,
 and node-wide operations require a node-admin token.
 **No smart-contract, ABI or deployment registry changes are required.** The
 batch stream is a new protocol that nodes use only with peers that advertise
-it; every existing protocol is unchanged. The release adds one published
-package, `@origintrail-official/dkg-node-store`.
+it. Every existing protocol is unchanged on the wire; a node no longer acts on
+finalization messages in the root-entity format that preceded 10.0.7. The
+release adds one published package, `@origintrail-official/dkg-node-store`.
 
 ### Upgrading from 10.0.20
 
@@ -44,6 +48,9 @@ package, `@origintrail-official/dkg-node-store`.
 | Store adapters report SPARQL terms that fail validation (#2763) | Nothing is rendered or sent differently. A malformed IRI, literal or blank-node label in an adapter statement is counted in `dkg.store.sparql_invalid_terms_total` and logged at most once a minute per adapter, operation, position and kind, with its length and a fingerprint, never the term | Watch the counter. A later release rejects such terms instead of rendering them as before |
 | The periodic Verifiable Memory sweep admits at most eight bound graphs per tick (#2820, #2923) | A node bound to many graphs works through them round-robin over several ticks, which leaves the background store slot to live finalization. An explicit full sweep keeps its complete rotation | None |
 | `DKGAgent.stop()` drains Context Graph subscription writes (#2935) | A daemon shutdown with a stuck subscription write can take up to 5 s longer. For SDK embedders, `stop()` can also reject with `ContextGraphSubscriptionPersistShutdownTimeoutError` (`CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT`), which blocks `start()` until `stop()` is retried | Embedders: retry `stop()` on that error |
+| Chain reconcile no longer promotes from root-entity shares (#2988) | A Knowledge Asset that a node holds only as a root-entity share from before 10.0.7 is not promoted to Verifiable Memory from that local copy any more; the node fetches it from peers like any other asset it lacks. A Core that was held up by the old search runs many more reconcile passes and recovery requests afterwards. `DKG_VM_RECONCILE_NEGATIVE_TTL_MS` is no longer read | None. Remove `DKG_VM_RECONCILE_NEGATIVE_TTL_MS` if you set it |
+| Root-entity publishes are retired at the node (#2991) | `publishFromSharedMemory` called without `contentScopeVersion` is refused with `LEGACY_KA_READ_ONLY`; that includes the remap publish into a sub context graph and its participant signatures. A node ignores a finalization message that is not graph-scoped. `DKG_FINALIZATION_SWM_PAGE_ROWS`, `DKG_FINALIZATION_SWM_MAX_ROWS`, `DKG_FINALIZATION_SWM_MAX_BYTES` and `DKG_DISABLE_SWM_KA_BOUND` are no longer read, and `dkg.store.scan_singleflight_joins_total` and `dkg.store.scan_singleflight_active` are no longer reported | SDK embedders: publish through `publishFromFinalizedAssertion`. Remove the four switches and any dashboard panel on the two metrics |
+| A serving Core answers `BUSY` on the batch stream (#2987) | Additive. A Core whose sync responder cannot admit a stream request sends a `BUSY` refusal where it reset the stream before; the requesting node pauses 2, 5 and 10 s and asks the same Core again. An older requester treats `BUSY` as the failed stream it saw before, and a new requester against an older Core still gets resets. New: `dkg.sync.response.total{outcome="busy"}` | None |
 
 ### Known issues
 
@@ -51,13 +58,16 @@ package, `@origintrail-official/dkg-node-store`.
   every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
   set.
 - **Recovery through the batch stream depends on the Cores that serve it**:
-  only Cores with the switch set serve the stream. A stream that breaks is
-  opened once more with the same Core (#2979); a stream that stalls without
-  closing, or breaks a second time, is not. The assets of an exchange that
-  could not be completed are then asked from other holders over the ordinary
-  protocol. Each such attempt is bounded to two minutes while a stream-capable
-  Core is connected (#2978), but large assets still take minutes each there.
-  Serve the stream from more than one Core that holds the graph.
+  only Cores with the switch set serve the stream. A Core that is busy
+  answers `BUSY` and is asked again after a short pause, and a stream that
+  breaks is opened once more with the same Core (#2979, #2987); a stream that
+  stalls without closing is not detected. After a busy attempt, and after a
+  broken one on a Core that has already served the graph, the Core keeps its
+  turn, but between two stream attempts the node can probe peers without the
+  stream. Each such probe is bounded to two minutes while a stream-capable
+  Core is connected, three times out of four (#2978), and large assets still
+  take minutes each there. Serve the stream from more than one Core that
+  holds the graph.
 - **Two peers that connect while both are still starting do not sync with each
   other until they reconnect** (#2854): a node learns a peer's protocols when
   the connection opens. Two nodes that both connected before either
@@ -177,6 +187,32 @@ package, `@origintrail-official/dkg-node-store`.
   A query that really outlives the client deadline is still reclaimed, and an
   abandoned answer with more than 1 MiB left to read is cancelled and still
   ends in a restart at the deadline.
+- **A Core no longer searches its old workspace operations for every
+  Knowledge Asset it does not hold** (#2988): when chain reconcile found no
+  state of the asset's own for a registered Knowledge Asset, it compared
+  every workspace operation the context graph had ever recorded with the
+  chain root, one read across the whole Shared Working Memory graph family
+  per operation. On a graph with a few thousand operations from before
+  10.0.7 and a few thousand assets, that took about an hour of store time
+  per missing asset and matched nothing, a write to the graph made the next
+  sweep repeat it, and every other background read waited behind it,
+  including the reads that serve recovery to other nodes. Chain reconcile now
+  decides from the asset's own state: an asset the node does not hold is
+  queued for recovery from peers without a chain read, and the marker of an
+  asset already in Verifiable Memory still settles it.
+  `DKG_VM_RECONCILE_NEGATIVE_TTL_MS` is no longer read.
+- **A busy Core no longer looks like a broken stream during public-graph
+  recovery** (#2985, #2987): a serving Core whose sync responder was full
+  reset the batch stream after its ten-second queue wait and sent nothing.
+  The recovering node could not tell that from a broken connection: it
+  retried once into the same queue and then spent minutes on peers that do
+  not serve the stream. The Core now answers `BUSY`, logs one line with the
+  stage and the limiter's state, and counts it in
+  `dkg.sync.response.total{outcome="busy"}`. The requester pauses 2, 5 and
+  10 s and asks the same Core again. A stream attempt that ended busy, or
+  broke on a Core that has already served the graph, no longer costs the
+  Core its turn in the peer rotation: the Core is left alone for 15 s, keeps
+  one of the pass's peer slots and is asked again in the same pass.
 - **`wm/discard` and `wm/write` on a shared or published Knowledge Asset
   answer 409** (#1425, #2581): such an asset has no working draft. The routes
   returned the engine's `KA_WM_LIFECYCLE_REQUIRED` as an unclassified 500;
@@ -211,6 +247,23 @@ package, `@origintrail-official/dkg-node-store`.
   operator-only routes: an agent-scoped token receives `403`, the
   node-operator token and auth-disabled mode keep full access. The upgrade
   table lists the routes.
+- **Root-entity publishes are retired at the node** (#2991): every default
+  publish and update path has named the Knowledge Asset's own graph since
+  10.0.7. Two root-entity paths remained. A finalization message without
+  that scope made the receiving node read Shared Working Memory by root
+  entity across the whole graph family and promote a match; the node now
+  ignores such a message with one log line, and its asset reaches Verifiable
+  Memory through chain reconcile and sync. `publishFromSharedMemory` called
+  without `contentScopeVersion` published a caller-selected slice as a
+  root-entity asset, which Cores have refused to acknowledge on public
+  graphs since 10.0.19; the method now refuses it up front with
+  `LEGACY_KA_READ_ONLY`. That also ends the remap publish into a sub context
+  graph and its participant signatures, which existed only on that path.
+  The metrics `dkg.store.scan_singleflight_joins_total` and
+  `dkg.store.scan_singleflight_active` and the switches
+  `DKG_FINALIZATION_SWM_PAGE_ROWS`, `DKG_FINALIZATION_SWM_MAX_ROWS`,
+  `DKG_FINALIZATION_SWM_MAX_BYTES` and `DKG_DISABLE_SWM_KA_BOUND` went with
+  the code they belonged to.
 - **Cores do less store work in the background** (#2820, #2908, #2919,
   #2923): the Verifiable Memory promotion audit checks 64 signed copies with
   one query, where a pass over 1,000 copies issued one query per copy. The
@@ -275,8 +328,8 @@ package, `@origintrail-official/dkg-node-store`.
 ### Added
 
 - **Verifiable Memory of a registered public graph can be recovered through a
-  batch stream** (#2939, #2956, #2978, #2979): a node fetched each missing
-  Knowledge Asset as small exact pages over the sync protocol, and the
+  batch stream** (#2939, #2956, #2978, #2979, #2987): a node fetched each
+  missing Knowledge Asset as small exact pages over the sync protocol, and the
   serving node repeated store reads for every page. A serving node can now
   export a whole asset once, bounded and compressed, and send up to ten
   assets over one duplex stream, two ahead of the receiver's
@@ -287,14 +340,16 @@ package, `@origintrail-official/dkg-node-store`.
   it, any node requests it, only for graphs registered as public and only
   from peers that advertise the protocol. A stream that breaks is opened once
   more with the same peer for the assets not yet stored, after waiting up to
-  15 s for the peer to be connected again; a refusal, an asset the node
-  rejects, a cancellation and a second break are not retried. While a
-  stream-capable Core is connected, an attempt on a peer without the stream
-  is bounded to two minutes; proven holders and every fourth attempt for an
-  asset on a peer keep the ordinary budget. Every exchange that stops early
-  logs one `Exact batch requester failure` line with where the failure came
-  from (`origin=stream`, `refusal`, `cancelled` or `other`) and the last
-  stage that completed.
+  15 s for the peer to be connected again; a refusal other than `BUSY`, an
+  asset the node rejects, a cancellation and a second break are not retried.
+  A Core that cannot admit a stream request answers `BUSY`: the node pauses
+  2, 5 and 10 s, asks it again, and the Core keeps its turn in the peer
+  rotation. While a stream-capable Core is connected, an attempt on a peer
+  without the stream is bounded to two minutes; proven holders and every
+  fourth attempt for an asset on a peer keep the ordinary budget. Every
+  exchange that stops early logs one `Exact batch requester failure` line
+  with where the failure came from (`origin=stream`, `refusal`, `cancelled`
+  or `other`) and the last stage that completed.
 - **A recovering node can prepare its next batch** (#2946, #2947, #2954,
   #2956): around each exchange a recovery pass reads how large its targets
   are and whether the graph is registered as public, and those chain reads
