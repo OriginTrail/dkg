@@ -1,8 +1,80 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
+import {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+} from '../src/http-response-limit.js';
+
+describe('store response-size error contract', () => {
+  it('recognizes instances and worker-deserialized errors structurally', () => {
+    expect(isStoreResponseTooLargeError(new StoreResponseTooLargeError(10, 11))).toBe(true);
+    expect(isStoreResponseTooLargeError({
+      code: 'STORE_RESPONSE_TOO_LARGE',
+      maxBytes: 10,
+      actualBytes: 11,
+      message: 'too large',
+    })).toBe(true);
+    expect(isStoreResponseTooLargeError({ code: 'STORE_RESPONSE_TOO_LARGE' })).toBe(false);
+  });
+
+  it('rejects invalid response limits before dispatching a local query', async () => {
+    const store = new OxigraphStore();
+    try {
+      await expect(store.query('ASK { ?s ?p ?o }', { maxResponseBytes: -1 }))
+        .rejects.toThrow('maxResponseBytes must be a non-negative safe integer');
+    } finally {
+      await store.close();
+    }
+  });
+});
 
 describe('OxigraphStore query result contract', () => {
+  it('bounds native string results as an empty binding envelope', async () => {
+    const store = new OxigraphStore();
+    const native = (store as unknown as {
+      store: { query(sparql: string): unknown };
+    }).store;
+    const query = vi.spyOn(native, 'query').mockReturnValue('serialized result');
+    const expected = { type: 'bindings', bindings: [] } as const;
+    const exactBytes = Buffer.byteLength(JSON.stringify(expected), 'utf8');
+    try {
+      await expect(store.query('SELECT * WHERE { ?s ?p ?o }', {
+        maxResponseBytes: exactBytes - 1,
+      })).rejects.toMatchObject({
+        code: 'STORE_RESPONSE_TOO_LARGE',
+        maxBytes: exactBytes - 1,
+        actualBytes: exactBytes,
+      });
+      await expect(store.query('SELECT * WHERE { ?s ?p ?o }', {
+        maxResponseBytes: exactBytes,
+      })).resolves.toEqual(expected);
+    } finally {
+      query.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('bounds an empty native graph catalog before returning it', async () => {
+    const store = new OxigraphStore();
+    const native = (store as unknown as {
+      store: { query(sparql: string): unknown };
+    }).store;
+    const query = vi.spyOn(native, 'query').mockReturnValue(false);
+    try {
+      await expect(store.listGraphs({ maxResponseBytes: 1 }))
+        .rejects.toMatchObject({
+          code: 'STORE_RESPONSE_TOO_LARGE',
+          maxBytes: 1,
+          actualBytes: 2,
+        });
+      await expect(store.listGraphs({ maxResponseBytes: 2 })).resolves.toEqual([]);
+    } finally {
+      query.mockRestore();
+      await store.close();
+    }
+  });
+
   it('preserves the query form for empty SELECT, CONSTRUCT, DESCRIBE, and ASK results', async () => {
     const store = new OxigraphStore();
     try {
@@ -60,6 +132,59 @@ describe('OxigraphStore query result contract', () => {
           graph: '',
         }],
       });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('bounds normalized SELECT production at the local adapter boundary', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(Array.from({ length: 32 }, (_, index) => ({
+        subject: `urn:subject:${index}`,
+        predicate: 'urn:predicate',
+        object: `"${'x'.repeat(64)}"`,
+        graph: 'urn:graph',
+      })));
+      const sparql = 'SELECT ?s ?o WHERE { GRAPH <urn:graph> { ?s <urn:predicate> ?o } }';
+      const result = await store.query(sparql);
+      const exactBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes - 1 }))
+        .rejects.toMatchObject({
+          code: 'STORE_RESPONSE_TOO_LARGE',
+          maxBytes: exactBytes - 1,
+          actualBytes: expect.any(Number),
+        });
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes }))
+        .resolves.toEqual(result);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('bounds a non-empty CONSTRUCT at its exact local-adapter boundary', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{
+        subject: 'urn:subject',
+        predicate: 'urn:predicate',
+        object: `"${'x'.repeat(64)}"`,
+        graph: 'urn:graph',
+      }]);
+      const sparql = 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <urn:graph> { ?s ?p ?o } }';
+      const result = await store.query(sparql);
+      expect(result.type).toBe('quads');
+      const exactBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes - 1 }))
+        .rejects.toMatchObject({
+          code: 'STORE_RESPONSE_TOO_LARGE',
+          maxBytes: exactBytes - 1,
+          actualBytes: exactBytes,
+        });
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes }))
+        .resolves.toEqual(result);
     } finally {
       await store.close();
     }

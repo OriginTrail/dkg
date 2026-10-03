@@ -14,6 +14,7 @@ import {
   type ContextGraphReadCheck,
 } from './prepare-unscoped-context-graph-read-checks.js';
 import { executeUnscopedQuery } from './unscoped-query-consistency.js';
+import { asQueryResultTooLargeError } from './query-result-too-large-error.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -41,7 +42,6 @@ import {
   assertContextGraphIdV1, assertNetworkIdV1,
   type ContextGraphIdV1, type NetworkIdV1,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
-  TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
@@ -78,7 +78,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig, type OperationContext, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -132,9 +132,12 @@ import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
+  QueryMaterializationBudget,
   emptyQueryResultForKind,
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
+  type QueryResult as EngineQueryResult,
+  type QueryOptions as EngineQueryOptions,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
@@ -412,71 +415,37 @@ interface ContextGraphReadAuthorityPlan {
   hasAcceptedRfc64PublicPolicy?: boolean;
 }
 
+type AgentForwardedQueryOptions = Pick<EngineQueryOptions,
+  | 'contextGraphId'
+  | 'graphSuffix'
+  | 'includeSharedMemory'
+  | 'includeWorkspace'
+  | 'includeContextGraphPartitions'
+  | 'includePrivate'
+  | 'signal'
+  | 'priority'
+  | 'source'
+  | 'maxResponseBytes'
+  | 'view'
+  | 'agentAddress'
+  | 'verifiedGraph'
+  | 'assertionName'
+  | 'subGraphName'
+  | 'minTrust'
+  | '_minTrust'
+>;
+
+/** Deliberate agent-owned query surface plus authorization and tracing. */
+export interface AgentQueryOptions extends AgentForwardedQueryOptions {
+  operationCtx?: OperationContext;
+  /** Authenticated caller identity used to enforce working-memory isolation. */
+  callerAgentAddress?: string;
+}
+
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
     sparql: string,
-    options?: string | {
-      contextGraphId?: string;
-      graphSuffix?: '_shared_memory';
-      includeSharedMemory?: boolean;
-      /** @deprecated Use includeSharedMemory */
-      includeWorkspace?: boolean;
-      /**
-       * Opt-in for dashboard/count queries that intentionally enumerate all
-       * registered public content partitions in a scoped `GRAPH ?g` scan.
-       */
-      includeContextGraphPartitions?: boolean;
-      /**
-       * Opt-in: allow the scoped query to reference the context graph's own
-       * `_private` partition (excluded from the scope guard's allow-set by
-       * default). Used by the EPCIS events query, whose SPARQL always names
-       * `<cg>/_private`. Does not widen access for other callers.
-       */
-      includePrivate?: boolean;
-      /** Cancel the underlying store request when the outer caller disconnects. */
-      signal?: AbortSignal;
-      /** Store admission lane used by the query engine. */
-      priority?: import('@origintrail-official/dkg-storage').StoreWorkPriority;
-      /** Store diagnostics / slow-query attribution label. */
-      source?: string;
-      operationCtx?: OperationContext;
-      view?: GetView;
-      agentAddress?: string;
-      verifiedGraph?: string;
-      assertionName?: string;
-      subGraphName?: string;
-      /**
-       * EVM address of the authenticated caller, as resolved by an
-       * outer layer (typically the daemon's per-request auth token).
-       * When set, the agent layer enforces that `view: 'working-memory'`
-       * queries can only read this caller's own WM — cross-agent reads
-       * via a foreign `agentAddress` are silently denied.
-       *
-       * Undefined = no caller authentication context (in-process call
-       * from trusted code). Backwards-compatible with callers that
-       * predate A-1 — they bypass the isolation check.
-       *
-       * Invariant: on a `view: 'working-memory'` read, the agent layer
-       * rejects (silently, with an empty-per-kind result) any
-       * `agentAddress` that differs from `callerAgentAddress`. If
-       * `agentAddress` is omitted, it defaults to `callerAgentAddress`
-       * so an authenticated caller cannot escape isolation by omission.
-       * See spec §04 / RFC-29 for the policy source.
-       */
-      callerAgentAddress?: string;
-      /**
-       * Minimum trust level for the verifiable-memory view (spec §14).
-       * Values above `SelfAttested` require explicit writer-side
-       * `dkg:trustLevel` metadata. Ignored for other views.
-       */
-      minTrust?: TrustLevel;
-      /**
-       * @deprecated Use `minTrust`. Legacy underscore alias preserved for
-       * V10-rc SDK consumers. When both are supplied, `minTrust` wins.
-       * See QueryOptions._minTrust for the deprecation policy.
-       */
-      _minTrust?: TrustLevel;
-    },
+    options?: string | AgentQueryOptions,
   ) {
     const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
     const opts = {
@@ -684,6 +653,9 @@ export class QueryMethods extends DKGAgentBase {
         effectiveWmAddress.toLowerCase() === defaultEvmLc ? [this.peerId!] : [this.defaultAgentAddress!];
     }
 
+    const materializationBudget = opts.maxResponseBytes === undefined
+      ? undefined
+      : new QueryMaterializationBudget(opts.maxResponseBytes);
     const execute = () => this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
       graphSuffix: opts.graphSuffix,
@@ -693,6 +665,12 @@ export class QueryMethods extends DKGAgentBase {
       signal: opts.signal,
       priority: opts.priority,
       source: opts.source,
+      maxResponseBytes: opts.maxResponseBytes,
+      // The public API uses one response ceiling. At the engine boundary it
+      // becomes two explicit policies: per-store-response transport limiting
+      // and cumulative decoded materialization limiting.
+      maxMaterializedBytes: opts.maxResponseBytes,
+      materializationBudget,
       view: opts.view,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
@@ -708,28 +686,37 @@ export class QueryMethods extends DKGAgentBase {
     // Arbitrary unscoped SPARQL can reveal private data through aggregates or
     // projections without a graph column. The executor owns admission and both
     // local consistency checks, including the release of the materialized result.
-    const result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
-      store: this.store,
-      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
-      admit: () => canReadUnscopedQuery({
+    let result: EngineQueryResult;
+    try {
+      result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
         store: this.store,
-        knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
-        canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
-          callerAgentAddress: callerAgentAddressStr,
-          signal,
+        readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+        admit: () => canReadUnscopedQuery({
+          store: this.store,
+          knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
+          canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: callerAgentAddressStr,
+            signal,
+          }),
+          prepareReadChecks: (ids, signal) => (
+            QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
+              this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
+            )
+          ),
+        }, {
+          signal: opts.signal,
+          maxResponseBytes: opts.maxResponseBytes,
+          materializationBudget,
         }),
-        prepareReadChecks: (ids, signal) => (
-          QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
-            this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
-          )
-        ),
-      }, { signal: opts.signal }),
-      execute,
-      denied: () => {
-        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
-        return emptyQueryResultForKind(sparql);
-      },
-    });
+        execute,
+        denied: () => {
+          this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
+          return emptyQueryResultForKind(sparql);
+        },
+      });
+    } catch (error) {
+      throw asQueryResultTooLargeError(error) ?? error;
+    }
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
   }

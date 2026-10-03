@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { QueryMaterializationBudget } from '@origintrail-official/dkg-query';
 import {
   canReadUnscopedQuery,
   type UnscopedQueryAdmissionDependencies,
@@ -33,6 +34,22 @@ function deferred<T>() {
 }
 
 describe('unscoped query admission', () => {
+  it('charges policy discovery and passes the same response cap to graph inventory', async () => {
+    const canRead = vi.fn(async () => true);
+    const deps = admissionDependencies(canRead, []);
+    deps.store.query.mockResolvedValue({
+      type: 'bindings',
+      bindings: [{ cg: `did:dkg:context-graph:${'private'.repeat(32)}` }],
+    });
+    await expect(canReadUnscopedQuery(deps, {
+      maxResponseBytes: 128,
+      materializationBudget: new QueryMaterializationBudget(128),
+    })).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE' });
+    expect(deps.store.query.mock.calls[0]?.[1]).toMatchObject({ maxResponseBytes: 128 });
+    expect(deps.store.listGraphsByPrefix.mock.calls[0]?.[1]).toMatchObject({ maxResponseBytes: 128 });
+    expect(canRead).not.toHaveBeenCalled();
+  });
+
   it('starts independent discovery together and waits for the complete candidate union', async () => {
     const ontology = deferred<Awaited<ReturnType<ContextGraphQueryStore['query']>>>();
     const inventory = deferred<string[]>();

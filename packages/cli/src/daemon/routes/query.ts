@@ -17,7 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { isClientQueryFailure } from "./query-error.js";
+import { classifyQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -230,6 +230,9 @@ import {
   isContextGraphReadAuthorityUnavailable,
   respondIfContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
+
+/** Keep an arbitrary public query from materializing an unbounded remote result. */
+export const API_QUERY_MAX_STORE_RESPONSE_BYTES = 10 * 1024 * 1024;
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -681,6 +684,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           signal: queryLifecycle.signal,
           priority: queryLifecycle.priority,
           source: queryLifecycle.source,
+          maxResponseBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
           // the daemon admin
           // token is the authorisation anchor for cross-agent WM reads
           // (adapter-openclaw and the CLI rely on this). Pass it through
@@ -732,6 +736,16 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         tracker.fail(ctx, err);
         return;
       }
+      const queryFailure = classifyQueryFailure(err);
+      if (queryFailure.kind === 'result-too-large') {
+        tracker.fail(ctx, err);
+        return jsonResponse(res, 413, {
+          error: queryFailure.error.message,
+          code: queryFailure.error.code,
+          limitBytes: queryFailure.error.maxBytes,
+          actualBytes: queryFailure.error.actualBytes,
+        });
+      }
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
       if (storeUnavailableOutcome !== null) {
         // Pre-dispatch shedding is a cancellation; a store deadline may have
@@ -745,7 +759,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       const msg = err?.message ?? "";
       // #1758 — one classifier: a typed upstream status decides, otherwise
       // legacy message families apply. See ./query-error.ts.
-      if (isClientQueryFailure(err)) {
+      if (queryFailure.kind === 'client') {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;
