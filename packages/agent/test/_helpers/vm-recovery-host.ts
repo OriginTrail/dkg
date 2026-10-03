@@ -14,8 +14,9 @@ import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
 import { DKGAgent } from '../../src/index.js';
 import { exactAssetUalsForSelection, type ExactAssetSelection } from '../../src/sync/exact-assets.js';
-import type { ExactRecoveryTransportMode } from '../../src/sync/requester/exact-recovery-transport.js';
+import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from '../../src/sync/requester/exact-recovery-transport.js';
 import type {
+  VmRecoveryProviderPolicy,
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
 import type { VmRecoveryRegisteredPublicEvidence } from '../../src/vm-recovery-pass-authority.js';
@@ -36,6 +37,8 @@ interface ExactFetchResult {
   };
   disposition: VmRecoveryUalDisposition;
   responderCapability?: 'legacy-filter-unsupported';
+  /** Set by a fixture that plays the exact-batch stream; the default fixture never does. */
+  streamOutcome?: ExactBatchStreamOutcome;
 }
 
 /**
@@ -72,6 +75,12 @@ export interface VmRecoveryHostInternals {
   vmReconcileTransportBudgetPolicy: VmRecoveryTransportBudgetPolicy;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
+  selectVmReconcileExactCandidate(
+    record: VmReconcileRotationRecord | undefined,
+    fallbackCandidatePeerIds: readonly string[],
+    policy: VmRecoveryProviderPolicy,
+    binding?: { localCgId: string; onChainCgId: string; experimentalStreamPeerIds?: ReadonlySet<string> },
+  ): string | undefined;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
   installVmReconcileActiveFetchCooldown(localCgId: string, now: number): symbol;
   readVmReconcileActiveFetchCooldown(

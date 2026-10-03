@@ -1,6 +1,7 @@
 import {
   createOperationContext,
   DEFAULT_MAX_READ_BYTES,
+  ExactBatchResponderRefusal,
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
@@ -39,6 +40,7 @@ import {
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
+import { observeExactBatch } from '../exact-batch-observation.js';
 import {
   createSyncResponderSnapshotBudget,
   SyncRowSnapshotBudgetError,
@@ -81,6 +83,12 @@ type PreparedResponderStage =
 export interface ExperimentalExactBatchResponderResources {
   readonly exportCache: ExactAssetExportCache;
   readonly snapshotBudget: import('./snapshot-budget.js').SyncResponderSnapshotBudget;
+  /**
+   * Both admissions share the limiter of every other sync response. When it
+   * does not admit the stage (queue wait exceeded, queue full, displaced) they
+   * reject with Core's `ExactBatchResponderRefusal('BUSY')`, which Core answers
+   * with a refusal frame.
+   */
   withPreAuthorizationAdmission<T>(peerId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
   withAuthorizedResponseAdmission<T>(peerId: string, contextGraphId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
 }
@@ -134,6 +142,8 @@ interface RegisterSyncHandlerParams {
    */
   servingWithheld?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
+  /** One line per exact-batch stream request refused as busy. Omitted ⇒ `logDebug`. */
+  logInfo?: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
   /** Primarily injectable for deterministic tests; production uses the bounded defaults below. */
   snapshotBudget?: SyncResponderSnapshotBudgetOptions;
@@ -337,6 +347,9 @@ function createSyncResponderLimiter() {
   });
 
   return {
+    /** Responses running and requests waiting right now, for diagnostics only. */
+    pressure: (): { running: number; queued: number } => ({ running, queued: queue.length }),
+
     async run<T>(
       peerId: string,
       signal: AbortSignal | undefined,
@@ -503,6 +516,33 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   // compatibility no-op for responder scheduling.
   const prioritySchedulingEnabled = Object.values(contextGraphPriorities ?? {})
     .some((priority) => priority !== 0);
+  // A page request the limiter does not admit fails with a retryable reply its
+  // requester can read. The stream has no reply to put that in, and an abort
+  // reads as a broken connection, so the same condition becomes a BUSY refusal.
+  // It is counted and logged here, once, with nothing taken from the request.
+  const admitExactBatchStage = async <T>(
+    stage: 'pre-authorization' | 'response',
+    remotePeerId: string,
+    signal: AbortSignal,
+    scheduling: SyncResponderScheduling,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await limiter.run(remotePeerId, signal, scheduling, work);
+    } catch (err) {
+      if (!(err instanceof SyncResponderBusyError)) throw err;
+      getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });
+      observeExactBatch(() => {
+        const { running, queued } = limiter.pressure();
+        (params.logInfo ?? logDebug)(
+          createOperationContext('sync'),
+          `Exact batch responder busy stage=${stage} peer=${remotePeerId.slice(-8)} `
+            + `reason=${JSON.stringify(err.message)} running=${running} queued=${queued}`,
+        );
+      });
+      throw new ExactBatchResponderRefusal('BUSY', { cause: err });
+    }
+  };
   // The opt-in batch profile uses two separately bounded stages. Unlike the
   // legacy runTwoStage path, it does not claim a reserved FIFO handoff between
   // authorization and response. No admission remains held across that gap.
@@ -511,11 +551,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   if (params.onExperimentalExactBatchResources && supportsBoundedExactGraphExport(store)) params.onExperimentalExactBatchResources({
     exportCache: exactAssetExportCache,
     snapshotBudget: responderSnapshotBudget,
-    withPreAuthorizationAdmission: (remotePeerId, signal, work) => limiter.run(remotePeerId, signal,
+    withPreAuthorizationAdmission: (remotePeerId, signal, work) => admitExactBatchStage(
+      'pre-authorization', remotePeerId, signal,
       { lane: 'pre_authorization', priority: 0, priorityClass: 'default' }, work),
     withAuthorizedResponseAdmission: (remotePeerId, contextGraphId, signal, work) => {
       const priority = prioritySchedulingEnabled ? contextGraphPriority(contextGraphPriorities, contextGraphId) : 0;
-      return limiter.run(remotePeerId, signal,
+      return admitExactBatchStage('response', remotePeerId, signal,
         { contextGraphId, lane: 'responder', priority, priorityClass: syncPriorityClass(priority) }, work);
     },
   });
