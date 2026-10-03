@@ -953,6 +953,12 @@ export interface VmReconcileRotationRecord {
   collectionDeadlineAt: number;
   /** Cursor only; every physical attempt advances it, regardless of outcome. */
   lastAttemptedPeerId?: string;
+  /**
+   * Peers whose last attempt for this target ended without a verdict on their
+   * data and left the target its turn at them (a busy answer, a broken
+   * stream). Ordering only: never read as attempted, present or absent.
+   */
+  streamSetbackPeerIds?: Set<string>;
   failures: number;
   nextRetryAt: number;
 }

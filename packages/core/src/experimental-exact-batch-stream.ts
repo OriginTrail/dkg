@@ -11,6 +11,7 @@ import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_MAX_REQUEST_BYTES, EXACT_BATCH_MAX_FRAME_BYTES,
   EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_ASSETS, encodeExactBatchFrame,
   decodeExactBatchFrames, validateExactBatchFrame, type ExactBatchFrame, type ExactBatchFrameKind,
+  type ExactBatchRefusal,
 } from './experimental-exact-batch-wire.js';
 export {
   EXACT_BATCH_STREAM_PROTOCOL as EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
@@ -186,6 +187,18 @@ export interface ExactBatchResponderAuthorization<Context> {
   readonly context: Context;
 }
 
+/**
+ * Thrown by a responder callback to end the exchange with a refusal frame the
+ * requester can read, where any other error aborts the stream and looks like a
+ * broken connection. Only the closed wire code is sent, never the cause.
+ */
+export class ExactBatchResponderRefusal extends Error {
+  constructor(readonly refusal: ExactBatchRefusal, options?: ErrorOptions) {
+    super(`Exact batch responder refused: ${refusal}`, options);
+    this.name = 'ExactBatchResponderRefusal';
+  }
+}
+
 /** Explicit responder registration. Authorization precedes any scoped export. */
 export function registerExperimentalExactBatchResponder<Context>(
   router: ProtocolRouter,
@@ -209,10 +222,17 @@ export function registerExperimentalExactBatchResponder<Context>(
         throw error;
       }
     }, async ({ requestData, peerId, continuation: session, signal }) => {
-      const authorized = await authorizeRequest(requestData, peerId, signal);
-      session.authorizeAssets(authorized.assetUals);
-      checkSignal(signal);
-      await respond(authorized.context, session, peerId);
+      try {
+        const authorized = await authorizeRequest(requestData, peerId, signal);
+        session.authorizeAssets(authorized.assetUals);
+        checkSignal(signal);
+        await respond(authorized.context, session, peerId);
+      } catch (error) {
+        if (!(error instanceof ExactBatchResponderRefusal)) throw error;
+        // `send` rejects in a cancelled scope, which then aborts as before.
+        await session.send({ kind: EXACT_BATCH_FRAME_KIND.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX,
+          sequence: 0, payload: new TextEncoder().encode(error.refusal) });
+      }
     }, stableOptions);
 }
 

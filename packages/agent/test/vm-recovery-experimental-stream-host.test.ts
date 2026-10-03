@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext, PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
-import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
+import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
+import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js';
+import { VM_RECOVERY_STREAM_SETBACK_LIMITS } from '../src/vm-recovery-stream-setback-policy.js';
 import { EXACT_BATCH_STREAM_PROTOCOL } from '../src/sync/exact-batch-stream-contract.js';
 import { rememberExactBatchStreamResourceRefusal, rememberExactBatchStreamUnsupported } from '../src/sync/exact-batch-stream-capability.js';
 
 const older = '12D3KooWAAStreamOlder';
+const olderB = '12D3KooWBBStreamOlder';
+const olderC = '12D3KooWCCStreamOlder';
 const core = '12D3KooWZZStreamCore';
 const cg = '0x0000000000000000000000000000000000000001/stream-profile';
 const agents: Array<{ stop(): Promise<void> }> = [];
@@ -278,5 +282,271 @@ describe('experimental public Core streaming recovery host', () => {
     expect(h.transportModes.every(mode => mode === 'legacy')).toBe(true);
     expect(h.fetched.every(({ uals }) => uals.length === 1)).toBe(true);
     expect(h.internals.peerCapabilityRegistry.supportsCore(core)).toBe(true);
+  });
+});
+
+/**
+ * Stream-capable Cores among peers that only speak the ordinary wire. A stream
+ * answer is scripted per Core, `complete` when its script is empty. Of the
+ * other peers only `legacyHolders` hold the assets, and each of their probes
+ * takes `legacyProbeMs` of the recovery clock, which nothing else moves.
+ */
+async function streamHolderHarness(options: {
+  legacyPeers?: readonly string[];
+  legacyHolders?: readonly string[];
+  streamPeers?: readonly string[];
+  legacyProbeMs?: number;
+  targetCount?: number;
+} = {}) {
+  vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
+  const legacyPeers = options.legacyPeers ?? [older, olderB];
+  const streamPeers = options.streamPeers ?? [core];
+  const clock = { now: 1_000_000, legacyProbeMs: options.legacyProbeMs ?? 61_000 };
+  const answers = new Map<string, ExactBatchStreamOutcome[]>(streamPeers.map(peer => [peer, []]));
+  const alwaysBusy = new Set<string>();
+  let lastAnswer: ExactBatchStreamOutcome = 'complete';
+  const h = await createVmRecoveryHostHarness({
+    name: 'StreamHolderSetback', localCgId: cg, peers: [...legacyPeers, ...streamPeers], targetCount: options.targetCount ?? 13,
+    footprintForOrdinal: () => ({ byteSize: 4n * 1024n * 1024n, merkleLeafCount: 10_000n }),
+    targetForOrdinal: ordinal => ({ localCgId: cg, onChainCgId: '1', ordinal,
+      kaId: String(ordinal), merkleRoot: `root-${ordinal}`, reason: 'no-swm' as const,
+      ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}` }),
+    onFetch: (peer, targets, recovered) => {
+      if (!streamPeers.includes(peer)) {
+        clock.now += clock.legacyProbeMs;
+        if (!options.legacyHolders?.includes(peer)) return 'clean-absent';
+      } else {
+        lastAnswer = alwaysBusy.has(peer) ? 'responder-busy' : answers.get(peer)!.shift() ?? 'complete';
+        if (lastAnswer !== 'complete') return 'incomplete';
+      }
+      for (const target of targets) recovered.add(target.ordinal);
+      return 'found';
+    },
+  });
+  agents.push(h.agent);
+  h.internals.vmReconcileRotationNow = () => clock.now;
+  for (const peer of streamPeers) {
+    h.internals.peerCapabilityRegistry.observe(peer, { source: 'identify-snapshot', protocols: [PROTOCOL_STORAGE_ACK] });
+  }
+  vi.spyOn(h.agent, 'getPeerProtocols').mockImplementation(async peer => streamPeers.includes(peer) ? [EXACT_BATCH_STREAM_PROTOCOL] : []);
+  vi.spyOn(h.agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({ kind: 'public', onChainId: '1' } as never);
+  const asked: Array<readonly [peer: string, assets: number, mode: ExactRecoveryTransportMode | undefined]> = [];
+  const fetch = h.internals.syncExactKnowledgeAssetsFromPeerDetailed.bind(h.internals);
+  h.internals.syncExactKnowledgeAssetsFromPeerDetailed = async (peer, graph, uals, requestOptions) => {
+    const mode = requestOptions?.exactRecoveryTransportMode;
+    asked.push([peer, (uals as readonly string[]).length, mode]);
+    const result = await fetch(peer, graph, uals, requestOptions);
+    // Only an exchange over the stream reports a stream outcome.
+    return streamPeers.includes(peer) && mode !== 'legacy' ? { ...result, streamOutcome: lastAnswer } : result;
+  };
+  const info = vi.spyOn((h.agent as unknown as { log: { info: (...args: unknown[]) => void } }).log, 'info');
+  return {
+    ...h, clock, asked, alwaysBusy,
+    coreAnswers: answers.get(core)!,
+    /** The next pass over the targets still missing, as the reconciler would start it; resolves with whom it asked. */
+    runPending: async () => {
+      const before = asked.length;
+      h.internals.clearVmReconcileActiveFetchCooldown(cg);
+      await h.internals.recoverVmReconcileBatch(cg, h.contextGraphId,
+        h.targets.filter(target => !h.recovered.has(target.ordinal)), 100, () => true);
+      return asked.slice(before);
+    },
+    record: (ordinal: number) => h.internals.vmReconcileRotationState.get(
+      h.internals.vmReconcileRotationSlotKey(h.targets[ordinal]!)),
+    /** The peers asked for one target, in order. */
+    askedFor: (ordinal: number) => h.fetched.filter(({ uals }) => uals.includes(h.targets[ordinal]!.ual)).map(({ peerId }) => peerId),
+    setbackLines: () => info.mock.calls.map(([, message]) => String(message))
+      .filter(line => line.startsWith('VM exact recovery stream setback for')),
+  };
+}
+
+describe('a stream Core whose attempt ended without a verdict on its data', () => {
+  const { holdOffMs, maxInterruptedInStreak } = VM_RECOVERY_STREAM_SETBACK_LIMITS;
+  const peersOf = (pass: ReadonlyArray<readonly [string, number, unknown]>) => pass.map(([peer]) => peer);
+
+  it('is asked again on the stream within the same pass, after one other peer, when it answered busy', async () => {
+    const h = await streamHolderHarness();
+    h.coreAnswers.push('responder-busy');
+    expect(await h.runPending()).toEqual([
+      [core, 1, 'stream-preferred'],
+      // One peer without the stream is probed while the Core is left alone.
+      [older, 1, 'legacy'],
+      [core, 1, 'stream-preferred'],
+      [core, 10, 'stream-required'],
+    ]);
+    // The asset of the refused probe kept its turn at the Core, with the setback noted on it;
+    // the other peer's answer is recorded as usual.
+    expect([...h.record(0)!.attemptedPeerIds]).toEqual([]);
+    expect([...h.record(0)!.streamSetbackPeerIds!]).toEqual([core]);
+    expect(h.record(1)!.streamSetbackPeerIds).toBeUndefined();
+    expect([...h.record(1)!.attemptedPeerIds]).toEqual([older]);
+    expect([...h.record(1)!.cleanAbsentPeerIds]).toEqual([older]);
+    expect(h.setbackLines()).toEqual([
+      `VM exact recovery stream setback for "${cg}" from ${core.slice(-8)}: kind=responder-busy assets=1 keepsTurn=1 holdOffMs=${holdOffMs}`,
+    ]);
+
+    // The Core has served since: the next pass goes straight back to it for both assets still missing.
+    expect(peersOf(await h.runPending())).toEqual([core]);
+    expect(h.recovered.size).toBe(13);
+  });
+
+  it('is left alone until its hold-off has passed, and keeps one of the pass\'s peer slots meanwhile', async () => {
+    // The other peers answer at once here, so no time passes inside a pass.
+    const h = await streamHolderHarness({ legacyPeers: [older, olderB, olderC], legacyProbeMs: 0 });
+    h.coreAnswers.push('responder-busy');
+    // Three peers at most per pass: the Core and two others. The Core is not asked twice.
+    expect(peersOf(await h.runPending())).toEqual([core, older, olderB]);
+
+    // A pass that starts inside the hold-off still keeps the Core's slot: two other peers, not three.
+    h.clock.now += holdOffMs - 1;
+    const during = peersOf(await h.runPending());
+    expect(during).toHaveLength(2);
+    expect(during).not.toContain(core);
+
+    h.clock.now += 1;
+    expect((await h.runPending())[0]).toEqual([core, 1, 'stream-preferred']);
+  });
+
+  it('is asked again in the same pass, once its hold-off is over, by an asset whose other peers the pass has no room for', async () => {
+    const h = await streamHolderHarness({ legacyPeers: [older, olderB, olderC], targetCount: 4 });
+    // The Core proves itself on the first asset, then answers busy for the batch of the other three.
+    h.coreAnswers.push('complete', 'responder-busy');
+    expect(await h.runPending()).toEqual([[core, 1, 'stream-preferred'], [core, 3, 'stream-required']]);
+
+    // The next pass starts inside the hold-off. Two assets ask a peer each (a minute each), which
+    // fills the pass together with the Core's kept place. The third asset still has an unasked peer,
+    // but the pass has no room for it: it goes to the Core, whose hold-off is over by then.
+    expect(await h.runPending()).toEqual([
+      [older, 1, 'legacy'],
+      [olderB, 1, 'legacy'],
+      [core, 1, 'stream-preferred'],
+    ]);
+    expect(h.asked.map(([peer]) => peer)).not.toContain(olderC);
+  });
+
+  it('lets an asset ask its other peers before it returns to a Core that stays busy', async () => {
+    const h = await streamHolderHarness({ targetCount: 1 });
+    h.alwaysBusy.add(core);
+    for (let pass = 0; pass < 5; pass += 1) {
+      await h.runPending();
+      h.clock.now += holdOffMs;
+    }
+    // Never twice in a row at the busy Core while another peer has not been asked.
+    expect(h.askedFor(0)).toEqual([core, older, core, olderB, core]);
+    // Its turn at the Core is still open: the cycle did not complete, so it is not backing off.
+    expect(h.record(0)).toMatchObject({ phase: 'collecting' });
+    expect(h.record(0)!.attemptedPeerIds.has(core)).toBe(false);
+  });
+
+  it('reaches a peer without the stream that holds the asset while two stream Cores stay busy', async () => {
+    const otherCore = '12D3KooWYYStreamCore';
+    const h = await streamHolderHarness({
+      legacyPeers: [older], legacyHolders: [older], streamPeers: [otherCore, core], targetCount: 1 });
+    h.alwaysBusy.add(otherCore); h.alwaysBusy.add(core);
+    for (let pass = 0; pass < 6 && h.recovered.size === 0; pass += 1) {
+      await h.runPending();
+      // Every pass starts with no Core held off, so only the order decides whom the asset asks.
+      h.clock.now += holdOffMs;
+    }
+    // Each busy Core once, then the holder: the two Cores must not take turns keeping it out.
+    expect(h.askedFor(0)).toEqual([otherCore, core, older]);
+    expect(h.recovered.has(0)).toBe(true);
+  });
+
+  it('goes to another stream Core that has served instead of back to the busy one', async () => {
+    // The busy Core sorts first, so it is the first stream peer of the roster.
+    const busyCore = '12D3KooWYYStreamCore';
+    const h = await streamHolderHarness({ legacyPeers: [older], streamPeers: [busyCore, core] });
+    h.alwaysBusy.add(busyCore);
+    expect(await h.runPending()).toEqual([
+      [busyCore, 1, 'stream-preferred'],
+      [core, 1, 'stream-preferred'],
+      [core, 10, 'stream-required'],
+    ]);
+    // Past the hold-off the busy Core could be asked again. Both assets still
+    // missing go to the Core that served: the one the busy Core was asked for,
+    // and the one no peer was asked for yet.
+    h.clock.now += holdOffMs;
+    expect(await h.runPending()).toEqual([[core, 2, 'stream-required']]);
+    expect(h.recovered.size).toBe(13);
+  });
+
+  it('asks the stream Core that last served this graph before another stream Core', async () => {
+    const otherCore = '12D3KooWYYStreamCore';
+    const h = await streamHolderHarness({ legacyPeers: [older], streamPeers: [otherCore, core] });
+    const first = () => h.internals.selectVmReconcileExactCandidate(undefined, [older, otherCore, core],
+      new VmRecoveryProviderPolicy(), { localCgId: cg, onChainCgId: '1', experimentalStreamPeerIds: new Set([otherCore, core]) });
+    // Roster order while neither has served.
+    expect(first()).toBe(otherCore);
+    expect(h.internals.vmReconcilePublicCoreTransportPreferencePolicy.remember(
+      cg, '1', core, h.internals.getSyncReconcilerConnectionKey(core))).toBe(true);
+    expect(first()).toBe(core);
+  });
+
+  it('costs its assets their turn, as before, when the stream broke and the Core has not served this graph', async () => {
+    const h = await streamHolderHarness();
+    h.coreAnswers.push('stream-interrupted');
+    // Spent for this pass even though a minute passes on each other probe.
+    expect(peersOf(await h.runPending())).toEqual([core, older, olderB]);
+    expect([...h.record(0)!.attemptedPeerIds]).toEqual([core]);
+    expect(h.setbackLines()).toEqual([
+      `VM exact recovery stream setback for "${cg}" from ${core.slice(-8)}: kind=stream-interrupted assets=1 keepsTurn=0 holdOffMs=0`,
+    ]);
+  });
+
+  it('keeps the turn when the stream of a Core that has served breaks, a bounded number of times in a row', async () => {
+    // Twelve assets: the first pass recovers eleven and leaves exactly one.
+    const h = await streamHolderHarness({ targetCount: 12 });
+    expect(await h.runPending()).toEqual([[core, 1, 'stream-preferred'], [core, 10, 'stream-required']]);
+    const last = 11;
+    expect(h.recovered.has(last)).toBe(false);
+
+    for (let broken = 1; broken <= maxInterruptedInStreak; broken += 1) {
+      h.coreAnswers.push('stream-interrupted');
+      expect(peersOf(await h.runPending())).toEqual([core]);
+      // The asset keeps its turn at the Core, and asks another peer before it returns to it.
+      expect(h.record(last)!.attemptedPeerIds.has(core)).toBe(false);
+      h.clock.now += holdOffMs;
+      expect(peersOf(await h.runPending())).toHaveLength(1);
+      expect(peersOf(h.asked.slice(-1))).not.toContain(core);
+    }
+
+    // One break too many: the Core's turn is spent, which completes the cycle and backs the asset off.
+    h.coreAnswers.push('stream-interrupted');
+    expect(peersOf(await h.runPending())).toEqual([core]);
+    expect(h.record(last)!.attemptedPeerIds.has(core)).toBe(true);
+    expect(h.record(last)).toMatchObject({ phase: 'backoff', backoffKind: 'incomplete-cycle' });
+    // The attempt that spent the turn replaces the earlier setback note.
+    expect([...h.record(last)!.streamSetbackPeerIds!]).toEqual([]);
+    expect(h.askedFor(last)).toEqual([core, older, core, olderB, core]);
+    expect(h.setbackLines().map(line => /keepsTurn=(\d)/.exec(line)![1]))
+      .toEqual([...Array.from({ length: maxInterruptedInStreak }, () => '1'), '0']);
+  });
+
+  it.each(['the graph\'s recovery state is cleared', 'recovery is closed'] as const)(
+    'is no longer held off once %s', async (boundary) => {
+      const h = await streamHolderHarness({ legacyProbeMs: 0 });
+      h.coreAnswers.push('responder-busy');
+      expect(peersOf(await h.runPending())).toEqual([core, older, olderB]);
+
+      if (boundary === 'recovery is closed') {
+        h.internals.closeVmReconcileRotationState();
+        h.internals.openVmReconcileRotationState();
+      } else {
+        h.internals.clearVmReconcileRotationStateForContextGraph(cg);
+      }
+      // No time has passed: only the forgotten hold-off lets the Core be asked first again.
+      expect((await h.runPending())[0]).toEqual([core, 1, 'stream-preferred']);
+    });
+
+  it('does not let a failing log sink change what a setback costs', async () => {
+    const h = await streamHolderHarness();
+    const log = (h.agent as unknown as { log: { info: (...args: unknown[]) => void } }).log;
+    vi.mocked(log.info).mockImplementation((_context: unknown, message: unknown) => {
+      if (String(message).includes('stream setback')) throw new Error('sink failed');
+    });
+    h.coreAnswers.push('responder-busy');
+    expect(peersOf(await h.runPending())).toEqual([core, older, core, core]);
+    expect([...h.record(0)!.attemptedPeerIds]).toEqual([]);
   });
 });

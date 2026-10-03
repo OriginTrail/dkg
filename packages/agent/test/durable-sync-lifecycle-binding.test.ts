@@ -87,6 +87,7 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
 import { PROTOCOL_SYNC_CHANGELOG, createOperationContext } from '@origintrail-official/dkg-core';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
+import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   durableSyncRequestPageSize,
@@ -609,6 +610,62 @@ describe('durable sync lifecycle chain binding', () => {
       stopOnBackoffWorthyFailure: true,
       source: 'vm-recovery',
     });
+  });
+
+  it.each(['complete', 'responder-busy', 'stream-interrupted', undefined] as const)(
+    'carries the stream outcome %s from the per-graph run to the exact-sync result', async (outcome) => {
+      const perGraph = vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+        .mockResolvedValue({
+          result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+          exactFetchDisposition: outcome === 'complete' ? 'found' : 'incomplete',
+          ...(outcome === undefined ? {} : { exactStreamOutcome: outcome }),
+        });
+      const agentLike: any = {
+        config: {},
+        runContextGraphSyncWithBackpressure: async (
+          _ctx: unknown, _contextGraphId: string, _lane: string, _operationId: string,
+          work: () => Promise<unknown>,
+        ) => work(),
+        log: { info: () => {}, warn: () => {}, debug: () => {} },
+      };
+      agentLike.runLegacyDurableSyncDetailed = LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed;
+
+      const settled = await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+        agentLike,
+        '12D3KooWExactStreamOutcomePeer',
+        contextGraphId,
+        [ual],
+        { exactRecoveryTransportMode: 'stream-required' },
+      );
+
+      expect(perGraph).toHaveBeenCalledOnce();
+      expect(settled.disposition).toBe(outcome === 'complete' ? 'found' : 'incomplete');
+      if (outcome === undefined) expect(settled).not.toHaveProperty('streamOutcome');
+      else expect(settled.streamOutcome).toBe(outcome);
+    });
+
+  it('reports no stream outcome for a run over several graphs', async () => {
+    vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+      .mockResolvedValue({
+        result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+        exactFetchDisposition: 'incomplete',
+        exactStreamOutcome: 'responder-busy',
+      });
+    const agentLike: any = {
+      config: {},
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown, _contextGraphId: string, _lane: string, _operationId: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const detailed = await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+      agentLike, ctx, 'peer-multi-stream', ['stream-cg-one', 'stream-cg-two'],
+      undefined, undefined, undefined,
+      { exactAssetSelection: createUalOnlyExactAssetSelection([ual]) },
+    );
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed).not.toHaveProperty('exactStreamOutcome');
   });
 
   it('projects the public exact-sync result from the detailed implementation', async () => {

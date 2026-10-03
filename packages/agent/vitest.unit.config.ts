@@ -245,6 +245,7 @@ export default defineConfig({
       "test/vm-recovery-footprint-prepared.test.ts",
       "test/vm-recovery-provider-policy.test.ts",
       "test/vm-recovery-core-transport-preference.test.ts",
+      "test/vm-recovery-stream-setback-policy.test.ts",
       "test/vm-recovery-microbatch-host.test.ts",
       "test/vm-recovery-footprint-bridge.test.ts",
       "test/vm-recovery-footprint-bridge-adversarial.test.ts",

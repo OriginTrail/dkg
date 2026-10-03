@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryPassAuthority, type VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
-import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
+import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { performance } from 'node:perf_hooks';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -684,6 +684,11 @@ type VmRecoveryBatchExecutionResult =
     readonly perUalDispositions: readonly (
       readonly [string, VmRecoveryUalDisposition]
     )[];
+    /**
+     * The attempt ended without a verdict on the peer's data (it answered busy,
+     * or its stream broke) and the pending targets kept their turn at it.
+     */
+    readonly providerTurnKept: boolean;
   };
 
 
@@ -6317,14 +6322,49 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const ordinaryTransportOrder = preferredPeerId
       ? [preferredPeerId, ...uncreditedCandidateOrder.filter((peerId) => peerId !== preferredPeerId)]
       : uncreditedCandidateOrder;
-    const streamCandidates = uncreditedCandidateOrder.filter((peerId) =>
-      binding?.experimentalStreamPeerIds?.has(peerId));
-    const transportOrder = streamCandidates.length === 0
-      ? ordinaryTransportOrder
-      : [...streamCandidates, ...ordinaryTransportOrder.filter((peerId) => !streamCandidates.includes(peerId))];
+    const now = this.vmReconcileRotationNow();
+    const isStreamPeer = (peerId: string): boolean =>
+      binding?.experimentalStreamPeerIds?.has(peerId) === true;
+    // The peers this target has a setback with: its last attempt at them ended
+    // busy or broken, and they have not completed an exchange for the graph since.
+    const setbackPeerIds = new Set(binding === undefined
+      ? []
+      : ordinaryTransportOrder.filter((peerId) =>
+        record?.streamSetbackPeerIds?.has(peerId)
+        && this.vmReconcileStreamSetbackPolicy.inSetbackStreak(binding.localCgId, peerId, now)));
+    const withoutSetback = ordinaryTransportOrder.filter((peerId) => !setbackPeerIds.has(peerId));
+    const withSetback = ordinaryTransportOrder.filter((peerId) => setbackPeerIds.has(peerId));
+    // Stream peers go first, the one that last served this graph ahead of the
+    // others, and those without a setback ahead of those with one. Right after
+    // a setback, though, the target asks every candidate it has no setback with
+    // before it returns to one it has. Busy Cores taking turns could otherwise
+    // keep it from a peer that holds the asset.
+    const lastAttemptWasSetback = record?.lastAttemptedPeerId !== undefined
+      && setbackPeerIds.has(record.lastAttemptedPeerId);
+    const transportOrder = lastAttemptWasSetback
+      ? [
+          ...withoutSetback.filter(isStreamPeer),
+          ...withoutSetback.filter((peerId) => !isStreamPeer(peerId)),
+          ...withSetback,
+        ]
+      : [
+          ...withoutSetback.filter(isStreamPeer),
+          ...withSetback.filter(isStreamPeer),
+          ...ordinaryTransportOrder.filter((peerId) => !isStreamPeer(peerId)),
+        ];
+    // A peer whose stream just answered busy or broke is left alone for a short
+    // hold-off, on either wire: both go through the same responder limiter. The
+    // provider policy keeps it one of this slice's peer slots meanwhile, so it
+    // is asked again as soon as the hold-off ends instead of after every other
+    // peer had a turn.
+    const heldOffPeerIds = new Set(binding === undefined
+      ? []
+      : transportOrder.filter((peerId) =>
+        this.vmReconcileStreamSetbackPolicy.heldOff(binding.localCgId, peerId, now)));
     return policy.selectNextCandidate(
       transportOrder,
       DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+      heldOffPeerIds,
     );
   }
 
@@ -6408,6 +6448,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (key.startsWith(prefix)) this.vmReconcileRotationState.delete(key);
     }
     this.vmReconcileTransportBudgetPolicy.forgetContextGraph(localCgId);
+    this.vmReconcileStreamSetbackPolicy.forgetContextGraph(localCgId);
     this.vmReconcileRotationAdmissionCursorByCg.delete(localCgId);
     this.vmReconcilePublicCoreTransportPreferencePolicy?.forgetContextGraph(localCgId);
     existingVmRecoveryPreparation(this)?.discard(localCgId);
@@ -6423,6 +6464,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // for that supported test seam and never mask later teardown failures.
     this.vmReconcileRotationState?.clear();
     this.vmReconcileTransportBudgetPolicy?.clear();
+    this.vmReconcileStreamSetbackPolicy?.clear();
     this.vmReconcileRotationAdmissionCursorByCg?.clear();
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
@@ -6477,6 +6519,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     if (peerId !== undefined) {
       capturedRecord.attemptedPeerIds.add(peerId);
+      // This attempt gave a verdict: an earlier setback with the peer is history.
+      capturedRecord.streamSetbackPeerIds?.delete(peerId);
       if (disposition === 'clean-absent') capturedRecord.cleanAbsentPeerIds.add(peerId);
       // Preserve fairly accumulated proof progress while other targets share
       // the bounded peer budget. A cycle expires only after this slot itself
@@ -6497,6 +6541,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // bounded prefix at elevated priority every sweep.
       this.enterVmReconcileRotationBackoff(slotKey, capturedRecord, 'incomplete-cycle');
     }
+    this.touchVmReconcileRotationRecord(slotKey, capturedRecord);
+  }
+
+  /**
+   * Hand a target its turn at `peerId` back after an attempt that ended
+   * without a verdict on the peer's data. The peer is uncredited again, so the
+   * cycle cannot complete, and so cannot back off, without asking it. Removing
+   * a mark is safe against any roster, which is why membership is not checked.
+   * The setback is noted on the target, for candidate selection to order by.
+   */
+  releaseVmReconcileRotationAttempt(
+    this: DKGAgent,
+    target: OrdinalRecoveryTarget,
+    peerId: string,
+    capturedRecord: VmReconcileRotationRecord,
+  ): void {
+    if (this.vmReconcileRotationClosed) return;
+    const slotKey = this.vmReconcileRotationSlotKey(target);
+    if (this.vmReconcileRotationState.get(slotKey) !== capturedRecord) return;
+    capturedRecord.attemptedPeerIds.delete(peerId);
+    (capturedRecord.streamSetbackPeerIds ??= new Set()).add(peerId);
     this.touchVmReconcileRotationRecord(slotKey, capturedRecord);
   }
 
@@ -6888,6 +6953,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     };
     let disposition: VmRecoveryUalDisposition = 'incomplete';
+    let streamOutcome: ExactBatchStreamOutcome | undefined;
     let localAdmissionDeferred = false;
     const legacyAttemptStartedAt = Date.now();
     const remainingLegacyAttemptMs = (): number | undefined => legacyAttemptTimeoutMs === undefined
@@ -6952,6 +7018,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
         const { result } = detailed;
         disposition = detailed.disposition;
+        streamOutcome = detailed.streamOutcome;
         // A fresh capability response is physical peer evidence even when
         // its later ordinary fallback cannot acquire local capacity.
         if (detailed.admission === 'work-started' || detailed.responderCapability !== undefined) onWorkStarted();
@@ -6976,6 +7043,26 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (phases && exchangeInterval) phases.chargeSince('exchange', exchangeInterval.startedAt, exchangeInterval.before);
     if (!isRecoveryCurrent()) return { kind: workStarted ? 'stale-after-attempt' : 'not-started-stale' };
     if (localAdmissionDeferred) return { kind: 'local-admission-deferred' };
+
+    // A stream that answered busy or broke says nothing about the peer's data.
+    // The policy decides whether the targets still pending keep their turn at it.
+    let providerTurnKept = false;
+    if (workStarted && streamOutcome !== undefined) {
+      if (streamOutcome === 'complete') {
+        this.vmReconcileStreamSetbackPolicy.recordServed(localCgId, peerId, this.vmReconcileRotationNow());
+      } else {
+        const setback = this.vmReconcileStreamSetbackPolicy.recordSetback(
+          localCgId, peerId, streamOutcome, this.vmReconcileRotationNow(),
+        );
+        providerTurnKept = setback.keepsTurn;
+        observeVmRecoveryTiming(() => this.log.info(
+          ctx,
+          `VM exact recovery stream setback for "${localCgId}" from ${peerId.slice(-8)}: `
+            + `kind=${streamOutcome} assets=${attempts.length} keepsTurn=${setback.keepsTurn ? 1 : 0} `
+            + `holdOffMs=${setback.holdOffMs}`,
+        ));
+      }
+    }
 
     const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
     const postFetch = <T>(run: () => Promise<T>): Promise<T> => (
@@ -7012,6 +7099,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
           !== batchRecord
         ) continue;
         const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(localCgId);
+        if (providerTurnKept) {
+          this.releaseVmReconcileRotationAttempt(batchTarget, peerId, batchRecord);
+        }
         if (!this.vmReconcilePeerMembershipMatches(
           batchRecord.candidatePeerIds,
           candidateMembershipAfter,
@@ -7021,7 +7111,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             candidateMembershipAfter,
             this.vmReconcileRotationNow(),
           );
-        } else if (this.vmReconcileRecoveryTargetMatches(batchTarget, outcome.recovery)) {
+        } else if (!providerTurnKept
+          && this.vmReconcileRecoveryTargetMatches(batchTarget, outcome.recovery)) {
           this.settleVmReconcileRotationAttempt(
             batchTarget,
             peerId,
@@ -7042,6 +7133,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       attemptedOrdinals,
       providerDisposition: disposition,
       perUalDispositions: [...perUalDispositions],
+      providerTurnKept,
     };
   }
 
@@ -7847,11 +7939,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       for (const [ordinal, outcome] of execution.outcomes) outcomes.set(ordinal, outcome);
       for (const ordinal of execution.handledOrdinals) handledBatchOrdinals.add(ordinal);
       for (const ordinal of execution.attemptedOrdinals) attemptedOrdinals.add(ordinal);
-      providerPolicy.finishAttempt(
-        providerAttempt,
-        execution.providerDisposition,
-        new Map(execution.perUalDispositions),
-      );
+      if (execution.providerTurnKept) {
+        // Busy or a broken stream: the peer is not spent for this slice. It is
+        // asked again, with a fresh probe, once its hold-off has passed.
+        providerPolicy.releaseAttempt(providerAttempt);
+      } else {
+        providerPolicy.finishAttempt(
+          providerAttempt,
+          execution.providerDisposition,
+          new Map(execution.perUalDispositions),
+        );
+      }
       const completelyVerified = execution.providerDisposition === 'found'
         && execution.perUalDispositions.length === batchAttempts.length
         && execution.perUalDispositions.every(([, disposition]) => disposition === 'found');
