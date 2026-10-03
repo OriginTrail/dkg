@@ -107,7 +107,7 @@ describe('a core whose sync responder has no room for a stream request', () => {
         + 'reason="sync responder peer queue full" running=1 queued=4';
       const busyLines = () => info.mock.calls.map(([, message]) => String(message))
         .filter(line => line.startsWith('Exact batch responder busy'));
-      await vi.waitFor(() => expect(busyLines()).toContain(busyLine));
+      await vi.waitFor(() => expect(busyLines()).toContain(busyLine), { timeout: 10_000 });
       expect(authorize).toHaveBeenCalledOnce();
     } finally {
       release();

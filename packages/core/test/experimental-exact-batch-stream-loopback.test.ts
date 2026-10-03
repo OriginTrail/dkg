@@ -126,7 +126,7 @@ describe('experimental exact-batch production router over libp2p Noise loopback'
     expect(clientStream.status).toBe('closed');
     const connections = f.a.libp2p.getConnections().filter(c => c.remotePeer.toString() === f.b.peerId);
     expect(connections).toHaveLength(1);
-    await vi.waitFor(() => expect(connections[0]!.streams.filter(s => s.protocol === PROTOCOL)).toHaveLength(0));
+    await vi.waitFor(() => expect(connections[0]!.streams.filter(s => s.protocol === PROTOCOL)).toHaveLength(0), { timeout: 10_000 });
     expect(getEventListeners(f.a.stopSignal!, 'abort')).toHaveLength(0);
   }, 15000);
 

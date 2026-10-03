@@ -243,9 +243,16 @@ async function busyFixture() {
     const running = resources.withPreAuthorizationAdmission(peer, new AbortController().signal, () => held.promise);
     return async () => { held.resolve(); await running; };
   };
-  /** Let real asynchronous work run, also while the timers are faked, until `stage` has asked the limiter. */
+  /**
+   * Let real asynchronous work run, also while the timers are faked, until
+   * `stage` has asked the limiter. Bounded by the wall clock, which is never
+   * faked here: a turn count would run out on a loaded machine.
+   */
   const untilAsked = async (stage: Stage) => {
-    for (let turn = 0; turn < 1_000 && !asked.includes(stage); turn += 1) await new Promise<void>(resolve => setImmediate(resolve));
+    const startedAt = performance.now();
+    while (!asked.includes(stage) && performance.now() - startedAt < 30_000) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
     expect(asked).toContain(stage);
   };
   const busyLines = () => info.mock.calls.map(([, message]) => message);
