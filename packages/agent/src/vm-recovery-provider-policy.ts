@@ -53,6 +53,16 @@ export class VmRecoveryProviderPolicy {
     return undefined;
   }
 
+  /**
+   * Keep a place among the peers this slice may consider for a peer that
+   * cannot be attempted yet, so the peers tried meanwhile cannot crowd it out.
+   */
+  reserve(peerId: string, maxPeers: number): void {
+    if (!this.#consideredPeerIds.has(peerId) && this.#consideredPeerIds.size < maxPeers) {
+      this.#consideredPeerIds.add(peerId);
+    }
+  }
+
   markUnavailable(peerId: string): void {
     this.#state(peerId).phase = { kind: 'unavailable' };
   }
@@ -76,11 +86,7 @@ export class VmRecoveryProviderPolicy {
     return attempt;
   }
 
-  finishAttempt(
-    attempt: VmRecoveryProviderAttempt,
-    aggregateDisposition: VmRecoveryUalDisposition,
-    perUalDispositions: ReadonlyMap<string, VmRecoveryUalDisposition>,
-  ): void {
+  #activeState(attempt: VmRecoveryProviderAttempt): VmRecoveryPeerState {
     const state = this.#state(attempt.peerId);
     const activeAttempt = state.phase.kind === 'attempting-probe'
       || state.phase.kind === 'attempting-reuse'
@@ -89,11 +95,28 @@ export class VmRecoveryProviderPolicy {
     if (activeAttempt !== attempt) {
       throw new Error(`VM recovery provider attempt is not active for ${attempt.peerId}`);
     }
+    return state;
+  }
+
+  finishAttempt(
+    attempt: VmRecoveryProviderAttempt,
+    aggregateDisposition: VmRecoveryUalDisposition,
+    perUalDispositions: ReadonlyMap<string, VmRecoveryUalDisposition>,
+  ): void {
+    const state = this.#activeState(attempt);
     const earnedReuse = state.phase.kind === 'attempting-probe'
       && aggregateDisposition === 'found'
       && perUalDispositions.size > 0
       && [...perUalDispositions.values()].every((disposition) => disposition === 'found');
     state.phase = earnedReuse ? { kind: 'holder-reusable' } : { kind: 'spent' };
+  }
+
+  /**
+   * The attempt ended without a verdict on the peer's data. The peer may be
+   * attempted again in this slice, and has to earn reuse again with a probe.
+   */
+  releaseAttempt(attempt: VmRecoveryProviderAttempt): void {
+    this.#activeState(attempt).phase = { kind: 'fresh' };
   }
 
   unavailablePeerIds(): ReadonlySet<string> {

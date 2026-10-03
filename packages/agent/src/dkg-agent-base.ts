@@ -1,5 +1,6 @@
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
+import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -1392,6 +1393,8 @@ export class DKGAgentBase {
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
   protected readonly vmReconcileTransportBudgetPolicy = new VmRecoveryTransportBudgetPolicy();
+  /** What a busy or broken exact-batch stream costs its peer in a graph's recovery. */
+  protected readonly vmReconcileStreamSetbackPolicy = new VmRecoveryStreamSetbackPolicy();
   /**
    * #2858 — confirmed VM copies behind an on-chain update, queued by the
    * `KnowledgeAssetUpdated` nudge and worked off by a refresh worker each
