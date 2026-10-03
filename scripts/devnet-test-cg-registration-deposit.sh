@@ -11,7 +11,9 @@
 #   2. ARMED: with the param set live, registering a CG pulls the deposit GROSS
 #      into the CSS vault — getRegistrationEscrow(cgId) == deposit, and the
 #      client adapter's lazy approve-and-retry funds the allowance with no
-#      manual approve.
+#      manual approve. From ContextGraphs 10.0.5 a registration signed by a
+#      PCA agent can be deposit-waived instead, so the script first checks
+#      that none of node1's wallets is bound to a PCA and stops if one is.
 #   3. Param is RESET to 0 at teardown (dormant-regression-safe for other suites).
 #
 # Governance setter is called with the local Hardhat deployer (Hub owner) key —
@@ -89,6 +91,31 @@ if [ -n "$CG_DORMANT" ]; then
   [ "$ESC" = "0" ] && ok "param=0: CG $CG_DORMANT escrowed nothing (esc=$ESC)" || bad "param=0 but escrow=$ESC (expected 0)"
 else
   bad "could not resolve dormant CG on-chain id"
+fi
+
+# ============================================================================
+act "PRECONDITION for step 2 — no node1 wallet is a PCA agent"
+# ============================================================================
+# From ContextGraphs 10.0.5 a CG registered by an agent of an eligible PCA is
+# deposit-waived (escrow 0), so step 2 can only prove the charged path when no
+# node1 wallet is bound to a PCA. Checked before arming, so nothing to restore.
+BOUND=""; CHECKED=0
+for WF in "$NODE_DIR/wallets.json" "$NODE_DIR/publisher-wallets.json"; do
+  [ -f "$WF" ] || continue
+  for ADDR in $(python3 -c 'import json,sys; [print(w["address"]) for w in json.load(open(sys.argv[1])).get("wallets", [])]' "$WF" 2>/dev/null); do
+    CHECKED=$((CHECKED+1))
+    ACCT=$(field "$(call DKGPublishingConvictionNFT agentToAccountId --json "[\"$ADDR\"]")" result)
+    if [ -n "$ACCT" ] && [ "$ACCT" != "0" ]; then BOUND="$BOUND $ADDR->PCA#$ACCT"; fi
+  done
+done
+if [ -n "$BOUND" ]; then
+  bad "node1 wallet(s) are PCA agents:$BOUND. The armed register could be deposit-waived, so the charged path can't be proven. Deregister them or use a fresh devnet."
+  log "PASS=$PASS  FAIL=$FAIL (stopped before arming the deposit)"
+  exit 1
+elif [ "$CHECKED" -eq 0 ]; then
+  log "no node1 wallet files under $NODE_DIR; PCA-agent check skipped"
+else
+  ok "none of node1's $CHECKED wallet(s) is a PCA agent"
 fi
 
 # ============================================================================
