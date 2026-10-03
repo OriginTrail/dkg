@@ -11,7 +11,13 @@
  * makes both files easy to read and test.
  */
 
-import type { ProverLogger, TickOutcome } from './prover.js';
+import {
+  classifyTickOutcome,
+  type ChallengePeriod,
+  type ProverLogger,
+  type TickFailureKind,
+  type TickOutcome,
+} from './prover.js';
 
 export interface TickableProver {
   tick(): Promise<TickOutcome>;
@@ -39,6 +45,23 @@ export interface ProverLoopStatus {
   lastSubmittedTxHash: string | null;
   /** Wall-clock ISO-8601 timestamp of the most recent `submitted` outcome. */
   lastSubmittedAt: string | null;
+  /**
+   * Distinct challenges (proof periods) this process first saw in the trailing
+   * 24 hours. Repeated ticks on one period count once. Process-local: a period
+   * first seen as already solved (for example, proved before a restart) counts
+   * here without a matching proof below. A tick that threw is not attributed
+   * to any period.
+   */
+  challengesReceived24h: number;
+  /**
+   * Of the periods counted in `challengesReceived24h`, how many this process
+   * submitted a proof for. Never exceeds `challengesReceived24h`.
+   */
+  proofsSubmitted24h: number;
+  /** Kind of the most recent failed tick, or null if none has failed. */
+  lastFailureClassification: TickFailureKind | null;
+  /** Wall-clock ISO-8601 timestamp of the most recent failed tick. */
+  lastFailureAt: string | null;
 }
 
 export interface ProverLoopOptions {
@@ -48,6 +71,21 @@ export interface ProverLoopOptions {
   /** Fired after every tick (success or mapped failure) — observability only. */
   onTick?: (outcome: TickOutcome) => void;
   log?: ProverLogger;
+  /** Injectable clock for deterministic health-window tests. */
+  now?: () => number;
+}
+
+const HEALTH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** One distinct challenge (proof period) inside the health window. */
+interface ObservedChallenge {
+  /** Completion time of the first tick that reported this period. */
+  readonly firstSeenAt: number;
+  proofSubmitted: boolean;
+}
+
+function challengeKey(period: ChallengePeriod): string {
+  return `${period.epoch}:${period.periodStartBlock}`;
 }
 
 export interface ProverLoopHandle {
@@ -64,6 +102,7 @@ export interface ProverLoopHandle {
 }
 
 export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
+  const now = opts.now ?? Date.now;
   let timer: ReturnType<typeof setInterval> | null = null;
   let started = false;
   let stopping = false;
@@ -76,21 +115,54 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
   let submittedCount = 0;
   let lastSubmittedTxHash: string | null = null;
   let lastSubmittedAt: string | null = null;
+  // One entry per proof period, in first-seen order, so pruning pops the front.
+  const observedChallenges = new Map<string, ObservedChallenge>();
+  let lastFailureClassification: TickFailureKind | null = null;
+  let lastFailureAt: string | null = null;
+
+  const pruneObservedChallenges = (at: number): void => {
+    const cutoff = at - HEALTH_WINDOW_MS;
+    for (const [key, observed] of observedChallenges) {
+      if (observed.firstSeenAt > cutoff) break;
+      observedChallenges.delete(key);
+    }
+  };
+
+  /** The one place a settled tick, returned or thrown, updates the snapshot. */
+  const recordOutcome = (outcome: TickOutcome, at: number): void => {
+    lastOutcome = outcome;
+    pruneObservedChallenges(at);
+    const health = classifyTickOutcome(outcome);
+    if (health.challenge !== null) {
+      const key = challengeKey(health.challenge);
+      let observed = observedChallenges.get(key);
+      if (observed === undefined) {
+        observed = { firstSeenAt: at, proofSubmitted: false };
+        observedChallenges.set(key, observed);
+      }
+      if (health.proofSubmitted) observed.proofSubmitted = true;
+    }
+    if (outcome.kind === 'submitted') {
+      submittedCount += 1;
+      lastSubmittedTxHash = outcome.txHash;
+      lastSubmittedAt = new Date(at).toISOString();
+    }
+    if (health.failure !== null) {
+      lastFailureClassification = health.failure;
+      lastFailureAt = new Date(at).toISOString();
+    }
+  };
 
   const runOnce = (): Promise<void> => {
     if (inflight || stopping) return Promise.resolve();
     inflight = true;
     totalTicks += 1;
-    lastTickAt = new Date().toISOString();
+    const tickStartedAt = now();
+    lastTickAt = new Date(tickStartedAt).toISOString();
     const run = (async (): Promise<void> => {
       try {
         const outcome = await opts.prover.tick();
-        lastOutcome = outcome;
-        if (outcome.kind === 'submitted') {
-          submittedCount += 1;
-          lastSubmittedTxHash = outcome.txHash;
-          lastSubmittedAt = lastTickAt;
-        }
+        recordOutcome(outcome, now());
         try {
           opts.onTick?.(outcome);
         } catch (err) {
@@ -100,7 +172,8 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
         }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        lastOutcome = { kind: 'error', error };
+        const outcome: TickOutcome = { kind: 'error', error };
+        recordOutcome(outcome, now());
         // The orchestrator already maps known errors to TickOutcome
         // variants. An exception here means an unmapped path
         // (typically a transient adapter / RPC issue). Log and keep
@@ -109,7 +182,7 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
           err: error.message,
         });
         try {
-          opts.onTick?.(lastOutcome);
+          opts.onTick?.(outcome);
         } catch (hookErr) {
           opts.log?.warn('rs.loop.onTick-threw', {
             err: hookErr instanceof Error ? hookErr.message : String(hookErr),
@@ -165,6 +238,11 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
       return stopPromise;
     },
     getStatus(): ProverLoopStatus {
+      pruneObservedChallenges(now());
+      let proofsSubmitted24h = 0;
+      for (const observed of observedChallenges.values()) {
+        if (observed.proofSubmitted) proofsSubmitted24h += 1;
+      }
       return {
         totalTicks,
         inflight,
@@ -173,6 +251,10 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
         submittedCount,
         lastSubmittedTxHash,
         lastSubmittedAt,
+        challengesReceived24h: observedChallenges.size,
+        proofsSubmitted24h,
+        lastFailureClassification,
+        lastFailureAt,
       };
     },
   };
