@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, beforeEach } from 'vitest';
 import {
   OxigraphStore,
   GraphManager,
@@ -9,9 +9,11 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest, createOperationContext,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
-  DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
+  Logger,
+  setKaPublishLifecycleDebugLoggingEnabled,
   type EventBus,
+  type LogRecord,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
@@ -131,40 +133,6 @@ describe('FinalizationHandler', () => {
     expect(wired.lifecycle.options).toEqual(lifecycleOptions);
   });
 
-  it('deduplicates messages with same UAL and txHash', async () => {
-    const msg = makeFinalizationMsg();
-    const data = encodeFinalizationMessage(msg);
-
-    let insertCallCount = 0;
-    const origInsert = store.insert.bind(store);
-    store.insert = async (...args: any[]) => { insertCallCount++; return (origInsert as any)(...args); };
-
-    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
-    const callsAfterFirst = insertCallCount;
-    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
-    expect(insertCallCount).toBe(callsAfterFirst);
-  });
-
-  it('processes messages with different UALs separately (not deduped)', async () => {
-    const msg1 = makeFinalizationMsg({ ual: 'did:dkg:evm:31337/0xABC/1' });
-    const msg2 = makeFinalizationMsg({ ual: 'did:dkg:evm:31337/0xABC/2', txHash: '0x' + 'cd'.repeat(32) });
-
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg1), CONTEXT_GRAPH);
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg2), CONTEXT_GRAPH);
-
-    // Now send msg1 again — it should be deduped (no extra processing)
-    // But msg2 should not have been blocked by msg1's dedup entry
-    // Verify both processed without error; dedup test covers the blocking case
-    const dedupMsg1 = makeFinalizationMsg({ ual: 'did:dkg:evm:31337/0xABC/1' });
-    let insertCalled = false;
-    const origInsert = store.insert.bind(store);
-    store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
-
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(dedupMsg1), CONTEXT_GRAPH);
-    // msg1 is deduped so no insert should happen
-    expect(insertCalled).toBe(false);
-  });
-
   it('silently skips non-finalization protobuf messages (wrong wire type)', async () => {
     const wrongTypeData = encodePublishRequest({
       ual: 'did:dkg:test/1',
@@ -199,257 +167,126 @@ describe('FinalizationHandler', () => {
     expect(insertCalled).toBe(false);
   });
 
-  it('cleans SWM metadata with either entity predicate without deleting other roots', async () => {
-    const metaGraph = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH);
-    const opMixed = 'urn:dkg:share:test-contextGraph:mixed';
-    const opNewOnly = 'urn:dkg:share:test-contextGraph:new-only';
-    const rootA = 'urn:test:cleanup:a';
-    const rootB = 'urn:test:cleanup:b';
-    const rootC = 'urn:test:cleanup:c';
+  describe('messages that are not graph-scoped', () => {
+    const ENTITY = 'urn:test:entity';
+    const DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 
-    await store.insert([
-      { graph: metaGraph, subject: opMixed, predicate: DKG_ROOT_ENTITY_LEGACY, object: rootA },
-      { graph: metaGraph, subject: opMixed, predicate: DKG_ENTITY, object: rootA },
-      { graph: metaGraph, subject: opMixed, predicate: DKG_ENTITY, object: rootB },
-      { graph: metaGraph, subject: opNewOnly, predicate: DKG_ENTITY, object: rootC },
-      { graph: metaGraph, subject: opNewOnly, predicate: 'http://dkg.io/ontology/shareOperationId', object: '"new-only"' },
-    ]);
-
-    await (handler as any).deleteMetaForRoot(metaGraph, rootA);
-
-    const rootARemoved = await store.query(
-      `ASK { GRAPH <${metaGraph}> { <${opMixed}> ?p <${rootA}> } }`,
-    );
-    expect(rootARemoved.type).toBe('boolean');
-    if (rootARemoved.type === 'boolean') {
-      expect(rootARemoved.value).toBe(false);
-    }
-
-    const rootBPreserved = await store.query(
-      `ASK { GRAPH <${metaGraph}> { <${opMixed}> <${DKG_ENTITY}> <${rootB}> } }`,
-    );
-    expect(rootBPreserved.type).toBe('boolean');
-    if (rootBPreserved.type === 'boolean') {
-      expect(rootBPreserved.value).toBe(true);
-    }
-
-    await (handler as any).deleteMetaForRoot(metaGraph, rootC);
-
-    const opNewOnlyRemoved = await store.query(
-      `ASK { GRAPH <${metaGraph}> { <${opNewOnly}> ?p ?o } }`,
-    );
-    expect(opNewOnlyRemoved.type).toBe('boolean');
-    if (opNewOnlyRemoved.type === 'boolean') {
-      expect(opNewOnlyRemoved.value).toBe(false);
-    }
-  });
-
-  it('ignores messages with mismatched contextGraphId', async () => {
-    const msg = makeFinalizationMsg({ contextGraphId: 'wrong-contextGraph' });
-    const data = encodeFinalizationMessage(msg);
-
-    let insertCalled = false;
-    const origInsert = store.insert.bind(store);
-    store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
-
-    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
-    expect(insertCalled).toBe(false);
-  });
-
-  it('rejects messages with incomplete fields', async () => {
-    const msg = makeFinalizationMsg({ rootEntities: [] });
-    const data = encodeFinalizationMessage(msg);
-
-    let insertCalled = false;
-    const origInsert = store.insert.bind(store);
-    store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
-
-    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
-    expect(insertCalled).toBe(false);
-  });
-
-  it('refuses to promote when no chain adapter is wired even if local merkle matches', async () => {
-    // Regression guard: a finalization message whose merkle root matches
-    // the local SWM contents MUST still be rejected when the handler was
-    // constructed without a chain adapter (`new FinalizationHandler(store,
-    // undefined)` in `beforeEach`). On-chain verification is NOT optional
-    // — trusting a matching local merkle without checking the KCCreated
-    // event would let any peer forge finalizations for their own forged
-    // SWM state. The canonical data graph must stay empty.
-    //
-    // The positive "merkle matches AND chain verification passes →
-    // promotes" path is covered by `agent-audit-extra.test.ts [A-4]` and
-    // the e2e-publish-protocol round-trip, both of which wire in a real
-    // EVMChainAdapter against the shared Hardhat node.
-    const entity = 'urn:test:entity';
-    const wsGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
-    const dataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
-
-    await store.insert([
-      { subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: wsGraph },
-    ]);
-
-    const { computeFlatKCRootV10: computeRoot } = await import('@origintrail-official/dkg-publisher');
-    const merkleRoot = computeRoot(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' }],
-      [],
-    );
-
-    const msg = makeFinalizationMsg({
-      kcMerkleRoot: merkleRoot,
-      rootEntities: [entity],
+    afterEach(() => {
+      Logger.setSink(null);
+      setKaPublishLifecycleDebugLoggingEnabled(undefined);
     });
 
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
+    /**
+     * A root-entity share whose content hashes to the message's root, and a
+     * chain that confirms the publish: everything a root-entity promotion
+     * would need.
+     */
+    async function stagePromotableRootEntityPublish(): Promise<{
+      store: OxigraphStore;
+      handler: FinalizationHandler;
+      message: FinalizationMessageMsg;
+    }> {
+      const localStore = new OxigraphStore();
+      await localStore.insert([
+        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Alice"', graph: contextGraphWorkspaceGraphUri(CONTEXT_GRAPH) },
+        { subject: `urn:dkg:share:${ENTITY}`, predicate: DKG_ROOT_ENTITY_LEGACY, object: ENTITY, graph: contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH) },
+      ]);
+      const message = makeFinalizationMsg({
+        kcMerkleRoot: computeFlatKCRootV10(
+          [{ subject: ENTITY, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' }],
+          [],
+        ),
+        rootEntities: [ENTITY],
+      });
+      const chain = {
+        chainId: 'evm:31337',
+        isV10Ready: () => true,
+        listenForEvents: async function* () {
+          yield {
+            blockNumber: Number(message.blockNumber),
+            data: {
+              txHash: message.txHash,
+              merkleRoot: message.kcMerkleRoot,
+              publisherAddress: message.publisherAddress,
+              startKAId: String(message.startKAId),
+              endKAId: String(message.endKAId),
+              txIndex: 0,
+            },
+          };
+        },
+      } as unknown as ChainAdapter;
+      return { store: localStore, handler: new FinalizationHandler(localStore, chain), message };
+    }
 
-    const result = await store.query(
-      `ASK { GRAPH <${dataGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
-    );
-    expect(result.type).toBe('boolean');
-    if (result.type === 'boolean') expect(result.value).toBe(false);
-  });
+    it('are ignored without touching the store, even when local shared memory and the chain match', async () => {
+      const { store: localStore, handler: localHandler, message } = await stagePromotableRootEntityPublish();
+      const queries: string[] = [];
+      const origQuery = localStore.query.bind(localStore);
+      localStore.query = (async (sparql: string, options?: QueryOptions) => {
+        queries.push(sparql);
+        return origQuery(sparql, options);
+      }) as typeof localStore.query;
+      let inserts = 0;
+      const origInsert = localStore.insert.bind(localStore);
+      localStore.insert = (async (...args: Parameters<typeof origInsert>) => {
+        inserts += 1;
+        return origInsert(...args);
+      }) as typeof localStore.insert;
 
-  it('does not promote when merkle root mismatches workspace data', async () => {
-    const entity = 'urn:test:entity';
-    const wsGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
-    const dataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+      await localHandler.handleFinalizationMessage(encodeFinalizationMessage(message), CONTEXT_GRAPH);
 
-    await store.insert([
-      { subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: wsGraph },
-    ]);
-
-    const msg = makeFinalizationMsg({
-      kcMerkleRoot: new Uint8Array(32).fill(0xFF),
-      rootEntities: [entity],
+      expect(queries).toEqual([]);
+      expect(inserts).toBe(0);
+      localStore.query = origQuery;
+      await expect(localStore.query(
+        `ASK { GRAPH ?g { <${ENTITY}> <http://schema.org/name> "Alice" } FILTER(?g != <${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH)}>) }`,
+      )).resolves.toEqual({ type: 'boolean', value: false });
+      await expect(localStore.query(
+        `ASK { GRAPH <${DATA_GRAPH}/_meta> { ?s ?p ?o } }`,
+      )).resolves.toEqual({ type: 'boolean', value: false });
     });
 
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
+    it('are reported once, with the scope they carried', async () => {
+      const { handler: localHandler, message } = await stagePromotableRootEntityPublish();
+      const entries: LogRecord[] = [];
+      Logger.setSink((entry) => entries.push(entry));
+      setKaPublishLifecycleDebugLoggingEnabled(true);
 
-    const result = await store.query(
-      `ASK { GRAPH <${dataGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
-    );
-    expect(result.type).toBe('boolean');
-    if (result.type === 'boolean') expect(result.value).toBe(false);
-  });
+      await localHandler.handleFinalizationMessage(encodeFinalizationMessage(message), CONTEXT_GRAPH);
+      await localHandler.handleFinalizationMessage(
+        encodeFinalizationMessage({ ...message, contentScopeVersion: 1 }),
+        CONTEXT_GRAPH,
+      );
 
-  it('backfills full sub-graph registration metadata during finalization promotion', async () => {
-    const entity = 'urn:test:entity';
-    const subGraphName = 'code';
-    const publisherAddress = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
-    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
-    const subGraphUri = `did:dkg:context-graph:${CONTEXT_GRAPH}/${subGraphName}`;
-    const dirtyQuads: Quad[] = [];
-    const localHandler = new FinalizationHandler(store, undefined, {
-      markContextGraphMetaDirtyFromQuads: (quads) => { dirtyQuads.push(...quads); },
+      const lifecycle = entries.filter((entry) => entry.message.includes('event=finalization_unsupported_scope'));
+      expect(lifecycle).toHaveLength(2);
+      expect(lifecycle[0].message).toContain(`assetUal=${message.ual}`);
+      expect(lifecycle[0].message).toContain('outcome=ignored');
+      expect(lifecycle[0].message).toContain('retryable=false');
+      const ignored = entries.filter((entry) => entry.message.startsWith('Finalization: ignoring'));
+      expect(ignored.map((entry) => entry.message)).toEqual([
+        `Finalization: ignoring ${message.ual}: content scope 0 is not graph-scoped`,
+        `Finalization: ignoring ${message.ual}: content scope 1 is not graph-scoped`,
+      ]);
+      expect(entries.filter((entry) => entry.level === 'warn' || entry.level === 'error')).toEqual([]);
     });
 
-    await (localHandler as any).promoteSharedMemoryToCanonical(
-      CONTEXT_GRAPH,
-      [{ subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' }],
-      'did:dkg:evm:31337/0xABC/1',
-      [entity],
-      publisherAddress,
-      '0x' + 'ab'.repeat(32),
-      100,
-      1n,
-      1n,
-      1n,
-      createOperationContext('system'),
-      undefined,
-      subGraphName,
-    );
+    it.each([
+      ['no UAL', { ual: '' }],
+      ['no transaction hash', { txHash: '' }],
+      ['a context graph id that is not one', { contextGraphId: 'not a context graph id\u0000' }],
+    ])('stay unreported when the frame has %s', async (_name, overrides) => {
+      const { handler: localHandler, message } = await stagePromotableRootEntityPublish();
+      const entries: LogRecord[] = [];
+      Logger.setSink((entry) => entries.push(entry));
 
-    // GH #748: agent DID subjects are lowercased per `canonicalAgentDidSubject`
-    // so the same wallet doesn't split into multiple RDF subjects (see
-    // `agentDid()` in packages/publisher/src/metadata.ts).
-    const registration = await store.query(
-      `ASK { GRAPH <${metaGraph}> {
-        <${subGraphUri}> a <http://dkg.io/ontology/SubGraph> ;
-          <http://schema.org/name> "code" ;
-          <http://dkg.io/ontology/createdBy> <did:dkg:agent:${publisherAddress.toLowerCase()}> .
-      } }`,
-    );
-    expect(registration.type).toBe('boolean');
-    if (registration.type === 'boolean') expect(registration.value).toBe(true);
-    expect(dirtyQuads).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          subject: subGraphUri,
-          predicate: 'http://schema.org/name',
-          object: `"${subGraphName}"`,
-          graph: metaGraph,
-        }),
-      ]),
-    );
+      await localHandler.handleFinalizationMessage(
+        encodeFinalizationMessage({ ...message, ...overrides }),
+        CONTEXT_GRAPH,
+      );
 
-    const canonical = await store.query(
-      `ASK { GRAPH <${subGraphUri}> { <${entity}> <http://schema.org/name> ?o } }`,
-    );
-    expect(canonical.type).toBe('boolean');
-    if (canonical.type === 'boolean') expect(canonical.value).toBe(true);
-  });
-
-  it('legacy publisher (no tag-15 on the wire) → no root dual-write, even when targetContextGraphId === local on-chain id (Codex r5b explicit-remap-to-self regression)', async () => {
-    // Codex r5b — pin the policy that the receiver-side rolling-upgrade
-    // fallback is gone. Earlier rounds tried to infer "same-graph
-    // publish" from `targetContextGraphId === local-on-chain-id-for(
-    // contextGraphId)`. That branch was unsound: a legacy publisher
-    // could have ALSO sent that exact wire shape via an
-    // explicit-remap-to-self publish (passing `subContextGraphId =
-    // ownCG.onChainId` to deliberately drop the root copy). Mirroring
-    // such a message into root re-exposes the KC under the source
-    // label and breaks data isolation.
-    //
-    // Construct a message that hits the exact ambiguity Codex flagged:
-    //   - keepRootCopyOnLabel is OMITTED on the wire (legacy publisher).
-    //   - targetContextGraphId === '42' which the resolver maps from
-    //     `contextGraphId`, so the dropped fallback WOULD have fired.
-    // Wire a `resolveContextGraphOnChainId` that returns the matching
-    // id so any future regression that re-introduces the inference
-    // shape would match against the resolver too. Drive promote
-    // directly with the wire-decoded message's `keepRootCopyOnLabel`
-    // (= undefined) and assert root stays empty even though the
-    // resolver returns a matching local id.
-    const localStore = new OxigraphStore();
-    const resolveCtxId = async (cgId: string) =>
-      cgId === CONTEXT_GRAPH ? '42' : null;
-    const localHandler = new FinalizationHandler(
-      localStore,
-      undefined,
-      { resolveContextGraphOnChainId: resolveCtxId },
-    );
-    const entity = 'urn:remap-to-self:entity';
-    const publisher = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
-    const cgRoot = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
-    const cgPerCgId = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/42`;
-
-    await (localHandler as any).promoteSharedMemoryToCanonical(
-      CONTEXT_GRAPH,
-      [{ subject: entity, predicate: 'http://schema.org/name', object: '"NoMirror"', graph: '' }],
-      'did:dkg:evm:31337/0xRTS/1',
-      [entity],
-      publisher,
-      '0x' + 'cd'.repeat(32),
-      777,
-      1n, 1n, 1n,
-      createOperationContext('system'),
-      '42',
-      undefined,
-      undefined,
-      undefined,
-    );
-
-    const rootBindings = await localStore.query(
-      `ASK { GRAPH <${cgRoot}> { <${entity}> <http://schema.org/name> "NoMirror" } }`,
-    );
-    expect(rootBindings.type).toBe('boolean');
-    if (rootBindings.type === 'boolean') expect(rootBindings.value).toBe(false);
-
-    const perCgBindings = await localStore.query(
-      `ASK { GRAPH <${cgPerCgId}> { <${entity}> <http://schema.org/name> "NoMirror" } }`,
-    );
-    expect(perCgBindings.type).toBe('boolean');
-    if (perCgBindings.type === 'boolean') expect(perCgBindings.value).toBe(true);
+      expect(entries).toEqual([]);
+    });
   });
 });
 

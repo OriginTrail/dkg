@@ -2317,7 +2317,7 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
-  it('never persists structurally invalid or legacy envelopes under store pressure', async () => {
+  it('never persists structurally invalid or non-graph-scoped envelopes, and never reads the store for the latter', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
@@ -2335,15 +2335,18 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toEqual([]);
 
       const query = store.query.bind(store);
+      let queries = 0;
       store.query = async () => {
+        queries += 1;
         throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
       };
       await expect(pressured.handleFinalizationMessage(encodeFinalizationMessage({
         ...message,
         contentScopeVersion: 0,
         rootEntities: ['urn:legacy:root'],
-      }), CG)).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+      }), CG)).resolves.toBeUndefined();
       store.query = query;
+      expect(queries).toBe(0);
       expect(await inbox.list()).toEqual([]);
     } finally {
       await closeInbox(inbox);
@@ -2364,6 +2367,32 @@ describe('graph-scoped finalization handler', () => {
       CG,
     )).rejects.toBeInstanceOf(StoreSchedulerBusyError);
     store.query = query;
+  });
+
+  it('reports a failed unjournaled apply and materializes nothing', async () => {
+    const { message, vmGraph } = await stageGraph();
+    const quadsBefore = await store.countQuads(vmGraph);
+    const unjournaled = new FinalizationHandler(store, legacyFinalizationChain(4));
+    (unjournaled as unknown as {
+      recovery: { processUnjournaled: () => Promise<never> };
+    }).recovery.processUnjournaled = async () => {
+      throw new Error('materializer unavailable');
+    };
+    const entries: LogRecord[] = [];
+    Logger.setSink((entry) => entries.push(entry));
+    try {
+      await expect(unjournaled.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+      )).resolves.toBeUndefined();
+    } finally {
+      Logger.setSink(null);
+    }
+
+    expect(await store.countQuads(vmGraph)).toBe(quadsBefore);
+    const warnings = entries.filter((entry) => entry.level === 'warn').map((entry) => entry.message);
+    expect(warnings).toContain('Finalization: failed to process message: materializer unavailable');
+    expect(warnings.some((message_) => message_.includes('event=finalization_failed'))).toBe(true);
   });
 
   it('does not delete a newer SWM assertion staged after source verification', async () => {

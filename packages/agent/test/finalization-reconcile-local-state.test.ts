@@ -130,28 +130,3 @@ describe('chain reconcile of a KA with no local graph-scoped state', () => {
     expect(queries.filter((sparql) => sparql.includes(ROOT_ENTITY_PRED))).toEqual([]);
   });
 });
-
-describe('finalization slice single-flight', () => {
-  it('single-flights concurrent equivalent finalization slice events', async () => {
-    const store = new OxigraphStore();
-    const fh = new FinalizationHandler(store, new MockChainAdapter());
-    const entity = 'urn:fact:finalization-singleflight';
-    const merkleRoot = await seedWorkspaceOperation(store, entity, 'shared value');
-    let acceptFactories = 0;
-    const load = () => (fh as any).loadFinalizationSwmSlice(
-      LOCAL_CG,
-      [entity],
-      undefined,
-      undefined,
-      merkleRoot,
-      async () => {
-        acceptFactories += 1;
-        return (quads: unknown[]) => quads;
-      },
-    );
-
-    const [first, second] = await Promise.all([load(), load()]);
-    expect(first.quads).toEqual(second.quads);
-    expect(acceptFactories).toBe(1);
-  });
-});
