@@ -15,11 +15,16 @@
 // time; this config version-controls that workaround so CI no longer needs the hack.
 import baseConfig from './hardhat.node.config';
 
-// This file is nothing more than the base config plus TWO devnet overrides
-// (solc 0.8.24 + cancun EVM target for the compiler; cancun hardfork for the
-// in-process chain so the mcopy bytecode also EXECUTES at deploy time). It is
-// COMPOSED from clones -- the imported base config object is never mutated --
-// so loading both configs in one process can never cross-contaminate them.
+// This file is nothing more than the base config plus ONE devnet override
+// (solc 0.8.24 + cancun EVM target for the compiler). The in-process chain's
+// hardfork is deliberately NOT overridden: it is INHERITED from the base config
+// so the devnet chain can never silently drift behind the unit-test chain (it
+// used to pin `cancun`, which was a bump while the base was `shanghai` and
+// became a downgrade once the base moved to `prague`). mcopy (EIP-5656) is what
+// the devnet actually needs at EXECUTION time, and every fork from cancun onward
+// executes it -- asserted below rather than assumed. It is COMPOSED from clones
+// -- the imported base config object is never mutated -- so loading both configs
+// in one process can never cross-contaminate them.
 //
 // The base config's relevant shape is asserted at load time instead of being
 // silently assumed: if hardhat.node.config ever moves to multiple compilers,
@@ -44,8 +49,23 @@ const baseHardhatNetwork = (baseConfig.networks as { hardhat?: Record<string, un
 if (!baseHardhatNetwork) {
   throw new Error(
     'hardhat.devnet.config.ts expects hardhat.node.config.ts to define `networks.hardhat` ' +
-      '(the in-process devnet chain whose hardfork must be bumped to cancun). Update this ' +
-      'file to mirror the new base `networks` shape before booting the devnet.',
+      '(the in-process devnet chain that must execute the mcopy bytecode this config ' +
+      'compiles). Update this file to mirror the new base `networks` shape before booting ' +
+      'the devnet.',
+  );
+}
+// Forks that implement mcopy (EIP-5656). An unknown name fails CLOSED: the
+// devnet would deploy bytecode the chain cannot execute, which surfaces as an
+// opaque deploy-time revert rather than a config error.
+const MCOPY_CAPABLE_HARDFORKS = ['cancun', 'prague', 'osaka'];
+const baseHardfork = baseHardhatNetwork.hardfork;
+if (typeof baseHardfork !== 'string' || !MCOPY_CAPABLE_HARDFORKS.includes(baseHardfork)) {
+  throw new Error(
+    `hardhat.devnet.config.ts inherits the in-process chain's hardfork from ` +
+      `hardhat.node.config.ts, which currently sets ${String(baseHardfork)}. The devnet ` +
+      'compiles OZ 5.4.0 to the cancun EVM target and needs a fork that executes mcopy ' +
+      `(one of ${MCOPY_CAPABLE_HARDFORKS.join(', ')}). Raise the base hardfork, or add the ` +
+      'newer fork name to MCOPY_CAPABLE_HARDFORKS here.',
   );
 }
 
@@ -62,10 +82,9 @@ export default {
       },
     ],
   },
-  networks: {
-    ...baseConfig.networks,
-    hardhat: { ...baseHardhatNetwork, hardfork: 'cancun' },
-  },
+  // The in-process chain is taken from the base config verbatim -- including its
+  // hardfork, asserted mcopy-capable above.
+  networks: { ...baseConfig.networks },
   // Isolate the devnet's compile outputs so the 0.8.24/cancun bytecode this
   // config produces never overwrites the production 0.8.20/london artifacts in
   // the shared checkout: a UI-test devnet boot must not leave stale/foreign

@@ -265,7 +265,7 @@ describe('@unit RandomSampling', () => {
 
   describe('version()', () => {
     it('Should return correct version', async () => {
-      expect(await RandomSampling.version()).to.equal('10.6.0');
+      expect(await RandomSampling.version()).to.equal('10.6.1');
     });
   });
 
@@ -361,6 +361,61 @@ describe('@unit RandomSampling', () => {
   });
 
   describe('Access Control Modifiers', () => {
+    it('rejects contract callers before profile lookup so challenge draws cannot be ground', async () => {
+      const walletFactory = await hre.ethers.getContractFactory('MockRandomSamplingWallet');
+      const wallet = await walletFactory.deploy();
+      await wallet.waitForDeployment();
+
+      await expect(wallet.createChallenge(RandomSampling.target))
+        .to.be.revertedWithCustomError(RandomSampling, 'ContractCallerNotAllowed')
+        .withArgs(wallet.target);
+    });
+
+    it('rejects an EIP-7702 delegated EOA when sender and origin are equal', async () => {
+      const delegateFactory = await hre.ethers.getContractFactory(
+        'MockRandomSamplingWallet',
+      );
+      const delegate = await delegateFactory.deploy();
+      await delegate.waitForDeployment();
+
+      const delegatedEoa = ethers.Wallet.createRandom().connect(
+        hre.ethers.provider,
+      );
+      await accounts[0].sendTransaction({
+        to: delegatedEoa.address,
+        value: ethers.parseEther('1'),
+      });
+
+      // A self-sponsored EIP-7702 transaction increments the sender nonce
+      // before processing its authorization, so the authorization signs n+1.
+      const authorization = await delegatedEoa.authorize({
+        address: await delegate.getAddress(),
+        nonce: (await delegatedEoa.getNonce()) + 1,
+      });
+
+      const delegatedWallet = new ethers.Contract(
+        delegatedEoa.address,
+        delegateFactory.interface,
+        delegatedEoa,
+      );
+      await expect(
+        delegatedWallet.createChallenge(RandomSampling.target, {
+          authorizationList: [authorization],
+          gasLimit: 1_000_000,
+          type: 4,
+        }),
+      )
+        .to.be.revertedWithCustomError(RandomSampling, 'ContractCallerNotAllowed')
+        .withArgs(delegatedEoa.address);
+
+      // The authorization is installed before execution and persists even
+      // though delegated execution reverted, proving this exercised a
+      // delegated authority rather than a conventional wrapper contract.
+      expect(await hre.ethers.provider.getCode(delegatedEoa.address)).to.equal(
+        `0xef0100${(await delegate.getAddress()).slice(2).toLowerCase()}`,
+      );
+    });
+
     it('Should revert createChallenge if profile does not exist', async () => {
       await expect(
         RandomSampling.connect(accounts[5]).createChallenge(),
