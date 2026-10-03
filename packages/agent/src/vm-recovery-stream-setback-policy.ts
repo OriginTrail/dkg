@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { rememberBounded } from './bounded-map.js';
 import type { ExactBatchStreamSetback } from './sync/requester/exact-recovery-transport.js';
 
 export interface VmRecoveryStreamSetbackLimits {
@@ -118,13 +119,7 @@ export class VmRecoveryStreamSetbackPolicy {
     if (state !== undefined && now - state.touchedAt > this.limits.streakWindowMs) state = undefined;
     state ??= { served: false, streakStartedAt: undefined, interruptedInStreak: 0, retryAt: 0, touchedAt: now };
     state.touchedAt = now;
-    this.entries.delete(key);
-    this.entries.set(key, state);
-    while (this.entries.size > this.limits.maxEntries) {
-      const oldest = this.entries.keys().next().value;
-      if (oldest === undefined) break;
-      this.entries.delete(oldest);
-    }
+    rememberBounded(this.entries, key, state, this.limits.maxEntries);
     return state;
   }
 
