@@ -1778,6 +1778,49 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     ]);
   });
 
+  it('rejects and does not cache a fork replaced while the projected network read is pending', async () => {
+    const harness = makeIndexedAuthorityAdapter({
+      headTimestampSeconds: Math.floor(Date.now() / 1_000),
+    });
+    const networkEntered = Promise.withResolvers<void>();
+    const networkReleased = Promise.withResolvers<void>();
+    const getNetwork = harness.provider.getNetwork.bind(harness.provider);
+    vi.spyOn(harness.provider, 'getNetwork').mockImplementationOnce(async () => {
+      networkEntered.resolve();
+      await networkReleased.promise;
+      return getNetwork();
+    });
+
+    const stale = harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    await networkEntered.promise;
+    // At the vulnerable ordering the physical scan had already stabilized at
+    // this point. Replace the same finalized height while metadata is pending;
+    // the reordered scan must now encounter and reject that moved anchor.
+    harness.replaceAuthorityFork();
+    networkReleased.resolve();
+    await expect(stale).rejects.toThrow('anchor changed');
+
+    // A rejected fork must not have reached the projection cache. The next
+    // read rebuilds all three pages and publishes only the replacement owner.
+    const replacement = await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(replacement).toMatchObject({
+      contextGraphId: '9',
+      owner: MEMBER,
+      participantAgents: [MEMBER],
+    });
+    expect(harness.evidence.indexInvalidations).toEqual([4]);
+    const replacementRanges = [
+      [7, 16], [17, 26], [27, 30],
+      [7, 16], [17, 26], [27, 30],
+    ] as const;
+    expect(harness.evidence.indexRanges).toEqual(replacementRanges);
+
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toEqual(
+      replacement,
+    );
+    expect(harness.evidence.indexRanges).toEqual(replacementRanges);
+  });
+
   it.each([
     ['chain head', (harness: IndexedAuthorityHarness) => harness.holdHeadRead()],
     ['stabilization fence', (harness: IndexedAuthorityHarness) => harness.holdBlockRead(30)],

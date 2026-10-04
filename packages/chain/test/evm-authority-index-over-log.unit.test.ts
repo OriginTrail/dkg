@@ -281,7 +281,7 @@ function makeReader(options: {
         }),
   });
   reader.snapshots.open();
-  return { reader, index, calls, authorityLogs, attempts, usage };
+  return { reader, index, provider, calls, authorityLogs, attempts, usage };
 }
 
 /** The same `ContextGraphCreated`, as the LIVE scan would deliver it. */
@@ -493,6 +493,44 @@ describe('Context Graph authority index over the one log', () => {
     expect(calls.getLogs).toBe(0);
     expect(attempts).toHaveLength(0);
   });
+
+  it('rejects and does not cache a same-source revision moved while network metadata is pending',
+    async () => {
+      const store = seededStore({
+        rows: [creationRow(20, 7n, NAME_HASH, 1)],
+      });
+      const source = logSource(store);
+      const { reader, provider, calls, attempts } = makeReader({ store, source });
+      const networkEntered = Promise.withResolvers<void>();
+      const networkReleased = Promise.withResolvers<void>();
+      const getNetwork = provider.getNetwork.bind(provider);
+      vi.spyOn(provider, 'getNetwork').mockImplementationOnce(async () => {
+        networkEntered.resolve();
+        await networkReleased.promise;
+        return getNetwork();
+      });
+
+      const reading = reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH);
+      await networkEntered.promise;
+      const before = await store.load(SCOPE);
+      expect(before).toBeDefined();
+      store.seed(SCOPE, {
+        cursor: {
+          ...before!.cursor,
+          revision: before!.cursor.revision + 1,
+        },
+        coverage: before!.coverage,
+      }, [creationRow(20, 8n, NAME_HASH, 1)]);
+      networkReleased.resolve();
+
+      await expect(reading).resolves.toBe(8n);
+      const networkReadsAfterRefresh = calls.getNetwork;
+      expect(networkReadsAfterRefresh).toBe(2);
+      expect(attempts).toHaveLength(0);
+
+      await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(8n);
+      expect(calls.getNetwork).toBe(networkReadsAfterRefresh);
+    });
 
   it('returns a proof miss when the source rotates during the point-row lookup', async () => {
     const store = seededStore();

@@ -441,8 +441,8 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
       // The lease-owned fence above settles the physical index scan. A log
       // caller can consume additional rows after `index.view()` returns (the
       // finalized-creation path does), so retain its original end-to-end CAS
-      // fence as well. Provider projections only read the static chain id after
-      // the view and need no second block RPC.
+      // fence as well. Provider projections finish their asynchronous metadata
+      // work before the view so the physical fence remains their final check.
       if (input.postProjectLogStabilization === true
         && logSource !== undefined
         && !await logSource.source.anchorHolds(logSource.anchor)) {
@@ -1025,12 +1025,16 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         operationLabel,
         options,
         async (scan, { provider, contractAddress, finalized, head, origin }) => {
-          const view = await dependencies.index.view(scan);
           const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
             `${operationLabel} network`,
             () => provider.getNetwork(),
             options.signal,
           )).chainId.toString(10);
+          // Keep the lifecycle-owned physical stabilization inside `view()` as
+          // the final source operation. A reorg or log revision while the
+          // asynchronous network metadata read is pending is therefore fenced
+          // before this projection can be returned or cached.
+          const view = await dependencies.index.view(scan);
           return Object.freeze({
             scope: scan.scope,
             chainId,
