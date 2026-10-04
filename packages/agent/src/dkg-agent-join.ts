@@ -1,5 +1,5 @@
 
-import { verifiedDelegationKeyIds, verifyJoinEncryptionKeyBundle } from './join-encryption-key-bundle.js';
+import { verifiedDelegationKeyIds, verifyJoinEncryptionKeyBundle } from './internal/join-encryption-key-bundle.js';
 import type { PeerSyncConnection } from './p2p/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 

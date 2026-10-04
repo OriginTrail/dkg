@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
+import type { ContextGraphMetaRecord } from '../context-graph-meta-projection.js';
 
 function delegationIsCurrentlyActive(expiresAtValues: readonly string[], nowMs: number): boolean {
   if (expiresAtValues.length === 0) return true;

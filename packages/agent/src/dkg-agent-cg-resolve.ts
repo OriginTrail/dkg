@@ -10,7 +10,7 @@
  */
 
 
-import { throwIfSyncAuthAborted } from './context-graph-sync-abort.js';
+import { throwIfSyncAuthAborted } from './internal/context-graph-sync-abort.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
 import {

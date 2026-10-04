@@ -10,7 +10,7 @@
  */
 
 
-import { isLocalPrivateMember } from './local-private-member.js';
+import { isLocalPrivateMember } from './internal/local-private-member.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
