@@ -565,6 +565,11 @@ export class OxigraphStore implements TripleStore {
    * termToString→parseTerm round-trip). See {@link TripleStore.update}.
    */
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  /** Oxigraph commits the entire request as one transaction. */
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    await this.update(sparql, options);
+  }
+
   async update(sparql: string, _options?: UpdateOptions): Promise<void> {
     // In-process oxigraph is never wrapped by a graph-set index, so the
     // `touchedGraphs` hint is inapplicable here — accepted for a uniform

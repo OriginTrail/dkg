@@ -765,6 +765,11 @@ export class OxigraphWorkerStore implements TripleStore {
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  /** Oxigraph commits the entire request as one transaction. */
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    await this.update(sparql, options);
+  }
+
   async update(sparql: string, _options?: UpdateOptions): Promise<void> {
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped lifecycle.

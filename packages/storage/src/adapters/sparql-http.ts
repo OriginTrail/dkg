@@ -919,6 +919,13 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
    * (oxigraph-server) executes graph-to-graph `INSERT…WHERE` copies internally,
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    if (!this.supportsConsistency('atomic-update')) {
+      throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'SparqlHttpStore');
+    }
+    await this.update(sparql, options);
+  }
+
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     await this.runRemoteGraphMutation({
       // `touchedGraphs` hints only membership changes, not every graph whose

@@ -362,14 +362,22 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    if (typeof this.inner.update !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
+    return this.runUpdate(sparql, options, 'update');
+  }
+
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    return this.runUpdate(sparql, options, 'atomicUpdate');
+  }
+
+  private async runUpdate(sparql: string, options: UpdateOptions | undefined, capability: 'update' | 'atomicUpdate'): Promise<void> {
+    if (typeof this.inner[capability] !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(capability, 'GraphSetIndexStore');
     }
     if (!this.enabled) {
-      await this.inner.update(sparql, options);
+      await this.inner[capability]!(sparql, options);
       return;
     }
-    await this.inner.update(sparql, options);
+    await this.inner[capability]!(sparql, options);
     // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
     // drop named graphs the index must learn about. When the caller declares the
     // touched graphs (#1549: RS-heal + agents-meta prune write statically-known

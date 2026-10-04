@@ -505,14 +505,22 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    if (typeof this.inner.update !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('update', 'ChangelogStore');
+    return this.runUpdate(sparql, options, 'update');
+  }
+
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    return this.runUpdate(sparql, options, 'atomicUpdate');
+  }
+
+  private async runUpdate(sparql: string, options: UpdateOptions | undefined, capability: 'update' | 'atomicUpdate'): Promise<void> {
+    if (typeof this.inner[capability] !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(capability, 'ChangelogStore');
     }
-    if (!this.enabled) return this.inner.update(sparql, options);
+    if (!this.enabled) return this.inner[capability]!(sparql, options);
     // Reject BEFORE the mutation runs so it never touches the reserved plane.
     this.assertNoReservedRef(sparql, 'update');
     await this.runExclusive(async () => {
-      await this.inner.update!(sparql, options);
+      await this.inner[capability]!(sparql, options);
       const hinted = (options?.touchedGraphs ?? []).filter((g) => !this.isReservedGraph(g));
       if (hinted.length > 0) {
         // Strip the update-only touchedGraphs hint before the read-path hasGraph

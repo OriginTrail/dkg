@@ -6,7 +6,7 @@ import { ethers } from 'ethers';
 import { assertionLifecycleUri, buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
   createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { OxigraphStore, StoreOperationTimeoutError, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreOperationTimeoutError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, DKGPublisher, TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -26,7 +26,7 @@ const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const store of new Set(stores.splice(0))) await store.close().catch(() => undefined); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 class FaultStore extends OxigraphStore {
   armed = false;
-  constructor(path: string, readonly predicate: string, readonly operation: 'insert' | 'delete') { super(path); }
+  constructor(path: string, readonly predicate: string, readonly operation: 'insert' | 'delete') { super(path); Object.defineProperty(this, 'atomicUpdate', { value: undefined }); }
   override async insert(quads: Quad[]): Promise<void> {
     if (this.armed && this.operation === 'insert' && quads.some(q => q.predicate === this.predicate)) throw this.failure();
     await super.insert(quads);
@@ -267,6 +267,86 @@ describe('review regression boundaries', () => {
     expect(await store.query(`ASK { GRAPH <${META}> { <${wmGraph}> <${DKG}memoryLayer> "WM" } }`)).toMatchObject({ type: 'boolean', value: true });
     await repair.stop();
   });
+  it('commits the planned metadata atomically and leaves every row unchanged on commit failure', async () => {
+    const store = new OxigraphStore(); stores.push(store);
+    await store.insert([
+      { subject: LIFECYCLE, predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify(PRIOR), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}wmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"shared"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}memoryLayer`, object: '"SWM"', graph: META },
+      { subject: ASSERTION, predicate: `${DKG}memoryLayer`, object: '"SWM"', graph: META },
+    ]);
+    const snapshot = () => store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${META}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`);
+    const before = await snapshot();
+    const commit = vi.fn(async () => { throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'update', outcome: 'not_started' }); });
+    Object.defineProperty(store, 'atomicUpdate', { value: commit, configurable: true });
+    await expect(applyPublishedNamedKaVmLifecycle(store, { ...input, priorMerkleRoot: PRIOR })).rejects.toThrow();
+    expect(commit).toHaveBeenCalledTimes(1); expect(await snapshot()).toEqual(before);
+    Object.defineProperty(store, 'atomicUpdate', { value: async (sparql: string) => store.update(sparql), configurable: true });
+    await applyPublishedNamedKaVmLifecycle(store, { ...input, priorMerkleRoot: PRIOR });
+    expect(await snapshot()).not.toEqual(before);
+    expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" ; <${DKG}state> "published" } }`)).toMatchObject({ value: true });
+  });
+
+  it.each(['absent', 'typed-refusal'] as const)('uses explicit compatibility repair when atomic capability is %s', async capability => {
+    const store = new OxigraphStore(); stores.push(store);
+    const atomic = capability === 'absent' ? undefined : vi.fn(async () => { throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'legacy-test-store'); });
+    Object.defineProperty(store, 'atomicUpdate', { value: atomic });
+    const update = vi.spyOn(store, 'update').mockRejectedValue(new Error('generic UPDATE is not atomic certification'));
+    await applyPublishedNamedKaVmLifecycle(store, input);
+    expect(update).not.toHaveBeenCalled();
+    if (atomic) expect(atomic).toHaveBeenCalledTimes(1);
+    expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" } }`)).toMatchObject({ value: true });
+  });
+
+  it('uses the real publisher lifecycle lock while repair is paused after its workspace read', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-overlapping-wm-repair-')); dirs.push(dir);
+    const store = new OxigraphStore(), agent = agentFor(store, dir, 1);
+    const scope = createGraphKnowledgeAssetScope(UAL, 1), vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
+    await store.insert([
+      ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,
+        authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2), authorSchemeVersion: 1,
+        chainId: 31337n, kav10Address: AUTHOR, reservedKaId: PACKED, finalizedAtIso: new Date().toISOString(),
+        contentScopeVersion: 2, kaUal: UAL, assertionVersion: 1, publicTripleCount: 1, privateTripleCount: 0 }),
+      ...QUADS.map(quad => ({ ...quad, graph: vmGraph })),
+      { subject: LIFECYCLE, predicate: `${DKG}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}assertionVersion`, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}kaId`, object: '"1"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}reservedUal`, object: UAL, graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"published"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}memoryLayer`, object: '"VM"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: META },
+    ]);
+    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+    agent.publisher = publisher; agent.writeLocks = publisher.writeLocks;
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
+    const query = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      const result = await query(sparql, options);
+      if (options?.source === 'agent.publish.confirmedLifecycleWorkspaceGuard') { entered(); await held; }
+      return result;
+    });
+    const repairing = agent._repairConfirmedNamedKaVmLifecycle(input); await started;
+    let mutationFinished = false;
+    const editing = publisher.assertionPullFrom(CG, NAME, AUTHOR, 'vm').then(async () => {
+      await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:overlap:draft', predicate: 'urn:text', object: '"editable"', graph: '' }]);
+      mutationFinished = true;
+    });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } finally { release(); }
+    const finishedWhileHeld = mutationFinished;
+    await repairing; await editing;
+    expect(finishedWhileHeld).toBe(false);
+    const wmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.WorkingMemory, scope);
+    expect(await query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "created" ; <${DKG}memoryLayer> "WM" ; <${DKG}assertionGraph> <${wmGraph}> } }`)).toMatchObject({ value: true });
+    await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:overlap:next', predicate: 'urn:text', object: '"still editable"', graph: '' }]);
+    expect(await store.countQuads(wmGraph)).toBe(3);
+    await agent.namedKaVmLifecycleRepair.stop();
+  });
+
   it('admits B durably while unrelated A is held in a repair attempt', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-parallel-admission-')); dirs.push(dir);
     let release!: () => void, entered!: () => void, bEntered!: () => void;

@@ -201,6 +201,13 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     );
   }
 
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    if (typeof this.inner.atomicUpdate !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'SharedMemoryLiteralBlobStore');
+    }
+    return this.inner.atomicUpdate(sparql, options);
+  }
+
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('update', 'SharedMemoryLiteralBlobStore');

@@ -283,6 +283,14 @@ export interface TripleStore {
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
 
+  /**
+   * Explicit whole-request transaction capability: every UPDATE statement commits
+   * together, or none becomes visible. Generic update() does not certify this.
+   * Unsupported implementations must refuse before execution with the typed
+   * capability error; execution failures must propagate without fallback.
+   */
+  atomicUpdate?(sparql: string, options?: UpdateOptions): Promise<void>;
+
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
   /**
