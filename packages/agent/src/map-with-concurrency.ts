@@ -39,7 +39,7 @@ export async function mapWithConcurrencyDrained<T, R>(
   limit: number,
   fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-  const results = new Array<R>(items.length);
+  const results = Array.from<R>({ length: items.length });
   const workerCount = !Number.isInteger(limit) || limit <= 0
     ? items.length
     : Math.min(limit, items.length);
