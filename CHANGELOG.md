@@ -11,11 +11,12 @@ whole Knowledge Assets, compressed, up to ten per exchange, and the receiver
 still verifies and authenticates every asset before it stores it. The chain
 reads behind a recovery now leave several to a request, which halved the
 requests of a full recovery and took it from 54.5 to 31 minutes on a 564-asset
-graph. Cores under store pressure do less background work per pass and no
-longer restart their own managed Oxigraph because a caller stopped waiting. A
-Core also stops searching its old workspace operations for every asset it
-lacks, a search that kept the stores of Cores on busy graphs occupied for
-hours, and fetches such assets from peers instead; a graph whose fetch the
+graph, and a cold node starts that recovery about 40 s after its start, where
+it took 80 s or more. Cores under store pressure do less background work per
+pass and no longer restart their own managed Oxigraph because a caller stopped
+waiting. A Core also stops searching its old workspace operations for every
+asset it lacks, a search that kept the stores of Cores on busy graphs occupied
+for hours, and fetches such assets from peers instead; a graph whose fetch the
 node's own sync admission refuses waits for capacity instead of repeating its
 pass. An asynchronous publish that fails before its transaction could have
 been sent retries by itself as the same job, and a job that is held for a
@@ -55,13 +56,14 @@ release adds one published package, `@origintrail-official/dkg-node-store`.
 | Chain reconcile no longer promotes from root-entity shares (#2988) | A Knowledge Asset that a node holds only as a root-entity share from before 10.0.7 is not promoted to Verifiable Memory from that local copy any more; the node fetches it from peers like any other asset it lacks. A Core that was held up by the old search runs many more reconcile passes and recovery requests afterwards. `DKG_VM_RECONCILE_NEGATIVE_TTL_MS` is no longer read | None. Remove `DKG_VM_RECONCILE_NEGATIVE_TTL_MS` if you set it |
 | Root-entity publishes are retired at the node (#2991) | `publishFromSharedMemory` called without `contentScopeVersion` is refused with `LEGACY_KA_READ_ONLY`; that includes the remap publish into a sub context graph and its participant signatures. A node ignores a finalization message that is not graph-scoped. `DKG_FINALIZATION_SWM_PAGE_ROWS`, `DKG_FINALIZATION_SWM_MAX_ROWS`, `DKG_FINALIZATION_SWM_MAX_BYTES` and `DKG_DISABLE_SWM_KA_BOUND` are no longer read, and `dkg.store.scan_singleflight_joins_total` and `dkg.store.scan_singleflight_active` are no longer reported | SDK embedders: publish through `publishFromFinalizedAssertion`. Remove the four switches and any dashboard panel on the two metrics |
 | A serving Core answers `BUSY` on the batch stream (#2987) | Additive. A Core whose sync responder cannot admit a stream request sends a `BUSY` refusal where it reset the stream before; the requesting node pauses 2, 5 and 10 s and asks the same Core again. An older requester treats `BUSY` as the failed stream it saw before, and a new requester against an older Core still gets resets. New: `dkg.sync.response.total{outcome="busy"}` | None |
-| Background contract reads leave together through Multicall3 (#2996) | On Base, Gnosis and Base Sepolia, background reads of seven storage views share one `eth_call` to Multicall3 (`aggregate3`) where each was a request of its own. Foreground reads (a publish, an API request) are issued as before, and so is every read on a chain without the canonical Multicall3 (NeuroWeb, local chains). RPC usage shows fewer requests under the seven read labels and new ones under `multicall3.aggregate3` and `multicall3.getCode`; the usage snapshot's `consumerVocabularyVersion` is 3. The daemon's usage log gains `rpc_read_batching` and `rpc_batched_reads` lines | None. A dashboard that sums requests per consumer should include the two new labels. `DKG_DISABLE_RPC_READ_BATCHING=1` turns batching off |
+| Background contract reads leave together through Multicall3 (#2996, #3025) | On Base, Gnosis and Base Sepolia, background reads of seven storage views share one `eth_call` to Multicall3 (`aggregate3`) where each was a request of its own. Foreground reads (a publish, an API request) are issued as before, and so is every read on a chain without the canonical Multicall3 (NeuroWeb, local chains). RPC usage shows fewer requests under the seven read labels and new ones under `multicall3.aggregate3` and `multicall3.getCode`; the usage snapshot's `consumerVocabularyVersion` is 3. The cold-start walk of the on-chain Context Graph ids is read the same way, 4 requests for 37 graphs where it took 80, still under the consumer `listContextGraphsFromChain`. The daemon's usage log gains `rpc_read_batching` and `rpc_batched_reads` lines | None. A dashboard that sums requests per consumer should include the two new labels. `DKG_DISABLE_RPC_READ_BATCHING=1` turns batching off |
 | A read stops starting at an RPC endpoint that refused it (#3020) | An endpoint that answers a read with HTTP 401 or 403 is tried last for that read for ten minutes. It is still tried when no other endpoint answers, and other reads still use it. With the default Base mainnet endpoints, receipt lookups are no longer sent first to the one that refuses them | None. `DKG_DISABLE_RPC_STICKINESS=1` switches it off together with endpoint stickiness |
 | A graph whose recovery fetch is refused waits for capacity (#2994) | Only on a node whose own sync admission refuses a Verifiable Memory recovery fetch, such as a Core that admits one background sync at a time: the graph's reconcile pass no longer runs again every 2.5 s, and waiting graphs take the freed capacity in turn. A node whose limiter queues sync work (the default) is unchanged | None |
 | A serving node admits one sync request per peer for each of Shared Working Memory and Verifiable Memory (#2971, #3012) | A peer could run one sync request at a time on a serving node. It can now run one for Shared Working Memory and one for Verifiable Memory, within the same three responses at a time and the same queue bounds. A node also asks for byte-budget pages when it syncs Shared Working Memory; a serving node on an older version ignores the hint and serves the pages it always served | None |
 | A query scoped to a graph the node does not hold returns an empty result (#2992) | A query scoped to a context graph that the node neither holds nor is subscribed to answered a retryable authority error when the graph's authority could not be settled. It now answers an empty result. Only for a well-formed graph id; a node that holds data of the graph, or has asked to join it, keeps the retryable answer | A client that retried on that error can stop |
 | A damaged working-draft record is a server error (#2969, #3009) | The `wm` routes answer 500 with `KA_WM_LIFECYCLE_CORRUPT` when a draft's lifecycle record has duplicate rows or an unexpected shape, where they answered the 409 that tells a caller to reopen the draft. A missing record and an inactive draft keep the 409 | Do not reopen the draft on `KA_WM_LIFECYCLE_CORRUPT`; report it |
 | The negative cache of chain reconcile is retired (#2990, #3008) | The `vm_reconcile_negative_cache` table stays in `node-ui.db` and is no longer read, written or pruned. For SDK embedders, the `loadVmReconcileNegative`, `saveVmReconcileNegative`, `deleteVmReconcileNegative` and `deleteVmReconcileNegativesForContextGraph` hooks of a custom subscription store are still accepted and never called | None |
+| A synchronous share whose prerequisite is briefly unavailable answers a retryable 503 (#3027) | `POST /api/knowledge-assets/:name/swm/share` answers `503` with `Retry-After: 1`, `code: PROMOTE_RETRYABLE_FAILURE`, `retryable: true` and `retryAction: resume_existing_knowledge_asset`, where it answered 500 with "A promote prerequisite is temporarily unavailable". The promote first repeats the read that failed, for up to 2 s | Send the same share again. The one-shot create with `alsoShareSwm` still reports this case in its 207 body |
 
 ### Known issues
 
@@ -85,7 +87,9 @@ release adds one published package, `@origintrail-official/dkg-node-store`.
   catalog status reaches `complete` only after about eight minutes on a
   Core and may not reach it on an Edge, because the curator gives up its
   replay to the approved peer before the member is ready. Delivery and reads
-  do not depend on it.
+  do not depend on it. These timings were measured before #3036, which
+  retries an incomplete private catalog within a short budget; they were not
+  measured again.
 - **Two peers that connect while both are still starting do not sync with each
   other until they reconnect** (#2854): a node learns a peer's protocols when
   the connection opens. Two nodes that both connected before either
@@ -164,6 +168,33 @@ release adds one published package, `@origintrail-official/dkg-node-store`.
   counted a recently cached chain head as an endpoint failure; it now waits
   300 ms and reads once more. A failed promote attempt logs the authority
   reason and where it came from.
+- **A share sent right after a Context Graph registration no longer fails**
+  (#3027, #3034): for a private graph the share resolves its recipients and
+  accepts the result only if the node's authority facts stayed the same
+  meanwhile, in at most three attempts. After a registration the node
+  reconciles the new graph's gossip subscription several times, and every
+  reconcile counted as a change although it writes no fact. A share in that
+  span could use up the three attempts, and a synchronous `swm/share`
+  answered 500 with "A promote prerequisite is temporarily unavailable". The
+  reconcile no longer counts as a change, which also covers the other
+  Shared Working Memory writers that resolve recipients. The promote repeats
+  its recipient read after 100, 300 and 700 ms, never starting a repeat
+  later than 2 s after the first read. What still fails is answered as a
+  retryable 503 with `Retry-After: 1`, `code: PROMOTE_RETRYABLE_FAILURE`
+  and `retryAction: resume_existing_knowledge_asset`; the same share is
+  safe to send again.
+- **Catalog catch-up no longer stays incomplete when authority changes
+  during publication** (#3036): a private graph's catalog replay that ended
+  failed or unverified is requested again within the short retry budget,
+  where one answered request was final. A Shared Working Memory inventory
+  commit that meets an authority transition is retried, bounded, and logs a
+  warning if the authority does not settle. The registration lookup that
+  classifies a graph runs in the request lane for authority reads, where it
+  waited behind background chain reads until its deadline. An absent name
+  binding is answered from the cached finalized projection only while the
+  finalized block is unchanged, checked with a fresh head read. And a
+  catalog peer is identified by its verified binding for the graph before
+  its public profile is consulted.
 - **A store rejection before a publish transaction was sent no longer strands
   the job** (#2940, #2941): on 10.0.20 a publish whose pre-send bookkeeping
   was refused by a busy store (`Store scheduler queue wait timeout`) was
@@ -416,6 +447,21 @@ release adds one published package, `@origintrail-official/dkg-node-store`.
   same 564-asset recovery authenticated and stored an asset in 1,159 ms at
   the median where it took 1,360 ms, and the time per asset while assets
   arrive fell from 3.20 s to 2.86 s.
+- **The on-chain Context Graph enumeration is read in aggregate requests**
+  (#3025): at a cold start a node lists every Context Graph that exists on
+  chain. The walk cost two `eth_call`s per id plus three requests per page
+  of 16 ids, 80 requests for a chain with 37 graphs, all of them background
+  requests. At two background requests a second it kept that budget full
+  for more than half a minute, and every other background read of the
+  start-up waited behind it. The walk now asks for both views of up to 32
+  ids in one request at the range's anchor block and reads 64 ids per page:
+  4 requests for the same chain. An id without a usable answer is read on
+  its own, a failed request falls back to reading id by id, and a range is
+  the longest prefix that could be read, so the cursor never passes an id
+  that was not read. Behind the same bytecode check and the same switch as
+  the shared batch above. A fresh node recovering a 564-asset public graph
+  started its first exchange 40 s after the start, where it took 76 and 82 s
+  in the two runs before.
 - **One peer can recover Verifiable Memory while it syncs Shared Working
   Memory** (#2971, #3012): a serving node admitted one sync request per peer
   at a time, so a node's recovery and its shared-memory sync waited for each
@@ -490,7 +536,8 @@ release adds one published package, `@origintrail-official/dkg-node-store`.
   with recovery timing, experiment policy and preparation each in a module
   of its own (#2951, #3016). Chain reconcile's unused inline fetch mode,
   workspace fingerprint and negative cache are removed, about 2,600 lines
-  (#2990, #3008).
+  (#2990, #3008). The parser of the promote stage tag has its own daemon
+  module (#3029, #3030).
 - Repository layout: one-off data and old tooling moved to `misc/`, and more
   root files moved next to what they configure (#2924, #2957). Anyone who
   keeps a `<chain>_distribution_ledger.json` under the former root
