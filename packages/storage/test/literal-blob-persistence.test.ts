@@ -3,10 +3,21 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { OxigraphStore, SharedMemoryLiteralBlobStore, asTripleStorePersistenceCapability } from '../src/index.js';
-const syncControl = vi.hoisted(() => ({ fail: undefined as 'file' | 'directory' | undefined, held: null as Promise<void> | null, entered: false, calls: [] as string[] }));
+const syncControl = vi.hoisted(() => ({ fail: undefined as 'file' | 'directory' | undefined, creationFail: false, held: null as Promise<void> | null, entered: false, directoryHeld: null as Promise<void> | null, directoryEntered: false, writes: [] as string[], calls: [] as string[] }));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+  return { ...actual, mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+    if (syncControl.creationFail && String(args[0]).includes('literal-files')) throw Object.assign(new Error('directory unavailable'), { code: 'EACCES' });
+    if (syncControl.directoryHeld !== null && syncControl.directoryEntered && String(args[0]).includes('literal-files')) return undefined;
+    const created = await actual.mkdir(...args);
+    if (created !== undefined && String(args[0]).includes('literal-files')) {
+      syncControl.directoryEntered = true; await syncControl.directoryHeld;
+    }
+    return created;
+  }, writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+    if (String(args[0]).includes('literal-files')) syncControl.writes.push(String(args[0]));
+    return actual.writeFile(...args);
+  }, open: async (...args: Parameters<typeof actual.open>) => {
     const file = await actual.open(...args), sync = file.sync.bind(file), path = String(args[0]);
     if (path.includes('literal-files')) file.sync = async () => {
       syncControl.calls.push(path); syncControl.entered = true; await syncControl.held;
@@ -17,7 +28,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   } };
 });
 const dirs: string[] = [], stores: SharedMemoryLiteralBlobStore[] = [];
-afterEach(async () => { syncControl.fail = undefined; syncControl.held = null; syncControl.entered = false; syncControl.calls = [];
+afterEach(async () => { syncControl.fail = undefined; syncControl.creationFail = false; syncControl.held = null; syncControl.entered = false; syncControl.directoryHeld = null; syncControl.directoryEntered = false; syncControl.writes = []; syncControl.calls = [];
   vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 async function fixture() {
@@ -28,6 +39,25 @@ async function fixture() {
   return { store, backend, path, blobDir, quad };
 }
 describe('external literal persistence certification', () => {
+  it('does not retain a failed directory-creation task and retries without a dangling reference', async () => {
+    const f = await fixture(), insert = vi.spyOn(f.backend, 'insert'); syncControl.creationFail = true;
+    await expect(f.store.insert([f.quad])).rejects.toMatchObject({ code: 'EACCES' });
+    expect(insert).not.toHaveBeenCalled(); expect(syncControl.writes).toEqual([]);
+    syncControl.creationFail = false; await f.store.insert([f.quad]); await asTripleStorePersistenceCapability(f.store)!.persist();
+    expect(await f.store.query('SELECT ?value WHERE { GRAPH <urn:dkg:cg/_shared_memory> { <urn:asset> <urn:value> ?value } }'))
+      .toMatchObject({ bindings: [{ value: f.quad.object }] });
+  });
+  it('keeps different content hashes behind the same initial directory creation and ancestry barrier', async () => {
+    const f = await fixture(); let release!: () => void;
+    syncControl.directoryHeld = new Promise<void>(resolve => { release = resolve; });
+    const insert = vi.spyOn(f.backend, 'insert'), first = f.store.insert([f.quad]);
+    await vi.waitFor(() => expect(syncControl.directoryEntered).toBe(true));
+    const second = f.store.insert([{ ...f.quad, subject: 'urn:second', object: '"another large content hash"' }]);
+    try { await new Promise(resolve => setImmediate(resolve)); expect(syncControl.writes).toEqual([]); expect(insert).not.toHaveBeenCalled(); }
+    finally { release(); await Promise.all([first, second]); }
+    await asTripleStorePersistenceCapability(f.store)!.persist();
+    expect(insert).toHaveBeenCalledTimes(2);
+  });
   it('waits for file and directory persistence before referencing the blob, then reopens hydrated content', async () => {
     const f = await fixture(); let release!: () => void;
     syncControl.held = new Promise<void>(resolve => { release = resolve; });

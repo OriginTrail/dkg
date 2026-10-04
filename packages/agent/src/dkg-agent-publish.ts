@@ -302,7 +302,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle, confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
 import { withKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
@@ -5030,7 +5030,7 @@ export class PublishMethods extends DKGAgentBase {
     return this.namedKaVmLifecycleRepair ??= new NamedKaVmLifecycleRepair({
       dataDir: this.config?.dataDir,
       writeLocks: this.writeLocks,
-      apply: input => applyPublishedNamedKaVmLifecycle(this.store, input),
+      apply: input => applyPublishedNamedKaVmLifecycle(this.store, input, confirmedNamedKaVmLifecycleApplyOptions(this.config?.dataDir)),
       isCurrent: input => isConfirmedNamedKaVmLifecycleCurrent(
         this.chain, input, this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir),
       ),
@@ -5075,7 +5075,7 @@ export class PublishMethods extends DKGAgentBase {
       if (!await isConfirmedNamedKaVmLifecycleCurrent(
         this.chain, input, this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir),
       ) || !await this._canStampRecoveredKnowledgeAssetVmLifecycle(request)) return false;
-      await applyPublishedNamedKaVmLifecycle(this.store, input);
+      await applyPublishedNamedKaVmLifecycle(this.store, input, confirmedNamedKaVmLifecycleApplyOptions(this.config?.dataDir));
       return true;
     });
   }

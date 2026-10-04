@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TripleStore } from '../src/triple-store.js';
 import { ChangelogStore, GraphSetIndexStore, OxigraphStore, OxigraphWorkerStore, SharedMemoryLiteralBlobStore, SparqlHttpStore, asTripleStorePersistenceCapability,
-  createManagedOxigraphRuntimeStoreConfigV1, createTripleStore } from '../src/index.js';
+  asTripleStoreEphemeralCommitCapability, createManagedOxigraphRuntimeStoreConfigV1, createTripleStore } from '../src/index.js';
 
 const directories: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -153,5 +153,39 @@ describe('certified adapter and decorator composition', () => {
       const rejected = expect(barrier).rejects.toBe(reason);
       await vi.waitFor(() => expect(entered).toBe(true)); controller.abort(reason); release(); await rejected;
     } finally { await store.close(); }
+  });
+});
+
+
+describe('explicit process-local commitment', () => {
+  it.each(['embedded', 'worker'] as const)('commits a real memory %s without certifying restart durability', async adapter => {
+    const backend = adapter === 'embedded' ? new OxigraphStore() : new OxigraphWorkerStore();
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-ephemeral-wrapper-')); directories.push(dir);
+    const store = new ChangelogStore(new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(backend, { blobDir: dir, thresholdBytes: 1024 })));
+    try {
+      expect(asTripleStorePersistenceCapability(store)).toBeNull();
+      await store.insert([{ graph: 'urn:memory', subject: 'urn:asset', predicate: 'urn:value', object: '"committed"' }]);
+      await asTripleStoreEphemeralCommitCapability(store)!.commitEphemeral();
+      expect(await store.headSeq()).toBe(1);
+      expect(await store.query('ASK { GRAPH <urn:memory> { <urn:asset> <urn:value> "committed" } }')).toMatchObject({ value: true });
+    } finally { await store.close(); }
+  });
+  it('does not grant a remote endpoint process-local authority through composed decorators', async () => {
+    const store = new ChangelogStore(new GraphSetIndexStore(new SparqlHttpStore({ queryEndpoint: 'http://untrusted.test/query' })));
+    try { expect(asTripleStoreEphemeralCommitCapability(store)).toBeNull(); } finally { await store.close(); }
+  });
+  it('waits for an outer queued mutation and propagates a process-local barrier failure', async () => {
+    const backend = new OxigraphStore(), store = new ChangelogStore(new GraphSetIndexStore(backend));
+    const insert = backend.insert.bind(backend); let release!: () => void, entered = false;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(backend, 'insert').mockImplementation(async (quads, options) => { entered = true; await held; await insert(quads, options); });
+    const failure = new Error('memory worker retired'), flush = vi.spyOn(backend, 'flush').mockRejectedValueOnce(failure);
+    const mutation = store.insert([{ graph: 'urn:memory', subject: 'urn:asset', predicate: 'urn:value', object: '"queued"' }]);
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      const barrier = asTripleStoreEphemeralCommitCapability(store)!.commitEphemeral(), rejected = expect(barrier).rejects.toBe(failure);
+      await new Promise(resolve => setImmediate(resolve)); expect(flush).not.toHaveBeenCalled();
+      release(); await mutation; await rejected; expect(await store.headSeq()).toBe(1);
+    } finally { release(); await mutation; await store.close(); }
   });
 });

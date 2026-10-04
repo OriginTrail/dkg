@@ -153,6 +153,8 @@ export interface TripleStore {
   readonly writesDurableOnAcknowledgement?: boolean;
   /** Explicitly certified restart-persistence barrier, composed through every decorator. */
   readonly persist?: (options?: QueryOptions) => Promise<void>;
+  /** Explicit process-local commit for in-memory stores; never substitutes for a durable journal barrier. */
+  readonly commitEphemeral?: (options?: QueryOptions) => Promise<void>;
   /** Present only when query response limits are enforced before decoding. */
   readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
 

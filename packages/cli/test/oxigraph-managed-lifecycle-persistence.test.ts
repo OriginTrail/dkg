@@ -59,7 +59,7 @@ it('completes confirmed lifecycle repair through actual managed configuration on
     const journal = async () => decodeLifecycleRepairJournal(JSON.parse(await readFile(join(root, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
     // Chain confirmation is an already admitted immutable input. This test uses
     // the actual production journal owner, writer, runtime factory and endpoint.
-    repair = new NamedKaVmLifecycleRepair({ dataDir: root, warn: vi.fn(), isCurrent: async () => true,
+    repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: root, warn: vi.fn(), isCurrent: async () => true,
       apply: input => applyPublishedNamedKaVmLifecycle(store!, input) });
     let entered!: () => void;
     const syncing = new Promise<void>(resolve => { entered = resolve; });

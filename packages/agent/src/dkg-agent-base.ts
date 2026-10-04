@@ -670,6 +670,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       )
       : undefined,
     persist: innerStore.persist?.bind(innerStore),
+    commitEphemeral: innerStore.commitEphemeral?.bind(innerStore),
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
     close() {
       return innerStore.close();

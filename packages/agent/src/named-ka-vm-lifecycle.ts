@@ -3,7 +3,7 @@ import {
   ASSERTION_SEAL_PREDICATES, MemoryLayer, assertionLifecycleUri,
   contextGraphAssertionUri, contextGraphLayerUri, contextGraphMetaUri, formatSparqlTerm,
 } from '@origintrail-official/dkg-core';
-import { asTripleStorePersistenceCapability, deleteByPatternWithoutCount, UnsupportedTripleStoreCapabilityError,
+import { asTripleStorePersistenceCapability, asTripleStoreEphemeralCommitCapability, deleteByPatternWithoutCount, UnsupportedTripleStoreCapabilityError,
   type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 
@@ -32,6 +32,15 @@ export interface PublishedNamedKaVmLifecycleInput extends NamedKaVmLifecycleFiel
 /** Tentative updates consume the prior sealed WM projection without claiming a VM graph. */
 export interface TentativeNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
   readonly tentative: true;
+}
+
+export interface NamedKaVmLifecycleApplyOptions {
+  /** A durable repair journal always selects restart-durable; standalone SDK hosts may select process-local. */
+  readonly persistence: 'restart-durable' | 'process-local';
+}
+/** A filesystem journal selects durability; a standalone SDK may commit within its process. */
+export function confirmedNamedKaVmLifecycleApplyOptions(dataDir?: string): NamedKaVmLifecycleApplyOptions {
+  return { persistence: dataDir ? 'restart-durable' : 'process-local' };
 }
 
 interface LifecycleMetadataPlan {
@@ -125,27 +134,34 @@ async function commitLifecycleMetadata(store: TripleStore, plan: LifecycleMetada
 }
 
 /** Caller holds the publisher's same-KA lifecycle lock across admission and commit. */
-export async function applyPublishedNamedKaVmLifecycle(store: TripleStore, input: PublishedNamedKaVmLifecycleInput): Promise<void> {
+export async function applyPublishedNamedKaVmLifecycle(
+  store: TripleStore, input: PublishedNamedKaVmLifecycleInput,
+  options: NamedKaVmLifecycleApplyOptions = { persistence: 'restart-durable' },
+): Promise<void> {
   if ('tentative' in input) throw Object.assign(new Error('Confirmed lifecycle commands cannot carry tentative mode'), {
     code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
   });
-  await applyNamedKaVmLifecycle(store, input, false);
+  await applyNamedKaVmLifecycle(store, input, false, options.persistence);
 }
 export async function applyTentativeNamedKaVmLifecycle(store: TripleStore, input: TentativeNamedKaVmLifecycleInput): Promise<void> {
   if (input.tentative !== true) throw Object.assign(new Error('Tentative lifecycle commands require tentative mode'), {
     code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
   });
-  await applyNamedKaVmLifecycle(store, input, true);
+  await applyNamedKaVmLifecycle(store, input, true, 'process-local');
 }
-async function applyNamedKaVmLifecycle(store: TripleStore, input: NamedKaVmLifecycleFields, tentative: boolean): Promise<void> {
+async function applyNamedKaVmLifecycle(
+  store: TripleStore, input: NamedKaVmLifecycleFields, tentative: boolean,
+  persistenceMode: NamedKaVmLifecycleApplyOptions['persistence'],
+): Promise<void> {
   const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const metaGraph = contextGraphMetaUri(input.contextGraphId);
   // Validate inputs before I/O and use the shared RDF serializer at the query boundary.
   checkedRoot(input.merkleRoot);
   if (input.priorMerkleRoot !== undefined) checkedRoot(input.priorMerkleRoot);
-  const persistence = asTripleStorePersistenceCapability(store);
-  if (!tentative && persistence === null) {
+  const barrier = asTripleStorePersistenceCapability(store)?.persist
+    ?? (persistenceMode === 'process-local' ? asTripleStoreEphemeralCommitCapability(store)?.commitEphemeral : undefined);
+  if (!tentative && barrier === undefined) {
     throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), {
       code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',
     });
@@ -164,6 +180,6 @@ async function applyNamedKaVmLifecycle(store: TripleStore, input: NamedKaVmLifec
   await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(input, decodeWorkspaceLifecycleValues(rows.bindings[0]), tentative));
   // Graph writes can be visible before the debounced snapshot is on disk. The
   // repair owner may retire its fsynced journal only after this barrier succeeds.
-  if (persistence !== null) await persistence.persist({ source: 'agent.publish.confirmedLifecycleFlush' });
+  if (barrier !== undefined) await barrier({ source: 'agent.publish.confirmedLifecycleFlush' });
   else await store.flush?.({ source: 'agent.publish.confirmedLifecycleFlush' });
 }

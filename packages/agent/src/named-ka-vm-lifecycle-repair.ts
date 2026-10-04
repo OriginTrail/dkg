@@ -29,7 +29,7 @@ export class NamedKaVmLifecycleRepair {
     now?: () => number;
     /** Share the publisher's lifecycle domain for currency, admission and mutation. */
     writeLocks: Map<string, Promise<void>>;
-    /** Resolve only after metadata persistence is durable, before retiring evidence. */
+    /** Resolve after the host's certified commit barrier: durable for every filesystem journal. */
     apply: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<void>;
     /** Coherent chain version evidence; a newer chain version fences an old repair. */
     isCurrent: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<boolean>;

@@ -1,5 +1,5 @@
 import { persistContentAddressedFile } from './durable-content-addressed-file.js';
-import { composeTripleStorePersistence, type TripleStorePersistenceBarrier } from './persistence.js';
+import { composeTripleStorePersistence, composeTripleStoreEphemeralCommit, type TripleStorePersistenceBarrier } from './persistence.js';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -58,12 +58,15 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
 
   readonly innerStore: TripleStore;
   readonly persist?: TripleStorePersistenceBarrier;
+  readonly commitEphemeral?: TripleStorePersistenceBarrier;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
   /** Retain newly created directory ancestry across a failed sync and retry. */
   private pendingCreatedDirectory?: string;
+  /** Different content hashes share initial directory creation and its ancestry evidence. */
+  private blobDirectoryCreation?: Promise<void>;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -75,6 +78,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.inner = inner;
     this.innerStore = inner;
     this.persist = composeTripleStorePersistence(inner);
+    this.commitEphemeral = composeTripleStoreEphemeralCommit(inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
     this.blobWrites = new ContentAddressedBlobSingleFlight({
@@ -400,7 +404,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   private async writeBlobFile(hash: string, term: string): Promise<void> {
-    this.pendingCreatedDirectory ??= await mkdir(this.blobDir, { recursive: true });
+    this.blobDirectoryCreation ??= mkdir(this.blobDir, { recursive: true }).then(created => {
+      this.pendingCreatedDirectory = created;
+    }).catch(error => { this.blobDirectoryCreation = undefined; throw error; });
+    await this.blobDirectoryCreation;
     const path = this.blobPath(hash);
 
     try {

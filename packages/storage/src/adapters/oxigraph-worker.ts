@@ -168,6 +168,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 
 export class OxigraphWorkerStore implements TripleStore {
   readonly persist?: TripleStorePersistenceBarrier;
+  readonly commitEphemeral?: TripleStorePersistenceBarrier;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -310,7 +311,9 @@ export class OxigraphWorkerStore implements TripleStore {
     }
     this.workerPath = workerPath;
     this.persistPath = persistPath;
-    this.persist = persistPath ? certifiedTripleStorePersistenceBarrier(options => this.flush(options)) : undefined;
+    const barrier = certifiedTripleStorePersistenceBarrier(options => this.flush(options));
+    this.persist = persistPath ? barrier : undefined;
+    this.commitEphemeral = persistPath ? undefined : barrier;
     this.spawnWorker();
   }
 

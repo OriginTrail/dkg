@@ -62,6 +62,7 @@ type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
   readonly persist?: TripleStorePersistenceBarrier;
+  readonly commitEphemeral?: TripleStorePersistenceBarrier;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -83,7 +84,9 @@ export class OxigraphStore implements TripleStore {
   constructor(persistPath?: string) {
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
-    this.persist = persistPath ? certifiedTripleStorePersistenceBarrier(options => this.flush(options)) : undefined;
+    const barrier = certifiedTripleStorePersistenceBarrier(options => this.flush(options));
+    this.persist = persistPath ? barrier : undefined;
+    this.commitEphemeral = persistPath ? undefined : barrier;
     if (persistPath) {
       this.hydrateSync(persistPath);
     }

@@ -2,6 +2,10 @@
 import type { QueryOptions, TripleStore } from './triple-store.js';
 
 export type TripleStorePersistenceBarrier = (options?: QueryOptions) => Promise<void>;
+export interface TripleStoreEphemeralCommitCapability {
+  /** Completed mutations remain in this explicitly process-local store; no restart durability is promised. */
+  commitEphemeral: TripleStorePersistenceBarrier;
+}
 export interface TripleStorePersistenceCapability {
   /** Persist completed mutations through the outer composition's certified barrier. */
   persist: TripleStorePersistenceBarrier;
@@ -11,6 +15,11 @@ export interface TripleStorePersistenceCapability {
 export function asTripleStorePersistenceCapability(store: TripleStore): TripleStorePersistenceCapability | null {
   const persist = store.persist;
   return typeof persist === 'function' ? Object.freeze({ persist: persist.bind(store) }) : null;
+}
+
+export function asTripleStoreEphemeralCommitCapability(store: TripleStore): TripleStoreEphemeralCommitCapability | null {
+  const commitEphemeral = store.commitEphemeral;
+  return typeof commitEphemeral === 'function' ? Object.freeze({ commitEphemeral: commitEphemeral.bind(store) }) : null;
 }
 
 /** Cancellation cannot turn a failed or unfinished persistence barrier into success. */
@@ -26,11 +35,20 @@ export function certifiedTripleStorePersistenceBarrier(work: TripleStorePersiste
 export function composeTripleStorePersistence(
   inner: TripleStore, drain?: () => Promise<void>,
 ): TripleStorePersistenceBarrier | undefined {
-  const capability = asTripleStorePersistenceCapability(inner);
-  if (capability === null) return undefined;
+  return composeBarrier(asTripleStorePersistenceCapability(inner)?.persist, drain);
+}
+export function composeTripleStoreEphemeralCommit(
+  inner: TripleStore, drain?: () => Promise<void>,
+): TripleStorePersistenceBarrier | undefined {
+  return composeBarrier(asTripleStoreEphemeralCommitCapability(inner)?.commitEphemeral, drain);
+}
+function composeBarrier(
+  barrier: TripleStorePersistenceBarrier | undefined, drain?: () => Promise<void>,
+): TripleStorePersistenceBarrier | undefined {
+  if (barrier === undefined) return undefined;
   return certifiedTripleStorePersistenceBarrier(async (options) => {
     await drain?.();
     options?.signal?.throwIfAborted();
-    await capability.persist(options);
+    await barrier(options);
   });
 }

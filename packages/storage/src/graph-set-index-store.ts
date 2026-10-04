@@ -1,4 +1,4 @@
-import { composeTripleStorePersistence, type TripleStorePersistenceBarrier } from './persistence.js';
+import { composeTripleStorePersistence, composeTripleStoreEphemeralCommit, type TripleStorePersistenceBarrier } from './persistence.js';
 import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 import { performance } from 'node:perf_hooks';
@@ -228,6 +228,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
   readonly persist?: TripleStorePersistenceBarrier;
+  readonly commitEphemeral?: TripleStorePersistenceBarrier;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;
@@ -252,6 +253,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.inner = inner;
     this.innerStore = inner;
     this.persist = composeTripleStorePersistence(inner);
+    this.commitEphemeral = composeTripleStoreEphemeralCommit(inner);
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(

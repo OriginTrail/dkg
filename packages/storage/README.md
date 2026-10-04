@@ -57,6 +57,13 @@ path (`oxigraph-persistent`) and to `oxigraph-worker` when that worker is given
 a persistence path. Plain `oxigraph`, and a worker without a persistence path,
 are in-memory stores and provide no restart durability.
 
+Standalone SDK agents without a data directory use the separate explicit
+`commitEphemeral` capability of those memory adapters. Decorators compose it
+through the same queue-draining boundary. This permits confirmed metadata to
+finish within the current process; it cannot retire a durable repair journal.
+Durable hosts require `persist`, and uncertified remote endpoints expose neither
+capability. A standalone agent backed by a durable store still uses `persist`.
+
 ### Mutation and flush semantics
 
 - Mutations update the in-memory store immediately and schedule a full N-Quads
