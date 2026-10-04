@@ -2647,6 +2647,11 @@ export class JoinRequestMethods extends DKGAgentBase {
           createOperationContext('system'),
           `RFC-64 catalog replay remains pending after join approval for "${contextGraphId}"`,
         );
+        this.scheduleRfc64CatalogAfterJoinApprovalRetryV1(
+          contextGraphId,
+          agentAddress,
+          result.peerId,
+        );
       }
       return;
     }

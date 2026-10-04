@@ -580,6 +580,12 @@ const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
   1_000,
   4_000,
 ]);
+const RFC64_JOIN_APPROVAL_CATALOG_REPLAY_RETRY_DELAYS_MS_V1 = Object.freeze([
+  5_000,
+  15_000,
+  30_000,
+  60_000,
+]);
 /**
  * Waits before an authority snapshot is composed again after local authority
  * facts moved under the previous composition. The first retry is immediate;
@@ -5037,6 +5043,44 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       policyDigest: accepted.policyDigest,
     });
     return replay.failed === 0;
+  }
+
+  /**
+   * An approval can arrive while its successor private roster is still being
+   * composed. Keep the exact approved peer's replay demand alive past the
+   * short notification attempt without delaying the join or widening the
+   * accepted policy. The dispatcher cancels and drains this bounded work on
+   * shutdown; each attempt rechecks current authority and membership.
+   */
+  scheduleRfc64CatalogAfterJoinApprovalRetryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    approvedAgentAddress: string,
+    peerId: string,
+  ): boolean {
+    const workKey = `join-approved-catalog-replay\0${contextGraphId}\0${approvedAgentAddress.toLowerCase()}\0${peerId}`;
+    return this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(workKey, async (signal) => {
+      for (const delayMs of RFC64_JOIN_APPROVAL_CATALOG_REPLAY_RETRY_DELAYS_MS_V1) {
+        await waitForRfc64ScheduledResponsibilityDelayV1(signal, delayMs);
+        try {
+          await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal);
+          signal.throwIfAborted();
+          if (await this.reannounceRfc64CatalogAfterJoinApprovalV1(
+            contextGraphId,
+            approvedAgentAddress,
+            peerId,
+          )) return;
+        } catch (error) {
+          if (signal.aborted) throw signal.reason ?? error;
+          // An overlapping metadata write or transport refusal is retryable;
+          // the next pass still has to authenticate the current roster.
+        }
+      }
+      this.log.warn(
+        createOperationContext('system'),
+        `RFC-64 catalog replay remained pending after bounded join approval retries for "${contextGraphId}"`,
+      );
+    });
   }
 
   /** Request scoped head replay from already-connected peers after late activation. */
