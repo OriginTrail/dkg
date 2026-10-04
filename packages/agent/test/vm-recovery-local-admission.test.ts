@@ -381,17 +381,19 @@ describe('bounded local-admission retry scheduling', () => {
   it('coalesces retries, releases the worker, and preserves dispatcher cross-CG fairness', async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
+    let free = false;
     const runtime = new VmReconcileSchedulingRuntime(async (key) => { calls.push(key); }, vi.fn(),
       { concurrency: 1, maxPending: 2, maxForegroundBurst: 1 });
     try {
-      runtime.retryLocalAdmission('busy', { isCurrent: () => true });
-      runtime.retryLocalAdmission('busy', { isCurrent: () => true });
+      runtime.retryLocalAdmission('busy', { isCurrent: () => true, canAdmit: () => free });
+      runtime.retryLocalAdmission('busy', { isCurrent: () => true, canAdmit: () => free });
       await runtime.dispatch('other', 'periodic');
       await runtime.waitForIdle();
       expect(calls).toEqual(['other']);
       expect(runtime.snapshot()).toMatchObject({ active: 0, queued: 0 });
       await vi.advanceTimersByTimeAsync(2_499);
       expect(calls).toEqual(['other']);
+      free = true;
       await vi.advanceTimersByTimeAsync(1);
       await runtime.waitForIdle();
       expect(calls).toEqual(['other', 'busy']);
@@ -404,7 +406,7 @@ describe('bounded local-admission retry scheduling', () => {
     const runtime = new VmReconcileSchedulingRuntime(run, vi.fn());
     const controller = new AbortController();
     let current = true;
-    runtime.retryLocalAdmission('busy', { signal: controller.signal, isCurrent: () => current });
+    runtime.retryLocalAdmission('busy', { signal: controller.signal, isCurrent: () => current, canAdmit: () => true });
     if (mode === 'abort') controller.abort();
     if (mode === 'stale') current = false;
     if (mode === 'close') await runtime.close();
@@ -418,7 +420,7 @@ describe('bounded local-admission retry scheduling', () => {
     const run = vi.fn(async () => undefined);
     const runtime = new VmReconcileSchedulingRuntime(run, vi.fn(), { maxPending: 2 });
     try {
-      for (const key of ['one', 'two', 'overflow']) runtime.retryLocalAdmission(key, { isCurrent: () => true });
+      for (const key of ['one', 'two', 'overflow']) runtime.retryLocalAdmission(key, { isCurrent: () => true, canAdmit: () => true });
       await vi.advanceTimersByTimeAsync(2_500);
       await runtime.waitForIdle();
       expect(run.mock.calls.map(([key]) => key)).toEqual(['one', 'two']);

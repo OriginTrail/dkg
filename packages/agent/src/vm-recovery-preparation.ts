@@ -4,10 +4,7 @@ import { runBoundedOperation } from './bounded-operation.js';
 import { resolveBooleanSwitch } from './sync/backpressure.js';
 import { MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
 import {
-  VM_RECOVERY_BRIDGE_ABORTED,
-  VM_RECOVERY_BRIDGE_TIMED_OUT,
   VM_RECOVERY_FOOTPRINT_READ_TIMEOUT_MS,
-  readVmRecoveryFootprintWithDeadline,
   vmRecoveryFootprintFromUpdateContext,
   type VmRecoveryFootprintSizingReader,
   type VmRecoveryPreparedHints,
@@ -122,14 +119,17 @@ export interface VmRecoveryPreparationStats {
   readonly activeReads: number;
 }
 
-type EntryState = 'queued' | 'reading' | 'ready' | 'unusable' | 'taken';
+type PublicFootprint = Extract<VmRecoveryChainFootprint, { kind: 'public-v10' }>;
+type PreparedEntryState =
+  | { readonly kind: 'queued' }
+  | { readonly kind: 'reading'; readonly settled: Promise<void> }
+  | { readonly kind: 'ready'; readonly footprint: PublicFootprint }
+  | { readonly kind: 'unusable' | 'taken' };
 
 interface PreparedEntry {
   readonly kaId: string;
-  state: EntryState;
-  footprint?: VmRecoveryChainFootprint;
   bytes: number;
-  settled?: Promise<void>;
+  state: PreparedEntryState;
 }
 
 interface PreparedBatch {
@@ -238,8 +238,7 @@ export class VmRecoveryPreparation {
       retained += bytes;
       batch.entries.set(candidate.kaId, {
         kaId: candidate.kaId,
-        state: ready ? 'ready' : 'queued',
-        ...(ready ? { footprint: ready } : {}),
+        state: ready ? { kind: 'ready', footprint: ready } : { kind: 'queued' },
         bytes,
       });
     }
@@ -334,10 +333,10 @@ export class VmRecoveryPreparation {
     if (this.#batch === batch) this.#batch = undefined;
     batch.detachScopeSignal();
     for (const entry of batch.entries.values()) {
-      if (entry.state !== 'taken') this.#counters.discardedUnused += 1;
+      if (entry.state.kind !== 'taken') this.#counters.discardedUnused += 1;
       this.#retainedBytes = Math.max(0, this.#retainedBytes - entry.bytes);
       entry.bytes = 0;
-      if (entry.state === 'ready' || entry.state === 'queued') entry.state = 'unusable';
+      if (entry.state.kind === 'ready' || entry.state.kind === 'queued') entry.state = { kind: 'unusable' };
     }
     if (abortInflight && !batch.controller.signal.aborted) {
       batch.controller.abort(new Error('VM recovery preparation discarded'));
@@ -357,7 +356,7 @@ export class VmRecoveryPreparation {
         this.#dropBatch(batch, true);
         return;
       }
-      const next = [...batch.entries.values()].find((entry) => entry.state === 'queued');
+      const next = [...batch.entries.values()].find((entry) => entry.state.kind === 'queued');
       if (!next) return;
       this.#startRead(batch, next);
     }
@@ -366,37 +365,37 @@ export class VmRecoveryPreparation {
   #startRead(batch: PreparedBatch, entry: PreparedEntry): void {
     const sizing = this.#sizing;
     if (sizing === null) return;
-    entry.state = 'reading';
     this.#activeReads += 1;
     this.#counters.readsStarted += 1;
     this.#counters.maxActiveReads = Math.max(this.#counters.maxActiveReads, this.#activeReads);
-    const finish = (footprint: VmRecoveryChainFootprint | undefined): void => {
+    const finish = (footprint: PublicFootprint | undefined): void => {
       // A result for a batch that was released, closed or aborted is never applied.
       if (batch.released || batch.controller.signal.aborted || !this.#scopeIsCurrent(batch.scope)) {
         this.#counters.lateDropped += 1;
-        if (entry.state === 'reading') entry.state = 'unusable';
+        if (entry.state.kind === 'reading') entry.state = { kind: 'unusable' };
         return;
       }
       if (footprint) {
         const bytes = entryBytes(entry.kaId, footprint);
         if (this.#retainedBytes - entry.bytes + bytes > this.#limits.maxRetainedBytes) {
-          entry.state = 'unusable';
+          entry.state = { kind: 'unusable' };
           this.#counters.readsUnusable += 1;
           return;
         }
         this.#retainedBytes += bytes - entry.bytes;
         entry.bytes = bytes;
-        entry.footprint = footprint;
-        entry.state = 'ready';
+        entry.state = { kind: 'ready', footprint };
         this.#counters.readsReady += 1;
         this.#counters.maxRetainedBytes = Math.max(this.#counters.maxRetainedBytes, this.#retainedBytes);
       } else {
-        entry.state = 'unusable';
+        entry.state = { kind: 'unusable' };
         this.#counters.readsUnusable += 1;
       }
     };
+    let issued = false;
     const issue = (readSignal: AbortSignal): Promise<Awaited<ReturnType<
       VmRecoveryFootprintSizingReader['readUpdateContext']>>> => {
+      issued = true;
       let read: ReturnType<VmRecoveryFootprintSizingReader['readUpdateContext']>;
       try {
         read = sizing.readUpdateContext(BigInt(entry.kaId), { signal: readSignal });
@@ -416,25 +415,28 @@ export class VmRecoveryPreparation {
       this.#physical.add(settled);
       return read;
     };
-    entry.settled = (async (): Promise<void> => {
-      let footprint: VmRecoveryChainFootprint | undefined;
+    const settled = (async (): Promise<void> => {
+      let footprint: PublicFootprint | undefined;
       try {
         const context = await withOwnedRpcRequestContext(
           { requestClass: 'background', signal: batch.controller.signal },
-          () => readVmRecoveryFootprintWithDeadline(
-            issue,
-            batch.controller.signal,
-            this.#limits.readTimeoutMs,
-          ),
+          () => runBoundedOperation(issue, {
+            label: 'VM recovery speculative sizing',
+            signal: batch.controller.signal,
+            timeoutMs: this.#limits.readTimeoutMs,
+          }),
         );
-        if (context !== VM_RECOVERY_BRIDGE_ABORTED && context !== VM_RECOVERY_BRIDGE_TIMED_OUT) {
-          footprint = vmRecoveryFootprintFromUpdateContext(context);
-        }
+        const observed = vmRecoveryFootprintFromUpdateContext(context);
+        if (observed?.kind === 'public-v10') footprint = observed;
       } catch {
         footprint = undefined;
       }
+      // A pre-aborted boundary starts no physical read. Ordinary issued reads
+      // release capacity only in issue()'s physical-settlement callback.
+      if (!issued) this.#activeReads -= 1;
       finish(footprint);
     })();
+    entry.state = { kind: 'reading', settled };
   }
 
   async #take(
@@ -456,25 +458,26 @@ export class VmRecoveryPreparation {
       || this.#now() - batch.createdAt > this.#limits.maxHintAgeMs
     ) return miss(true);
     const entry = batch.entries.get(kaId);
-    if (!entry || entry.state === 'taken' || entry.state === 'unusable') return miss();
-    if (entry.state === 'queued') {
+    if (!entry || entry.state.kind === 'taken' || entry.state.kind === 'unusable') return miss();
+    if (entry.state.kind === 'queued') {
       // The consumer reads this candidate live now; never start a duplicate read.
-      entry.state = 'unusable';
+      entry.state = { kind: 'unusable' };
       return miss();
     }
-    if (entry.state === 'reading' && entry.settled) {
-      await this.#settleWithin(entry.settled, options);
+    if (entry.state.kind === 'reading') {
+      await this.#settleWithin(entry.state.settled, options);
     }
     // Re-check everything after any wait: ownership may have changed meanwhile.
     if (batch.released || this.#closed || options.signal?.aborted || !this.#scopeIsCurrent(scope)) {
       return miss(true);
     }
-    if (entry.state !== 'ready' || !entry.footprint) return miss();
-    entry.state = 'taken';
+    const state = batch.entries.get(kaId)?.state;
+    if (state?.kind !== 'ready') return miss();
+    entry.state = { kind: 'taken' };
     this.#retainedBytes = Math.max(0, this.#retainedBytes - entry.bytes);
     entry.bytes = 0;
     this.#counters.hits += 1;
-    return entry.footprint;
+    return state.footprint;
   }
 
   /**
@@ -497,28 +500,7 @@ export class VmRecoveryPreparation {
   }
 }
 
-/**
- * Resolve after `ms`, or sooner when `signal` aborts. Never rejects and leaves neither
- * a timer nor a listener behind, so a cancelled pass is not held by its own wait.
- */
-export function vmRecoveryRetryDelay(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0 || signal?.aborted) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    let onAbort: (() => void) | undefined;
-    const timer = setTimeout(() => {
-      if (onAbort) signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    timer.unref?.();
-    if (signal) {
-      onAbort = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-  });
-}
+export { vmRecoveryRetryDelay } from './vm-recovery-pass-authority.js';
 
 const hostOwners = new WeakMap<object, VmRecoveryPreparation>();
 

@@ -3,6 +3,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
@@ -314,6 +315,7 @@ function shutdownAgent(overrides: Record<string, unknown> = {}): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.chain = new MockChainAdapter();
   agent.peerSyncSession = PeerSyncSession.stopped();
+  agent.gossipSession = new GossipSession();
   agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   agent.rfc64BackgroundWorkDispatcherV1 = new Rfc64BackgroundWorkDispatcherV1();
