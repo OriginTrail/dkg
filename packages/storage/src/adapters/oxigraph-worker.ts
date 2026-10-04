@@ -1,4 +1,3 @@
-import { workerAtomicReplacements } from './worker-atomic-replacements.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
@@ -771,12 +770,25 @@ export class OxigraphWorkerStore implements TripleStore {
     // (`touchedGraphs` hints only membership changes) — unscoped lifecycle.
     await this.runTrackedWrite({ kind: 'all' }, () => this.call('update', sparql));
   }
-  private readonly atomicReplacements = workerAtomicReplacements((scope, method, args) =>
-    this.runTrackedWrite(scope, () => this.call(method, ...args)));
-  readonly replaceGraph = this.atomicReplacements.replaceGraph;
-  readonly replaceGraphAndSubject = this.atomicReplacements.replaceGraphAndSubject;
-  readonly replaceSubject = this.atomicReplacements.replaceSubject;
-  readonly replaceSubjectPredicates = this.atomicReplacements.replaceSubjectPredicates;
+  async replaceGraph(graph: string, quads: Quad[]): Promise<void> {
+    return this.runTrackedWrite({ kind: 'graphs', graphs: [graph] },
+      () => this.call('replaceGraph', graph, quads));
+  }
+  async replaceGraphAndSubject(graph: string, quads: Quad[], meta: string, subject: string, metadata: Quad[]): Promise<void> {
+    return this.runTrackedWrite({ kind: 'graphs', graphs: [graph, meta] },
+      () => this.call('replaceGraphAndSubject', graph, quads, meta, subject, metadata));
+  }
+  // The worker dispatch is generic (`store[method](...args)`), so this routes
+  // to the worker's embedded OxigraphStore.replaceSubject — one atomic
+  // single-message commit, same contract as insert/replaceGraph.
+  async replaceSubject(graph: string, subject: string, quads: Quad[]): Promise<void> {
+    return this.runTrackedWrite({ kind: 'graphs', graphs: [graph] },
+      () => this.call('replaceSubject', graph, subject, quads));
+  }
+  async replaceSubjectPredicates(graph: string, subject: string, predicates: readonly string[], quads: Quad[]): Promise<void> {
+    return this.runTrackedWrite({ kind: 'graphs', graphs: [graph] },
+      () => this.call('replaceSubjectPredicates', graph, subject, predicates, quads));
+  }
   async rfc64AuthorCommitCasV1(
     input: Rfc64AuthorCommitCasInputV1,
     options?: TripleStoreQueryOptions,
