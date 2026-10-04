@@ -3,15 +3,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
-import { NODE26_REQUIRED_ASSERTIONS } from '../ci-results.mjs';
+import { repositoryFiles, workflowExecution } from './ci-execution-graph.mjs';
+
+// Independent test obligations: deriving these from the production validator
+// would let deleting a requirement silently remove its regression coverage.
+export const EXPECTED_NODE26_ASSERTIONS = Object.freeze([
+  'chain RPC fetches against a server that offers HTTP/2 (#2828) stay on HTTP/1.1 where a plain fetch negotiates HTTP/2',
+  'chain RPC fetches against a server that offers HTTP/2 (#2828) go through a dispatcher the application installed, with its own TLS trust',
+  'chain RPC fetches against a server that offers HTTP/2 (#2828) go through the proxy of NODE_USE_ENV_PROXY',
+  'chain RPC fetches against a server that offers HTTP/2 (#2828) stay on HTTP/1.1 when a chain RPC call is the first request of a fresh process',
+]);
 
 export function node26Evidence() {
   return {
     version: 1, node: '26.7.0', undici: '8.9.0', requireUndici8Fetch: true, success: true,
-    assertions: NODE26_REQUIRED_ASSERTIONS.map((name) => ({ name, status: 'passed' })),
+    assertions: EXPECTED_NODE26_ASSERTIONS.map((name) => ({ name, status: 'passed' })),
   };
 }
-import { repositoryFiles, workflowExecution } from './ci-execution-graph.mjs';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // The trusted CI controller commit that the workflows' four trusted checkouts

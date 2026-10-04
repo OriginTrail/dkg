@@ -8,7 +8,7 @@ import { parse } from 'yaml';
 import { githubOutputsForPlan, planCi } from '../ci-delta.mjs';
 import { NODE26_REQUIRED_ASSERTIONS, validateNode26Evidence, validatePrimaryResults } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
-import { REPO_ROOT, TRUSTED_CI_CONTROLLER_SHA, change, gateNeeds, node26Evidence, pullRequestPlan, succeeded } from './ci-plan-fixtures.mjs';
+import { EXPECTED_NODE26_ASSERTIONS, REPO_ROOT, TRUSTED_CI_CONTROLLER_SHA, change, gateNeeds, node26Evidence, pullRequestPlan, succeeded } from './ci-plan-fixtures.mjs';
 import { workspaceClosure } from './ci-execution-graph.mjs';
 
 const read = (file) => fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
@@ -83,7 +83,12 @@ test('selected Node 26 failure, cancellation, skip, missing job or missing plan 
   assert.match(validatePrimaryResults({ eventName: 'merge_group', plan: full, needs: goodNeeds() }).join('\n'), /Full CI mode must select every/);
 });
 
-test('green jobs with wrong runtime, generic-only, skipped, failed, duplicated or missing assertions block', () => {
+test('the Node 26 validator requires all four independent transport obligations', () => {
+  assert.deepEqual([...NODE26_REQUIRED_ASSERTIONS].sort(), [...EXPECTED_NODE26_ASSERTIONS].sort());
+  assert.deepEqual(validateNode26Evidence(node26Evidence()), []);
+});
+
+test('green jobs with wrong runtime, generic-only or malformed evidence block', () => {
   const cases = [
     { ...node26Evidence(), node: '22.23.2', undici: '6.23.0' },
     { ...node26Evidence(), requireUndici8Fetch: false },
@@ -92,19 +97,6 @@ test('green jobs with wrong runtime, generic-only, skipped, failed, duplicated o
     { ...node26Evidence(), version: 2 },
     null,
   ];
-  for (let index = 0; index < NODE26_REQUIRED_ASSERTIONS.length; index++) {
-    for (const status of ['pending', 'skipped', 'todo', 'failed']) {
-      const evidence = node26Evidence();
-      evidence.assertions[index].status = status;
-      cases.push(evidence);
-    }
-    const missing = node26Evidence();
-    missing.assertions.splice(index, 1);
-    cases.push(missing);
-    const duplicated = node26Evidence();
-    duplicated.assertions.push(duplicated.assertions[index]);
-    cases.push(duplicated);
-  }
   for (const evidence of cases) {
     assert.ok(validateNode26Evidence(evidence).length);
     const needs = goodNeeds();
@@ -115,6 +107,24 @@ test('green jobs with wrong runtime, generic-only, skipped, failed, duplicated o
     const needs = goodNeeds();
     needs['chain-rpc-node26'].outputs.evidence = output;
     assert.ok(errorsFor(needs).length);
+  }
+});
+
+test('every independent Node 26 obligation rejects missing, failed, skipped or duplicated evidence', async (t) => {
+  for (const name of EXPECTED_NODE26_ASSERTIONS) {
+    for (const status of ['missing', 'failed', 'pending', 'skipped', 'todo', 'duplicated']) {
+      await t.test(`${status}: ${name}`, () => {
+        const evidence = node26Evidence();
+        const assertion = evidence.assertions.find((entry) => entry.name === name);
+        if (status === 'missing') evidence.assertions = evidence.assertions.filter((entry) => entry.name !== name);
+        else if (status === 'duplicated') evidence.assertions.push({ ...assertion });
+        else assertion.status = status;
+        assert.ok(validateNode26Evidence(evidence).some((error) => error.includes(name)), `${status} obligation must fail validation: ${name}`);
+        const needs = goodNeeds();
+        needs['chain-rpc-node26'].outputs.evidence = JSON.stringify(evidence);
+        assert.ok(errorsFor(needs).some((error) => error.includes(name)), `${status} obligation must block the aggregate: ${name}`);
+      });
+    }
   }
 });
 
