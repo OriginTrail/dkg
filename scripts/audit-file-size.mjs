@@ -51,13 +51,6 @@ export function countLines(content) {
   return lines.length;
 }
 
-/** Budget a given file is held to: its baseline entry, else the default cap. */
-export function budgetFor(relPath, baselineFiles, defaultMax = DEFAULT_MAX_LINES) {
-  return Object.prototype.hasOwnProperty.call(baselineFiles, relPath)
-    ? baselineFiles[relPath]
-    : defaultMax;
-}
-
 /**
  * Pure evaluation. `measured` is an array of `{ path, lines }`. Returns the
  * over-budget violations (sorted largest-first) and non-failing "approaching

@@ -19,7 +19,6 @@ import {
   DEFAULT_MAX_LINES,
   isSourceFile,
   countLines,
-  budgetFor,
   evaluate,
   main,
 } from './audit-file-size.mjs';
@@ -73,18 +72,6 @@ describe('countLines', () => {
   it('counts the final line when there is no trailing newline', () => {
     assert.equal(countLines('a'), 1);
     assert.equal(countLines('a\nb'), 2);
-  });
-});
-
-describe('budgetFor', () => {
-  const baseline = { 'packages/agent/src/dkg-agent.ts': 2100 };
-
-  it('uses the baseline entry when present', () => {
-    assert.equal(budgetFor('packages/agent/src/dkg-agent.ts', baseline), 2100);
-  });
-
-  it('falls back to the default cap otherwise', () => {
-    assert.equal(budgetFor('packages/agent/src/new-file.ts', baseline), DEFAULT_MAX_LINES);
   });
 });
 
@@ -185,12 +172,13 @@ describe('baseline lifecycle', () => {
   });
 
   it('excludes test directories and generated sources while scanning actual source', async () => {
-    await withRepository(async ({ rootDir, writeSource }) => {
+    await withRepository(async ({ rootDir, baselinePath, writeSource }) => {
       fs.mkdirSync(path.join(rootDir, 'packages/sample/src/__tests__'));
       writeSource('__tests__/fixture.ts', 1000);
       writeSource('bindings.generated.ts', 1000);
       writeSource('index.d.ts', 1000);
       await main(['--write'], { rootDir });
+      assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')).files, {});
       assert.equal(await main([], { rootDir }), 0);
       writeSource('real.ts', 801);
       assert.equal(await main([], { rootDir }), 1);
