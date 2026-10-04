@@ -574,7 +574,20 @@ describe('signed key bundle rejection preserves cached authority', () => {
             : damage === 'missing-attestation'
               ? { ...replacement.delegation, workspaceEncryptionKeysSignature: undefined }
               : { ...replacement.delegation, workspaceEncryptionKeysSignature: '0xff' };
-      await expect(cache(agent, damaged)).rejects.toThrow();
+      if (damage === 'bad-proof') {
+        // Keep the bundle attestation valid so it cannot mask a missing proof check.
+        damaged.workspaceEncryptionKeysSignature = await wallet.signMessage(
+          computeWorkspaceEncryptionKeysAttestationDigest(damaged),
+        );
+      }
+      const expectedRefusal = {
+        empty: /between 1 and 8 workspace encryption keys/,
+        malformed: /malformed workspace encryption key/,
+        'bad-proof': /invalid workspace encryption key proof/,
+        'missing-attestation': /missing its workspace encryption-key attestation/,
+        'bad-attestation': /invalid workspace encryption-key attestation/,
+      }[damage];
+      await expect(cache(agent, damaged)).rejects.toThrow(expectedRefusal);
       expect(await cachedPublicKeys(store, wallet.address)).toEqual([initial.publicEncryptionKey]);
       await store.close();
     },
