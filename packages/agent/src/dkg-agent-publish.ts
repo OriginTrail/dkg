@@ -325,7 +325,7 @@ import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
-import { resolveFinalizedDraftVersion } from './finalize-draft-version.js';
+import { resolveFinalizedDraftVersion } from './internal/draft/finalize-draft-version.js';
 import { withDraftArtifactReferences, withKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {

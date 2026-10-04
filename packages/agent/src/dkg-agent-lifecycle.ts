@@ -1,5 +1,5 @@
-import { collectAbandonedDraftArtifacts } from './draft-artifact-gc.js';
-import { expireSharedMemoryScope } from './swm-operation-expiry.js';
+import { collectAbandonedDraftArtifacts } from './internal/draft/draft-artifact-gc.js';
+import { expireSharedMemoryScope } from './internal/swm-expiry/swm-operation-expiry.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';

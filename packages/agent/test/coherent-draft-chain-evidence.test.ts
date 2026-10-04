@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { assertCanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter, KnowledgeAssetVersionSnapshot } from '@origintrail-official/dkg-chain';
-import { readConfirmedDraftVersion } from '../src/confirmed-draft-version.js';
+import { readConfirmedDraftVersion } from '../src/internal/draft/confirmed-draft-version.js';
 import { assertRfc64CatalogReplacementOrderV1 } from '../src/rfc64/catalog-replacement-order-v1.js';
 
 const AUTHOR = `0x${'11'.repeat(20)}`;

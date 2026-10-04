@@ -7,7 +7,7 @@ import {
   markDraftOperationRetired, readDraftArtifactReferences, swmKaWriteLockKey,
   withDraftArtifactCollection, withKeyedLocks, workspaceOperationSubject,
 } from '@origintrail-official/dkg-publisher';
-import { stripMetadataLiteral as literal } from './sync/metadata-literal.js';
+import { stripMetadataLiteral as literal } from '../../sync/metadata-literal.js';
 import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 
 const DKG = 'http://dkg.io/ontology/';

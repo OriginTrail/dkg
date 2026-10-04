@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { canonicalQuadKey } from './quad-key.js';
+import { canonicalQuadKey } from '../../sync/requester/quad-key.js';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 

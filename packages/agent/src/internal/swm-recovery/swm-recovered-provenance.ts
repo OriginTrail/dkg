@@ -2,9 +2,9 @@
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import { KnowledgeAssetWorkspaceHeadCorruptError, resolveAcquiredKnowledgeAssetWorkspaceHead, readAuthenticatedWorkspaceOperations, type KnowledgeAssetWorkspaceHeadResolution } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { decodeRecoveryOperationCandidate, isPublisherOperationCandidate, type RecoveryOperationCandidate, type GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
-import { stripMetadataLiteral } from '../metadata-literal.js';
-import { canonicalQuadKey } from './quad-key.js';
+import { decodeRecoveryOperationCandidate, isPublisherOperationCandidate, type RecoveryOperationCandidate, type GraphScopedSwmRecoveryDescriptor } from '../../sync/graph-scoped-swm-recovery.js';
+import { stripMetadataLiteral } from '../../sync/metadata-literal.js';
+import { canonicalQuadKey } from '../../sync/requester/quad-key.js';
 
 const DKG = 'http://dkg.io/ontology/';
 type AuthenticatedCandidate = RecoveryOperationCandidate & {

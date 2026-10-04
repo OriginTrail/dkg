@@ -7,10 +7,10 @@ import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-cha
 import { GraphManager, OxigraphStore, deleteByPatternWithoutCount, type Quad } from '@origintrail-official/dkg-storage';
 import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, swmKaWriteLockKey, withKeyedLocks, workspaceOperationSubject, storageAckLedgerEntryQuads } from '@origintrail-official/dkg-publisher';
 import { storageAckNotRetainedFilters } from '../src/storage-ack-retention.js';
-import { expiredSwmOperationMayRetire } from '../src/swm-expiry-batch.js';
+import { expiredSwmOperationMayRetire } from '../src/internal/swm-expiry/swm-expiry-batch.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
-import { collectAbandonedDraftArtifacts } from '../src/draft-artifact-gc.js';
-import { withUnqueuedDraftOperation, withDraftOperationCollectionBatches } from '../src/swm-operation-expiry.js';
+import { collectAbandonedDraftArtifacts } from '../src/internal/draft/draft-artifact-gc.js';
+import { withUnqueuedDraftOperation, withDraftOperationCollectionBatches } from '../src/internal/swm-expiry/swm-operation-expiry.js';
 const CG = 'draft-gc';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const KA = `did:dkg:31337/${AUTHOR}/7`;

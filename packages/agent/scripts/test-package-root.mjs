@@ -435,37 +435,6 @@ for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.j
   }
 }
 
-// Decomposition must preserve historical entrypoints without publishing new helpers.
-const privateImplementationModules = [
-  'confirmed-draft-version',
-  'draft-artifact-gc',
-  'finalize-draft-version',
-  'swm-expiry-batch',
-  'swm-operation-expiry',
-  'sync/requester/swm-draft-order',
-  'sync/requester/swm-recovered-provenance',
-  'sync/requester/swm-recovery-bulk-metadata',
-  'sync/requester/swm-recovery-commit',
-];
-for (const module of privateImplementationModules) {
-  for (const extension of ['', '.js', '.d.ts', '.js.map', '.d.ts.map']) {
-    const path = `${module}${extension}`;
-    const specifier = `@origintrail-official/dkg-agent/dist/${path}`;
-    try {
-      await import(`@origintrail-official/dkg-agent/dist/${path}`);
-      throw new Error(`private implementation module unexpectedly imported: ${specifier}`);
-    } catch (error) {
-      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-    }
-    try {
-      require.resolve(specifier);
-      throw new Error(`private implementation module unexpectedly resolved: ${specifier}`);
-    } catch (error) {
-      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-    }
-  }
-}
-
 async function listEmittedModules(namespace, extensions = ['.js']) {
   const rootPath = fileURLToPath(new URL(`../dist/${namespace}/`, import.meta.url));
   const pending = [rootPath];

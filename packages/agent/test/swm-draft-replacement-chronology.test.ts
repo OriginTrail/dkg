@@ -3,7 +3,7 @@ import { persistWorkspaceOperationEvidence } from '@origintrail-official/dkg-pub
 import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { readConfirmedDraftVersion } from '../src/confirmed-draft-version.js';
+import { readConfirmedDraftVersion } from '../src/internal/draft/confirmed-draft-version.js';
 import { encodeRootlessWorkspaceRequest } from '../../publisher/test/_helpers/rootless-workspace.js';
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,10 +14,10 @@ import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
-import { commitRecoveredSwmAsset } from '../src/sync/requester/swm-recovery-commit.js';
+import { commitRecoveredSwmAsset } from '../src/internal/swm-recovery/swm-recovery-commit.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { parseGraphScopedSwmRecoveryDescriptors, decodeRecoveryOperationCandidate, isPublisherOperationCandidate } from '../src/sync/graph-scoped-swm-recovery.js';
-import { isAuthenticatedPublisherCandidate } from '../src/sync/requester/swm-recovered-provenance.js';
+import { isAuthenticatedPublisherCandidate } from '../src/internal/swm-recovery/swm-recovered-provenance.js';
 
 const CG = 'draft-chronology';
 const UAL = 'did:dkg:hardhat:31337/0xcccccccccccccccccccccccccccccccccccccccc/3';

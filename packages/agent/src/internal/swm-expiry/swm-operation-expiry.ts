@@ -2,8 +2,8 @@
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, assertSafeIri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { STORAGE_ACK_LEDGER_GRAPH, draftOperationReferenceKey, markDraftOperationRetired, readDraftArtifactReferences, swmKaWriteLockKey, swmEntityWriteLockKey, withDraftArtifactCollection, withKeyedLocks, workspaceOperationSubject, withWorkspaceOperationWriteLock } from '@origintrail-official/dkg-publisher';
-import { stripMetadataLiteral as literal } from './sync/metadata-literal.js';
-import { storageAckNotRetainedFilters } from './storage-ack-retention.js';
+import { stripMetadataLiteral as literal } from '../../sync/metadata-literal.js';
+import { storageAckNotRetainedFilters } from '../../storage-ack-retention.js';
 import { expiredSwmOperationMayRetire, readExpiredSwmOperationBatch } from './swm-expiry-batch.js';
 
 type DraftArtifactReferences = NonNullable<Awaited<ReturnType<typeof readDraftArtifactReferences>>>;

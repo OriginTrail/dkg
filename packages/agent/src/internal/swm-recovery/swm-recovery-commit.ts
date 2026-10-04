@@ -2,9 +2,9 @@
 import { healthyRecoveredAliasRows } from './swm-draft-order.js';
 import type { DurableRootAtomicCompanionResolver } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
-import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
-import { canonicalQuadKey } from './quad-key.js';
+import type { GraphScopedSwmRecoveryDescriptor } from '../../sync/graph-scoped-swm-recovery.js';
+import type { SharedMemorySnapshotMaterializer } from '../../sync/requester/swm-snapshot-materializer.js';
+import { canonicalQuadKey } from '../../sync/requester/quad-key.js';
 
 export interface SwmRecoveryCommitResult {
   readonly kind: 'committed' | 'superseded' | 'deferred';

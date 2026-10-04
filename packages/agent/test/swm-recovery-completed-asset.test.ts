@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { commitRecoveredSwmAsset } from '../src/sync/requester/swm-recovery-commit.js';
+import { commitRecoveredSwmAsset } from '../src/internal/swm-recovery/swm-recovery-commit.js';
 import type { SharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';

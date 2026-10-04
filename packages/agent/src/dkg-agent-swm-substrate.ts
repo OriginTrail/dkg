@@ -391,7 +391,7 @@ import {
   deserializeSwmSenderReceiveState,
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
-import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
+import { readConfirmedDraftVersion } from './internal/draft/confirmed-draft-version.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { commitRecoveredSwmAsset } from '../src/sync/requester/swm-recovery-commit.js';
+import { commitRecoveredSwmAsset } from '../src/internal/swm-recovery/swm-recovery-commit.js';
 
 declare const admitted: Parameters<typeof commitRecoveredSwmAsset>[0];
 void commitRecoveredSwmAsset({ ...admitted, mutationAttribution: {

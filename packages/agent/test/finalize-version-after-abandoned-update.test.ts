@@ -31,7 +31,7 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { stubAgent } from './_helpers/foreign-author-resolution-fixtures.js';
-import { collectAbandonedDraftArtifacts } from '../src/draft-artifact-gc.js';
+import { collectAbandonedDraftArtifacts } from '../src/internal/draft/draft-artifact-gc.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 const CG = 'finalize-version-gap';

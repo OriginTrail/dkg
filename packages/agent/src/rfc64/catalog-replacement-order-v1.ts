@@ -2,7 +2,7 @@
 import { canonicalizeCanonicalGraphScopedAuthorSealV1, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
-import { readCoherentKnowledgeAssetVersionEvidence } from '../confirmed-draft-version.js';
+import { readCoherentKnowledgeAssetVersionEvidence } from '../internal/draft/confirmed-draft-version.js';
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './abort-v1.js';
 
 /** Order replacements by author-issued canonical seal evidence, not draft numbers alone. */

@@ -61,7 +61,7 @@ import {
   type SharedMemoryMetadataFetcher,
   type SharedMemorySnapshotWalkContinuation,
 } from '../src/sync/requester/shared-memory-sync.js';
-import type { PreparedSwmRecoveryDescriptor } from '../src/sync/requester/swm-recovered-provenance.js';
+import type { PreparedSwmRecoveryDescriptor } from '../src/internal/swm-recovery/swm-recovered-provenance.js';
 import type { SharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import type { RecoveryExecutionGuard } from
   '../src/sync/requester/recovery-execution-guard.js';

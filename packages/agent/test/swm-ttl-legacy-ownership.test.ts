@@ -4,7 +4,7 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { generateShareMetadata, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, swmEntityWriteLockKey, withKeyedLocks, workspaceOperationSubject, withWorkspaceOperationWriteLock } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
-import { withUnqueuedDraftOperation } from '../src/swm-operation-expiry.js';
+import { withUnqueuedDraftOperation } from '../src/internal/swm-expiry/swm-operation-expiry.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 
 const DKG = 'http://dkg.io/ontology/';

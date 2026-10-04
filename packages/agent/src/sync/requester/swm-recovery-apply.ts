@@ -1,4 +1,4 @@
-import { commitRecoveredSwmAsset } from './swm-recovery-commit.js';
+import { commitRecoveredSwmAsset } from '../../internal/swm-recovery/swm-recovery-commit.js';
 import {
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,

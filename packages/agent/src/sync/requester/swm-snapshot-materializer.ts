@@ -1,4 +1,4 @@
-import { filterRecoveredBulkMetadata } from './swm-recovery-bulk-metadata.js';
+import { filterRecoveredBulkMetadata } from '../../internal/swm-recovery/swm-recovery-bulk-metadata.js';
 /**
  * The store adapter behind public SWM catch-up snapshot materialization.
  *
@@ -31,8 +31,8 @@ import {
   writeSwmMaterializationWitness,
   tryReplaceGraphAtomically,
 } from '@origintrail-official/dkg-storage';
-import { recoveredDraftMayReplace, retainedPublisherAlias, healthyRecoveredAliasRows } from './swm-draft-order.js';
-import { prepareRecoveredDescriptor, type PreparedSwmRecoveryDescriptor } from './swm-recovered-provenance.js';
+import { recoveredDraftMayReplace, retainedPublisherAlias, healthyRecoveredAliasRows } from '../../internal/swm-recovery/swm-draft-order.js';
+import { prepareRecoveredDescriptor, type PreparedSwmRecoveryDescriptor } from '../../internal/swm-recovery/swm-recovered-provenance.js';
 import type { ConfirmedKnowledgeAssetVersionReader } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import type { RecoveryOperationCandidate } from '../graph-scoped-swm-recovery.js';

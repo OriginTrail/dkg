@@ -18,7 +18,7 @@ import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
-import { commitRecoveredSwmAsset } from '../src/sync/requester/swm-recovery-commit.js';
+import { commitRecoveredSwmAsset } from '../src/internal/swm-recovery/swm-recovery-commit.js';
 
 const CG = 'ws00-recovery';
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);

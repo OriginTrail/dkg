@@ -10,38 +10,14 @@ declare const context: SharedMemorySyncContext;
 void store;
 void context;
 
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper0 from '@origintrail-official/dkg-agent/dist/confirmed-draft-version.js';
-void (null as unknown as typeof PrivateHelper0);
+// @ts-expect-error The complete internal namespace is private, including draft validation.
+import type * as DraftHelper from '@origintrail-official/dkg-agent/dist/internal/draft/confirmed-draft-version.js';
+void (null as unknown as typeof DraftHelper);
 
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper1 from '@origintrail-official/dkg-agent/dist/draft-artifact-gc.js';
-void (null as unknown as typeof PrivateHelper1);
+// @ts-expect-error The complete internal namespace is private, including expiry ownership.
+import type * as ExpiryHelper from '@origintrail-official/dkg-agent/dist/internal/swm-expiry/swm-operation-expiry.js';
+void (null as unknown as typeof ExpiryHelper);
 
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper2 from '@origintrail-official/dkg-agent/dist/finalize-draft-version.js';
-void (null as unknown as typeof PrivateHelper2);
-
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper3 from '@origintrail-official/dkg-agent/dist/swm-expiry-batch.js';
-void (null as unknown as typeof PrivateHelper3);
-
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper4 from '@origintrail-official/dkg-agent/dist/swm-operation-expiry.js';
-void (null as unknown as typeof PrivateHelper4);
-
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper5 from '@origintrail-official/dkg-agent/dist/sync/requester/swm-draft-order.js';
-void (null as unknown as typeof PrivateHelper5);
-
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper6 from '@origintrail-official/dkg-agent/dist/sync/requester/swm-recovered-provenance.js';
-void (null as unknown as typeof PrivateHelper6);
-
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper7 from '@origintrail-official/dkg-agent/dist/sync/requester/swm-recovery-bulk-metadata.js';
-void (null as unknown as typeof PrivateHelper7);
-
-// @ts-expect-error internal draft, expiry and recovered-operation helpers remain private
-import type * as PrivateHelper8 from '@origintrail-official/dkg-agent/dist/sync/requester/swm-recovery-commit.js';
-void (null as unknown as typeof PrivateHelper8);
+// @ts-expect-error The complete internal namespace is private, including recovery commits.
+import type * as RecoveryHelper from '@origintrail-official/dkg-agent/dist/internal/swm-recovery/swm-recovery-commit.js';
+void (null as unknown as typeof RecoveryHelper);

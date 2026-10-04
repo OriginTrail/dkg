@@ -1,4 +1,4 @@
-import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
+import { readConfirmedDraftVersion } from './internal/draft/confirmed-draft-version.js';
 
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
