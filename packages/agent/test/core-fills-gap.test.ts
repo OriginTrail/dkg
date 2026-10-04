@@ -36,23 +36,6 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
-/**
- * Count the store-side chain reconciles a visit reaches. A visit answered by
- * the negative cache returns before the finalization handler is asked.
- */
-function countChainReconciles(internals: object): { count: number } {
-  const handler = (internals as {
-    getOrCreateFinalizationHandler(): { handleChainReconciledKC(...args: unknown[]): Promise<unknown> };
-  }).getOrCreateFinalizationHandler();
-  const reconcile = handler.handleChainReconciledKC.bind(handler);
-  const reconciles = { count: 0 };
-  handler.handleChainReconciledKC = async (...args: unknown[]) => {
-    reconciles.count += 1;
-    return reconcile(...args);
-  };
-  return reconciles;
-}
-
 /** Model admitted exact (argument four) or legacy (argument seven) work explicitly.
  * Uncalled readiness/cancellation sentinels remain outside this boundary. */
 function admittedRecoveryWork<Args extends unknown[], Result extends object>(
@@ -71,14 +54,13 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   DKG_ONTOLOGY,
-  PROTOCOL_STORAGE_ACK,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
   createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import { type TripleStore } from '@origintrail-official/dkg-storage';
 import type {
   ReplicationEvent,
   ContextGraphSubscriptionRecord,
@@ -99,7 +81,6 @@ import {
   stageKnowledgeAssetInSharedMemory,
 } from './_helpers/staged-knowledge-asset.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
-import { createVmReconcilePeerTopology } from '../src/vm-reconcile-peer-topology.js';
 import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js';
 
 interface AgentInternals {
@@ -218,76 +199,6 @@ function vmRecoveryTarget(
   };
 }
 
-function noProtocolCatchupStats() {
-  return {
-    ...emptyCatchupStats(),
-    syncCapablePeers: 0,
-    peersTried: 0,
-    peersSucceeded: 0,
-  };
-}
-
-async function insertWorkspaceOperationMeta(
-  store: TripleStore,
-  metaGraph: string,
-  opId: string,
-  rootEntity: string,
-  publishedAt: string,
-): Promise<void> {
-  const subject = `urn:dkg:share:${opId}`;
-  await store.insert([
-    { graph: metaGraph, subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
-    { graph: metaGraph, subject, predicate: 'http://dkg.io/ontology/rootEntity', object: rootEntity },
-    { graph: metaGraph, subject, predicate: 'http://dkg.io/ontology/publishedAt', object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
-  ]);
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return `0x${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
-async function insertWorkspaceDataTriple(
-  store: TripleStore,
-  localCgId: string,
-  entity: string,
-  value: string,
-): Promise<void> {
-  await store.insert([{
-    subject: entity,
-    predicate: 'http://schema.org/name',
-    object: `"${value}"`,
-    graph: contextGraphWorkspaceGraphUri(localCgId),
-  }]);
-}
-
-async function replaceWorkspaceDataTriple(
-  store: TripleStore,
-  localCgId: string,
-  entity: string,
-  value: string,
-): Promise<void> {
-  await store.deleteByPattern({
-    subject: entity,
-    predicate: 'http://schema.org/name',
-    graph: contextGraphWorkspaceGraphUri(localCgId),
-  });
-  await insertWorkspaceDataTriple(store, localCgId, entity, value);
-}
-
-async function insertPrivateMerkleRoot(
-  store: TripleStore,
-  localCgId: string,
-  entity: string,
-  privateRoot: Uint8Array,
-): Promise<void> {
-  await store.insert([{
-    subject: entity,
-    predicate: 'http://dkg.io/ontology/privateMerkleRoot',
-    object: `"${bytesToHex(privateRoot)}"`,
-    graph: contextGraphWorkspaceMetaGraphUri(localCgId),
-  }]);
-}
-
 /** Seed a local SWM snapshot for one KA under a CG and return its flat-KC root. */
 async function seedSwmSnapshot(store: TripleStore, localCgId: string, entity: string, value: string): Promise<Uint8Array> {
   const wsGraph = contextGraphWorkspaceGraphUri(localCgId);
@@ -295,25 +206,6 @@ async function seedSwmSnapshot(store: TripleStore, localCgId: string, entity: st
   await store.insert([
     { subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: wsGraph },
     { subject: `urn:dkg:share:${entity}`, predicate: 'http://dkg.io/ontology/rootEntity', object: entity, graph: wsMetaGraph },
-  ]);
-  return computeFlatKCRootV10(
-    [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-    [],
-  );
-}
-
-async function seedSwmSnapshotInSubGraph(
-  store: TripleStore,
-  localCgId: string,
-  subGraphName: string,
-  entity: string,
-  value: string,
-): Promise<Uint8Array> {
-  const graphManager = new GraphManager(store);
-  await store.insert([
-    { subject: `urn:test:subgraph-marker:${subGraphName}`, predicate: 'http://schema.org/name', object: '"marker"', graph: graphManager.subGraphUri(localCgId, subGraphName) },
-    { subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: graphManager.sharedMemoryUri(localCgId, subGraphName) },
-    { subject: `urn:dkg:share:${subGraphName}`, predicate: 'http://dkg.io/ontology/rootEntity', object: entity, graph: graphManager.sharedMemoryMetaUri(localCgId, subGraphName) },
   ]);
   return computeFlatKCRootV10(
     [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
