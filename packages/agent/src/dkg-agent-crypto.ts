@@ -2924,6 +2924,34 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
+   * A delivered Sender Key setup can receive a retryable authority denial.
+   * That leaves a durable pending row but does not create a Messenger outbox
+   * retry, and an already-connected recipient may never produce another
+   * connection:open event. Retry only peer-bound rows on the ordinary outbox
+   * cadence. The drain below re-resolves current graph authority and the exact
+   * recipient key/peer route before sending any package.
+   */
+  public async drainPendingSenderKeysForConnectedPeers(this: DKGAgent): Promise<number> {
+    await this.loadSwmSenderKeyState();
+    if (this.pendingSenderKeyByAgent.size === 0 || !this.node.isStarted) return 0;
+
+    const pendingPeers = new Set(
+      [...this.pendingSenderKeyByAgent.values()]
+        .flatMap((queue) => queue.flatMap((entry) =>
+          entry.recipientPeerId === undefined ? [] : [entry.recipientPeerId])),
+    );
+    if (pendingPeers.size === 0) return 0;
+
+    let drained = 0;
+    for (const peer of this.node.libp2p.getPeers()) {
+      const peerId = peer.toString();
+      if (!pendingPeers.has(peerId)) continue;
+      drained += await this.drainPendingSenderKeyForPeer(peerId);
+    }
+    return drained;
+  }
+
+  /**
    * Retry queued sender-key setup for recipients that are reachable in the
    * current workspace recipient snapshot. This covers already-established
    * connections where no fresh connection:open event will fire after the
