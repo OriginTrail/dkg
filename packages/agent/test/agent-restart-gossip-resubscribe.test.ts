@@ -30,6 +30,9 @@ type SubscriptionRow = Record<string, unknown> & { id: string };
 
 interface RestartInternals {
   gossip: GossipSubManager;
+  gossipSession: { gossipRegistered: Set<string>; sharedMemoryGossipRegistered: Set<string>; active: boolean };
+  reconcileSharedMemoryGossipSubscription(contextGraphId: string): Promise<void>;
+  canUseSharedMemoryForContextGraph(contextGraphId: string): Promise<boolean>;
   gossipRegistered: Set<string>;
   sharedMemoryGossipRegistered: Set<string>;
   swmHostModeSubscribed: Map<string, unknown>;
@@ -215,20 +218,41 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     await createLocalContextGraph(agent);
     await expect.poll(() => internals.sharedMemoryGossipRegistered.has(CG)).toBe(true);
     const firstManager = internals.gossip;
+    const retiredSession = internals.gossipSession;
 
     await agent.stop();
+    expect(retiredSession.active).toBe(false);
     // What a detached subscribe of the retired session leaves behind when it
     // settles after stop() has cleared the registries.
-    internals.gossipRegistered.add(CG);
-    internals.sharedMemoryGossipRegistered.add(CG);
+    retiredSession.gossipRegistered.add(CG);
+    retiredSession.sharedMemoryGossipRegistered.add(CG);
     await agent.start();
 
-    // The reset at the manager swap dropped the stale entries, so the
-    // subscribe helpers did not short-circuit on them.
+    // The retired owner cannot change the replacement session, so the
+    // subscribe helpers do not short-circuit on its stale entries.
     expect(internals.gossip).not.toBe(firstManager);
     const swmTopic = contextGraphSharedMemoryTopic(internals.gossipWireIdFor(CG));
     await expect.poll(() => internals.gossip.subscribedTopics).toContain(swmTopic);
     for (const topic of memberTopics(CG)) expect(internals.gossip.subscribedTopics).toContain(topic);
+  }, 60_000);
+
+  it('ignores a retired member subscription that settles after the replacement starts', async () => {
+    const boot = await createEdgeAgent('RestartGossipInflight');
+    agent = boot.agent;
+    const { internals } = boot;
+    await agent.start();
+    let resolveAuthority!: (allowed: boolean) => void;
+    const authority = new Promise<boolean>((resolve) => { resolveAuthority = resolve; });
+    const canUse = vi.spyOn(internals, 'canUseSharedMemoryForContextGraph');
+    canUse.mockImplementationOnce(() => authority);
+    const staleSubscription = internals.reconcileSharedMemoryGossipSubscription(OTHER_CG);
+    await agent.stop();
+    await agent.start();
+    const manager = internals.gossip;
+    resolveAuthority(true);
+    await staleSubscription;
+    expect(internals.sharedMemoryGossipRegistered.has(OTHER_CG)).toBe(false);
+    expect(manager.subscribedTopics).not.toContain(contextGraphSharedMemoryTopic(internals.gossipWireIdFor(OTHER_CG)));
   }, 60_000);
 
   it('lets a host-mode handler be wired again on the fresh manager', async () => {
