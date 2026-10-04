@@ -114,6 +114,115 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
   });
 
+  it.each([
+    { share: 'a newer version', inFlightVersion: '2' },
+    { share: 'the same version', inFlightVersion: '1' },
+  ])('holds finalized VM twin retirement behind an in-flight share of $share', async ({ inFlightVersion }) => {
+    const root = await secureTempRoot(roots);
+    const store = new OxigraphStore();
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL_ONE, inFlightVersion),
+    );
+    const swmQuad = {
+      graph: swmGraph, subject: 'urn:test:vm-twin',
+      predicate: 'urn:test:content', object: '"shared-again"',
+    };
+    const headQuad = {
+      graph: contextGraphSharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+      subject: `${UAL_ONE}#dkg-swm-head`,
+      predicate: 'urn:test:version', object: JSON.stringify(inFlightVersion),
+    };
+    const markerSubjects = async () => {
+      const result = await store.query(
+        `SELECT ?s WHERE { GRAPH <${finalized.graphUri}> { ?s ?p ?o } }`,
+      );
+      return (result.type === 'bindings' ? result.bindings.map((row) => row['s']) : []).sort();
+    };
+
+    // Version 1 was shared and finalized; its SWM graph and head are already cleaned up.
+    const finalized = prepareRfc64LateLegacySwmBoundaryV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, 'finalized-share', '1',
+    );
+    await store.insert([...finalized.quads]);
+    finalized.settle(true);
+    // The same asset is being shared again: marker prepared, nothing committed yet.
+    const inFlight = prepareRfc64LateLegacySwmBoundaryV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, 'in-flight-share', inFlightVersion,
+    );
+    const query = store.query.bind(store);
+    const absenceChecks = vi.fn();
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (options?.source?.startsWith('agent.rfc64.legacySwmBoundary.finalizedVm')) {
+        absenceChecks();
+      }
+      return query(sparql, options);
+    });
+
+    let outcome: boolean | undefined;
+    const retirement = retireRfc64LegacySwmAfterFinalizedVmV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
+    ).then((retired) => {
+      outcome = retired;
+      return retired;
+    });
+    for (let turn = 0; turn < 20; turn += 1) {
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+    }
+    // The graph and head are absent at this moment. Rechecking them before the
+    // share settles would retire evidence for a root that is about to commit.
+    expect(absenceChecks).not.toHaveBeenCalled();
+    expect(outcome).toBeUndefined();
+    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+      owner, CONTEXT_GRAPH_ID, UAL_TWO, 'same-cg-during-finalized-vm-retirement', '1',
+    )).toThrow('retirement is in progress');
+    const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
+      owner, SECOND_CONTEXT_GRAPH_ID, UAL_TWO, 'other-cg-during-finalized-vm-retirement', '1',
+    );
+    unrelatedPreparation.settle(false);
+
+    await store.replaceGraphAndSubject!(
+      swmGraph,
+      [swmQuad],
+      inFlight.graphUri,
+      inFlight.subject,
+      [...inFlight.quads],
+    );
+    await store.insert([headQuad]);
+    inFlight.settle(true);
+
+    // The committed share is visible to the recheck, so no marker is retired.
+    await expect(retirement).resolves.toBe(false);
+    expect(absenceChecks).toHaveBeenCalled();
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(1);
+    expect(await markerSubjects()).toEqual([finalized.subject, inFlight.subject].sort());
+    const afterRetirement = prepareRfc64LateLegacySwmBoundaryV1(
+      owner, CONTEXT_GRAPH_ID, UAL_TWO, 'same-cg-after-finalized-vm-retirement', '1',
+    );
+    afterRetirement.settle(false);
+
+    const restartedOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(restartedOwner, root, store);
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(1);
+
+    // Once the newer share is finalized and cleaned up too, both markers retire:
+    // not while its graph is still stored, even with the head already removed.
+    await store.delete([headQuad]);
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1(
+      restartedOwner, CONTEXT_GRAPH_ID, UAL_ONE, inFlightVersion,
+    )).resolves.toBe(false);
+    await store.delete([swmQuad]);
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1(
+      restartedOwner, CONTEXT_GRAPH_ID, UAL_ONE, inFlightVersion,
+    )).resolves.toBe(true);
+    expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
+    expect(await markerSubjects()).toEqual([]);
+  });
+
   it('captures once, remains private by count, and retires only after explicit republish', async () => {
     const root = await secureTempRoot(roots);
     const store = new OxigraphStore();
