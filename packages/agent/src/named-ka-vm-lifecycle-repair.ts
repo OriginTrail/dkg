@@ -26,7 +26,6 @@ export class NamedKaVmLifecycleRepair {
   private entries = new Map<string, RepairEntry>();
   private loaded = false;
   private journalTail: Promise<unknown> = Promise.resolve();
-  private executionLocks = new Map<string, Promise<void>>();
   private inFlight = new Set<Promise<unknown>>();
   private worker?: CoalescingRecurringTask;
   private stopping?: Promise<void>;
@@ -104,7 +103,12 @@ export class NamedKaVmLifecycleRepair {
   }
 
   private execute(key: string, entry: RepairEntry): Promise<NamedKaVmLifecycleRepairOutcome> {
-    const execution = withKeyedLocks(this.executionLocks, [key], async () => {
+    const input = entry.input;
+    const execution = withKeyedLocks(this.options.writeLocks, [
+      assertionLifecycleWriteLockKey(input.contextGraphId, input.name, input.agentAddress, input.subGraphName),
+    ], async () => {
+      // The shared lifecycle owner covers readiness, graph commitment and durable
+      // journal retirement. Admissions never wait on this lock inside journal serialization.
       const ready = await this.serial(async () => {
         if (this.entries.get(key) !== entry) return 'superseded' as const;
         if (entry.rejected) return 'rejected' as const;
@@ -122,16 +126,14 @@ export class NamedKaVmLifecycleRepair {
     let outcome: NamedKaVmLifecycleRepairOutcome;
     let failure: unknown;
     try {
-      outcome = await withKeyedLocks(this.options.writeLocks, [
-        assertionLifecycleWriteLockKey(input.contextGraphId, input.name, input.agentAddress, input.subGraphName),
-      ], async () => {
-        // Both fences run after any prior lifecycle writer has physically retired.
-        if (!await this.serial(async () => this.entries.get(key) === entry)) return 'superseded';
-        if (!await this.options.isCurrent(input)) return 'superseded';
-        if (!await this.serial(async () => this.entries.get(key) === entry)) return 'superseded';
+      // Readiness already ran after the prior lifecycle writer physically retired.
+      // Admission can still supersede this entry during the external currency read.
+      if (!await this.options.isCurrent(input)
+        || !await this.serial(async () => this.entries.get(key) === entry)) outcome = 'superseded';
+      else {
         await this.options.apply(input);
-        return 'repaired';
-      });
+        outcome = 'repaired';
+      }
     } catch (error) {
       failure = error;
       outcome = isNamedKaVmLifecycleIntegrityError(error) ? 'rejected' : 'pending';
