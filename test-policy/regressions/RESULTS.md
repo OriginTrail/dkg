@@ -44,6 +44,10 @@ pnpm lint
 
 Fresh inventory resolves both files to `tornado-agent`, required cadence. Named Vitest discovery and `planAgentShards` assign GH-2741 to `agent-6.xml` and GH-2782 to `agent-10.xml`, exactly once each. The primary/normal unit configs both discover the files.
 
+The actual required GitHub CI jobs passed: [GH-2741, shard 6/10](https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111517782120) and [GH-2782, shard 10/10](https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111517782149). Downloading and parsing each uploaded JUnit report found exactly one matching assertion, passed with no failure/error/skipped element. Both actual runtimes were Node `v22.23.3`. The [compact CI evidence](evidence/required-ci-assertions.json) records artifact links, raw XML hashes, exact testcase identities and matching test-source hashes.
+
+These jobs evaluated PR head `155b9cba50f4cb651114e593a0c06b24289a77ff` in merge commit `810f8e00da64f4980c139ac3c46fb72bc5257fd5`. The [required build job](https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111516808494) also validated both proven records and passed all 449 tooling tests then present. Subsequent changes tighten validation of waived disabled tests, add one tool rejection check and retain this CI evidence; the behavioral tests and all historical proof inputs are unchanged.
+
 The [local shared-runner JUnit](evidence/required-agent-unit.xml) and [metadata](evidence/required-agent-unit.json) show both assertions executed and passed, with zero skipped. This command is a **filtered local run through the required profile**, not a full GitHub shard receipt:
 
 ```sh
@@ -53,8 +57,8 @@ node scripts/ci/run-vitest-junit.mjs --lane agent -- --config vitest.unit.config
 | Check | Observed result |
 | --- | --- |
 | Six affected agent files under normal unit config | 240 passed, 0 failed, 0 skipped |
-| Proof-tool negatives, including actual Vitest fixture reports | 14 passed, 0 failed, 0 skipped |
-| Existing repository-script lane after the explicit-input fix | 449 passed, 0 failed, 0 skipped |
+| Proof-tool negatives, including actual Vitest fixture reports | 15 passed, 0 failed, 0 skipped |
+| Existing repository-script lane after the waiver rejection check | 450 passed, 0 failed, 0 skipped |
 | Lint | exit 0; zero disabled-test additions; no baseline changes |
 | Fresh inventory and registry | 2,249 files, 23 Vitest packages; two proven records |
 | Agent and CLI/dependency builds | passed |
@@ -73,7 +77,7 @@ pnpm -r --filter '@origintrail-official/dkg...' --filter '!@origintrail-official
 
 ## Rejection evidence and limitations
 
-The [focused TAP evidence](evidence/proof-tool-negatives.tap) covers zero selection, a skipped assertion, the wrong failing assertion, import failure, an unrelated failure in the named test, stale test/proof/receipt identity, missing/ambiguous discovery, duplicate case ID, absent owner/file, optional-only routing and disabled/excluded assertions. It runs actual Vitest for execution negatives and actually changes copied fixture bytes for stale-evidence rejection. Owned process deadlines and cancellation are also exercised.
+The [focused TAP evidence](evidence/proof-tool-negatives.tap) covers zero selection, a skipped assertion, the wrong failing assertion, import failure, an unrelated failure in the named test, stale test/proof/receipt identity, missing/ambiguous discovery, duplicate case ID, absent owner/file, optional-only routing and disabled/excluded assertions. A registered skipped assertion is rejected even with a valid general disabled-test waiver and an explicitly unproven record. It runs actual Vitest for execution negatives and actually changes copied fixture bytes for stale-evidence rejection. Owned process deadlines and cancellation are also exercised.
 
 The original GH-2782 detector failed before reaching its expected-result assertions. The extracted detector observes the production exception and stalled state, then executes a named invariant assertion; success checks remain intact. GH-2741 already detected its original defect; extraction keeps the real store and strengthens setup and the independent fixed-byte expectation.
 
@@ -81,4 +85,4 @@ An initial proof-tool discovery attempt was inconclusive because macOS returned 
 
 GH-2741 is classified as defective from repair’s first shipment (v10.0.15); that introducing commit is absent from v10.0.14 and the repair method is absent there. GH-2782’s first affected release remains unknown.
 
-Transport/chain facts remain the documented fixture boundaries. These proofs certify cursor/persistence and repair/real-store orchestration, not a distributed release campaign. Required PR CI receipts will be linked when available. The inventory hook uses the existing required build job; it needs no controller pin rotation. PR #3031’s staged Node 26 activation is independent.
+Transport/chain facts remain the documented fixture boundaries. These proofs certify cursor/persistence and repair/real-store orchestration, not a distributed release campaign. The inventory hook uses the existing required build job; it needs no controller pin rotation. PR #3031's staged Node 26 activation is independent.

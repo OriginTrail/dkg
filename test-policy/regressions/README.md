@@ -86,7 +86,9 @@ The current weighted planner assigns each to exactly one required unit shard.
 The register validator resolves files through **fresh test inventory**, checks
 actual named Vitest discovery and disabled/focused-test analysis, and confirms
 the planner's assignment. It rechecks the stored raw red/green reports and their
-artifact/test/profile hashes. A test or proof-tool edit requires fresh proof.
+artifact/test/profile hashes. A test or proof-execution-tool edit requires fresh
+proof. Registered assertions cannot use general disabled-test waivers, including
+records explicitly marked unproven.
 It does not replay historical versions during ordinary PR CI.
 
 The only build-gate integration is the call from `scripts/ci/test-inventory.mjs`,
@@ -107,7 +109,7 @@ fixtures for intended red and corrected green, zero selection, skipped
 assertion, wrong failing assertion, import failure and an unrelated failure in
 the named test. It also rejects stale test/proof/receipt identities, missing or
 ambiguous discovery, duplicate case IDs, absent owner/file, optional-only
-routes and excluded/disabled assertions. Owned subprocess timeout/cancellation
+routes and excluded/disabled assertions (also with a general waiver). Owned subprocess timeout/cancellation
 are exercised and cleaned up. These are tool fixtures, not additional incident
 proofs.
 

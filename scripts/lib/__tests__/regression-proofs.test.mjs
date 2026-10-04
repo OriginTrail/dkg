@@ -8,6 +8,7 @@ import { profileFor } from '../regressions/profiles.mjs';
 import { inspectExecution, verifyDiscovery } from '../regressions/results.mjs';
 import { proofIdentity, sha256, verifyIdentity } from '../regressions/identity.mjs';
 import { validateRecord, validateRegressions, validateEvidence } from '../regressions/registry.mjs';
+import { analyzeTestSource } from '../disabled-test-scanner.mjs';
 import { runCommand } from '../regressions/proof.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -123,4 +124,25 @@ test('bounded subprocess runner stops only its own timed-out or cancelled child'
     const cancelled = await runCommand(process.execPath, args, root, path.join(directory, 'cancelled.log'), 5000, controller.signal);
     clearTimeout(timer); assert.equal(cancelled.timedOut, false); assert.notEqual(cancelled.code, 0);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('registry rejects skipped assertions even with a general disabled-test waiver', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'regression-waiver-'));
+  const pragma = ['test', 'disable', 'allow'].join('-') + ':';
+  const source = `import { describe, it } from 'vitest';
+describe(${JSON.stringify(profile.suite)}, () => {
+// ${pragma} D1 #2782 -- owner=agent lane=tornado-agent expires=${new Date(Date.now() + 86400000).toISOString().slice(0, 10)} reviewed debt
+it.skip(${JSON.stringify(profile.title)}, () => {});
+});
+`;
+  try {
+    const file = path.join(temp, profile.file); fs.mkdirSync(path.dirname(file), { recursive: true });
+    const unproven = { ...record, proof: { status: 'unproven', method: 'historical-replay', receipt: null } };
+    for (const text of [source, source.replace(pragma, pragma.toUpperCase())]) {
+      fs.writeFileSync(file, text);
+      assert.equal(analyzeTestSource(text, profile.file).disabled.length, 0, 'the general waiver would hide this disabled test');
+      assert.throws(() => validateRegressions(temp, inventory, { records: [{ file: 'GH-2782.json', record: unproven }],
+        discover: () => discovered, shards }), /disabled or focused/);
+    }
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
