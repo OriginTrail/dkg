@@ -425,12 +425,10 @@ describe('public SWM snapshot materialization', () => {
     const summary = await h.run();
     expect(summary.failedPhases).toBe(0);
     expect(h.events).toContain('finalized-twin-reconciled');
-    const retiredSubjects = new Set([
-      `${UAL}#dkg-swm-head`,
-      `urn:dkg:share:${CG}:snapshot-materialization-op`,
-    ]);
-    expect(h.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))
-      .toHaveLength(0);
+    // The descriptor metadata now finishes under the lock, before retirement.
+    // Every later append must omit it; replay after this point would resurrect it.
+    expect(h.events.lastIndexOf('meta-inserted'))
+      .toBeLessThan(h.events.indexOf('finalized-twin-reconciled'));
   });
 
   it('does not bulk-recreate metadata after freshly materializing and retiring a twin', async () => {

@@ -907,16 +907,39 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
   });
 
-  it('a verified graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {
+  it.each(['materialized', 'absent'] as const)(
+    'does not recreate a preserved head retired after the KA lock (%s content)', async (content) => {
+      const store = new OxigraphStore();
+      stores.push(store);
+      if (content === 'materialized') await seedMaterializedLocal(store);
+      else await store.insert([...v1.meta]);
+      let retired = false;
+      await makeSwmSyncHarness({
+        ctx, contextGraphId: CG, store, served: remoteEquivalent,
+        afterKaWriteLock: async () => {
+          retired = true;
+          // Model VM promotion after the sync write completes under the lock.
+          await store.deleteByPattern({ graph: WS_META, subject: v1.headSubject });
+          await store.deleteByPattern({ graph: WS_META, subject: v1.operationSubject });
+        },
+      }).run();
+      expect(retired).toBe(true);
+      const head = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${WS_META}> { <${v1.headSubject}> ?p ?o } }`,
+      );
+      expect(head).toMatchObject({ type: 'bindings', bindings: [] });
+    },
+  );
+
+  it('a verified graph-backed KA receives its head inside the KA lock', async () => {
     // Graph-backed descriptors (publicSnapshotGraph, no publicSnapshotRef)
     // receive their bytes from the aggregate data phase under the canonical
     // per-KA assertion graph. V2 metadata deliberately carries no rootEntity,
     // so the legacy entity verifier excludes those bytes from its aggregate
     // output; the raw transport must still reach the descriptor-bound digest
     // verifier and must not fall through to the aggregate insert. Once the KA
-    // is materialized under its lock, the round's bulk insert remains its head
-    // writer. A blanket head-row filter instead of decision-driven suppression
-    // would leave it permanently headless (the #2050 G7 invisibility class).
+    // is materialized, its metadata is written under the same KA lock. The
+    // later bulk append omits those rows so it cannot resurrect a retired head.
     const store = new OxigraphStore();
     stores.push(store);
     const publicSnapshotGraph =
