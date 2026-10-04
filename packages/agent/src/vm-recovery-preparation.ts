@@ -336,7 +336,7 @@ export class VmRecoveryPreparation {
       if (entry.state.kind !== 'taken') this.#counters.discardedUnused += 1;
       this.#retainedBytes = Math.max(0, this.#retainedBytes - entry.bytes);
       entry.bytes = 0;
-      if (entry.state.kind === 'ready' || entry.state.kind === 'queued') this.#transition(entry, { kind: 'unusable' });
+      if (entry.state.kind === 'ready' || entry.state.kind === 'queued') entry.state = { kind: 'unusable' };
     }
     if (abortInflight && !batch.controller.signal.aborted) {
       batch.controller.abort(new Error('VM recovery preparation discarded'));
@@ -372,23 +372,23 @@ export class VmRecoveryPreparation {
       // A result for a batch that was released, closed or aborted is never applied.
       if (batch.released || batch.controller.signal.aborted || !this.#scopeIsCurrent(batch.scope)) {
         this.#counters.lateDropped += 1;
-        if (entry.state.kind === 'reading') this.#transition(entry, { kind: 'unusable' });
+        if (entry.state.kind === 'reading') entry.state = { kind: 'unusable' };
         return;
       }
       if (footprint) {
         const bytes = entryBytes(entry.kaId, footprint);
         if (this.#retainedBytes - entry.bytes + bytes > this.#limits.maxRetainedBytes) {
-          this.#transition(entry, { kind: 'unusable' });
+          entry.state = { kind: 'unusable' };
           this.#counters.readsUnusable += 1;
           return;
         }
         this.#retainedBytes += bytes - entry.bytes;
         entry.bytes = bytes;
-        this.#transition(entry, { kind: 'ready', footprint });
+        entry.state = { kind: 'ready', footprint };
         this.#counters.readsReady += 1;
         this.#counters.maxRetainedBytes = Math.max(this.#counters.maxRetainedBytes, this.#retainedBytes);
       } else {
-        this.#transition(entry, { kind: 'unusable' });
+        entry.state = { kind: 'unusable' };
         this.#counters.readsUnusable += 1;
       }
     };
@@ -436,11 +436,7 @@ export class VmRecoveryPreparation {
       if (!issued) this.#activeReads -= 1;
       finish(footprint);
     })();
-    this.#transition(entry, { kind: 'reading', settled });
-  }
-
-  #transition(entry: PreparedEntry, state: PreparedEntryState): void {
-    entry.state = state;
+    entry.state = { kind: 'reading', settled };
   }
 
   async #take(
@@ -465,7 +461,7 @@ export class VmRecoveryPreparation {
     if (!entry || entry.state.kind === 'taken' || entry.state.kind === 'unusable') return miss();
     if (entry.state.kind === 'queued') {
       // The consumer reads this candidate live now; never start a duplicate read.
-      this.#transition(entry, { kind: 'unusable' });
+      entry.state = { kind: 'unusable' };
       return miss();
     }
     if (entry.state.kind === 'reading') {
@@ -477,7 +473,7 @@ export class VmRecoveryPreparation {
     }
     const state = batch.entries.get(kaId)?.state;
     if (state?.kind !== 'ready') return miss();
-    this.#transition(entry, { kind: 'taken' });
+    entry.state = { kind: 'taken' };
     this.#retainedBytes = Math.max(0, this.#retainedBytes - entry.bytes);
     entry.bytes = 0;
     this.#counters.hits += 1;
