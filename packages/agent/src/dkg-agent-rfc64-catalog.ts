@@ -601,6 +601,16 @@ function isRfc64ActiveRegisteredSubscriptionV1(
     && subscription.onChainHash !== undefined;
 }
 
+/** A private join has no numeric binding while its signed _meta catches up. */
+function isRfc64LocalJoinIntentUnregisteredSubscriptionV1(
+  hasLocalJoinIntent: boolean,
+  subscription: ContextGraphSub | undefined,
+): boolean {
+  return subscription?.subscribed === true
+    && subscription.onChainId === undefined
+    && hasLocalJoinIntent;
+}
+
 /**
  * Construct the complete retry identity once so dispatcher-key uniqueness,
  * the revision fence, attempt, and delay cannot drift at separate call sites.
@@ -2952,7 +2962,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const eligible = authorityRequest.kind === 'finalized-absence'
       && !responsibility.active
       && !this.config.rfc64CatalogExecutionPlan.killSwitchActive
-      && isRfc64ActiveRegisteredSubscriptionV1(subscription)
+      && (
+        isRfc64ActiveRegisteredSubscriptionV1(subscription)
+        || isRfc64LocalJoinIntentUnregisteredSubscriptionV1(
+          this.localApprovedAgentByCG.has(contextGraphId),
+          subscription,
+        )
+      )
       && isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision);
     if (!eligible) {
       this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId, revision);
@@ -2986,7 +3002,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           return;
         }
         const currentSubscription = this.subscribedContextGraphs.get(contextGraphId);
-        if (!isRfc64ActiveRegisteredSubscriptionV1(currentSubscription)) {
+        if (
+          !isRfc64ActiveRegisteredSubscriptionV1(currentSubscription)
+          && !isRfc64LocalJoinIntentUnregisteredSubscriptionV1(
+            this.localApprovedAgentByCG.has(contextGraphId),
+            currentSubscription,
+          )
+        ) {
           this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
             contextGraphId,
             retry.revision,

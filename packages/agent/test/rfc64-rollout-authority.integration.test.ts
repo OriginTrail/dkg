@@ -4368,6 +4368,70 @@ describe('RFC-64 rollout authority integration', () => {
     }
   });
 
+  it('retries an unbound private join after its metadata arrives, but stops when join intent is removed', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-private-join`;
+    const resolveSnapshots = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-private-join',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    vi.spyOn(edge, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+
+    vi.useFakeTimers();
+    try {
+      // A subscribed node without a local join intent cannot promote an
+      // unregistered private graph, and it must not poll indefinitely.
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(resolveSnapshots).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(resolveSnapshots).toHaveBeenCalledOnce();
+
+      // The signed join path records this local agent intent before _meta
+      // arrives. The next selection stays inactive until the authority facts
+      // are verified, but it must retry rather than remain permanently idle.
+      (edge as any).localApprovedAgentByCG.set(contextGraphId, MEMBER);
+      // Real unregistered subscriptions retain their name hash even though
+      // the numeric chain ID remains absent.
+      const subscription = edge.getSubscribedContextGraphs().get(contextGraphId)!;
+      Reflect.get(edge, 'subscribedContextGraphs').set(contextGraphId, {
+        ...subscription,
+        onChainHash: edge.contextGraphNameCommitment(contextGraphId),
+      });
+      expect(edge.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId))
+        .toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(resolveSnapshots).toHaveBeenCalledTimes(2);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId, active: true }),
+      );
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(resolveSnapshots).toHaveBeenCalledTimes(3);
+
+      // Removing the join intent before the next timer fires fences the
+      // queued retry even if the subscription row has not yet been removed.
+      (edge as any).localApprovedAgentByCG.delete(contextGraphId);
+      await vi.advanceTimersByTimeAsync(60_100);
+      expect(resolveSnapshots).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
   it('does not arm finalized-absence retries while the RFC-64 kill switch is active', async () => {
     const contextGraphId = `${AUTHOR}/scheduled-finality-kill-switch`;
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
@@ -6223,16 +6287,7 @@ describe('RFC-64 rollout authority integration', () => {
     };
   }
 
-  it.each([
-    ['its own metadata changes', (f: Awaited<ReturnType<typeof acceptedPrivateAuthorityFixture>>) => (
-      f.projection.markDirty(f.contextGraphId)
-    )],
-    // Any single-graph write moves the node-wide authority-facts revision, also
-    // one that cannot change this graph's owner, policy or members.
-    ['an unrelated graph is written', (f: Awaited<ReturnType<typeof acceptedPrivateAuthorityFixture>>) => (
-      f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph')
-    )],
-  ] as const)('never accepts an unregistered roster read while %s, and composes again from the current facts', async (_case, move) => {
+  it('recomposes an unregistered roster when its own metadata changes during the read', async () => {
     const f = await acceptedPrivateAuthorityFixture('private-roster-revision-fence');
     const acceptedBefore = f.accepted();
     expect(f.rosterMembers(acceptedBefore)).toEqual([AUTHOR.toLowerCase()]);
@@ -6253,7 +6308,7 @@ describe('RFC-64 rollout authority integration', () => {
 
     const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
     await versionRead;
-    move(f);
+    f.projection.markDirty(f.contextGraphId);
     releaseVersion();
 
     const authority = await refresh;
@@ -6266,6 +6321,35 @@ describe('RFC-64 rollout authority integration', () => {
     expect((await f.curator.readRfc64CatalogOperationalStatusV1())
       .find((status) => status.contextGraphId === f.contextGraphId))
       .toMatchObject({ authorityState: 'accepted', policyDigest: acceptedBefore.policyDigest });
+  });
+
+  it('keeps an unregistered authority composition when only another graph changes', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-roster-unrelated-write');
+    let releaseVersion!: () => void;
+    let versionEntered!: () => void;
+    const versionGate = new Promise<void>((resolve) => { releaseVersion = resolve; });
+    const versionRead = new Promise<void>((resolve) => { versionEntered = resolve; });
+    const roster = vi.spyOn(f.curator, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValueOnce([AUTHOR, MEMBER]);
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementationOnce(async () => {
+        versionEntered();
+        await versionGate;
+        return '9';
+      });
+
+    const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await versionRead;
+    f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+    releaseVersion();
+
+    await expect(refresh).resolves.toMatchObject({
+      roster: { version: '9' },
+    });
+    expect(f.rosterMembers(f.accepted())).toEqual([
+      AUTHOR.toLowerCase(), MEMBER.toLowerCase(),
+    ]);
+    expect(roster).toHaveBeenCalledOnce();
   });
 
   it('composes an unregistered authority generation again when metadata changes during the policy read', async () => {
@@ -6306,7 +6390,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
       .mockImplementation(async () => {
         compositions += 1;
-        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        f.projection.markDirty(f.contextGraphId);
         return '9';
       });
 
@@ -6334,7 +6418,7 @@ describe('RFC-64 rollout authority integration', () => {
           return '9';
         }
         // Every composition of the first refresh is discarded.
-        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        f.projection.markDirty(f.contextGraphId);
         if (compositions === 3) thirdDiscard();
         return '9';
       });
@@ -6363,7 +6447,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
       .mockImplementation(async () => {
         compositions += 1;
-        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        f.projection.markDirty(f.contextGraphId);
         // The second discard is followed by a real wait; cancel inside it.
         if (compositions === 2) setTimeout(() => owner.abort(cancelled), 5);
         return '9';

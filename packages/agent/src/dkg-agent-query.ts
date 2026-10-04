@@ -562,14 +562,16 @@ export class QueryMethods extends DKGAgentBase {
         }),
       );
       if (scopedReadAuthority.outcome === 'unavailable') {
-        // An exact finalized name absence plus no local declaration or
-        // subscription means this node has no graph it could expose to the
-        // caller. Return an empty scoped result without touching the store's
-        // graph partitions. This gives a nonmember a settled privacy denial
-        // while keeping any replica that has local data or join intent on the
-        // retryable authority path until its proof is complete.
+        // An exact finalized name absence or a transient authority-circuit
+        // failure cannot expose data when this node has no local declaration,
+        // subscription, or graph. Return an empty scoped result without
+        // touching the store's graph partitions. A replica that has local
+        // data or join intent remains on the retryable authority path.
         if (
-          scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
+          (
+            scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
+            || scopedReadAuthority.reason === 'authority-circuit-open'
+          )
           && !this.subscribedContextGraphs.has(scopedContextGraphId)
           && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
           && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })

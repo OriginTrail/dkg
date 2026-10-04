@@ -161,6 +161,17 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(exists).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
     expect(execution).not.toHaveBeenCalled();
 
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'authority-circuit-open',
+      dependency: 'chain',
+      metadataBootstrap: 'forbidden',
+    });
+    await expect(agent.query(sparql, { contextGraphId }))
+      .resolves.toMatchObject({ bindings: [] });
+    expect(execution).not.toHaveBeenCalled();
+
     Reflect.get(agent, 'subscribedContextGraphs').set(contextGraphId, {
       subscribed: true,
       pendingMeta: true,
