@@ -525,6 +525,21 @@ export class RpcRequestGovernor {
       : -1;
   }
 
+  /**
+   * Whether the background class is owed its turn past foreground work: one of
+   * its waiters has waited the fairness grace period for a permit it could
+   * take now. Which waiter the turn goes to is a separate question
+   * ({@link RpcRequestGovernor.#nextBackgroundWaiter}), so an authority read
+   * that queued a moment ago does not undo what ordinary work behind it has
+   * already waited.
+   */
+  #backgroundWorkHasWaited(): boolean {
+    const head = this.#backgroundQueue[0];
+    const authorityHasWaited = head?.admissionPriority === 'authority'
+      && this.#clock.now() - head.enqueuedAtMs >= RpcRequestGovernor.BACKGROUND_FAIRNESS_GRACE_MS;
+    return authorityHasWaited || this.#passedBackgroundWaiter() >= 0;
+  }
+
   #admit(requestClass: RpcRequestClass, authorityPriority = false): void {
     this.#availableTokens -= 1;
     if (requestClass === 'background') {
@@ -559,8 +574,7 @@ export class RpcRequestGovernor {
     const agedBackgroundHasCapacity = backgroundNext >= 0
       && this.#availableTokens >= 1
       && this.#backgroundAvailableTokens >= 1
-      && this.#clock.now() - this.#backgroundQueue[backgroundNext]!.enqueuedAtMs
-        >= RpcRequestGovernor.BACKGROUND_FAIRNESS_GRACE_MS;
+      && this.#backgroundWorkHasWaited();
     // At most one aged background request jumps the foreground queue per
     // scheduling turn. Its own bucket keeps this within the background share;
     // the single admission keeps foreground latency bounded.

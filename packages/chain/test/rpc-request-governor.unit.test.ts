@@ -316,6 +316,74 @@ describe('RpcRequestGovernor', () => {
     ]);
   });
 
+  it('gives a background authority read that has waited its turn past foreground demand', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 10,
+      foregroundReservePercent: 80,
+      burstRequests: 1,
+      maxQueueSize: 1_000,
+      startupJitterMs: 0,
+    });
+
+    // Foreground demand that outlasts the test: every permit has a taker.
+    const foreground = Array.from({ length: 60 }, () => governor.acquire('foreground'));
+    let admittedAt: number | undefined;
+    const authority = acquireBackgroundAuthority(governor).then(() => { admittedAt = Date.now(); });
+
+    // It yields to foreground work like any background request ...
+    await vi.advanceTimersByTimeAsync(999);
+    expect(admittedAt).toBeUndefined();
+    // ... and like any background request it is not postponed past the
+    // fairness grace period.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(admittedAt).toBe(1_000);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.all([...foreground, authority]);
+  });
+
+  it('gives waited ordinary background work its turn past foreground demand, however young the authority reads ahead of it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 10,
+      foregroundReservePercent: 80,
+      burstRequests: 1,
+      maxQueueSize: 1_000,
+      startupJitterMs: 0,
+    });
+
+    // Foreground demand that outlasts the test: every permit has a taker.
+    const foreground = Array.from({ length: 150 }, () => governor.acquire('foreground'));
+    const order: string[] = [];
+    const ordinary = governor.acquire('background').then(() => { order.push('ordinary'); });
+
+    // An authority read every 250 ms, each given up after 500 ms. The one at
+    // the front of the background queue is never as old as the grace period.
+    const authorities: Promise<unknown>[] = [];
+    for (let elapsed = 0; elapsed < 5_000; elapsed += 250) {
+      const controller = new AbortController();
+      authorities.push(
+        acquireBackgroundAuthority(governor, controller.signal)
+          .then(() => { order.push('authority'); }, () => undefined),
+      );
+      setTimeout(() => controller.abort(new Error('authority read gave up')), 500);
+      await vi.advanceTimersByTimeAsync(250);
+    }
+
+    // The ordinary waiter has waited the grace period since the first second.
+    // From then on the class takes its turn past the foreground queue: four
+    // authority reads, then the ordinary request.
+    expect(order.slice(0, 5)).toEqual([
+      'authority', 'authority', 'authority', 'authority', 'ordinary',
+    ]);
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await Promise.all([...foreground, ordinary, ...authorities]);
+  });
+
   it('does not count authority reads that pass ordinary background work which has only just queued', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
