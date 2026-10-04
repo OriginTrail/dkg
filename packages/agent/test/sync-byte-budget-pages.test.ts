@@ -5,7 +5,7 @@ import {
   DEFAULT_MAX_READ_BYTES,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
@@ -29,8 +29,11 @@ import {
 import { resolveSyncResponderRequestProfile } from '../src/sync/responder/page-framing-policy.js';
 import * as wireCompression from '../src/sync/wire-compression.js';
 import {
+  DKG_NS,
   linesFromNquads,
   registerTestSyncHandler,
+  subGraphRegistrationQuads,
+  workspaceOpQuads,
 } from './_helpers/sync-responder.js';
 
 const CG_ID = 'byte-budget-cg';
@@ -200,6 +203,87 @@ describe('byte-budget sync pagination', () => {
       // Empty EOF releases the pin, so the competing snapshot can evict it.
       expect(linesFromNquads(await cap.invoke(competitor, 'competing-peer')).length).toBeGreaterThan(128);
     } finally { clock?.mockRestore(); await store.close(); }
+  });
+
+  it.each(['meta', 'data'] as const)('continues byte-truncated TTL %s store windows through empty EOF', async (phase) => {
+    const store = new OxigraphStore();
+    try {
+      const contextGraphId = `ttl-byte-fit-${phase}`;
+      const rootGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+      const subGraph = `did:dkg:context-graph:${contextGraphId}/subx/_shared_memory`;
+      const now = Date.now();
+      const fresh = new Date(now - 1_000).toISOString();
+      const stale = new Date(now - 600_000).toISOString();
+      const freshMeta: Quad[] = [];
+      const freshData: Quad[] = [];
+      const staleRows: Quad[] = [];
+      const seedOperation = (index: number, timestamp: string, admitted: boolean) => {
+        const graph = index % 2 === 0 ? rootGraph : subGraph;
+        const id = `${admitted ? 'fresh' : 'stale'}-${String(index).padStart(4, '0')}`;
+        const root = `urn:ttl-root:${id}`;
+        const meta = workspaceOpQuads(contextGraphId, id, root, `${graph}_meta`, timestamp);
+        meta.push({ graph: `${graph}_meta`, subject: meta[0]!.subject,
+          predicate: `${DKG_NS}note`, object: `"${id}:${'x'.repeat(22_000)}"` });
+        const data = { graph, subject: root, predicate: 'urn:value',
+          object: `"${id}:${'y'.repeat(22_000)}"` };
+        if (admitted) { freshMeta.push(...meta); freshData.push(data); }
+        else staleRows.push(...meta, data);
+      };
+      for (let index = 0; index < 220; index += 1) seedOperation(index, fresh, true);
+      for (let index = 0; index < 20; index += 1) seedOperation(index, stale, false);
+      await store.insert([
+        ...subGraphRegistrationQuads(contextGraphId, 'subx'),
+        ...freshMeta, ...freshData, ...staleRows,
+        { graph: rootGraph, subject: 'urn:ttl-root:unshared', predicate: 'urn:value', object: '"unshared"' },
+        { graph: `${rootGraph}_meta`, subject: 'urn:ttl-op:undated', predicate: `${DKG_NS}note`, object: '"undated"' },
+      ]);
+      const expected = new Set((phase === 'meta' ? freshMeta : freshData).map((quad) =>
+        `<${quad.subject}> <${quad.predicate}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} <${quad.graph}> .`,
+      ));
+      expect(new TextEncoder().encode([...expected].join('\n')).byteLength)
+        .toBeGreaterThan(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+      let windowReads = 0;
+      const originalQuery = store.query.bind(store);
+      vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        if (options?.source === (phase === 'meta'
+          ? 'sync.responder.readFreshSwmMetaSubjectRows'
+          : 'sync.responder.readFreshSwmDataRowsPage')) windowReads += 1;
+        return originalQuery(sparql, options);
+      });
+      const cap = registerTestSyncHandler(store, {
+        sharedMemoryTtlMs: 60_000, syncPageSize: 128,
+        snapshotBudget: { maxRows: 1_000_000, maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+          maxSnapshotRows: 1, maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER },
+      });
+      const request = { contextGraphId, limit: 128, includeSharedMemory: true, phase,
+        syncSessionId: `ttl-byte-fit-${phase}`, pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 2_000 };
+      const collected: string[] = [];
+      const requestedOffsets: number[] = [];
+      const pageLengths: number[] = [];
+      let reachedEmptyEof = false;
+      for (let page = 0; page < 10; page += 1) {
+        requestedOffsets.push(collected.length);
+        const previousWindowReads = windowReads;
+        const response = await cap.invoke({ ...request, offset: collected.length });
+        expect(new TextEncoder().encode(response).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+        const rows = linesFromNquads(response);
+        if (rows.length === 0) { reachedEmptyEof = true; break; }
+        // Every continuation rereads its subject/graph window, proving this is
+        // the forced store fallback rather than the cached unfiltered lane.
+        expect(windowReads).toBeGreaterThan(previousWindowReads);
+        pageLengths.push(rows.length);
+        collected.push(...rows);
+      }
+      expect(reachedEmptyEof).toBe(true);
+      expect(pageLengths.length).toBeGreaterThan(1);
+      expect(pageLengths[0]).toBeLessThan(expected.size);
+      expect(pageLengths[0]).toBeLessThan(request.pageRowsHint);
+      expect(requestedOffsets).toEqual([0, ...pageLengths.map((_, index) =>
+        pageLengths.slice(0, index + 1).reduce((sum, count) => sum + count, 0))]);
+      expect(collected).toHaveLength(expected.size);
+      expect(new Set(collected).size).toBe(collected.length);
+      expect(new Set(collected)).toEqual(expected);
+    } finally { await store.close(); }
   });
 
   it('advertises byte-budget paging in an unauthenticated public request', async () => {
