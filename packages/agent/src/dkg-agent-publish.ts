@@ -303,6 +303,7 @@ import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyOwnedPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { stampLifecyclePointer, stampLifecyclePointerIfDivergedFromVm } from './lifecycle-pointer-writer.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -6472,13 +6473,7 @@ export class PublishMethods extends DKGAgentBase {
     return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
   }
 
-  /**
-   * OT-RFC-43 A2 — idempotent per-layer pointer (re)stamp on the lifecycle URN.
-   * Drop-then-set the single value for `pred`. Uses `deleteByPattern` + `insert`
-   * (NOT a SPARQL UPDATE string) because the oxigraph storage adapter's
-   * `query()` rejects DELETE/INSERT — `stampLayerPointerSparql` is reserved for
-   * backends that accept UPDATE via query(). `merkleHex` is stored bare (no 0x).
-   */
+  /** Delegate pointer writes to the store policy shared with publication completion. */
   async _stampPointer(
     this: DKGAgent,
     lifecycleUri: string,
@@ -6486,23 +6481,9 @@ export class PublishMethods extends DKGAgentBase {
     merkleHex: string,
     metaGraph: string,
   ): Promise<void> {
-    const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
-    await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
-    await this.store.insert([
-      { subject: lifecycleUri, predicate: pred, object: `"${bare}"`, graph: metaGraph },
-    ]);
+    await stampLifecyclePointer(this.store, lifecycleUri, pred, merkleHex, metaGraph);
   }
 
-  /**
-   * RFC ka-metadata-trim Phase 2 — divergence-only wm/swm pointer stamp.
-   * `dkg:vmCurrentAssertion` is always materialised; the wm/swm pointers are
-   * only written when they DIVERGE from the current VM value (the common
-   * "all three equal" steady state is implicit). When the new value equals
-   * VM, any prior row for `pred` is deleted instead (drop-then-skip), so a
-   * stale divergent pointer never lingers. Readers COALESCE a missing wm/swm
-   * to the vm value (see `agent.assertion.history()`), which also keeps
-   * old-store rows (always materialised) readable unchanged.
-   */
   async _stampPointerIfDivergedFromVm(
     this: DKGAgent,
     lifecycleUri: string,
@@ -6510,25 +6491,7 @@ export class PublishMethods extends DKGAgentBase {
     merkleHex: string,
     metaGraph: string,
   ): Promise<void> {
-    const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
-    let vmBare: string | undefined;
-    try {
-      const res = await this.store.query(
-        `SELECT ?vm WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm } } LIMIT 1`,
-        { source: 'agent.publish.pointerVmGuard' },
-      );
-      const raw = res.type === 'bindings' ? res.bindings[0]?.['vm'] : undefined;
-      vmBare = raw?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
-    } catch {
-      // On a failed VM read fall back to the always-write behaviour below —
-      // an extra convergent row is harmless (readers COALESCE), a missing
-      // divergent row is not.
-    }
-    if (vmBare !== undefined && vmBare === bare) {
-      await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
-      return;
-    }
-    await this._stampPointer(lifecycleUri, pred, bare, metaGraph);
+    await stampLifecyclePointerIfDivergedFromVm(this.store, lifecycleUri, pred, merkleHex, metaGraph);
   }
 
   /**

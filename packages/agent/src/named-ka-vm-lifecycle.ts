@@ -13,7 +13,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import type { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
-import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { stampLifecyclePointerIfDivergedFromVm } from './lifecycle-pointer-writer.js';
 
 const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
 const STATE_PRED = 'http://dkg.io/ontology/state';
@@ -156,7 +156,9 @@ async function applyPublishedNamedKaDraftLifecycle(
   store: TripleStore, input: PublishedNamedKaVmLifecycleInput, lifecycleUri: string, assertionUri: string, metaGraph: string,
 ): Promise<void> {
   if (input.convergeWorkingMemory) {
-    await convergePublishedWorkingMemoryPointer(store, input, lifecycleUri, metaGraph);
+    await stampLifecyclePointerIfDivergedFromVm(
+      store, lifecycleUri, WM_CURRENT_ASSERTION_PRED, input.merkleRoot.toLowerCase().replace(/^0x/, ''), metaGraph,
+    );
   }
   for (const subject of [lifecycleUri, assertionUri]) {
     await deleteByPatternWithoutCount(store, { subject, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
@@ -205,27 +207,5 @@ async function applyPublishedNamedKaDraftLifecycle(
     predicate: MEMORY_LAYER_PRED,
     object: `"${MemoryLayer.VerifiableMemory}"`,
     graph: metaGraph,
-  }]);
-}
-
-/** Divergence-only WM bookkeeping belongs to the same guarded draft transition. */
-async function convergePublishedWorkingMemoryPointer(
-  store: TripleStore, input: PublishedNamedKaVmLifecycleInput, lifecycleUri: string, metaGraph: string,
-): Promise<void> {
-  const bareRoot = input.merkleRoot.toLowerCase().replace(/^0x/, '');
-  let vmRoot: string | undefined;
-  try {
-    const result = await store.query(`SELECT ?vm WHERE { GRAPH <${metaGraph}> {
-      <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm
-    } } LIMIT 1`, { source: 'agent.publish.pointerVmGuard' });
-    const raw = result.type === 'bindings' ? result.bindings[0]?.['vm'] : undefined;
-    vmRoot = raw === undefined ? undefined : parseRdfLiteralTerm(raw)?.value;
-  } catch {
-    // Failed reads preserve the always-write fallback: an extra convergent
-    // row is harmless, whereas a missing divergent pointer is not.
-  }
-  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: WM_CURRENT_ASSERTION_PRED, graph: metaGraph });
-  if (vmRoot !== bareRoot) await store.insert([{
-    subject: lifecycleUri, predicate: WM_CURRENT_ASSERTION_PRED, object: JSON.stringify(bareRoot), graph: metaGraph,
   }]);
 }
