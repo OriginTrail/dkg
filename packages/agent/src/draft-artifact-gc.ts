@@ -59,7 +59,7 @@ export async function collectAbandonedDraftArtifacts(input: {
       FILTER(?cursor > ${sparqlString(cursor.operation)})
     } ORDER BY ?cursor LIMIT ${BATCH_SIZE}`, { source: 'agent.draftArtifacts.supersededOperations', priority: 'background' });
     if (rows.type !== 'bindings') return counts;
-    cursor.operation = rows.bindings.length === BATCH_SIZE ? rows.bindings.at(-1)?.['cursor'] ?? '' : '';
+    cursor.operation = rows.bindings.length === BATCH_SIZE ? literal(rows.bindings.at(-1)?.['cursor'] ?? '') : '';
     for (const row of rows.bindings) {
       const meta = row['meta']; const op = row['op']; const ka = row['ka'];
       if (!meta || !op || !ka || !row['id']) continue;

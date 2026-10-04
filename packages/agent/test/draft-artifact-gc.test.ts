@@ -70,6 +70,27 @@ describe('reference-safe abandoned draft maintenance', () => {
     await withUnqueuedDraftOperation(f.store, CG, undefined, workspaceOperationSubject(CG, 'queued'), NOW, async () => { deleted = true; });
     expect(deleted).toBe(false);
   });
+  it('advances the operation cursor beyond 32 retained ACK copies to collect later drafts', async () => {
+    const f = await fixture();
+    for (let index = 0; index < 40; index += 1) await f.op(`old-${index}`);
+    await f.op('new', '2'); await f.head();
+    const candidates = await f.store.query(`SELECT DISTINCT ?op WHERE { GRAPH <${META}> {
+      ?op a <${DKG}WorkspaceOperation> ; <${DKG}shareOperationId> ?id .
+      FILTER(?id != "new")
+    } } ORDER BY ?op`);
+    if (candidates.type !== 'bindings') throw new Error('expected operation bindings');
+    expect(candidates.bindings).toHaveLength(40);
+    const retained = candidates.bindings.slice(0, 32).map(row => row['op']!);
+    const collectible = candidates.bindings.slice(32).map(row => row['op']!);
+    await f.store.insert(retained.map(subject => ({
+      subject, predicate: `${DKG}storageAckSignedAt`, object: '"2026-10-04"', graph: STORAGE_ACK_LEDGER_GRAPH,
+    })));
+    expect((await f.collect()).operations).toBe(0);
+    expect((await f.collect()).operations).toBe(8);
+    for (const op of retained) expect(await f.has(META, op)).toBe(true);
+    for (const op of collectible) expect(await f.has(META, op)).toBe(false);
+  });
+
   it('advances a bounded cursor past more than 32 retained private graphs', async () => {
     const f = await fixture();
     for (let index = 0; index < 40; index += 1) await f.privateGraph(1, `/commitments/${index.toString(16).padStart(64, '0')}`);
