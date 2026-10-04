@@ -1,6 +1,6 @@
 import { materializeConfirmedGraphPublish } from './confirmed-graph-publish-materialization.js';
 import { replaceExactKnowledgeAssetGraph } from './knowledge-asset-graph-write.js';
-import { convergeKnowledgeAssetMetadataRows } from './knowledge-asset-metadata-write.js';
+import { convergeKnowledgeAssetMetadataRows, prepareKnowledgeAssetMaterializationMetadata } from './knowledge-asset-metadata-write.js';
 import { createKnowledgeAssetsWithMintAdoption } from './adopt-existing-mint.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
@@ -5035,7 +5035,7 @@ export class DKGPublisher implements Publisher {
         const labelMeta = options.targetMetaGraphUri
           ?? this.graphManager.metaGraphUri(contextGraphId);
         // GH#842 last-writer-wins + atomicity. Serialise the whole exact-graph
-        // replace + private replace + metadata converge + version stamp under
+        // replace + private replace + metadata/catalog converge + version stamp under
         // the per-KA materialization lock, and skip a stale (lower chain
         // version) re-run — exactly like the publish-promote path (~4182) and
         // the legacy update restate. Without this the graph-scoped update was
@@ -5073,17 +5073,6 @@ export class DKGPublisher implements Publisher {
                 `${inherited.subGraphName ?? '(root)'} to ${options.subGraphName ?? '(root)'}`,
             );
           }
-          await this.replaceExactKnowledgeAssetGraph(
-            dataGraph,
-            allSkolemizedQuads,
-            'Graph-scoped KA update',
-          );
-          await this.privateStore.replaceKnowledgeAssetPrivateTriples(
-            contextGraphId,
-            graphUpdate.scope,
-            canonicalPrivateQuads,
-            options.subGraphName,
-          );
           // 🔴 PR #1712 review (3586192289): the converge below replaces the
           // KA's entire access row set, so passing raw update options here let
           // an update that omitted `accessPolicy` rewrite a private KA to the
@@ -5119,6 +5108,20 @@ export class DKGPublisher implements Publisher {
                 }
               : { status: 'tentative' },
           );
+          const preparedMetadata = await prepareKnowledgeAssetMaterializationMetadata(
+            this.store, labelMeta, graphUpdate.scope.ual, metadata,
+          );
+          await this.replaceExactKnowledgeAssetGraph(
+            dataGraph,
+            allSkolemizedQuads,
+            'Graph-scoped KA update',
+          );
+          await this.privateStore.replaceKnowledgeAssetPrivateTriples(
+            contextGraphId,
+            graphUpdate.scope,
+            canonicalPrivateQuads,
+            options.subGraphName,
+          );
           await replaceLocallyTrustedKnowledgeAssetControls(
             this.store,
             graphUpdate.scope.ual,
@@ -5128,9 +5131,10 @@ export class DKGPublisher implements Publisher {
             this.store,
             labelMeta,
             graphUpdate.scope.ual,
-            metadata,
+            preparedMetadata,
           );
           if (version) {
+            await persistUpdateCatalogEntry();
             await writeMaterializedVersion(
               this.store,
               labelMeta,
@@ -5726,11 +5730,12 @@ export class DKGPublisher implements Publisher {
     await storeUpdatedQuads(updateVersion, updateProvenance);
 
     // B6 — the on-chain update has confirmed and the verifiable-memory quads are
-    // committed: REPLACE-persist the rotated PUBLIC `_catalog` here, inside the
+    // committed: legacy updates REPLACE-persist the rotated PUBLIC `_catalog` here, inside the
     // confirmed-success branch ONLY (no-op unless `useCuratedUpdate`), so a
     // failed/tentative update never exposes a public catalog entry. Mirrors the
-    // publish path's deferred `persistCatalogEntry` invocation (2989).
-    await persistUpdateCatalogEntry();
+    // publish path's deferred `persistCatalogEntry` invocation (2989). Graph-scoped
+    // updates commit it under the KA lock before their final ordering fence.
+    if (!graphUpdate) await persistUpdateCatalogEntry();
 
     const ual = graphUpdate?.scope.ual ?? await this.resolveKaUal(kaId);
 

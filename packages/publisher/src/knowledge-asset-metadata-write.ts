@@ -1,7 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { MATERIALIZED_VERSION_PRED } from './metadata.js';
+import { MATERIALIZED_VERSION_PRED, materializedVersionQuad, readMaterializedVersion } from './metadata.js';
+
+/**
+ * Prepare replacement rows once while the caller owns the KA materialization
+ * lock. Public data and its metadata can commit together, but only the previous
+ * ordering fence belongs in that payload: the new fence commits after every
+ * private/catalog slice. Compound and compatibility writes use these same rows.
+ */
+export async function prepareKnowledgeAssetMaterializationMetadata(
+  store: TripleStore,
+  metaGraph: string,
+  subject: string,
+  quads: readonly Quad[],
+): Promise<Quad[]> {
+  const previousVersion = await readMaterializedVersion(store, metaGraph, subject);
+  const rows = quads.filter(quad => quad.predicate !== MATERIALIZED_VERSION_PRED)
+    .map(quad => ({ ...quad, graph: metaGraph }));
+  if (previousVersion !== null) {
+    rows.push(materializedVersionQuad(metaGraph, subject, previousVersion));
+  }
+  return rows;
+}
 
 /**
  * Retry-safe replacement of one KA's rows inside a shared metadata graph.
@@ -26,10 +47,7 @@ export async function convergeKnowledgeAssetMetadataRows(
     quads.map((quad) => JSON.stringify([quad.subject, quad.predicate, quad.object])),
   );
   const stale = previous.quads.filter(
-    // The ordering fence commits separately after every materialized slice.
-    // Keep its previous value if a later private/catalog write fails.
-    (quad) => quad.predicate !== MATERIALIZED_VERSION_PRED
-      && !nextKeys.has(JSON.stringify([quad.subject, quad.predicate, quad.object])),
+    (quad) => !nextKeys.has(JSON.stringify([quad.subject, quad.predicate, quad.object])),
   );
   if (stale.length > 0) {
     // CONSTRUCT results carry no graph — restore the metadata graph before

@@ -87,6 +87,7 @@ export default defineConfig({
       'test/agents-meta-bound.test.ts',
       'test/publish-adopt-existing-mint.test.ts',
       'test/confirmed-graph-publish-materialization.test.ts',
+      'test/knowledge-asset-metadata-write.test.ts',
       'test/ack-collector.test.ts',
       'test/publish-lifecycle-logger.test.ts',
       'test/storage-ack-handler.test.ts',
