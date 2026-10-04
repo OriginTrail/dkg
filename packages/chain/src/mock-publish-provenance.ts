@@ -1,4 +1,5 @@
 import type { ChainEvent, CanonicalFinalizationReceiptReadOptions, CanonicalFinalizationReceiptResolution, OnChainPublishResult } from './chain-adapter.js';
+import { projectAdoptedMintPublishResult, type AdoptedMintPublishResult } from './existing-mint-provenance.js';
 import { AdoptExistingMintRefusalError } from './adopt-existing-mint-refusal-error.js';
 
 interface MockMintProvenancePorts {
@@ -45,7 +46,7 @@ export async function getMockMintedKnowledgeAssetProvenance(
   kaId: bigint,
   expectedMerkleRoot: Uint8Array,
   expectedContextGraphId: bigint,
-): Promise<OnChainPublishResult | null> {
+): Promise<AdoptedMintPublishResult | null> {
   const collection = ports.collection;
   if (collection === undefined || toHex(collection.merkleRoot).toLowerCase()
     !== toHex(expectedMerkleRoot).toLowerCase()) {
@@ -70,7 +71,8 @@ export async function getMockMintedKnowledgeAssetProvenance(
   });
   if (resolution.status !== 'confirmed' || resolution.receipt.kaId !== kaId
     || toHex(resolution.receipt.merkleRoot).toLowerCase() !== toHex(expectedMerkleRoot).toLowerCase()) return null;
-  return ports.resolvePublish(txHash);
+  const publish = await ports.resolvePublish(txHash);
+  return publish === null ? null : projectAdoptedMintPublishResult(publish, resolution.receipt);
 }
 
 

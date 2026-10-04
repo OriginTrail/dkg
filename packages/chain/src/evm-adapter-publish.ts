@@ -36,6 +36,7 @@ import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
 import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
+import type { AdoptedMintPublishResult } from './existing-mint-provenance.js';
 import { getEvmMintedKnowledgeAssetProvenance } from './evm-existing-mint.js';
 import { projectCanonicalFinalizationReceipt, resolveCanonicalFinalizationPublish, type CanonicalFinalizationPublishResolution } from './canonical-finalization-publish.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
@@ -820,7 +821,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     kaId: bigint,
     expectedMerkleRoot: Uint8Array,
     expectedContextGraphId: bigint,
-  ): Promise<OnChainPublishResult | null> {
+  ): Promise<AdoptedMintPublishResult | null> {
     // Concrete EVMChainAdapter assembly requires both storage-read methods.
     // An incomplete mixin holder cannot prove current provenance; refuse it
     // once at composition rather than treating a missing reader as a null read.
@@ -829,11 +830,17 @@ export class PublishMethods extends EVMChainAdapterBase {
     const readCurrentVersion = readers.readKnowledgeAssetVersionSnapshot;
     const versionIsCurrent = readers.knowledgeAssetVersionSnapshotIsCurrent;
     if (typeof readCurrentVersion !== 'function' || typeof versionIsCurrent !== 'function') return null;
+    const storage = this.contracts.knowledgeAssetStorage, graphStorage = this.contracts.contextGraphStorage;
+    const address = this.knowledgeAssetStorageBindingAddress(storage);
+    const generation = this.knowledgeAssetStorageBindingGeneration, hubGeneration = this.hubBindingGeneration;
+    if (!storage || address === undefined || !Number.isSafeInteger(generation) || generation < 0) return null;
     return getEvmMintedKnowledgeAssetProvenance({
-      storage: this.contracts.knowledgeAssetStorage,
+      storage, storageBinding: { address, generation, isCurrent: () =>
+        this.knowledgeAssetStorageBindingIsCurrent(storage, address, generation)
+        && this.contracts.contextGraphStorage === graphStorage && this.hubBindingGeneration === hubGeneration },
       readRoots: (storage, id) => this.readContract(storage, 'kas.getMerkleRoots', 'getMerkleRoots', id),
-      readContextGraphId: async (id) => this.contracts.contextGraphStorage
-        ? BigInt(await this.readContract(this.contracts.contextGraphStorage, 'cgStorage.kaToContextGraph', 'kaToContextGraph', id)) : null,
+      readContextGraphId: async (id) => graphStorage
+        ? BigInt(await this.readContract(graphStorage, 'cgStorage.kaToContextGraph', 'kaToContextGraph', id)) : null,
       resolveDeployBlock: (address) => this.resolveKaStorageDeployBlock(address),
       readBlockTimestamp: (block) => this.getBlockTimestamp(block),
       readCreationLogs: async (storage, id, from, to, providers) => {

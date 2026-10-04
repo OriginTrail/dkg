@@ -55,6 +55,7 @@ import {
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
+import type { AdoptedMintPublishResult } from './existing-mint-provenance.js';
 import { getMockMintedKnowledgeAssetProvenance, resolveMockPublishByTxHash, fromHex, toHex } from './mock-publish-provenance.js';
 import {
   isNonexistentContextGraphStorageRevert,
@@ -438,7 +439,7 @@ export class MockChainAdapter implements ChainAdapter {
     kaId: bigint,
     expectedMerkleRoot: Uint8Array,
     expectedContextGraphId: bigint,
-  ): Promise<OnChainPublishResult | null> {
+  ): Promise<AdoptedMintPublishResult | null> {
     return getMockMintedKnowledgeAssetProvenance({
       collection: this.collections.get(kaId), events: this.events,
       isUnfinalized: (hash) => this.unfinalizedTxHashes.has(hash), blockHash: mockBlockHash,

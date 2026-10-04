@@ -1,5 +1,6 @@
 import type { OnChainPublishResult } from './publish-provenance.js';
 export type { OnChainPublishResult } from './publish-provenance.js';
+export type { AdoptedMintPublishResult } from './existing-mint-provenance.js';
 import type { ExistingMintProvenanceReader } from './existing-mint-provenance.js';
 import type {
   RandomSamplingAvailability,

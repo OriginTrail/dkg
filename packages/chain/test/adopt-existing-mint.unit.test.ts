@@ -5,7 +5,7 @@ import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { StorageReadMethods } from '../src/evm-adapter-storage-reads.js';
 import { EvmReceiptFinalityReader } from '../src/evm-adapter-receipt-finality.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
-import { AdoptExistingMintRefusalError } from '../src/index.js';
+import { MockChainAdapter, AdoptExistingMintRefusalError } from '../src/index.js';
 
 const KA_ID = 42n;
 const CG_ID = 7n;
@@ -23,7 +23,7 @@ function fixture(finalityConfirmations = 1) {
   };
   const storage = { target: ADDRESS, interface: storageInterface,
     filters: { KnowledgeAssetCreated: vi.fn(() => ({})) } };
-  const receipt = { txHash: HASH, blockNumber: 10, txIndex: 2, blockTimestamp: 100,
+  const receipt = { txHash: HASH, blockNumber: 10, blockHash: BLOCK_HASH, txIndex: 2, blockTimestamp: 100,
     batchId: KA_ID, kaId: KA_ID, startKAId: KA_ID, endKAId: KA_ID,
     merkleRoot: ethers.getBytes(ROOT), publisherAddress: ADDRESS,
     authorAddress: '0x2222222222222222222222222222222222222222', knowledgeAssetsContract: ADDRESS };
@@ -38,6 +38,7 @@ function fixture(finalityConfirmations = 1) {
   const chain = Object.assign(Object.create(PublishMethods.prototype), {
     init: vi.fn(async () => undefined),
     contracts: { knowledgeAssetStorage: storage, contextGraphStorage: {} },
+    knowledgeAssetStorageBindingGeneration: 1, hubBindingGeneration: 1,
     readContract, queryEventLogsPage, readPublishReceipt,
     readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({ knowledgeAssetId: KA_ID, latestRoot: ROOT, rootCount: BigInt(roots.length), latestAuthor: receipt.authorAddress, latestPublisher: ADDRESS, blockNumber: receipt.blockNumber, blockHash: BLOCK_HASH, knowledgeAssetStorageAddress: ADDRESS, knowledgeAssetStorageGeneration: 1 })),
     knowledgeAssetVersionSnapshotIsCurrent: vi.fn(async () => true),
@@ -94,6 +95,36 @@ describe('existing mint provenance', () => {
       expectedBlockNumber: 10, expectedBlockHash: BLOCK_HASH,
     }, 'canonical finalization receipt');
     expect(f.provider.getBlock).toHaveBeenCalledWith(10);
+  });
+
+  it('projects definite canonical identity and ordering while retaining parsed costs and storage provenance', async () => {
+    const f = fixture();
+    Reflect.set(f.receipt, 'kaId', undefined); Reflect.set(f.receipt, 'startKAId', undefined);
+    Reflect.set(f.receipt, 'endKAId', undefined); Reflect.set(f.receipt, 'txIndex', undefined);
+    const costs = { gasUsed: 100n, effectiveGasPrice: 5n, gasCostWei: 500n, tokenAmount: 123n,
+      convictionCostCovered: { accountId: 7n, epoch: 2, baseCost: 20n, discountedCost: 10n,
+        drawnFromEpoch: 8n, drawnFromTopUp: 2n } };
+    Object.assign(f.receipt, costs, { publisherAddress: '0x3333333333333333333333333333333333333333', blockTimestamp: 999 });
+    const adopted = await f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID);
+    expect(adopted).toMatchObject({ ...costs, kaId: KA_ID, startKAId: KA_ID, endKAId: KA_ID,
+      txIndex: 2, blockHash: BLOCK_HASH, txHash: HASH, blockTimestamp: 100, publisherAddress: ADDRESS });
+  });
+
+  it('retains the same strict canonical facts in a successful mock adoption', async () => {
+    const mock = new MockChainAdapter('mock:31337'); mock.minimumRequiredSignatures = 0;
+    const root = ethers.getBytes(ROOT);
+    const created = await mock.createKnowledgeAssets({ publishOperationId: 'strict-adoption', contextGraphId: CG_ID,
+      merkleRoot: root, knowledgeAssetsAmount: 1, byteSize: 1n, epochs: 1, tokenAmount: 1n, isImmutable: false,
+      merkleLeafCount: 1, publisherNodeIdentityId: 1n, author: { address: ADDRESS,
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) }, schemeVersion: 1 }, ackSignatures: [] });
+    const canonical = await mock.resolveCanonicalFinalizationReceipt(created.txHash);
+    if (canonical.status !== 'confirmed') throw new Error('Expected canonical mock receipt');
+    const legacy = await mock.resolvePublishByTxHash(created.txHash);
+    if (!legacy) throw new Error('Expected parsed mock publish');
+    vi.spyOn(mock, 'resolvePublishByTxHash').mockResolvedValueOnce(legacy).mockResolvedValueOnce({ ...legacy,
+      txIndex: undefined, kaId: undefined, startKAId: undefined, endKAId: undefined, merkleRoot: undefined, gasCostWei: 500n });
+    const adopted = await mock.getMintedKnowledgeAssetProvenance(created.batchId, root, CG_ID);
+    expect(adopted).toMatchObject({ ...canonical.receipt, blockTimestamp: legacy.blockTimestamp, gasCostWei: 500n });
   });
 
   it.each([
@@ -182,6 +213,64 @@ describe('existing mint provenance', () => {
         .resolves.toBeNull();
     },
   );
+
+  it.each(['replacement address', 'same address new handle', 'ABA generation', 'graph binding only'] as const)(
+    'does not join retired receipt evidence to a fresh %s observation', async rotation => {
+      const f = fixture();
+      const contracts = Reflect.get(f.chain, 'contracts');
+      const originalStorage = contracts.knowledgeAssetStorage;
+      const replacementAddress = '0x3333333333333333333333333333333333333333';
+      const snapshot = await Reflect.get(f.chain, 'readKnowledgeAssetVersionSnapshot')();
+      const lease = Reflect.get(f.chain, 'knowledgeAssetVersionSnapshotIsCurrent');
+      lease.mockResolvedValue(true); // B's own lease is valid, so it cannot fence A's receipt.
+      // The first graph check belongs to A; rotate only after receipt recovery.
+      const initialGraph = contracts.contextGraphStorage;
+      Reflect.get(f.chain, 'readContract').mockImplementation(async (contract, _label, method) =>
+        method === 'getMerkleRoots' ? f.roots : contract === initialGraph ? CG_ID : CG_ID + 1n);
+      Reflect.get(f.chain, 'readKnowledgeAssetVersionSnapshot').mockImplementation(async () => {
+        expect(f.readPublishReceipt).toHaveBeenCalledTimes(1);
+        if (rotation !== 'graph binding only') {
+          contracts.knowledgeAssetStorage = rotation === 'ABA generation' ? originalStorage : {
+            ...originalStorage, target: rotation === 'replacement address' ? replacementAddress : ADDRESS,
+          };
+          Reflect.set(f.chain, 'knowledgeAssetStorageBindingGeneration', rotation === 'ABA generation' ? 3 : 2);
+        }
+        contracts.contextGraphStorage = {};
+        Reflect.set(f.chain, 'hubBindingGeneration', rotation === 'ABA generation' ? 3 : 2);
+        return { ...snapshot, knowledgeAssetStorageAddress: rotation === 'replacement address' ? replacementAddress : ADDRESS,
+          knowledgeAssetStorageGeneration: Reflect.get(f.chain, 'knowledgeAssetStorageBindingGeneration') };
+      });
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID)).resolves.toBeNull();
+      expect(f.readPublishReceipt).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['storage ABA', 'graph registry'] as const)('fences a %s rotation after the lease answer but before resumption', async rotation => {
+    const f = fixture();
+    const contracts = Reflect.get(f.chain, 'contracts');
+    Reflect.get(f.chain, 'knowledgeAssetVersionSnapshotIsCurrent').mockImplementation(() => {
+      const provedCurrent = Promise.resolve(true);
+      queueMicrotask(() => {
+        if (rotation === 'storage ABA') Reflect.set(f.chain, 'knowledgeAssetStorageBindingGeneration', 3);
+        else contracts.contextGraphStorage = {};
+        Reflect.set(f.chain, 'hubBindingGeneration', 3);
+      });
+      return provedCurrent;
+    });
+    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID)).resolves.toBeNull();
+    expect(Reflect.get(f.chain, 'knowledgeAssetVersionSnapshotIsCurrent')).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['storage address', 'binding generation'] as const)('requires the refreshed snapshot to carry the original %s', async mismatch => {
+    const f = fixture();
+    const readCurrent = Reflect.get(f.chain, 'readKnowledgeAssetVersionSnapshot');
+    const snapshot = await readCurrent();
+    readCurrent.mockResolvedValue({ ...snapshot, ...(mismatch === 'storage address'
+      ? { knowledgeAssetStorageAddress: '0x3333333333333333333333333333333333333333' }
+      : { knowledgeAssetStorageGeneration: 2 }) });
+    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID)).resolves.toBeNull();
+    expect(Reflect.get(f.chain, 'knowledgeAssetVersionSnapshotIsCurrent')).not.toHaveBeenCalled();
+  });
 
   it('retains storage publisher provenance when the receipt records another recipient', async () => {
     const f = fixture();

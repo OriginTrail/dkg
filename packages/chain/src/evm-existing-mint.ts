@@ -2,12 +2,14 @@
 import { ethers, type Contract } from 'ethers';
 import type { ScanProvider } from './evm-adapter-base.js';
 import type { CanonicalFinalizationReceipt, CanonicalFinalizationReceiptReadOptions, KnowledgeAssetVersionSnapshot, OnChainPublishResult } from './chain-adapter.js';
+import { projectAdoptedMintPublishResult, type AdoptedMintPublishResult } from './existing-mint-provenance.js';
 import { AdoptExistingMintRefusalError } from './adopt-existing-mint-refusal-error.js';
 
 import type { CanonicalFinalizationPublishResolution } from './canonical-finalization-publish.js';
 
 export interface EvmExistingMintPorts {
   storage?: Contract;
+  storageBinding: Readonly<{ address: string; generation: number; isCurrent(): boolean }>;
   readRoots(storage: Contract, kaId: bigint): Promise<Array<{ publisher: string; merkleRoot: string; timestamp: bigint }>>;
   readContextGraphId(kaId: bigint): Promise<bigint | null>;
   resolveDeployBlock(address: string): Promise<{ fromBlock: number; head: number; scanProviders: ReadonlyArray<ScanProvider> }>;
@@ -31,9 +33,10 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   kaId: bigint,
   expectedMerkleRoot: Uint8Array,
   expectedContextGraphId: bigint,
-): Promise<OnChainPublishResult | null> {
+): Promise<AdoptedMintPublishResult | null> {
   const storage = ports.storage;
-  if (!storage) return null;
+  const binding = ports.storageBinding;
+  if (!storage || !binding.isCurrent()) return null;
   const expectedHex = ethers.hexlify(expectedMerkleRoot).toLowerCase();
 
   // 1. Chain root must be EXACTLY the locally sealed root, and exactly one
@@ -41,6 +44,7 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   //    index 0 would later stamp vmCurrentAssertion to a stale version).
   const roots: Array<{ publisher: string; merkleRoot: string; timestamp: bigint }> =
     await ports.readRoots(storage, kaId);
+  if (!binding.isCurrent()) return null;
   if (!roots || roots.length === 0) {
     throw new AdoptExistingMintRefusalError(
       'KA_ID_COLLISION',
@@ -64,6 +68,7 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   // 2. CG binding: the minted KA must belong to the CG this publish targets.
   {
     const boundCg = await ports.readContextGraphId(kaId);
+    if (!binding.isCurrent()) return null;
     if (boundCg === null) return null;
     if (boundCg !== expectedContextGraphId) {
       throw new AdoptExistingMintRefusalError(
@@ -74,7 +79,7 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   }
 
   const observation = await readExistingMintObservation(ports, storage, kaId, Number(roots[0].timestamp));
-  if (observation === null) return null;
+  if (observation === null || !binding.isCurrent()) return null;
   const { receipt, publish, eventRoot } = observation;
   // Content refusals are deliberately outside the best-effort read boundary.
   if (receipt.kaId !== kaId || receipt.startKAId !== kaId || receipt.endKAId !== kaId
@@ -91,7 +96,10 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   // coherent finalized version, then validate its current physical lease.
   let current: KnowledgeAssetVersionSnapshot | null;
   try { current = await ports.readCurrentVersion(kaId); } catch { return null; }
-  if (!current || current.knowledgeAssetId !== kaId
+  if (!current || !binding.isCurrent()
+    || current.knowledgeAssetStorageAddress?.toLowerCase() !== binding.address
+    || current.knowledgeAssetStorageGeneration !== binding.generation
+    || current.knowledgeAssetId !== kaId
     || !Number.isSafeInteger(current.blockNumber) || current.blockNumber < receipt.blockNumber
     || typeof current.rootCount !== 'bigint' || current.rootCount < 1n) return null;
   if (current.rootCount > 1n) {
@@ -105,10 +113,10 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   if (current.latestPublisher.toLowerCase() !== roots[0].publisher.toLowerCase()
     || (receipt.authorAddress !== undefined
       && current.latestAuthor.toLowerCase() !== receipt.authorAddress.toLowerCase())) return null;
-  try { if (!await ports.versionIsCurrent(kaId, current)) return null; } catch { return null; }
+  try { if (!await ports.versionIsCurrent(kaId, current) || !binding.isCurrent()) return null; } catch { return null; }
   // Retain the receipt parser's provenance. These three overrides come from
   // the verified storage/seal state rather than a second event decoder.
-  return { ...publish, merkleRoot: expectedMerkleRoot,
+  return { ...projectAdoptedMintPublishResult(publish, receipt), merkleRoot: expectedMerkleRoot,
     blockTimestamp: Number(roots[0].timestamp), publisherAddress: roots[0].publisher };
 }
 

@@ -1,4 +1,16 @@
-import type { OnChainPublishResult } from './chain-adapter.js';
+// SPDX-License-Identifier: Apache-2.0
+import type { CanonicalFinalizationReceipt, OnChainPublishResult } from './chain-adapter.js';
+
+/** Verified identity and ordering from the canonical receipt, plus the parsed publish costs. */
+export type AdoptedMintPublishResult = CanonicalFinalizationReceipt
+  & Omit<OnChainPublishResult, keyof CanonicalFinalizationReceipt>;
+
+/** Required receipt facts win over permissive legacy publish fields. */
+export function projectAdoptedMintPublishResult(
+  publish: OnChainPublishResult, receipt: CanonicalFinalizationReceipt,
+): AdoptedMintPublishResult {
+  return { ...publish, ...receipt };
+}
 
 export interface ExistingMintProvenanceReader {
   /**
@@ -6,8 +18,8 @@ export interface ExistingMintProvenanceReader {
    * minted, verify chain truth (single merkle root == expectedMerkleRoot,
    * KA bound to expectedContextGraphId) and recover the mint transaction's
    * provenance from the `KnowledgeAssetCreated` event log. Returns a
-   * synthesized OnChainPublishResult equivalent to what the original mint
-   * receipt would have produced, or `null` when the log cannot be recovered
+   * verified canonical receipt with the original mint's parsed cost fields,
+   * or `null` when the log cannot be recovered
    * (pruned / non-archive RPCs) — callers must then rethrow their original
    * error, never synthesize a txHash (finalization-handler invariant).
    * Throws AdoptExistingMintRefusalError (KA_ID_COLLISION / KA_SUPERSEDED /
@@ -17,6 +29,6 @@ export interface ExistingMintProvenanceReader {
     kaId: bigint,
     expectedMerkleRoot: Uint8Array,
     expectedContextGraphId: bigint,
-  ): Promise<OnChainPublishResult | null>;
+  ): Promise<AdoptedMintPublishResult | null>;
 
 }

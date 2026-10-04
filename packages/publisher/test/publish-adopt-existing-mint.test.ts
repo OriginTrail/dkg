@@ -34,7 +34,7 @@ import {
   generateEd25519Keypair,
   ed25519Sign, encodeAccessRequest, decodeAccessResponse,
 } from '@origintrail-official/dkg-core';
-import { MockChainAdapter, type OnChainPublishResult } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, type OnChainPublishResult, type AdoptedMintPublishResult } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetsWithMintAdoption } from '../src/adopt-existing-mint.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
@@ -61,7 +61,7 @@ class AdoptableMintChain extends MockChainAdapter {
     expectedMerkleRoot: Uint8Array;
     expectedContextGraphId: bigint;
   }> = [];
-  provenanceResult: OnChainPublishResult | null = null;
+  provenanceResult: AdoptedMintPublishResult | null = null;
 
   constructor(private readonly wallet: ethers.Wallet) {
     super('mock:31337', wallet.address);
@@ -97,7 +97,7 @@ class AdoptableMintChain extends MockChainAdapter {
     kaId: bigint,
     expectedMerkleRoot: Uint8Array,
     expectedContextGraphId: bigint,
-  ): Promise<OnChainPublishResult | null> {
+  ): Promise<AdoptedMintPublishResult | null> {
     this.provenanceCalls.push({ kaId, expectedMerkleRoot, expectedContextGraphId });
     return this.provenanceResult;
   }
@@ -189,7 +189,8 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
       async function access(peer: string) { return decodeAccessResponse(await handler.handler(request, peer as never)); }
       expect(await access('Bob')).toMatchObject({ granted: true, rejectionReason: '' });
       s.chain.mintError = kaIdAlreadyMintedRevert(s.reservedKaId);
-      s.chain.provenanceResult = original.onChainResult!;
+      s.chain.provenanceResult = await MockChainAdapter.prototype.getMintedKnowledgeAssetProvenance.call(
+        s.chain, s.reservedKaId, original.merkleRoot, BigInt(CONTEXT_GRAPH_ID));
       const retry = await s.publisher.publish({ ...s.publishOptions, accessPolicy: policy,
         ...(policy === 'allowList' ? { allowedPeers: ['Alice'] } : {}) });
       expect(retry.status).toBe('confirmed');
@@ -219,6 +220,7 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
       knowledgeAssetsContract: (await s.chain.getDKGKnowledgeAssetsAddress()).toLowerCase(),
       txHash: ADOPTED_TX_HASH,
       blockNumber: 4242,
+      blockHash: `0x${'ef'.repeat(32)}`,
       txIndex: 0,
       blockTimestamp: 1_753_000_000,
       publisherAddress: s.wallet.address,
@@ -364,7 +366,8 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
       const params = submitted.mock.calls[0][0];
       const original = kaIdAlreadyMintedRevert(s.reservedKaId);
       s.chain.mintError = original;
-      s.chain.provenanceResult = initial.onChainResult!;
+      s.chain.provenanceResult = await MockChainAdapter.prototype.getMintedKnowledgeAssetProvenance.call(
+        s.chain, s.reservedKaId, initial.merkleRoot, BigInt(CONTEXT_GRAPH_ID));
       await expect(createKnowledgeAssetsWithMintAdoption(s.chain, params, false,
         createOperationContext('test'), new Logger('test'))).rejects.toBe(original);
       expect(s.chain.provenanceCalls).toHaveLength(0);
@@ -393,7 +396,8 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
     const s = await setupSealedGraphPublish();
     try {
       const initial = await s.publisher.publish(s.publishOptions);
-      s.chain.provenanceResult = initial.onChainResult!;
+      s.chain.provenanceResult = await MockChainAdapter.prototype.getMintedKnowledgeAssetProvenance.call(
+        s.chain, s.reservedKaId, initial.merkleRoot, BigInt(CONTEXT_GRAPH_ID));
       const original = kaIdAlreadyMintedRevert(s.reservedKaId);
       s.chain.mintError = original;
       await expect(s.publisher.publish({ contextGraphId: CONTEXT_GRAPH_ID,
