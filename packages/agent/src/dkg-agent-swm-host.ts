@@ -908,7 +908,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     source: SubscriptionSource = SUBSCRIPTION_SOURCES.RECONCILER,
   ): Promise<void> {
     const session = this.gossipSession;
-    if (!session.active) return;
+    const live = session.live();
+    if (live === null) return;
     if (!this.swmHostModeStore) return;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
@@ -1117,7 +1118,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     curated = true,
   ): void {
     const session = this.gossipSession;
-    if (!session.active) return;
+    const live = session.live();
+    if (live === null) return;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
       const hadRuntimeHostState = session.swmHostModeHandlers.has(hostKey)
@@ -1163,7 +1165,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
     session.swmHostModeSubscribed.set(wireCgId, source);
     session.swmHostModeCurated.set(wireCgId, curated);
-    session.manager!.subscribe(swmTopic);
+    live.manager.subscribe(swmTopic);
     const handler = (_topic: string, data: Uint8Array, from: string) => {
       if (!session.active) return;
       // Fail closed when the classification is absent. Only an explicitly
@@ -1209,7 +1211,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
     };
     session.swmHostModeHandlers.set(wireCgId, handler);
-    session.manager!.onMessage(swmTopic, handler);
+    live.manager.onMessage(swmTopic, handler);
     // B3: persist the host-mode designation so a restart re-engages
     // this handler before the chain-event poller catches up.
     // Codex PR #620 R2: chain wire/unwire writes through a per-CG

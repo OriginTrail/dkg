@@ -747,9 +747,9 @@ export class DKGAgentBase {
    */
   protected _promoteQueueConfig?: Partial<AsyncPromoteQueueConfig>;
   protected gossipSession = new GossipSession();
-  get gossip(): GossipSubManager { return this.gossipSession?.manager as GossipSubManager; }
+  get gossip(): GossipSubManager { return this.gossipSession.requireManager(); }
   set gossip(manager: GossipSubManager) {
-    this.gossipSession?.retire();
+    this.gossipSession.retire();
     this.gossipSession = new GossipSession(manager);
   }
   router!: ProtocolRouter;
@@ -1650,7 +1650,7 @@ export class DKGAgentBase {
 
   /** Retire the owner without touching durable subscription or host-mode intent. */
   protected retireGossipSession(): void {
-    this.gossipSession?.retire();
+    this.gossipSession.retire();
     this.gossipSession = new GossipSession();
   }
   protected readonly seenOnChainIds = new Set<string>();

@@ -276,6 +276,44 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     expect(internals.swmHostModeHandlers.has(hostCg)).toBe(true);
   }, 60_000);
 
+  it.each(['member', 'host'] as const)('ignores retained %s callbacks after retirement and processes replacement callbacks', async (mode) => {
+    const boot = await createEdgeAgent(`RestartGossipRetained-${mode}`);
+    agent = boot.agent;
+    const { internals } = boot;
+    await agent.start();
+    const onMessage = vi.spyOn(GossipSubManager.prototype, 'onMessage');
+    const handle = vi.fn(async () => ({ applied: false }));
+    const ingest = vi.spyOn(agent as any, 'ingestSwmHostModeEnvelope').mockResolvedValue(undefined);
+    const ingestChunk = vi.spyOn(agent as any, 'ingestSwmCiphertextChunkEnvelope').mockResolvedValue(undefined);
+    vi.spyOn(agent as any, 'getOrCreateSharedMemoryHandler').mockReturnValue({ handle });
+    const topic = contextGraphSharedMemoryTopic(internals.gossipWireIdFor(CG));
+    const callbackFor = (manager: GossipSubManager) => {
+      const index = onMessage.mock.calls.findIndex(([wiredTopic], index) =>
+        wiredTopic === topic && onMessage.mock.contexts[index] === manager);
+      expect(index).toBeGreaterThanOrEqual(0);
+      return onMessage.mock.calls[index]![1];
+    };
+    if (mode === 'member') {
+      await createLocalContextGraph(agent);
+      await expect.poll(() => internals.sharedMemoryGossipRegistered.has(CG)).toBe(true);
+    } else internals.wireSwmHostModeHandler(CG, 'manual', false);
+    const retained = callbackFor(internals.gossip);
+    await retained(topic, new Uint8Array(), 'remote-peer');
+    expect(mode === 'member' ? handle : ingest).toHaveBeenCalledOnce();
+    handle.mockClear(); ingest.mockClear(); ingestChunk.mockClear();
+
+    await agent.stop();
+    await agent.start();
+    if (mode === 'member') await expect.poll(() => internals.sharedMemoryGossipRegistered.has(CG)).toBe(true);
+    else internals.wireSwmHostModeHandler(CG, 'manual', false);
+    await retained(topic, new Uint8Array(), 'remote-peer');
+    expect(handle).not.toHaveBeenCalled();
+    expect(ingest).not.toHaveBeenCalled();
+    expect(ingestChunk).not.toHaveBeenCalled();
+    await callbackFor(internals.gossip)(topic, new Uint8Array(), 'remote-peer');
+    expect(mode === 'member' ? handle : ingest).toHaveBeenCalledOnce();
+  }, 60_000);
+
   it('keeps durable state across a restart: subscription intent, sync scope and disconnect history', async () => {
     const boot = await createEdgeAgent('RestartGossipDurable');
     agent = boot.agent;
@@ -387,6 +425,43 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
   }, 60_000);
 
   describe('with a durable subscription store', () => {
+    it.each([false, true])('keeps accounted durable rows unwired when loadAll rejects (delayed=%s)', async (delayed) => {
+      const durable = createSubscriptionStore();
+      const boot = await createEdgeAgent(`RestartGossipRejectedRead-${delayed}`, {
+        contextGraphSubscriptionStore: durable.store,
+      });
+      agent = boot.agent;
+      const { internals } = boot;
+      await agent.start();
+      await createLocalContextGraph(agent);
+      await expect.poll(() => durable.persisted.get(CG)?.subscribed).toBe(true);
+      expect(internals.contextGraphSubscriptionRehydrationAccountedIds.has(CG)).toBe(true);
+      agent.subscribeToContextGraph(OTHER_CG, { syncMode: 'on-demand' });
+      await agent.stop();
+      if (delayed) {
+        let rejectLoad!: (reason: Error) => void;
+        let enteredLoad!: () => void;
+        const entered = new Promise<void>((resolve) => { enteredLoad = resolve; });
+        const pending = new Promise<SubscriptionRow[]>((_, reject) => { rejectLoad = reject; });
+        vi.spyOn(durable.store, 'loadAll').mockImplementationOnce(() => { enteredLoad(); return pending; });
+        const restarting = agent.start();
+        await entered;
+        // Detached accounting moves while the read awaits; the pre-read
+        // snapshot must still govern which live intents may be restored.
+        internals.contextGraphSubscriptionRehydrationAccountedIds.delete(CG);
+        internals.contextGraphSubscriptionRehydrationAccountedIds.add(OTHER_CG);
+        rejectLoad(new Error('durable load failed'));
+        await restarting;
+      } else {
+        vi.spyOn(durable.store, 'loadAll').mockRejectedValueOnce(new Error('durable load failed'));
+        await agent.start();
+      }
+      for (const topic of memberTopics(CG)) expect(internals.gossip.subscribedTopics).not.toContain(topic);
+      for (const topic of memberTopics(OTHER_CG)) expect(internals.gossip.subscribedTopics).toContain(topic);
+      expect(internals.gossipRegistered.has(CG)).toBe(false);
+      expect(internals.gossipRegistered.has(OTHER_CG)).toBe(true);
+    }, 60_000);
+
     it('replays a persisted subscription through rehydration onto the fresh manager', async () => {
       const durable = createSubscriptionStore();
       const boot = await createEdgeAgent('RestartGossipRehydrate', {

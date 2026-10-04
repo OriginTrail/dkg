@@ -888,7 +888,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
     const session = this.gossipSession;
-    if (!session.active) return;
+    const live = session.live();
+    if (live === null) return;
     // Retired name-hash id: skip. It shares the wire topic and host-mode key
     // with the cleartext row, and a topic-wide unsubscribe here would drop
     // that row's handler (see supersedingContextGraphIdFor).
@@ -921,7 +922,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // GossipSubManager.unsubscribe() is topic-wide, so clear both member
         // and host bookkeeping before returning. A future live subscription
         // may explicitly restore the scope-filtered member handler.
-        session.manager!.unsubscribe(swmTopic);
+        live.manager.unsubscribe(swmTopic);
         session.sharedMemoryGossipRegistered.delete(contextGraphId);
         const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
         session.swmHostModeSubscribed.delete(hostKey);
@@ -969,7 +970,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // final on-disk state always matches the final in-memory
         // intent — no possible interleave where the "false" lands
         // after a later "true" and re-subscribes on next boot.
-        session.manager!.unsubscribe(swmTopic);
+        live.manager.unsubscribe(swmTopic);
         session.sharedMemoryGossipRegistered.delete(contextGraphId);
         // Host-mode maps are canonical-keyed (wire-form hash); delete
         // by canonical id so this cleanup hits the entry regardless
@@ -1005,8 +1006,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.unwireSwmHostModeHandler(contextGraphId);
 
     session.sharedMemoryGossipRegistered.add(contextGraphId);
-    session.manager!.subscribe(swmTopic);
-    session.manager!.onMessage(swmTopic, async (_topic, data, from) => {
+    live.manager.subscribe(swmTopic);
+    live.manager.onMessage(swmTopic, async (_topic, data, from) => {
       if (!session.active) return;
       const wh = this.getOrCreateSharedMemoryHandler();
       const outcome = await wh.handle(data, from);
