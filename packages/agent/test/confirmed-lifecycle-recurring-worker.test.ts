@@ -7,10 +7,74 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
+import { assertionLifecycleUri, buildAssertionSealQuads, contextGraphAssertionUri,
+  contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import { ethers } from 'ethers';
 const dirs: string[] = [], stores: OxigraphStore[] = [], owners: NamedKaVmLifecycleRepair[] = [];
 afterEach(async () => { vi.useRealTimers(); for (const owner of owners.splice(0)) await owner.stop();
   for (const store of stores.splice(0)) await store.close(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 describe('confirmed lifecycle recurring worker ownership', () => {
+  it('completes a confirmed process-local pending repair after same-instance stop/start without publishing again', async () => {
+    const chain = new MockChainAdapter();
+    const agent = await DKGAgent.create({ name: 'ProcessLocalRepairRestart', nodeRole: 'edge',
+      listenHost: '127.0.0.1', listenPort: 0, chainAdapter: chain });
+    let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const { input, publication } = confirmedLifecycleRecoveryFixture();
+    const data = [{ subject: 'urn:restart:entity', predicate: 'http://schema.org/name', object: '"Pending"', graph: '' }];
+    const root = computeFlatKCRootV10(data, []), rootHex = ethers.hexlify(root);
+    const scope = createGraphKnowledgeAssetScope(input.publishedUal, 1);
+    const packed = (BigInt(input.agentAddress) << 96n) | 1n;
+    const meta = contextGraphMetaUri(input.contextGraphId);
+    const lifecycle = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name);
+    const assertion = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name);
+    const deployment = await chain.getKnowledgeAssetsLifecycleAddress();
+    const internals = agent as unknown as { namedKaVmLifecycleRepair?: NamedKaVmLifecycleRepair; config: { dataDir?: string } };
+    try {
+      await agent.start(); expect(internals.config.dataDir).toBeUndefined();
+      await agent.store.insert([
+        ...data.map(quad => ({ ...quad, graph: knowledgeAssetLayerGraphUri(input.contextGraphId, MemoryLayer.SharedWorkingMemory, scope) })),
+        ...buildAssertionSealQuads({ ...publication.seal, assertionUri: assertion, metaGraph: meta,
+          merkleRoot: root, kav10Address: deployment, reservedKaId: packed, kaUal: input.publishedUal }),
+        { graph: meta, subject: lifecycle, predicate: 'http://dkg.io/ontology/kaId', object: '"1"' },
+        { graph: meta, subject: lifecycle, predicate: 'http://dkg.io/ontology/state', object: '"shared"' },
+      ]);
+      vi.spyOn(agent.publisher, 'hasSwmShareComplete').mockResolvedValue(true);
+      vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot').mockResolvedValue({ latestRoot: rootHex, rootCount: 1n });
+      // Control confirmation only; lifecycle recovery still uses the real owner and memory store.
+      const publish = vi.spyOn(agent, 'publishFromSharedMemory').mockResolvedValue({ ...publication, merkleRoot: root, kaId: packed });
+      const mint = vi.spyOn(agent.publisher, 'publish'), update = vi.spyOn(agent.publisher, 'update');
+      const mutate = agent.store.atomicUpdate!.bind(agent.store);
+      let failing = true;
+      const writes = vi.spyOn(agent.store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
+        if (failing && options?.source === 'agent.publish.confirmedLifecycleCommit') {
+          throw new StoreOperationTimeoutError({ backend: 'oxigraph', operation: 'atomicUpdate', outcome: 'not_started' });
+        }
+        return mutate(sparql, options);
+      });
+      const result = await agent.publishFromFinalizedAssertion(input.contextGraphId, input.name, { agentAddress: input.agentAddress });
+      expect(result).toMatchObject({ status: 'confirmed', ual: input.publishedUal, lifecycleRepairPending: true });
+      expect(publish).toHaveBeenCalledOnce();
+      const owner = agent.getOrCreateNamedKaVmLifecycleRepair();
+      const committed = () => agent.store.query(`ASK { GRAPH <${meta}> { <${lifecycle}>
+        <http://dkg.io/ontology/vmCurrentAssertion> "${rootHex.slice(2)}" ;
+        <http://dkg.io/ontology/state> "published" ;
+        <http://dkg.io/ontology/publishedUal> ${JSON.stringify(input.publishedUal)} } }`);
+      expect(await committed()).toMatchObject({ value: false });
+      const attempts = () => writes.mock.calls.filter(([, options]) => options?.source === 'agent.publish.confirmedLifecycleCommit').length;
+      await owner.runDue(); expect(attempts()).toBe(1); // The original retry deadline remains authoritative.
+      await agent.stop(); now += 6_000; failing = false;
+      await owner.runDue(); expect(attempts()).toBe(1); // No retry while dependencies are closed.
+      await agent.start();
+      await agent.getOrCreateNamedKaVmLifecycleRepair().runDue();
+      expect(await committed()).toMatchObject({ value: true });
+      expect(attempts()).toBe(2); expect(publish).toHaveBeenCalledOnce();
+      expect(mint).not.toHaveBeenCalled(); expect(update).not.toHaveBeenCalled();
+      expect(internals.namedKaVmLifecycleRepair).toBe(owner);
+      await owner.runDue(); expect(attempts()).toBe(2); // Completed evidence is consumed exactly once.
+    } finally { await agent.stop().catch(() => undefined); await agent.store.close(); vi.restoreAllMocks(); }
+  });
   it('refuses restart and new submissions until a held direct write physically retires, then permits a fresh worker', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-worker-retirement-')); dirs.push(dir);
     const path = join(dir, 'store.nq'), store = new OxigraphStore(path); stores.push(store);
@@ -39,7 +103,7 @@ describe('confirmed lifecycle recurring worker ownership', () => {
     owner.start(); expect(await owner.submit({ ...input, name: 'after-retirement' })).toBe('repaired');
     expect(apply).toHaveBeenCalledTimes(2); await owner.stop();
   });
-  it('fences agent admission before teardown, drains physical writes and installs a fresh owner on same-instance restart', async () => {
+  it('fences agent admission before teardown, drains physical writes and restarts the retained owner', async () => {
     const agent = await DKGAgent.create({ name: 'ConfirmedRepairRestart', nodeRole: 'edge',
       listenHost: '127.0.0.1', listenPort: 0, chainAdapter: new MockChainAdapter() });
     let release!: () => void, entered!: () => void;
@@ -68,12 +132,12 @@ describe('confirmed lifecycle recurring worker ownership', () => {
       expect(close).not.toHaveBeenCalled(); expect(nextTeardown).not.toHaveBeenCalled();
       release(); expect(await submission).toBe('repaired'); await stopping;
       expect(close).toHaveBeenCalledOnce(); expect(nextTeardown).toHaveBeenCalledOnce();
-      expect(internals.namedKaVmLifecycleRepair).toBeUndefined();
+      expect(internals.namedKaVmLifecycleRepair).toBe(owner);
       const restart = vi.spyOn(NamedKaVmLifecycleRepair.prototype, 'start');
       await agent.start();
-      const fresh = agent.getOrCreateNamedKaVmLifecycleRepair();
-      expect(fresh).not.toBe(owner); expect(restart).toHaveBeenCalledOnce();
-      expect(restart.mock.contexts[0]).toBe(fresh);
+      const retained = agent.getOrCreateNamedKaVmLifecycleRepair();
+      expect(retained).toBe(owner); expect(restart).toHaveBeenCalledOnce();
+      expect(restart.mock.contexts[0]).toBe(retained);
       expect(await agent.store.query('ASK { GRAPH <urn:worker> { <urn:before-stop> <urn:value> "committed" } }')).toMatchObject({ value: true });
     } finally { release(); await Promise.allSettled([submission, stopping]); await owner.stop();
       await agent.stop().catch(() => undefined); await agent.store.close(); vi.restoreAllMocks(); }

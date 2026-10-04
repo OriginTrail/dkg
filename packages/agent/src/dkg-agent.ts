@@ -3053,7 +3053,7 @@ export class DKGAgent extends DKGAgentBase {
     // chain and graph-store dependencies are still alive. No new retry may
     // begin after this boundary.
     await namedLifecycleRepairDrain;
-    this.namedKaVmLifecycleRepair = undefined;
+    // Keep scheduled repairs for same-instance restart, including process-local hosts.
     await this.finalizationHandler?.stopRecoveryWorker();
     // OT-RFC-64 Gate 1: unregister the public catalog protocols and drain the
     // receiver scheduler (awaiting in-flight durable stage writes) while the
