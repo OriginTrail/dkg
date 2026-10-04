@@ -89,10 +89,13 @@ export async function collectAbandonedDraftArtifacts(input: {
     }
     // Old counter bugs left /assertions/N above the confirmed next version. Only
     // those unreachable versions are collected; historical and next drafts remain.
-    const graphs = await store.query(`SELECT DISTINCT ?graph WHERE {
-      GRAPH ?graph { ?s ?p ?o }
+    // Enumerate the graph index once per graph; the probe excludes registered
+    // empty graphs without materializing every private quad before paging.
+    const graphs = await store.query(`SELECT ?graph WHERE {
+      GRAPH ?graph {}
       FILTER(STRSTARTS(STR(?graph), ${sparqlString(prefix)}) && CONTAINS(STR(?graph), "/_private/"))
       FILTER(STR(?graph) > ${sparqlString(cursor.privateGraph)})
+      FILTER EXISTS { GRAPH ?graph { ?s ?p ?o } }
     } ORDER BY ?graph LIMIT ${BATCH_SIZE}`, { source: 'agent.draftArtifacts.privateGraphs', priority: 'background' });
     if (graphs.type !== 'bindings') return counts;
     cursor.privateGraph = graphs.bindings.length === BATCH_SIZE ? graphs.bindings.at(-1)?.['graph'] ?? '' : '';
