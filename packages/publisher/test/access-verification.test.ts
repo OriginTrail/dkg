@@ -355,7 +355,7 @@ describe('I-005: Access handler signature verification', () => {
 });
 
 describe('graph-scoped private access', () => {
-  it('serves the accepted private commitment after an unshared same-version draft replaces the latest partition', async () => {
+  it.each([false, true])('serves the accepted private commitment after same-version replacement until explicit deletion (%s)', async deleteVersion => {
     const store = new OxigraphStore();
     try {
       const graphManager = new GraphManager(store);
@@ -390,6 +390,16 @@ describe('graph-scoped private access', () => {
       expect(bytes).not.toContain('unshared-c');
       expect(toHex(response.privateMerkleRoot)).toBe(toHex(privateMerkleRoot));
       expect(toHex(computePrivateRootV10(parseSimpleNQuads(bytes))!)).toBe(toHex(response.privateMerkleRoot));
+      if (deleteVersion) {
+        await privateStore.deleteKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope);
+        const deleted = decodeAccessResponse(await new AccessHandler(store, new TypedEventBus()).handler(encodeAccessRequest({
+          kaUal: ual, requesterPeerId: 'reader-peer', paymentProof: new Uint8Array(0),
+          requesterSignature: signature, requesterPublicKey: keypair.publicKey,
+        }), 'reader-peer' as any));
+        expect(deleted.granted).toBe(false);
+        expect(deleted.nquads).toHaveLength(0);
+        expect(deleted.rejectionReason).toContain('integrity check failed');
+      }
     } finally { await store.close(); }
   });
 

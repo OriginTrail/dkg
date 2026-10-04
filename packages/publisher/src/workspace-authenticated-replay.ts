@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri } from '@origintrail-official/dkg-core';
-import { deleteByPatternWithoutCount, type GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import type { GraphManager, TripleStore } from '@origintrail-official/dkg-storage';
 import { RECOVERED_OPERATION_CHRONOLOGY, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
 import { normalizeWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
 import { xsdDateTimeLiteral } from './storage-ack-ledger.js';
+import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 
 /** Called under the live KA lock after the authenticated exact-content checks. */
 export async function authenticateWorkspaceOperationReplay(input: {
@@ -30,8 +31,7 @@ export async function authenticateWorkspaceOperationReplay(input: {
   // Authenticate the signed wire clock, never the provider's retained clock.
   // Immutable semantics were checked by the caller; keep every head alias and
   // snapshot locator so queued references retain their exact operation identity.
-  await deleteByPatternWithoutCount(input.store, { graph, subject, predicate: publishedAt });
-  await deleteByPatternWithoutCount(input.store, { graph, subject, predicate: RECOVERED_OPERATION_CHRONOLOGY });
-  await input.store.insert([clock]);
-  await persistWorkspaceOperationEvidence(input.store, [...rows, clock]);
+  const replacement = [...rows, clock];
+  await replaceSubjectAtomicallyOrFallback(input.store, graph, subject, replacement, 'publisher.workspace.authenticatedReplay');
+  await persistWorkspaceOperationEvidence(input.store, replacement);
 }

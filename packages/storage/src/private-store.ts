@@ -5,6 +5,7 @@ import {
   canonicalKnowledgeAssetGraphIdentitySuffix,
   escapeSparqlLiteral,
   isSafeIri,
+  sparqlString,
   type GraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
 import {
@@ -385,9 +386,21 @@ export class PrivateContentStore {
     scope: GraphKnowledgeAssetScope,
     subGraphName?: string,
   ): Promise<void> {
-    await this.store.dropGraph(
-      this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName),
-    );
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    await this.withGraphWriteLock(graphUri, async () => {
+      // Explicit deletion retires all commitments of this version. Ordinary
+      // replacement deliberately retains them for older authenticated seals.
+      const prefix = `${graphUri}/commitments/`;
+      for (;;) {
+        const result = await this.store.query(`SELECT ?graph WHERE { GRAPH ?graph {}
+          FILTER(STRSTARTS(STR(?graph), ${sparqlString(prefix)}))
+        } ORDER BY ?graph LIMIT 32`, { source: 'storage.private.deleteVersionArchives' });
+        if (result.type !== 'bindings') throw new Error('Private commitment archive discovery is unavailable');
+        if (result.bindings.length === 0) break;
+        for (const row of result.bindings) await this.store.dropGraph(assertSafeIri(row['graph']!));
+      }
+      await this.store.dropGraph(graphUri);
+    });
   }
 
   private privateKey(contextGraphId: string, subGraphName?: string): string {
