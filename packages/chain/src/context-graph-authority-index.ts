@@ -88,6 +88,15 @@ export interface ContextGraphAuthorityIndexScanInput {
   readonly scope: string;
   /** Physical RPC reader identity; isolates a timed-out provider attempt. */
   readonly readScope: object;
+  /**
+   * Optional immutable generation of the rows exposed by `readScope`.
+   *
+   * A long-lived local reader can replace its rows while retaining the same
+   * object identity and finalized block. Such generations must not join one
+   * physical flight because its stabilization fence belongs to the generation
+   * that started it. Provider readers omit this and retain the previous key.
+   */
+  readonly readGeneration?: string;
   readonly deploymentBlockNumber: number;
   readonly finalized: Readonly<{ number: number; hash: string }>;
   readonly pageSize: number;
@@ -350,7 +359,12 @@ export class ContextGraphAuthorityIndex {
       { number: input.finalized.number, hash: finalizedHash },
       horizonMode === 'active',
     );
-    const scanKey = [scope, input.finalized.number, finalizedHash].join('\u0000');
+    const scanKey = [
+      scope,
+      input.finalized.number,
+      finalizedHash,
+      input.readGeneration ?? '',
+    ].join('\u0000');
     const pending = this.#singleFlight.run(scanKey, input.readScope, () => {
       const lifecycleSignal = this.#lifecycleAbort.signal;
       const scan = this.#scan({ ...input, scope, finalized: {

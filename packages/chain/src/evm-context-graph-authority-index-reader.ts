@@ -67,6 +67,10 @@ function isContextGraphAuthorityIndexProviderRetryableV1(
   );
 }
 
+/** A local one-log CAS fence moved; retry locally before spending failover. */
+class ContextGraphAuthorityIndexLogAnchorMovedError extends
+  ContextGraphAuthorityIndexRetryableError {}
+
 /**
  * Keep authority-index eth_getLogs requests inside the strictest production
  * provider limit currently supported. The configured registry page size can
@@ -344,6 +348,10 @@ function authorityIndexScanInputV1(
       // Two generations can share the same fallback provider, but may never
       // join one physical single-flight scan across that ownership boundary.
       readScope: logSource.source,
+      // The source object is stable for its whole runtime generation, while an
+      // ordinary tick commit advances this revision even at the same head.
+      // Bind the physical flight to the exact rows its stabilizer fences.
+      readGeneration: `${logSource.anchor.lineage}:${logSource.anchor.revision}`,
       readBlockHash: (blockNumber, lifecycleSignal) => (
         logged.readBlockHash(blockNumber, lifecycleSignal)
       ),
@@ -356,7 +364,7 @@ function authorityIndexScanInputV1(
       stabilize: async (lifecycleSignal) => {
         lifecycleSignal.throwIfAborted();
         if (!await logSource.source.anchorHolds(logSource.anchor)) {
-          throw new ContextGraphAuthorityIndexRetryableError(
+          throw new ContextGraphAuthorityIndexLogAnchorMovedError(
             `chain event log moved under ${input.stabilizationOperation}`,
           );
         }
@@ -438,7 +446,7 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
       if (input.postProjectLogStabilization === true
         && logSource !== undefined
         && !await logSource.source.anchorHolds(logSource.anchor)) {
-        throw new ContextGraphAuthorityIndexRetryableError(
+        throw new ContextGraphAuthorityIndexLogAnchorMovedError(
           `chain event log moved under ${input.stabilizationOperation}`,
         );
       }
@@ -783,6 +791,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             options.signal?.throwIfAborted();
             projectionSignal.throwIfAborted();
             if (!isContextGraphAuthorityIndexRetryableError(error)) throw error;
+            // A tick commit moves the local revision without implicating this
+            // RPC endpoint. Reacquire the new generation once; if it moves
+            // again, use this same provider's live scan rather than consuming
+            // an endpoint failover or falsely exhausting a single-provider set.
+            if (error instanceof ContextGraphAuthorityIndexLogAnchorMovedError) {
+              if (logAttempt === 0) continue;
+              break;
+            }
             // Retrying the same local rows cannot lift a fold above the
             // durable horizon. Fall through to this provider's live view; if
             // the endpoint also trails, the outer pool can try a sibling.

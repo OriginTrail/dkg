@@ -445,6 +445,55 @@ describe('Context Graph authority index over the one log', () => {
     await expect(readingA).resolves.toBeUndefined();
   });
 
+  it('does not single-flight successive revisions of one source at the same head', async () => {
+    const store = seededStore({
+      rows: [creationRow(20, 7n, NAME_HASH, 1)],
+    });
+    const original = logSource(store);
+    const enteredA = Promise.withResolvers<void>();
+    const releaseA = Promise.withResolvers<void>();
+    const readPage = vi.fn(async (...args: Parameters<typeof original.pageSource.readPage>) => {
+      if (readPage.mock.calls.length === 1) {
+        enteredA.resolve();
+        await releaseA.promise;
+      }
+      return original.pageSource.readPage(...args);
+    });
+    const source: ChainEventLogAuthoritySource = {
+      ...original,
+      pageSource: { ...original.pageSource, readPage },
+    };
+    const { reader, calls, attempts } = makeReader({ store, source });
+    const readingA = reader.readContextGraphFinalizedCreation(7n);
+    await enteredA.promise;
+
+    const before = (await store.load(SCOPE))!;
+    const { revision, ...cursor } = before.cursor;
+    await expect(store.commit(SCOPE, revision, {
+      cursor,
+      rows: [],
+      coverage: [],
+    })).resolves.toBe(revision + 1);
+    const after = (await store.load(SCOPE))!;
+    expect(after.cursor.head).toEqual(before.cursor.head);
+
+    const readingB = reader.readContextGraphFinalizedCreation(7n);
+    try {
+      await vi.waitFor(() => expect(readPage).toHaveBeenCalledTimes(2), { timeout: 250 });
+      await expect(readingB).resolves.toEqual({
+        nameHash: NAME_HASH,
+        accessPolicy: 1,
+      });
+    } finally {
+      releaseA.resolve();
+      await Promise.allSettled([readingA, readingB]);
+    }
+
+    await expect(readingA).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+    expect(attempts).toHaveLength(0);
+  });
+
   it('returns a proof miss when the source rotates during the point-row lookup', async () => {
     const store = seededStore();
     const original = logSource(store);
@@ -1184,19 +1233,19 @@ describe('Context Graph authority index over the one log', () => {
       });
   });
 
-  it('refuses the fold when the tick committed underneath it', async () => {
+  it('retries a moved log revision then falls back within the same provider', async () => {
     const store = seededStore();
     // The fence, and only the fence: the anchor resolves, the pages read, and
     // then the log moves before the answer is handed over.
     const moved = vi.fn(async () => false);
     const source = { ...logSource(store), anchorHolds: moved };
-    const { reader, attempts } = makeReader({ store, source });
+    const { reader, attempts, calls } = makeReader({ store, source });
 
-    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /chain event log moved under/,
-    );
-    // Retryable, not fatal: the transport asked for a second attempt.
-    expect(attempts).toHaveLength(2);
-    expect(moved).toHaveBeenCalled();
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(7n);
+    // The first moved revision reacquires the log; the second drops to the live
+    // scan against this provider instead of being misclassified as its outage.
+    expect(moved).toHaveBeenCalledTimes(2);
+    expect(calls.getLogs).toBe(1);
+    expect(attempts).toHaveLength(0);
   });
 });
