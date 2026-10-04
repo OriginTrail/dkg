@@ -46,6 +46,7 @@ import {
 import {
   NoChainAdapter,
   activeRpcRequestAbortSignal,
+  activeRpcRequestContext,
   createRpcRequestProvider,
   RpcRequestGovernor,
   RpcEndpointsExhaustedError,
@@ -2481,7 +2482,10 @@ describe('RFC-64 rollout authority integration', () => {
       contextGraphId: '10',
       accessPolicy: 0,
     });
+    const readLanes: Array<Readonly<{ requestClass: string; admissionPriority?: string }>> = [];
     const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
+      const { requestClass, admissionPriority } = activeRpcRequestContext();
+      readLanes.push({ requestClass, admissionPriority });
       if (nameHashes.includes(firstSnapshot.nameHash)) {
         throw new Error('durably bound duplicate name hash is ambiguous');
       }
@@ -2524,12 +2528,15 @@ describe('RFC-64 rollout authority integration', () => {
         contextGraphId === localFirstContextGraphId
       ));
 
-    const requests = await edge.createRfc64CatalogAuthorityRefreshRequestsV1(
-      [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
-      new AbortController().signal,
-    );
+    const requests = await withRpcRequestContext({ requestClass: 'background' }, () => (
+      edge.createRfc64CatalogAuthorityRefreshRequestsV1(
+        [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
+        new AbortController().signal,
+      )
+    ));
 
     expect(resolveSnapshots).toHaveBeenCalledOnce();
+    expect(readLanes).toEqual([{ requestClass: 'foreground', admissionPriority: 'authority' }]);
     expect(resolveSnapshots).toHaveBeenCalledWith([
       secondSnapshot.nameHash,
     ], {
