@@ -1157,7 +1157,8 @@ export class QueryMethods extends DKGAgentBase {
    */
   resolveRfc64PrivateReadRosterV1(this: DKGAgent, contextGraphId: string): readonly string[] | null | undefined {
     return resolveRfc64PrivateReadRoster({
-      config: this.config,
+      activeNetworkId: this.config.networkIdentity?.chainId,
+      acceptedPolicies: this.config.rfc64CatalogBootstrap?.acceptedPolicies,
       service: this.rfc64PublicCatalogServiceV1,
       isJoinDerived: id => this.isRfc64JoinDerivedAcceptedAuthorityV1?.(id) === true,
     }, contextGraphId);
