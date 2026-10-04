@@ -2,7 +2,13 @@
 
 import type { ApprovedPrivateReplicaAuthority } from '../approved-private-replica.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
-import type { Rfc64ReleaseNativeAuthoritySnapshotV1 } from './release-native-catalog-authority-v1.js';
+import type { Rfc64ParsedAuthoritySnapshotV1, Rfc64ReleaseNativeAuthoritySnapshotV1 } from './release-native-catalog-authority-v1.js';
+
+export interface Rfc64RegisteredLifecycleAuthorityEvidenceV1 {
+  readonly expectedNameHash: string;
+  readonly expectedOnChainId: bigint;
+  readonly snapshot: Rfc64ParsedAuthoritySnapshotV1;
+}
 
 /** Source precedence is selected once; lifecycle composition validates its constraints. */
 export type Rfc64CatalogLifecycleAuthoritySourceV1 =
@@ -10,7 +16,7 @@ export type Rfc64CatalogLifecycleAuthoritySourceV1 =
   | Readonly<{ kind: 'compatibility'; snapshot: AcceptedRfc64CatalogAccessSnapshotV1 }>
   | Readonly<{ kind: 'approved-private'; authority: ApprovedPrivateReplicaAuthority; metadataRevision: string; requesterRevision: number }>
   | Readonly<{ kind: 'replica-seed'; snapshot: Rfc64ReleaseNativeAuthoritySnapshotV1 }>
-  | Readonly<{ kind: 'registered' }>;
+  | Readonly<{ kind: 'registered'; evidence: Rfc64RegisteredLifecycleAuthorityEvidenceV1 }>;
 
 export type Rfc64ApprovedPrivateLifecycleSourceResolutionV1 =
   | Readonly<{ kind: 'available'; authority: ApprovedPrivateReplicaAuthority; metadataRevision: string; requesterRevision: number }>
@@ -29,14 +35,16 @@ function available(source: Rfc64CatalogLifecycleAuthoritySourceV1): Rfc64Catalog
 export async function resolveRfc64CatalogLifecycleAuthoritySourceV1(ports: {
   readonly bound: boolean;
   readonly finalizedAbsence: boolean;
-  /** A successful registered read found no target; only join proof may use legacy absence. */
-  readonly registeredAbsence?: boolean;
+  readonly readRegistered: () => Promise<Rfc64RegisteredLifecycleAuthorityEvidenceV1 | null>;
   readonly isLocalFirst: () => Promise<boolean>;
   readonly readCompatibility: () => AcceptedRfc64CatalogAccessSnapshotV1 | null;
   readonly resolveApprovedPrivate: () => Promise<Rfc64ApprovedPrivateLifecycleSourceResolutionV1>;
   readonly loadReplicaSeed: () => Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null>;
 }): Promise<Rfc64CatalogLifecycleAuthoritySourceResolutionV1> {
-  if (ports.bound) return available({ kind: 'registered' });
+  if (ports.bound) {
+    const evidence = await ports.readRegistered();
+    return evidence === null ? Object.freeze({ kind: 'absent' }) : available({ kind: 'registered', evidence });
+  }
   if (await ports.isLocalFirst()) return available({ kind: 'local-first' });
   const compatibility = ports.readCompatibility();
   if (compatibility?.policy.accessPolicy === 1
@@ -47,7 +55,10 @@ export async function resolveRfc64CatalogLifecycleAuthoritySourceV1(ports: {
   // A proof cannot substitute for registration discovery. Signed replica seeds
   // require finalized absence; approved private joins also support legacy absence.
   // Public metadata alone is never an authority source.
-  if (!ports.finalizedAbsence && !ports.registeredAbsence) return available({ kind: 'registered' });
+  if (!ports.finalizedAbsence) {
+    const evidence = await ports.readRegistered();
+    if (evidence !== null) return available({ kind: 'registered', evidence });
+  }
   const approved = await ports.resolveApprovedPrivate();
   if (approved.kind === 'facts-moved') return approved;
   if (approved.kind === 'available') return available({ kind: 'approved-private',

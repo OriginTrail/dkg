@@ -288,6 +288,35 @@ describe('durable VM / SWM tier reconciliation', () => {
     await store.close();
   });
 
+  it.each([undefined, 'updates'])('preserves headless nonempty SWM on a VM evidence arrival for subgraph %s', async (subGraphName) => {
+    const store = new OxigraphStore();
+    try {
+      const input = fixture(subGraphName);
+      await seedTwin(store, input);
+      await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      const readSwm = () => store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.swmGraph}> { ?s ?p ?o } }`);
+      const readMetadata = () => store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.swmMetaGraph}> { ?s ?p ?o } }`);
+      const before = JSON.stringify(await readSwm());
+      const metadataBefore = JSON.stringify(await readMetadata());
+      const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+        await store.dropGraph(candidate.swmGraph);
+        await store.dropGraph(input.swmMetaGraph);
+      });
+
+      const result = await reconcileFinalizedSwmTwinWithEvidence({
+        store, writeLocks: new Map(), asset: input.asset, retire,
+      });
+
+      expect(result).toEqual({ outcome: 'head-missing-or-ambiguous' });
+      expect('retirement' in result).toBe(false);
+      expect(retire).not.toHaveBeenCalled();
+      expect(JSON.stringify(await readSwm())).toBe(before);
+      expect(JSON.stringify(await readMetadata())).toBe(metadataBefore);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('reconciles a later SWM arrival after a VM-first absence check', async () => {
     const store = new OxigraphStore();
     const input = fixture();

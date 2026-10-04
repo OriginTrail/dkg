@@ -3041,10 +3041,81 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : undefined;
       const boundOnChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
         ?? suppliedAuthorityEvidence?.contextGraphAuthorityIndexId;
-      const resolveSource = (registeredAbsence = false) => resolveRfc64CatalogLifecycleAuthoritySourceV1({
+      if (
+        suppliedAuthorityEvidence !== undefined
+        && suppliedAuthorityEvidence.contextGraphAuthorityIndexId !== boundOnChainId
+      ) {
+        throw new Error('RFC-64 finalized authority evidence belongs to another graph');
+      }
+      const sourceResolution = await resolveRfc64CatalogLifecycleAuthoritySourceV1({
         bound: boundOnChainId !== undefined,
         finalizedAbsence: authorityRequest.kind === 'finalized-absence',
-        registeredAbsence,
+        readRegistered: async () => {
+          // Responsibility bootstrap and scheduled refreshes pass the exact
+          // immutable evidence selected by their owner. `null` is finalized
+          // absence and must not reopen a legacy current-state lookup.
+          const ownedAuthorityEvidence = authorityRequest.kind === 'finalized-absence'
+            ? null
+            : authorityRequest.kind === 'finalized-evidence'
+              ? authorityRequest.evidence
+              : boundOnChainId === undefined
+                ? undefined
+                : await this.readRfc64FinalizedAuthoritySnapshotEvidenceV1(
+                  boundOnChainId,
+                  signal,
+                );
+          const batchedSnapshot = ownedAuthorityEvidence === null
+            ? null
+            : ownedAuthorityEvidence?.snapshot;
+          // "Bound locally but absent from the FINALIZED index" is chain-finality lag
+          // (Base Sepolia lags ~600 blocks / ~20 min), which is retryable -- not a
+          // binding fault. `auto` / `finalized-evidence` requests have already read
+          // the index, so a null snapshot IS that absence. A `finalized-absence`
+          // request is ambiguous: the refresh loop derives it from a null finalized
+          // snapshot (lag), but an explicit caller may assert an absence the index
+          // contradicts (a real mismatch). Probe the index once to tell them apart;
+          // with no indexed reader we keep failing closed as a mismatch.
+          let boundIdUnfinalized = false;
+          if (boundOnChainId !== undefined && batchedSnapshot === null) {
+            if (authorityRequest.kind !== 'finalized-absence') {
+              boundIdUnfinalized = true;
+            } else {
+              const probe = await this.readRfc64FinalizedAuthoritySnapshotEvidenceV1(
+                boundOnChainId,
+                signal,
+              );
+              boundIdUnfinalized = probe !== undefined && probe.snapshot === null;
+            }
+          }
+          if (batchedSnapshot === undefined) {
+            return this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId, signal);
+          }
+          if (batchedSnapshot === null || boundOnChainId === undefined) {
+            // Retryable lag vs. a genuine mismatch: see `boundIdUnfinalized`.
+            // Whether accepted authority is RETAINED through the lag is decided
+            // by the refresh caller and is author-scoped.
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              boundIdUnfinalized
+                ? 'registered-authority-unfinalized'
+                : 'registered-authority-binding-mismatch',
+              'registered RFC-64 Context Graph has no finalized indexed authority',
+            );
+          }
+          const expectedOnChainId = BigInt(boundOnChainId);
+          const explicitNameHash = this.subscribedContextGraphs
+            .get(contextGraphId)?.onChainHash;
+          const expectedNameHash = explicitNameHash === undefined
+            ? this.contextGraphNameCommitment(contextGraphId)
+            : this.contextGraphWireId(explicitNameHash);
+          return {
+            expectedNameHash,
+            expectedOnChainId,
+            snapshot: parseRfc64AuthoritySnapshotV1(
+              batchedSnapshot,
+              expectedOnChainId,
+            ),
+          } as const;
+        },
         isLocalFirst: () => this.isLocalFirstUnregisteredContextGraph(contextGraphId),
         readCompatibility: () => rfc64DirectAcceptedCompatibilityV1.get(this)
           ?.has(contextGraphId) === true
@@ -3086,7 +3157,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           seeds: this.rfc64UnregisteredAuthoritySeedAccessV1(),
         }),
       });
-      const sourceResolution = await resolveSource();
       if (sourceResolution.kind === 'facts-moved') return new Rfc64AuthorityFactsMovedV1(authorityRevision);
       if (sourceResolution.kind === 'absent') {
         throw new Rfc64CatalogAuthorityResolutionErrorV1(
@@ -3094,101 +3164,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           'unregistered RFC-64 Context Graph has no authenticated owner authority',
         );
       }
-      let source = sourceResolution.source;
-      if (
-        suppliedAuthorityEvidence !== undefined
-        && suppliedAuthorityEvidence.contextGraphAuthorityIndexId !== boundOnChainId
-      ) {
-        throw new Error('RFC-64 finalized authority evidence belongs to another graph');
-      }
-      // Responsibility bootstrap and scheduled refreshes pass the exact
-      // immutable evidence selected by their owner. `null` is finalized
-      // absence and must not reopen a legacy current-state lookup.
-      const ownedAuthorityEvidence = authorityRequest.kind === 'finalized-absence'
-        ? null
-        : authorityRequest.kind === 'finalized-evidence'
-          ? authorityRequest.evidence
-          : boundOnChainId === undefined
-            ? undefined
-            : await this.readRfc64FinalizedAuthoritySnapshotEvidenceV1(
-              boundOnChainId,
-              signal,
-            );
-      const batchedSnapshot = ownedAuthorityEvidence === null
-        ? null
-        : ownedAuthorityEvidence?.snapshot;
-      // "Bound locally but absent from the FINALIZED index" is chain-finality lag
-      // (Base Sepolia lags ~600 blocks / ~20 min), which is retryable -- not a
-      // binding fault. `auto` / `finalized-evidence` requests have already read
-      // the index, so a null snapshot IS that absence. A `finalized-absence`
-      // request is ambiguous: the refresh loop derives it from a null finalized
-      // snapshot (lag), but an explicit caller may assert an absence the index
-      // contradicts (a real mismatch). Probe the index once to tell them apart;
-      // with no indexed reader we keep failing closed as a mismatch.
-      let boundIdUnfinalized = false;
-      if (boundOnChainId !== undefined && batchedSnapshot === null) {
-        if (authorityRequest.kind !== 'finalized-absence') {
-          boundIdUnfinalized = true;
-        } else {
-          const probe = await this.readRfc64FinalizedAuthoritySnapshotEvidenceV1(
-            boundOnChainId,
-            signal,
-          );
-          boundIdUnfinalized = probe !== undefined && probe.snapshot === null;
-        }
-      }
-      const registeredAuthorityRead = source.kind !== 'registered'
-        ? null
-        : batchedSnapshot !== undefined
-        ? (() => {
-          if (batchedSnapshot === null || boundOnChainId === undefined) {
-            // Retryable lag vs. a genuine mismatch: see `boundIdUnfinalized`.
-            // Whether accepted authority is RETAINED through the lag is decided
-            // by the refresh caller and is author-scoped.
-            throw new Rfc64CatalogAuthorityResolutionErrorV1(
-              boundIdUnfinalized
-                ? 'registered-authority-unfinalized'
-                : 'registered-authority-binding-mismatch',
-              'registered RFC-64 Context Graph has no finalized indexed authority',
-            );
-          }
-          const expectedOnChainId = BigInt(boundOnChainId);
-          const explicitNameHash = this.subscribedContextGraphs
-            .get(contextGraphId)?.onChainHash;
-          const expectedNameHash = explicitNameHash === undefined
-            ? this.contextGraphNameCommitment(contextGraphId)
-            : this.contextGraphWireId(explicitNameHash);
-          return {
-            expectedNameHash,
-            expectedOnChainId,
-            snapshot: parseRfc64AuthoritySnapshotV1(
-              batchedSnapshot,
-              expectedOnChainId,
-            ),
-          } as const;
-        })()
-        : await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId, signal);
-      if (source.kind === 'registered' && registeredAuthorityRead === null) {
-        // A successful absence read can authenticate an approved private join,
-        // but it never turns ordinary RDF metadata into owner authority.
-        const unregistered = await resolveSource(true);
-        if (unregistered.kind === 'facts-moved') return new Rfc64AuthorityFactsMovedV1(authorityRevision);
-        if (unregistered.kind !== 'available' || unregistered.source.kind === 'registered') {
-          throw new Rfc64CatalogAuthorityResolutionErrorV1(
-            'unregistered-owner-unresolved',
-            'unregistered RFC-64 Context Graph has no authenticated owner authority',
-          );
-        }
-        source = unregistered.source;
-      }
+      const source = sourceResolution.source;
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
       // Mutable local authority facts must be one projection generation. Keep
       // the exact revision paired with every later metadata/version await and
       // refuse to accept a composed snapshot if owner, policy, revocation, or
       // membership facts changed in the meantime.
       let metadataAuthorityRevision: string | null = null;
-      if (registeredAuthorityRead !== null) {
-        const { expectedNameHash, snapshot } = registeredAuthorityRead;
+      if (source.kind === 'registered') {
+        const { expectedNameHash, snapshot } = source.evidence;
         if (signal?.aborted) throw signal.reason;
         if (!snapshot.active || snapshot.nameHash !== expectedNameHash) {
           throw new Rfc64CatalogAuthorityResolutionErrorV1(
