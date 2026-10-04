@@ -21,3 +21,22 @@ if (isConfirmedNamedKaVmLifecycleRecoveryError(failure)) {
   void receipt; void resend;
 }
 void assertionUri; void assertionVersion;
+
+import type { PublishResult } from '@origintrail-official/dkg-publisher';
+declare const genericPublication: PublishResult;
+// @ts-expect-error Generic publishing does not own the agent's lifecycle repair worker.
+void genericPublication.lifecycleRepairPending;
+
+import type { DKGAgent, NamedKaVmPublishResult } from '../src/index.js';
+declare const namedPublication: NamedKaVmPublishResult;
+const pendingRepair: boolean | undefined = namedPublication.lifecycleRepairPending;
+declare const queuedResult: Awaited<ReturnType<DKGAgent['publishQueuedKnowledgeAssetVmPublish']>>;
+declare const finalizedResult: Awaited<ReturnType<DKGAgent['publishFromFinalizedAssertion']>>;
+const queuedPublication: NamedKaVmPublishResult = queuedResult;
+const finalizedPublication: NamedKaVmPublishResult = finalizedResult;
+const queuedPending: boolean | undefined = queuedResult.lifecycleRepairPending;
+const finalizedPending: boolean | undefined = finalizedResult.lifecycleRepairPending;
+const confirmedPending: boolean | undefined = publication.lifecycleRepairPending;
+const confirmedResult: NamedKaVmPublishResult = publication;
+void pendingRepair; void queuedPublication; void finalizedPublication; void confirmedResult;
+void queuedPending; void finalizedPending; void confirmedPending;

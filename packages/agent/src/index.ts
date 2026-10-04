@@ -368,6 +368,7 @@ export {
 export { ConfirmedNamedKaVmLifecycleRecoveryError, isConfirmedNamedKaVmLifecycleRecoveryError,
   type ConfirmedNamedKaVmPublication, type ConfirmedNamedKaVmLifecycleRecovery,
 } from './named-ka-vm-lifecycle-recovery-error.js';
+export type { NamedKaVmPublishResult } from './named-ka-vm-publish-result.js';
 export type {
   ContextGraphReadAuthorityDecision,
   ContextGraphReadAuthorityDependency,

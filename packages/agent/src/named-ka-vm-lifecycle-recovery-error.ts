@@ -1,13 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import type { PublishResult } from '@origintrail-official/dkg-publisher';
+import type { NamedKaVmPublishResult } from './named-ka-vm-publish-result.js';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 
-export type ConfirmedNamedKaVmPublication = PublishResult & {
-  readonly status: 'confirmed';
-  readonly assertionUri: string;
-  readonly seal: AssertionSeal;
-};
+export type ConfirmedNamedKaVmPublication = NamedKaVmPublishResult & { readonly status: 'confirmed' };
 export interface ConfirmedNamedKaVmLifecycleRecovery extends ConfirmedNamedKaVmLifecycleInput {
   readonly action: 'recover_confirmed_publication';
   readonly publicationRetrySafe: false;
