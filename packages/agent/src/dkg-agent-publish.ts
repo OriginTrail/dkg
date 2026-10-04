@@ -10,7 +10,10 @@ import { submitOwnedNamedKaVmLifecycleRepair } from './named-ka-vm-publication-r
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+
+import { planKnowledgeAssetVmPublication, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './knowledge-asset-vm-publish-request.js';
+export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './knowledge-asset-vm-publish-request.js';
+import { randomUUID } from 'node:crypto';
 import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
 import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
@@ -124,11 +127,21 @@ import {
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
-import {
-  DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
-  VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
+import  {
+  DKGPublisher,
+  PublishHandler,
+  SharedMemoryHandler,
+  UpdateHandler,
+  ChainEventPoller,
+  AccessHandler,
+  AccessClient,
+  PublishJournal,
+  StaleWriteError,
+  ACKCollector,
+  StorageACKHandler,
+  VerifyCollector,
+  VerifyProposalHandler,
+  buildVerificationMetadata,
   computeTripleHashV10 as computeTripleHash,
   computeFlatKCRootV10 as computeFlatKCRoot,
   computePrivateRootV10 as computePrivateRoot,
@@ -151,15 +164,25 @@ import {
   TripleStoreAsyncPromoteQueue,
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
-  type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteJob, type PromoteListFilter,
+  type AsyncPromoteQueue,
+  type AsyncPromoteQueueConfig,
+  type PromoteJob,
+  type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
-  type PublishOptions, type UpdateOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  // OT-RFC-43 A2 — per-layer pointer + KA-id predicates and stamp helpers.
-  KA_ID_PRED, RESERVED_UAL_PRED,
-  WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
+  type PublishOptions,
+  type UpdateOptions,
+  type PublishResult,
+  type PhaseCallback,
+  type KAMetadata,
+  type CASCondition,
+  KA_ID_PRED,
+  RESERVED_UAL_PRED,
+  WM_CURRENT_ASSERTION_PRED,
+  SWM_CURRENT_ASSERTION_PRED,
+  VM_CURRENT_ASSERTION_PRED,
   type CollectedACK,
-  type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest,
+  type LiftRequestAuthorSeal,
+  type KnowledgeAssetVmPublishRequest,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
   type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type WorkspaceAgentRecipient,
@@ -168,7 +191,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
-  assertPublicationPricingPolicyApplicable,
   type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
@@ -468,113 +490,6 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { createLocalContextGraphOriginMembershipRecord } from
   './local-context-graph-provenance.js';
-
-type KnowledgeAssetVmPublicationOperationPlan =
-  | {
-      readonly kind: 'initial';
-      readonly pricingPolicy: PublishOptions['pricingPolicy'];
-    }
-  | {
-      readonly kind: 'update';
-      readonly vmCurrentAssertion: string;
-    };
-
-/** One operation discriminator shared by admission, sync, and queued execution. */
-function planKnowledgeAssetVmPublication(input: {
-  readonly vmCurrentAssertion?: string;
-  readonly pricingPolicy?: PublishOptions['pricingPolicy'];
-}): KnowledgeAssetVmPublicationOperationPlan {
-  if (input.vmCurrentAssertion) {
-    assertPublicationPricingPolicyApplicable(input.pricingPolicy, { kind: 'update' });
-    return { kind: 'update', vmCurrentAssertion: input.vmCurrentAssertion };
-  }
-  assertPublicationPricingPolicyApplicable(input.pricingPolicy, {
-    kind: 'initial',
-    graphScoped: true,
-  });
-  return { kind: 'initial', pricingPolicy: input.pricingPolicy };
-}
-
-/** Rebuild the immutable graph-scoped seal carried by one queued VM request. */
-function assertionSealFromQueuedKnowledgeAssetVmPublishRequest(
-  request: KnowledgeAssetVmPublishRequest,
-): AssertionSeal {
-  // Both execution boundaries validate the immutable graph-scoped envelope
-  // before calling this shared reconstruction helper.
-  const graphScope = createGraphKnowledgeAssetScope(
-    request.kaUal!,
-    request.assertionVersion!,
-  );
-  return {
-    merkleRoot: ethers.getBytes(request.seal.merkleRoot),
-    authorAddress: ethers.getAddress(request.seal.authorAddress),
-    authorAttestationR: ethers.getBytes(request.seal.signature.r),
-    authorAttestationVS: ethers.getBytes(request.seal.signature.vs),
-    authorSchemeVersion: request.seal.schemeVersion,
-    chainId: BigInt(request.sealChainId),
-    kav10Address: ethers.getAddress(request.sealKav10Address),
-    finalizedAtIso: request.sealFinalizedAtIso,
-    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-    kaUal: graphScope.ual,
-    assertionVersion: graphScope.assertionVersion,
-    publicTripleCount: request.publicTripleCount!,
-    ...(request.privateMerkleRoot
-      ? { privateMerkleRoot: ethers.getBytes(request.privateMerkleRoot) }
-      : {}),
-    privateTripleCount: request.privateTripleCount!,
-    rootEntities: [],
-    ...(request.seal.reservedKaId !== undefined
-      ? { reservedKaId: BigInt(request.seal.reservedKaId) }
-      : {}),
-  };
-}
-
-export type KnowledgeAssetVmPublishRequestWithoutIntentKey = Omit<
-  KnowledgeAssetVmPublishRequest,
-  'intentKey'
->;
-
-/** Canonical immutable projection of the persisted queued-publish request. */
-export function createKnowledgeAssetVmPublishIntentKey(
-  request: KnowledgeAssetVmPublishRequestWithoutIntentKey,
-): string {
-  const canonicalIntent = {
-    contextGraphId: request.contextGraphId,
-    name: request.name,
-    agentAddress: request.agentAddress ?? null,
-    subGraphName: request.subGraphName ?? null,
-    shareOperationId: request.shareOperationId,
-    roots: request.roots,
-    contentScopeVersion: request.contentScopeVersion ?? null,
-    kaUal: request.kaUal ?? null,
-    assertionVersion: request.assertionVersion ?? null,
-    publicTripleCount: request.publicTripleCount ?? null,
-    privateMerkleRoot: request.privateMerkleRoot?.toLowerCase() ?? null,
-    privateTripleCount: request.privateTripleCount ?? null,
-    accessPolicy: request.accessPolicy ?? null,
-    allowedPeers: request.allowedPeers ?? [],
-    entityProofs: request.entityProofs ?? null,
-    sealMerkleRoot: request.sealMerkleRoot.toLowerCase(),
-    seal: request.seal,
-    sealChainId: request.sealChainId,
-    sealKav10Address: request.sealKav10Address,
-    sealFinalizedAtIso: request.sealFinalizedAtIso,
-    wmCurrentAssertion: request.wmCurrentAssertion ?? null,
-    swmCurrentAssertion: request.swmCurrentAssertion ?? null,
-    vmCurrentAssertion: request.vmCurrentAssertion ?? null,
-    kaNumber: request.kaNumber ?? null,
-    reservedUal: request.reservedUal ?? null,
-    publishEpochs: request.publishEpochs ?? null,
-    // Keep the pre-feature canonical JSON unchanged when the policy is omitted.
-    ...(request.pricingPolicy !== undefined
-      ? { pricingPolicy: request.pricingPolicy }
-      : {}),
-    clearSharedMemoryAfter: request.clearSharedMemoryAfter ?? null,
-    publisherNodeIdentityIdOverride:
-      request.publisherNodeIdentityIdOverride ?? null,
-  };
-  return `sha256:${createHash('sha256').update(JSON.stringify(canonicalIntent)).digest('hex')}`;
-}
 
 /**
  * #1116 (round 11) — stable code tagged on the `assertionFinalize` throws that are

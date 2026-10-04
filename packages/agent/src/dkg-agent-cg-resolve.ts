@@ -9,6 +9,8 @@
  * cross-calls resolve against the composed class.
  */
 
+
+import { throwIfSyncAuthAborted } from './context-graph-sync-abort.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
 import {
@@ -328,7 +330,7 @@ import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { finalizedAuthorityColdResolutionOf } from
   './finalized-authority-cold-resolution.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
-import { createAbortError, runBoundedOperation } from './bounded-operation.js';
+import { runBoundedOperation } from './bounded-operation.js';
 import type {
   ContextGraphAuthorityReadMode,
   RegisteredContextGraphAuthority,
@@ -449,14 +451,6 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
-
-function syncAuthAbortError(reason: unknown): Error {
-  return createAbortError(reason);
-}
-
-function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw syncAuthAbortError(signal.reason);
-}
 
 type InternalContextGraphListRow = ListContextGraphsRow & {
   policyKnown?: boolean;
