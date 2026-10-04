@@ -12,6 +12,8 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ['scripts/ci/run-chain-rpc-node26.mjs: vitest',
+    'the Vitest CLI resolved from packages/chain node_modules, run with the verified process.execPath; not a repository file'],
   ['packages/agent/test/sync-native-export-hostile.test.ts: pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href',
     'an optional user-supplied external frozen 10.0.20 build; compatibility cases always execute the repository historical source fixture, and no repository lane can route the external build'],
   ['packages/agent/src/generic-sql-source.ts: moduleName', 'the optional mssql driver and node:sqlite, neither a repository file'],

@@ -3,6 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
+import { NODE26_REQUIRED_ASSERTIONS } from '../ci-results.mjs';
+
+export function node26Evidence() {
+  return {
+    version: 1, node: '26.7.0', undici: '8.9.0', requireUndici8Fetch: true, success: true,
+    assertions: NODE26_REQUIRED_ASSERTIONS.map((name) => ({ name, status: 'passed' })),
+  };
+}
 import { repositoryFiles, workflowExecution } from './ci-execution-graph.mjs';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -49,6 +57,9 @@ export function gateNeeds(results = {}) {
   ].map((job) => [job, { result: 'skipped' }]));
   needs.changes = { result: 'success' };
   for (const [job, result] of Object.entries(results)) needs[job] = { result };
+  if (needs['chain-rpc-node26'].result === 'success') {
+    needs['chain-rpc-node26'].outputs = { evidence: JSON.stringify(node26Evidence()) };
+  }
   return needs;
 }
 
