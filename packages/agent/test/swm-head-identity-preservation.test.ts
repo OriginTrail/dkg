@@ -1,3 +1,4 @@
+import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
 /**
  * GH#2273 operation identity preservation — the catch-up rows split from
  * `swm-snapshot-materializer.test.ts` (which pins the materializer's own
@@ -94,6 +95,7 @@ describe('operation identity preservation (GH#2273)', () => {
     // assertion-graph content the per-KA path takes the MATERIALIZE branch and
     // rewrites the head in round 1, so the two-stage shape under test would
     // never form and the rows below would fail for the wrong reason.
+    await persistLocalSwmOperation(store, CG, v1);
     await store.insert(inGraph(v1.payload, v1.assertionGraph));
     await store.insert([...v1.meta]);
   }
@@ -484,7 +486,7 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(operationIdentityKey(explicitPublic)).not.toBe(key);
   });
 
-  it('sync repairs a pre-dirtied two-valued head preserving the stored identity', async () => {
+  it('sync recognizes a validated equivalent alias class as a healthy head', async () => {
     // The pre-upgrade residue shape: a node that ran the OLD code already has
     // BOTH ids stacked on the head. This row drives the FULL sync lane (not a
     // direct materializer call) against that state, so a regression that
@@ -503,7 +505,7 @@ describe('operation identity preservation (GH#2273)', () => {
     await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
 
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-      .toEqual(['"op-v1"']);
+      .toEqual(['"op-v1"', '"storage-ack-2273b"']);
     expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
     const head = await resolveKnowledgeAssetWorkspaceHead({
@@ -512,7 +514,7 @@ describe('operation identity preservation (GH#2273)', () => {
       contextGraphId: CG,
       kaUal: UAL,
     });
-    expect(head?.shareOperationId).toBe('op-v1');
+    expect(head?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual(['op-v1', 'storage-ack-2273b']);
   });
 
   it('an absent accessPolicy row and the explicit default are the SAME identity', async () => {
@@ -584,6 +586,7 @@ describe('operation identity preservation (GH#2273)', () => {
       { subject: policyShare.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
       { subject: policyShare.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
     ];
+    await persistLocalSwmOperation(store, CG, { ...policyShare, meta: envelopeMeta });
     await makeSwmSyncHarness({
       ctx,
       contextGraphId: CG,
@@ -603,6 +606,7 @@ describe('operation identity preservation (GH#2273)', () => {
     const store = new OxigraphStore();
     stores.push(store);
     await seedMaterializedLocal(store);
+    await persistLocalSwmOperation(store, CG, remoteChanged);
     await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteChanged, readConfirmedKnowledgeAssetVersion: async () => 0n }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"publisher-change-2273c"']);

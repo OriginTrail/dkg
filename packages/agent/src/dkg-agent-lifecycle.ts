@@ -1,5 +1,5 @@
-import { collectAbandonedDraftArtifacts, withUnqueuedDraftOperation } from './draft-artifact-gc.js';
-import { readExpiredSwmOperationBatch } from './swm-expiry-batch.js';
+import { collectAbandonedDraftArtifacts, withDraftOperationCollectionBatches } from './draft-artifact-gc.js';
+import { readExpiredSwmOperationBatch, expiredSwmOperationMayRetire } from './swm-expiry-batch.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -180,8 +180,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig,
   STORAGE_ACK_LEDGER_GRAPH,
-  swmKaWriteLockKey,
-  withKeyedLocks,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -11596,11 +11594,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 .map((g) => sharedMemoryOwnershipKeyFromGraph(pid, g))
                 .filter((key): key is string => Boolean(key));
 
-              for (const row of expiredOps.bindings) {
+              await withDraftOperationCollectionBatches(this.store, expiredOps.bindings, async (row, collection) => {
                 const opUri = row['op'];
-                if (!opUri) continue;
+                if (!opUri) return;
 
-                await withUnqueuedDraftOperation(this.store, pid, wsSubGraphName, opUri, now, async () => {
+                await collection.withUnqueuedOperation(pid, wsSubGraphName, opUri, now, async () => {
                 const rootEntitiesResult = await this.store.query(
                   `SELECT ?re WHERE {
                   GRAPH <${wsMetaGraph}> {
@@ -11648,12 +11646,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   // Checked and torn down under the per-KA write lock, so an
                   // ACK or share that repoints the head in between is never
                   // deleted with the expired operation.
-                  if (kaUal && headSubject && isSafeIri(headSubject)) graphDeleted += await withKeyedLocks(
-                    this.writeLocks,
-                    [swmKaWriteLockKey(pid, wsSubGraphName, kaUal)],
-                    async (): Promise<number> => {
+                  if (kaUal && headSubject && isSafeIri(headSubject)) graphDeleted += await (async (): Promise<number> => {
                     let tornDown = 0;
-                    // The head is owned by exactly one operation. Join on the
+                    // All retained aliases were checked under this KA lock. Join on the
                     // dkg:shareOperationId literal (both rows are written by the
                     // same `lit()` serializer) so this op's expiry only tears the
                     // head down when the head still references it — and never
@@ -11685,7 +11680,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                       tornDown += await this.store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
                     }
                     return tornDown;
-                  });
+                  })();
                   const snapshotGraph = v2Row?.['snapshotGraph'];
                   if (snapshotGraph && isSafeIri(snapshotGraph)) {
                     graphDeleted += await this.store.deleteByPattern({ graph: snapshotGraph });
@@ -11718,8 +11713,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     ownedSet.delete(re);
                   }
                 }
-                });
-              }
+                }, { writeLocks: this.writeLocks, cutoffMs: now - ttl, mayRetire: () => expiredSwmOperationMayRetire(this.store, { metaGraph: wsMetaGraph, operationSubject: opUri, cutoff, retentionFilters: storageAckNotRetained('', '?op', '?ts', 'Recheck') }) });
+              });
             }
           }
 

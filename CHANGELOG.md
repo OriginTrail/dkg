@@ -26,6 +26,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
   commitment, so an earlier shared draft can be reopened after an unshared
   replacement. Signed StorageACK copies remain protected during the pending
   transaction window; mixed fleets retain the old receiver behavior until upgraded.
+  Legacy recovery metadata cannot certify a publisher clock: only an operation
+  previously authenticated by a local writer can replace a differing healthy
+  draft. Unsigned legacy recovery can initialize or repair equivalent content,
+  but a higher claimed number alone cannot replace that existing draft. Unsigned provider history, including previously recovered future
+  timestamps, cannot block a later authenticated higher assertion. Recovery
+  preserves the complete equivalent alias class and its private/access identity;
+  TTL cleanup retains that class while any alias is live, queued, or ACK-owned.
 
 - **`@origintrail-official/dkg-core/dist/absolute-rfc3987-iri.js` resolves
   again** (#2926): 10.0.19 moved `isAbsoluteRfc3987IriV1` to

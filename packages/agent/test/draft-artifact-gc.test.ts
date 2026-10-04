@@ -2,9 +2,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { GraphManager, OxigraphStore, deleteByPatternWithoutCount, type Quad } from '@origintrail-official/dkg-storage';
-import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, swmKaWriteLockKey, withKeyedLocks, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
+import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, swmKaWriteLockKey, withKeyedLocks, workspaceOperationSubject, storageAckLedgerEntryQuads } from '@origintrail-official/dkg-publisher';
+import { storageAckNotRetainedFilters } from '../src/storage-ack-retention.js';
+import { expiredSwmOperationMayRetire } from '../src/swm-expiry-batch.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
-import { collectAbandonedDraftArtifacts, withUnqueuedDraftOperation } from '../src/draft-artifact-gc.js';
+import { collectAbandonedDraftArtifacts, withUnqueuedDraftOperation, withDraftOperationCollectionBatches } from '../src/draft-artifact-gc.js';
 const CG = 'draft-gc';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const KA = `did:dkg:31337/${AUTHOR}/7`;
@@ -25,6 +27,58 @@ async function fixture(contextGraphId = CG) {
   return { store, chain, writeLocks, op, head, privateGraph, has, collect };
 }
 describe('reference-safe abandoned draft maintenance', () => {
+  it.each(['clock', 'signed-ledger'] as const)('revalidates a selected expired operation after an in-lock %s refresh', async mode => {
+    const f = await fixture(); const id = 'storage-ack-refreshed'; await f.op(id, '1'); await f.head(id, '1');
+    const key = swmKaWriteLockKey(CG, undefined, KA);
+    let release!: () => void; let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const writing = withKeyedLocks(f.writeLocks, [key], async () => { entered(); await gate; });
+    await ready; const predecessor = f.writeLocks.get(key); const collect = vi.fn(async () => {});
+    const retiring = withUnqueuedDraftOperation(f.store, CG, undefined, workspaceOperationSubject(CG, id), NOW, collect, {
+      writeLocks: f.writeLocks, cutoffMs: NOW,
+      mayRetire: () => expiredSwmOperationMayRetire(f.store, { metaGraph: META, operationSubject: workspaceOperationSubject(CG, id), cutoff: new Date(NOW).toISOString(), retentionFilters: storageAckNotRetainedFilters({ rootMetaGraph: ROOT_META, metaGraph: META, binding: '', opVar: '?op', tsVar: '?ts', retentionCutoffIso: new Date(NOW - 30 * 24 * 60 * 60_000).toISOString(), suffix: 'Recheck', ledgerReady: true }) }),
+    });
+    await vi.waitFor(() => expect(f.writeLocks.get(key)).not.toBe(predecessor));
+    if (mode === 'clock') {
+      await f.store.deleteByPattern({ graph: META, subject: workspaceOperationSubject(CG, id), predicate: `${DKG}publishedAt` });
+      await f.store.insert([{ graph: META, subject: workspaceOperationSubject(CG, id), predicate: `${DKG}publishedAt`, object: `"${new Date(NOW + 1).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` }]);
+    } else await f.store.insert(storageAckLedgerEntryQuads({ namespace: CG, metaGraph: META, contextGraphId: '42', kaUal: KA, assertionVersion: '1', operation: 'publish', operationSubject: workspaceOperationSubject(CG, id), signedAt: new Date(NOW) }));
+    release(); await writing; await retiring;
+    expect(collect).not.toHaveBeenCalled();
+    expect(await f.has(META, workspaceOperationSubject(CG, id))).toBe(true);
+    await f.store.close();
+  });
+  it('acquires queue references once per 32-operation chunk and admits a later queued operation between chunks', async () => {
+    const f = await fixture();
+    const ids = Array.from({ length: 65 }, (_, index) => `batch-${index}`);
+    for (const id of ids) await f.op(id, '1', id === ids[64] ? KA.replace('/7', '/8') : KA);
+    const queue = new TripleStoreAsyncLiftPublisher(f.store);
+    await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: CG, shareOperationId: ids[0]!, assertionVersion: '1', kaUal: KA }));
+    const query = vi.spyOn(f.store, 'query');
+    const retired: string[] = [];
+    let lateAdmission: Promise<unknown> | undefined;
+    await withDraftOperationCollectionBatches(f.store, ids, async (id, session) => {
+      await session.withUnqueuedOperation(CG, undefined, workspaceOperationSubject(CG, id), NOW, async () => { retired.push(id); }, { writeLocks: f.writeLocks, cutoffMs: NOW });
+      if (id === ids[31]) lateAdmission = queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: CG, shareOperationId: ids[64]!, name: 'late-other', assertionVersion: '1', kaUal: KA.replace('/7', '/8') }));
+    });
+    await lateAdmission;
+    expect(query.mock.calls.filter(([, options]) => options?.source === 'publisher.draftArtifacts.queueReferences')).toHaveLength(3);
+    expect(retired).toHaveLength(63);
+    expect(retired).not.toContain(ids[0]); expect(retired).not.toContain(ids[64]);
+    await expect(queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: CG, shareOperationId: ids[1]!, assertionVersion: '1' }))).rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+    query.mockRestore(); await f.store.close();
+  });
+  it('unknown queue coverage preserves every operation in each bounded chunk', async () => {
+    const f = await fixture(); const ids = Array.from({ length: 65 }, (_, index) => `unknown-${index}`);
+    const original = f.store.query.bind(f.store);
+    const query = vi.spyOn(f.store, 'query').mockImplementation((text, options) => options?.source === 'publisher.draftArtifacts.queueReferences' ? Promise.resolve({ type: 'boolean', value: false }) : original(text, options));
+    const collect = vi.fn(async () => {});
+    await withDraftOperationCollectionBatches(f.store, ids, collect);
+    expect(collect).not.toHaveBeenCalled();
+    expect(query.mock.calls.filter(([, options]) => options?.source === 'publisher.draftArtifacts.queueReferences')).toHaveLength(3);
+    query.mockRestore(); await f.store.close();
+  });
   it('preserves queued snapshots and commitments in slash-containing descendant context graphs', async () => {
     const owner = 'a/b'; const f = await fixture(owner);
     await f.op('queued'); await f.op('new', '2'); await f.head();

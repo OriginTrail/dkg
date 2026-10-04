@@ -297,6 +297,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           failAfter('replace-graph-meta');
         },
         snapshotMaterializer: {
+          selectRepairIdentity: async () => null,
+        filterBulkMetadata: async rows => rows,
+        prepareRecoveredDescriptor: async descriptor => descriptor,
+        isGraphAssetMaterialized: async () => false,
           withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
           draftMayReplace: async () => true,
           readStoredHead: async () => ({
@@ -358,6 +362,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       replaceMetaForRoots: async () => undefined,
       replaceMetaForGraphAssets: async () => undefined,
       snapshotMaterializer: {
+          selectRepairIdentity: async () => null,
+        filterBulkMetadata: async rows => rows,
+        prepareRecoveredDescriptor: async descriptor => descriptor,
+        isGraphAssetMaterialized: async () => false,
         withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
         draftMayReplace: async () => true,
         readStoredHead: async () => ({
@@ -455,6 +463,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           },
           replaceMetaForGraphAssets,
           snapshotMaterializer: {
+          selectRepairIdentity: async () => null,
+        filterBulkMetadata: async rows => rows,
+        prepareRecoveredDescriptor: async descriptor => descriptor,
+        isGraphAssetMaterialized: async () => kind === 'preserve-equivalent',
             withKaWriteLock: async (
               _cg: string,
               _sg: string | undefined,
@@ -548,6 +560,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         },
         replaceMetaForGraphAssets: vi.fn(),
         snapshotMaterializer: {
+          selectRepairIdentity: async () => null,
+        filterBulkMetadata: async rows => rows,
+        prepareRecoveredDescriptor: async descriptor => descriptor,
+        isGraphAssetMaterialized: async () => false,
           withKaWriteLock: async (
             _cg: string,
             _sg: string | undefined,
@@ -627,6 +643,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       },
       replaceMetaForGraphAssets,
       snapshotMaterializer: {
+          selectRepairIdentity: async () => null,
+        filterBulkMetadata: async rows => rows,
+        prepareRecoveredDescriptor: async descriptor => descriptor,
+        isGraphAssetMaterialized: async () => true,
         withKaWriteLock: async (
           _cg: string,
           _sg: string | undefined,
@@ -653,6 +673,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
     expect(replaceGraph).not.toHaveBeenCalled();
 
     replaceMetaForGraphAssets.mockClear();
+    ports.snapshotMaterializer.isGraphAssetMaterialized = async () => false;
     await expect(applyVerifiedSwmRecoveryGraphAsset({
       contextGraphId: 'private-recovery-cg',
       asset: { kind: 'replace', descriptor, replacementQuads },

@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: Apache-2.0
+import { createHash } from 'node:crypto';
+import { assertSafeIri, sparqlString, type TimestampMsV1 } from '@origintrail-official/dkg-core';
+import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import type { WorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
+import type { KnowledgeAssetWorkspaceOperationAlias, KnowledgeAssetWorkspaceSnapshotLocator } from './workspace-resolution.js';
+
+/** Local recovery writes impose this marker; remote metadata cannot clear it. */
+export const RECOVERED_OPERATION_CHRONOLOGY = 'http://dkg.io/ontology/recoveredOperationChronology';
+
+export function workspaceOperationAlias(candidate: {
+  provenance: WorkspaceOperationProvenance;
+  snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator;
+}): KnowledgeAssetWorkspaceOperationAlias {
+  return Object.freeze({
+    shareOperationId: candidate.provenance.shareOperationId,
+    ...(candidate.provenance.publishedAtMs === undefined ? {} : { publishedAt: candidate.provenance.publishedAtMs.toString() as TimestampMsV1 }),
+    ...(candidate.provenance.publisherChronologyAuthenticated === false ? { publisherChronologyAuthenticated: false } : {}),
+    snapshotLocator: candidate.snapshotLocator,
+  });
+}
+
+const LOCAL_EVIDENCE_GRAPH = 'urn:dkg:publisher:authenticated-operation-evidence';
+const EVIDENCE_DIGEST = 'urn:dkg:publisher:authenticatedOperationDigest';
+
+function evidenceDigest(rows: readonly Quad[]): string {
+  const term = (row: Quad) => {
+    if (row.predicate === 'http://dkg.io/ontology/publishedAt') {
+      const date = /^"([^"]*)"/.exec(row.object)?.[1];
+      if (date && Number.isFinite(Date.parse(date))) return new Date(date).toISOString();
+    }
+    return row.object.replace(/\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#string>$/, '');
+  };
+  const values = [...new Set(rows.filter(row => row.predicate !== RECOVERED_OPERATION_CHRONOLOGY)
+    .map(row => JSON.stringify([row.subject, row.predicate, term(row)])))].sort();
+  return createHash('sha256').update(JSON.stringify(values)).digest('hex');
+}
+
+/** Only local publisher/verified-live writers may create this positive evidence. */
+export async function persistWorkspaceOperationEvidence(store: TripleStore, rows: readonly Quad[]): Promise<void> {
+  const subject = rows[0]?.subject;
+  if (!subject || rows.some(row => row.subject !== subject)) throw new Error('Invalid immutable operation evidence');
+  await deleteByPatternWithoutCount(store, { graph: LOCAL_EVIDENCE_GRAPH, subject });
+  await store.insert([{ subject, predicate: EVIDENCE_DIGEST, object: sparqlString(evidenceDigest(rows)), graph: LOCAL_EVIDENCE_GRAPH }]);
+}
+
+/** Reserved local graph evidence cannot arrive through provider metadata unions. */
+export async function readAuthenticatedWorkspaceOperations(store: TripleStore, rows: readonly Quad[]): Promise<ReadonlySet<string>> {
+  const subjects = [...new Set(rows.map(row => row.subject))];
+  if (subjects.length === 0) return new Set();
+  const evidence = await store.query(`SELECT ?s ?digest WHERE { GRAPH <${LOCAL_EVIDENCE_GRAPH}> {
+    VALUES ?s { ${subjects.map(subject => `<${assertSafeIri(subject)}>`).join(' ')} } ?s <${EVIDENCE_DIGEST}> ?digest
+  } }`, { priority: 'background', source: 'publisher.workspace.authenticatedOperationEvidence' });
+  if (evidence.type !== 'bindings') throw new Error('Authenticated operation evidence is unavailable');
+  const authenticated = new Set<string>();
+  for (const subject of subjects) {
+    const operation = rows.filter(row => row.subject === subject);
+    const digests = evidence.bindings.filter(row => row['s'] === subject).map(row => row['digest']);
+    if (digests.length === 1
+      && digests[0]?.replace(/^"|"(?:\^\^<[^>]+>)?$/g, '') === evidenceDigest(operation)) authenticated.add(subject);
+  }
+  return authenticated;
+}

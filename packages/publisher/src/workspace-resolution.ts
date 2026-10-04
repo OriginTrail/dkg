@@ -1,3 +1,5 @@
+export { RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
+import { RECOVERED_OPERATION_CHRONOLOGY, workspaceOperationAlias, persistWorkspaceOperationEvidence, readAuthenticatedWorkspaceOperations } from './workspace-operation-alias.js';
 import { snapshotOperation } from './workspace-snapshot-lifecycle.js';
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
@@ -192,6 +194,7 @@ export type KnowledgeAssetWorkspaceSnapshotLocator =
   | Readonly<{ kind: 'store'; ref: string }>;
 
 export interface KnowledgeAssetWorkspaceOperationAlias {
+  readonly publisherChronologyAuthenticated?: boolean;
   readonly shareOperationId: string;
   readonly publishedAt?: TimestampMsV1;
   readonly snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator;
@@ -533,6 +536,7 @@ function decodeWorkspaceOperationRows(input: {
     },
     provenance: {
       shareOperationId: input.shareOperationId,
+      ...(input.operationValues.has(RECOVERED_OPERATION_CHRONOLOGY) ? { publisherChronologyAuthenticated: false } : {}),
       ...(publishedAtMs === undefined ? {} : { publishedAtMs }),
     },
     snapshotLocator,
@@ -644,6 +648,8 @@ export async function resolveKnowledgeAssetWorkspaceHead(
   // snapshot. Equivalent storage-ACK/originator aliases collapse to one
   // deterministic newest operation; a missing or semantically different
   // candidate remains corruption.
+  const authenticatedOperations = await readAuthenticatedWorkspaceOperations(params.store,
+    [...rowsBySubject.entries()].filter(([key]) => key !== subject).flatMap(([key, rows]) => rows.map(row => ({ subject: key, predicate: row.p!, object: row.o!, graph: metaGraph }))));
   const candidates = decodedHead.shareOperationIds.map((shareOperationId) => {
     const operationSubject = workspaceOperationSubject(params.contextGraphId, shareOperationId);
     const operationRows = rowsBySubject.get(operationSubject) ?? [];
@@ -660,7 +666,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       contextGraphId: params.contextGraphId,
       ...(subGraphName === undefined ? {} : { subGraphName }),
     });
-    return operation;
+    return { ...operation, provenance: { ...operation.provenance, publisherChronologyAuthenticated: authenticatedOperations.has(operationSubject) } };
   });
   const orderedCandidates = selectEquivalentWorkspaceOperation(
     candidates,
@@ -677,16 +683,9 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     (candidate) => candidate.semantics.access.kind === 'persisted',
   )?.semantics.access;
   const access = persistedAccess ?? decodedOperation.access;
-  const toAlias = (candidate: typeof selected): KnowledgeAssetWorkspaceOperationAlias => Object.freeze({
-      shareOperationId: candidate.provenance.shareOperationId,
-      ...(candidate.provenance.publishedAtMs === undefined
-        ? {}
-        : { publishedAt: candidate.provenance.publishedAtMs.toString() as TimestampMsV1 }),
-      snapshotLocator: candidate.snapshotLocator,
-    });
   const operationAliases: KnowledgeAssetWorkspaceOperationAliasClass = Object.freeze([
-    toAlias(selected),
-    ...orderedCandidates.slice(1).map(toAlias),
+    workspaceOperationAlias(selected),
+    ...orderedCandidates.slice(1).map(workspaceOperationAlias),
   ]);
   return createKnowledgeAssetWorkspaceHead({
     kaUal: decodedHead.scope.ual,
@@ -981,6 +980,7 @@ export const storeKnowledgeAssetOperationPublicQuads = snapshotOperation<StoreKn
     });
   }
   await params.store.insert(metadata);
+  await persistWorkspaceOperationEvidence(params.store, metadata);
 });
 
 /** Resolve and integrity-check a complete graph-scoped KA operation snapshot. */

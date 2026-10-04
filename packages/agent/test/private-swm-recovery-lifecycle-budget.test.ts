@@ -222,6 +222,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     for (const { ref } of manifest) retained.markResolved(ref);
 
     let canAdmit = true;
+    let insideCommit = false;
     const isGraphAssetMaterialized = vi.fn(async () => {
       canAdmit = false;
       return true;
@@ -250,12 +251,15 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         putSnapshot: async () => { throw new Error('No snapshot write expected'); },
       },
       snapshotMaterializer: {
+        prepareRecoveredDescriptor: async descriptor => descriptor,
+        filterBulkMetadata: async rows => rows,
+        selectRepairIdentity: async () => null,
         withKaWriteLock: async (
           _contextGraphId: string,
           _subGraphName: string | undefined,
           _kaUal: string,
           fn: () => Promise<unknown>,
-        ) => fn(),
+        ) => { insideCommit = true; try { return await fn(); } finally { insideCommit = false; } },
         draftMayReplace: async () => true,
         readStoredHead: async () => ({
           version: null,
@@ -263,7 +267,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
           shareOperationIds: [],
           needsRepair: false,
         }),
-        isGraphAssetMaterialized,
+        isGraphAssetMaterialized: () => insideCommit ? Promise.resolve(true) : isGraphAssetMaterialized(),
         preserveStoredIdentityForSkippedAsset: async () => ({ outcome: 'replace' }),
       } as unknown as SharedMemorySnapshotMaterializer,
       snapshotWalkProgress: () => retained,

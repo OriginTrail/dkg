@@ -1,3 +1,4 @@
+import { commitRecoveredSwmAsset } from './swm-recovery-commit.js';
 import {
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
@@ -6,8 +7,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
-  deleteByPatternWithoutCount,
   invalidateSwmMaterializationWitness,
+  deleteByPatternWithoutCount,
   tryReplaceGraphAtomically,
   type Quad,
   type TripleStore,
@@ -369,120 +370,23 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
   >;
 }>): Promise<VerifiedSwmRecoveryGraphAssetApplyResult> {
   const { asset, ports } = params;
-  const { descriptor } = asset;
-  return ports.snapshotMaterializer.withKaWriteLock(
-    params.contextGraphId,
-    descriptor.subGraphName,
-    descriptor.kaUal,
-    async () => {
-      // The recovery-level CG lock elects one provider, but live gossip uses
-      // this canonical per-KA lock. Re-read ordering only after acquiring it;
-      // otherwise a queued recovery can overwrite a newer live generation.
-      if (asset.kind === 'already-replaced') return { insertedGraphQuads: 0, insertedMetaQuads: 0, withholdRows: descriptor.metadataQuads };
-      const storedHead = await ports.snapshotMaterializer.readStoredHead(descriptor);
-      const commitMeta = async (withholdRows: readonly Quad[], insertedGraphQuads: number) => {
-        const withheld = new Set(withholdRows.map(canonicalQuadKey));
-        const rows = descriptor.metadataQuads.filter(row => !withheld.has(canonicalQuadKey(row)));
-        if (rows.length > 0) await ports.store.insert([...rows]);
-        return { insertedGraphQuads, insertedMetaQuads: rows.length, withholdRows: [...withholdRows, ...rows] };
-      };
-      if (!await ports.snapshotMaterializer.draftMayReplace(params.contextGraphId, descriptor, asset.kind !== 'replace')) {
-        return { insertedGraphQuads: 0, insertedMetaQuads: 0, withholdRows: descriptor.metadataQuads.filter(quad => quad.subject === descriptor.headSubject) };
-      }
-
-      if (asset.kind === 'replace') {
-        const companion = descriptor.subGraphName === undefined
-          ? ports.resolveRootAtomicCompanion?.(Object.freeze({
-              contextGraphId: params.contextGraphId,
-              kaUal: descriptor.kaUal,
-              assertionVersion: descriptor.assertionVersion,
-              shareOperationId: descriptor.shareOperationId,
-            }))
-          : undefined;
-        if (companion === undefined) {
-          await ports.store.replaceGraph(
-            descriptor.assertionGraph,
-            [...asset.replacementQuads],
-          );
-          await invalidateSwmMaterializationWitness(
-            ports.store,
-            descriptor.assertionGraph,
-            { source: 'agent.swmRecovery.witnessInvalidate' },
-          ).catch(() => {});
-        } else {
-          await ports.snapshotMaterializer.replaceGraphWithAtomicCompanion(
-            descriptor.assertionGraph,
-            [...asset.replacementQuads],
-            companion,
-          );
-        }
-      }
-
-      if (asset.kind === 'preserve-equivalent') {
-        if (
-          descriptor.subGraphName === undefined
-          && ports.resolveRootAtomicCompanion !== undefined
-        ) {
-          const exactStoredGraph = await ports.snapshotMaterializer
-            .readExactMaterializedGraph(descriptor);
-          if (exactStoredGraph === null) {
-            throw new Error(
-              `stored root recovery asset ${descriptor.kaUal} changed before boundary commit`,
-            );
-          }
-          if (!await ports.snapshotMaterializer.draftMayReplace(params.contextGraphId, descriptor, true)) return { insertedGraphQuads: 0, insertedMetaQuads: 0, withholdRows: descriptor.metadataQuads.filter(quad => quad.subject === descriptor.headSubject) };
-          const companion = ports.resolveRootAtomicCompanion(Object.freeze({
-            contextGraphId: params.contextGraphId,
-            kaUal: descriptor.kaUal,
-            assertionVersion: descriptor.assertionVersion,
-            shareOperationId: descriptor.shareOperationId,
-          }));
-          if (companion !== undefined) {
-            await ports.snapshotMaterializer.replaceGraphWithAtomicCompanion(
-              descriptor.assertionGraph,
-              exactStoredGraph,
-              companion,
-            );
-          }
-        }
-
-        // This is the locked form of preserveStoredIdentityForSkippedAsset.
-        // Calling that convenience method here would reacquire the same key
-        // and deadlock; its component capabilities explicitly require the
-        // caller to hold this lock.
-        let sameVersion = false;
-        if (
-          storedHead.version !== null
-        ) {
-          try {
-            sameVersion = BigInt(storedHead.version) === BigInt(descriptor.assertionVersion);
-          } catch {
-            sameVersion = false;
-          }
-        }
-        if (
-          sameVersion
-          && storedHead.shareOperationId !== descriptor.shareOperationId
-        ) {
-          const selected = await ports.snapshotMaterializer.selectRepairIdentity(
-            params.contextGraphId,
-            descriptor,
-          );
-          if (selected !== null) {
-            await ports.snapshotMaterializer.repairHeadPreservingIdentity(
-              params.contextGraphId,
-              descriptor,
-              selected.winnerShareOperationId,
-            );
-            return commitMeta(selected.withholdRows, descriptor.publicQuadsCount);
-          }
-        }
-      }
-
-      await ports.replaceMetaForGraphAssets([descriptor]);
-      return commitMeta([], asset.kind === 'replace' ? asset.replacementQuads.length : descriptor.publicQuadsCount);
+  const committed = await commitRecoveredSwmAsset({
+    contextGraphId: params.contextGraphId,
+    descriptor: asset.descriptor,
+    materializer: ports.snapshotMaterializer,
+    alreadyReplaced: asset.kind === 'already-replaced',
+    requireEquivalent: asset.kind === 'preserve-equivalent',
+    loadVerifiedQuads: async () => asset.kind === 'replace' ? asset.replacementQuads : [],
+    insertMetadata: rows => ports.store.insert([...rows]),
+    replaceGraph: async (graph, quads) => {
+      await ports.store.replaceGraph(graph, [...quads]);
+      await invalidateSwmMaterializationWitness(ports.store, graph, { source: 'agent.swmRecovery.witnessInvalidate' }).catch(() => {});
     },
-  );
+    replaceMetadata: descriptor => ports.replaceMetaForGraphAssets([descriptor]),
+    resolveRootAtomicCompanion: ports.resolveRootAtomicCompanion,
+  });
+  return { insertedGraphQuads: asset.kind === 'preserve-equivalent' && committed.kind === 'committed' ? asset.descriptor.publicQuadsCount : committed.insertedGraphQuads, insertedMetaQuads: committed.insertedMetaQuads, withholdRows: committed.withholdRows };
+
 }
 
 /**
@@ -544,11 +448,12 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
         metaQuads: plan.verifiedMeta,
         descriptors: plan.graphAssets.map(({ descriptor }) => descriptor),
       });
-      const insertableMeta = preservedHeadIdRowKeys.size === 0
+      const filteredMeta = preservedHeadIdRowKeys.size === 0
         ? canonicalMeta
         : canonicalMeta.filter(
           (quad) => !preservedHeadIdRowKeys.has(canonicalQuadKey(quad)),
         );
+      const insertableMeta = ports.snapshotMaterializer ? await ports.snapshotMaterializer.filterBulkMetadata(filteredMeta) : filteredMeta;
       if (insertableMeta.length > 0) {
         await ports.store.insert([...insertableMeta]);
       }

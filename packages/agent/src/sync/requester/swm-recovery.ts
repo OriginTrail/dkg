@@ -517,10 +517,7 @@ async function recoverContextGraphSwmUnlocked(
               },
             })
           ));
-          const withheld = new Set(applied.withholdRows.map(canonicalQuadKey));
-          const insertableMeta = verifiedAssetMeta.filter(
-            (quad) => !withheld.has(canonicalQuadKey(quad)),
-          );
+          const insertableMeta = await deps.snapshotMaterializer.filterBulkMetadata(verifiedAssetMeta, applied.withholdRows);
           if (insertableMeta.length > 0) await deps.store.insert([...insertableMeta]);
           incrementallyInsertedMetaQuads += applied.insertedMetaQuads + insertableMeta.length;
           incrementallyInsertedDataQuads += applied.insertedGraphQuads;
@@ -557,8 +554,7 @@ async function recoverContextGraphSwmUnlocked(
               : { resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion }),
           },
         });
-        const withheld = new Set(applied.withholdRows.map(canonicalQuadKey));
-        const insertableMeta = verifiedAssetMeta.filter(row => !withheld.has(canonicalQuadKey(row)));
+        const insertableMeta = await deps.snapshotMaterializer.filterBulkMetadata(verifiedAssetMeta, applied.withholdRows);
         if (insertableMeta.length > 0) await deps.store.insert([...insertableMeta]);
         incrementallyInsertedMetaQuads += applied.insertedMetaQuads + insertableMeta.length;
         if (applied.insertedGraphQuads > 0 || applied.insertedMetaQuads > 0) {

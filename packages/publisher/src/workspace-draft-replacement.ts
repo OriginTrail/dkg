@@ -8,8 +8,8 @@ export type ConfirmedKnowledgeAssetVersionReader = (kaUal: string) => Promise<bi
 export type DraftReplacementRejection = { phase: 'validation' | 'corrupt-head'; reason: string };
 
 /** Only publisher aliases establish draft chronology; ACK clocks are local receipts. */
-export function workspacePublisherOperationTimestamp(aliases: readonly { shareOperationId: string; publishedAt?: string | number }[]): number | undefined {
-  const value = Math.max(...aliases.filter(alias => !alias.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX))
+export function workspacePublisherOperationTimestamp(aliases: readonly { shareOperationId: string; publishedAt?: string | number; publisherChronologyAuthenticated?: boolean }[]): number | undefined {
+  const value = Math.max(...aliases.filter(alias => alias.publisherChronologyAuthenticated !== false && !alias.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX))
     .map(alias => Number(alias.publishedAt ?? NaN)).filter(Number.isFinite));
   return Number.isFinite(value) ? value : undefined;
 }
@@ -31,7 +31,9 @@ export async function checkWorkspaceDraftReplacementOrder(input: {
   if (Number.isFinite(currentTimestamp) && timestamp.getTime() < currentTimestamp) return {
     phase: 'validation', reason: 'STALE_KA_SHARE_OPERATION: authenticated publisher operation precedes the current head',
   };
-  if (!Number.isFinite(currentTimestamp)) return { phase: 'corrupt-head', reason: 'DRAFT_REPLACEMENT_PROOF_UNAVAILABLE: authenticated publisher chronology is unavailable' };
+  // A recovered clock cannot fence a later authenticated forward assertion.
+  // Reuse/lower replacement still needs a trusted predecessor chronology.
+  if (!Number.isFinite(currentTimestamp) && (incomingVersion <= currentVersion || !head.operationAliases.every(alias => alias.publisherChronologyAuthenticated === false))) return { phase: 'corrupt-head', reason: 'DRAFT_REPLACEMENT_PROOF_UNAVAILABLE: authenticated publisher chronology is unavailable' };
   if (incomingVersion > currentVersion) return;
   const reason = incomingVersion < currentVersion
     ? `STALE_KA_ASSERTION_VERSION: incoming=${incomingVersion}, current=${currentVersion}`

@@ -115,6 +115,8 @@ export interface GraphScopedSwmRecoveryDescriptor {
   /** Publisher chronology, independent of a selected receiver-clock ACK alias. */
   readonly publisherOperationTimestampMs?: number;
   readonly publisherOperationId?: string;
+  /** Set only after matching a trusted operation already persisted locally. */
+  readonly locallyAuthenticatedPublisherOperationId?: string;
   /** Equivalent operation and immutable locator selected for materialization. */
   readonly snapshotSource: Readonly<{
     shareOperationId: string;
@@ -229,7 +231,6 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     const {
       shareOperationId,
       operationSubject,
-      operationRows,
       semantics,
       snapshotSource,
       equivalentOperationSubjects,
@@ -260,16 +261,10 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       ...(subGraphName ? { subGraphName } : {}),
       ...(operation.publisherOperationTimestampMs === undefined ? {} : { publisherOperationTimestampMs: operation.publisherOperationTimestampMs, publisherOperationId: operation.publisherOperation!.shareOperationId }),
       metadataQuads: [
-        ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
-        // Keep every lexical form of both validated aliases so the ordering
-        // proof survives an ACK display alias, retries and process restart.
-        ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
-          && [shareOperationId, operation.publisherOperation?.shareOperationId].includes(stripLiteral(row.object).trim())),
-        ...operationRows,
-        ...(snapshotSource.operationSubject === operationSubject
-          ? []
-          : snapshotSource.operationRows),
-        ...(operation.publisherOperation && ![operationSubject, snapshotSource.operationSubject].includes(operation.publisherOperation.operationSubject) ? operation.publisherOperation.operationRows : []),
+        ...headRows,
+        // Every validated alias is settled under the KA lock. Unselected
+        // provider operation rows must not escape into a later bulk union.
+        ...equivalentOperationSubjects.flatMap(subject => byGraphAndSubject.get(`${metaGraph}\u0000${subject}`) ?? []),
       ],
     });
   }

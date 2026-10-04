@@ -21,3 +21,17 @@ export function readExpiredSwmOperationBatch(store: TripleStore, input: {
     ${input.retentionFilters}
   } ORDER BY STR(?op) LIMIT ${input.limit}`, { source: 'agent.swmCleanup.expiredOperations' });
 }
+
+
+/** Revalidate selection after awaiting the live KA writer, including ACK retention. */
+export async function expiredSwmOperationMayRetire(store: TripleStore, input: {
+  metaGraph: string; operationSubject: string; cutoff: string; retentionFilters: string;
+}): Promise<boolean> {
+  const result = await store.query(`ASK {
+    BIND(<${assertSafeIri(input.operationSubject)}> AS ?op)
+    GRAPH <${assertSafeIri(input.metaGraph)}> { ?op <http://dkg.io/ontology/publishedAt> ?ts }
+    FILTER(?ts < "${input.cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+    ${input.retentionFilters}
+  }`, { source: 'agent.swmCleanup.expiredOperationRecheck', priority: 'background' });
+  return result.type === 'boolean' && result.value;
+}

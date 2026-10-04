@@ -1,3 +1,4 @@
+import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
 /**
  * The REAL store-backed snapshot materializer, against a REAL OxigraphStore —
  * no injected guard answers. This is what proves the production lifecycle
@@ -411,7 +412,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     it('is null/clean when no head exists', async () => {
       const store = new OxigraphStore();
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: null, needsRepair: false, shareOperationId: null });
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({ version: null, needsRepair: false, shareOperationId: null });
     });
 
     it('reads a single-version head without flagging repair', async () => {
@@ -421,7 +422,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       // GH#2273 — the single unambiguous id is exposed so catch-up can compare
       // it against a descriptor's id before deciding whether the head may be
       // rewritten at all.
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: '1', needsRepair: false, shareOperationId: 'op-v1' });
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({ version: '1', needsRepair: false, shareOperationId: 'op-v1' });
     });
 
     it('returns the NEWEST version (MAX) for union-insert residue and flags repair', async () => {
@@ -435,7 +436,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       // GH#2273 — with residue on the head, ANY sampled id would be an
       // arbitrary pick (the exact failure the field exists to prevent), so
       // ambiguity reads as null and the decision routes through repair.
-      expect(await materializer.readStoredHead(descriptorFor(v2))).toEqual({ version: '2', needsRepair: true, shareOperationId: null });
+      expect(await materializer.readStoredHead(descriptorFor(v2))).toMatchObject({ version: '2', needsRepair: true, shareOperationId: null });
     });
   });
 
@@ -875,7 +876,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(h.atomicReplaceCalls()).toBe(0);
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({
         version: '2',
         needsRepair: false,
         shareOperationId: 'op-v2',
@@ -938,8 +939,10 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       // the head so the LIMIT-1 production reader resolves version 2 — not an
       // arbitrary row from a v1+v2 union pile-up.
       const store = new OxigraphStore();
+      await persistLocalSwmOperation(store, CG, v1);
       await store.insert([...v1.meta]);
       await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await persistLocalSwmOperation(store, CG, v2);
       const h = realHarness(store, v2);
 
       const summary = await h.run();
@@ -1515,7 +1518,8 @@ describe('T9b — the already-materialized exit repairs an absent or stale head'
     const shares = [target, ...base.slice(1)];
 
     await store.insert(inGraph(target.payload, target.assertionGraph));
-    await store.insert(base[0]!.meta.filter((q) => q.subject === base[0]!.headSubject));
+    await persistLocalSwmOperation(store, CG, target);
+    await store.insert(base[0]!.meta.filter((q) => q.subject === base[0]!.headSubject).map(row => row.predicate === `${DKG}shareOperationId` ? { ...row, object: JSON.stringify(target.operationId) } : row));
     expect(await headVersions(store, target.headSubject)).toEqual([`"1"^^<${XSD_INTEGER}>`]);
 
     await runPartial(store, shares, 2);

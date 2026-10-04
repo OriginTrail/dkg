@@ -59,6 +59,8 @@ export function canonicalPublisherWorkspaceOperationSemantics(
 export interface WorkspaceOperationProvenance {
   readonly shareOperationId: string;
   readonly publishedAtMs?: number;
+  /** Provider metadata is not publisher-signed ordering evidence. */
+  readonly publisherChronologyAuthenticated?: boolean;
 }
 
 export interface WorkspaceOperationModel<TSemantics> {

@@ -1,8 +1,11 @@
+import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
+import { ethers } from 'ethers';
+import { encodeRootlessWorkspaceRequest } from '../../publisher/test/_helpers/rootless-workspace.js';
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { workspaceKnowledgeAssetOperationSnapshotGraph, type OperationContext } from '@origintrail-official/dkg-core';
-import { resolveKnowledgeAssetWorkspaceHead, withKeyedLocks, swmKaWriteLockKey, storageAckLedgerEntryQuads, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
+import { workspaceKnowledgeAssetOperationSnapshotGraph, TypedEventBus, computeGossipSigningPayload, encodeGossipEnvelope, GOSSIP_ENVELOPE_VERSION, GOSSIP_TYPE_WORKSPACE_PUBLISH, type OperationContext } from '@origintrail-official/dkg-core';
+import { resolveKnowledgeAssetWorkspaceHead, SharedMemoryHandler, withKeyedLocks, swmKaWriteLockKey, storageAckLedgerEntryQuads, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
@@ -69,10 +72,77 @@ const staleCases = (['publicRun', 'privateRun'] as const).flatMap(lane =>
     [undefined, 'team'].flatMap(subGraph => [false, true].map(graphLocator => ({ lane, oldVersion, currentVersion, subGraph, scope: subGraph ?? 'root', graphLocator })))));
 
 describe('legacy catch-up respects publisher draft chronology', () => {
+  it.each((['publicRun', 'privateRun'] as const).flatMap(lane => ['cold', 'equivalent', 'same-id', 'pre-upgrade'].map(mode => ({ lane, mode }))))('$lane does not let $mode recovered 2099 metadata fence a later signed publisher share', async ({ lane, mode }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const wallet = ethers.Wallet.createRandom();
+    const ka = `did:dkg:31337/${wallet.address.toLowerCase()}/3`;
+    const make = (id: string, timestamp: number) => swmFixtures(CG).share({ version: 1, operationId: id, marker: 'same-bytes', ual: ka, timestamp: new Date(timestamp) });
+    const local = make('local-publisher', 2000);
+    const forged = make(mode === 'same-id' ? local.operationId : 'forged-peer-alias', Date.parse('2099-01-01T00:00:00Z'));
+    // A provider copying the peer id and content cannot attest the clock, even
+    // when it omits the locally imposed provenance flag or spoofs a false one.
+    forged.meta.push({ subject: forged.operationSubject, predicate: `${DKG}recoveredOperationChronology`, object: '"false"', graph: forged.meta[0]!.graph });
+    if (mode === 'pre-upgrade') await store.insert([...forged.meta.filter(row => row.predicate !== `${DKG}recoveredOperationChronology`), ...inGraph(forged)]);
+    if (!['cold', 'pre-upgrade'].includes(mode)) { await persistLocalSwmOperation(store, CG, local); await store.insert([...local.meta, ...local.payload.map(row => ({ ...row, graph: local.assertionGraph }))]); }
+    await harness(store, forged)[lane]();
+    // Repeated transport acquisition must not upgrade the unsigned operation,
+    // erase the imposed marker, or downgrade an authenticated local operation.
+    await harness(store, forged)[lane]();
+    const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: ka });
+    if (['cold', 'pre-upgrade'].includes(mode)) expect(head?.operationAliases.every(alias => alias.publisherChronologyAuthenticated === false)).toBe(true);
+    else expect(head?.operationAliases.map(alias => alias.shareOperationId)).toEqual([local.operationId]);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {});
+    const payload = encodeRootlessWorkspaceRequest({ contextGraphId: CG, shareOperationId: 'signed-forward-share', publisherPeerId: 'peer-source', kaUal: ka, agentAddress: wallet.address, kaNumber: '3', assertionVersion: '2', timestampMs: Date.now(), nquads: new TextEncoder().encode(`<urn:later:signed> <urn:title> "legitimate" <did:dkg:context-graph:${CG}> .`) });
+    const timestamp = new Date().toISOString();
+    const signature = await wallet.signMessage(computeGossipSigningPayload(GOSSIP_TYPE_WORKSPACE_PUBLISH, CG, timestamp, payload));
+    const envelope = encodeGossipEnvelope({ version: GOSSIP_ENVELOPE_VERSION, type: GOSSIP_TYPE_WORKSPACE_PUBLISH, contextGraphId: CG, agentAddress: wallet.address, timestamp, signature: ethers.getBytes(signature), payload });
+    expect(await handler.verifyHostModeEnvelopeAuthority(envelope, CG, 'peer-source', { resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }) })).toMatchObject({ accepted: true });
+    expect(await handler.handle(envelope, 'peer-source', undefined, { trustedReplay: true })).toMatchObject({ applied: true });
+    expect((await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: ka }))?.assertionVersion).toBe('2');
+  });
+
+  it.each((['publicRun', 'privateRun'] as const).flatMap(lane => ['clock-and-marker', 'partial-orphan'].map(mode => ({ lane, mode }))))('$lane preserves trusted chronology against $mode provider metadata outside its selected alias', async ({ lane, mode }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const local = share(1, 'trusted-B', 2000);
+    await persistLocalSwmOperation(store, CG, local);
+    await store.insert([...local.meta, ...inGraph(local)]);
+    const provider = share(1, 'unsigned-P', Date.parse('2099-01-01T00:00:00Z'));
+    const ack = share(1, 'storage-ack-Q', Date.parse('2100-01-01T00:00:00Z'));
+    for (const candidate of [provider, ack]) { candidate.payload = local.payload; candidate.digest = local.digest; candidate.meta = candidate.meta.map(row => row.predicate === `${DKG}publicQuadsDigest` || row.predicate === `${DKG}publicSnapshotRef` ? { ...row, object: JSON.stringify(local.digest) } : row); }
+    const forged = local.meta.filter(row => row.subject === local.operationSubject).map(row => row.predicate === `${DKG}publishedAt` ? { ...row, object: `"2099-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>` } : row);
+    forged.push({ subject: local.operationSubject, predicate: `${DKG}recoveredOperationChronology`, object: '"false"', graph: local.meta[0]!.graph });
+    const served = { ...provider, meta: [...provider.meta, ...ack.meta.filter(row => row.subject === ack.operationSubject || row.predicate === `${DKG}shareOperationId`), ...forged.filter(row => mode !== 'partial-orphan' || row.predicate === `${DKG}publishedAt`)] };
+    if (mode === 'clock-and-marker') served.meta.push({ subject: local.headSubject, predicate: `${DKG}shareOperationId`, object: JSON.stringify(local.operationId), graph: local.meta[0]!.graph });
+    for (let round = 0; round < 2; round++) await harness(store, served)[lane]();
+    const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: UAL });
+    expect(head?.operationAliases.map(alias => alias.shareOperationId)).toEqual([local.operationId]);
+    expect(head?.operationAliases[0].publisherChronologyAuthenticated).not.toBe(false);
+    expect(head?.operationAliases[0].publishedAt).toBe('2000');
+  });
+
+  it.each((['publicRun', 'privateRun'] as const).flatMap(lane => [false, true].flatMap(trusted => ['private', 'access', 'version'].map(change => ({ lane, trusted, change })))))('$lane refuses same-ID $change mutation (local authenticated=$trusted)', async ({ lane, trusted, change }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const make = (version: number, privateByte: number) => swmFixtures(CG).share({ version, operationId: 'same-immutable-id', marker: 'same-public', ual: UAL, privateTripleCount: 1, privateMerkleRoot: new Uint8Array(32).fill(privateByte) });
+    const local = make(2, 0xbb);
+    if (trusted) await persistLocalSwmOperation(store, CG, local);
+    else local.meta.push({ subject: local.operationSubject, predicate: `${DKG}recoveredOperationChronology`, object: '"true"', graph: local.meta[0]!.graph });
+    await store.insert([...local.meta, ...inGraph(local)]);
+    const remote = make(change === 'version' ? 1 : 2, change === 'private' ? 0xaa : 0xbb);
+    if (change === 'access') remote.meta = [...remote.meta.filter(row => row.predicate !== `${DKG}accessPolicy`), { subject: remote.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: remote.meta[0]!.graph }, { subject: remote.operationSubject, predicate: `${DKG}allowedPeer`, object: '"foreign-peer"', graph: remote.meta[0]!.graph }];
+    const h = harness(store, remote);
+    await h.materializer.isGraphAssetMaterialized(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: remote.meta })[0]!);
+    const before = await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }');
+    try { await h[lane](); } catch (error) { expect(error).toMatchObject({ code: 'RECOVERED_OPERATION_EVIDENCE_CONFLICT' }); }
+    expect(await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }')).toEqual(before);
+    expect(h.companion).not.toHaveBeenCalled();
+    expect((await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: UAL }))?.assertionVersion).toBe('2');
+  });
+
   it.each(staleCases)('$lane keeps newer v$currentVersion over abandoned v$oldVersion ($scope, graph locator=$graphLocator)', async ({ lane, oldVersion, currentVersion, subGraph, graphLocator }) => {
     const store = new OxigraphStore(); stores.push(store);
     const old = share(oldVersion, 'abandoned', 1000, subGraph, graphLocator);
     const current = share(currentVersion, 'replacement', 2000, subGraph, graphLocator);
+    await persistLocalSwmOperation(store, CG, current);
     await store.insert([...inGraph(current), ...current.meta]);
     const h = harness(store, old, async () => currentVersion === 1 ? 0n : 1n);
     const replace = vi.spyOn(store, 'replaceGraph');
@@ -86,17 +156,32 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const store = new OxigraphStore(); stores.push(store);
     const old = share(oldVersion, 'abandoned', 1000);
     const current = share(currentVersion, 'replacement', 2000);
+    await persistLocalSwmOperation(store, CG, old);
     await store.insert([...inGraph(old), ...old.meta]);
+    await persistLocalSwmOperation(store, CG, current);
     const h = harness(store, current, async () => currentVersion === 1 ? 0n : 1n);
     await h[lane]();
     await expectHead(store, current);
     expect(h.companion).toHaveBeenCalled();
   });
 
+  it.each((['publicRun', 'privateRun'] as const).flatMap(lane => ([[1, 1], [4, 2]] as const).map(([oldVersion, nextVersion]) => ({ lane, oldVersion, nextVersion }))))('$lane refuses unsigned later v$nextVersion over established v$oldVersion', async ({ lane, oldVersion, nextVersion }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const old = share(oldVersion, 'local-draft', 1000);
+    const unsigned = share(nextVersion, 'unsigned-provider-draft', 2000);
+    await persistLocalSwmOperation(store, CG, old);
+    await store.insert([...inGraph(old), ...old.meta]);
+    const h = harness(store, unsigned, async () => 0n);
+    await h[lane]();
+    await expectHead(store, old);
+    expect(h.companion).not.toHaveBeenCalled();
+  });
+
   it.each((['publicRun', 'privateRun'] as const).flatMap(lane => [null, 2n, 4n].map(confirmed => ({ lane, confirmed }))))('$lane refuses later reuse with confirmed proof $confirmed', async ({ lane, confirmed }) => {
     const store = new OxigraphStore(); stores.push(store);
     const old = share(4, 'abandoned', 1000);
     const incoming = share(2, 'replacement', 2000);
+    await persistLocalSwmOperation(store, CG, old);
     await store.insert([...inGraph(old), ...old.meta]);
     const h = harness(store, incoming, async () => confirmed);
     await h[lane]();
@@ -112,7 +197,9 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     // The ACK copy has exactly the publisher's assertion bytes, not its clock.
     ack.meta = ack.meta.map(row => row.predicate === `${DKG}publicQuadsDigest` ? { ...row, object: JSON.stringify(current.digest) } : row.predicate === `${DKG}publicSnapshotRef` ? { ...row, object: JSON.stringify(current.digest) } : row);
     const served = { ...current, meta: [...current.meta, ...ack.meta.filter(row => row.subject === ack.operationSubject || row.predicate === `${DKG}shareOperationId`)] };
+    await persistLocalSwmOperation(store, CG, old);
     await store.insert([...inGraph(old), ...old.meta]);
+    await persistLocalSwmOperation(store, CG, current);
     await harness(store, served)[lane]();
     const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: UAL });
     expect(head?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual(['publisher-replacement', 'storage-ack-replacement']);
@@ -121,6 +208,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     // Retaining the publisher proof must also permit a later replacement;
     // merely rejecting every draft after an ACK would pass the stale control.
     const next = share(1, 'next-publisher-replacement', 3000);
+    await persistLocalSwmOperation(store, CG, next);
     await harness(store, next)[lane]();
     await expectHead(store, next);
   });
@@ -134,12 +222,14 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     publisher.digest = ack.digest; publisher.payload = ack.payload;
     publisher.meta = publisher.meta.map(row => row.predicate === `${DKG}publicQuadsDigest` || row.predicate === `${DKG}publicSnapshotRef` ? { ...row, object: JSON.stringify(ack.digest) } : row);
     await store.insert([...inGraph(ack), ...ack.meta]);
+    await persistLocalSwmOperation(store, CG, publisher);
     await harness(store, publisher)[lane]();
     const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: UAL });
     expect(head?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual(['publisher-existing-copy', 'storage-ack-existing-copy']);
     await harness(store, share(1, 'abandoned-publisher', 1000))[lane]();
     await expectHead(store, ack);
     const next = share(1, 'later-publisher', 3000);
+    await persistLocalSwmOperation(store, CG, next);
     await harness(store, next)[lane]();
     await expectHead(store, next);
   });
@@ -151,7 +241,9 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const current = share(1, 'latest-equivalent-publisher-copy', 3000);
     current.digest = old.digest; current.payload = old.payload;
     current.meta = current.meta.map(row => row.predicate === `${DKG}publicQuadsDigest` || row.predicate === `${DKG}publicSnapshotRef` ? { ...row, object: JSON.stringify(old.digest) } : row);
+    await persistLocalSwmOperation(store, CG, old);
     await store.insert([...inGraph(old), ...old.meta]);
+    await persistLocalSwmOperation(store, CG, current);
     await harness(store, current)[lane]();
     await expectHead(store, current);
     const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: UAL });
@@ -176,6 +268,13 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: recoveredMeta.quads.map(row => ({ ...row, graph: served.meta[0]!.graph })) })[0]!;
     expect(descriptor).toBeDefined();
     expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect(await h.materializer.readStoredHead(descriptor)).toMatchObject({ status: 'resolved', needsRepair: false });
+    const repair = vi.spyOn(h.materializer, 'repairHeadPreservingIdentity');
+    await h[lane]();
+    expect(repair).not.toHaveBeenCalled();
+    const restarted = harness(store, served).materializer;
+    expect(await restarted.readStoredHead(descriptor)).toMatchObject({ status: 'resolved', needsRepair: false });
+    expect(await restarted.isGraphAssetMaterialized(descriptor)).toBe(true);
     await expectHead(store, { ...publisher, operationId: ack.operationId });
   });
 
@@ -207,6 +306,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const store = new OxigraphStore(); stores.push(store);
     const old = share(4, 'queued-abandoned', 1000);
     const current = share(2, 'live-replacement', 2000);
+    await persistLocalSwmOperation(store, CG, old);
     await store.insert([...inGraph(old), ...old.meta]);
     const h = harness(store, old, async () => 1n);
     let unlock!: () => void;
@@ -231,13 +331,16 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const store = new OxigraphStore(); stores.push(store);
     const old = share(1, 'owed-copy', 1000);
     const current = share(1, 'later-publisher', 2000);
+    await persistLocalSwmOperation(store, CG, old);
     await store.insert([...inGraph(old), ...old.meta]);
     const ledger = { namespace: CG, metaGraph: old.meta[0]!.graph, contextGraphId: '42', kaUal: UAL, assertionVersion: '1', operation: 'publish' as const, operationSubject: workspaceOperationSubject(CG, old.operationId) };
     await store.insert(storageAckLedgerEntryQuads({ ...ledger, signedAt: new Date() }));
+    await persistLocalSwmOperation(store, CG, current);
     await harness(store, current)[lane]();
     await expectHead(store, old);
     await store.dropGraph('urn:dkg:node:storage-ack-ledger');
     await store.insert(storageAckLedgerEntryQuads({ ...ledger, signedAt: new Date(Date.now() - 300_001) }));
+    await persistLocalSwmOperation(store, CG, current);
     await harness(store, current)[lane]();
     await expectHead(store, current);
   });
@@ -246,6 +349,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const store = new OxigraphStore(); stores.push(store);
     const current = share(2, 'storage-ack-only-copy', 50000);
     const incoming = share(4, 'abandoned-publisher', 1000);
+    await persistLocalSwmOperation(store, CG, current);
     await store.insert([...inGraph(current), ...current.meta]);
     await harness(store, incoming, async () => 1n)[lane]();
     await expectHead(store, current);

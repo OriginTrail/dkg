@@ -44,6 +44,7 @@ import {
   knowledgeAssetLayerGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { canonicalQuadKey } from '../src/sync/requester/quad-key.js';
 import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import {
   generateKnowledgeAssetShareMetadata,
@@ -219,6 +220,8 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
+        prepareRecoveredDescriptor: async descriptor => descriptor,
+        filterBulkMetadata: async (rows, withheld = []) => { const keys = new Set(withheld.map(canonicalQuadKey)); return rows.filter(row => !keys.has(canonicalQuadKey(row))); },
         // Private-lane mutations are outside this public orchestration fixture.
         readExactMaterializedGraph: async () => { throw new Error('unexpected private recovery'); },
         replaceGraphWithAtomicCompanion: async () => { throw new Error('unexpected private recovery'); },
@@ -242,13 +245,15 @@ function harness(overrides: HarnessOverrides = {}) {
           return overrides.contentPresent?.() ?? false;
         },
         draftMayReplace: async (_cg, descriptor) => {
+          events.push('version-read');
           const version = overrides.storedHead?.().version;
           if (version == null) return true;
           try { return BigInt(version) <= BigInt(descriptor.assertionVersion); } catch { return false; }
         },
         readStoredHead: async () => {
           events.push('version-read');
-          return overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
+          const state = overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
+          return { ...state, status: state.version === null ? 'missing' : state.needsRepair ? 'corrupt' : 'resolved', head: { operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as StoredWorkspaceHeadState;
         },
         replaceGraph: async (graphUri, quads) => {
           events.push('replaced');
@@ -265,7 +270,7 @@ function harness(overrides: HarnessOverrides = {}) {
         // records that it ran.
         selectRepairIdentity: async () => {
           events.push('repair-identity-selected');
-          return overrides.selectRepairIdentity?.() ?? null;
+          return overrides.selectRepairIdentity?.() ?? (overrides.storedHead?.().version === '1' && overrides.contentPresent?.() && !overrides.storedHead?.().needsRepair ? { winnerShareOperationId: 'snapshot-materialization-op', withholdRows: [] } : null);
         },
         repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
           events.push('head-repaired-preserving-identity');
