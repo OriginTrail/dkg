@@ -2614,18 +2614,19 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
     this.messenger.setOutboxResponseHandler(PROTOCOL_JOIN_REQUEST, async (result) => {
       await this.handleJoinRequestOutboxResponse(result);
     });
-    // Restart contract (see DKGAgentBase): the manager built here starts with
-    // no subscriptions and no handlers, so the registries that mirror the
-    // previous manager must not outlive it. A detached subscribe from the
-    // previous session can repopulate them after stop() returned, hence the
-    // reset lives at the manager swap and not only in stop().
-    this.resetGossipSessionState();
+    // Snapshot live intent before any durable read or detached persistence
+    // completion. Durable rows claim their part of this startup plan below.
+    const liveIntents = [...this.subscribedContextGraphs].filter(
+      ([, subscription]) => subscription.subscribed && !subscription.pendingMeta,
+    );
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
       chainId: this.config.networkIdentity?.chainId,
       isPeerAccepted: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
     });
-    const isRestart = ++this.gossipSessionCount > 1;
+    for (const [id, subscription] of liveIntents) {
+      this.gossipSession.startupLiveIntents.set(id, { syncMode: subscription.syncMode });
+    }
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphsFromDurableState();
@@ -3815,9 +3816,7 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
     for (const systemContextGraph of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
       this.subscribeToContextGraph(systemContextGraph, { syncMode: 'always-on' });
     }
-    // Same-instance restart: durable rows were replayed by rehydration above;
-    // give the live process-local subscriptions the wiring the new manager lacks.
-    if (isRestart) this.restoreLiveContextGraphGossipSubscriptions();
+    this.applyStartupContextGraphGossipPlan();
 
     // Connect to bootstrap peers
     if (this.config.bootstrapPeers) {
@@ -8119,21 +8118,6 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
   }
 
   /** Focused VM-recovery operation that returns clean per-peer miss evidence. */
-  async syncVmRecoveryFromConnectedPeers(
-    this: DKGAgent,
-    contextGraphId: string,
-    options?: ContextGraphCatchupOptions,
-  ): Promise<{ catchup: ContextGraphCatchupResult; cleanMissPeerIds: string[] }> {
-    const catchup = await this.syncContextGraphFromConnectedPeers(contextGraphId, options);
-    return {
-      catchup,
-      // Embedders may still override the catch-up method with the pre-evidence
-      // result shape. Treat that legacy shape as no proof; production results
-      // always carry the immutable field below.
-      cleanMissPeerIds: [...(catchup.cleanSharedMemoryPeerIds ?? [])],
-    };
-  }
-
   selectCatchupPeerWindow(this: DKGAgent,
     peers: Array<{ toString(): string }>,
     options?: { maxPeers?: number; peerRotationKey?: string; peerPriorityRanks?: ReadonlyMap<string, number> },
@@ -10728,10 +10712,12 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
     const store = this.config.contextGraphSubscriptionStore;
     this.contextGraphSubscriptionRehydrationSlotIds.clear();
     this.contextGraphSubscriptionRehydrationPendingIds.clear();
-    this.contextGraphSubscriptionRehydrationPassAccountedIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
+    const startupPlan = this.gossipSession.beginDurableStartupPlan(
+      this.contextGraphSubscriptionRehydrationAccountedIds,
+    );
     try {
       // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
       // by start(); their persisted rows must NOT be rehydrated here too. Re-
@@ -10740,6 +10726,7 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
       // dormant. Exclude them from the rehydration set entirely.
       const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
       const persistedRows = await store.loadAll();
+      startupPlan.claimDurableRows(persistedRows);
       // A name-hash placeholder whose verified cleartext row is also durable
       // was adopted earlier; the crash window between the two writes can
       // leave both. Never reactivate the placeholder. Record the adoption as
@@ -11153,12 +11140,7 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       authorityBudget?.dispose();
-      // Freeze the accounting as this pass leaves it: rebuilt from the rows it
-      // read, or inherited when it failed. No await separates the rebuild from
-      // this copy, so a persistence completion cannot land in between.
-      for (const id of this.contextGraphSubscriptionRehydrationAccountedIds) {
-        this.contextGraphSubscriptionRehydrationPassAccountedIds.add(id);
-      }
+      startupPlan.finish();
     }
   }
 

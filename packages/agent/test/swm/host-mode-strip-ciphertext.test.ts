@@ -121,6 +121,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
       swmHostMode: strip === undefined ? { enabled: true } : { enabled: true, stripCiphertext: strip },
     });
     agents.push(core);
+    installGossipStub(core as unknown as StripInternals);
     const store = new SwmHostModeStore({
       dataDir: join(dataDir, 'swm-host'),
       ...SwmHostModeStore.defaultLimits(),

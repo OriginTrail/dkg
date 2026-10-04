@@ -63,6 +63,7 @@ export default defineConfig({
           // Guarded per-view fan-out on the same route (pure handler).
           'test/memory-search-guarded-query-path.test.ts',
           'test/memory-turn-route.test.ts',
+          'test/chat-turn-persistence-session-recovery.test.ts',
           'test/trust-endpoint-validation.test.ts',
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',

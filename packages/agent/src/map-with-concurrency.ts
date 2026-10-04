@@ -29,6 +29,44 @@ export async function mapWithConcurrency<T, R>(
 }
 
 /**
+ * {@link mapWithConcurrency} for callbacks whose work must not outlive the
+ * call. The first rejection stops further callbacks from starting, the ones
+ * already running are awaited, and only then does the call reject with that
+ * first error. Results preserve input order.
+ */
+export async function mapWithConcurrencyDrained<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = Array.from<R>({ length: items.length });
+  const workerCount = !Number.isInteger(limit) || limit <= 0
+    ? items.length
+    : Math.min(limit, items.length);
+  let nextIndex = 0;
+  let failed = false;
+  let failure: unknown;
+  const worker = async (): Promise<void> => {
+    while (!failed) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          failure = error;
+        }
+        return;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  if (failed) throw failure;
+  return results;
+}
+
+/**
  * Bounded concurrent `every`. The first false result or rejection settles the
  * predicate immediately, aborts active siblings and prevents queued callbacks
  * from starting. Work already in flight is observed so a non-cooperative

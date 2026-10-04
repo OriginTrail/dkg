@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
-import { formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
+import { mergeRpcUsageWindows, RpcRequestGovernor } from '@origintrail-official/dkg-chain';
+import { createDaemonRpcTelemetrySource, formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
 
 /**
  * The rpc_usage line format is a CONTRACT with the Grafana dashboards (parsed
@@ -8,6 +8,22 @@ import { formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../sr
  * pin it: one logfmt line per method, delta counts, token-safe values.
  */
 describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => {
+  it('composes live adapter windows and retains the governor drain receiver', () => {
+    let publisherCount = 5;
+    const governor = new RpcRequestGovernor({ maxRequestsPerSecond: 10 });
+    const source = createDaemonRpcTelemetrySource([
+      () => ({ byMethod: { eth_call: publisherCount }, lifetimeTotal: publisherCount }),
+      () => undefined,
+      () => ({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 }),
+    ], governor);
+    expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 7 });
+    publisherCount = 9;
+    expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 11 });
+    expect(source.drainRpcRequestGovernor?.()).toEqual(governor.drainWindow());
+    expect(source.drainRpcReadBatching?.()).toMatchObject({ batches: 0, readsByLabel: {} });
+    expect(createDaemonRpcTelemetrySource([]).drainRpcRequestGovernor).toBeUndefined();
+  });
+
   it('emits one logfmt line per method with count/window/chain', () => {
     const lines = formatRpcUsageLines(
       { byMethod: { eth_call: 42, eth_getLogs: 7 }, ethCallByConsumer: {}, lifetimeTotal: 49 },
@@ -223,6 +239,53 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
   });
 });
 
+describe('formatRpcUsageLines — reads that left in aggregate requests', () => {
+  const usage = {
+    byMethod: { eth_call: 9 },
+    ethCallByConsumer: { 'multicall3.aggregate3': 9 },
+    lifetimeTotal: 9,
+  };
+
+  it('adds one summary line and one line per read label, after the request counts', () => {
+    const lines = formatRpcUsageLines(usage, 60, 'base:8453', undefined, {
+      batches: 8,
+      failedBatches: 1,
+      refusedBatches: 0,
+      calls: 74,
+      directReads: 3,
+      readsByLabel: { 'kas.getLatestMerkleRoot': 27, 'cgStorage.getContextGraphKaAt': 54, 'kas.unused': 0 },
+    });
+
+    expect(lines).toEqual([
+      'rpc_usage method=eth_call count=9 window_s=60 chain=base:8453',
+      'rpc_usage_by_consumer method=eth_call consumer=multicall3.aggregate3 count=9 window_s=60 chain=base:8453',
+      'rpc_read_batching batches=8 failed_batches=1 refused_batches=0 calls=74 reads=81 direct_reads=3 window_s=60 chain=base:8453',
+      'rpc_batched_reads consumer=kas.getLatestMerkleRoot count=27 window_s=60 chain=base:8453',
+      'rpc_batched_reads consumer=cgStorage.getContextGraphKaAt count=54 window_s=60 chain=base:8453',
+    ]);
+    for (const line of lines) expect(line).toMatch(/^[a-z_]+( [a-z_]+=[A-Za-z0-9_.:-]+)+$/);
+  });
+
+  it('emits nothing for a window without an aggregate request', () => {
+    const idle = { batches: 0, failedBatches: 0, refusedBatches: 0, calls: 0, directReads: 0, readsByLabel: {} };
+
+    expect(formatRpcUsageLines(usage, 60, 'base:8453', undefined, idle)).toHaveLength(2);
+    expect(formatRpcUsageLines(usage, 60, 'base:8453')).toHaveLength(2);
+  });
+
+  it('keeps a read label that is not token-safe out of the line', () => {
+    const lines = formatRpcUsageLines(usage, 60, undefined, undefined, {
+      batches: 0, failedBatches: 0, refusedBatches: 1, calls: 0, directReads: 0,
+      readsByLabel: { 'bad label="x"': 2 },
+    });
+
+    expect(lines.slice(2)).toEqual([
+      'rpc_read_batching batches=0 failed_batches=0 refused_batches=1 calls=0 reads=2 direct_reads=0 window_s=60',
+      'rpc_batched_reads consumer=other count=2 window_s=60',
+    ]);
+  });
+});
+
 describe('composite daemon source — agent + publisher-runtime windows merged at drain time', () => {
   it('COMPOSITE SOURCE end-to-end: publisher-runtime traffic reaches the emitted rpc_usage lines', () => {
     // The exact daemon wiring shape: the source merges the agent window with
@@ -283,6 +346,29 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
     expect(drainRpcUsage).toHaveBeenCalledTimes(1);
     expect(drainRpcRequestGovernor).toHaveBeenCalledTimes(1);
     expect(emitted.some((line) => line.startsWith('rpc_request_governor '))).toBe(true);
+  });
+
+  it('drains the read batching window once and survives its drain failing', () => {
+    const emitted: string[] = [];
+    const drainRpcUsage = () => ({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 });
+    const drainRpcReadBatching = vi.fn(() => ({
+      batches: 2, failedBatches: 0, refusedBatches: 0, calls: 6, directReads: 0,
+      readsByLabel: { 'kas.getLatestMerkleRoot': 6 },
+    }));
+
+    expect(emitRpcUsage({ drainRpcUsage, drainRpcReadBatching }, (line) => emitted.push(line), 60)).toBe(3);
+    expect(drainRpcReadBatching).toHaveBeenCalledTimes(1);
+    expect(emitted.slice(1)).toEqual([
+      'rpc_read_batching batches=2 failed_batches=0 refused_batches=0 calls=6 reads=6 direct_reads=0 window_s=60',
+      'rpc_batched_reads consumer=kas.getLatestMerkleRoot count=6 window_s=60',
+    ]);
+
+    const usageOnly: string[] = [];
+    expect(emitRpcUsage({
+      drainRpcUsage,
+      drainRpcReadBatching: () => { throw new Error('batching window down'); },
+    }, (line) => usageOnly.push(line), 60)).toBe(1);
+    expect(usageOnly).toEqual(['rpc_usage method=eth_call count=2 window_s=60']);
   });
 
   it('drains the agent source and emits one line per method', () => {

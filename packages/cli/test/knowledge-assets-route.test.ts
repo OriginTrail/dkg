@@ -586,7 +586,7 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       const finalized = await postJson(daemon, '/api/knowledge-assets/share/wm/finalize', { contextGraphId: REG });
       expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
       const res = await postJson(daemon, '/api/knowledge-assets/share/swm/share', { contextGraphId: REG });
-      expect(res.status).toBe(200);
+      expect(res.status, `share failed: ${JSON.stringify(res.body)}`).toBe(200);
       expect(res.body.swmShared).toBe(true);
       expect(res.body.promotedCount).toBeGreaterThan(0);
     });
@@ -970,7 +970,7 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       // finalized + shared to SWM earlier in this suite, so pulling from SWM
       // re-opens its WM draft and re-seeds its one entity (ex:A).
       const res = await postJson(daemon, '/api/knowledge-assets/share/wm/pull-from', { contextGraphId: REG, layer: 'swm' });
-      expect(res.status).toBe(200);
+      expect(res.status, `pull-from failed: ${JSON.stringify(res.body)}`).toBe(200);
       expect(res.body.wmDraft).toBe('open');
       expect(res.body.seededFrom).toEqual({ layer: 'swm' });
       expect(res.body.fromLayer).toBe('swm');

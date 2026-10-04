@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Buffer } from 'node:buffer';
+import type { VmRecoveryPreparation, VmRecoveryPreparationScope, VmRecoveryPreparationCandidate } from './vm-recovery-preparation.js';
 import { encodeExactAssetUals, MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
 import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import {
@@ -50,17 +51,16 @@ export interface VmRecoveryTransportPlanningOptions<T> {
   readonly sizingReadConcurrency?: number;
   /** Deadline of one live sizing read; omitted keeps the sizing bridge's default. */
   readonly sizingReadTimeoutMs?: number;
+  /** Pending candidates after a probe; the transport owner prepares their sizing. */
+  readonly probeRemainder?: readonly VmRecoveryPreparationCandidate[];
 }
 
 export interface VmRecoveryTransportPlanningPorts {
   readonly resolvePublicAccess: VmRecoveryFootprintBridge['resolvePublicAccess'];
   /** Ordinary probes do not inspect or invoke optional sizing ports. */
   readonly createSizingReader: () => VmRecoveryFootprintSizingReader | null;
-  /**
-   * Advisory sizing already prepared for this exact recovery operation. Consumed
-   * only when sizing a holder prefix; a probe sizes one asset to choose its wire.
-   */
-  readonly preparedHints?: VmRecoveryPreparedHints | null;
+  /** The scoped owner of advisory sizing and its transport-plan lifetime. */
+  readonly preparation?: VmRecoveryTransportPreparationPort;
 }
 
 /** A sized candidate the plan left for a later batch, with the footprint already observed. */
@@ -99,10 +99,58 @@ function freezePlan<T>(
   });
 }
 
-/** Size and select one transport plan without changing provider/rotation state. */
+export interface VmRecoveryTransportPreparationPort {
+  /** Holder sizing consumes hints; probes always inspect live sizing. */
+  hints(): VmRecoveryPreparedHints;
+  release(): void;
+  prepareRemainder(candidates: readonly VmRecoveryPreparationCandidate[]): void;
+}
+
+type VmRecoveryTransportSizingPorts = Pick<VmRecoveryTransportPlanningPorts,
+  'resolvePublicAccess' | 'createSizingReader'>;
+
+/** Coordinate advisory hint lifetime at transport-plan boundaries. */
+export class VmRecoveryTransportPreparation implements VmRecoveryTransportPreparationPort {
+  #entryPrepared = false;
+  constructor(private readonly owner: VmRecoveryPreparation, private readonly scope: VmRecoveryPreparationScope) {}
+  preparePass(candidates: readonly VmRecoveryPreparationCandidate[]): void {
+    if (this.#entryPrepared) return;
+    this.#entryPrepared = true;
+    this.owner.prepare(this.scope, candidates);
+  }
+  hints(): VmRecoveryPreparedHints { return this.owner.hintsFor(this.scope); }
+  release(): void { this.owner.release(this.scope); }
+  prepareRemainder(candidates: readonly VmRecoveryPreparationCandidate[]): void { this.owner.prepare(this.scope, candidates); }
+}
+
+/** Plan, release consumed hints, then prepare only the still-pending remainder. */
 export async function planVmRecoveryTransport<T>(
+  options: VmRecoveryTransportPlanningOptions<T>, ports: VmRecoveryTransportPlanningPorts,
+): Promise<VmRecoveryTransportPlan<T>> {
+  let plan: VmRecoveryTransportPlan<T>;
+  try {
+    plan = await selectVmRecoveryTransport(options, {
+      resolvePublicAccess: ports.resolvePublicAccess,
+      createSizingReader: ports.createSizingReader,
+    }, ports.preparation?.hints());
+  } finally {
+    if (options.providerAttemptKind !== 'probe') ports.preparation?.release();
+  }
+  if (plan.attempts.length > 0 && !options.signal?.aborted && options.isCurrent()) {
+    ports.preparation?.prepareRemainder(options.providerAttemptKind === 'probe'
+      ? options.probeRemainder ?? []
+      : plan.unplanned.map(({ kaId, recoveryFootprint }) => ({
+        kaId, ...(recoveryFootprint ? { footprint: recoveryFootprint } : {}),
+      })));
+  }
+  return plan;
+}
+
+/** Size and select one transport plan without changing provider/rotation state. */
+async function selectVmRecoveryTransport<T>(
   options: VmRecoveryTransportPlanningOptions<T>,
-  ports: VmRecoveryTransportPlanningPorts,
+  ports: VmRecoveryTransportSizingPorts,
+  preparedHints?: VmRecoveryPreparedHints,
 ): Promise<VmRecoveryTransportPlan<T>> {
   const probe = options.providerAttemptKind === 'probe';
   const candidates = probe ? options.candidates.slice(0, 1) : options.candidates;
@@ -120,7 +168,7 @@ export async function planVmRecoveryTransport<T>(
       return allowed;
     },
     sizing: ports.createSizingReader(),
-    ...(!probe && ports.preparedHints ? { prepared: ports.preparedHints } : {}),
+    ...(!probe && preparedHints ? { prepared: preparedHints } : {}),
   }, {
     maxContextReads: probe ? 1 : MAX_EXACT_SYNC_ASSETS,
     signal: options.signal, isCurrent: options.isCurrent,
