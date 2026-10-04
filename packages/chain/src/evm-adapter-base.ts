@@ -44,6 +44,7 @@ import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
   classifyRpcRetryDisposition,
+  rethrowInterruptedInitialization,
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   resolveRpcUrls,
@@ -58,7 +59,6 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
 import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -66,8 +66,8 @@ import {
 import {
   RpcFailoverClient,
   createRpcReadDescriptor,
+  rpcReadDescriptor,
   type ReadOpts,
-  type RpcReadDescriptor,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
@@ -149,24 +149,6 @@ type SerializedSignerWriteContext = {
   /** Refresh the lane-health clock after a meaningful write-stage boundary. */
   markProgress: () => void;
 };
-
-/**
- * Bind an adapter read's human label and telemetry owner together.
- *
- * Kept as a module helper so it does not become part of the concrete adapter's
- * prototype API (the mock-adapter parity test intentionally enumerates that
- * surface).
- */
-function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
-  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
-  return createRpcReadDescriptor(label, consumer);
-}
-
-function rethrowInterruptedInitialization(error: unknown): void {
-  activeRpcRequestAbortSignal()?.throwIfAborted();
-  // Local refusal is not proof that an optional contract is absent.
-  if (isRpcRequestGovernorQueueFullError(error)) throw error;
-}
 
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
