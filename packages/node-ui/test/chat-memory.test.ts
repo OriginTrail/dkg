@@ -29,7 +29,7 @@ function createTools(overrides?: {
   mockListContextGraphs?: TrackingFn;
   mockPublishFromSharedMemory?: TrackingFn;
 }) {
-  const mockQuery = overrides?.mockQuery ?? trackFn(undefined);
+  const mockQuery = overrides?.mockQuery ?? trackFn({ bindings: [] });
   const mockShare = overrides?.mockShare ?? trackFn({ shareOperationId: 'op-1' });
   const mockCreateContextGraph = overrides?.mockCreateContextGraph ?? trackFn(undefined);
   const mockListContextGraphs = overrides?.mockListContextGraphs ?? trackFn([{ id: 'agent-memory', name: 'Agent Memory' }]);
@@ -133,7 +133,7 @@ describe('ChatMemoryManager', () => {
   let mockListContextGraphs: TrackingFn;
 
   beforeEach(() => {
-    mockQuery = trackFn(undefined);
+    mockQuery = trackFn({ bindings: [] });
     mockShare = trackFn({ shareOperationId: 'op-1' });
     mockCreateAssertion = trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false });
     mockWriteAssertion = trackFn({ written: 0 });
@@ -922,7 +922,7 @@ describe('ChatMemoryManager WM write discipline', () => {
   let mockListContextGraphs: TrackingFn;
 
   beforeEach(() => {
-    mockQuery = trackFn(undefined);
+    mockQuery = trackFn({ bindings: [] });
     mockShare = trackFn({ shareOperationId: 'op-1' });
     mockCreateAssertion = trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false });
     mockWriteAssertion = trackFn({ written: 0 });
