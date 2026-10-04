@@ -12,7 +12,8 @@ async function verifiedOrdering(adapter: Pick<ChainAdapter, 'getMintedKnowledgeA
   const root: Uint8Array = result.merkleRoot;
   const blockHash: string = result.blockHash;
   const gasCostWei: bigint | undefined = result.gasCostWei;
-  return { txIndex, kaId, startKAId, endKAId, root, blockHash, gasCostWei };
+  const tokenAmount: bigint = result.tokenAmount;
+  return { txIndex, kaId, startKAId, endKAId, root, blockHash, gasCostWei, tokenAmount };
 }
 void verifiedOrdering(new MockChainAdapter());
 void verifiedOrdering(Object.create(EVMChainAdapter.prototype) as EVMChainAdapter);
@@ -27,4 +28,6 @@ const noIndex: AdoptedMintPublishResult = { ...verified, txIndex: undefined };
 const noIdentity: AdoptedMintPublishResult = { ...verified, kaId: undefined };
 // @ts-expect-error Canonical block identity must remain definite.
 const noBlockHash: AdoptedMintPublishResult = { ...verified, blockHash: undefined };
-void legacyAdoption; void noIndex; void noIdentity; void noBlockHash;
+// @ts-expect-error Original mint cost must remain definite.
+const noTokenAmount: AdoptedMintPublishResult = { ...verified, tokenAmount: undefined };
+void legacyAdoption; void noIndex; void noIdentity; void noBlockHash; void noTokenAmount;

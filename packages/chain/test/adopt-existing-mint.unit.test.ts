@@ -26,7 +26,7 @@ function fixture(finalityConfirmations = 1) {
   const receipt = { txHash: HASH, blockNumber: 10, blockHash: BLOCK_HASH, txIndex: 2, blockTimestamp: 100,
     batchId: KA_ID, kaId: KA_ID, startKAId: KA_ID, endKAId: KA_ID,
     merkleRoot: ethers.getBytes(ROOT), publisherAddress: ADDRESS,
-    authorAddress: '0x2222222222222222222222222222222222222222', knowledgeAssetsContract: ADDRESS };
+    authorAddress: '0x2222222222222222222222222222222222222222', knowledgeAssetsContract: ADDRESS, tokenAmount: 100n };
   const rawReceipt = { hash: HASH, status: 1, blockNumber: 10, blockHash: BLOCK_HASH, index: 2 };
   const readContract = vi.fn(async (_contract, _label, method) =>
     method === 'getMerkleRoots' ? roots : CG_ID);
@@ -110,11 +110,25 @@ describe('existing mint provenance', () => {
       txIndex: 2, blockHash: BLOCK_HASH, txHash: HASH, blockTimestamp: 100, publisherAddress: ADDRESS });
   });
 
-  it('retains the same strict canonical facts in a successful mock adoption', async () => {
+  it.each([undefined, -1n, '100'])('refuses adoption without an original confirmed bigint cost (%s)', async cost => {
+    const f = fixture();
+    Reflect.set(f.receipt, 'tokenAmount', cost);
+    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+      .resolves.toBeNull();
+  });
+
+  it('retains a confirmed historical zero cost without substituting a current quote', async () => {
+    const f = fixture();
+    f.receipt.tokenAmount = 0n;
+    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+      .resolves.toMatchObject({ txHash: HASH, tokenAmount: 0n });
+  });
+
+  it('retains the same strict canonical facts and original cost in a successful mock adoption', async () => {
     const mock = new MockChainAdapter('mock:31337'); mock.minimumRequiredSignatures = 0;
     const root = ethers.getBytes(ROOT);
     const created = await mock.createKnowledgeAssets({ publishOperationId: 'strict-adoption', contextGraphId: CG_ID,
-      merkleRoot: root, knowledgeAssetsAmount: 1, byteSize: 1n, epochs: 1, tokenAmount: 1n, isImmutable: false,
+      merkleRoot: root, knowledgeAssetsAmount: 1, byteSize: 1n, epochs: 1, tokenAmount: 100n, isImmutable: false,
       merkleLeafCount: 1, publisherNodeIdentityId: 1n, author: { address: ADDRESS,
         signature: { r: new Uint8Array(32), vs: new Uint8Array(32) }, schemeVersion: 1 }, ackSignatures: [] });
     const canonical = await mock.resolveCanonicalFinalizationReceipt(created.txHash);
@@ -123,8 +137,11 @@ describe('existing mint provenance', () => {
     if (!legacy) throw new Error('Expected parsed mock publish');
     vi.spyOn(mock, 'resolvePublishByTxHash').mockResolvedValueOnce(legacy).mockResolvedValueOnce({ ...legacy,
       txIndex: undefined, kaId: undefined, startKAId: undefined, endKAId: undefined, merkleRoot: undefined, gasCostWei: 500n });
+    // Lifetime extensions can change current storage costs without a new root.
+    mock.getCollection(created.batchId)!.updateContext.tokenAmount = 999n;
     const adopted = await mock.getMintedKnowledgeAssetProvenance(created.batchId, root, CG_ID);
-    expect(adopted).toMatchObject({ ...canonical.receipt, blockTimestamp: legacy.blockTimestamp, gasCostWei: 500n });
+    expect(adopted).toMatchObject({ ...canonical.receipt, blockTimestamp: legacy.blockTimestamp,
+      gasCostWei: 500n, tokenAmount: 100n });
   });
 
   it.each([

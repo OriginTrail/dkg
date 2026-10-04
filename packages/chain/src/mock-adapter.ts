@@ -2239,6 +2239,7 @@ export class MockChainAdapter implements ChainAdapter {
       publishOperationId: params.publishOperationId,
       merkleRoot: toHex(params.merkleRoot),
       byteSize: params.byteSize.toString(),
+      tokenAmount: params.tokenAmount.toString(),
       txHash,
       txIndex: this.txIndexInBlock,
       publisherAddress,

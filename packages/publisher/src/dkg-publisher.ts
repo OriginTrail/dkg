@@ -4160,8 +4160,6 @@ export class DKGPublisher implements Publisher {
           bestEffortNotify(onPublishConfirmed, { txHash: onChainResult.txHash });
         }
 
-        onChainResult.tokenAmount = tokenAmount;
-
         const kaId = onChainResult.kaId ?? onChainResult.batchId;
         if (reservedKaId !== undefined && kaId !== reservedKaId) {
           throw new Error(
@@ -4197,7 +4195,7 @@ export class DKGPublisher implements Publisher {
             txHash: onChainResult.txHash,
             blockNumber: onChainResult.blockNumber,
             txIndex: onChainResult.txIndex,
-            tokenAmount: tokenAmount.toString(),
+            tokenAmount: onChainResult.tokenAmount?.toString(),
           },
         });
 

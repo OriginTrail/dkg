@@ -116,7 +116,9 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   try { if (!await ports.versionIsCurrent(kaId, current) || !binding.isCurrent()) return null; } catch { return null; }
   // Retain the receipt parser's provenance. These three overrides come from
   // the verified storage/seal state rather than a second event decoder.
-  return { ...projectAdoptedMintPublishResult(publish, receipt), merkleRoot: expectedMerkleRoot,
+  const adopted = projectAdoptedMintPublishResult(publish, receipt);
+  if (!adopted) return null;
+  return { ...adopted, merkleRoot: expectedMerkleRoot,
     blockTimestamp: Number(roots[0].timestamp), publisherAddress: roots[0].publisher };
 }
 
@@ -157,4 +159,3 @@ async function readExistingMintObservation(ports: EvmExistingMintPorts, storage:
     return null;
   }
 }
-

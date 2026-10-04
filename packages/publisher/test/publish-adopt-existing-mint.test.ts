@@ -208,6 +208,62 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
     } finally { await s.store.close(); }
   });
 
+  it('reports the original mint cost after a retry receives a different quote', async () => {
+    const s = await setupSealedGraphPublish();
+    const quote = vi.fn(async () => 100n);
+    Object.assign(s.chain, { getRequiredPublishTokenAmount: quote });
+    const messages: string[] = [];
+    Logger.setSink(entry => messages.push(entry.message));
+    try {
+      const original = await s.publisher.publish(s.publishOptions);
+      expect(original.onChainResult?.tokenAmount).toBe(100n);
+      const provenance = await MockChainAdapter.prototype.getMintedKnowledgeAssetProvenance.call(
+        s.chain, s.reservedKaId, original.merkleRoot, BigInt(CONTEXT_GRAPH_ID));
+      if (!provenance) throw new Error('Expected the original mint provenance');
+      s.chain.provenanceResult = { ...provenance, tokenAmount: original.onChainResult!.tokenAmount! };
+      s.chain.mintError = kaIdAlreadyMintedRevert(s.reservedKaId);
+      quote.mockResolvedValue(200n);
+      messages.length = 0;
+
+      const retry = await s.publisher.publish(s.publishOptions);
+      expect(quote).toHaveBeenCalledTimes(2);
+      expect(retry.status).toBe('confirmed');
+      expect(retry.onChainResult).toMatchObject({ txHash: original.onChainResult!.txHash, tokenAmount: 100n });
+      expect(s.chain.createAttempts).toBe(2);
+      expect(messages.find(message => message.includes('stage=chain event=confirm'))).toContain('tokenAmount=100');
+      expect(messages.find(message => message.includes('stage=chain event=submit'))).toContain('tokenAmount=200');
+    } finally { Logger.setSink(null); await s.store.close(); }
+  });
+
+  it.each([undefined, -1n, '100'])('keeps the original error when a custom reader supplies an invalid cost (%s)', async cost => {
+    const s = await setupSealedGraphPublish();
+    try {
+      const original = await s.publisher.publish(s.publishOptions);
+      s.chain.provenanceResult = await MockChainAdapter.prototype.getMintedKnowledgeAssetProvenance.call(
+        s.chain, s.reservedKaId, original.merkleRoot, BigInt(CONTEXT_GRAPH_ID));
+      if (!s.chain.provenanceResult) throw new Error('Expected original mint provenance');
+      Reflect.set(s.chain.provenanceResult, 'tokenAmount', cost);
+      const error = kaIdAlreadyMintedRevert(s.reservedKaId);
+      s.chain.mintError = error;
+      await expect(s.publisher.publish(s.publishOptions)).rejects.toBe(error);
+    } finally { await s.store.close(); }
+  });
+
+  it('keeps the submission quote for a fresh mint with a legacy optional-cost result', async () => {
+    const s = await setupSealedGraphPublish();
+    Object.assign(s.chain, { getRequiredPublishTokenAmount: async () => 200n });
+    vi.spyOn(s.chain, 'createKnowledgeAssets').mockImplementation(async params => {
+      const result = await MockChainAdapter.prototype.createKnowledgeAssets.call(s.chain, params);
+      return { ...result, tokenAmount: undefined };
+    });
+    try {
+      const result = await s.publisher.publish(s.publishOptions);
+      expect(result.status).toBe('confirmed');
+      expect(result.onChainResult?.tokenAmount).toBe(200n);
+      expect(s.chain.provenanceCalls).toHaveLength(0);
+    } finally { await s.store.close(); }
+  });
+
   it('adopts OUR already-minted kaId: synthesized provenance flows through the confirmed path', async () => {
     const s = await setupSealedGraphPublish();
     s.chain.mintError = kaIdAlreadyMintedRevert(s.reservedKaId);
@@ -223,6 +279,7 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
       blockHash: `0x${'ef'.repeat(32)}`,
       txIndex: 0,
       blockTimestamp: 1_753_000_000,
+      tokenAmount: 100n,
       publisherAddress: s.wallet.address,
       authorAddress: s.wallet.address,
     };

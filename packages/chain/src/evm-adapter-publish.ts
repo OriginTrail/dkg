@@ -906,6 +906,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     let merkleRoot: Uint8Array | undefined;
     let publisherAddress = '';
     let authorAddress: string | undefined;
+    let tokenAmount: bigint | undefined;
     let foundCreated = false;
     const storageAddress = String(kas.target).toLowerCase();
 
@@ -917,6 +918,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         if (parsed?.name === 'KnowledgeAssetCreated') {
           kaId = BigInt(parsed.args.id);
           authorAddress = String(parsed.args.author);
+          tokenAmount = parsed.args.tokenAmount == null ? undefined : BigInt(parsed.args.tokenAmount);
           if (parsed.args.merkleRoot != null) {
             merkleRoot = ethers.getBytes(parsed.args.merkleRoot);
           }
@@ -954,6 +956,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       txIndex: receipt.index,
       publisherAddress,
       authorAddress,
+      tokenAmount,
       ...(convictionCostCovered ? { convictionCostCovered } : {}),
     };
   }

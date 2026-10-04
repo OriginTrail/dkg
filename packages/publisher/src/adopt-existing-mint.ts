@@ -15,9 +15,10 @@ export async function createKnowledgeAssetsWithMintAdoption(
   hasSeal: boolean,
   ctx: OperationContext,
   log: Pick<Logger, 'warn' | 'info'>,
-): Promise<OnChainPublishResult> {
+): Promise<OnChainPublishResult & { tokenAmount: bigint }> {
   try {
-    return await chain.createKnowledgeAssets(params);
+    // Fresh mint pricing uses the submitted plan; adoption retains receipt cost.
+    return { ...await chain.createKnowledgeAssets(params), tokenAmount: params.tokenAmount };
   } catch (mintErr) {
     const mintedKaId = getKaIdAlreadyMintedKaId(mintErr);
     const provenanceFn = chain.getMintedKnowledgeAssetProvenance?.bind(chain);
@@ -36,7 +37,7 @@ export async function createKnowledgeAssetsWithMintAdoption(
         + 'verifying sealed root against chain and recovering mint provenance',
     );
     const synthesized = await provenanceFn(params.reservedKaId, params.merkleRoot, params.contextGraphId);
-    if (!synthesized) {
+    if (!synthesized || typeof synthesized.tokenAmount !== 'bigint' || synthesized.tokenAmount < 0n) {
       log.warn(
         ctx,
         `[adopt-existing-mint] mint provenance unrecoverable for kaId ${params.reservedKaId} `
