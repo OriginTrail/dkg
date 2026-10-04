@@ -5308,6 +5308,13 @@ describe('RFC-64 rollout authority integration', () => {
       signal,
       request,
     )).rejects.toThrow('no finalized indexed authority');
+    // The automatic entrypoint must classify the same bound absence as
+    // finality lag, without reopening legacy policy or private-proof fallback.
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      { kind: 'auto' },
+    )).rejects.toMatchObject({ code: 'registered-authority-unfinalized' });
     expect(resolveIds).not.toHaveBeenCalled();
     expect(readSnapshots).toHaveBeenCalledWith(['9'], {
       signal: expect.any(AbortSignal),
@@ -5361,6 +5368,17 @@ describe('RFC-64 rollout authority integration', () => {
     author.subscribeToContextGraph(contextGraphId);
     await author.whenRfc64CatalogResponsibilitiesIdleV1();
     const signal = new AbortController().signal;
+
+    const selectedRequest = (await author.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId], signal,
+    )).get(contextGraphId);
+    expect(selectedRequest?.kind).toBe('finalized-evidence');
+    if (selectedRequest?.kind !== 'finalized-evidence') throw new Error('expected indexed evidence');
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, {
+      kind: 'finalized-evidence',
+      evidence: Object.freeze({ ...selectedRequest.evidence,
+        contextGraphAuthorityIndexId: '10' as ContextGraphAuthorityIndexId }),
+    })).rejects.toThrow('finalized authority evidence belongs to another graph');
 
     // Accepted while the index carries the entry.
     await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
