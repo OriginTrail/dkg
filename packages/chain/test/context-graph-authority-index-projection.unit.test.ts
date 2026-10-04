@@ -16,10 +16,14 @@ import {
   type ContextGraphAuthorityIndexCompletedProjection,
   type ContextGraphAuthorityProjectionServedEvidence,
 } from '../src/context-graph-authority-index-projection.js';
-import type {
-  RawContextGraphAuthorityIndexEvent as ContextGraphAuthorityIndexEvent,
+import {
+  reduceContextGraphAuthorityIndexPage,
+  type RawContextGraphAuthorityIndexEvent as ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
-import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
+import {
+  MemoryAuthorityIndexStore,
+  ScopedAuthorityIndexStore,
+} from './helpers/context-graph-authority-index.js';
 
 const OWNER = `0x${'11'.repeat(20)}`;
 const NEXT_OWNER = `0x${'22'.repeat(20)}`;
@@ -835,6 +839,1228 @@ describe('finalized Context Graph authority projection cache', () => {
     expect(h.reads.refreshes).toBe(2);
   });
 
+  it('fences a cold projection refresh when the durable horizon advances', async () => {
+    const h = makeHarness();
+    const staleProjection = await h.refresh();
+    let staleStarted!: () => void;
+    const started = new Promise<void>((resolve) => { staleStarted = resolve; });
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+    const staleRead = h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        staleStarted();
+        await staleGate;
+        return staleProjection;
+      },
+    });
+    await started;
+
+    h.chain.head = 26;
+    const hash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: h.chain,
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: hash(26) },
+      pageSize: 100,
+      readBlockHash: async (block) => hash(block),
+      readPage: async () => [],
+    });
+    let replacementRefreshes = 0;
+    const replacement = h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        replacementRefreshes += 1;
+        return {
+          ...staleProjection,
+          finalized: { number: 26, hash: hash(26) },
+          head: { ...staleProjection.head, number: 26, hash: hash(26) },
+        };
+      },
+    });
+    await turns();
+    expect(replacementRefreshes).toBe(1);
+    await expect(replacement).resolves.toBe(26);
+
+    releaseStale();
+    await expect(staleRead).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    await expect(h.index.peekProjection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+    })).resolves.toEqual({ hit: true, value: 26 });
+  });
+
+  it('fences a projection refresh that starts during a durable scan', async () => {
+    const h = makeHarness();
+    const staleProjection = await h.refresh();
+    const hash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
+    let scanStarted!: () => void;
+    const startedScan = new Promise<void>((resolve) => { scanStarted = resolve; });
+    let releaseScan!: () => void;
+    const scanGate = new Promise<void>((resolve) => { releaseScan = resolve; });
+    h.chain.head = 26;
+    const advancing = h.index.refresh({
+      scope: h.scope,
+      readScope: h.chain,
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: hash(26) },
+      pageSize: 100,
+      readBlockHash: async (block) => hash(block),
+      readPage: async () => {
+        scanStarted();
+        await scanGate;
+        return [];
+      },
+    });
+    await startedScan;
+
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+    const staleRead = h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        await staleGate;
+        return staleProjection;
+      },
+    });
+    await turns();
+    releaseScan();
+    await advancing;
+    releaseStale();
+    await expect(staleRead).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+
+    let replacementRefreshes = 0;
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        replacementRefreshes += 1;
+        return {
+          ...staleProjection,
+          finalized: { number: 26, hash: hash(26) },
+          head: { ...staleProjection.head, number: 26, hash: hash(26) },
+        };
+      },
+    })).resolves.toBe(26);
+    expect(replacementRefreshes).toBe(1);
+  });
+
+  it('keeps the durable refresh horizon above its persisted holdback cursor', async () => {
+    const h = makeHarness();
+    const baseProjection = await h.refresh();
+    const hash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
+    h.chain.head = 1_000;
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: h.chain,
+      deploymentBlockNumber: 10,
+      finalized: { number: 1_000, hash: hash(1_000) },
+      pageSize: 1_000,
+      durableReorgHoldbackBlocks: 50,
+      readBlockHash: async (block) => hash(block),
+      readPage: async (from, to) => h.chain.events
+        .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+        .map((event) => ({ ...event, blockHash: hash(event.blockNumber) })),
+    });
+
+    const laggingProjection = {
+      ...baseProjection,
+      finalized: { number: 970, hash: hash(970) },
+      head: { ...baseProjection.head, number: 970, hash: hash(970) },
+    };
+    const laggingRead = () => h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => laggingProjection,
+    });
+    await expect(laggingRead()).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    await expect(laggingRead()).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    await expect(h.index.peekProjection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+    })).resolves.toEqual({ hit: false });
+
+    let currentRefreshes = 0;
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        currentRefreshes += 1;
+        return {
+          ...baseProjection,
+          finalized: { number: 1_000, hash: hash(1_000) },
+          head: { ...baseProjection.head, number: 1_000, hash: hash(1_000) },
+        };
+      },
+    })).resolves.toBe(1_000);
+    expect(currentRefreshes).toBe(1);
+  });
+
+  it('rolls a failed higher physical refresh back before admitting a healthy lower horizon', async () => {
+    const h = makeHarness();
+    const baseProjection = await h.refresh();
+    const hash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
+
+    await expect(h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'failed-high' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 1_000, hash: hash(1_000) },
+      pageSize: 1_000,
+      readBlockHash: async (block) => hash(block),
+      readPage: async () => { throw new Error('high provider failed'); },
+    })).rejects.toThrow('high provider failed');
+
+    h.chain.head = 26;
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'healthy-lower' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: hash(26) },
+      pageSize: 100,
+      readBlockHash: async (block) => hash(block),
+      readPage: async () => [],
+    });
+
+    let refreshes = 0;
+    const read = () => h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        refreshes += 1;
+        return {
+          ...baseProjection,
+          finalized: { number: 26, hash: hash(26) },
+          head: { ...baseProjection.head, number: 26, hash: hash(26) },
+        };
+      },
+    });
+    await expect(read()).resolves.toBe(26);
+    await expect(read()).resolves.toBe(26);
+    expect(refreshes).toBe(1);
+  });
+
+  it('rolls back an active high horizon when its lifecycle stabilization fails', async () => {
+    const h = makeHarness();
+    const hash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
+    const readPage = async (from: number, to: number) => h.chain.events
+      .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+      .map((event) => ({ ...event, blockHash: hash(event.blockNumber) }));
+
+    await expect(h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'unstable-high' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 1_000, hash: hash(1_000) },
+      pageSize: 1_000,
+      durableReorgHoldbackBlocks: 50,
+      readBlockHash: async (block) => hash(block),
+      readPage,
+      stabilize: async () => {
+        throw new ContextGraphAuthorityIndexRetryableError('high anchor moved');
+      },
+    })).rejects.toThrow('high anchor moved');
+
+    // The failed scan left a reusable H950 durable prefix. H970 may extend it;
+    // only a wrongly committed tentative H1000 publication floor can reject it.
+    await expect(h.index.view({
+      scope: h.scope,
+      readScope: { provider: 'healthy-lower' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 970, hash: hash(970) },
+      pageSize: 1_000,
+      durableReorgHoldbackBlocks: 20,
+      readBlockHash: async (block) => hash(block),
+      readPage,
+    })).resolves.toSatisfy((view) => view.has(id(9n)));
+  });
+
+  it('keeps an inactive view lease alive across projection invalidation', async () => {
+    const h = makeHarness();
+    const staleProjection = await h.refresh();
+    const forkHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    const anchorRead = Promise.withResolvers<void>();
+    const releaseAnchor = Promise.withResolvers<void>();
+    const rebuilding = h.index.view({
+      scope: h.scope,
+      readScope: { provider: 'replacement' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: forkHash(26) },
+      pageSize: 100,
+      readBlockHash: async (block) => {
+        anchorRead.resolve();
+        await releaseAnchor.promise;
+        return forkHash(block);
+      },
+      readPage: async (from, to) => h.chain.events
+        .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+        .map((event) => ({ ...event, blockHash: forkHash(event.blockNumber) })),
+    });
+    await anchorRead.promise;
+    h.index.dropProjections();
+    releaseAnchor.resolve();
+    await expect(rebuilding).resolves.toSatisfy((view) => view.has(id(9n)));
+
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => staleProjection,
+    })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+  });
+
+  it('lets a later stabilized view finish recovery from a failed rejecting scan', async () => {
+    const h = makeHarness();
+    const baseProjection = await h.refresh();
+    const oldHash = (block: number): string => (
+      `0x${block.toString(16).padStart(64, '0')}`
+    );
+    const newHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'old-floor' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 25, hash: oldHash(25) },
+      pageSize: 100,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => [],
+    });
+    await expect(h.index.view({
+      scope: h.scope,
+      readScope: { provider: 'failed-replacement' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: newHash(29) },
+      pageSize: 100,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async () => { throw new Error('replacement failed after rejection'); },
+    })).rejects.toThrow('replacement failed after rejection');
+
+    await expect(h.index.view({
+      scope: h.scope,
+      readScope: { provider: 'later-recovery' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: newHash(26) },
+      pageSize: 100,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async (from, to) => h.chain.events
+        .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+        .map((event) => ({ ...event, blockHash: newHash(event.blockNumber) })),
+    })).resolves.toSatisfy((view) => view.has(id(9n)));
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => ({
+        ...baseProjection,
+        finalized: { number: 26, hash: newHash(26) },
+        head: { ...baseProjection.head, number: 26, hash: newHash(26) },
+      }),
+    })).resolves.toBe(26);
+  });
+
+  it('does not let a pre-invalidation checkpoint clear its pending rejection fence', async () => {
+    const h = makeHarness();
+    const oldHash = (block: number): string => (
+      `0x${block.toString(16).padStart(64, '0')}`
+    );
+    const newHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'old-floor' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 25, hash: oldHash(25) },
+      pageSize: 100,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => [],
+    });
+
+    const invalidationEntered = Promise.withResolvers<void>();
+    const releaseInvalidation = Promise.withResolvers<void>();
+    const originalInvalidate = h.store.invalidate.bind(h.store);
+    h.store.invalidate = async (scope, token) => {
+      invalidationEntered.resolve();
+      await releaseInvalidation.promise;
+      return originalInvalidate(scope, token);
+    };
+    const rejecting = h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'new-rejecting' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: newHash(29) },
+      pageSize: 100,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async () => { throw new Error('replacement failed after rejection'); },
+    });
+    await invalidationEntered.promise;
+
+    // This scan begins after the logical rejection, but while token 1 still
+    // exposes the rejected old-fork checkpoint. Its H26-H29 tail never writes.
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'pre-invalidation-old' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: oldHash(29) },
+      pageSize: 100,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => [],
+    });
+
+    releaseInvalidation.resolve();
+    await expect(rejecting).rejects.toThrow('replacement failed after rejection');
+    expect(h.store.record?.value).toBeNull();
+
+    // The late tombstone is the durable fact. Neither same-height fork may be
+    // admitted until a physical scan proves it rebuilt from that generation.
+    for (const hash of [oldHash(29), newHash(29)]) {
+      await expect(Promise.resolve().then(() => {
+        h.index.assertProjectionAtRefreshHorizon(h.scope, { number: 29, hash });
+      })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    }
+  });
+
+  it('does not let a fallback started during trusted invalidation clear the rejection', async () => {
+    const oldHash = (block: number): string => (
+      `0x${block.toString(16).padStart(64, '0')}`
+    );
+    const newHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    const checkpoint = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 25,
+      throughBlockHash: oldHash(25),
+      events: [{ ...creation(9n, 10), blockHash: oldHash(10) }],
+    }).checkpoint;
+    const trustDomain = 'pending-invalidation-fallback';
+    const trustedScope = `${SCOPE}:trusted-bootstrap:${trustDomain}`;
+    const store = new ScopedAuthorityIndexStore();
+    store.records.set(trustedScope, { token: 3, value: checkpoint });
+    store.records.set(SCOPE, { token: 7, value: checkpoint });
+    const invalidationEntered = Promise.withResolvers<void>();
+    const releaseInvalidation = Promise.withResolvers<void>();
+    store.invalidate.mockImplementation(async (scope, token) => {
+      if (scope === trustedScope && token === 3) {
+        invalidationEntered.resolve();
+        await releaseInvalidation.promise;
+      }
+      if (store.records.get(scope)?.token !== token) return undefined;
+      store.records.set(scope, { token: token + 1, value: null });
+      return token + 1;
+    });
+    const index = new ContextGraphAuthorityIndex(store, {
+      trustDomain,
+      maxTailBlocks: 200,
+      fetchSnapshot: async () => { throw new Error('trusted cores unavailable'); },
+      localHistoryFallback: true,
+    });
+
+    // This scan records the trusted-key rejection, then pauses before its
+    // tombstone CAS becomes a durable recovery boundary.
+    const rejecting = index.refresh({
+      scope: SCOPE,
+      readScope: { provider: 'new-rejecting' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 230, hash: newHash(230) },
+      pageSize: 500,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block) => {
+        if (block === 25) return newHash(block);
+        throw new Error('new-fork follow-up stopped');
+      },
+      readPage: async () => [],
+    });
+    await invalidationEntered.promise;
+
+    // This conflicting scan starts under the new rejection revision. Its
+    // trusted row is too old to seed H230, so it falls back to the existing
+    // plain checkpoint and completes on the old fork while the trusted CAS is
+    // still pending. Start time alone must not make that checkpoint a recovery
+    // boundary for the rejected trusted key.
+    let oldForkPages = 0;
+    let oldForkStabilizations = 0;
+    await index.refresh({
+      scope: SCOPE,
+      readScope: { provider: 'old-fallback' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 230, hash: oldHash(230) },
+      pageSize: 500,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => {
+        oldForkPages += 1;
+        return [];
+      },
+      stabilize: async () => { oldForkStabilizations += 1; },
+    });
+    expect(oldForkPages).toBe(2);
+    expect(oldForkStabilizations).toBe(1);
+
+    releaseInvalidation.resolve();
+    await expect(rejecting).rejects.toThrow('new-fork follow-up stopped');
+    expect(store.records.get(trustedScope)).toEqual({ token: 4, value: null });
+
+    // The late trusted tombstone is still the decisive durable fact. The
+    // alternate-key scan cannot clear its fence retroactively.
+    for (const hash of [oldHash(230), newHash(230)]) {
+      await expect(Promise.resolve().then(() => {
+        index.assertProjectionAtRefreshHorizon(SCOPE, { number: 230, hash });
+      })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    }
+  });
+
+  it('does not let a late waiter launder pre-rejection single-flight work into recovery', async () => {
+    const h = makeHarness();
+    const oldHash = (block: number): string => (
+      `0x${block.toString(16).padStart(64, '0')}`
+    );
+    const newHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'old-floor' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 25, hash: oldHash(25) },
+      pageSize: 100,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => [],
+    });
+
+    const oldProvider = { provider: 'shared-old' };
+    const oldTailEntered = Promise.withResolvers<void>();
+    const releaseOldTail = Promise.withResolvers<void>();
+    let oldTailReads = 0;
+    const oldRefresh = () => h.index.refresh({
+      scope: h.scope,
+      readScope: oldProvider,
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: oldHash(29) },
+      pageSize: 100,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => {
+        oldTailReads += 1;
+        oldTailEntered.resolve();
+        await releaseOldTail.promise;
+        return [];
+      },
+    });
+    const physicalOwner = oldRefresh();
+    await oldTailEntered.promise;
+
+    await expect(h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'new-rejecting' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: newHash(29) },
+      pageSize: 100,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async () => { throw new Error('replacement failed after rejection'); },
+    })).rejects.toThrow('replacement failed after rejection');
+    expect(h.store.record?.value).toBeNull();
+
+    // The waiter starts under the rejection revision but joins physical work
+    // that loaded token 1 before that rejection. It must inherit the owner's
+    // recovery provenance rather than manufacture its own.
+    const lateWaiter = oldRefresh();
+    releaseOldTail.resolve();
+    await Promise.all([physicalOwner, lateWaiter]);
+    expect(oldTailReads).toBe(1);
+    expect(h.store.record?.value).toBeNull();
+
+    await expect(Promise.resolve().then(() => {
+      h.index.assertProjectionAtRefreshHorizon(h.scope, {
+        number: 29,
+        hash: oldHash(29),
+      });
+    })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+  });
+
+  it('lets an active waiter fence through an inactive physical flight owner', async () => {
+    const h = makeHarness();
+    await h.read();
+    const hash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
+    const provider = { provider: 'shared' };
+    const pageEntered = Promise.withResolvers<void>();
+    const releasePage = Promise.withResolvers<void>();
+    let pageReads = 0;
+    const input = {
+      scope: h.scope,
+      readScope: provider,
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: hash(26) },
+      pageSize: 100,
+      readBlockHash: async (block: number) => hash(block),
+      readPage: async () => {
+        pageReads += 1;
+        pageEntered.resolve();
+        await releasePage.promise;
+        return [];
+      },
+    };
+
+    // `view()` owns the one physical page without publishing an active floor.
+    const inactiveOwner = h.index.view(input);
+    await pageEntered.promise;
+    expect(pageReads).toBe(1);
+    expect(() => h.index.assertProjectionAtRefreshHorizon(h.scope, {
+      number: 25,
+      hash: hash(25),
+    })).not.toThrow();
+
+    // The active caller joins that flight. Its lease must fence immediately;
+    // it must not wait for the inactive owner's physical page to settle.
+    const activeJoiner = h.index.refresh(input);
+    await expect(Promise.resolve().then(() => {
+      h.index.assertProjectionAtRefreshHorizon(h.scope, {
+        number: 25,
+        hash: hash(25),
+      });
+    })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    await expect(h.index.peekProjection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+    })).resolves.toEqual({ hit: false });
+
+    releasePage.resolve();
+    await Promise.all([inactiveOwner, activeJoiner]);
+    expect(pageReads).toBe(1);
+    expect(() => h.index.assertProjectionAtRefreshHorizon(h.scope, {
+      number: 26,
+      hash: hash(26),
+    })).not.toThrow();
+  });
+
+  it('does not trust a pre-rejection tombstone descendant until it is re-admitted', async () => {
+    const cache = new ContextGraphAuthorityIndexProjectionCache();
+    const repositoryKey = `${SCOPE}:durable`;
+    const oldHash = `0x${(29).toString(16).padStart(64, '0')}`;
+    const newHash = `0x${(1_000_029).toString(16).padStart(64, '0')}`;
+
+    // This physical scan started from tombstone token 2 and committed a first
+    // page at token 3 before any rejection existed.
+    const preRejection = cache.beginRefreshHorizon(
+      SCOPE,
+      { number: 29, hash: oldHash },
+      false,
+    );
+    preRejection.admitDurableGeneration(repositoryKey, 'tombstone', 2);
+    preRejection.commitDurableGeneration(repositoryKey, 3);
+
+    // A competing provider rejects checkpoint token 3 and begins its
+    // conditional invalidation. The old physical scan then wins that CAS by
+    // committing token 4, but has not re-admitted token 4 after the rejection.
+    const rejecting = cache.beginRefreshHorizon(
+      SCOPE,
+      { number: 29, hash: newHash },
+      true,
+    );
+    rejecting.markCheckpointRejected(repositoryKey, 3);
+    preRejection.commitDurableGeneration(repositoryKey, 4);
+
+    const proof = preRejection.recoveryProof();
+    expect(proof).toBeUndefined();
+    preRejection.commit({ checkpointRejected: false, recoveryProof: proof });
+    await expect(Promise.resolve().then(() => {
+      cache.assertAtOrAboveRefreshHorizon(SCOPE, { number: 29, hash: oldHash });
+    })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+
+    // The rejecting scan force-rejects that descendant too, then rebuilds only
+    // after its token-4 invalidation establishes tombstone token 5.
+    rejecting.markCheckpointRejected(repositoryKey, 4);
+    rejecting.markCheckpointRecovery(repositoryKey, 4, 5);
+    rejecting.admitDurableGeneration(repositoryKey, 'tombstone', 5);
+    rejecting.commitDurableGeneration(repositoryKey, 6);
+    const recoveryProof = rejecting.recoveryProof();
+    expect(recoveryProof).toBeDefined();
+    rejecting.commit({ checkpointRejected: true, recoveryProof });
+    expect(() => cache.assertAtOrAboveRefreshHorizon(
+      SCOPE,
+      { number: 29, hash: newHash },
+    )).not.toThrow();
+  });
+
+  it('does not let a multi-page root lineage advance past a later rejection', () => {
+    const cache = new ContextGraphAuthorityIndexProjectionCache();
+    const repositoryKey = `${SCOPE}:durable`;
+    const oldHash = `0x${(29).toString(16).padStart(64, '0')}`;
+    const newHash = `0x${(1_000_029).toString(16).padStart(64, '0')}`;
+    const older = cache.beginRefreshHorizon(SCOPE, { number: 29, hash: oldHash }, false);
+    older.admitDurableGeneration(repositoryKey, 'tombstone', 2);
+    older.commitDurableGeneration(repositoryKey, 3);
+
+    const rejecting = cache.beginRefreshHorizon(SCOPE, { number: 29, hash: newHash }, true);
+    rejecting.admitDurableGeneration(repositoryKey, 'checkpoint', 3);
+    older.commitDurableGeneration(repositoryKey, 4);
+    rejecting.markCheckpointRejected(repositoryKey, 3);
+    older.commitDurableGeneration(repositoryKey, 5);
+
+    const proof = older.recoveryProof();
+    expect(proof).toBeUndefined();
+    older.commit({ checkpointRejected: false, recoveryProof: proof });
+    rejecting.rollback();
+    expect(() => cache.assertAtOrAboveRefreshHorizon(
+      SCOPE,
+      { number: 29, hash: oldHash },
+    )).toThrow('behind durable refresh horizon');
+  });
+
+  it('does not let a pre-rejection root on another repository clear the fence', () => {
+    const cache = new ContextGraphAuthorityIndexProjectionCache();
+    const oldHash = `0x${(29).toString(16).padStart(64, '0')}`;
+    const newHash = `0x${(1_000_029).toString(16).padStart(64, '0')}`;
+    const fallback = cache.beginRefreshHorizon(SCOPE, { number: 29, hash: oldHash }, false);
+    fallback.admitDurableGeneration(`${SCOPE}:plain`, 'missing', undefined);
+
+    const rejecting = cache.beginRefreshHorizon(SCOPE, { number: 29, hash: newHash }, true);
+    rejecting.markCheckpointRejected(`${SCOPE}:trusted`, 3);
+    fallback.commitDurableGeneration(`${SCOPE}:plain`, 1);
+
+    const proof = fallback.recoveryProof();
+    expect(proof).toBeUndefined();
+    fallback.commit({ checkpointRejected: false, recoveryProof: proof });
+    rejecting.rollback();
+    expect(() => cache.assertAtOrAboveRefreshHorizon(
+      SCOPE,
+      { number: 29, hash: oldHash },
+    )).toThrow('behind durable refresh horizon');
+  });
+
+  it.each([4, 7])(
+    'does not use plain-fallback token %i to discharge a trusted-bootstrap rejection',
+    async (plainToken) => {
+      const oldHash = (block: number): string => (
+        `0x${block.toString(16).padStart(64, '0')}`
+      );
+      const newHash = (block: number): string => (
+        `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+      );
+      const checkpoint = (hash: (block: number) => string) => (
+        reduceContextGraphAuthorityIndexPage({
+          deploymentBlockNumber: 10,
+          throughBlockNumber: 25,
+          throughBlockHash: hash(25),
+          events: [{ ...creation(9n, 10), blockHash: hash(10) }],
+        }).checkpoint
+      );
+      const trustDomain = 'projection-recovery-boundary';
+      const trustedScope = `${SCOPE}:trusted-bootstrap:${trustDomain}`;
+      const store = new ScopedAuthorityIndexStore();
+      store.records.set(trustedScope, { token: 3, value: checkpoint(oldHash) });
+      store.records.set(SCOPE, { token: plainToken, value: checkpoint(newHash) });
+      let fallbacks = 0;
+      let pageReads = 0;
+      let stabilizations = 0;
+      let cursorReads = 0;
+      const plainAdmissionEntered = Promise.withResolvers<void>();
+      const releasePlainAdmission = Promise.withResolvers<void>();
+      const index = new ContextGraphAuthorityIndex(store, {
+        trustDomain,
+        maxTailBlocks: 200,
+        fetchSnapshot: async () => { throw new Error('trusted cores unavailable'); },
+        localHistoryFallback: true,
+        onLocalHistoryFallback: () => { fallbacks += 1; },
+      });
+
+      const refreshing = index.refresh({
+        scope: SCOPE,
+        readScope: { provider: 'fallback' },
+        deploymentBlockNumber: 10,
+        finalized: { number: 29, hash: newHash(29) },
+        pageSize: 100,
+        durableReorgHoldbackBlocks: 4,
+        readBlockHash: async (block) => {
+          if (block === 25) {
+            cursorReads += 1;
+            if (cursorReads === 2) {
+              plainAdmissionEntered.resolve();
+              await releasePlainAdmission.promise;
+            }
+          }
+          return newHash(block);
+        },
+        readPage: async () => {
+          pageReads += 1;
+          return [];
+        },
+        stabilize: async () => { stabilizations += 1; },
+      });
+
+      await plainAdmissionEntered.promise;
+      expect(fallbacks).toBe(1);
+      expect(store.records.get(trustedScope)).toEqual({ token: 4, value: null });
+      expect(store.records.get(SCOPE)?.token).toBe(plainToken);
+      await expect(Promise.resolve().then(() => {
+        index.assertProjectionAtRefreshHorizon(SCOPE, {
+          number: 29,
+          hash: newHash(29),
+        });
+      })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+
+      // Numeric ordering alone did not recover. Actual plain-scope admission,
+      // tail completion and stabilization now prove the independent lineage.
+      releasePlainAdmission.resolve();
+      await refreshing;
+      expect(pageReads).toBe(1);
+      expect(stabilizations).toBe(1);
+      expect(() => index.assertProjectionAtRefreshHorizon(SCOPE, {
+        number: 29,
+        hash: newHash(29),
+      })).not.toThrow();
+    },
+  );
+
+  it('lets a later fallback recover after an earlier trusted rejection failed', async () => {
+    const oldHash = (block: number): string => (
+      `0x${block.toString(16).padStart(64, '0')}`
+    );
+    const newHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    const checkpoint = (hash: (block: number) => string) => (
+      reduceContextGraphAuthorityIndexPage({
+        deploymentBlockNumber: 10,
+        throughBlockNumber: 25,
+        throughBlockHash: hash(25),
+        events: [{ ...creation(9n, 10), blockHash: hash(10) }],
+      }).checkpoint
+    );
+    const trustDomain = 'later-fallback-recovery';
+    const trustedScope = `${SCOPE}:trusted-bootstrap:${trustDomain}`;
+    const store = new ScopedAuthorityIndexStore();
+    store.records.set(trustedScope, { token: 3, value: checkpoint(oldHash) });
+    store.records.set(SCOPE, { token: 7, value: checkpoint(newHash) });
+    let failFirstPlainLoad = true;
+    store.load.mockImplementation(async (scope) => {
+      if (scope === SCOPE && failFirstPlainLoad) {
+        failFirstPlainLoad = false;
+        throw new Error('plain repository unavailable once');
+      }
+      return store.records.get(scope);
+    });
+    const index = new ContextGraphAuthorityIndex(store, {
+      trustDomain,
+      maxTailBlocks: 200,
+      fetchSnapshot: async () => { throw new Error('trusted cores unavailable'); },
+      localHistoryFallback: true,
+    });
+    let pageReads = 0;
+    let stabilizations = 0;
+    const input = (readScope: object) => ({
+      scope: SCOPE,
+      readScope,
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: newHash(29) },
+      pageSize: 100,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block: number) => newHash(block),
+      readPage: async () => {
+        pageReads += 1;
+        return [];
+      },
+      stabilize: async () => { stabilizations += 1; },
+    });
+
+    await expect(index.refresh(input({ provider: 'first' }))).rejects.toThrow(
+      'plain repository unavailable once',
+    );
+    expect(store.records.get(trustedScope)).toEqual({ token: 4, value: null });
+    expect(() => index.assertProjectionAtRefreshHorizon(
+      SCOPE,
+      { number: 29, hash: newHash(29) },
+    )).toThrow('behind durable refresh horizon');
+
+    await expect(index.refresh(input({ provider: 'later' }))).resolves.toBeUndefined();
+    expect(pageReads).toBe(1);
+    expect(stabilizations).toBe(1);
+    expect(() => index.assertProjectionAtRefreshHorizon(
+      SCOPE,
+      { number: 29, hash: newHash(29) },
+    )).not.toThrow();
+  });
+
+  it('does not let an older rejecting scan overwrite a newer recovery', async () => {
+    const h = makeHarness();
+    const baseProjection = await h.refresh();
+    const oldHash = (block: number): string => (
+      `0x${block.toString(16).padStart(64, '0')}`
+    );
+    const newHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'old-floor' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 25, hash: oldHash(25) },
+      pageSize: 100,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => [],
+    });
+    const rejected = Promise.withResolvers<void>();
+    const releaseOld = Promise.withResolvers<void>();
+    const older = h.index.view({
+      scope: h.scope,
+      readScope: { provider: 'older-recovery' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: newHash(29) },
+      pageSize: 100,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async (from, to) => {
+        rejected.resolve();
+        await releaseOld.promise;
+        return h.chain.events
+          .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+          .map((event) => ({ ...event, blockHash: newHash(event.blockNumber) }));
+      },
+    });
+    await rejected.promise;
+    await expect(h.index.view({
+      scope: h.scope,
+      readScope: { provider: 'newer-recovery' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 30, hash: newHash(30) },
+      pageSize: 100,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async (from, to) => h.chain.events
+        .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+        .map((event) => ({ ...event, blockHash: newHash(event.blockNumber) })),
+    })).resolves.toSatisfy((view) => view.has(id(9n)));
+    releaseOld.resolve();
+    await expect(older).rejects.toMatchObject({ reason: 'cursor-ahead' });
+
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => ({
+        ...baseProjection,
+        finalized: { number: 30, hash: newHash(30) },
+        head: { ...baseProjection.head, number: 30, hash: newHash(30) },
+      }),
+    })).resolves.toBe(30);
+  });
+
+  it('re-enters provider refresh once when the durable floor wins after provider return', async () => {
+    const h = makeHarness();
+    const staleProjection = await h.refresh();
+    const hash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
+    const currentProjection = {
+      ...staleProjection,
+      finalized: { number: 26, hash: hash(26) },
+      head: { ...staleProjection.head, number: 26, hash: hash(26) },
+    };
+    let refreshes = 0;
+
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        refreshes += 1;
+        if (refreshes === 1) {
+          await h.index.refresh({
+            scope: h.scope,
+            readScope: { provider: 'background-winner' },
+            deploymentBlockNumber: 10,
+            finalized: { number: 26, hash: hash(26) },
+            pageSize: 100,
+            readBlockHash: async (block) => hash(block),
+            readPage: async () => [],
+          });
+          return staleProjection;
+        }
+        return currentProjection;
+      },
+    })).resolves.toBe(26);
+    expect(refreshes).toBe(2);
+  });
+
+  it('keeps a fail-closed fence when checkpoint rejection is followed by scan failure', async () => {
+    const h = makeHarness();
+    const baseProjection = await h.refresh();
+    const oldHash = (block: number): string => (
+      `0x${block.toString(16).padStart(64, '0')}`
+    );
+    const newHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+
+    // Commit an explicit old-fork publication floor at the durable H25 row.
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'old-floor' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 25, hash: oldHash(25) },
+      pageSize: 100,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => [],
+    });
+
+    await expect(h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'failed-replacement' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: newHash(26) },
+      pageSize: 100,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async () => { throw new Error('replacement scan failed'); },
+    })).rejects.toThrow('replacement scan failed');
+    expect(h.store.invalidations).toHaveLength(1);
+
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => baseProjection,
+    })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    await expect(h.index.peekProjection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+    })).resolves.toEqual({ hit: false });
+
+    // A later successful rebuild at the rejected boundary clears the tombstone.
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'healthy-replacement' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: newHash(26) },
+      pageSize: 100,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async (from, to) => h.chain.events
+        .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+        .map((event) => ({ ...event, blockHash: newHash(event.blockNumber) })),
+    });
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => ({
+        ...baseProjection,
+        finalized: { number: 26, hash: newHash(26) },
+        head: { ...baseProjection.head, number: 26, hash: newHash(26) },
+      }),
+    })).resolves.toBe(26);
+  });
+
+  it('keeps the horizon fence when a durable refresh waiter cancels', async () => {
+    const h = makeHarness();
+    const staleProjection = await h.refresh();
+    const hash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
+    let scanStarted!: () => void;
+    const startedScan = new Promise<void>((resolve) => { scanStarted = resolve; });
+    let releaseScan!: () => void;
+    const scanGate = new Promise<void>((resolve) => { releaseScan = resolve; });
+    const controller = new AbortController();
+    h.chain.head = 26;
+    const advancing = h.index.refresh({
+      scope: h.scope,
+      readScope: h.chain,
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: hash(26) },
+      pageSize: 100,
+      signal: controller.signal,
+      readBlockHash: async (block) => hash(block),
+      readPage: async () => {
+        scanStarted();
+        await scanGate;
+        return [];
+      },
+    });
+    await startedScan;
+    const cancelled = new Error('durable refresh waiter stopped');
+    controller.abort(cancelled);
+    await expect(advancing).rejects.toBe(cancelled);
+
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => staleProjection,
+    })).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    releaseScan();
+    await h.index.whenIdle();
+
+    let replacementRefreshes = 0;
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        replacementRefreshes += 1;
+        return {
+          ...staleProjection,
+          finalized: { number: 26, hash: hash(26) },
+          head: { ...staleProjection.head, number: 26, hash: hash(26) },
+        };
+      },
+    })).resolves.toBe(26);
+    expect(replacementRefreshes).toBe(1);
+  });
+
+  it('keeps the refresh horizon when checkpoint rejection outlives a cancelled waiter', async () => {
+    const h = makeHarness();
+    // Seed durable old-fork H25, but do not seed the projection cache.
+    const staleProjection = await h.refresh();
+    const forkHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    h.chain.fork = 1;
+    h.chain.head = 26;
+
+    let scanStarted!: () => void;
+    const startedScan = new Promise<void>((resolve) => { scanStarted = resolve; });
+    let releaseScan!: () => void;
+    const scanGate = new Promise<void>((resolve) => { releaseScan = resolve; });
+    const controller = new AbortController();
+    const advancing = h.index.refresh({
+      scope: h.scope,
+      readScope: {},
+      deploymentBlockNumber: 10,
+      finalized: { number: 26, hash: forkHash(26) },
+      pageSize: 100,
+      signal: controller.signal,
+      readBlockHash: async (block) => forkHash(block),
+      readPage: async (from, to) => {
+        // Reaching here proves H25 admission already rejected and tombstoned
+        // the old checkpoint, invoking the projection invalidation callback.
+        scanStarted();
+        await scanGate;
+        return h.chain.events
+          .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+          .map((event) => ({ ...event, blockHash: forkHash(event.blockNumber) }));
+      },
+    });
+    await startedScan;
+    expect(h.store.invalidations).toHaveLength(1);
+
+    let staleStarted!: () => void;
+    const startedStale = new Promise<void>((resolve) => { staleStarted = resolve; });
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+    const staleRead = h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => {
+        staleStarted();
+        await staleGate;
+        return staleProjection;
+      },
+    });
+    await startedStale;
+
+    const cancelled = new Error('durable refresh waiter stopped');
+    controller.abort(cancelled);
+    await expect(advancing).rejects.toBe(cancelled);
+
+    // Caller-side completion is gone, but lifecycle-owned work still commits.
+    releaseScan();
+    await h.index.whenIdle();
+    expect(h.index.exportSnapshot({
+      scope: h.scope,
+      deploymentBlockNumber: 10,
+      minThroughBlockNumber: 26,
+      maxThroughBlockNumber: 26,
+    })?.checkpoint.cursor.throughBlockNumber).toBe(26);
+
+    releaseStale();
+    await expect(staleRead).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+    await expect(h.index.peekProjection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+    })).resolves.toEqual({ hit: false });
+  });
+
+  it('reasserts a cancelled higher physical refresh after a lower fork rebuild finishes first', async () => {
+    const h = makeHarness();
+    const baseProjection = await h.refresh();
+    const oldHash = (block: number): string => (
+      `0x${block.toString(16).padStart(64, '0')}`
+    );
+    const newHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    const events = (
+      from: number,
+      to: number,
+      hash: (block: number) => string,
+    ) => h.chain.events
+      .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+      .map((event) => ({ ...event, blockHash: hash(event.blockNumber) }));
+
+    let highTailStarted!: () => void;
+    const startedHighTail = new Promise<void>((resolve) => { highTailStarted = resolve; });
+    let releaseHighTail!: () => void;
+    const highTailGate = new Promise<void>((resolve) => { releaseHighTail = resolve; });
+    const controller = new AbortController();
+    const high = h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'high' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 1_000, hash: oldHash(1_000) },
+      pageSize: 1_000,
+      durableReorgHoldbackBlocks: 500,
+      signal: controller.signal,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async (from, to) => {
+        if (from === 501) {
+          highTailStarted();
+          await highTailGate;
+        }
+        return events(from, to, oldHash);
+      },
+    });
+    await startedHighTail;
+
+    const cancelled = new Error('high refresh waiter left');
+    controller.abort(cancelled);
+    await expect(high).rejects.toBe(cancelled);
+
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: { provider: 'low-new-fork' },
+      deploymentBlockNumber: 10,
+      finalized: { number: 900, hash: newHash(900) },
+      pageSize: 1_000,
+      readBlockHash: async (block) => newHash(block),
+      readPage: async (from, to) => events(from, to, newHash),
+    });
+    expect(h.store.invalidations).toHaveLength(1);
+    expect(h.index.exportSnapshot({
+      scope: h.scope,
+      deploymentBlockNumber: 10,
+      minThroughBlockNumber: 900,
+      maxThroughBlockNumber: 900,
+    })?.checkpoint.cursor.throughBlockNumber).toBe(900);
+
+    releaseHighTail();
+    await h.index.whenIdle();
+
+    const projectionAt = (number: number, hash: string) => ({
+      ...baseProjection,
+      finalized: { number, hash },
+      head: { ...baseProjection.head, number, hash },
+    });
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => projectionAt(950, newHash(950)),
+    })).rejects.toMatchObject({
+      name: 'ContextGraphAuthorityIndexRetryableError',
+      reason: 'refresh-horizon-ahead',
+    });
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: true, value: candidate.finalized.number }),
+      refresh: async () => projectionAt(1_000, oldHash(1_000)),
+    })).resolves.toBe(1_000);
+  });
+
   it('drops the projection when admission tombstones the durable checkpoint', async () => {
     const h = makeHarness();
     const before = await h.read();
@@ -856,7 +2082,12 @@ describe('finalized Context Graph authority projection cache', () => {
     // Still inside T by the clock — and no longer an answer.
     const after = await h.read(9n, undefined, async () => {
       h.reads.refreshes += 1;
-      return { ...before, head: { ...before.head, number: 26 } };
+      const hash = `0x${(1_000_026).toString(16).padStart(64, '0')}`;
+      return {
+        ...before,
+        finalized: { number: 26, hash },
+        head: { ...before.head, number: 26, hash },
+      };
     });
     expect(h.reads.refreshes).toBe(2);
     expect(after).not.toBe(before);
@@ -1220,6 +2451,78 @@ describe('peekProjection', () => {
 
     expect(peeked).toEqual({ hit: false });
     expect(h.reads.refreshes).toBe(1);
+  });
+
+  it('does not let an old anchor validator serve or drop a replacement projection', async () => {
+    const h = makeHarness({ holdback: 1 });
+    await h.read();
+
+    let validatorStarted!: () => void;
+    const started = new Promise<void>((resolve) => { validatorStarted = resolve; });
+    let releaseValidator!: () => void;
+    const validatorGate = new Promise<void>((resolve) => { releaseValidator = resolve; });
+    const pending = h.index.peekProjection({
+      scope: h.scope,
+      project: () => ({ complete: true, value: 'old' }),
+      validateAnchor: async () => {
+        validatorStarted();
+        await validatorGate;
+        return false;
+      },
+    });
+    await started;
+
+    h.index.dropProjections();
+    h.chain.head = 26;
+    const replacement = await h.read();
+    releaseValidator();
+
+    await expect(pending).resolves.toEqual({ hit: false });
+    await expect(h.read()).resolves.toBe(replacement);
+    expect(h.reads.refreshes).toBe(2);
+  });
+
+  it('does not serve an incomplete projection replaced during its finality proof', async () => {
+    const h = makeHarness();
+    await h.read();
+
+    let validationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { validationStarted = resolve; });
+    let releaseValidation!: () => void;
+    const validationGate = new Promise<void>((resolve) => { releaseValidation = resolve; });
+    const pending = h.index.peekProjection({
+      scope: h.scope,
+      project: () => ({ complete: false, value: 'old absence' }),
+      validateIncomplete: async () => {
+        validationStarted();
+        await validationGate;
+        return { admitted: true, anchorValidated: true };
+      },
+    });
+    await started;
+
+    h.index.dropProjections();
+    h.chain.head = 26;
+    const replacement = await h.read();
+    releaseValidation();
+
+    await expect(pending).resolves.toEqual({ hit: false });
+    await expect(h.read()).resolves.toBe(replacement);
+    expect(h.reads.refreshes).toBe(2);
+  });
+
+  it('preserves legacy boolean incomplete admission and still validates its tail anchor', async () => {
+    const h = makeHarness({ holdback: 1 });
+    await h.read();
+    const validateAnchor = vi.fn(async () => true);
+
+    await expect(h.index.peekProjection({
+      scope: h.scope,
+      project: () => ({ complete: false, value: 'cached absence' }),
+      validateIncomplete: async () => true,
+      validateAnchor,
+    })).resolves.toEqual({ hit: true, value: 'cached absence' });
+    expect(validateAnchor).toHaveBeenCalledOnce();
   });
 
   it('honours an already-aborted signal', async () => {

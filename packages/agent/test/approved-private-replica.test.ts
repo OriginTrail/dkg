@@ -1836,7 +1836,7 @@ describe('approved private bare-name replica authorization', () => {
     expect(schedule).toHaveBeenCalledWith(
       CONTEXT_GRAPH_ID,
       expect.stringMatching(/^0x[0-9a-f]{64}$/u),
-      { awaitsProviderAuthorization: true, retryIncompletePrivate: true },
+      'private-join',
     );
   });
 

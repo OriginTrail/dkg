@@ -11,8 +11,8 @@ import type { ContextGraphAuthorityIndexCheckpoint } from
 import { ContextGraphAuthorityIndexRetryableError } from
   './context-graph-authority-index-errors.js';
 import type {
+  ContextGraphAuthorityIndexKeyedScopedRepository,
   ContextGraphAuthorityIndexRepositoryRecord,
-  ContextGraphAuthorityIndexScopedRepository,
 } from './context-graph-authority-index-repository.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS,
@@ -27,10 +27,15 @@ import {
 interface BootstrapSessionInput {
   readonly request: ContextGraphAuthorityIndexSnapshotRequest;
   readonly finalized: Readonly<{ number: number; hash: string }>;
-  readonly repository: ContextGraphAuthorityIndexScopedRepository;
+  readonly repository: ContextGraphAuthorityIndexKeyedScopedRepository;
   readonly lifecycleSignal: AbortSignal;
   readonly readBlockHash: (blockNumber: number, signal: AbortSignal) => Promise<string | null>;
-  readonly onRejectedCheckpoint: () => void;
+  readonly onRejectedCheckpoint: (repositoryKey: string, rejectedToken: number) => void;
+  readonly onCheckpointRecovery: (
+    repositoryKey: string,
+    rejectedToken: number,
+    recoveryToken: number | undefined,
+  ) => void;
 }
 
 export interface ContextGraphAuthorityIndexBootstrapSession {
@@ -169,7 +174,16 @@ export class ContextGraphAuthorityIndexBootstrapCoordinator {
           finalized: input.finalized,
           readBlockHash: input.readBlockHash,
           lifecycleSignal: budgetSignal,
-          onRejectedCheckpoint: input.onRejectedCheckpoint,
+          onRejectedCheckpoint: (rejectedToken) => {
+            input.onRejectedCheckpoint(input.repository.key, rejectedToken);
+          },
+          onCheckpointRecovery: (rejectedToken, recoveryToken) => {
+            input.onCheckpointRecovery(
+              input.repository.key,
+              rejectedToken,
+              recoveryToken,
+            );
+          },
         }));
   }
 }

@@ -300,7 +300,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     expect(store.invalidations).toEqual([]);
   });
 
-  it('reloads a newer winner when conditional reorg invalidation loses its race', async () => {
+  it('tombstones a checkpoint winner when conditional reorg invalidation loses its race', async () => {
     const store = new MemoryAuthorityIndexStore();
     const readPage = async (from: number, to: number) => allEvents.filter((entry) => (
       entry.blockNumber >= from && entry.blockNumber <= to
@@ -323,14 +323,14 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     };
 
     const state = await new ContextGraphAuthorityIndex(store).resolve({
-      ...makeInput(10n, {}, async () => [], 30),
+      ...makeInput(10n, {}, readPage, 30),
       readBlockHash: async (blockNumber: number) => (
         blockNumber === 25 ? blockHash(24) : blockHash(blockNumber)
       ),
     });
     expect(state).toMatchObject({ contextGraphId: '10', policyVersion: 1 });
-    expect(store.record?.token).toBe(rejectedToken + 1);
-    expect(store.invalidations).toEqual([]);
+    expect(store.record?.token).toBeGreaterThan(rejectedToken + 2);
+    expect(store.invalidations).toEqual([rejectedToken + 2]);
   });
 
   it('bounds repeated invalidation losses without recursive recovery', async () => {
@@ -358,7 +358,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     expect(pageReads).toBe(0);
   });
 
-  it('accepts a valid checkpoint installed by the third invalidation winner', async () => {
+  it('does not trust even a valid-looking third checkpoint invalidation winner', async () => {
     const store = new MemoryAuthorityIndexStore();
     const winner = reduceContextGraphAuthorityIndexPage({
       deploymentBlockNumber: 10,
@@ -395,7 +395,9 @@ describe('durable contract-wide Context Graph authority scanner', () => {
         blockReads += 1;
         return blockHash(25);
       },
-    })).resolves.toMatchObject({ contextGraphId: '9' });
+    })).rejects.toThrow(
+      'Context Graph authority index changed repeatedly during checkpoint recovery',
+    );
     expect(invalidationAttempts).toBe(3);
     expect(store.record).toEqual({ token: 4, value: winner });
     expect(blockReads).toBe(0);
@@ -490,7 +492,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     await expect(providerB).resolves.toMatchObject({ nameHash: NAME_10 });
 
     releaseFinalCommit.resolve();
-    await expect(providerA).resolves.toMatchObject({ nameHash: NAME_9 });
+    await expect(providerA).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
     expect(store.invalidations).toEqual([5]);
     expect((store.record!.value as { states: Array<{ nameHash: string }> }).states[0])
       .toMatchObject({ nameHash: NAME_10 });
