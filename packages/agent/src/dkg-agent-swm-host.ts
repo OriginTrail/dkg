@@ -551,6 +551,7 @@ import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
 import { resolveExactBatchStreamEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
 import { finalizedContextGraphSnapshotMismatchV1 } from
   './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
@@ -7064,22 +7065,30 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
 
     const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
-    const postFetch = <T>(run: () => Promise<T>): Promise<T> => (
-      phases ? phases.measure('post-fetch', run) : run());
-    for (const attempt of attempts) {
-      const batchTarget = attempt.entry.target;
-      const outcome = await postFetch(() => this.reconcileChainOrdinal(
+    // The batch's targets are re-verified side by side, with the scan's own
+    // bound, so their chain reads can leave in one request. They are settled
+    // in order below: each step still sees the rotation state its
+    // predecessor left.
+    const revalidateBatch = (): Promise<OrdinalOutcome[]> => mapWithConcurrency(
+      attempts,
+      DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY,
+      (attempt) => this.reconcileChainOrdinal(
         localCgId,
         onChainCgId,
-        batchTarget.ordinal,
+        attempt.entry.target.ordinal,
         headBlock,
         {
           isTargetCurrent: isRecoveryCurrent,
           revalidateTarget,
           deferActiveFetch: true,
         },
-      ));
-      if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
+      ),
+    );
+    const revalidated = await (phases ? phases.measure('post-fetch', revalidateBatch) : revalidateBatch());
+    if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
+    for (const [attemptIndex, attempt] of attempts.entries()) {
+      const batchTarget = attempt.entry.target;
+      const outcome = revalidated[attemptIndex]!;
       outcomes.push([batchTarget.ordinal, outcome]);
       const perTargetDisposition: VmRecoveryUalDisposition = (
         outcome.status === 'reconciled' || outcome.status === 'already'

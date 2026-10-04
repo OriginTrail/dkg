@@ -535,6 +535,10 @@ const RPC_USAGE_SNAPSHOT_RAW_CONSUMERS = [
   'DKGKnowledgeAssets.ownerOf',
   'rss.getNodeChallenge',
   'rss.getNodeEpochProofPeriodScore',
+
+  // Background views coalesced into one request, and the bytecode check before it.
+  'multicall3.aggregate3',
+  'multicall3.getCode',
 ] as const;
 
 const RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES = [
@@ -576,8 +580,12 @@ const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
  * labels. Membership only — the snapshot SHAPE is versioned separately by
  * `schemaVersion`, so a reader that pins a label vocabulary must gate on this
  * field rather than infer stability from the shape version.
+ *
+ * v3 adds `multicall3.aggregate3` and `multicall3.getCode`: one aggregate
+ * request now carries background views that v2 counted one request each under
+ * their own labels.
  */
-export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 2 as const;
+export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 3 as const;
 
 /** Complete closed vocabulary that the cumulative diagnostic may serialize. */
 export const RPC_USAGE_SNAPSHOT_CONSUMERS: readonly string[] = Object.freeze(

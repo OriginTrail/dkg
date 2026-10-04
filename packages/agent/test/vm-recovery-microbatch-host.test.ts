@@ -631,6 +631,109 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(result.hasImmediateRecoveryWork).toBe(false);
   });
 
+  it('re-verifies a fetched batch side by side and settles it in target order', async () => {
+    const peerId = '12D3KooWPostFetchBatchHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/post-fetch-batch';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchPostFetch',
+      localCgId,
+      peers: [peerId],
+      targetCount: 7,
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+    // The re-verification is where each target's chain reads are issued. Hold
+    // every call for a turn so overlapping calls are observable.
+    const reverify = harness.internals.reconcileChainOrdinal;
+    const started: number[] = [];
+    let active = 0;
+    let maxActive = 0;
+    harness.internals.reconcileChainOrdinal = async (cg, onChainCgId, ordinal, headBlock, options) => {
+      started.push(ordinal);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
+        return await reverify(cg, onChainCgId, ordinal, headBlock, options);
+      } finally {
+        active -= 1;
+      }
+    };
+
+    const result = await harness.internals.executeVmRecoveryBatch({
+      localCgId,
+      onChainCgId: 1n,
+      peerId,
+      attempts: harness.targets.map((target, index) => ({
+        entry: {
+          index,
+          target,
+          prepared: { slotKey: harness.internals.vmReconcileRotationSlotKey(target), suppressed: false },
+        },
+        installedRecord: undefined,
+        candidatePeerIds: [peerId],
+      })),
+      unavailablePeerIds: [],
+      headBlock: 100,
+      isRecoveryCurrent: () => true,
+      ctx: createOperationContext('system'),
+    }) as { kind: string; outcomes: Array<readonly [number, unknown]> };
+
+    expect(result.kind).toBe('completed');
+    expect(started).toHaveLength(7);
+    // Bounded like the scan: never all seven at once, and not one at a time.
+    expect(maxActive).toBe(DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY);
+    expect(result.outcomes).toEqual(
+      harness.targets.map(({ ordinal }) => [ordinal, { status: 'reconciled', blockNumber: 100 }]),
+    );
+  });
+
+  it('reports a batch whose lifecycle ended during re-verification as stale', async () => {
+    const peerId = '12D3KooWPostFetchStaleHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/post-fetch-stale';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchPostFetchStale',
+      localCgId,
+      peers: [peerId],
+      targetCount: 2,
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+    let current = true;
+    const reverify = harness.internals.reconcileChainOrdinal;
+    harness.internals.reconcileChainOrdinal = async (cg, onChainCgId, ordinal, headBlock, options) => {
+      current = false;
+      return reverify(cg, onChainCgId, ordinal, headBlock, options);
+    };
+
+    const result = await harness.internals.executeVmRecoveryBatch({
+      localCgId,
+      onChainCgId: 1n,
+      peerId,
+      attempts: harness.targets.map((target, index) => ({
+        entry: {
+          index,
+          target,
+          prepared: { slotKey: harness.internals.vmReconcileRotationSlotKey(target), suppressed: false },
+        },
+        installedRecord: undefined,
+        candidatePeerIds: [peerId],
+      })),
+      unavailablePeerIds: [],
+      headBlock: 100,
+      isRecoveryCurrent: () => current,
+      ctx: createOperationContext('system'),
+    });
+
+    expect(result).toEqual({ kind: 'stale-after-attempt' });
+  });
+
   it('retains no attempt evidence when stale at executor entry', async () => {
     const peerId = '12D3KooWStaleExecutorHolder';
     const localCgId = '0x0000000000000000000000000000000000000001/stale-entry';
