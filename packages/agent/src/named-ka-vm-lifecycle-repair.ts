@@ -28,13 +28,17 @@ export class NamedKaVmLifecycleRepair {
     dataDir?: string;
     now?: () => number;
     /** Share the publisher's lifecycle domain for currency, admission and mutation. */
-    writeLocks?: Map<string, Promise<void>>;
+    writeLocks: Map<string, Promise<void>>;
     /** Resolve only after metadata persistence is durable, before retiring evidence. */
     apply: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<void>;
     /** Coherent chain version evidence; a newer chain version fences an old repair. */
     isCurrent: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<boolean>;
     warn: (message: string) => void;
-  }) {}
+  }) {
+    if (!(options.writeLocks instanceof Map)) throw Object.assign(new Error('Named KA lifecycle repair requires the shared lifecycle write-lock map'), {
+      code: 'KA_VM_LIFECYCLE_REPAIR_LOCKS_REQUIRED',
+    });
+  }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.journalTail.then(work, work);
@@ -108,7 +112,7 @@ export class NamedKaVmLifecycleRepair {
     let outcome: NamedKaVmLifecycleRepairOutcome;
     let failure: unknown;
     try {
-      outcome = await withKeyedLocks(this.options.writeLocks ?? this.executionLocks, [
+      outcome = await withKeyedLocks(this.options.writeLocks, [
         assertionLifecycleWriteLockKey(input.contextGraphId, input.name, input.agentAddress, input.subGraphName),
       ], async () => {
         // Both fences run after any prior lifecycle writer has physically retired.

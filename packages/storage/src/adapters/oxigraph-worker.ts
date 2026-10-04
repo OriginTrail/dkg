@@ -1,9 +1,10 @@
+import { certifiedTripleStorePersistenceBarrier, type TripleStorePersistenceBarrier } from '../persistence.js';
 import { sleep, normalizeNonNegativeInt } from './oxigraph-worker-timing.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
+import type { TripleStore, QueryOptions, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import {
   GraphWriteGenTracker,
@@ -166,6 +167,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly persist?: TripleStorePersistenceBarrier;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -308,6 +310,7 @@ export class OxigraphWorkerStore implements TripleStore {
     }
     this.workerPath = workerPath;
     this.persistPath = persistPath;
+    this.persist = persistPath ? certifiedTripleStorePersistenceBarrier(options => this.flush(options)) : undefined;
     this.spawnWorker();
   }
 
@@ -846,7 +849,7 @@ export class OxigraphWorkerStore implements TripleStore {
     }
   }
   async countQuads(graphUri?: string): Promise<number> { return this.call('countQuads', graphUri); }
-  async flush(): Promise<void> { return this.call('flush'); }
+  async flush(_options?: QueryOptions): Promise<void> { return this.call('flush'); }
 
   async close(): Promise<void> {
     // Memoized + serialized: every close() call shares ONE teardown promise, so

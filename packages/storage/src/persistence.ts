@@ -1,27 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
-import { findTripleStoreCapability, type QueryOptions, type TripleStore } from './triple-store.js';
+import type { QueryOptions, TripleStore } from './triple-store.js';
 
+export type TripleStorePersistenceBarrier = (options?: QueryOptions) => Promise<void>;
 export interface TripleStorePersistenceCapability {
-  /** Persist completed mutations through the outer composition's barrier. */
-  persist(options?: QueryOptions): Promise<void>;
+  /** Persist completed mutations through the outer composition's certified barrier. */
+  persist: TripleStorePersistenceBarrier;
 }
 
-/** A decorator's optional/no-op flush does not certify its underlying backend. */
+/** An adapter explicitly certifies its own barrier; neither flush nor wrapper topology grants it. */
 export function asTripleStorePersistenceCapability(store: TripleStore): TripleStorePersistenceCapability | null {
-  let forwardingFlush = true;
-  const backend = findTripleStoreCapability(store, (candidate): candidate is TripleStore => {
-    if (typeof candidate !== 'object' || candidate === null) return false;
-    const current = candidate as Partial<TripleStore>;
-    if (current.writesDurableOnAcknowledgement === true) return true;
-    forwardingFlush &&= typeof current.flush === 'function';
-    return !('innerStore' in candidate) && forwardingFlush;
-  });
-  if (backend === null) return null;
-  return Object.freeze({
-    async persist(options?: QueryOptions): Promise<void> {
-      options?.signal?.throwIfAborted();
-      await store.flush?.(options);
-      options?.signal?.throwIfAborted();
-    },
+  const persist = store.persist;
+  return typeof persist === 'function' ? Object.freeze({ persist: persist.bind(store) }) : null;
+}
+
+/** Cancellation cannot turn a failed or unfinished persistence barrier into success. */
+export function certifiedTripleStorePersistenceBarrier(work: TripleStorePersistenceBarrier): TripleStorePersistenceBarrier {
+  return async (options) => {
+    options?.signal?.throwIfAborted();
+    await work(options);
+    options?.signal?.throwIfAborted();
+  };
+}
+
+/** Decorators certify only an explicitly certified inner endpoint, after their own mutation queue drains. */
+export function composeTripleStorePersistence(
+  inner: TripleStore, drain?: () => Promise<void>,
+): TripleStorePersistenceBarrier | undefined {
+  const capability = asTripleStorePersistenceCapability(inner);
+  if (capability === null) return undefined;
+  return certifiedTripleStorePersistenceBarrier(async (options) => {
+    await drain?.();
+    options?.signal?.throwIfAborted();
+    await capability.persist(options);
   });
 }

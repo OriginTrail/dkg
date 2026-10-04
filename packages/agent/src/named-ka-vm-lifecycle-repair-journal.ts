@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
-export type StoredLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'packedKaId'> & { packedKaId?: string };
+export type StoredLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'packedKaId' | 'tentative'> & { packedKaId?: string };
 export interface LifecycleRepairEntry {
   input: StoredLifecycleRepairInput;
   attempts: number;
@@ -28,6 +28,7 @@ function root(value: unknown): string {
 }
 export function normalizeLifecycleRepairInput(value: unknown, submission = false): StoredLifecycleRepairInput {
   const input = record(value);
+  if ('tentative' in input) return invalid();
   const assertionVersion = string(input['assertionVersion']);
   if (!/^[1-9][0-9]*$/.test(assertionVersion)) return invalid();
   const packed = input['packedKaId'];

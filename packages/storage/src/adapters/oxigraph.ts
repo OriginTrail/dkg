@@ -1,3 +1,4 @@
+import { certifiedTripleStorePersistenceBarrier, type TripleStorePersistenceBarrier } from '../persistence.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
@@ -5,6 +6,7 @@ import { mkdir, open, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type {
   TripleStore,
+  QueryOptions,
   Quad as DKGQuad,
   QueryResult,
   SelectResult,
@@ -59,6 +61,7 @@ type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
+  readonly persist?: TripleStorePersistenceBarrier;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -80,6 +83,7 @@ export class OxigraphStore implements TripleStore {
   constructor(persistPath?: string) {
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
+    this.persist = persistPath ? certifiedTripleStorePersistenceBarrier(options => this.flush(options)) : undefined;
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
@@ -608,7 +612,7 @@ export class OxigraphStore implements TripleStore {
    * rejection as a hard error — previous behaviour swallowed these and
    * returned success even when the data never landed.
    */
-  async flush(): Promise<void> {
+  async flush(_options?: QueryOptions): Promise<void> {
     if (!this.persistPath) return;
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);

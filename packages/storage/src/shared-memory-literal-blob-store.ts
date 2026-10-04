@@ -1,3 +1,5 @@
+import { persistContentAddressedFile } from './durable-content-addressed-file.js';
+import { composeTripleStorePersistence, type TripleStorePersistenceBarrier } from './persistence.js';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -55,10 +57,13 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   readonly innerStore: TripleStore;
+  readonly persist?: TripleStorePersistenceBarrier;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
+  /** Retain newly created directory ancestry across a failed sync and retry. */
+  private pendingCreatedDirectory?: string;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -69,6 +74,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     this.inner = inner;
     this.innerStore = inner;
+    this.persist = composeTripleStorePersistence(inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
     this.blobWrites = new ContentAddressedBlobSingleFlight({
@@ -394,20 +400,18 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   private async writeBlobFile(hash: string, term: string): Promise<void> {
-    await mkdir(this.blobDir, { recursive: true });
+    this.pendingCreatedDirectory ??= await mkdir(this.blobDir, { recursive: true });
     const path = this.blobPath(hash);
 
     try {
       await writeFile(path, term, { encoding: 'utf8', flag: 'wx' });
     } catch (err) {
-      if (isNodeError(err, 'EEXIST')) {
-        await this.readBlob(hash);
-        return;
-      }
-      throw err;
+      if (!isNodeError(err, 'EEXIST')) throw err;
     }
 
     await this.readBlob(hash);
+    await persistContentAddressedFile(path, this.pendingCreatedDirectory);
+    this.pendingCreatedDirectory = undefined;
   }
 
   private async readBlob(hash: string): Promise<string> {

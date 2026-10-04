@@ -1,3 +1,4 @@
+import { certifiedTripleStorePersistenceBarrier, type TripleStorePersistenceBarrier } from '../persistence.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -402,6 +403,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
 
   private readonly queryEndpoint: string;
   readonly writesDurableOnAcknowledgement: boolean;
+  readonly persist?: TripleStorePersistenceBarrier;
   readonly flush?: (options?: QueryOptions) => Promise<void>;
   private readonly updateEndpoint: string;
   private readonly timeout: number;
@@ -444,6 +446,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     );
     this.flush = this.managedOxigraph && typeof options.managedPersistence === 'function'
       ? options.managedPersistence : undefined;
+    this.persist = this.flush || this.writesDurableOnAcknowledgement
+      ? certifiedTripleStorePersistenceBarrier(options => this.flush?.(options) ?? Promise.resolve()) : undefined;
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;

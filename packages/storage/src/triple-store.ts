@@ -151,6 +151,8 @@ export interface UpdateOptions extends QueryOptions {
 export interface TripleStore {
   /** Successful mutations already certify persistence; independent of atomicity. */
   readonly writesDurableOnAcknowledgement?: boolean;
+  /** Explicitly certified restart-persistence barrier, composed through every decorator. */
+  readonly persist?: (options?: QueryOptions) => Promise<void>;
   /** Present only when query response limits are enforced before decoding. */
   readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
 

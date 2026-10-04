@@ -669,6 +669,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         'update',
       )
       : undefined,
+    persist: innerStore.persist?.bind(innerStore),
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
     close() {
       return innerStore.close();
