@@ -423,23 +423,27 @@ export function getSyncBackpressureBusyError(
   return undefined;
 }
 
-function acquire(
-  policy: SyncGlobalBackpressurePolicy,
-  options: {
-    label: string;
-    contextGraphId?: string;
-    lane: SyncSchedulerLane;
-    priority: number;
-    priorityClass: SyncPriorityClass;
-    source: SyncAdmissionSource;
-    selectedSwmPriority: boolean;
-    signal?: AbortSignal;
-    agingThresholdMs: number;
-  },
-): PriorityAdmission<GlobalQueuePayload> {
-  const { limit } = policy;
-  if (limit === undefined) throw new Error('disabled sync backpressure policy cannot acquire');
-  const { queueLimit } = policy;
+interface SyncAdmissionRequest {
+  label: string;
+  contextGraphId?: string;
+  lane: SyncSchedulerLane;
+  priority: number;
+  priorityClass: SyncPriorityClass;
+  source: SyncAdmissionSource;
+  selectedSwmPriority: boolean;
+  agingThresholdMs: number;
+}
+
+/**
+ * Everything the queue decides an admission on. `acquire` and the refusal
+ * probe both read it from here, so the two cannot describe one request
+ * differently.
+ */
+function syncAdmissionTerms(
+  policy: SyncGlobalBackpressurePolicy & { limit: number; queueLimit: number },
+  options: SyncAdmissionRequest,
+) {
+  const { limit, queueLimit } = policy;
   const normalizedSource = normalizeSyncAdmissionSource(options.source);
   const selectedRecoveryScope = options.contextGraphId !== undefined
     && (selectedRecoveryScopeIds.get(policy)?.has(options.contextGraphId) ?? false);
@@ -472,29 +476,44 @@ function acquire(
   const queueTimeoutMs = isPartitionedPolicy(policy) && admissionClass === 'fast'
     ? policy.partitions.fast.queueTimeoutMs
     : undefined;
+  return {
+    queueTimeoutMs,
+    queued: {
+      payload: {
+        policy,
+        admissionClass,
+        limit,
+        automaticBackgroundLimit: automaticBackgroundLimits.get(policy) ?? limit,
+        label: options.label,
+        contextGraphId: options.contextGraphId,
+        source: normalizedSource,
+        capacityClaim,
+      } satisfies GlobalQueuePayload,
+      ownerKey,
+      ownerQueueLimit,
+      lane: schedulerLane,
+      priority: options.priority,
+      priorityClass: options.priorityClass,
+      agingThresholdMs: options.agingThresholdMs,
+      queueLimit,
+    },
+  };
+}
+
+function acquire(
+  policy: SyncGlobalBackpressurePolicy,
+  options: SyncAdmissionRequest & { signal?: AbortSignal },
+): PriorityAdmission<GlobalQueuePayload> {
+  if (policy.limit === undefined) throw new Error('disabled sync backpressure policy cannot acquire');
+  const { limit, queueLimit } = policy;
+  const terms = syncAdmissionTerms(policy, options);
   lastLimit = limit;
   lastQueueLimit = queueLimit;
   const queuedBefore = queue.length;
   return queue.acquire({
-    payload: {
-      policy: policy as GlobalQueuePayload['policy'],
-      admissionClass,
-      limit,
-      automaticBackgroundLimit: automaticBackgroundLimits.get(policy) ?? limit,
-      label: options.label,
-      contextGraphId: options.contextGraphId,
-      source: normalizedSource,
-      capacityClaim,
-    },
-    ownerKey,
-    ownerQueueLimit,
-    lane: schedulerLane,
-    priority: options.priority,
-    priorityClass: options.priorityClass,
+    ...terms.queued,
     signal: options.signal,
-    timeoutMs: queueTimeoutMs,
-    agingThresholdMs: options.agingThresholdMs,
-    queueLimit,
+    timeoutMs: terms.queueTimeoutMs,
     createBusyError: () => new SyncBackpressureBusyError(
       `Sync backpressure rejected ${options.label} `
         + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queuedBefore}/${queueLimit})`,
@@ -807,6 +826,40 @@ export function getSyncBackpressureSnapshot(
     queuedByPriorityClass,
     oldestQueuedAgeMs: queue.oldestAgeMs(),
   };
+}
+
+/**
+ * Whether an admission with these terms would be refused right now, as
+ * {@link withGlobalSyncBackpressure} would refuse it. A read of the limiter:
+ * it claims no capacity and queues nothing, so a caller holding refused work
+ * can wait for room instead of repeating the work to find out.
+ *
+ * The answer is a snapshot. Capacity can be taken between this read and the
+ * admission it predicts, so a caller must still handle the refusal.
+ */
+export function syncAdmissionWouldBeRefused(
+  policy: SyncGlobalBackpressurePolicy,
+  options: {
+    contextGraphId?: string;
+    lane?: SyncSchedulerLane;
+    priority?: number;
+    priorityClass?: SyncPriorityClass;
+    source?: SyncAdmissionSource;
+    selectedSwmPriority?: boolean;
+    agingThresholdMs?: number;
+  } = {},
+): boolean {
+  if (policy.limit === undefined) return false;
+  return queue.wouldRefuse(syncAdmissionTerms(policy, {
+    label: 'probe',
+    contextGraphId: options.contextGraphId,
+    lane: options.lane ?? 'durable',
+    priority: options.priority ?? 0,
+    priorityClass: options.priorityClass ?? 'default',
+    source: normalizeSyncAdmissionSource(options.source),
+    selectedSwmPriority: options.selectedSwmPriority === true,
+    agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
+  }).queued);
 }
 
 export async function withGlobalSyncBackpressure<T>(
