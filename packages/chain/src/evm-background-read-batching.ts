@@ -23,6 +23,11 @@
  *
  * Everything the batch cannot answer with a decoded value is answered by the
  * direct read itself (see `contract-read-batcher.ts`).
+ *
+ * A background caller whose reads cannot share a batch (they are pinned to a
+ * block, or carry their own request policy) sends one aggregate request of its
+ * own through {@link BackgroundContractReadBatching.aggregateAtBlock}, behind
+ * the same kill switch and bytecode check.
  */
 
 import { Contract, ethers } from 'ethers';
@@ -43,6 +48,7 @@ import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
 import {
   activeRpcRequestContext,
   bindActiveRpcRequestScope,
+  waitForActiveRpcRequest,
   withDetachedRpcRequestContext,
 } from './rpc-request-transport.js';
 
@@ -178,6 +184,7 @@ export interface BackgroundContractReadBatchingDeps {
   readonly readProvider: <T>(
     label: string,
     fn: (provider: JsonRpcProvider) => Promise<T>,
+    opts?: ReadOpts,
   ) => Promise<T>;
   /** Kill switch, read on every call. */
   readonly isEnabled: () => boolean;
@@ -197,6 +204,42 @@ export interface BackgroundContractRead<T> {
 /** Capped on every node: see the aggregate request. */
 const MULTICALL3_AGGREGATE_READ_OPTS: ReadOpts = Object.freeze({ policy: 'watchdogPointRead' });
 
+/**
+ * The bytecode check waits for the background request budget like any other
+ * background request: behind what is queued ahead of it, and at start behind
+ * a budget that stays closed for a while. The point-read cap would end the
+ * check there, unsent, and a caller waiting for the answer would be turned
+ * away. This cap outlasts an ordinary wait, and holds on every node, so that
+ * caller is not held by one stuck connection either.
+ */
+const MULTICALL3_CODE_READ_OPTS: ReadOpts = Object.freeze({ policy: 'watchdogWideLogScan' });
+
+/**
+ * Issues a caller-owned aggregate request: `request` run against the
+ * Multicall3 contract under the caller's own read policy and attribution.
+ */
+export type AggregateRequestSender = (
+  multicall3: Contract,
+  request: (multicall3: Contract) => Promise<readonly BatchedContractCallResult[]>,
+) => Promise<readonly BatchedContractCallResult[]>;
+
+/** `aggregate3` as a view, every inner call allowed to fail on its own. */
+async function staticAggregate3(
+  multicall3: Contract,
+  calls: readonly BatchedContractCall[],
+  blockTag?: number,
+): Promise<readonly BatchedContractCallResult[]> {
+  const innerCalls = calls.map(({ target, callData }) => ({ target, allowFailure: true, callData }));
+  const results = await (blockTag === undefined
+    ? multicall3.aggregate3.staticCall(innerCalls)
+    : multicall3.aggregate3.staticCall(innerCalls, { blockTag })
+  ) as ReadonlyArray<{ success: unknown; returnData: unknown }>;
+  return results.map(({ success, returnData }) => ({
+    success: success === true,
+    returnData: String(returnData),
+  }));
+}
+
 type Multicall3State = 'unchecked' | 'checking' | 'present';
 
 export class BackgroundContractReadBatching {
@@ -207,6 +250,8 @@ export class BackgroundContractReadBatching {
   readonly #batcher: ContractReadBatcher;
   #multicall3State: Multicall3State = 'unchecked';
   #checkNotBefore = 0;
+  /** The bytecode check, while it is out. */
+  #multicall3Check: Promise<void> | undefined;
 
   constructor(deps: BackgroundContractReadBatchingDeps) {
     this.#deps = deps;
@@ -261,13 +306,64 @@ export class BackgroundContractReadBatching {
     });
   }
 
+  /**
+   * One aggregate request that a single background caller sends for itself:
+   * its calls evaluated together at `blockTag`. `send` issues it, so it runs
+   * under that caller's own read policy, cancellation and usage attribution,
+   * and unlike a shared batch it carries nobody else's reads.
+   *
+   * Resolves `undefined` when the caller has to issue its reads one by one:
+   * outside the background request class, with batching switched off, or
+   * where the canonical Multicall3 is not deployed. A bytecode check that has
+   * not answered yet is waited for, so the first caller after start is not
+   * turned away. `buildCalls` runs only when the request is going to be sent.
+   * A request that fails rejects with the request's own error.
+   */
+  async aggregateAtBlock(
+    buildCalls: () => readonly BatchedContractCall[],
+    blockTag: number,
+    send: AggregateRequestSender,
+  ): Promise<readonly BatchedContractCallResult[] | undefined> {
+    if (activeRpcRequestContext().requestClass !== 'background' || !this.#deps.isEnabled()) {
+      return undefined;
+    }
+    if (!(await this.#multicall3Checked())) return undefined;
+    const calls = buildCalls();
+    const results = await send(
+      this.#multicall3,
+      (multicall3) => staticAggregate3(multicall3, calls, blockTag),
+    );
+    if (results.length !== calls.length) {
+      throw new Error(`Aggregate call answered ${results.length} of ${calls.length} calls`);
+    }
+    return results;
+  }
+
   #multicall3Present(): boolean {
     if (this.#multicall3State === 'present') return true;
+    this.#startMulticall3Check();
+    return false;
+  }
+
+  /** Present, once a check that is due or already out has answered. */
+  async #multicall3Checked(): Promise<boolean> {
+    const check = this.#multicall3State === 'present' ? undefined : this.#startMulticall3Check();
+    // The check is shared: this caller may stop waiting, but not cancel it.
+    if (check !== undefined) await waitForActiveRpcRequest(check);
+    return this.#multicall3State === 'present';
+  }
+
+  /** Start the bytecode check when one is due. Returns the check that is out, if any. */
+  #startMulticall3Check(): Promise<void> | undefined {
     if (this.#multicall3State === 'unchecked' && this.#now() >= this.#checkNotBefore) {
       this.#multicall3State = 'checking';
-      void this.#checkMulticall3();
+      const check = this.#checkMulticall3();
+      this.#multicall3Check = check;
+      void check.then(() => {
+        if (this.#multicall3Check === check) this.#multicall3Check = undefined;
+      });
     }
-    return false;
+    return this.#multicall3Check;
   }
 
   async #checkMulticall3(): Promise<void> {
@@ -277,14 +373,18 @@ export class BackgroundContractReadBatching {
       const code = await withDetachedRpcRequestContext('background', () => this.#deps.readProvider(
         MULTICALL3_CODE_READ,
         (provider) => provider.getCode(MULTICALL3_ADDRESS),
+        MULTICALL3_CODE_READ_OPTS,
       ));
       if (isCanonicalMulticall3Code(code)) {
         this.#multicall3State = 'present';
         return;
       }
       retryAfterMs = MULTICALL3_ABSENT_RECHECK_MS;
-    } catch {
-      // Unreadable: nothing is known about the chain yet.
+    } catch (error) {
+      // Unreadable: nothing is known about the chain yet. A check the node's
+      // own request admission refused was never sent, so no endpoint needs
+      // sparing: the next read may ask again at once.
+      if (isRpcRequestGovernorQueueFullError(error)) retryAfterMs = 0;
     }
     this.#multicall3State = 'unchecked';
     this.#checkNotBefore = this.#now() + retryAfterMs;
@@ -298,17 +398,11 @@ export class BackgroundContractReadBatching {
     // So nothing but its own policy bounds how long it stays out, and it has
     // somewhere to fall back to (the reads themselves) even on a node with one
     // endpoint, where a plain point read is left uncapped.
-    const results = await withDetachedRpcRequestContext('background', () => this.#deps.readContract(
+    return withDetachedRpcRequestContext('background', () => this.#deps.readContract(
       this.#descriptor,
       this.#multicall3,
-      (multicall3) => multicall3.aggregate3.staticCall(
-        calls.map(({ target, callData }) => ({ target, allowFailure: true, callData })),
-      ) as Promise<ReadonlyArray<{ success: unknown; returnData: unknown }>>,
+      (multicall3) => staticAggregate3(multicall3, calls),
       MULTICALL3_AGGREGATE_READ_OPTS,
     ));
-    return results.map(({ success, returnData }) => ({
-      success: success === true,
-      returnData: String(returnData),
-    }));
   }
 }
