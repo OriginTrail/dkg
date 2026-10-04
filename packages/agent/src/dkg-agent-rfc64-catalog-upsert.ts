@@ -119,6 +119,11 @@ interface Rfc64CatalogMutationStateV1 {
   readonly expectedCurrentCatalogHeadDigest: Digest32V1 | null;
 }
 
+/** The canonical planner owns the complete sequence behind one applied-head CAS. */
+export type Rfc64CatalogMutationV1 =
+  | readonly [Rfc64CatalogSuccessorAssetInputV1[]]
+  | readonly [Rfc64CatalogSuccessorAssetInputV1[], Rfc64CatalogSuccessorAssetInputV1[]];
+
 interface Rfc64CatalogTargetMutationResultV1 {
   readonly state: Rfc64CatalogMutationStateV1;
   readonly successorsApplied: number;
@@ -363,16 +368,17 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     const hardLimit = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
     while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
       throwIfAbortedV1(params.signal);
-      const step = planRfc64CatalogMutationStepV1(state.assets, targetAssets);
-      if (successorsApplied + step.successors > hardLimit) {
+      const mutation = planNextRfc64CatalogExactSetV1(state.assets, targetAssets);
+      const assets = mutation.at(-1)!;
+      if (successorsApplied + mutation.length > hardLimit) {
         throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
       }
-      const committed = await this.applyRfc64CatalogSuccessorV1(
-        persistence, state, params, step.assets, peers, stageOnly,
-        params.signal, commitAppliedHead, step.intermediateAssets,
+      const committed = await this.applyRfc64CatalogMutationV1(
+        persistence, state, params, mutation, peers, stageOnly,
+        params.signal, commitAppliedHead,
       );
-      successorsApplied += step.successors;
-      state = catalogStateAfterSuccessorV1(state, committed, step.assets);
+      successorsApplied += mutation.length;
+      state = catalogStateAfterSuccessorV1(state, committed, assets);
       sourceCurrent = committed.sourceCurrent;
       // A signed successor still commits when its inventory becomes stale,
       // but only a fresh projection pass may construct the next successor.
@@ -474,7 +480,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     });
   }
 
-  private async applyRfc64CatalogSuccessorV1(
+  private async applyRfc64CatalogMutationV1(
     this: DKGAgent,
     persistence: Rfc64PersistenceV1,
     state: Rfc64CatalogMutationStateV1,
@@ -483,41 +489,36 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       author: Rfc64CatalogAuthorSignerV1;
       deployment: CatalogSealDeploymentProfileV1;
     }>,
-    assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
+    mutation: Rfc64CatalogMutationV1,
     peers: readonly string[],
     stageOnly: boolean,
     signal?: AbortSignal,
     commitAppliedHead?: (
       commit: () => AppliedCatalogHeadSnapshotV1,
     ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>,
-    intermediateAssets?: readonly Rfc64CatalogSuccessorAssetInputV1[],
   ) {
     throwIfAbortedV1(signal);
-    const stage = (previousHead: Rfc64StagedAuthorCatalogHeadRefV1, nextAssets: readonly Rfc64CatalogSuccessorAssetInputV1[]) => (
-      this.publishAuthorCatalogExactSetSuccessorV1({
+    let previousHead = state.previousHead;
+    let successor!: Awaited<ReturnType<DKGAgent['publishAuthorCatalogExactSetSuccessorV1']>>;
+    // Stage the explicit sequence without exposing an intermediate removal.
+    // A failed insertion leaves the prior applied row available and ordered.
+    for (const assets of mutation) {
+      successor = await this.publishAuthorCatalogExactSetSuccessorV1({
         previousHead,
         author: params.author,
         catalogIssuerAuthorization: state.catalogIssuerAuthorization,
-        assets: nextAssets,
+        assets,
         deployment: params.deployment,
         issuedAt: Date.now().toString() as TimestampMsV1,
         peers: [],
-      })
-    );
-    let previousHead = state.previousHead;
-    if (intermediateAssets !== undefined) {
-      // Retain the ordered active row until both replacement heads are signed
-      // and durable. A failed insertion must not expose a removal-only head
-      // that lets an abandoned seal re-enter as a new catalog asset.
-      const removal = await stage(previousHead, intermediateAssets);
+      });
       throwIfAbortedV1(signal);
       previousHead = Object.freeze({
-        objectDigest: removal.headObjectDigest,
-        signatureVariantDigest: removal.signatureVariantDigest,
+        objectDigest: successor.headObjectDigest,
+        signatureVariantDigest: successor.signatureVariantDigest,
       });
     }
-    const successor = await stage(previousHead, assets);
-    throwIfAbortedV1(signal);
+    const assets = mutation.at(-1)!;
     // A reused or lower burned draft is admissible only while its chain proof
     // remains unpublished. Signing and durable staging may cross a block.
     await assertRfc64CatalogReplacementOrderV1(this.chain, state.assets, assets, signal);
@@ -579,35 +580,6 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
 
 }
 
-/** Keep a draft replacement's signed remove/insert pair behind one applied-head CAS. */
-function planRfc64CatalogMutationStepV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-): Readonly<{
-  assets: Rfc64CatalogSuccessorAssetInputV1[];
-  intermediateAssets?: readonly Rfc64CatalogSuccessorAssetInputV1[];
-  successors: number;
-}> {
-  const next = planNextRfc64CatalogExactSetV1(current, target);
-  if (next.length < current.length) {
-    const removed = current.find((asset) => !next.some(
-      (retained) => retained.seal.reservedKaId === asset.seal.reservedKaId,
-    ));
-    const replacement = removed && target.find(
-      (asset) => asset.seal.reservedKaId === removed.seal.reservedKaId,
-    );
-    if (removed && replacement
-      && BigInt(replacement.seal.assertionVersion) <= BigInt(removed.seal.assertionVersion)) {
-      return Object.freeze({
-        assets: insertRfc64CatalogAssetV1(next, replacement),
-        intermediateAssets: next,
-        successors: 2,
-      });
-    }
-  }
-  return Object.freeze({ assets: next, successors: 1 });
-}
-
 function catalogStateAfterSuccessorV1(
   state: Rfc64CatalogMutationStateV1,
   committed: Readonly<{
@@ -649,37 +621,39 @@ export function planRfc64CatalogProjectionTargetV1(
 export function planNextRfc64CatalogExactSetV1(
   current: readonly Rfc64CatalogSuccessorAssetInputV1[],
   target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-): Rfc64CatalogSuccessorAssetInputV1[] {
+): Rfc64CatalogMutationV1 {
   let currentIndex = 0;
   let targetIndex = 0;
   while (currentIndex < current.length || targetIndex < target.length) {
     const currentAsset = current[currentIndex];
     const targetAsset = target[targetIndex];
     if (currentAsset === undefined) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset!);
+      return Object.freeze([insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset!)]);
     }
     if (targetAsset === undefined) {
-      return current.filter((_, index) => index !== currentIndex);
+      return Object.freeze([current.filter((_, index) => index !== currentIndex)]);
     }
     const comparison = compareRfc64CatalogAssetsByKaIdV1(currentAsset, targetAsset);
-    if (comparison < 0) return current.filter((_, index) => index !== currentIndex);
+    if (comparison < 0) return Object.freeze([current.filter((_, index) => index !== currentIndex)]);
     if (comparison > 0) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset);
+      return Object.freeze([insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset)]);
     }
     if (!sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) {
       if (
         BigInt(targetAsset.seal.assertionVersion)
           !== BigInt(currentAsset.seal.assertionVersion) + 1n
       ) {
-        // A reopened draft can reuse or lower an abandoned number; inventory
-        // can also skip numbers while projection is unavailable. The wire only
-        // permits contiguous updates, so retire the row before adding its
-        // independently ordered replacement on the following successor.
-        return current.filter((_, index) => index !== currentIndex);
+        // Reused/lower drafts need a signed remove/insert pair committed as
+        // one mutation. Version gaps retain the ordinary removal successor;
+        // their later insertion is planned against that newly applied head.
+        const removal = current.filter((_, index) => index !== currentIndex);
+        return BigInt(targetAsset.seal.assertionVersion) <= BigInt(currentAsset.seal.assertionVersion)
+          ? Object.freeze([removal, insertRfc64CatalogAssetV1(removal, targetAsset)])
+          : Object.freeze([removal]);
       }
       const next = [...current];
       next[currentIndex] = targetAsset;
-      return next;
+      return Object.freeze([next]);
     }
     currentIndex += 1;
     targetIndex += 1;
