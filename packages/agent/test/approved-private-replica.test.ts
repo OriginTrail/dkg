@@ -1621,6 +1621,97 @@ describe('approved private bare-name replica authorization', () => {
   });
 
   it.each([
+    ['the shared agents graph', SECONDARY_META_GRAPH],
+    ['the shared ontology graph', contextGraphDataGraphUri('ontology')],
+  ] as const)(
+    'keeps an agent asserted only in %s out of the accepted private roster',
+    async (_label, graph) => {
+      const fixture = await approvedBareNameReplicaFixture();
+      await fixture.receiver.store.insert([{
+        graph,
+        subject: fixture.subject,
+        predicate: D.DKG_ALLOWED_AGENT,
+        object: JSON.stringify(OUTSIDER),
+      }]);
+      Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+      // The merged projection carries the assertion: this is the widening input.
+      expect((await fixture.receiver.getLocalMetadataMemberRecoveryGate(CONTEXT_GRAPH_ID))
+        ?.map((address) => address.toLowerCase())).toContain(OUTSIDER);
+
+      const authority = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+        CONTEXT_GRAPH_ID,
+        undefined,
+        { kind: 'finalized-absence' },
+      );
+
+      expect(authority?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
+        .toEqual([OWNER, fixture.memberAddress].sort());
+      await expect(fixture.receiver.canReadContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress: OUTSIDER,
+        allowSubscriptionFallback: false,
+      })).resolves.toBe(false);
+      await expect(fixture.receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress: OUTSIDER,
+      })).resolves.toBe(false);
+      await expect(fixture.receiver.canReadContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress: fixture.memberAddress,
+        allowSubscriptionFallback: false,
+      })).resolves.toBe(true);
+    },
+  );
+
+  it.each([
+    ['an allowed agent', D.DKG_ALLOWED_AGENT],
+    ['a participant agent', D.DKG_PARTICIPANT_AGENT],
+  ] as const)(
+    'keeps %s named in the graph\'s own metadata in the accepted private roster',
+    async (_label, predicate) => {
+      const secondMember = OUTSIDER;
+      const fixture = await approvedBareNameReplicaFixture();
+      await fixture.receiver.store.insert([{
+        graph: fixture.graph,
+        subject: fixture.subject,
+        predicate,
+        object: JSON.stringify(secondMember),
+      }]);
+      Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+
+      const authority = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+        CONTEXT_GRAPH_ID,
+        undefined,
+        { kind: 'finalized-absence' },
+      );
+
+      expect(authority?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
+        .toEqual([OWNER, fixture.memberAddress, secondMember].sort());
+    },
+  );
+
+  it('applies a revocation from shared metadata to a member named in the graph\'s own metadata', async () => {
+    const secondMember = OUTSIDER;
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [secondMember],
+    });
+    await fixture.receiver.store.insert([{
+      graph: SECONDARY_META_GRAPH,
+      subject: fixture.subject,
+      predicate: D.DKG_REVOKED_AGENT,
+      object: JSON.stringify(secondMember),
+    }]);
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+
+    const authority = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+
+    // Shared metadata may only narrow the roster, never widen it.
+    expect(authority?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
+      .toEqual([OWNER, fixture.memberAddress].sort());
+  });
+
+  it.each([
     ['curator', D.DKG_CURATOR, `did:dkg:agent:${OUTSIDER}`],
     ['creator', D.DKG_CREATOR, `did:dkg:agent:${CURATOR_PEER}-other`],
     ['peer allowlist', D.DKG_ALLOWED_PEER, JSON.stringify(CURATOR_PEER)],
