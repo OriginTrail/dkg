@@ -31,6 +31,7 @@ import {
 import type { DkgConfig } from '../config.js';
 import {
   createReadAuthorityDiagnostics,
+  decodeReadAuthorityAttribution,
   type ContextGraphReadAuthorityAttribution,
 } from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
@@ -136,24 +137,7 @@ export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
   }
 }
 
-export const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
-
-/**
- * The attribution a thrown read-authority marker carries. The agent's error is
- * recognised structurally, so each field is read defensively; a missing,
- * non-string or throwing field becomes `unknown` here and nowhere else.
- */
-function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
-  const field = (key: keyof ContextGraphReadAuthorityAttribution): string => {
-    try {
-      const value: unknown = Reflect.get(err as object, key);
-      return typeof value === 'string' ? value : 'unknown';
-    } catch {
-      return 'unknown';
-    }
-  };
-  return { source: field('source'), reason: field('reason'), dependency: field('dependency') };
-}
+const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
 
 /**
  * Uniform retryable response for an unresolvable Context Graph read authority,
@@ -167,18 +151,29 @@ export function respondContextGraphReadAuthorityUnavailable(
   attribution: ContextGraphReadAuthorityAttribution,
   ctx: OperationContext = createOperationContext('query'),
 ): void {
-  readAuthorityDiagnostics.record(ctx, attribution);
-  jsonResponse(
-    res,
-    503,
-    {
-      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '3', 'x-dkg-operation-id': ctx.operationId },
-  );
+  respondAuthorityUnavailable(res, 'read', attribution, ctx);
+}
+
+/** Admission preserves its historical code and headers; only classified decisions carry attribution. */
+export function respondContextGraphAuthorityUnavailable(
+  res: ServerResponse,
+  attribution?: ContextGraphReadAuthorityAttribution,
+): void {
+  respondAuthorityUnavailable(res, 'admission', attribution);
+}
+
+function respondAuthorityUnavailable(
+  res: ServerResponse,
+  kind: 'read' | 'admission',
+  attribution?: ContextGraphReadAuthorityAttribution,
+  ctx: OperationContext = createOperationContext('query'),
+): void {
+  if (attribution) readAuthorityDiagnostics.record(ctx, attribution);
+  jsonResponse(res, 503, {
+    error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+    code: kind === 'read' ? CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE : 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+    retryable: true,
+  }, undefined, { 'Retry-After': '3', ...(kind === 'read' ? { 'x-dkg-operation-id': ctx.operationId } : {}) });
 }
 
 /**

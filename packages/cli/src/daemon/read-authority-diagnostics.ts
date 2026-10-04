@@ -12,6 +12,23 @@ export interface ContextGraphReadAuthorityAttribution {
   readonly dependency: string;
 }
 
+/**
+ * The attribution a thrown read-authority marker carries. The agent's error is
+ * recognised structurally, so each field is read defensively; a missing,
+ * non-string or throwing field becomes `unknown` here and nowhere else.
+ */
+export function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
+  const field = (key: keyof ContextGraphReadAuthorityAttribution): string => {
+    try {
+      const value: unknown = Reflect.get(err as object, key);
+      return typeof value === 'string' ? value : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  };
+  return { source: field('source'), reason: field('reason'), dependency: field('dependency') };
+}
+
 export interface ReadAuthorityDiagnosticsOptions {
   readonly logger?: Pick<Logger, 'info' | 'warn'>;
   /** Monotonic milliseconds; defaults to `performance.now()`. */

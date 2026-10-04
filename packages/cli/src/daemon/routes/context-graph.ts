@@ -231,7 +231,6 @@ import {
 import {
   resolveNameToPeerId,
   jsonResponse,
-  readAuthorityDiagnostics,
   safeDecodeURIComponent,
   safeParseJson,
   validateOptionalSubGraphName,
@@ -1961,8 +1960,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     if (readAuthority.outcome === 'unavailable') {
-      readAuthorityDiagnostics.record(createOperationContext('query'), readAuthority);
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, readAuthority);
     }
     // A private graph named by its on-chain id: one decision, with one answer
     // whether or not this node holds its cleartext id.

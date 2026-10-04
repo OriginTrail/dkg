@@ -6,6 +6,7 @@ import {
   corsHeaders,
   isContextGraphReadAuthorityUnavailable,
   respondContextGraphReadAuthorityUnavailable,
+  respondContextGraphAuthorityUnavailable,
   respondIfContextGraphReadAuthorityUnavailable,
   respondWithDaemonError,
 } from '../src/daemon/http-utils.js';
@@ -198,6 +199,19 @@ describe('read-authority 503 attribution in the daemon log (#2834)', () => {
     expect(lineFor(ctx.operationId).message).toContain('source=unknown reason=unknown dependency=unknown');
     expect(lineFor(ctx.operationId).message).not.toContain('private-graph-name');
     expect(res.body).not.toContain('private-graph-name');
+  });
+
+  it('preserves unattributed admission responses without manufacturing a diagnostic', () => {
+    const res = mockResponse();
+    respondContextGraphAuthorityUnavailable(res);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('3');
+    expect(res.headers['x-dkg-operation-id']).toBeUndefined();
+    expect(JSON.parse(res.body ?? '{}')).toEqual({
+      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', retryable: true,
+    });
+    expect(records.filter((record) => record.module === 'read-authority')).toEqual([]);
   });
 
   it('logs an attribution field whose getter throws as unknown', () => {
