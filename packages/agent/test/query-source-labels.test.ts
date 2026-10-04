@@ -15,6 +15,7 @@ import type { DKGAgent } from '../src/dkg-agent.js';
 import { JoinRequestMethods } from '../src/dkg-agent-join.js';
 import { QueryMethods } from '../src/dkg-agent-query.js';
 import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
+import type { Rfc64PublicCatalogServiceV1 } from '../src/rfc64/public-catalog-service-v1.js';
 import {
   createRfc64CatalogAccessPolicyRegistryFixture,
 } from './support/rfc64-catalog-access-policy-fixture.js';
@@ -118,10 +119,9 @@ function runtimePrivateQueryAgent(options: {
     ownerAddress: LOCAL_MEMBER,
     curatorAddress: LOCAL_MEMBER,
   });
-  const acceptedPolicySnapshot = vi.fn((
-    networkId: NetworkIdV1,
-    contextGraphId: ContextGraphIdV1,
-  ) => registry.lookup(networkId, contextGraphId));
+  const acceptedPolicySnapshotForReads = vi.fn<Rfc64PublicCatalogServiceV1['acceptedPolicySnapshotForReads']>(
+    (networkId, contextGraphId) => registry.lookupForReads(networkId, contextGraphId),
+  );
   const queryEngine = {
     query: vi.fn(async () => ({ bindings: [{ value: 'visible' }] })),
   };
@@ -167,7 +167,9 @@ function runtimePrivateQueryAgent(options: {
     subscribedContextGraphs: options.subscribed === false
       ? new Map()
       : new Map([[RUNTIME_PRIVATE_CG, { synced: true }]]),
-    rfc64PublicCatalogServiceV1: { acceptedPolicySnapshot },
+    rfc64PublicCatalogServiceV1: { acceptedPolicySnapshotForReads } satisfies Pick<
+      Rfc64PublicCatalogServiceV1, 'acceptedPolicySnapshotForReads'
+    >,
     isPrivateContextGraph,
     getContextGraphAllowedPeers: vi.fn(async () => null),
     resolveRegisteredContextGraphAuthority: vi.fn(async () => ({ kind: 'unregistered' as const })),
@@ -180,7 +182,7 @@ function runtimePrivateQueryAgent(options: {
   };
   return {
     agent,
-    acceptedPolicySnapshot,
+    acceptedPolicySnapshotForReads,
     isPrivateContextGraph,
     queryEngine,
     store,
@@ -191,14 +193,14 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
   it('does not execute SPARQL when unscoped read authority throws', async () => {
     const fixture = runtimePrivateQueryAgent();
     const authorityFailure = new Error('authority lookup failed');
-    fixture.acceptedPolicySnapshot.mockImplementation(() => { throw authorityFailure; });
+    fixture.acceptedPolicySnapshotForReads.mockImplementation(() => { throw authorityFailure; });
 
     await expect(QueryMethods.prototype.query.call(
       fixture.agent as never,
       'ASK { GRAPH ?g { ?s ?p ?o } }',
       { callerAgentAddress: OUTSIDER },
     )).rejects.toBe(authorityFailure);
-    expect(fixture.acceptedPolicySnapshot).toHaveBeenCalledWith(
+    expect(fixture.acceptedPolicySnapshotForReads).toHaveBeenCalledWith(
       RUNTIME_NETWORK_ID,
       RUNTIME_PRIVATE_CG,
     );
@@ -235,7 +237,7 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     expect(outsider.bindings).toEqual([]);
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
-    expect(fixture.acceptedPolicySnapshot).toHaveBeenCalledWith(
+    expect(fixture.acceptedPolicySnapshotForReads).toHaveBeenCalledWith(
       RUNTIME_NETWORK_ID,
       RUNTIME_PRIVATE_CG,
     );
