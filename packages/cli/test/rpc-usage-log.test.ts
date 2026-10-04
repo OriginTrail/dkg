@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
-import { formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
+import { mergeRpcUsageWindows, RpcRequestGovernor } from '@origintrail-official/dkg-chain';
+import { createDaemonRpcTelemetrySource, formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
 
 /**
  * The rpc_usage line format is a CONTRACT with the Grafana dashboards (parsed
@@ -8,6 +8,22 @@ import { formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../sr
  * pin it: one logfmt line per method, delta counts, token-safe values.
  */
 describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => {
+  it('composes live adapter windows and retains the governor drain receiver', () => {
+    let publisherCount = 5;
+    const governor = new RpcRequestGovernor({ maxRequestsPerSecond: 10 });
+    const source = createDaemonRpcTelemetrySource([
+      () => ({ byMethod: { eth_call: publisherCount }, lifetimeTotal: publisherCount }),
+      () => undefined,
+      () => ({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 }),
+    ], governor);
+    expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 7 });
+    publisherCount = 9;
+    expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 11 });
+    expect(source.drainRpcRequestGovernor?.()).toEqual(governor.drainWindow());
+    expect(source.drainRpcReadBatching?.()).toMatchObject({ batches: 0, readsByLabel: {} });
+    expect(createDaemonRpcTelemetrySource([]).drainRpcRequestGovernor).toBeUndefined();
+  });
+
   it('emits one logfmt line per method with count/window/chain', () => {
     const lines = formatRpcUsageLines(
       { byMethod: { eth_call: 42, eth_getLogs: 7 }, ethCallByConsumer: {}, lifetimeTotal: 49 },
