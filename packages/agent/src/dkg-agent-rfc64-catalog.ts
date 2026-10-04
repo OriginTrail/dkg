@@ -2099,9 +2099,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<readonly EvmAddressV1[] | null> {
-    if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
-      return null;
-    }
     // The creator's explicit local-first registration marker already proves
     // this graph has no chain roster. Reading the general member-recovery
     // authority here would ask the accepted catalog policy we are currently
@@ -2110,7 +2107,72 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     // the old policy. Read the creator's own confirmed _meta instead, while
     // keeping merged revocations effective and fencing registration changes.
     const localFirst = await this.isLocalFirstUnregisteredContextGraph(contextGraphId);
-    const gate = localFirst
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
+    let approvedReplicaGate: readonly string[] | undefined;
+    if (
+      !localFirst
+      && approvedAgent !== undefined
+      && accepted?.policy.accessPolicy === 1
+      && accepted.policy.source.kind === 'owner-signed-unregistered'
+    ) {
+      const revision = this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId);
+      const approved = await resolveApprovedPrivateReplicaAuthority(
+        this,
+        contextGraphId,
+        approvedAgent,
+        () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+          === approvedAgent.toLowerCase(),
+        () => this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId) === revision,
+      ).catch(() => null);
+      if (
+        approved?.kind === 'unregistered-private-replica'
+        && approved.authority.ownerAddress === accepted.policy.source.ownerAddress
+      ) {
+        // The approved-member proof authenticates this replica's own private
+        // definition. Check finalized name absence independently, then read
+        // the effective local roster and fence both sources again after the
+        // store awaits. The general recovery helper would ask the accepted
+        // catalog policy to authorize the roster needed to authorize that
+        // same catalog transport, leaving cold approved replicas stuck.
+        const before = await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId)
+          .catch(() => undefined);
+        if (before === undefined) return null;
+        if (before === null) {
+          const merged = await this.getLocalMetadataMemberRecoveryGate(contextGraphId)
+            .catch(() => null);
+          const own = await this.getOwnCgMetaFacts(contextGraphId)
+            .catch(() => null);
+          const after = await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId)
+            .catch(() => undefined);
+          if (
+            merged === null
+            || own === null
+            || after !== null
+            || this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId) !== revision
+            || this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+              !== approvedAgent.toLowerCase()
+            || this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)
+              ?.policyDigest !== accepted.policyDigest
+          ) return null;
+          const named = new Set(
+            [...own.allowedAgents, ...own.participantAgents]
+              .map((address) => address.toLowerCase()),
+          );
+          approvedReplicaGate = merged.filter((address) => named.has(address.toLowerCase()));
+        }
+      }
+    }
+    if (approvedReplicaGate === undefined
+      && !await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+      return null;
+    }
+    const gate = approvedReplicaGate !== undefined
+      ? approvedReplicaGate
+      : localFirst
       ? await (async () => {
           const revision = this.contextGraphMetaProjection
             .readContextGraphAuthorityFactsRevision(contextGraphId);
