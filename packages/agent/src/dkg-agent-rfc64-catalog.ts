@@ -5042,7 +5042,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       contextGraphId: accepted.policy.contextGraphId,
       policyDigest: accepted.policyDigest,
     });
-    return replay.failed === 0;
+    // An approval can precede the first authored head. An empty replay is not
+    // delivery evidence: keep the bounded retry armed so a head published a
+    // moment later is announced under the settled private roster.
+    return replay.failed === 0 && replay.announced > 0;
   }
 
   /**

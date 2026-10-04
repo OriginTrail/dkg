@@ -6218,6 +6218,10 @@ describe('RFC-64 rollout authority integration', () => {
       contextGraphId,
       policyDigest,
     }));
+    replay.mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
+    await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
+      contextGraphId, MEMBER, 'member-peer',
+    )).resolves.toBe(false);
   });
 
   it('rejects an out-of-order unregistered roster refresh after removal', async () => {
