@@ -65,6 +65,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
   buildEvmDeploymentId,
+  drainRpcReadBatchingWindow,
   MockChainAdapter,
   mergeRpcUsageWindows,
   snapshotProcessRpcUsage,
@@ -3052,6 +3053,7 @@ async function runDaemonInnerWithStartupOwnership(
       ...(rpcRequestGovernor === undefined
         ? {}
         : { drainRpcRequestGovernor: () => rpcRequestGovernor.drainWindow() }),
+      drainRpcReadBatching: drainRpcReadBatchingWindow,
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
     chainId: chainBase?.chainId ?? config.chain?.chainId,

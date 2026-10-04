@@ -43,7 +43,13 @@ import {
   HARDHAT_KEYS,
 } from './evm-test-context.js';
 import { mintTokens } from './hardhat-harness.js';
+import { MULTICALL3_RUNTIME_CODE } from './fixtures/multicall3-runtime-code.js';
 import type { ChainEvent } from '../src/chain-adapter.js';
+import {
+  MULTICALL3_ADDRESS,
+  drainRpcReadBatchingWindow,
+} from '../src/evm-background-read-batching.js';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import {
   buildAuthorAttestationTypedData,
   buildUpdateAuthorAttestationTypedData,
@@ -708,5 +714,95 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
         }),
       ).rejects.toThrow(/positive on-chain context graph id/);
     });
+  });
+
+  // --------------------------------------------------------------------
+  // Background views through Multicall3, against the deployed contracts.
+  // --------------------------------------------------------------------
+
+  describe('background views through Multicall3', () => {
+    const background = <T>(fn: () => T): T => withRpcRequestContext({ requestClass: 'background' }, fn);
+
+    /** Background reads go out directly until the adapter has checked the bytecode. */
+    async function waitUntilBatching(adapter: ReturnType<typeof createEVMAdapter>, kaId: bigint): Promise<boolean> {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        drainRpcReadBatchingWindow();
+        await background(() => adapter.getLatestMerkleRoot(kaId));
+        if (drainRpcReadBatchingWindow().batches > 0) return true;
+        await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
+      }
+      return false;
+    }
+
+    it('answers a published asset\'s views in one request, with the direct reads\' values', async () => {
+      const provider = createProvider();
+      await provider.send('hardhat_setCode', [MULTICALL3_ADDRESS, MULTICALL3_RUNTIME_CODE]);
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const { kaId, contextGraphId, merkleRoot } = await publishOneKCV10();
+      const views = () => Promise.all([
+        adapter.getLatestMerkleRoot(kaId),
+        adapter.getMerkleRootCount(kaId),
+        adapter.getKnowledgeAssetUpdateContext(kaId),
+        adapter.getKAContextGraphId(kaId),
+        adapter.getContextGraphKCCount(contextGraphId),
+        adapter.getContextGraphKCAt(contextGraphId, 0n),
+        adapter.getLatestMerkleRootPublisher(kaId),
+        adapter.getLatestMerkleRootAuthor(kaId),
+      ]);
+
+      const direct = await views();
+      expect(ethers.hexlify(direct[0])).toBe(ethers.hexlify(merkleRoot));
+      expect(direct[1]).toBe(1n);
+      expect(direct[3]).toBe(contextGraphId);
+      expect(direct[5]).toBe(kaId);
+      expect(await waitUntilBatching(adapter, kaId)).toBe(true);
+      adapter.drainRpcUsage();
+
+      const batched = await background(views);
+
+      expect(batched).toEqual(direct);
+      // Eight reads, seven distinct calls (the root count and the update
+      // context are the same view), one request.
+      expect(drainRpcReadBatchingWindow()).toMatchObject({
+        batches: 1, failedBatches: 0, refusedBatches: 0, calls: 7, directReads: 0,
+      });
+      expect(adapter.drainRpcUsage().byMethod).toEqual({ eth_call: 1 });
+    }, 60_000);
+
+    it('reports a view the contract reverts exactly as the direct read does', async () => {
+      const provider = createProvider();
+      await provider.send('hardhat_setCode', [MULTICALL3_ADDRESS, MULTICALL3_RUNTIME_CODE]);
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const { kaId, contextGraphId } = await publishOneKCV10();
+      // Position 5 of a graph that holds one asset: the contract reverts.
+      const outOfRange = () => adapter.getContextGraphKCAt(contextGraphId, 5n);
+
+      const direct = await outOfRange().then(() => undefined, (error: unknown) => error);
+      expect(direct).toBeInstanceOf(Error);
+      expect(await waitUntilBatching(adapter, kaId)).toBe(true);
+      const [batched, neighbour] = await Promise.allSettled(background(() => [
+        outOfRange(),
+        adapter.getKAContextGraphId(kaId),
+      ]));
+
+      expect(batched.status).toBe('rejected');
+      const reason = (batched as PromiseRejectedResult).reason as { code?: unknown; message?: string };
+      expect(reason.code).toBe((direct as { code?: unknown }).code);
+      expect(reason.message).toBe((direct as Error).message);
+      // The revert stays that read's own: the view beside it is answered.
+      expect(neighbour).toEqual({ status: 'fulfilled', value: contextGraphId });
+      expect(drainRpcReadBatchingWindow()).toMatchObject({ batches: 1, directReads: 1 });
+    }, 60_000);
+
+    it('keeps the direct reads on a chain without Multicall3', async () => {
+      const provider = createProvider();
+      expect(await provider.getCode(MULTICALL3_ADDRESS)).toBe('0x');
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const { kaId, merkleRoot } = await publishOneKCV10();
+
+      expect(await waitUntilBatching(adapter, kaId)).toBe(false);
+      expect(ethers.hexlify(await background(() => adapter.getLatestMerkleRoot(kaId))))
+        .toBe(ethers.hexlify(merkleRoot));
+    }, 60_000);
   });
 });
