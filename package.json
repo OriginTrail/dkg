@@ -135,7 +135,9 @@
     "test:properties": "vitest run --config test-policy/vitest.properties.config.ts",
     "test:mutation": "stryker run test-policy/stryker.config.mjs",
     "test:inventory": "node scripts/ci/test-inventory.mjs",
-    "test:conformance": "tsx --tsconfig test-systems/tsconfig.json --test test-systems/storage-conformance.test.ts"
+    "test:conformance": "tsx --tsconfig test-systems/tsconfig.json --test test-systems/storage-conformance.test.ts",
+    "qa:check-regressions": "node scripts/qa-check-regressions.mjs",
+    "qa:prove-regression": "node scripts/qa-prove-regression.mjs"
   },
   "devDependencies": {
     "@origintrail-official/dkg": "workspace:*",

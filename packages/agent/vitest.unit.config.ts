@@ -116,6 +116,8 @@ export default defineConfig({
       "test/gossip-publish-handler.test.ts",
       "test/discovery-subscription-boundary.test.ts",
       "test/core-fills-gap.test.ts",
+      "test/regression-on-demand-cursor.test.ts",
+      "test/regression-peer-store-repair.test.ts",
       "test/context-graph-name-candidate.test.ts",
       "test/context-graph-name-protocol.test.ts",
       "test/context-graph-name-resolver.test.ts",
