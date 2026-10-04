@@ -11,8 +11,11 @@ import type { RpcRequestAdmissionPriority } from './rpc-request-transport.js';
 /**
  * Internal authority reads may enter a saturated ordinary queue, but remain
  * bounded independently so a bug cannot create an unbounded priority lane.
- * Four slots match the default async-promote worker concurrency. The same
- * bound applies on top of the background share of the queue.
+ * Four slots match the default async-promote worker concurrency. An authority
+ * read enters the reserve when the ordinary slots of its class are taken: the
+ * whole queue for foreground work, the background share of it for background
+ * work. Reserve slots are counted apart from ordinary ones, so a read waiting
+ * in the reserve never takes a slot the capacity split keeps for other work.
  */
 const AUTHORITY_PRIORITY_QUEUE_RESERVE = 4;
 
@@ -211,6 +214,8 @@ interface RpcRequestWaiter {
   readonly requestClass: RpcRequestClass;
   readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly enqueuedAtMs: number;
+  /** Waits in the authority reserve rather than in an ordinary queue slot. */
+  readonly authorityReserveSlot: boolean;
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
   readonly signal?: AbortSignal;
@@ -275,6 +280,8 @@ export class RpcRequestGovernor {
   #lastRefillMs: number;
   /** See {@link RpcRequestGovernor.#nextBackgroundWaiter}. */
   #backgroundAuthorityPasses = 0;
+  /** Queued waiters that hold a slot of the authority reserve. */
+  #authorityReserveSlotsInUse = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #window = zeroGovernorCounters();
 
@@ -370,13 +377,16 @@ export class RpcRequestGovernor {
       this.#admit(requestClass, authorityPriority);
       return;
     }
-    const queueSize = this.#foregroundQueue.length + this.#backgroundQueue.length;
-    const authorityReserve = authorityPriority ? AUTHORITY_PRIORITY_QUEUE_RESERVE : 0;
+    const ordinarySlotsInUse = this.#foregroundQueue.length + this.#backgroundQueue.length
+      - this.#authorityReserveSlotsInUse;
+    const authorityReserveSlot = ordinarySlotsInUse >= (
+      requestClass === 'background' ? this.#backgroundQueueLimit : this.#policy.maxQueueSize
+    );
     if (
-      queueSize >= this.#policy.maxQueueSize + authorityReserve
-      || (
-        requestClass === 'background'
-        && queueSize >= this.#backgroundQueueLimit + authorityReserve
+      authorityReserveSlot
+      && (
+        !authorityPriority
+        || this.#authorityReserveSlotsInUse >= AUTHORITY_PRIORITY_QUEUE_RESERVE
       )
     ) {
       this.#window.rejected += 1;
@@ -388,6 +398,7 @@ export class RpcRequestGovernor {
         requestClass,
         ...(authorityPriority ? { admissionPriority } : {}),
         enqueuedAtMs: this.#clock.now(),
+        authorityReserveSlot,
         resolve,
         reject,
         signal,
@@ -404,6 +415,7 @@ export class RpcRequestGovernor {
         },
       };
       if (waiter.onAbort) signal!.addEventListener('abort', waiter.onAbort, { once: true });
+      if (authorityReserveSlot) this.#authorityReserveSlotsInUse += 1;
       const queue = requestClass === 'foreground' ? this.#foregroundQueue : this.#backgroundQueue;
       if (authorityPriority) {
         const firstOrdinary = queue.findIndex(
@@ -551,18 +563,24 @@ export class RpcRequestGovernor {
     this.#window[requestClass === 'foreground' ? 'foregroundAdmitted' : 'backgroundAdmitted'] += 1;
   }
 
+  /** Take a waiter out of its queue and give back the slot it held there. */
+  #dequeue(queue: RpcRequestWaiter[], index: number): RpcRequestWaiter {
+    const [waiter] = queue.splice(index, 1) as [RpcRequestWaiter];
+    waiter.signal?.removeEventListener('abort', waiter.onAbort!);
+    if (waiter.authorityReserveSlot) this.#authorityReserveSlotsInUse -= 1;
+    return waiter;
+  }
+
   #removeWaiter(waiter: RpcRequestWaiter): boolean {
     const queue = waiter.requestClass === 'foreground' ? this.#foregroundQueue : this.#backgroundQueue;
     const index = queue.indexOf(waiter);
     if (index < 0) return false;
-    queue.splice(index, 1);
-    waiter.signal?.removeEventListener('abort', waiter.onAbort!);
+    this.#dequeue(queue, index);
     return true;
   }
 
   #resolveWaiter(queue: RpcRequestWaiter[], index = 0): void {
-    const [waiter] = queue.splice(index, 1) as [RpcRequestWaiter];
-    waiter.signal?.removeEventListener('abort', waiter.onAbort!);
+    const waiter = this.#dequeue(queue, index);
     this.#admit(waiter.requestClass, waiter.admissionPriority === 'authority');
     waiter.resolve();
   }

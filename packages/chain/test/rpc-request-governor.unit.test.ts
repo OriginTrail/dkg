@@ -452,6 +452,95 @@ describe('RpcRequestGovernor', () => {
     ));
   });
 
+  it('keeps the queue slots reserved for foreground work when background authority reads wait in the reserve', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 2,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+
+    // The background share of the queue is one slot. The ordinary request
+    // takes it, so the authority read waits in the reserve.
+    const controller = new AbortController();
+    const ordinaryBackground = governor.acquire('background', controller.signal);
+    const authority = acquireBackgroundAuthority(governor, controller.signal);
+
+    // The slot kept for foreground work is still there for it ...
+    const foreground = governor.acquire('foreground', controller.signal);
+    expect(governor.snapshot()).toMatchObject({
+      foregroundQueued: 1,
+      backgroundQueued: 2,
+      rejected: 0,
+    });
+    // ... and the queue's ordinary slots are bounded as before.
+    await expect(governor.acquire('foreground')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+
+    controller.abort(new Error('test cleanup'));
+    await Promise.all([ordinaryBackground, authority, foreground].map(
+      (pending) => expect(pending).rejects.toThrow('test cleanup'),
+    ));
+  });
+
+  it('gives a reserve slot back when the authority read that held it leaves the queue, and nothing else', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 2,
+      startupJitterMs: 0,
+    });
+    const queueFull = (pending: Promise<void>) => (
+      expect(pending).rejects.toBeInstanceOf(RpcRequestGovernorQueueFullError)
+    );
+    await governor.acquire('background');
+    // The background share of the queue is one slot, and this request has it.
+    const ordinary = governor.acquire('background');
+
+    // Four reads fill the reserve.
+    const leaving = new AbortController();
+    const admitted = [acquireBackgroundAuthority(governor), acquireBackgroundAuthority(governor)];
+    const givenUp = [
+      acquireBackgroundAuthority(governor, leaving.signal),
+      acquireBackgroundAuthority(governor, leaving.signal),
+    ];
+    await queueFull(acquireBackgroundAuthority(governor));
+
+    // Two give up and two are admitted (one background permit in two seconds).
+    leaving.abort(new Error('authority read gave up'));
+    await Promise.all(givenUp.map(
+      (pending) => expect(pending).rejects.toThrow('authority read gave up'),
+    ));
+    await vi.advanceTimersByTimeAsync(4_000);
+    await Promise.all(admitted);
+
+    // The reserve is empty. That frees no ordinary slot: the background
+    // share is still taken ...
+    await queueFull(governor.acquire('background'));
+    // ... and the reserve holds four reads again, no more.
+    const again = Array.from({ length: 4 }, () => acquireBackgroundAuthority(governor));
+    await queueFull(acquireBackgroundAuthority(governor));
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.all([ordinary, ...again]);
+
+    // An ordinary request that leaves gives back its own slot and no other:
+    // the share is one slot, as at the start.
+    await governor.acquire('background');
+    const next = governor.acquire('background');
+    await queueFull(governor.acquire('background'));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await next;
+  });
+
   it('eventually admits aged background work during sustained foreground demand', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
