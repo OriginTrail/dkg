@@ -427,8 +427,16 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events).toContain('finalized-twin-reconciled');
     // The descriptor metadata now finishes under the lock, before retirement.
     // Every later append must omit it; replay after this point would resurrect it.
-    expect(h.events.lastIndexOf('meta-inserted'))
-      .toBeLessThan(h.events.indexOf('finalized-twin-reconciled'));
+    const metadata = h.events.indexOf('meta-inserted');
+    const released = h.events.indexOf('lock-released');
+    const reconciled = h.events.indexOf('finalized-twin-reconciled');
+    expect(metadata).toBeGreaterThanOrEqual(0);
+    expect(released).toBeGreaterThan(metadata);
+    expect(reconciled).toBeGreaterThan(released);
+    expect(h.inserted).toHaveLength(1);
+    expect(h.inserted[0]).toHaveLength(h.fx.meta.length);
+    expect(h.inserted[0]).toEqual(expect.arrayContaining(h.fx.meta));
+    expect(h.events.slice(released + 1)).not.toContain('meta-inserted');
   });
 
   it('does not bulk-recreate metadata after freshly materializing and retiring a twin', async () => {
