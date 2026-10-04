@@ -219,6 +219,8 @@ export interface ReconcileResult {
   staleTarget: boolean;
   /** Internal bounded retry signal; local pressure is not peer evidence. */
   localAdmissionDeferred?: boolean;
+  /** This pass asked peers for missing assets, so it used node-local sync admission. */
+  recoveryAttempted?: boolean;
 }
 
 interface OrdinalPassPlan {
@@ -635,6 +637,7 @@ export async function reconcileContextGraph(
     shouldContinueImmediately,
     staleTarget,
     ...(recovery.kind === 'local-admission' ? { localAdmissionDeferred: true } : {}),
+    ...(recoveryAttempted ? { recoveryAttempted: true } : {}),
   };
 }
 
