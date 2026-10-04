@@ -79,6 +79,7 @@ export default defineConfig({
       "test/exact-batch-stream-responder-switch.test.ts",
       "test/exact-graph-content-export.test.ts",
       "test/vm-recovery-local-admission.test.ts",
+      "test/vm-reconcile-read-authority-wait.test.ts",
       "test/exact-asset-responder.test.ts",
       "test/responder-asset-metadata.test.ts",
       "test/exact-asset-wire-parse.test.ts",

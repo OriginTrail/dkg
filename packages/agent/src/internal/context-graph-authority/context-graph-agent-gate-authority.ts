@@ -60,52 +60,48 @@ function conclusiveTransportGate(
 export async function resolveContextGraphAgentGateAuthorityDecision(
   input: ContextGraphAgentGateAuthorityInput,
 ): Promise<ContextGraphAgentGateAuthority> {
-  const transportAuthority = await input.getTransportAuthority();
-  const conclusiveGate = conclusiveTransportGate(transportAuthority);
-  if (conclusiveGate !== null) return conclusiveGate;
+  // A concurrent metadata write can invalidate a legacy roster while its
+  // store read is in flight. Re-read the entire decision a bounded number of
+  // times so an ordinary create/write burst does not strand SWM publishing.
+  // Never return a roster captured before the final revision check.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const conclusiveGate = conclusiveTransportGate(await input.getTransportAuthority());
+    if (conclusiveGate !== null) return conclusiveGate;
 
-  const metadataRevision = input.readMetadataRevision();
-  const meta = await input.getLegacyMeta();
-  // Metadata is an async boundary. A private RFC-64 policy can activate or a
-  // private registration can commit while it awaits the store; in either case
-  // that exact roster must supersede the captured legacy/approved projection.
-  const currentConclusiveGate = conclusiveTransportGate(
-    await input.getTransportAuthority(),
-  );
-  if (currentConclusiveGate !== null) return currentConclusiveGate;
-  // Approved-private authority proves this receiver's membership, not every
-  // member in the legacy roster. A different member can be revoked while the
-  // transport recheck awaits and leave that proof valid. Do not combine the
-  // fresh receiver proof with a stale metadata gate from before the revoke.
-  if (input.readMetadataRevision() !== metadataRevision) {
-    return unavailableAuthority(
-      'local-existence-unavailable',
-      `Context graph "${input.contextGraphId}" metadata authority changed while resolving its agent gate`,
-    );
+    const metadataRevision = input.readMetadataRevision();
+    const meta = await input.getLegacyMeta();
+    // A private policy or registration can activate during the store read.
+    const currentConclusiveGate = conclusiveTransportGate(await input.getTransportAuthority());
+    if (currentConclusiveGate !== null) return currentConclusiveGate;
+    if (input.readMetadataRevision() !== metadataRevision) continue;
+
+    const seen = new Set<string>();
+    const agents: string[] = [];
+    let sawAgentGate = false;
+    const revoked = new Set(meta.revokedAgents.map((address) => address.toLowerCase()));
+    const add = (value: string | undefined) => {
+      if (!value || !ethers.isAddress(value)) return;
+      const checksum = ethers.getAddress(value);
+      const key = checksum.toLowerCase();
+      if (revoked.has(key) || seen.has(key)) return;
+      seen.add(key);
+      agents.push(checksum);
+    };
+
+    const subscriptionAgents = input.getSubscriptionAgents();
+    if (subscriptionAgents.length > 0) sawAgentGate = true;
+    for (const agentAddress of subscriptionAgents) add(agentAddress);
+
+    if (meta.allowedAgents.length > 0 || meta.participantAgents.length > 0) sawAgentGate = true;
+    for (const agentAddress of meta.allowedAgents) add(agentAddress);
+    for (const agentAddress of meta.participantAgents) add(agentAddress);
+
+    return sawAgentGate
+      ? { kind: 'available', agentAddresses: agents }
+      : { kind: 'ungated' };
   }
-
-  const seen = new Set<string>();
-  const agents: string[] = [];
-  let sawAgentGate = false;
-  const revoked = new Set(meta.revokedAgents.map((address) => address.toLowerCase()));
-  const add = (value: string | undefined) => {
-    if (!value || !ethers.isAddress(value)) return;
-    const checksum = ethers.getAddress(value);
-    const key = checksum.toLowerCase();
-    if (revoked.has(key) || seen.has(key)) return;
-    seen.add(key);
-    agents.push(checksum);
-  };
-
-  const subscriptionAgents = input.getSubscriptionAgents();
-  if (subscriptionAgents.length > 0) sawAgentGate = true;
-  for (const agentAddress of subscriptionAgents) add(agentAddress);
-
-  if (meta.allowedAgents.length > 0 || meta.participantAgents.length > 0) sawAgentGate = true;
-  for (const agentAddress of meta.allowedAgents) add(agentAddress);
-  for (const agentAddress of meta.participantAgents) add(agentAddress);
-
-  return sawAgentGate
-    ? { kind: 'available', agentAddresses: agents }
-    : { kind: 'ungated' };
+  return unavailableAuthority(
+    'local-existence-unavailable',
+    `Context graph "${input.contextGraphId}" metadata authority changed while resolving its agent gate`,
+  );
 }

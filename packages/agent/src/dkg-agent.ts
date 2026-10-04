@@ -967,6 +967,9 @@ export class DKGAgent extends DKGAgentBase {
       retireFinalizedSwmTwin: (candidate, ctx) => (
         this.retireFinalizedSwmTwinCandidate(candidate, ctx)
       ),
+      retireLegacySwmAfterVerifiedVmTwin: (input) => (
+        this.retireLegacySwmAfterVerifiedVmTwin(input)
+      ),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),

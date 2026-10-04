@@ -2116,8 +2116,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
           workspaceWriteLocks: this.writeLocks,
-          retireConfirmedGraphScopedSwmTwinIfOrphaned:
-            createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+          retireConfirmedGraphScopedSwmTwinIfOrphaned: (() => {
+            const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
               store: this.store,
               writeLocks: this.writeLocks,
               retire: async (candidate, ctx) => {
@@ -2136,7 +2136,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
                 );
               },
               onTornHeadRemoved: (message, ctx) => this.log.warn(ctx, message),
-            }),
+            });
+            return async (candidate, ctx) => {
+              await retireOrphaned(candidate, ctx);
+              await this.retireLegacySwmAfterVerifiedVmTwin({
+                contextGraphId: candidate.contextGraphId,
+                kaUal: candidate.ual,
+                assertionVersion: candidate.assertionVersion,
+                subGraphName: candidate.subGraphName,
+              });
+            };
+          })(),
           reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
             const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({
               store: this.store,
@@ -2145,6 +2155,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
               retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
             });
             if (retirement === 'retired') {
+              await this.retireLegacySwmAfterVerifiedVmTwin({
+                contextGraphId: evidence.contextGraphId,
+                kaUal: evidence.kaUal,
+                assertionVersion: evidence.assertionVersion,
+                subGraphName: evidence.subGraphName,
+              });
               this.invalidateListContextGraphsCache();
               this.log.info(
                 ctx,

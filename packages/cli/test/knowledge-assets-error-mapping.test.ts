@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { respondAssertionError } from '../src/daemon/routes/knowledge-assets.js';
+import { respondAssertionError } from '../src/daemon/routes/knowledge-assets-error-mapping.js';
 
 function fakeResponse() {
   const record = { status: 0, body: '', ended: false };
@@ -17,6 +17,37 @@ function fakeResponse() {
 }
 
 describe('knowledge-assets mutation error mapping', () => {
+  it.each(['KA_ASSERTION_ALREADY_FINALIZED', 'ASSERTION_EMPTY'])('keeps the %s conflict mapping', (code) => {
+    const { record, res } = fakeResponse();
+    respondAssertionError(res, { code, message: 'caller precondition' });
+    expect(record.status).toBe(409);
+    expect(JSON.parse(record.body)).toEqual({ code, error: 'caller precondition' });
+  });
+
+  it.each([
+    ['CURATOR_REJECTED', 409, 'rejected'],
+    ['CURATOR_UNCONFIRMED', 503, 'unconfirmed'],
+  ])('keeps %s response details', (code, status, curatorDelivery) => {
+    const { record, res } = fakeResponse();
+    respondAssertionError(res, { code, message: 'curator outcome', contextGraphId: 'cg' });
+    expect(record.status).toBe(status);
+    expect(JSON.parse(record.body)).toEqual({ code, error: 'curator outcome', curatorDelivery, contextGraphId: 'cg' });
+  });
+
+  it('does not map inherited object-property names as error codes', () => {
+    const { record, res } = fakeResponse();
+    respondAssertionError(res, { code: 'toString', message: 'store damage' });
+    expect(record.status).toBe(500);
+  });
+
+  it.each(['draft', 'InvalidAddresses', 'UnsafeImports'])('keeps damaged lifecycle records for %s as typed server failures', (name) => {
+    const { record, res } = fakeResponse();
+    const message = `Assertion "${name}" has a corrupt Working Memory lifecycle record`;
+    respondAssertionError(res, { code: 'KA_WM_LIFECYCLE_CORRUPT', message });
+    expect(record.status).toBe(500);
+    expect(JSON.parse(record.body)).toEqual({ error: message, code: 'KA_WM_LIFECYCLE_CORRUPT' });
+  });
+
   it.each(['KA_PROMOTE_RECOVERY_REQUIRED', 'PROMOTE_POST_COMMIT_FAILURE'])('keeps %s recovery coordinates consistent', (code) => {
     for (const context of [undefined, { contextGraphId: 'cg', name: 'same-asset', phase: 'share', subGraphName: 'sub' }]) {
       const { record, res } = fakeResponse();
@@ -44,6 +75,7 @@ describe('knowledge-assets mutation error mapping', () => {
       retryAction: 'resume_existing_knowledge_asset', retryPhase: 'swm-share',
       contextGraphId: 'cg', retryKnowledgeAssetName: 'same-asset',
     });
+
   });
 
   it('maps an inactive WM discard precondition to a typed conflict', () => {

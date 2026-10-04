@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: [
       'test/workspace-draft-replacement.test.ts',
+      'test/wm-lifecycle-integrity.test.ts',
       'test/sealed-create-retry.test.ts',
       'test/workspace-snapshot-source.test.ts',
       'test/workspace-snapshot-page-index.test.ts',

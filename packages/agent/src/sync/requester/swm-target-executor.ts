@@ -80,6 +80,12 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
+  readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
+    contextGraphId: string;
+    kaUal: string;
+    assertionVersion: string;
+    subGraphName?: string;
+  }>) => Promise<void>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -291,6 +297,31 @@ export class SwmTargetExecutorV1 {
           descriptor,
           retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
         });
+        const twinRetired = retirement === 'retired'
+          || retirement === 'already-retired-finalized';
+        if (twinRetired) {
+          // The twin's graph and head are already gone at this point. Marker
+          // retirement is a second, separate cleanup: if its failure escaped,
+          // the caller would treat the whole reconciliation as deferred, skip
+          // the suppression below, and its bulk append would write the retired
+          // head and operation rows back without their graph. A marker left
+          // behind is the conservative state (the graph stays reported as
+          // incomplete) until a later pass or a catalog replay retires it.
+          try {
+            await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
+              contextGraphId,
+              kaUal: descriptor.kaUal,
+              assertionVersion: descriptor.assertionVersion,
+              subGraphName: descriptor.subGraphName,
+            });
+          } catch (cause) {
+            this.#ports.logWarn(
+              target.ctx,
+              `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
+                + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+        }
         if (retirement === 'retired') {
           this.#ports.invalidateListContextGraphsCache();
           this.#ports.logInfo(
@@ -298,9 +329,7 @@ export class SwmTargetExecutorV1 {
             `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
           );
         }
-        return retirement === 'retired' || retirement === 'already-retired-finalized'
-          ? 'suppress-metadata'
-          : 'preserve';
+        return twinRetired ? 'suppress-metadata' : 'preserve';
       },
       storeInsert,
       publicSnapshotStore: this.#ports.publicSnapshotStore,

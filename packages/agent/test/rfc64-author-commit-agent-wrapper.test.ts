@@ -7,6 +7,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 
 function input(): Rfc64AuthorCommitCasInputV1 {
   const graph = 'did:dkg:context-graph:rfc64/_shared_memory';
@@ -73,21 +74,49 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options)).resolves.toBe('committed');
     expect(cas).toHaveBeenLastCalledWith(manifest, options);
     expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(1);
+    expect(markProjectionDirty).toHaveBeenCalledTimes(6);
+    expect(markProjectionDirty).toHaveBeenNthCalledWith(
+      1,
+      undefined,
+      manifest.sharedProjectionGraph,
+    );
+    expect(markProjectionDirty.mock.calls.every((call) => call[1] !== undefined)).toBe(true);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options)).resolves.toBe('conflict');
     expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(1);
+    expect(markProjectionDirty).toHaveBeenCalledTimes(6);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options))
       .rejects.toThrow('response lost after commit');
     expect(invalidate).toHaveBeenCalledTimes(2);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(2);
+    expect(markProjectionDirty).toHaveBeenCalledTimes(12);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options))
       .rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
     expect(invalidate).toHaveBeenCalledTimes(2);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(2);
+    expect(markProjectionDirty).toHaveBeenCalledTimes(12);
+  });
+
+  it('keeps an unrelated private proof current after an exact author commit', async () => {
+    const inner = overrideStore(new OxigraphStore(), {
+      rfc64AuthorCommitCasV1: async () => 'committed',
+    });
+    const projection = new ContextGraphMetaProjection(inner);
+    const store = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      vi.fn(),
+      (quads, targetGraph) => {
+        if (targetGraph !== undefined) projection.markDirtyForGraph(targetGraph);
+        if (quads !== undefined) projection.markDirtyFromQuads(quads);
+        else if (targetGraph === undefined) projection.markAllDirty();
+      },
+    );
+    const before = projection.readContextGraphAuthorityFactsRevision('unrelated-private-cg');
+
+    await expect(store.rfc64AuthorCommitCasV1!(input())).resolves.toBe('committed');
+
+    expect(projection.readContextGraphAuthorityFactsRevision('unrelated-private-cg'))
+      .toBe(before);
   });
 
   it('does not advertise a capability absent from the inner store', () => {
