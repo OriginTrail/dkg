@@ -1,5 +1,5 @@
 
-export { createListContextGraphsCacheInvalidatingStore } from './context-graph-cache-invalidating-store.js';
+export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
 import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';

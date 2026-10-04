@@ -3,8 +3,8 @@
 import { createHash } from 'node:crypto';
 import { WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519, decodeWorkspaceEncryptionKey, workspaceAgentEncryptionKeyId } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { computeWorkspaceEncryptionKeysAttestationDigest, verifyAgentDelegation, type SignedAgentDelegation } from './auth/agent-delegation.js';
-import { verifyWorkspaceEncryptionKeyBinding } from './agent-keystore.js';
+import { computeWorkspaceEncryptionKeysAttestationDigest, verifyAgentDelegation, type SignedAgentDelegation } from '../auth/agent-delegation.js';
+import { verifyWorkspaceEncryptionKeyBinding } from '../agent-keystore.js';
 
 const JOIN_ENCRYPTION_KEY_LIMIT = 8;
 
