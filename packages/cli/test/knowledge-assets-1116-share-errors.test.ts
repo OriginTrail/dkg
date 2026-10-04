@@ -1067,6 +1067,17 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(calls[0]).toEqual([CG_ID, ASSERTION_NAME, 'wm', expect.any(Object)]);
   });
 
+  it.each([undefined, 'archive', 'WM'])('wm/pull-from rejects invalid source %s before mutating the draft', async layer => {
+    let pulls = 0;
+    await startWith({ pullFrom: async () => { pulls += 1; return { seeded: 1 }; } });
+
+    const res = await post('wm/pull-from', { contextGraphId: CG_ID, ...(layer === undefined ? {} : { layer }) });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'pull-from requires "layer": "wm" | "swm" | "vm"' });
+    expect(pulls).toBe(0);
+  });
+
   it('vm/publish-async maps incompatible duplicate jobs to 409 with existingJobId', async () => {
     const intent = {
       contextGraphId: CG_ID,
