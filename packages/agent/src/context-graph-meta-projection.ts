@@ -191,12 +191,19 @@ function emptyContextGraphMetaRecord(
 export class ContextGraphMetaProjection {
   private readonly entries = new Map<string, ProjectionEntry>();
   private authorityFactsRevision = 0;
+  private allFactsRevision = 0;
 
   constructor(private readonly store: TripleStore) {}
 
   /** Invalidate request-local absence proofs when projection sources change. */
   get readAuthorityFactsRevision(): number {
     return this.authorityFactsRevision;
+  }
+
+  /** Fence a source-qualified proof over one CG's metadata without rejecting
+   * it when an unrelated graph or agent profile changes during the read. */
+  readContextGraphAuthorityFactsRevision(contextGraphId: string): string {
+    return `${this.allFactsRevision}:${this.entries.get(contextGraphId)?.invalidationVersion ?? 0}`;
   }
 
   /**
@@ -295,7 +302,8 @@ export class ContextGraphMetaProjection {
       .then((record) => {
         entry.value = record;
         entry.inflight = undefined;
-        entry.dirty = entry.invalidationVersion !== rebuildVersion;
+        // A fresh-read request during the rebuild leaves the version as it is.
+        entry.dirty ||= entry.invalidationVersion !== rebuildVersion;
         this.entries.set(contextGraphId, entry);
         return record;
       })
@@ -320,6 +328,16 @@ export class ContextGraphMetaProjection {
       return;
     }
     this.entries.set(contextGraphId, { dirty: true, invalidationVersion: 1 });
+  }
+
+  /**
+   * Rebuild this graph's cached record on its next read without reporting a
+   * change of authority facts, for a caller that wrote nothing itself: no
+   * authority-facts revision advances. Supersedes a rebuild in flight.
+   */
+  requireFreshRead(contextGraphId: string): void {
+    const existing = this.entries.get(contextGraphId);
+    if (existing) existing.dirty = true;
   }
 
   /**
@@ -362,6 +380,7 @@ export class ContextGraphMetaProjection {
 
   markAllDirty(): void {
     this.authorityFactsRevision += 1;
+    this.allFactsRevision += 1;
     for (const entry of this.entries.values()) {
       entry.dirty = true;
       entry.invalidationVersion += 1;

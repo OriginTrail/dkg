@@ -197,10 +197,7 @@ import { handleSharedMemoryTtlSettingsRequest } from './shared-memory-ttl-route.
 import { nodeUiTokenForRequest } from './node-ui-access.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createProtocolStores } from './protocol-persistence.js';
-import {
-  decodeVmReconcileNegativeRow,
-  encodeVmReconcileNegativeRow,
-} from './vm-reconcile-negative-store-adapter.js';
+
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
@@ -2034,25 +2031,6 @@ async function runDaemonInnerWithStartupOwnership(
       },
       delete: async (contextGraphId) => {
         dashDb.deleteContextGraphSubscription(contextGraphId);
-      },
-      loadVmReconcileNegative: async (cacheKey) => {
-        const row = dashDb.getVmReconcileNegative(cacheKey);
-        if (!row) return null;
-        const decoded = decodeVmReconcileNegativeRow(row);
-        if (!decoded) {
-          dashDb.deleteVmReconcileNegative(cacheKey);
-          return null;
-        }
-        return decoded;
-      },
-      saveVmReconcileNegative: async (record) => {
-        dashDb.upsertVmReconcileNegative(encodeVmReconcileNegativeRow(record, Date.now()));
-      },
-      deleteVmReconcileNegative: async (cacheKey) => {
-        dashDb.deleteVmReconcileNegative(cacheKey);
-      },
-      deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
-        dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
       },
     },
     selectedVmReconcileCursorStore: {

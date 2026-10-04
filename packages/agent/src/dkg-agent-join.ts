@@ -1451,7 +1451,21 @@ export class JoinRequestMethods extends DKGAgentBase {
     } catch (error) {
       cache.delete(key);
       throw error;
+    } finally {
+      this.fenceRequesterJoinStateChange(contextGraphId);
     }
+  }
+
+  /**
+   * The join proof behind an approved replica's reads, catalog roster and
+   * catalog authority is bound to the requester state. That state lives in
+   * its own graph, so store-level invalidation does not reach the context
+   * graph's facts revision, which is what those paths compare after the reads
+   * that follow the proof. Move it here for every attempted change, including
+   * one that failed part-way, so an in-flight result is discarded.
+   */
+  private fenceRequesterJoinStateChange(this: DKGAgent, contextGraphId: string): void {
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
   }
 
   async clearRequesterJoinRequestState(
@@ -1471,6 +1485,8 @@ export class JoinRequestMethods extends DKGAgentBase {
     } catch (error) {
       cache.delete(key);
       throw error;
+    } finally {
+      this.fenceRequesterJoinStateChange(contextGraphId);
     }
   }
 
@@ -2614,6 +2630,45 @@ export class JoinRequestMethods extends DKGAgentBase {
       'join-approval',
     );
     if (result.delivered) {
+      // The requester can join over an already-open P2P connection. Its
+      // connect-time catalog replay then predates the private roster update,
+      // and the cold requester cannot pull a head until it knows the new
+      // policy digest. Refresh after the durable approval and push only this
+      // graph's current head to the exact peer that received the approval.
+      // Bounded retries cover an overlapping authority composition that was
+      // revision-fenced during admission; transport still checks the current
+      // policy and roster before sending any private head.
+      if (
+        result.peerId
+        && result.peerId !== this.peerId
+        && this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).track2Enabled
+      ) {
+        for (const delayMs of [0, 250, 1_000]) {
+          if (delayMs > 0) {
+            await new Promise<void>((resolve) => { setTimeout(resolve, delayMs); });
+          }
+          try {
+            await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+            if (await this.reannounceRfc64CatalogAfterJoinApprovalV1(
+              contextGraphId,
+              agentAddress,
+              result.peerId,
+            )) return;
+          } catch {
+            // The approval remains durable. The next bounded attempt can
+            // observe the current authority generation.
+          }
+        }
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 catalog replay remains pending after join approval for "${contextGraphId}"`,
+        );
+        this.scheduleRfc64CatalogAfterJoinApprovalRetryV1(
+          contextGraphId,
+          agentAddress,
+          result.peerId,
+        );
+      }
       return;
     }
     // rc.9 PR-10: the substrate outbox already holds the queued send

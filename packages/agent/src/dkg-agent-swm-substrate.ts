@@ -901,9 +901,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       );
       return;
     }
-    // Reconcile is the membership boundary; rebuild this CG's policy view
-    // before deciding whether to keep or drop the SWM subscription.
-    this.contextGraphMetaProjection.markDirty(contextGraphId);
+    // Reconcile is the membership boundary: decide on a rebuilt policy view.
+    // It writes no authority fact, so the authority revisions stay as they are.
+    this.contextGraphMetaProjection.requireFreshRead(contextGraphId);
     // OT-RFC-38 / LU-6 Phase B — subscribe on the wire-form (hash) topic.
     // Members compute the hash from their local cleartext id via
     // {@link gossipWireIdFor}; cores hosting CGs they never joined
@@ -2118,8 +2118,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
           workspaceWriteLocks: this.writeLocks,
-          retireConfirmedGraphScopedSwmTwinIfOrphaned:
-            createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+          retireConfirmedGraphScopedSwmTwinIfOrphaned: (() => {
+            const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
               store: this.store,
               writeLocks: this.writeLocks,
               retire: async (candidate, ctx) => {
@@ -2138,7 +2138,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
                 );
               },
               onTornHeadRemoved: (message, ctx) => this.log.warn(ctx, message),
-            }),
+            });
+            return async (candidate, ctx) => {
+              await retireOrphaned(candidate, ctx);
+              await this.retireLegacySwmAfterVerifiedVmTwin({
+                contextGraphId: candidate.contextGraphId,
+                kaUal: candidate.ual,
+                assertionVersion: candidate.assertionVersion,
+                subGraphName: candidate.subGraphName,
+              });
+            };
+          })(),
           reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
             const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({
               store: this.store,
@@ -2147,6 +2157,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
               retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
             });
             if (retirement === 'retired') {
+              await this.retireLegacySwmAfterVerifiedVmTwin({
+                contextGraphId: evidence.contextGraphId,
+                kaUal: evidence.kaUal,
+                assertionVersion: evidence.assertionVersion,
+                subGraphName: evidence.subGraphName,
+              });
               this.invalidateListContextGraphsCache();
               this.log.info(
                 ctx,

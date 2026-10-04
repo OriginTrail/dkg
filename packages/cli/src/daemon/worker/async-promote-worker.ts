@@ -34,7 +34,10 @@
  * decide what to do with any leases the old worker held.
  */
 
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type {
+  DKGAgent,
+  RegisteredContextGraphAuthorityUnavailableReason,
+} from '@origintrail-official/dkg-agent';
 import {
   isStoreOperationTimeoutError,
   StoreSchedulerBusyError,
@@ -47,9 +50,9 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
+import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
 import {
   classifyPromoteError,
-  diagnosticPromoteStage,
   safePromoteErrorIdentity,
   type ClassifiedPromoteError,
 } from './async-promote-error-classification.js';
@@ -240,6 +243,55 @@ function isRetryableQueueBookkeepingError(error: unknown): boolean {
     || (isStoreOperationTimeoutError(error) && error.outcome === 'not_started');
 }
 
+const SAFE_PROMOTE_AUTHORITY_REASONS = Object.freeze({
+  'finalized-name-absence-unaccepted': true,
+  'chain-name-binding-unavailable': true,
+  'authority-circuit-open': true,
+  'local-chain-binding-unavailable': true,
+  'local-existence-unavailable': true,
+  'chain-access-policy-unavailable': true,
+  'chain-access-policy-timeout': true,
+  'chain-access-policy-unknown': true,
+  'chain-participant-authority-unsupported': true,
+  'chain-participant-authority-unavailable': true,
+  'chain-participant-authority-invalid': true,
+  'rfc64-private-read-roster-unavailable': true,
+} as const satisfies Record<RegisteredContextGraphAuthorityUnavailableReason
+  | 'rfc64-private-read-roster-unavailable', true>);
+
+function safePromoteAuthorityReason(cause: unknown): string | undefined {
+  if ((typeof cause !== 'object' && typeof cause !== 'function') || cause === null) {
+    return undefined;
+  }
+  try {
+    if (Reflect.get(cause, 'code') !== 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE') return undefined;
+    const reason = Reflect.get(cause, 'reason');
+    return typeof reason === 'string'
+      && Object.hasOwn(SAFE_PROMOTE_AUTHORITY_REASONS, reason)
+      ? reason
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safePromoteAuthorityOrigin(cause: unknown): 'agent-gate-revision' | undefined {
+  if ((typeof cause !== 'object' && typeof cause !== 'function') || cause === null) {
+    return undefined;
+  }
+  try {
+    if (Reflect.get(cause, 'code') !== 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE'
+      || Reflect.get(cause, 'reason') !== 'local-existence-unavailable') return undefined;
+    const detail = Reflect.get(cause, 'detail');
+    return typeof detail === 'string'
+      && detail.endsWith(' metadata authority changed while resolving its agent gate')
+      ? 'agent-gate-revision'
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Emit privacy-bounded evidence before queue.fail() makes a terminal row
  * externally clearable. Diagnostics are best-effort and can never change the
@@ -256,6 +308,16 @@ function logPromoteAttemptFailure(input: {
   log: PromoteWorkerSyncLogger;
 }): void {
   try {
+    // The queue marker hides arbitrary cause text. A typed authority reason is
+    // a closed, privacy-bounded value that identifies which prerequisite kept
+    // this pre-commit attempt from making progress.
+    const cause = input.classified.diagnostic?.code === 'PROMOTE_RETRYABLE_FAILURE'
+      && (typeof input.err === 'object' || typeof input.err === 'function')
+      && input.err !== null
+      ? Reflect.get(input.err, 'cause')
+      : undefined;
+    const authorityReason = safePromoteAuthorityReason(cause);
+    const authorityOrigin = safePromoteAuthorityOrigin(cause);
     input.log(
       `[async-promote-worker] ${JSON.stringify({
         event: 'async_promote_attempt_failed',
@@ -274,6 +336,8 @@ function logPromoteAttemptFailure(input: {
         errorCode: input.classified.diagnostic?.code
           ?? safePromoteErrorIdentity(input.err, 'code')
           ?? 'unknown',
+        ...(authorityReason === undefined ? {} : { authorityReason }),
+        ...(authorityOrigin === undefined ? {} : { authorityOrigin }),
       })}`,
     );
   } catch {

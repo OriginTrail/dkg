@@ -42,6 +42,25 @@ async function fixture() {
 }
 
 describe('exact DATA session owner boundaries', () => {
+  it('scopes both manifest reads to the requested assets, ignoring unrelated corrupt markers', async () => {
+    const f = await fixture();
+    try {
+      const unrelated = f.params.assetUals[0]!.replace('/1', '/2');
+      await f.store.insert([{ graph: `did:dkg:context-graph:${f.params.contextGraphId}/_meta`,
+        subject: unrelated, predicate: 'http://dkg.io/ontology/contentScopeVersion', object: '"999"' }]);
+      const page = await readExactDataSessionPage(f.params);
+      expect(page.rows).toHaveLength(2);
+      const manifestReads = f.query.mock.calls.filter(([, options]) =>
+        options?.source === 'sync.responder.readGraphScopedVmManifest'
+        || options?.source === 'sync.responder.readGraphScopedVmManifestMarkers');
+      expect(manifestReads).toHaveLength(2);
+      for (const [sparql] of manifestReads) {
+        expect(sparql).toContain(`VALUES ?ual { <${f.params.assetUals[0]}> }`);
+        expect(sparql).not.toContain(`<${unrelated}>`);
+      }
+    } finally { await f.close(); }
+  });
+
   it('releases an unadopted response lease when the source changes during its read', async () => {
     const f = await fixture();
     try {

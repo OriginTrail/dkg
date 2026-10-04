@@ -122,7 +122,6 @@ export interface VmRecoveryHostInternals {
     headBlock: number | undefined,
     options?: {
       isTargetCurrent?: () => boolean;
-      deferActiveFetch?: boolean;
     },
   ): Promise<OrdinalOutcome>;
   executeVmRecoveryBatch(input: {
