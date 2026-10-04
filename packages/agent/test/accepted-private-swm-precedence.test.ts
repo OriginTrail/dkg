@@ -596,7 +596,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       });
     await store.insert([...signedKeyQuads(member, peerId), allowedPeerQuad(peerId)]);
     const nodeWide = projection.readAuthorityFactsRevision;
-    const perGraph = projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID);
+    const perGraph = projection.captureContextGraphAuthorityFactsFence(CONTEXT_GRAPH_ID);
 
     await expect(WorkspaceCryptoMethods.prototype
       .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
@@ -617,7 +617,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     expect(reconciles).toHaveLength(2);
     expect(reconcileHost.canUseSharedMemoryForContextGraph).toHaveBeenCalledTimes(2);
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
-    expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID)).toBe(perGraph);
+    expect(perGraph.assertCurrent()).toBe(true);
   });
 
   /** What one scenario may read and change while the recipients resolve. */
@@ -783,7 +783,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     };
     await store.insert(scenario.seed(context));
     const nodeWide = projection.readAuthorityFactsRevision;
-    const perGraph = projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID);
+    const perGraph = projection.captureContextGraphAuthorityFactsFence(CONTEXT_GRAPH_ID);
 
     const resolution = WorkspaceCryptoMethods.prototype
       .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
@@ -799,8 +799,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     expect(reconciles).toHaveLength(2);
     // Only the change itself moved a revision, and only the ones it belongs to.
     expect(projection.readAuthorityFactsRevision !== nodeWide).toBe(scenario.moves !== 'neither');
-    expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID) !== perGraph)
-      .toBe(scenario.moves === 'both');
+    expect(perGraph.assertCurrent()).toBe(scenario.moves !== 'both');
   });
 
   it.each([
