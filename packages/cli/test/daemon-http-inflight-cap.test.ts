@@ -21,6 +21,7 @@ import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from '.
  */
 describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
   let daemon: LiveDaemon | undefined;
+  const contextGraphId = 'http-admission-public';
 
   beforeAll(async () => {
     // Pin the cap via ENV (which takes precedence over config) so the test is
@@ -30,6 +31,15 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
       extraConfig: { maxInFlightRequests: 1 },
       env: { DKG_MAX_INFLIGHT: '1' },
     });
+    // Admission load is scoped to a real public CG. Unscoped reads have their
+    // own dataset revision fence and may correctly reject startup profile writes.
+    const created = await fetch(`${daemon.base}/api/context-graph/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(daemon) },
+      body: JSON.stringify({ id: contextGraphId, name: contextGraphId, accessPolicy: 0 }),
+    });
+    expect(created.status).toBe(200);
+    expect((await created.json()).created).toBe(contextGraphId);
   }, 90_000);
 
   afterAll(async () => {
@@ -42,7 +52,7 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
     return fetch(`${d.base}/api/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
-      body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }),
+      body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1', contextGraphId }),
     });
   }
 

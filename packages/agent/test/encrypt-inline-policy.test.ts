@@ -948,6 +948,9 @@ function makeQueuedAgentHarness(options: {
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   agentLike.retireLegacySwmAfterConfirmedLocalPublish =
     (DKGAgent.prototype as any).retireLegacySwmAfterConfirmedLocalPublish;
+  agentLike.completeVerifiedVmMarkerRetirement =
+    (DKGAgent.prototype as any).completeVerifiedVmMarkerRetirement;
+  agentLike.invalidateListContextGraphsCache = recorder(() => undefined);
   agentLike.retireLegacySwmAfterVerifiedVmTwin = recorder(async () => undefined);
   agentLike.observeRfc64ConfirmedVmV1 =
     (DKGAgent.prototype as any).observeRfc64ConfirmedVmV1;
@@ -1152,7 +1155,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     expect(agentLike.retireLegacySwmAfterVerifiedVmTwin.calls).toEqual([[{
       contextGraphId: request.contextGraphId,
       kaUal: request.kaUal,
-      assertionVersion: request.assertionVersion,
+      assertionVersion: BigInt(request.assertionVersion),
       subGraphName: request.subGraphName,
     }]]);
   });
