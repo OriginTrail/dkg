@@ -361,24 +361,11 @@ import {
 } from '../local-agents.js';
 import {
   readContextGraphNamedGraphStats,
-  readMemoryLayers,
-  type ContextGraphReader,
 } from '../context-graph-read-model.js';
 
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
-
-function contextGraphReader(agent: DKGAgent, contextGraphId: string, callerAgentAddress?: string): ContextGraphReader {
-  return {
-    listGraphs: options => agent.listContextGraphQueryPartitions(contextGraphId, { ...options, callerAgentAddress }),
-    query: async (sparql, options, policy) => {
-      const result = await agent.query(sparql, { ...options, contextGraphId,
-        includeContextGraphPartitions: true, exactContextGraphPartitions: true,
-        includeSharedMemory: policy.includeSharedMemory, callerAgentAddress });
-      return { type: 'bindings', bindings: result.bindings };
-    },
-  };
-}
+import { contextGraphReader, handleContextGraphMemoryLayerRoute } from './context-graph-memory.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -1104,55 +1091,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
-  // POST /api/context-graph/memory-layers  { contextGraphId }
-  //
-  // Purpose-built read model for the node UI. The old UI issued three broad
-  // GRAPH ?g queries and opted into every context-graph partition; the scoped
-  // query engine then injected a potentially enormous VALUES allow-list. On a
-  // large, actively publishing CG, Oxigraph planned those as Cartesian joins
-  // and client-side HTTP timeouts left the server evaluations running. This
-  // endpoint discovers graph names through GraphSetIndexStore and reads small
-  // batches of concrete GRAPH IRIs serially.
   if (req.method === 'POST' && path === '/api/context-graph/memory-layers') {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const contextGraphId = parsed.contextGraphId;
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
-
-    // Discover no graph names until the canonical admission boundary accepts
-    // this caller. Each batch then uses agent.query again to preserve read,
-    // shared-memory, and caller isolation if authority changes during the read.
-    const admission = await admitContextGraphFollow(agent, contextGraphId, {
-      isNodeAdmin: isNodeAdminCaller(), agentAddress: actor.authenticatedAgentAddress,
-    });
-    if (admission === 'unavailable') {
-      res.setHeader('Retry-After', '2');
-      return jsonResponse(res, 503, { code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true, error: 'Context graph read authority unavailable' });
-    }
-    if (admission === 'denied') {
-      const empty = { bindings: [], ok: true, truncated: false };
-      return jsonResponse(res, 200, { contextGraphId, layers: { wm: empty, swm: empty, vm: empty } });
-    }
-    const lifecycle = createStoreQueryRequestLifecycle(req, res, 'node-ui.memory-layers');
-    try {
-      const snapshot = await readMemoryLayers(contextGraphReader(agent, contextGraphId, actor.authenticatedAgentAddress), contextGraphId, {
-        signal: lifecycle.signal,
-        priority: lifecycle.priority,
-        includeQueryCatalog: parsed.includeQueryCatalog === true,
-      });
-      if (!res.writableEnded && !res.destroyed) {
-        return jsonResponse(res, 200, { contextGraphId, ...snapshot });
-      }
-      return;
-    } catch (err: any) {
-      if (lifecycle.signal.aborted || res.destroyed) return;
-      return jsonResponse(res, 500, {
-        error: err?.message ?? 'Failed to read context-graph memory layers',
-      });
-    } finally {
-      lifecycle.dispose();
-    }
+    return handleContextGraphMemoryLayerRoute(ctx);
   }
 
   // GET /api/sub-graph/list?contextGraphId=...

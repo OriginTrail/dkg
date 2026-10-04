@@ -15,6 +15,7 @@ import type { SignedAgentDelegation } from '../src/auth/agent-delegation.js';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { JoinRequestMethods } from '../src/dkg-agent-join.js';
 import { QueryMethods } from '../src/dkg-agent-query.js';
+import { ContextGraphPartitionQueryMethods } from '../src/internal/context-graph-partition-query.js';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
 import {
@@ -38,7 +39,7 @@ describe('query caller-provided store labels', () => {
       const authority = vi.fn(async () => ({ outcome }));
       const agent = { queryEngine, resolveContextGraphReadAuthority: authority } as unknown as DKGAgent;
       const options = { callerAgentAddress: '0xreader', signal: new AbortController().signal, priority: 'background' as const, source: 'inventory-caller' };
-      const result = QueryMethods.prototype.listContextGraphQueryPartitions.call(agent, contextGraphId, options);
+      const result = ContextGraphPartitionQueryMethods.prototype.listContextGraphQueryPartitions.call(agent, contextGraphId, options);
       if (outcome === 'unavailable') await expect(result).rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' });
       else {
         const graphs = await result;

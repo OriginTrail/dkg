@@ -413,16 +413,6 @@ interface ContextGraphReadAuthorityPlan {
 }
 
 export class QueryMethods extends DKGAgentBase {
-  /** Enumerate the same public count dataset used by scoped query execution. */
-  async listContextGraphQueryPartitions(this: DKGAgent, contextGraphId: string,
-    options: { callerAgentAddress?: string; signal?: AbortSignal; priority?: import('@origintrail-official/dkg-storage').StoreWorkPriority; source?: string } = {},
-  ): Promise<string[]> {
-    const authority = await this.resolveContextGraphReadAuthority(contextGraphId, options);
-    if (authority.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, authority);
-    if (authority.outcome !== 'allowed') return [];
-    return this.queryEngine.listContextGraphQueryPartitions(contextGraphId, options);
-  }
-
   async query(this: DKGAgent,
     sparql: string,
     options?: string | {
@@ -431,10 +421,7 @@ export class QueryMethods extends DKGAgentBase {
       includeSharedMemory?: boolean;
       /** @deprecated Use includeSharedMemory */
       includeWorkspace?: boolean;
-      /**
-       * Opt-in for dashboard/count queries that intentionally enumerate all
-       * registered public content partitions in a scoped `GRAPH ?g` scan.
-       */
+      /** Admit registered public partitions for scoped count scans. */
       includeContextGraphPartitions?: boolean;
       /** Bounded exact-graph reads over the registered public count dataset. */
       exactContextGraphPartitions?: boolean;
