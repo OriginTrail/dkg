@@ -72,6 +72,45 @@ const staleCases = (['publicRun', 'privateRun'] as const).flatMap(lane =>
     [undefined, 'team'].flatMap(subGraph => [false, true].map(graphLocator => ({ lane, oldVersion, currentVersion, subGraph, scope: subGraph ?? 'root', graphLocator })))));
 
 describe('legacy catch-up respects publisher draft chronology', () => {
+  it.each((['publicRun', 'privateRun'] as const).flatMap(lane => ['cold', 'pre-upgrade'].map(mode => ({ lane, mode }))))('$lane authenticates an exact signed replay after $mode recovery without certifying a provider clock', async ({ lane, mode }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const wallet = ethers.Wallet.createRandom();
+    const ka = `did:dkg:31337/${wallet.address.toLowerCase()}/3`;
+    const make = (id: string, marker: string, timestamp: number) => swmFixtures(CG).share({ version: 1, operationId: id, marker, ual: ka, timestamp: new Date(timestamp) });
+    const b = make('recovered-B', 'B', Date.parse('2099-01-01T00:00:00Z'));
+    const ack = make('storage-ack-equivalent-B', 'B', 50_000);
+    const served = { ...b, meta: [...b.meta, ...ack.meta.filter(row => row.subject === ack.operationSubject || row.predicate === `${DKG}shareOperationId`)] };
+    if (mode === 'pre-upgrade') await store.insert([...served.meta, ...inGraph(b)]);
+    else await harness(store, served)[lane]();
+    const readHead = () => resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: ka });
+    expect((await readHead())?.operationAliases.every(alias => alias.publisherChronologyAuthenticated === false)).toBe(true);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), { readConfirmedKnowledgeAssetVersion: async () => 0n });
+    const signed = async (fixture: ReturnType<typeof make>, timestampMs: number) => {
+      const payload = encodeRootlessWorkspaceRequest({ contextGraphId: CG, shareOperationId: fixture.operationId,
+        publisherPeerId: 'peer-source', kaUal: ka, agentAddress: wallet.address, kaNumber: '3', assertionVersion: '1', timestampMs,
+        nquads: new TextEncoder().encode(fixture.payload.map(row => `<${row.subject}> <${row.predicate}> ${row.object} <did:dkg:context-graph:${CG}> .`).join('\n')) });
+      const timestamp = new Date().toISOString();
+      const signature = await wallet.signMessage(computeGossipSigningPayload(GOSSIP_TYPE_WORKSPACE_PUBLISH, CG, timestamp, payload));
+      const envelope = encodeGossipEnvelope({ version: GOSSIP_ENVELOPE_VERSION, type: GOSSIP_TYPE_WORKSPACE_PUBLISH, contextGraphId: CG,
+        agentAddress: wallet.address, timestamp, signature: ethers.getBytes(signature), payload });
+      expect(await handler.verifyHostModeEnvelopeAuthority(envelope, CG, 'peer-source', { resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }) })).toMatchObject({ accepted: true });
+      return handler.handle(envelope, 'peer-source', undefined, { trustedReplay: true });
+    };
+    expect(await signed(b, 2000)).toMatchObject({ applied: true });
+    const authenticated = await readHead();
+    expect(authenticated?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual([b.operationId, ack.operationId].sort());
+    expect(authenticated?.operationAliases.find(alias => alias.shareOperationId === b.operationId))
+      .toMatchObject({ publishedAt: '2000' });
+    expect(authenticated?.operationAliases.find(alias => alias.shareOperationId === b.operationId)?.publisherChronologyAuthenticated).not.toBe(false);
+    // An older exact replay cannot replace the newly authenticated clock.
+    expect(await signed(b, 1000)).toMatchObject({ applied: true });
+    expect((await readHead())?.operationAliases.find(alias => alias.shareOperationId === b.operationId)?.publishedAt).toBe('2000');
+    const c = make('replacement-C', 'C', 3000);
+    expect(await signed(c, 3000)).toMatchObject({ applied: true });
+    expect(await signed(b, 2000)).toMatchObject({ applied: false, reason: expect.stringContaining('STALE_KA_SHARE_OPERATION') });
+    expect((await readHead())?.shareOperationId).toBe(c.operationId);
+  });
+
   it.each((['publicRun', 'privateRun'] as const).flatMap(lane => ['cold', 'equivalent', 'same-id', 'pre-upgrade'].map(mode => ({ lane, mode }))))('$lane does not let $mode recovered 2099 metadata fence a later signed publisher share', async ({ lane, mode }) => {
     const store = new OxigraphStore(); stores.push(store);
     const wallet = ethers.Wallet.createRandom();
@@ -144,6 +183,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const current = share(currentVersion, 'replacement', 2000, subGraph, graphLocator);
     await persistLocalSwmOperation(store, CG, current);
     await store.insert([...inGraph(current), ...current.meta]);
+    await persistLocalSwmOperation(store, CG, old);
     const h = harness(store, old, async () => currentVersion === 1 ? 0n : 1n);
     const replace = vi.spyOn(store, 'replaceGraph');
     await h[lane]();
@@ -183,10 +223,17 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const incoming = share(2, 'replacement', 2000);
     await persistLocalSwmOperation(store, CG, old);
     await store.insert([...inGraph(old), ...old.meta]);
-    const h = harness(store, incoming, async () => confirmed);
+    await persistLocalSwmOperation(store, CG, incoming);
+    const readConfirmed = vi.fn(async () => confirmed);
+    const h = harness(store, incoming, readConfirmed);
     await h[lane]();
+    expect(readConfirmed).toHaveBeenCalledWith(UAL);
     await expectHead(store, old);
     expect(h.companion).not.toHaveBeenCalled();
+    const positive = harness(store, incoming, async () => 1n);
+    await positive[lane]();
+    await expectHead(store, incoming);
+    expect(positive.companion).toHaveBeenCalled();
   });
 
   it.each(['publicRun', 'privateRun'] as const)('%s keeps publisher chronology across ACK alias recovery and restart', async lane => {
@@ -268,12 +315,12 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: recoveredMeta.quads.map(row => ({ ...row, graph: served.meta[0]!.graph })) })[0]!;
     expect(descriptor).toBeDefined();
     expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
-    expect(await h.materializer.readStoredHead(descriptor)).toMatchObject({ status: 'resolved', needsRepair: false });
+    expect(await h.materializer.readStoredHead(descriptor)).toMatchObject({ status: 'resolved' });
     const repair = vi.spyOn(h.materializer, 'repairHeadPreservingIdentity');
     await h[lane]();
     expect(repair).not.toHaveBeenCalled();
     const restarted = harness(store, served).materializer;
-    expect(await restarted.readStoredHead(descriptor)).toMatchObject({ status: 'resolved', needsRepair: false });
+    expect(await restarted.readStoredHead(descriptor)).toMatchObject({ status: 'resolved' });
     expect(await restarted.isGraphAssetMaterialized(descriptor)).toBe(true);
     await expectHead(store, { ...publisher, operationId: ack.operationId });
   });

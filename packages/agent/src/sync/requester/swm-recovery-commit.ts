@@ -13,6 +13,13 @@ export interface SwmRecoveryCommitResult {
   readonly withholdRows: readonly Quad[];
 }
 
+/** Preserve the verified asset's mode and require acquisition only for replacement. */
+export type SwmRecoveryCommitAsset =
+  | { readonly kind: 'replace'; readonly descriptor: GraphScopedSwmRecoveryDescriptor;
+      readonly loadVerifiedQuads: () => Promise<readonly Quad[]> }
+  | { readonly kind: 'preserve-equivalent'; readonly descriptor: GraphScopedSwmRecoveryDescriptor }
+  | { readonly kind: 'already-replaced'; readonly descriptor: GraphScopedSwmRecoveryDescriptor };
+
 /**
  * One per-KA recovery commit protocol for public graph/store and private lanes.
  * Transport acquisition supplies verified bytes; authority hooks preserve each
@@ -21,9 +28,8 @@ export interface SwmRecoveryCommitResult {
  */
 export async function commitRecoveredSwmAsset(input: {
   contextGraphId: string;
-  descriptor: GraphScopedSwmRecoveryDescriptor;
+  asset: SwmRecoveryCommitAsset;
   materializer: SharedMemorySnapshotMaterializer;
-  loadVerifiedQuads: () => Promise<readonly Quad[]>;
   insertMetadata: (rows: readonly Quad[]) => Promise<unknown>;
   ensureContextGraph?: () => Promise<void>;
   replaceGraph?: (graph: string, quads: readonly Quad[]) => Promise<unknown>;
@@ -31,16 +37,14 @@ export async function commitRecoveredSwmAsset(input: {
   resolveRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
   assertCurrent?: () => void;
   allowed?: () => boolean;
-  alreadyReplaced?: boolean;
-  requireEquivalent?: boolean;
 }): Promise<SwmRecoveryCommitResult> {
-  const { materializer, contextGraphId } = input;
-  return materializer.withKaWriteLock(contextGraphId, input.descriptor.subGraphName, input.descriptor.kaUal, async () => {
-    const result = (kind: SwmRecoveryCommitResult['kind'], insertedGraphQuads = 0, insertedMetaQuads = 0): SwmRecoveryCommitResult => ({ kind, insertedGraphQuads, insertedMetaQuads, withholdRows: input.descriptor.metadataQuads });
-    if (input.alreadyReplaced) return result('committed');
+  const { materializer, contextGraphId, asset } = input;
+  const result = (kind: SwmRecoveryCommitResult['kind'], insertedGraphQuads = 0, insertedMetaQuads = 0): SwmRecoveryCommitResult => ({ kind, insertedGraphQuads, insertedMetaQuads, withholdRows: asset.descriptor.metadataQuads });
+  if (asset.kind === 'already-replaced') return result('committed');
+  return materializer.withKaWriteLock(contextGraphId, asset.descriptor.subGraphName, asset.descriptor.kaUal, async () => {
     const authorityAllows = () => { input.assertCurrent?.(); return input.allowed?.() !== false; };
     if (!authorityAllows()) return result('deferred');
-    const descriptor = await materializer.prepareRecoveredDescriptor(input.descriptor);
+    const descriptor = await materializer.prepareRecoveredDescriptor(asset.descriptor);
     let equivalent = await materializer.isGraphAssetMaterialized(descriptor);
     if (!authorityAllows()) return result('deferred');
     if (!await materializer.draftMayReplace(contextGraphId, descriptor, equivalent)) return result('superseded');
@@ -49,8 +53,8 @@ export async function commitRecoveredSwmAsset(input: {
       quads = await materializer.readExactMaterializedGraph(descriptor);
       if (quads === null) throw new Error(`stored root recovery asset ${descriptor.kaUal} changed before boundary commit`);
     } else if (!equivalent) {
-      if (input.requireEquivalent) throw new Error(`stored recovery asset ${descriptor.kaUal} changed before equivalent commit`);
-      quads = await input.loadVerifiedQuads();
+      if (asset.kind === 'preserve-equivalent') throw new Error(`stored recovery asset ${descriptor.kaUal} changed before equivalent commit`);
+      quads = await asset.loadVerifiedQuads();
       await input.ensureContextGraph?.();
     }
     // Snapshot/context reads can yield to authority revocation or a coherent
@@ -68,11 +72,11 @@ export async function commitRecoveredSwmAsset(input: {
     const selected = await materializer.selectRepairIdentity(contextGraphId, descriptor);
     // Equivalent healthy aliases are a normal resolved state. Keep the whole
     // class, including queued ACK identities; no head/operation repair is owed.
-    if (selected && stored.status === 'resolved' && (!descriptor.locallyAuthenticatedPublisherOperationId || stored.head.operationAliases.some(alias => alias.shareOperationId === descriptor.locallyAuthenticatedPublisherOperationId))) {
+    if (selected && stored.status === 'resolved' && (!descriptor.authenticatedPublisherOperation?.id || stored.head.operationAliases.some(alias => alias.shareOperationId === descriptor.authenticatedPublisherOperation?.id))) {
       const ownedSubjects = new Set(stored.head.operationAliases.map(alias => workspaceOperationSubject(contextGraphId, alias.shareOperationId)));
       const history = descriptor.metadataQuads.filter(row => row.subject !== descriptor.headSubject && !ownedSubjects.has(row.subject));
       if (history.length > 0) await input.insertMetadata(history);
-      const providerKeys = new Set(input.descriptor.metadataQuads.map(canonicalQuadKey));
+      const providerKeys = new Set(asset.descriptor.metadataQuads.map(canonicalQuadKey));
       return result('committed', equivalent ? 0 : quads?.length ?? 0, history.filter(row => providerKeys.has(canonicalQuadKey(row))).length);
     }
     let withheld: readonly Quad[] = [];
@@ -86,7 +90,7 @@ export async function commitRecoveredSwmAsset(input: {
     const rows = descriptor.metadataQuads.filter(row => !keys.has(canonicalQuadKey(row)));
     if (rows.length > 0) await input.insertMetadata(rows);
     // The local provenance marker is control metadata, not a fetched triple.
-    const providerKeys = new Set(input.descriptor.metadataQuads.map(canonicalQuadKey));
+    const providerKeys = new Set(asset.descriptor.metadataQuads.map(canonicalQuadKey));
     const insertedMetaQuads = rows.filter(row => providerKeys.has(canonicalQuadKey(row))).length;
     return result('committed', equivalent ? 0 : quads?.length ?? 0, insertedMetaQuads);
   });

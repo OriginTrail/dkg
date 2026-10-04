@@ -101,6 +101,7 @@ export default defineConfig({
       'test/published-snapshot-cleanup.test.ts',
       'test/workspace-snapshot-validation.test.ts',
       'test/workspace-head-cardinality.test.ts',
+      'test/workspace-authenticated-replay.test.ts',
       'test/knowledge-asset-swm-staging.test.ts',
       'test/durable-root-atomic-companion.test.ts',
     ],

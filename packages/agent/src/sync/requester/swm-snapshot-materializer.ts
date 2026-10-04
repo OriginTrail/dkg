@@ -31,8 +31,8 @@ import {
   asGraphWriteRevisionSource,
 } from '@origintrail-official/dkg-storage';
 import { recoveredDraftMayReplace, readStoredWorkspaceHead, retainedPublisherAlias } from './swm-draft-order.js';
-import { prepareRecoveredDescriptor } from './swm-recovered-provenance.js';
-import type { KnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
+import { prepareRecoveredDescriptor, type PreparedSwmRecoveryDescriptor } from './swm-recovered-provenance.js';
+import type { KnowledgeAssetWorkspaceHeadResolution } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { ConfirmedKnowledgeAssetVersionReader } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
@@ -101,16 +101,7 @@ function storedWinnerHasResponderType(storedRows: readonly Quad[]): boolean {
 
 
 /** Canonical resolution distinguishes a healthy alias class from corrupt rows. */
-export type StoredWorkspaceHeadState =
-  | { readonly status: 'missing'; readonly version: null; readonly needsRepair: false; readonly shareOperationId: null }
-  | { readonly status: 'resolved'; readonly head: KnowledgeAssetWorkspaceHead; readonly version: string; readonly needsRepair: false; readonly shareOperationId: string }
-  | {
-      readonly status: 'corrupt';
-      /** Diagnostic MAX/cardinality view, never replacement authorization. */
-      readonly version: string | null;
-      readonly needsRepair: true;
-      readonly shareOperationId: string | null;
-    };
+export type StoredWorkspaceHeadState = KnowledgeAssetWorkspaceHeadResolution;
 
 /**
  * Everything `runSharedMemorySync` needs to MATERIALIZE verified public SWM
@@ -138,16 +129,16 @@ export interface SharedMemorySnapshotMaterializer {
     fn: () => Promise<T>,
   ): Promise<T>;
   /**
-   * Read the KA's stored head state (newest version + ambiguity flag). Read
+   * Read the KA's canonical missing/resolved/corrupt head state. Read
    * INSIDE the lock: a lock prevents interleaving but not overwriting-with-
    * older, and gossip may have committed a newer version while catch-up
    * waited.
    */
   filterBulkMetadata(rows: readonly Quad[], withheld?: readonly Quad[]): Promise<Quad[]>;
-  prepareRecoveredDescriptor(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<GraphScopedSwmRecoveryDescriptor>;
+  prepareRecoveredDescriptor(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<PreparedSwmRecoveryDescriptor>;
   readStoredHead(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<StoredWorkspaceHeadState>;
   /** Canonical publisher chronology and unpublished proof, under the KA lock. */
-  draftMayReplace(contextGraphId: string, descriptor: GraphScopedSwmRecoveryDescriptor, contentAlreadyEquivalent?: boolean): Promise<boolean>;
+  draftMayReplace(contextGraphId: string, descriptor: PreparedSwmRecoveryDescriptor, contentAlreadyEquivalent?: boolean): Promise<boolean>;
   /**
    * True only when the KA's assertion graph CONTENT equals the descriptor's:
    * same quad count AND same public-quads digest. A marker-only predicate
@@ -230,7 +221,7 @@ export interface SharedMemorySnapshotMaterializer {
    */
   repairHeadPreservingIdentity(
     contextGraphId: string,
-    descriptor: GraphScopedSwmRecoveryDescriptor,
+    descriptor: PreparedSwmRecoveryDescriptor,
     winnerShareOperationId: string,
   ): Promise<void>;
   /**
@@ -597,7 +588,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<boolean> => {
     const stored = await readStoredHead(descriptor);
-    if (stored.status !== 'resolved' || !stored.head) return false;
+    if (stored.status !== 'resolved') return false;
     const head = stored.head;
     const operation = descriptor.metadataQuads.filter(row => row.subject === descriptor.operationSubject);
     const accessPolicy = literalValue(operation.find(row => row.predicate === `${DKG}accessPolicy`)?.object)
@@ -918,17 +909,17 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           // an id-equal head with a stale or corrupt version row is NOT
           // healthy, and preserving it would leave unrepaired metadata in
           // place while withholding nothing the union could not re-stack.
-          if (stored.needsRepair || stored.version === null || stored.shareOperationId === null) {
+          if (stored.status !== 'resolved') {
             return { outcome: 'replace' as const };
           }
           try {
-            if (BigInt(stored.version) !== BigInt(descriptor.assertionVersion)) {
+            if (BigInt(stored.head.assertionVersion) !== BigInt(descriptor.assertionVersion)) {
               return { outcome: 'replace' as const };
             }
           } catch {
             return { outcome: 'replace' as const };
           }
-          if (stored.shareOperationId === descriptor.shareOperationId) {
+          if (stored.head.shareOperationId === descriptor.shareOperationId) {
             // Identical id: replacement IS identity-preserving by
             // construction (the descriptor reinstalls the same id), and it
             // is the only healer for op-subject corruption — a duplicate
@@ -948,7 +939,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           // replacement it suppresses.
           await repairHeadPreservingIdentity(
             contextGraphId,
-            descriptor,
+            await prepareRecoveredDescriptor(deps.store, descriptor),
             winnerShareOperationId,
           );
           return { outcome: 'preserved' as const, withholdRows };

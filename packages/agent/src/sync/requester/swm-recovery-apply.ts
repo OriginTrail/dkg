@@ -372,11 +372,9 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
   const { asset, ports } = params;
   const committed = await commitRecoveredSwmAsset({
     contextGraphId: params.contextGraphId,
-    descriptor: asset.descriptor,
+    asset: asset.kind === 'replace' ? { kind: asset.kind, descriptor: asset.descriptor,
+      loadVerifiedQuads: async () => asset.replacementQuads } : asset,
     materializer: ports.snapshotMaterializer,
-    alreadyReplaced: asset.kind === 'already-replaced',
-    requireEquivalent: asset.kind === 'preserve-equivalent',
-    loadVerifiedQuads: async () => asset.kind === 'replace' ? asset.replacementQuads : [],
     insertMetadata: rows => ports.store.insert([...rows]),
     replaceGraph: async (graph, quads) => {
       await ports.store.replaceGraph(graph, [...quads]);

@@ -9,9 +9,9 @@ import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
  *     materialized; a short graph reads as NOT materialized; and — the
  *     count-only trap — an equal-count graph holding an OLDER version's
  *     content reads as NOT materialized because the digest differs.
- *   - `readStoredHead` returns the NEWEST version (MAX) when append-style
- *     meta inserts left several version rows on one head subject, and flags
- *     that residue for repair.
+ *   - `readStoredHead` returns canonical corruption when append-style meta
+ *     inserts left several version rows on one head subject, and requires
+ *     complete immutable equivalence before healing that residue.
  *   - `replaceHeadMetadata` collapses the head to a clean subject: old head
  *     rows and every operation the head referenced are deleted, other
  *     subjects (and other KAs' operations) are untouched.
@@ -412,7 +412,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     it('is null/clean when no head exists', async () => {
       const store = new OxigraphStore();
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({ version: null, needsRepair: false, shareOperationId: null });
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({ status: 'missing' });
     });
 
     it('reads a single-version head without flagging repair', async () => {
@@ -422,13 +422,13 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       // GH#2273 — the single unambiguous id is exposed so catch-up can compare
       // it against a descriptor's id before deciding whether the head may be
       // rewritten at all.
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({ version: '1', needsRepair: false, shareOperationId: 'op-v1' });
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({ status: 'resolved', head: { assertionVersion: '1', shareOperationId: 'op-v1' } });
     });
 
-    it('returns the NEWEST version (MAX) for union-insert residue and flags repair', async () => {
+    it('returns canonical corruption for union-insert residue without an aggregate acquisition', async () => {
       // Append-style meta inserts stacked v1 and v2 rows on one head subject.
-      // An arbitrary binding (or MIN) could report "1" and authorize an
-      // overwrite-with-older; MAX must win, and the residue must be flagged.
+      // Neither an arbitrary sampled id nor a MAX version authorizes repair;
+      // the canonical decoder must expose corruption for the equivalence gate.
       const store = new OxigraphStore();
       await store.insert([...v1.meta]);
       await store.insert([...v2.meta]);
@@ -436,7 +436,9 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       // GH#2273 — with residue on the head, ANY sampled id would be an
       // arbitrary pick (the exact failure the field exists to prevent), so
       // ambiguity reads as null and the decision routes through repair.
-      expect(await materializer.readStoredHead(descriptorFor(v2))).toMatchObject({ version: '2', needsRepair: true, shareOperationId: null });
+      const query = vi.spyOn(store, 'query');
+      expect(await materializer.readStoredHead(descriptorFor(v2))).toMatchObject({ status: 'corrupt', error: { code: 'KA_WORKSPACE_HEAD_CORRUPT' } });
+      expect(query.mock.calls.some(([sparql]) => sparql.includes('MAX('))).toBe(false);
     });
   });
 
@@ -877,9 +879,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
       expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({
-        version: '2',
-        needsRepair: false,
-        shareOperationId: 'op-v2',
+        status: 'resolved', head: { assertionVersion: '2', shareOperationId: 'op-v2' },
       });
       await expect(store.query(
         `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,

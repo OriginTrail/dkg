@@ -1461,15 +1461,20 @@ describe('SharedMemoryHandler', () => {
       kaUal: firstRequest.kaUal ?? '',
     })).rejects.toThrow(/missing canonical publishedAt/u);
 
-    const msg2 = encodeRootlessWorkspaceRequest({
+    expect(legacyHeadWithoutPublishedAt?.operationAliases).toEqual([
+      expect.objectContaining({ shareOperationId: 'ws-own-1', publisherChronologyAuthenticated: false }),
+    ]);
+    const reusedVersion = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
       publisherPeerId: peerId,
       shareOperationId: 'ws-own-2',
-      assertionVersion: '2',
+      assertionVersion: '1',
       timestampMs: secondPublishedAt,
     });
-    await expect(handler.handle(msg2, peerId)).resolves.toMatchObject({
+    // Reusing a draft number still fails closed without trusted predecessor
+    // chronology. A claimed higher clock cannot supply the missing evidence.
+    await expect(handler.handle(reusedVersion, peerId)).resolves.toMatchObject({
       applied: false,
       retryable: true,
       reason: expect.stringContaining('DRAFT_REPLACEMENT_PROOF_UNAVAILABLE'),
@@ -1481,14 +1486,11 @@ describe('SharedMemoryHandler', () => {
       kaUal: firstRequest.kaUal ?? '',
     })).resolves.toEqual(legacyHeadWithoutPublishedAt);
 
-    // Restore the publisher evidence removed for the legacy-read control.
-    // Forward versions must not bypass a head whose chronology is unavailable.
-    await store.insert([q(
-      `urn:dkg:share:${CONTEXT_GRAPH}:ws-own-1`,
-      'http://dkg.io/ontology/publishedAt',
-      `"${new Date(firstPublishedAt).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`,
-      gm.sharedMemoryMetaUri(CONTEXT_GRAPH),
-    )]);
+    // Verified live progress from the same transport owner may advance the
+    // assertion number without trusting the old unavailable/provider clock.
+    const msg2 = encodeRootlessWorkspaceRequest({
+      ...decodeWorkspacePublishRequest(reusedVersion), assertionVersion: '2',
+    });
     await expect(handler.handle(msg2, peerId)).resolves.toMatchObject({ applied: true });
 
     const afterSecond = await resolveKnowledgeAssetWorkspaceHead({
@@ -1502,6 +1504,8 @@ describe('SharedMemoryHandler', () => {
       publisherPeerId: peerId,
       publishedAt: secondPublishedAt.toString(),
     });
+    expect(afterSecond?.operationAliases).toHaveLength(1);
+    expect(afterSecond?.operationAliases[0]?.publisherChronologyAuthenticated).not.toBe(false);
   });
 });
 

@@ -298,9 +298,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     const deps = identityDeps(store, [...curatorPrivateOnly.meta]);
 
     expect(await deps.snapshotMaterializer.readStoredHead(descriptor)).toMatchObject({
-      version: null,
-      needsRepair: false,
-      shareOperationId: null,
+      status: 'missing',
     });
     expect(await deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)).toBe(false);
 
@@ -327,9 +325,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     })[0]!;
     const materializer = identityDeps(store, curatorPrivateOnly.meta).snapshotMaterializer;
     expect(await materializer.readStoredHead(descriptor)).toMatchObject({
-      version: '1',
-      needsRepair: false,
-      shareOperationId: 'private-local',
+      status: 'resolved', head: { assertionVersion: '1', shareOperationId: 'private-local' },
     });
     expect(await materializer.selectRepairIdentity(CG, descriptor)).not.toBeNull();
     expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);

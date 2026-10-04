@@ -295,7 +295,7 @@ describe('operation identity preservation (GH#2273)', () => {
       quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
     await store.insert(opRowsOf(remoteEquivalent));
     const { materializer } = materializerFor(store);
-    await materializer.repairHeadPreservingIdentity(CG, descriptorFor(remoteEquivalent), 'op-v1');
+    await materializer.repairHeadPreservingIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)), 'op-v1');
     // Head certifies exactly the local identity again, the winner's operation
     // rows were NEVER deleted (they may be the only durable copy a queued job
     // references), and the loser's operation subject is gone.
@@ -800,7 +800,7 @@ describe('operation identity preservation (GH#2273)', () => {
     const { materializer } = materializerFor(store);
     const preserved = await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent));
     expect(preserved).toMatchObject({ winnerShareOperationId: 'op-aa' });
-    await materializer.repairHeadPreservingIdentity(CG, descriptorFor(remoteEquivalent), 'op-aa');
+    await materializer.repairHeadPreservingIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)), 'op-aa');
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-aa"']);
   });
@@ -885,7 +885,7 @@ describe('operation identity preservation (GH#2273)', () => {
       { subject: foreignOpSubject, predicate: `${DKG}kaUal`, object: FOREIGN_UAL, graph: WS_META },
     ]);
     const { materializer } = materializerFor(store);
-    await materializer.repairHeadPreservingIdentity(CG, descriptorFor(remoteEquivalent), 'op-v1');
+    await materializer.repairHeadPreservingIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)), 'op-v1');
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
     // The foreign KA's operation rows survived the loser sweep.

@@ -112,11 +112,8 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly assertionGraph: string;
   /** Deterministic newest alias used as the logical head identity. */
   readonly shareOperationId: string;
-  /** Publisher chronology, independent of a selected receiver-clock ACK alias. */
-  readonly publisherOperationTimestampMs?: number;
-  readonly publisherOperationId?: string;
-  /** Set only after matching a trusted operation already persisted locally. */
-  readonly locallyAuthenticatedPublisherOperationId?: string;
+  /** Provider chronology is a claim until local evidence preparation. */
+  readonly providerPublisherOperation?: Readonly<{ id: string; timestampMs: number }>;
   /** Equivalent operation and immutable locator selected for materialization. */
   readonly snapshotSource: Readonly<{
     shareOperationId: string;
@@ -259,7 +256,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
       publisherPeerId: semantics.publisherIdentity,
       ...(subGraphName ? { subGraphName } : {}),
-      ...(operation.publisherOperationTimestampMs === undefined ? {} : { publisherOperationTimestampMs: operation.publisherOperationTimestampMs, publisherOperationId: operation.publisherOperation!.shareOperationId }),
+      ...(operation.publisherOperationTimestampMs === undefined ? {} : { providerPublisherOperation: { timestampMs: operation.publisherOperationTimestampMs, id: operation.publisherOperation!.shareOperationId } }),
       metadataQuads: [
         ...headRows,
         // Every validated alias is settled under the KA lock. Unselected
@@ -311,7 +308,7 @@ export function canonicalizeGraphScopedSwmHeadRows(params: {
   const selectedByHead = new Map(
     params.descriptors.map((descriptor) => [
       `${descriptor.metaGraph}\u0000${descriptor.headSubject}`,
-      new Set([descriptor.shareOperationId, descriptor.publisherOperationId]),
+      new Set([descriptor.shareOperationId, descriptor.providerPublisherOperation?.id]),
     ]),
   );
   return params.metaQuads.filter((row) => {

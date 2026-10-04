@@ -8,12 +8,18 @@ import { operationIdentityKey, type GraphScopedSwmRecoveryDescriptor } from '../
 import { stripMetadataLiteral } from '../metadata-literal.js';
 
 const DKG = 'http://dkg.io/ontology/';
+/** The prepared boundary separates acquired local evidence from provider claims. */
+export interface PreparedSwmRecoveryDescriptor extends GraphScopedSwmRecoveryDescriptor {
+  readonly preparation: 'local-evidence-acquired';
+  readonly authenticatedPublisherOperation?: Readonly<{ id: string; timestampMs: number }>;
+}
+
 /**
  * A provider authenticates transport/content, not the publisher's RDF clock.
  * Only an immutable operation already established locally by a trusted writer
  * may contribute chronology. Never copy, clear, or reinterpret a peer's marker.
  */
-export async function prepareRecoveredDescriptor(store: TripleStore, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<GraphScopedSwmRecoveryDescriptor> {
+export async function prepareRecoveredDescriptor(store: TripleStore, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<PreparedSwmRecoveryDescriptor> {
   const subjects = [...new Set(descriptor.metadataQuads.filter(row => row.subject !== descriptor.headSubject).map(row => row.subject))];
   // sparql-scan-allow: R4 -- VALUES binds the exact operation subjects in one validated KA alias class; this never walks the CG bucket.
   const acquired = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> {
@@ -44,5 +50,7 @@ export async function prepareRecoveredDescriptor(store: TripleStore, descriptor:
   }
   const timestamp = workspacePublisherOperationTimestamp(clocks);
   const publisherOperationId = clocks.find(clock => clock.publishedAt === timestamp)?.shareOperationId;
-  return { ...descriptor, metadataQuads, publisherOperationTimestampMs: timestamp, publisherOperationId, locallyAuthenticatedPublisherOperationId: publisherOperationId };
+  return { ...descriptor, metadataQuads, preparation: 'local-evidence-acquired',
+    authenticatedPublisherOperation: publisherOperationId === undefined || timestamp === undefined
+      ? undefined : { id: publisherOperationId, timestampMs: timestamp } };
 }

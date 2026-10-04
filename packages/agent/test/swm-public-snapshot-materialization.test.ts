@@ -132,7 +132,7 @@ function fixture(subGraphName?: string, publisherPeerId = 'peer-source') {
 interface HarnessOverrides {
   deadline?: number;
   snapshotStore?: WorkspacePublicSnapshotStore;
-  storedHead?: () => StoredWorkspaceHeadState;
+  storedHead?: () => { version: string | null; needsRepair: boolean; shareOperationId: string | null };
   contentPresent?: () => boolean;
   replaceImpl?: (graphUri: string, quads: Quad[]) => Promise<void>;
   onLockRequested?: () => void;
@@ -220,7 +220,7 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
-        prepareRecoveredDescriptor: async descriptor => descriptor,
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const }),
         filterBulkMetadata: async (rows, withheld = []) => { const keys = new Set(withheld.map(canonicalQuadKey)); return rows.filter(row => !keys.has(canonicalQuadKey(row))); },
         // Private-lane mutations are outside this public orchestration fixture.
         readExactMaterializedGraph: async () => { throw new Error('unexpected private recovery'); },
@@ -253,7 +253,9 @@ function harness(overrides: HarnessOverrides = {}) {
         readStoredHead: async () => {
           events.push('version-read');
           const state = overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
-          return { ...state, status: state.version === null ? 'missing' : state.needsRepair ? 'corrupt' : 'resolved', head: { operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as StoredWorkspaceHeadState;
+          return state.version === null ? { status: 'missing' } : state.needsRepair
+            ? { status: 'corrupt', error: new Error('fixture corruption') } as StoredWorkspaceHeadState
+            : { status: 'resolved', head: { assertionVersion: state.version, operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as StoredWorkspaceHeadState;
         },
         replaceGraph: async (graphUri, quads) => {
           events.push('replaced');

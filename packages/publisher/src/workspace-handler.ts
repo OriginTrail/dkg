@@ -35,6 +35,7 @@ import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext,
 import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
+import { authenticateWorkspaceOperationReplay } from './workspace-authenticated-replay.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
   generateSubGraphRegistration,
@@ -1637,6 +1638,8 @@ export class SharedMemoryHandler {
               // Refresh local-only controls so a retry completes a prior
               // head/sidecar tear.
               await persistLocallyTrustedControls();
+              await authenticateWorkspaceOperationReplay({ store: this.store, graphManager: this.graphManager,
+                contextGraphId, subGraphName, head: currentHead, shareOperationId, timestamp: operationTimestamp });
               return swmWriteApplied;
             }
           }

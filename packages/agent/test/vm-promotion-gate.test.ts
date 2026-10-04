@@ -2001,14 +2001,15 @@ describe('core VM-promotion guarantees', () => {
     expect(await count(internals.store, expired.assertionGraph)).toBe(0);
   });
 
-  it('tears an expired sub-graph head down only under that sub-graph\'s per-KA write lock', async () => {
+  it.each([
+    { namespace: 'lock-sub-cg', n: 98, subGraphName: 'research' },
+    { namespace: 'lock-cg', n: 95, subGraphName: undefined },
+  ])('tears an expired $namespace head down only under its per-KA write lock', async input => {
     const internals = await boot({ sharedMemoryTtlMs: 60_000 });
     await internals.ensureStorageAckLedgerReady();
-    await seedCopy(internals.store, {
-      namespace: 'lock-sub-cg', n: 98, ageMs: HOUR, subGraphName: 'research', ledger: 'none',
-    });
-    // A retained ledgered copy names the namespace to the cleanup walk.
-    await seedCopy(internals.store, { namespace: 'lock-sub-cg', n: 99, ageMs: HOUR, subGraphName: 'research' });
+    const copy = await seedCopy(internals.store, { ...input, ageMs: HOUR, ledger: 'none' });
+    // A retained ledgered copy names a sub-graph namespace to the cleanup walk.
+    if (input.subGraphName) await seedCopy(internals.store, { ...input, n: 99, ageMs: HOUR });
     const sources: string[] = [];
     const query = internals.store.query.bind(internals.store);
     internals.store.query = (async (sparql: string, options?: { source?: string }) => {
@@ -2016,53 +2017,32 @@ describe('core VM-promotion guarantees', () => {
       return query(sparql, options as never);
     }) as typeof internals.store.query;
     let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    const holder = withKeyedLocks(
-      internals.writeLocks,
-      [swmKaWriteLockKey('lock-sub-cg', 'research', ual(98))],
-      () => held,
-    );
-
-    const cleanup = internals.cleanupExpiredSharedMemory();
-    for (let i = 0; i < 100 && !sources.includes('agent.swmCleanup.graphScopedMetadata'); i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    expect(sources).toContain('agent.swmCleanup.graphScopedMetadata');
-    expect(sources).not.toContain('agent.swmCleanup.currentHeadOwner');
-    release();
-    await holder;
-    await cleanup;
+    let entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const holding = new Promise<void>(resolve => { entered = resolve; });
+    const holder = withKeyedLocks(internals.writeLocks,
+      [swmKaWriteLockKey(input.namespace, input.subGraphName, ual(input.n))],
+      () => { entered(); return held; });
+    await holding;
+    let settled = false;
+    const cleanup = internals.cleanupExpiredSharedMemory().finally(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(sources).toContain('agent.draftArtifacts.ttlOperationReference'));
+      // The collector has selected this expired operation, but expiry/alias
+      // revalidation and every mutation now wait for the same KA lock.
+      expect(sources).not.toContain('agent.draftArtifacts.ttlCurrentExpiry');
+      expect(sources).not.toContain('agent.swmCleanup.graphScopedMetadata');
+      expect(sources).not.toContain('agent.swmCleanup.currentHeadOwner');
+      expect(settled).toBe(false);
+      expect(await count(internals.store, copy.metaGraph, copy.op)).toBeGreaterThan(0);
+      expect(await count(internals.store, copy.metaGraph, copy.head)).toBeGreaterThan(0);
+      expect(await count(internals.store, copy.assertionGraph)).toBe(1);
+    } finally { release(); await holder; await cleanup; }
+    expect(sources).toContain('agent.draftArtifacts.ttlCurrentExpiry');
     expect(sources).toContain('agent.swmCleanup.currentHeadOwner');
+    expect(await count(internals.store, copy.metaGraph, copy.op)).toBe(0);
+    expect(await count(internals.store, copy.metaGraph, copy.head)).toBe(0);
+    expect(await count(internals.store, copy.assertionGraph)).toBe(0);
   });
 
-  it('tears an expired head down only under the per-KA write lock', async () => {
-    const internals = await boot({ sharedMemoryTtlMs: 60_000 });
-    await internals.ensureStorageAckLedgerReady();
-    await seedCopy(internals.store, { namespace: 'lock-cg', n: 95, ageMs: HOUR, ledger: 'none' });
-    const sources: string[] = [];
-    const query = internals.store.query.bind(internals.store);
-    internals.store.query = (async (sparql: string, options?: { source?: string }) => {
-      if (options?.source) sources.push(options.source);
-      return query(sparql, options as never);
-    }) as typeof internals.store.query;
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    const holder = withKeyedLocks(internals.writeLocks, [swmKaWriteLockKey('lock-cg', undefined, ual(95))], () => held);
-
-    const cleanup = internals.cleanupExpiredSharedMemory();
-    for (let i = 0; i < 100 && !sources.includes('agent.swmCleanup.graphScopedMetadata'); i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    // A writer holding the lock (an ACK or share) is never interleaved with.
-    expect(sources).toContain('agent.swmCleanup.graphScopedMetadata');
-    expect(sources).not.toContain('agent.swmCleanup.currentHeadOwner');
-    release();
-    await holder;
-    await cleanup;
-    expect(sources).toContain('agent.swmCleanup.currentHeadOwner');
-  });
 });

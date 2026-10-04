@@ -917,8 +917,9 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       for (const descriptor of graphBackedDescriptors) {
         try {
           const committed = await recoveryBoundary.admitAsyncMutation(() => commitRecoveredSwmAsset({
-            contextGraphId: pid, descriptor, materializer: snapshotMaterializer!,
-            loadVerifiedQuads: async () => (await materializeGraphScopedSwmRecoveryAsset({ descriptor, fetchedDataQuads, publicSnapshotStore })).quads,
+            contextGraphId: pid, materializer: snapshotMaterializer!,
+            asset: { kind: 'replace', descriptor,
+              loadVerifiedQuads: async () => (await materializeGraphScopedSwmRecoveryAsset({ descriptor, fetchedDataQuads, publicSnapshotStore })).quads },
             ensureContextGraph: ensureContextGraphOnce,
             insertMetadata: rows => storeInsert([...rows]),
             resolveRootAtomicCompanion: resolveRootSnapshotAtomicCompanion,
@@ -971,8 +972,9 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
           let deferredToCatalogAuthority = false;
           try {
             const committed = await recoveryBoundary.admitAsyncMutation(() => commitRecoveredSwmAsset({
-              contextGraphId: pid, descriptor, materializer: snapshotMaterializer,
-              loadVerifiedQuads: async () => (await materializeGraphScopedSwmRecoveryAsset({ descriptor, fetchedDataQuads: [], publicSnapshotStore })).quads,
+              contextGraphId: pid, materializer: snapshotMaterializer,
+              asset: { kind: 'replace', descriptor,
+                loadVerifiedQuads: async () => (await materializeGraphScopedSwmRecoveryAsset({ descriptor, fetchedDataQuads: [], publicSnapshotStore })).quads },
               ensureContextGraph: ensureContextGraphOnce,
               insertMetadata: rows => storeInsert([...rows]),
               resolveRootAtomicCompanion: resolveRootSnapshotAtomicCompanion,
