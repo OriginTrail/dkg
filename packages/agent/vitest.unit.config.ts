@@ -43,6 +43,7 @@ export default defineConfig({
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
+      "test/coherent-draft-chain-evidence.test.ts",
       "test/draft-artifact-gc.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",

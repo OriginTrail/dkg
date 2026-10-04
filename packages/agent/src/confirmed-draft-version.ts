@@ -1,17 +1,52 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, ChainReadOptions, KnowledgeAssetVersionSnapshot } from '@origintrail-official/dkg-chain';
 import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 
+export type CoherentKnowledgeAssetVersionEvidence =
+  | Readonly<{ kind: 'available'; snapshot: KnowledgeAssetVersionSnapshot }>
+  | Readonly<{ kind: 'unavailable' | 'invalid' | 'stale' }>;
+
+/** Read and fence identity, author, count and currency from one pinned view. */
+export async function readCoherentKnowledgeAssetVersionEvidence(
+  chain: ChainAdapter,
+  input: {
+    readonly knowledgeAssetId: bigint;
+    readonly expectedAuthor: string;
+    readonly options?: ChainReadOptions;
+    /** Caller-specific eligibility is checked before the currency read. */
+    readonly acceptsSnapshot?: (snapshot: KnowledgeAssetVersionSnapshot) => boolean;
+  },
+): Promise<CoherentKnowledgeAssetVersionEvidence> {
+  const { knowledgeAssetId: kaId, options } = input;
+  options?.signal?.throwIfAborted();
+  if (!chain.readKnowledgeAssetVersionSnapshot) return { kind: 'unavailable' };
+  const snapshot = options === undefined
+    ? await chain.readKnowledgeAssetVersionSnapshot(kaId)
+    : await chain.readKnowledgeAssetVersionSnapshot(kaId, options);
+  options?.signal?.throwIfAborted();
+  if (snapshot == null) return { kind: 'unavailable' };
+  if (snapshot.rootCount < 0n
+    || (snapshot.knowledgeAssetId !== undefined && snapshot.knowledgeAssetId !== kaId)
+    || (snapshot.rootCount > 0n && snapshot.latestAuthor.toLowerCase() !== input.expectedAuthor.toLowerCase())
+    || input.acceptsSnapshot?.(snapshot) === false) return { kind: 'invalid' };
+  if (chain.knowledgeAssetVersionSnapshotIsCurrent) {
+    const current = options === undefined
+      ? await chain.knowledgeAssetVersionSnapshotIsCurrent(kaId, snapshot)
+      : await chain.knowledgeAssetVersionSnapshotIsCurrent(kaId, snapshot, options);
+    options?.signal?.throwIfAborted();
+    if (!current) return { kind: 'stale' };
+  }
+  return { kind: 'available', snapshot };
+}
+
 /** A draft number is unpublished only when one current chain view proves it. */
-export async function readConfirmedDraftVersion(chain: ChainAdapter, kaUal: string): Promise<bigint | null> {
+export async function readConfirmedDraftVersion(
+  chain: ChainAdapter, kaUal: string, options?: ChainReadOptions,
+): Promise<bigint | null> {
   const scope = createGraphKnowledgeAssetScope(kaUal, 1);
   const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-  if (!chain.readKnowledgeAssetVersionSnapshot) return null;
-  const snapshot = await chain.readKnowledgeAssetVersionSnapshot(kaId);
-  if (snapshot === null || snapshot.rootCount < 0n
-    || (snapshot.knowledgeAssetId !== undefined && snapshot.knowledgeAssetId !== kaId)
-    || (snapshot.rootCount > 0n && snapshot.latestAuthor.toLowerCase() !== scope.agentAddress.toLowerCase())) return null;
-  if (chain.knowledgeAssetVersionSnapshotIsCurrent
-    && !await chain.knowledgeAssetVersionSnapshotIsCurrent(kaId, snapshot)) return null;
-  return snapshot.rootCount;
+  const evidence = await readCoherentKnowledgeAssetVersionEvidence(chain, {
+    knowledgeAssetId: kaId, expectedAuthor: scope.agentAddress, options,
+  });
+  return evidence.kind === 'available' ? evidence.snapshot.rootCount : null;
 }

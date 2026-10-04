@@ -2,6 +2,7 @@
 import { canonicalizeCanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
+import { readCoherentKnowledgeAssetVersionEvidence } from '../confirmed-draft-version.js';
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './abort-v1.js';
 
 /** Order replacements by author-issued canonical seal evidence, not draft numbers alone. */
@@ -31,23 +32,18 @@ export async function assertRfc64CatalogReplacementOrderV1(
     // Count/root/attribution come from one pinned chain view. Never infer
     // that a number was merely burned from separate or unavailable reads.
     const kaId = BigInt(candidate.seal.reservedKaId);
-    const snapshot = await chain.readKnowledgeAssetVersionSnapshot?.(kaId, { signal });
+    const evidence = await readCoherentKnowledgeAssetVersionEvidence(chain, {
+      knowledgeAssetId: kaId,
+      expectedAuthor: candidate.seal.authorAddress,
+      options: { signal },
+      acceptsSnapshot: (snapshot) => (candidateVersion >= currentVersion || snapshot.rootCount >= 1n)
+        && currentVersion > snapshot.rootCount && candidateVersion > snapshot.rootCount,
+    });
     throwIfAbortedV1(signal);
-    if (
-      snapshot == null
-      || snapshot.rootCount < 0n
-      || (candidateVersion < currentVersion && snapshot.rootCount < 1n)
-      || currentVersion <= snapshot.rootCount
-      || candidateVersion <= snapshot.rootCount
-      || (snapshot.knowledgeAssetId !== undefined && snapshot.knowledgeAssetId !== kaId)
-      || (snapshot.rootCount > 0n && snapshot.latestAuthor.toLowerCase() !== candidate.seal.authorAddress)
-    ) {
+    if (evidence.kind === 'unavailable' || evidence.kind === 'invalid') {
       throw new Error('RFC-64 draft replacement requires coherent proof that both numbers exceed the published version');
     }
-    if (
-      chain.knowledgeAssetVersionSnapshotIsCurrent !== undefined
-      && !await chain.knowledgeAssetVersionSnapshotIsCurrent(kaId, snapshot, { signal })
-    ) {
+    if (evidence.kind === 'stale') {
       throw new Error('RFC-64 draft replacement chain snapshot is no longer current');
     }
     throwIfAbortedV1(signal);

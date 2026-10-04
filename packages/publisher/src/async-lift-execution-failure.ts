@@ -246,7 +246,7 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
 
   return mapPublishExceptionToLiftJobFailure({
     error,
-    failedFromState: requestedOrigin === 'included' ? 'included' : 'broadcast',
+    failedFromState: origin === 'included' ? 'included' : 'broadcast',
     errorPayloadRef,
     timeout:
       lower.includes('timeout') || lower.includes('timed out')

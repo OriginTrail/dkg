@@ -31,7 +31,7 @@ import {
   createAsyncLift2270Harness,
   expectFailed,
 } from './_helpers/async-lift-2270-harness.js';
-import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
+import { KA_VM_INCLUSION, KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { RETRY_LANE, adapterRewrap, createStoreRejectionFixtures, legacyAdapterRewrap, schedulerBusy } from './_helpers/store-rejection-2940.js';
 import {
   KEYED_RPC_URL,
@@ -45,7 +45,7 @@ import {
   receiptWaitTimeout,
 } from './_helpers/rpc-prep-failure-2942.js';
 
-type PersistedStatus = 'claimed' | 'validated' | 'broadcast';
+type PersistedStatus = 'claimed' | 'validated' | 'broadcast' | 'included';
 
 interface MappingRow {
   readonly name: string;
@@ -120,6 +120,8 @@ const MAPPING_ROWS: readonly MappingRow[] = [
     () => withCode('deterministic refusal', { code }), to('validated', mapped))),
   row('a deterministic code cannot discard persisted transaction evidence', 'broadcast', 'validated',
     () => withCode('deterministic refusal', { code: 'ROOTLESS_KA_NOT_MATERIALIZED' }), to('broadcast', 'rpc_unavailable')),
+  ...DRAFT_PRECONDITIONS.map(([code]) => row(`included transaction survives ${code}`, 'included', 'validated',
+    () => withCode('deterministic refusal', { code }), to('included', 'confirmation_mismatch'))),
   // --- A. a failure while the job is still 'claimed' (the preflight / validation call sites) ---------
   row('A typed transient failure with no keyword is recorded retryable (the C conjunct)', 'claimed', 'claimed',
     keyedExhaustedWithoutKeywords, to('claimed', 'workspace_unavailable')),
@@ -283,14 +285,18 @@ describe('GH#2945 recordExecutionFailure: the failure decision, characterized th
     const claimed = await publisher.claimNext('wallet-1');
     if (!claimed) throw new Error('expected a claim');
     if (persisted !== 'claimed') await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
-    if (persisted === 'broadcast') {
+    if (persisted === 'broadcast' || persisted === 'included') {
       await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: 'wallet-1', operationKind: 'create' } });
     }
-    return { publisher, jobId, session: publisher.openClaimSession(claimed as ActiveLiftJobClaim) };
+    if (persisted === 'included') {
+      await publisher.update(jobId, 'included', { inclusion: { ...KA_VM_INCLUSION, txHash: TX_HASH } });
+    }
+    const persistedJob = await publisher.getStatus(jobId);
+    return { publisher, jobId, persistedJob, session: publisher.openClaimSession(claimed as ActiveLiftJobClaim) };
   }
 
   it.each(MAPPING_ROWS)('$name', async (r) => {
-    const { publisher, jobId, session } = await sessionAt(r.persisted);
+    const { publisher, jobId, persistedJob, session } = await sessionAt(r.persisted);
 
     if ('rejects' in r.expected) {
       await expect(session.recordExecutionFailure(r.requested, r.error(), r.evidence)).rejects.toThrow(r.expected.rejects);
@@ -312,6 +318,17 @@ describe('GH#2945 recordExecutionFailure: the failure decision, characterized th
     expect(failed.failure.message).toBe(
       r.expected.message ?? hostOnlyRpcText(error instanceof Error ? error.message : String(error)),
     );
+    if (r.persisted === 'broadcast' || r.persisted === 'included') {
+      expect(failed.broadcast).toEqual(persistedJob?.broadcast);
+      expect(failed.broadcast?.txHash).toBe(TX_HASH);
+    }
+    if (r.persisted === 'included') {
+      expect(failed.inclusion).toEqual({ ...KA_VM_INCLUSION, txHash: TX_HASH });
+      const reloaded = expectFailed((await publisher.getStatus(jobId))!);
+      expect(reloaded.failure.failedFromState).toBe('included');
+      expect(reloaded.broadcast).toEqual(persistedJob?.broadcast);
+      expect(reloaded.inclusion).toEqual(persistedJob?.inclusion);
+    }
     if (r.expected.timeout) {
       expect(failed.failure.timeout).toEqual({
         timeoutMs: 0,
