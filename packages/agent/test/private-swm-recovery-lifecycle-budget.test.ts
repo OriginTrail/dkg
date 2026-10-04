@@ -256,6 +256,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
           _kaUal: string,
           fn: () => Promise<unknown>,
         ) => fn(),
+        draftMayReplace: async () => true,
         readStoredHead: async () => ({
           version: null,
           shareOperationId: null,

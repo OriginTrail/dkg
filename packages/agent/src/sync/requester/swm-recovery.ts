@@ -503,10 +503,8 @@ async function recoverContextGraphSwmUnlocked(
           descriptor.subGraphName === undefined
           && deps.resolveRootAtomicCompanion !== undefined
         ) {
-          // A bounded/partial manifest may stop after this exact ref. Establish
-          // the durable root boundary now, under the canonical KA lock owned by
-          // applyVerifiedSwmRecoveryGraphAsset, instead of waiting for the final
-          // all-manifest plan that this invocation may never reach.
+          // Establish exact graph/head durability inside the canonical KA lock
+          // even when this bounded manifest cannot reach its final plan.
           const applied = await boundary.admitAsyncMutation(() => (
             applyVerifiedSwmRecoveryGraphAsset({
               contextGraphId: deps.contextGraphId,
@@ -524,7 +522,8 @@ async function recoverContextGraphSwmUnlocked(
             (quad) => !withheld.has(canonicalQuadKey(quad)),
           );
           if (insertableMeta.length > 0) await deps.store.insert([...insertableMeta]);
-          incrementallyInsertedMetaQuads += insertableMeta.length;
+          incrementallyInsertedMetaQuads += applied.insertedMetaQuads + insertableMeta.length;
+          incrementallyInsertedDataQuads += applied.insertedGraphQuads;
           rewrittenGraphKeys.add(graphKey);
         }
         incrementallyReadyGraphs.add(graphKey);
@@ -535,15 +534,14 @@ async function recoverContextGraphSwmUnlocked(
         fetchedDataQuads: [],
         publicSnapshotStore: snapshotScope,
       }));
-      // Admit the retry-safe graph+metadata sequence once. A lease revoked
-      // before admission prevents every mutation; one revoked after graph
-      // replacement starts cannot interrupt the related witness/meta writes.
+      // Admit graph/head durability once; stale or already committed rows
+      // must be withheld from the later bulk metadata append.
       await boundary.admitAsyncMutation(async () => {
         if (!contextGraphEnsured) {
           await deps.ensureContextGraph(deps.contextGraphId);
           contextGraphEnsured = true;
         }
-        await applyVerifiedSwmRecoveryGraphAsset({
+        const applied = await applyVerifiedSwmRecoveryGraphAsset({
           contextGraphId: deps.contextGraphId,
           asset: {
             kind: 'replace',
@@ -559,15 +557,17 @@ async function recoverContextGraphSwmUnlocked(
               : { resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion }),
           },
         });
-        if (verifiedAssetMeta.length > 0) {
-          await deps.store.insert([...verifiedAssetMeta]);
+        const withheld = new Set(applied.withholdRows.map(canonicalQuadKey));
+        const insertableMeta = verifiedAssetMeta.filter(row => !withheld.has(canonicalQuadKey(row)));
+        if (insertableMeta.length > 0) await deps.store.insert([...insertableMeta]);
+        incrementallyInsertedMetaQuads += applied.insertedMetaQuads + insertableMeta.length;
+        if (applied.insertedGraphQuads > 0 || applied.insertedMetaQuads > 0) {
+          rewrittenGraphKeys.add(graphKey);
+          incrementallyReplacedGraphs += 1;
+          incrementallyInsertedDataQuads += applied.insertedGraphQuads;
         }
       });
       incrementallyReadyGraphs.add(graphKey);
-      rewrittenGraphKeys.add(graphKey);
-      incrementallyReplacedGraphs += 1;
-      incrementallyInsertedDataQuads += asset.quads.length;
-      incrementallyInsertedMetaQuads += verifiedAssetMeta.length;
       deps.logInfo?.(
         deps.ctx,
         `SWM recovery for "${deps.contextGraphId}": committed verified snapshot ${snapshotRef} ` +
@@ -793,15 +793,15 @@ async function recoverContextGraphSwmUnlocked(
     deps.ctx,
     `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: replaced ${applied.replacedRoots} roots, ` +
     `${applied.replacedGraphs} exact graphs, ` +
-    `${applied.insertedRootQuads + applied.insertedGraphQuads} data + ` +
-    `${applied.insertedMetaQuads} meta triples`,
+    `${applied.insertedRootQuads + applied.insertedGraphQuads + incrementallyInsertedDataQuads} data + ` +
+    `${applied.insertedMetaQuads + incrementallyInsertedMetaQuads} meta triples`,
   );
 
   return {
     replacedRoots: applied.replacedRoots,
     replacedGraphs: applied.replacedGraphs,
-    insertedDataQuads: applied.insertedRootQuads + applied.insertedGraphQuads,
-    insertedMetaQuads: applied.insertedMetaQuads,
+    insertedDataQuads: applied.insertedRootQuads + applied.insertedGraphQuads + incrementallyInsertedDataQuads,
+    insertedMetaQuads: applied.insertedMetaQuads + incrementallyInsertedMetaQuads,
     droppedDataTriples: processed.droppedDataTriples,
     ...snapshotProgress,
     completed: true,

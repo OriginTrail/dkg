@@ -29,6 +29,8 @@ import {
   writeSwmMaterializationWitness,
   asGraphWriteRevisionSource,
 } from '@origintrail-official/dkg-storage';
+import { recoveredDraftMayReplace, readStoredWorkspaceHead, readRecoveryAliasIds, retainedPublisherAlias } from './swm-draft-order.js';
+import type { ConfirmedKnowledgeAssetVersionReader } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
 import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
@@ -157,6 +159,8 @@ export interface SharedMemorySnapshotMaterializer {
    * waited.
    */
   readStoredHead(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<StoredWorkspaceHeadState>;
+  /** Canonical publisher chronology and unpublished proof, under the KA lock. */
+  draftMayReplace(contextGraphId: string, descriptor: GraphScopedSwmRecoveryDescriptor, contentAlreadyEquivalent?: boolean): Promise<boolean>;
   /**
    * True only when the KA's assertion graph CONTENT equals the descriptor's:
    * same quad count AND same public-quads digest. A marker-only predicate
@@ -225,7 +229,8 @@ export interface SharedMemorySnapshotMaterializer {
   } | null>;
   /**
    * GH#2273 — repair a (possibly multi-valued) head to certify the WINNER
-   * identity chosen by `selectRepairIdentity`, deleting every other operation
+   * identity chosen by `selectRepairIdentity`, retaining its publisher chronology
+   * alias and deleting every other operation
    * subject the head references (same kaUal ownership guard as
    * `replaceHeadMetadata`) while NEVER deleting the winner's operation rows —
    * they are the only durable copy of the identity a queued VM-publish job
@@ -291,6 +296,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    */
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
+  readConfirmedKnowledgeAssetVersion?: ConfirmedKnowledgeAssetVersionReader;
+  pendingAckTxWindowMs?: number;
 }): SharedMemorySnapshotMaterializer {
   // #2079 operator override, default ON. Blank is UNSET, not false:
   // `DKG_SWM_MATERIALIZATION_WITNESS=` is the normal compose/.env shape for
@@ -497,40 +504,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     return subjects;
   };
 
-  const readStoredHead: SharedMemorySnapshotMaterializer['readStoredHead'] = async (descriptor) => {
-    // Aggregates over ONE bound subject in the KA's meta graph: bounded by
-    // that subject's row count. COUNT(DISTINCT …) doubles as the duplicate
-    // detector — more than one version or operation value on the head is the
-    // union-insert residue that must be repaired.
-    const result = await deps.store.query(
-      `SELECT (MAX(?v) AS ?maxVersion) (COUNT(DISTINCT ?v) AS ?versions) `
-      + `(COUNT(DISTINCT ?op) AS ?operations) (SAMPLE(?op) AS ?anyOp) WHERE { `
-      + `GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-      + `<${assertSafeIri(descriptor.headSubject)}> `
-      + `<${DKG}assertionVersion> ?v ; `
-      + `<${DKG}shareOperationId> ?op } }`,
-      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readStoredHead' },
-    );
-    if (result.type !== 'bindings' || result.bindings.length === 0) {
-      return { version: null, needsRepair: false, shareOperationId: null };
-    }
-    const row = result.bindings[0];
-    const version = literalValue(row?.['maxVersion']);
-    const versions = parseCount(row?.['versions']);
-    const operations = parseCount(row?.['operations']);
-    // SAMPLE is deterministic only when there is exactly one distinct id;
-    // with more, ANY pick would be arbitrary, so the id reads as null and
-    // `needsRepair` routes the decision through repair instead.
-    const sampledOperationId = literalValue(row?.['anyOp']);
-    return {
-      version: version && version.length > 0 ? version : null,
-      needsRepair: versions > 1 || operations > 1,
-      shareOperationId:
-        operations === 1 && sampledOperationId && sampledOperationId.length > 0
-          ? sampledOperationId
-          : null,
-    };
-  };
+  const readStoredHead = (descriptor: GraphScopedSwmRecoveryDescriptor) => readStoredWorkspaceHead(deps.store, descriptor);
 
   /** One bounded head join acquires the complete candidate model for both consumers. */
   const loadStoredOperationCandidates = async (
@@ -636,17 +610,25 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<boolean> => {
     const head = await readStoredHead(descriptor);
-    if (head.needsRepair || head.version === null || head.shareOperationId === null) return false;
+    const contextGraphId = literalValue(descriptor.metadataQuads.find(quad => quad.subject === descriptor.operationSubject && quad.predicate === `${DKG}contextGraphId`)?.object);
+    if (head.needsRepair && contextGraphId !== undefined) {
+      const aliases = await readRecoveryAliasIds(deps.store, contextGraphId, descriptor);
+      const descriptorKey = operationIdentityKey(descriptor.metadataQuads.filter(quad => quad.subject === descriptor.operationSubject));
+      const candidates = await loadStoredOperationCandidates(descriptor);
+      if (!aliases || !descriptorKey || !candidates) return false;
+      for (const shareOperationId of aliases) {
+        const storedRows = [...candidates.values()].find(rows => rows.some(row => row.predicate === `${DKG}shareOperationId` && literalValue(row.object) === shareOperationId));
+        if (!storedRows || !await validateStoredOperation({ storedRows, descriptor, descriptorKey, shareOperationId })) return false;
+      }
+      return true;
+    }
+    if (head.version === null || head.shareOperationId === null) return false;
     try {
       if (BigInt(head.version) !== BigInt(descriptor.assertionVersion)) return false;
     } catch {
       return false;
     }
     if (head.shareOperationId !== descriptor.shareOperationId) {
-      const contextGraphId = literalValue(descriptor.metadataQuads.find((quad) => (
-        quad.subject === descriptor.operationSubject
-        && quad.predicate === `${DKG}contextGraphId`
-      ))?.object);
       return contextGraphId !== undefined
         && await selectRepairIdentity(contextGraphId, descriptor) !== null;
     }
@@ -670,14 +652,16 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   };
 
   const repairHeadPreservingIdentity: SharedMemorySnapshotMaterializer['repairHeadPreservingIdentity'] = async (contextGraphId, descriptor, winnerShareOperationId) => {
+    const publisherAlias = retainedPublisherAlias(descriptor, winnerShareOperationId, [...(await loadStoredOperationCandidates(descriptor))?.values() ?? []].flat());
     const loserSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
       seed: descriptor.shareOperationId !== winnerShareOperationId
         ? [descriptor.operationSubject]
         : [],
       excludeShareOperationId: winnerShareOperationId,
     });
+    if (publisherAlias) loserSubjects.delete(publisherAlias.operationSubject);
     // ORDER MATTERS: rewrite the head FIRST, delete the losers AFTER. A
-    // crash between the two then leaves a HEALTHY single-valued head plus
+    // crash between the two then leaves a healthy equivalent-alias head plus
     // stale loser operation subjects — benign residue (they are
     // identity-equivalent by the selection above, and nothing references
     // them). The reverse order would leave a still-multi-valued head naming
@@ -693,6 +677,10 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       .map((quad) => quad.predicate === `${DKG}shareOperationId`
         ? { ...quad, object: JSON.stringify(winnerShareOperationId) }
         : { ...quad });
+    if (publisherAlias) {
+      headRows.push(publisherAlias.headRow);
+      await deps.store.insert(publisherAlias.operationRows);
+    }
     await deleteByPatternWithoutCount(
       deps.store,
       { graph: descriptor.metaGraph, subject: descriptor.headSubject },
@@ -717,6 +705,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       withKeyedLocks(deps.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn),
 
     readStoredHead,
+    draftMayReplace: (contextGraphId, descriptor, contentAlreadyEquivalent) => recoveredDraftMayReplace({ store: deps.store, contextGraphId, descriptor, contentAlreadyEquivalent, readConfirmedVersion: deps.readConfirmedKnowledgeAssetVersion, pendingAckTxWindowMs: deps.pendingAckTxWindowMs }),
 
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
@@ -1015,9 +1004,4 @@ function literalValue(binding: string | undefined): string | undefined {
   if (binding === undefined) return undefined;
   const literal = /^"([^"]*)"/.exec(binding);
   return literal ? literal[1] : binding;
-}
-
-function parseCount(binding: string | undefined): number {
-  const parsed = Number.parseInt(literalValue(binding) ?? '0', 10);
-  return Number.isFinite(parsed) ? parsed : 0;
 }

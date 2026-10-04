@@ -1,3 +1,4 @@
+import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
@@ -926,6 +927,8 @@ export class DKGAgent extends DKGAgentBase {
         )
       ),
       publicSnapshotStore: this.publicSnapshotStore,
+      readConfirmedKnowledgeAssetVersion: kaUal => readConfirmedDraftVersion(this.chain, kaUal),
+      pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
       ordinaryRootSnapshotApplyAllowed: (contextGraphId) => (
         this.rfc64LegacySwmApplyAllowedForScope(contextGraphId, null)
       ),

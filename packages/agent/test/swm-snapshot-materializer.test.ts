@@ -977,7 +977,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(h.replaceCalls()).toBe(1);
     });
 
-    it('recovers equivalent originator and storage-ACK heads and stores one current pointer', async () => {
+    it('recovers an ACK display alias while retaining its publisher chronology', async () => {
       // A later StorageACK can persist the exact same assertion under its own
       // deterministic operation id while an older originator head is replayed
       // by durable metadata sync. This is the production residue observed in
@@ -1003,14 +1003,14 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(parsed[0]?.shareOperationId).toBe('storage-ack-equivalent');
       expect(parsed[0]?.metadataQuads.filter((row) =>
         row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`))
-        .toEqual([expect.objectContaining({ object: '"storage-ack-equivalent"' })]);
+        .toEqual(expect.arrayContaining([expect.objectContaining({ object: '"storage-ack-equivalent"' }), expect.objectContaining({ object: '"op-v1"' })]));
 
       const store = new OxigraphStore();
       const h = realHarness(store, storageAck, servedMeta);
       const summary = await h.run();
       expect(summary.failedPhases).toBe(0);
       expect(await distinctObjects(store, WS_META, storageAck.headSubject, `${DKG}shareOperationId`))
-        .toEqual(['"storage-ack-equivalent"']);
+        .toEqual(['"op-v1"', '"storage-ack-equivalent"']);
     });
 
     it('accepts an omitted legacy policy and an explicitly persisted effective default', () => {

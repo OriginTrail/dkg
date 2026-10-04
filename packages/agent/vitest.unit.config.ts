@@ -197,6 +197,7 @@ export default defineConfig({
       "test/rootless-durable-skips-legacy-partition.test.ts",
       "test/rootless-lifecycle-graph.test.ts",
       "test/swm-recovery-apply.test.ts",
+      "test/swm-draft-replacement-chronology.test.ts",
       "test/swm-recovery.test.ts",
       "test/swm-recovery-identity-preservation.test.ts",
       // #2083: the discoverable suffix keeps runtime/type adoption in sync.

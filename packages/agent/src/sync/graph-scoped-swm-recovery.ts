@@ -1,3 +1,4 @@
+import { workspacePublisherOperationTimestamp } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { stripMetadataLiteral as stripLiteral } from './metadata-literal.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -111,6 +112,9 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly assertionGraph: string;
   /** Deterministic newest alias used as the logical head identity. */
   readonly shareOperationId: string;
+  /** Publisher chronology, independent of a selected receiver-clock ACK alias. */
+  readonly publisherOperationTimestampMs?: number;
+  readonly publisherOperationId?: string;
   /** Equivalent operation and immutable locator selected for materialization. */
   readonly snapshotSource: Readonly<{
     shareOperationId: string;
@@ -126,7 +130,7 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly privateMerkleRoot?: string;
   readonly publisherPeerId: string;
   readonly subGraphName?: string;
-  /** Only the active head and its referenced operation, for snapshot fetch. */
+  /** Active head and materialization operations. */
   readonly metadataQuads: readonly Quad[];
 }
 
@@ -161,11 +165,7 @@ export function discoverSwmRecoverySubGraphNames(params: {
   return [...names].sort();
 }
 
-/**
- * Parse and validate the active graph-scoped SWM heads in a complete recovery
- * metadata snapshot. Every accepted descriptor is bound to one deterministic
- * UAL/version graph and one same-graph WorkspaceOperation commitment.
- */
+/** Validate exact graph heads and their same-graph operation commitments. */
 export function parseGraphScopedSwmRecoveryDescriptors(params: {
   readonly contextGraphId: string;
   readonly metaQuads: readonly Quad[];
@@ -258,20 +258,18 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
       publisherPeerId: semantics.publisherIdentity,
       ...(subGraphName ? { subGraphName } : {}),
+      ...(operation.publisherOperationTimestampMs === undefined ? {} : { publisherOperationTimestampMs: operation.publisherOperationTimestampMs, publisherOperationId: operation.publisherOperation!.shareOperationId }),
       metadataQuads: [
         ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
-        // EVERY lexical form of the selected id, not just the one selected
-        // row: RDF 1.1 admits the same value as a plain and an
-        // xsd:string-typed literal, and downstream withhold plans are built
-        // from these rows BYTE-keyed — a variant left out here passes the
-        // value-based insert canonicalization and re-stacks the losing id
-        // beside a just-preserved head.
+        // Keep every lexical form of both validated aliases so the ordering
+        // proof survives an ACK display alias, retries and process restart.
         ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
-          && stripLiteral(row.object).trim() === shareOperationId),
+          && [shareOperationId, operation.publisherOperation?.shareOperationId].includes(stripLiteral(row.object).trim())),
         ...operationRows,
         ...(snapshotSource.operationSubject === operationSubject
           ? []
           : snapshotSource.operationRows),
+        ...(operation.publisherOperation && ![operationSubject, snapshotSource.operationSubject].includes(operation.publisherOperation.operationSubject) ? operation.publisherOperation.operationRows : []),
       ],
     });
   }
@@ -310,11 +308,7 @@ export function canonicalGraphScopedSnapshotManifestQuads(
   ));
 }
 
-/**
- * Collapse only the current-head pointer rows covered by parsed descriptors.
- * Superseded operation subjects may remain as immutable history, but a head
- * itself must name exactly one operation or LIMIT-1 readers become arbitrary.
- */
+/** Keep the selected identity and its validated publisher chronology alias. */
 export function canonicalizeGraphScopedSwmHeadRows(params: {
   readonly metaQuads: readonly Quad[];
   readonly descriptors: readonly GraphScopedSwmRecoveryDescriptor[];
@@ -322,13 +316,13 @@ export function canonicalizeGraphScopedSwmHeadRows(params: {
   const selectedByHead = new Map(
     params.descriptors.map((descriptor) => [
       `${descriptor.metaGraph}\u0000${descriptor.headSubject}`,
-      descriptor.shareOperationId,
+      new Set([descriptor.shareOperationId, descriptor.publisherOperationId]),
     ]),
   );
   return params.metaQuads.filter((row) => {
     if (row.predicate !== SHARE_OPERATION_ID) return true;
     const selected = selectedByHead.get(`${row.graph}\u0000${row.subject}`);
-    return selected === undefined || stripLiteral(row.object).trim() === selected;
+    return selected === undefined || selected.has(stripLiteral(row.object).trim());
   });
 }
 
@@ -512,6 +506,8 @@ interface RecoveryOperationCandidate extends WorkspaceOperationModel<RecoveryWor
 }
 
 interface ResolvedHeadOperation {
+  readonly publisherOperationTimestampMs?: number;
+  readonly publisherOperation?: RecoveryOperationCandidate;
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
@@ -571,13 +567,7 @@ function recoverySnapshotLocator(params: {
   };
 }
 
-/**
- * Storage-ACK persistence and originator persistence can legitimately produce
- * two operation ids for the same exact assertion. Accept that residue only
- * when every recovery-relevant operation row is byte-equivalent (apart from
- * operation id and timestamp), then choose the newest operation
- * deterministically. Any content or policy disagreement remains fail-closed.
- */
+/** Resolve equivalent originator/ACK aliases; disagreements remain fail-closed. */
 function resolveEquivalentHeadOperation(params: {
   readonly headRows: readonly Quad[];
   readonly byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>;
@@ -665,7 +655,10 @@ function resolveEquivalentHeadOperation(params: {
       && selected.snapshotLocator.provenance === 'persisted-ref'
       ? selected
       : persistedRefSource ?? selected);
+  const publisherOperationTimestampMs = workspacePublisherOperationTimestamp(orderedCandidates.map(candidate => ({ shareOperationId: candidate.provenance.shareOperationId, publishedAt: candidate.provenance.publishedAtMs })));
+  const publisherOperation = orderedCandidates.find(candidate => candidate.provenance.publishedAtMs === publisherOperationTimestampMs && workspacePublisherOperationTimestamp([{ shareOperationId: candidate.shareOperationId, publishedAt: candidate.provenance.publishedAtMs }]) !== undefined);
   return {
+    ...(publisherOperationTimestampMs === undefined ? {} : { publisherOperationTimestampMs, publisherOperation }),
     shareOperationId: selected.provenance.shareOperationId,
     operationSubject: selected.operationSubject,
     operationRows: selected.operationRows,

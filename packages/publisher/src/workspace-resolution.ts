@@ -1730,3 +1730,4 @@ function parsePositiveBigIntLiteral(value: string | undefined): bigint {
 function isPresent<T>(value: T | undefined): value is T {
   return value !== undefined;
 }
+export { checkWorkspaceDraftReplacementOrder, workspacePublisherOperationTimestamp, headIsUnpromotedOwedAckCopy, type ConfirmedKnowledgeAssetVersionReader } from './workspace-draft-replacement.js';

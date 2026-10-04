@@ -7,9 +7,16 @@ import { storageAckOwedCopiesByScopeQuery, STORAGE_ACK_OPERATION_ID_PREFIX } fro
 export type ConfirmedKnowledgeAssetVersionReader = (kaUal: string) => Promise<bigint | null>;
 export type DraftReplacementRejection = { phase: 'validation' | 'corrupt-head'; reason: string };
 
+/** Only publisher aliases establish draft chronology; ACK clocks are local receipts. */
+export function workspacePublisherOperationTimestamp(aliases: readonly { shareOperationId: string; publishedAt?: string | number }[]): number | undefined {
+  const value = Math.max(...aliases.filter(alias => !alias.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX))
+    .map(alias => Number(alias.publishedAt ?? NaN)).filter(Number.isFinite));
+  return Number.isFinite(value) ? value : undefined;
+}
+
 /** Authenticated share ordering is independent of reused draft version numbers. */
 export async function checkWorkspaceDraftReplacementOrder(input: {
-  head: KnowledgeAssetWorkspaceHead;
+  head: Pick<KnowledgeAssetWorkspaceHead, 'kaUal' | 'assertionVersion' | 'publisherPeerId' | 'operationAliases'>;
   incomingVersion: bigint;
   publisherPeerId: string;
   timestamp: Date;
@@ -20,14 +27,11 @@ export async function checkWorkspaceDraftReplacementOrder(input: {
   if (head.publisherPeerId !== publisherPeerId) return {
     phase: 'validation', reason: `KA_PUBLISHER_MISMATCH: ${head.kaUal} is owned in SWM by ${head.publisherPeerId}, not ${publisherPeerId}`,
   };
-  // ACK copies stamp the receiver's clock; only publisher-issued aliases order drafts.
-  const timestamps = head.operationAliases
-    .filter(alias => !alias.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX))
-    .map(alias => Number(alias.publishedAt ?? NaN)).filter(Number.isFinite);
-  const currentTimestamp = Math.max(...timestamps);
+  const currentTimestamp = workspacePublisherOperationTimestamp(head.operationAliases) ?? NaN;
   if (Number.isFinite(currentTimestamp) && timestamp.getTime() < currentTimestamp) return {
     phase: 'validation', reason: 'STALE_KA_SHARE_OPERATION: authenticated publisher operation precedes the current head',
   };
+  if (!Number.isFinite(currentTimestamp)) return { phase: 'corrupt-head', reason: 'DRAFT_REPLACEMENT_PROOF_UNAVAILABLE: authenticated publisher chronology is unavailable' };
   if (incomingVersion > currentVersion) return;
   const reason = incomingVersion < currentVersion
     ? `STALE_KA_ASSERTION_VERSION: incoming=${incomingVersion}, current=${currentVersion}`

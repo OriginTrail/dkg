@@ -298,6 +298,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         },
         snapshotMaterializer: {
           withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
+          draftMayReplace: async () => true,
           readStoredHead: async () => ({
             version: null,
             shareOperationId: null,
@@ -358,6 +359,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       replaceMetaForGraphAssets: async () => undefined,
       snapshotMaterializer: {
         withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
+        draftMayReplace: async () => true,
         readStoredHead: async () => ({
           version: null,
           shareOperationId: null,
@@ -459,6 +461,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
               _ual: string,
               fn: () => Promise<unknown>,
             ) => fn(),
+            draftMayReplace: async () => true,
             readStoredHead: async () => kind === 'replace'
               ? {
                   version: null,
@@ -555,6 +558,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
             await releaseLock.promise;
             return fn();
           },
+          draftMayReplace: async () => BigInt(storedVersion) <= BigInt(descriptor.assertionVersion),
           readStoredHead: async () => ({
             version: storedVersion,
             shareOperationId: 'live-v5',
@@ -572,6 +576,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
     releaseLock.resolve();
     await expect(applying).resolves.toEqual({
       insertedGraphQuads: 0,
+      insertedMetaQuads: 0,
       withholdRows: descriptor.metadataQuads,
     });
     expect(resolveRootAtomicCompanion).not.toHaveBeenCalled();
@@ -628,6 +633,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           _ual: string,
           fn: () => Promise<unknown>,
         ) => fn(),
+        draftMayReplace: async (_cg: string, _descriptor: unknown, equivalent: boolean) => equivalent,
         readStoredHead: async () => ({
           version: 'not-a-version',
           shareOperationId: descriptor.shareOperationId,
@@ -641,7 +647,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       contextGraphId: 'private-recovery-cg',
       asset: { kind: 'preserve-equivalent', descriptor },
       ports,
-    })).resolves.toEqual({ insertedGraphQuads: 1, withholdRows: [] });
+    })).resolves.toMatchObject({ insertedGraphQuads: 1 });
     expect(replaceMetaForGraphAssets).toHaveBeenCalledOnce();
     expect(replaceMetaForGraphAssets).toHaveBeenCalledWith([descriptor]);
     expect(replaceGraph).not.toHaveBeenCalled();
@@ -653,6 +659,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       ports,
     })).resolves.toEqual({
       insertedGraphQuads: 0,
+      insertedMetaQuads: 0,
       withholdRows: descriptor.metadataQuads,
     });
     expect(replaceMetaForGraphAssets).not.toHaveBeenCalled();

@@ -49,7 +49,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   const UAL3 = 'did:dkg:hardhat:31337/0xcccccccccccccccccccccccccccccccccccccccc/3';
   const localShare = swmFx.share({ version: 1, operationId: 'op-local', marker: 'identity', ual: UAL3 });
   const curatorEquivalent = swmFx.share({ version: 1, operationId: 'storage-ack-x', marker: 'identity', ual: UAL3 });
-  const curatorChanged = swmFx.share({ version: 1, operationId: 'storage-ack-y', marker: 'changed', ual: UAL3 });
+  const curatorChanged = swmFx.share({ version: 1, operationId: 'publisher-changed', marker: 'changed', ual: UAL3, timestamp: new Date(1000) });
   const providerAShare = swmFx.share({
     version: 1,
     operationId: 'provider-a',
@@ -59,6 +59,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   const providerBShare = swmFx.share({
     version: 1,
     operationId: 'provider-b',
+    timestamp: new Date(1000),
     marker: 'provider-b',
     ual: UAL3,
   });
@@ -151,6 +152,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
       store,
       writeLocks,
       invalidateListContextGraphsCache: () => {},
+      readConfirmedKnowledgeAssetVersion: async () => 0n,
     });
     const ownership = new Map<string, Map<string, string>>();
     return {
@@ -470,7 +472,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     // so the stale assertion graph is replaced rather than marker-skipped.
     const result = await recoverContextGraphSwm(identityDeps(store, [...curatorChanged.meta]));
     expect(result.completed).toBe(true);
-    expect(await headIds(store)).toEqual(['"storage-ack-y"']);
+    expect(await headIds(store)).toEqual(['"publisher-changed"']);
     expect(await opSubjectExists(store, localShare.operationSubject)).toBe(false);
     const graph = await store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${curatorChanged.assertionGraph}> { ?s ?p ?o } }`,

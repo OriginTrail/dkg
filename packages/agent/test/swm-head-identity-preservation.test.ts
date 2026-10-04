@@ -83,7 +83,7 @@ describe('operation identity preservation (GH#2273)', () => {
   // `resolveEquivalentHeadOperation`'s docstring names as legitimate.
   const remoteEquivalent = share(1, 'storage-ack-2273b', 'version-one');
   // Same version, different content => different digest => NOT equivalent.
-  const remoteChanged = share(1, 'storage-ack-2273c', 'version-one-changed');
+  const remoteChanged = swmFx.share({ version: 1, operationId: 'publisher-change-2273c', marker: 'version-one-changed', ual: UAL, timestamp: new Date(1000) });
 
   function opRowsOf(fixture: typeof v1): Quad[] {
     return fixture.meta.filter((quad) => quad.subject === fixture.operationSubject);
@@ -570,27 +570,28 @@ describe('operation identity preservation (GH#2273)', () => {
     // REAL sync loop rather than the decision API: same content digest, but
     // the peer's operation adds an allowList envelope. The decision must
     // refuse preservation and — critically for the LEDGER — must NOT
-    // suppress the descriptor's head-id row: the union lands it beside the
-    // local id, and the next round's repair converges to remote authority,
-    // exactly today's behavior for a genuine policy change. A regression
+    // reject the new publisher head. The later authenticated operation has
+    // coherent unpublished proof and replaces the old policy in one lock. A regression
     // that suppresses whenever ids differ would pass every decision-level
     // row and mask the policy change here.
     const store = new OxigraphStore();
     stores.push(store);
     await seedMaterializedLocal(store);
+    const policyShare = swmFx.share({ version: 1, operationId: 'publisher-policy-change', marker: 'version-one', ual: UAL, timestamp: new Date(1000) });
     const envelopeMeta = [
-      ...remoteEquivalent.meta.filter((quad) =>
-        !(quad.subject === remoteEquivalent.operationSubject && quad.predicate === `${DKG}accessPolicy`)),
-      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
-      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
+      ...policyShare.meta.filter((quad) =>
+        !(quad.subject === policyShare.operationSubject && quad.predicate === `${DKG}accessPolicy`)),
+      { subject: policyShare.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
+      { subject: policyShare.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
     ];
     await makeSwmSyncHarness({
       ctx,
       contextGraphId: CG,
       store,
+      readConfirmedKnowledgeAssetVersion: async () => 0n,
       served: { digest: remoteEquivalent.digest, payload: remoteEquivalent.payload, meta: envelopeMeta },
     }).run();
-    expect((await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`)).length).toBe(2);
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`)).toEqual(['"publisher-policy-change"']);
   });
 
   it('a genuinely changed share still adopts the remote identity (discriminator polarity)', async () => {
@@ -602,9 +603,9 @@ describe('operation identity preservation (GH#2273)', () => {
     const store = new OxigraphStore();
     stores.push(store);
     await seedMaterializedLocal(store);
-    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteChanged }).run();
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteChanged, readConfirmedKnowledgeAssetVersion: async () => 0n }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-      .toEqual(['"storage-ack-2273c"']);
+      .toEqual(['"publisher-change-2273c"']);
     expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
       .toEqual([]);
   });

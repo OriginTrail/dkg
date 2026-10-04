@@ -299,6 +299,7 @@ export interface VerifiedSwmRecoveryApplyPorts {
 }
 
 export interface VerifiedSwmRecoveryGraphAssetApplyResult {
+  readonly insertedMetaQuads: number;
   readonly insertedGraphQuads: number;
   readonly withholdRows: readonly Quad[];
 }
@@ -377,41 +378,16 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
       // The recovery-level CG lock elects one provider, but live gossip uses
       // this canonical per-KA lock. Re-read ordering only after acquiring it;
       // otherwise a queued recovery can overwrite a newer live generation.
+      if (asset.kind === 'already-replaced') return { insertedGraphQuads: 0, insertedMetaQuads: 0, withholdRows: descriptor.metadataQuads };
       const storedHead = await ports.snapshotMaterializer.readStoredHead(descriptor);
-      if (storedHead.version !== null) {
-        try {
-          // A genuinely newer live share has a different operation identity
-          // and must win this race. The same operation id cannot legitimately
-          // certify two assertion versions, though: that shape is a corrupt
-          // head row which the canonical metadata replacement must heal. In
-          // particular, do not let a drifted higher version turn the race
-          // guard into an id-equal fast path that preserves bad metadata.
-          if (
-            BigInt(storedHead.version) > BigInt(descriptor.assertionVersion)
-            && storedHead.shareOperationId !== descriptor.shareOperationId
-          ) {
-            return {
-              insertedGraphQuads: 0,
-              withholdRows: descriptor.metadataQuads.filter(
-                (quad) => quad.subject === descriptor.headSubject,
-              ),
-            };
-          }
-        } catch {
-          // A replace carries different content, so an unparseable local
-          // version leaves its ordering unknowable and must fail closed.
-          // Preserve-equivalent already proved the assertion bytes identical;
-          // it may continue solely to replace the corrupt head metadata with
-          // the descriptor's canonical rows.
-          if (asset.kind === 'replace') {
-            return {
-              insertedGraphQuads: 0,
-              withholdRows: descriptor.metadataQuads.filter(
-                (quad) => quad.subject === descriptor.headSubject,
-              ),
-            };
-          }
-        }
+      const commitMeta = async (withholdRows: readonly Quad[], insertedGraphQuads: number) => {
+        const withheld = new Set(withholdRows.map(canonicalQuadKey));
+        const rows = descriptor.metadataQuads.filter(row => !withheld.has(canonicalQuadKey(row)));
+        if (rows.length > 0) await ports.store.insert([...rows]);
+        return { insertedGraphQuads, insertedMetaQuads: rows.length, withholdRows: [...withholdRows, ...rows] };
+      };
+      if (!await ports.snapshotMaterializer.draftMayReplace(params.contextGraphId, descriptor, asset.kind !== 'replace')) {
+        return { insertedGraphQuads: 0, insertedMetaQuads: 0, withholdRows: descriptor.metadataQuads.filter(quad => quad.subject === descriptor.headSubject) };
       }
 
       if (asset.kind === 'replace') {
@@ -454,6 +430,7 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
               `stored root recovery asset ${descriptor.kaUal} changed before boundary commit`,
             );
           }
+          if (!await ports.snapshotMaterializer.draftMayReplace(params.contextGraphId, descriptor, true)) return { insertedGraphQuads: 0, insertedMetaQuads: 0, withholdRows: descriptor.metadataQuads.filter(quad => quad.subject === descriptor.headSubject) };
           const companion = ports.resolveRootAtomicCompanion(Object.freeze({
             contextGraphId: params.contextGraphId,
             kaUal: descriptor.kaUal,
@@ -475,9 +452,7 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
         // caller to hold this lock.
         let sameVersion = false;
         if (
-          !storedHead.needsRepair
-          && storedHead.version !== null
-          && storedHead.shareOperationId !== null
+          storedHead.version !== null
         ) {
           try {
             sameVersion = BigInt(storedHead.version) === BigInt(descriptor.assertionVersion);
@@ -499,21 +474,13 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
               descriptor,
               selected.winnerShareOperationId,
             );
-            return {
-              insertedGraphQuads: descriptor.publicQuadsCount,
-              withholdRows: selected.withholdRows,
-            };
+            return commitMeta(selected.withholdRows, descriptor.publicQuadsCount);
           }
         }
       }
 
       await ports.replaceMetaForGraphAssets([descriptor]);
-      return {
-        insertedGraphQuads: asset.kind === 'replace'
-          ? asset.replacementQuads.length
-          : descriptor.publicQuadsCount,
-        withholdRows: [],
-      };
+      return commitMeta([], asset.kind === 'replace' ? asset.replacementQuads.length : descriptor.publicQuadsCount);
     },
   );
 }
@@ -548,6 +515,7 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
 
     let replacedGraphs = 0;
     let insertedGraphQuads = 0;
+    let insertedMetaQuads = 0;
     const preservedWithholdRows: Quad[] = [];
     for (const asset of plan.graphAssets) {
       replacedGraphs += 1;
@@ -557,6 +525,7 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
         ports,
       });
       insertedGraphQuads += applied.insertedGraphQuads;
+      insertedMetaQuads += applied.insertedMetaQuads;
       preservedWithholdRows.push(...applied.withholdRows);
     }
 
@@ -567,7 +536,6 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
       await ports.replaceMetaForRoots(plan.roots, rootMetaGraphs);
     }
 
-    let insertedMetaQuads = 0;
     if (plan.verifiedMeta.length > 0) {
       const preservedHeadIdRowKeys = new Set(
         preservedWithholdRows.map(canonicalQuadKey),
@@ -584,7 +552,7 @@ export async function applyVerifiedSwmRecoveryPlan(params: Readonly<{
       if (insertableMeta.length > 0) {
         await ports.store.insert([...insertableMeta]);
       }
-      insertedMetaQuads = insertableMeta.length;
+      insertedMetaQuads += insertableMeta.length;
     }
 
     for (const { dataGraph, entity, creator } of plan.roots) {

@@ -241,6 +241,11 @@ function harness(overrides: HarnessOverrides = {}) {
           events.push('content-checked');
           return overrides.contentPresent?.() ?? false;
         },
+        draftMayReplace: async (_cg, descriptor) => {
+          const version = overrides.storedHead?.().version;
+          if (version == null) return true;
+          try { return BigInt(version) <= BigInt(descriptor.assertionVersion); } catch { return false; }
+        },
         readStoredHead: async () => {
           events.push('version-read');
           return overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
@@ -419,7 +424,7 @@ describe('public SWM snapshot materialization', () => {
   it('does not recreate SWM head metadata after retiring an already-materialized twin', async () => {
     const h = harness({
       contentPresent: () => true,
-      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }),
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: 'snapshot-materialization-op' }),
       reconcileDisposition: 'suppress-metadata',
     });
     const summary = await h.run();

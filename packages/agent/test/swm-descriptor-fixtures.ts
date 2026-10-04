@@ -43,6 +43,7 @@ const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 export interface ShareOptions {
   version: number;
+  timestamp?: Date;
   operationId: string;
   marker: string;
   ual: string;
@@ -100,7 +101,7 @@ export function swmFixtures(contextGraphId: string) {
         // OLD-metadata interop shape, constructed per-row where a test needs
         // it — the preserve gate refuses winners without the explicit row.
         accessPolicy: opts.accessPolicy ?? 'public',
-        timestamp: new Date(0),
+        timestamp: opts.timestamp ?? new Date(0),
       }, metaGraph),
       { subject: operationSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: metaGraph },
       { subject: operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"${digest}"`, graph: metaGraph },
