@@ -32,6 +32,7 @@ import {
 } from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
+import { assertGraphCatalogWithinResponseLimit } from './graph-catalog-response-limit.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -136,9 +137,11 @@ export async function loadSortedGraphCatalog(
     === 'function'
     ? store as TripleStore & SortedGraphSetSource
     : null;
-  return sortedSource
+  const graphs = await (sortedSource
     ? sortedSource.listGraphsSorted(options)
-    : createSortedUniqueStringCatalog(await store.listGraphs(options));
+    : createSortedUniqueStringCatalog(await store.listGraphs(options)));
+  assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+  return graphs;
 }
 
 /** Internal/test-only observation seam; intentionally absent from the package API. */
@@ -566,22 +569,28 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
     if (!this.enabled) {
-      return (await this.inner.listGraphs(options)).filter(
+      const graphs = await this.inner.listGraphs(options);
+      assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+      return graphs.filter(
         (graph) => !isAtomicGraphReplaceStagingGraph(graph),
       );
     }
-    return [...await this.loadCurrentSortedGraphs(options)];
+    const graphs = await this.loadCurrentSortedGraphs(options);
+    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+    return [...graphs];
   }
 
   async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
     if (!this.enabled) {
-      return createSortedUniqueStringCatalog(
-        (await this.inner.listGraphs(options)).filter(
-          (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
-        ),
-      );
+      const graphs = await this.inner.listGraphs(options);
+      assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+      return createSortedUniqueStringCatalog(graphs.filter(
+        (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
+      ));
     }
-    return this.loadCurrentSortedGraphs(options);
+    const graphs = await this.loadCurrentSortedGraphs(options);
+    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+    return graphs;
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
@@ -591,11 +600,14 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
           (graph) => !isAtomicGraphReplaceStagingGraph(graph),
         );
       }
-      return (await this.inner.listGraphs(options)).filter(
+      const graphs = await this.inner.listGraphs(options);
+      assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+      return graphs.filter(
         (graph) => graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph),
       );
     }
     const graphs = await this.loadCurrentSortedGraphs(options);
+    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
     // startsWith() is defined over UTF-16 code units, while this catalog is
     // ordered by Unicode code point. A prefix ending in a high surrogate can
     // split an astral code point, so its matches are not guaranteed to be one
@@ -712,8 +724,10 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
       const scan = this.refreshCoordinator.beginScan(flight);
+      const discovered = await this.inner.listGraphs(scanOptions);
+      assertGraphCatalogWithinResponseLimit(discovered, scanOptions?.maxResponseBytes);
       const next = new Set(
-        (await this.inner.listGraphs(scanOptions)).filter(
+        discovered.filter(
           (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
         ),
       );

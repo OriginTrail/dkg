@@ -1,21 +1,27 @@
-import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
+import type {
+  Quad,
+  QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
+import type { QueryMaterializationBudget } from './query-store-read-context.js';
 
 export interface QueryResult {
   bindings: Array<Record<string, string>>;
   quads?: Quad[];
 }
 
-export interface QueryOptions {
+export interface QueryOptions extends StoreQueryOptions {
+  /**
+   * Query-wide ceiling for the cumulative decoded store results retained while
+   * evaluating one logical query. Unlike the transport-level
+   * `maxResponseBytes`, this limit is charged across every internal read.
+   */
+  maxMaterializedBytes?: number;
+  /** Request-local budget shared with pre-execution admission reads. */
+  materializationBudget?: QueryMaterializationBudget;
   contextGraphId?: string;
   timeout?: number;
-  /** Cancel queued and in-flight store work when the caller goes away. */
-  signal?: AbortSignal;
-  /** Store admission lane. External/API reads should use `background`. */
-  priority?: StoreWorkPriority;
-  /** Bounded operation label propagated to store diagnostics and slow-query telemetry. */
-  source?: string;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
   graphSuffix?: '_shared_memory';
   /** When true and contextGraphId is set, query runs over both data and shared memory graphs (union). */

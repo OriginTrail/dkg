@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CclResourceNotFoundError,
   ContextGraphPolicyAuthorizationError,
+  QueryResultTooLargeError,
 } from '@origintrail-official/dkg-agent';
 import {
   SparqlHttpResponseError,
@@ -15,6 +16,7 @@ import {
   configureApiQueryPriority,
   createApiQueryRequestLifecycle,
   handleQueryRoutes,
+  API_QUERY_MAX_STORE_RESPONSE_BYTES,
   normalizePublicApiQueryResult,
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
@@ -356,12 +358,37 @@ describe('/api/query request lifecycle', () => {
     expect(receivedOptions).toMatchObject({
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
     });
     expect(receivedOptions?.signal).toBeInstanceOf(AbortSignal);
     expect((receivedOptions?.signal as AbortSignal).aborted).toBe(false);
     expect(res.statusCode).toBe(200);
     expect(tracker.complete).toHaveBeenCalledTimes(1);
     expect(tracker.fail).not.toHaveBeenCalled();
+  });
+
+  it('reports the canonical agent byte overflow as a stable 413 response', async () => {
+    const error = new QueryResultTooLargeError(
+      1_024,
+      2_048,
+    );
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const agent = { query: vi.fn(async () => { throw error; }) };
+    const tracker = {
+      start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(),
+      complete: vi.fn(), fail: vi.fn(), cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, agent, tracker));
+
+    expect(res.statusCode).toBe(413);
+    expect(JSON.parse(res.body)).toEqual(expect.objectContaining({
+      code: 'QUERY_RESULT_TOO_LARGE',
+      limitBytes: 1_024,
+      actualBytes: 2_048,
+    }));
+    expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), error);
   });
 
   it('normalizes the legacy all sentinel before the agent query boundary', async () => {

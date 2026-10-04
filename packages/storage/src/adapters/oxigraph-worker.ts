@@ -817,7 +817,19 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
+    // AbortSignal is not structured-cloneable. The byte ceiling is: enforce it
+    // inside the worker before a large normalized result is copied across the
+    // worker boundary and materialized again in the daemon process.
+    const workerOptions = options?.maxResponseBytes === undefined
+      ? undefined
+      : { maxResponseBytes: options.maxResponseBytes };
+    return this.callWithTimeout<QueryResult>(
+      this.operationTimeoutMs,
+      options?.signal,
+      'query',
+      sparql,
+      workerOptions,
+    );
   }
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);
@@ -830,7 +842,10 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
-    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
+    const workerOptions = options?.maxResponseBytes === undefined
+      ? undefined
+      : { maxResponseBytes: options.maxResponseBytes };
+    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs', workerOptions);
   }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
     return this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>

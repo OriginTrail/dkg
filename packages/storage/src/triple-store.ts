@@ -106,8 +106,9 @@ export interface QueryOptions {
    */
   signal?: AbortSignal;
   /**
-   * Optional pre-parse cap for remote response bodies. HTTP adapters stream
-   * and reject above this bound before JSON/N-Quads materialization.
+   * Optional cap for one query response. HTTP adapters reject while streaming
+   * before JSON/N-Quads materialization; local worker adapters reject before
+   * copying a normalized result into the daemon process.
    */
   maxResponseBytes?: number;
 }

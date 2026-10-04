@@ -6,7 +6,6 @@ import type {
   TripleStore,
   Quad,
   QueryResult as StoreQueryResult,
-  QueryOptions as StoreQueryOptions,
 } from '@origintrail-official/dkg-storage';
 import {
   ExactGraphReadError,
@@ -65,6 +64,13 @@ import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
+import {
+  createQueryStoreReadContext,
+  createStoreReadLane,
+  estimateMaterializedBytes,
+  type QueryStoreReadContext,
+  type StoreReadLane,
+} from './query-store-read-context.js';
 
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
@@ -83,67 +89,6 @@ export interface ViewResolution {
    * assertions) and verifiable-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-}
-
-function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
-  if (!options?.signal && !options?.priority && !options?.source) return undefined;
-  return {
-    signal: options.signal,
-    priority: options.priority,
-    source: options.source,
-  };
-}
-
-function sharedDiscoveryStoreOptions(
-  options: StoreQueryOptions | undefined,
-): StoreQueryOptions | undefined {
-  if (!options?.priority && !options?.source) return undefined;
-  return {
-    priority: options.priority,
-    source: options.source,
-  };
-}
-
-interface StoreReadLane {
-  query(sparql: string): Promise<StoreQueryResult>;
-  listGraphsByPrefix(prefix: string): Promise<string[]>;
-  listGraphFamily(rootGraph: string): Promise<string[]>;
-}
-
-interface QueryStoreReadContext extends StoreReadLane {
-  readonly signal: AbortSignal | undefined;
-  readonly shared: StoreReadLane & { readonly cacheKey: string };
-}
-
-function createStoreReadLane(
-  store: TripleStore,
-  options: StoreQueryOptions | undefined,
-): StoreReadLane {
-  return {
-    query: (sparql) => store.query(sparql, options),
-    listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
-    listGraphFamily: (rootGraph) => listGraphFamily(store, rootGraph, options),
-  };
-}
-
-function createQueryStoreReadContext(
-  store: TripleStore,
-  queryOptions: QueryOptions | undefined,
-): QueryStoreReadContext {
-  const options = storeOptions(queryOptions);
-  const lane = createStoreReadLane(store, options);
-  const sharedOptions = sharedDiscoveryStoreOptions(options);
-  return {
-    ...lane,
-    signal: options?.signal,
-    shared: {
-      ...createStoreReadLane(store, sharedOptions),
-      cacheKey: JSON.stringify([
-        sharedOptions?.priority ?? 'normal',
-        sharedOptions?.source ?? null,
-      ]),
-    },
-  };
 }
 
 /**
@@ -945,6 +890,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       sharedReads.listGraphsByPrefix(prefix),
       callerSignal,
     );
+    // The upstream flight is deliberately shared and therefore unmetered.
+    // Debit its materialized result only after this logical caller receives it,
+    // so coalescing stays cancellation-safe without bypassing the request cap.
+    if ('shared' in reads) reads.materializationBudget?.consume(allGraphs);
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );
@@ -1106,17 +1055,34 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   ): Promise<readonly string[]> {
     const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
-    return this.scopedContentGraphDiscoveryMemo.get({
+    const discovery = await this.scopedContentGraphDiscoveryMemo.get({
       contentKey,
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
-      load: () => this.discoverScopedContentGraphAllowList(
-        contextGraphId,
-        reads.shared,
-        subGraphName,
-      ),
+      load: async () => {
+        let materializedBytes = 0;
+        const discoveryReads = createStoreReadLane(
+          this.store,
+          reads.shared.options,
+          {
+            consume(result) {
+              materializedBytes += estimateMaterializedBytes(result);
+            },
+          },
+        );
+        const discovered = await this.discoverScopedContentGraphAllowList(
+          contextGraphId,
+          discoveryReads,
+          subGraphName,
+        );
+        return { graphs: discovered, materializedBytes };
+      },
     });
+    // Shared discovery work is coalesced, but every logical query debits the
+    // reported materialization cost against its own request-local budget.
+    reads.materializationBudget?.consumeBytes(discovery.materializedBytes);
+    return discovery.graphs;
   }
 
   private async discoverScopedContentGraphAllowList(
@@ -1548,28 +1514,6 @@ function parseCanonicalIntegerBinding(value: string | undefined): bigint | undef
   } catch {
     return undefined;
   }
-}
-
-async function listGraphsByPrefix(
-  store: TripleStore,
-  prefix: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix, options)
-    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
-}
-
-async function listGraphFamily(
-  store: TripleStore,
-  rootGraph: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`, options);
-  if (await store.hasGraph(rootGraph, options)) {
-    graphs.unshift(rootGraph);
-  }
-  return graphs;
 }
 
 function mergeSharedMemoryAndDataResults(
