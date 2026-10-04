@@ -223,20 +223,15 @@ export class OxigraphStore implements TripleStore {
       await rename(tmpPath, this.persistPath);
 
       // 4: fsync the directory so the rename itself survives a power loss.
-      // Best-effort: some filesystems / Node versions don't expose dir-fd
-      // sync; swallow ENOENT/EPERM since the rename itself already
-      // succeeded and the cache will eventually flush. The rename itself
-      // landed bytes on disk; only the directory entry's durability
-      // depends on this step.
+      // A visible rename is not proof of durability. In particular, certified
+      // persist() callers may erase recovery evidence only after this sync
+      // succeeds. Unsupported directory sync and I/O failures both propagate;
+      // a retry can re-dump the already visible in-memory state safely.
+      const dirFh = await open(dir, 'r');
       try {
-        const dirFh = await open(dir, 'r');
-        try {
-          await dirFh.sync();
-        } finally {
-          await dirFh.close();
-        }
-      } catch {
-        // Best-effort dir fsync — see comment above.
+        await dirFh.sync();
+      } finally {
+        await dirFh.close();
       }
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but

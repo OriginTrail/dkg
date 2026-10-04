@@ -39,6 +39,13 @@ describe('confirmed lifecycle command contract', () => {
       .rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
     expect(read).not.toHaveBeenCalled();
   });
+  it.each([1n, undefined])('refuses a tentative confirmed-graph coordinate before I/O, packedKaId=%s', async packedKaId => {
+    const store = new OxigraphStore(); stores.push(store);
+    const read = vi.spyOn(store, 'query'), write = vi.spyOn(store, 'atomicUpdate');
+    await expect(applyTentativeNamedKaVmLifecycle(store, { ...fields, tentative: true, packedKaId } as unknown as Parameters<typeof applyTentativeNamedKaVmLifecycle>[1]))
+      .rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
+    expect(read).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled();
+  });
   it('consumes the sealed prior WM pointer through the tentative entry point without certifying memory persistence', async () => {
     const store = new OxigraphStore(); stores.push(store);
     const graph = contextGraphMetaUri(fields.contextGraphId), lifecycle = assertionLifecycleUri(fields.contextGraphId, fields.agentAddress, fields.name);

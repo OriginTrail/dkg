@@ -24,10 +24,19 @@ const DKG = 'http://dkg.io/ontology/', PRIOR = 'ab'.repeat(32);
 const QUADS = [{ subject: 'urn:repair:entity', predicate: 'http://schema.org/name', object: '"Confirmed"', graph: '' }];
 const ROOT = computeFlatKCRootV10(QUADS, []), HEX = ethers.hexlify(ROOT);
 const META = contextGraphMetaUri(CG), LIFECYCLE = assertionLifecycleUri(CG, AUTHOR, NAME), ASSERTION = contextGraphAssertionUri(CG, AUTHOR, NAME);
+function confirmedPublicationFor(input: ConfirmedNamedKaVmLifecycleInput) {
+  const seal = parseAssertionSealQuads(buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META,
+    merkleRoot: ethers.getBytes(input.merkleRoot), authorAddress: AUTHOR, authorAttestationR: new Uint8Array(32).fill(1),
+    authorAttestationVS: new Uint8Array(32).fill(2), authorSchemeVersion: 1, chainId: 31337n, kav10Address: AUTHOR,
+    reservedKaId: input.packedKaId, finalizedAtIso: new Date().toISOString(), contentScopeVersion: 2,
+    kaUal: UAL, assertionVersion: input.assertionVersion, publicTripleCount: 1, privateTripleCount: 0 }), ASSERTION)!;
+  return { status: 'confirmed' as const, ual: input.publishedUal, kaId: input.packedKaId,
+    merkleRoot: seal.merkleRoot, kaManifest: [], assertionUri: ASSERTION, seal };
+}
 const dirs: string[] = [];
 const stores: OxigraphStore[] = [];
 const flushBarrier = vi.hoisted(() => ({ path: null as string | null, captured: null as (() => void) | null,
-  release: null as Promise<void> | null, fail: false }));
+  release: null as Promise<void> | null, fail: false, directoryErrorPath: null as string | null }));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
@@ -36,10 +45,14 @@ vi.mock('node:fs/promises', async importOriginal => {
       await flushBarrier.release;
       if (flushBarrier.fail) throw Object.assign(new Error('snapshot persistence failed'), { code: 'EIO' });
     }
-    return actual.open(...args);
+    const handle = await actual.open(...args);
+    if (String(args[0]) === flushBarrier.directoryErrorPath && args[1] === 'r') {
+      handle.sync = async () => { throw Object.assign(new Error('snapshot directory sync failed'), { code: 'EIO' }); };
+    }
+    return handle;
   } };
 });
-afterEach(async () => { flushBarrier.path = null; flushBarrier.captured = null; flushBarrier.release = null; flushBarrier.fail = false;
+afterEach(async () => { flushBarrier.path = null; flushBarrier.captured = null; flushBarrier.release = null; flushBarrier.fail = false; flushBarrier.directoryErrorPath = null;
   vi.restoreAllMocks(); for (const store of new Set(stores.splice(0))) await store.close().catch(() => undefined); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 class FaultStore extends OxigraphStore {
   armed = false;
@@ -59,6 +72,31 @@ async function persistentStore(): Promise<OxigraphStore> {
   const store = new OxigraphStore(join(dir, 'store.nq')); stores.push(store);
   return store;
 }
+it('retains confirmed repair evidence when snapshot directory sync fails after rename, then repairs and reopens', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dkg-snapshot-dir-sync-')); dirs.push(dir);
+  const snapshotDir = join(dir, 'snapshots'), path = join(snapshotDir, 'store.nq');
+  const store = new OxigraphStore(path); stores.push(store);
+  let now = 1_000;
+  const input: ConfirmedNamedKaVmLifecycleInput = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR,
+    publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED };
+  const owner = new NamedKaVmLifecycleRepair({ dataDir: dir, writeLocks: new Map(), now: () => now,
+    isCurrent: async () => true, apply: candidate => applyPublishedNamedKaVmLifecycle(store, candidate), warn: () => {} });
+  flushBarrier.directoryErrorPath = snapshotDir;
+  try {
+    expect(await owner.submit(input)).toBe('pending');
+    const journal = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
+    expect(journal.entries).toHaveLength(1);
+    expect(journal.entries[0][1]).toMatchObject({ input: { publishedUal: PUBLISHED }, lastError: 'snapshot directory sync failed' });
+    // The failure follows the real atomic rename; visibility cannot certify durability.
+    expect(await readFile(path, 'utf8')).toContain('publishedUal');
+    flushBarrier.directoryErrorPath = null; now += 6_000;
+    await owner.runDue();
+    expect(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries).toHaveLength(0);
+    await store.close();
+    const reopened = new OxigraphStore(path); stores.push(reopened);
+    expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}publishedUal> ${JSON.stringify(PUBLISHED)} } }`)).toMatchObject({ value: true });
+  } finally { flushBarrier.directoryErrorPath = null; await owner.stop(); }
+});
 function agentFor(store: OxigraphStore, dir: string, version: number) {
   stores.push(store);
   const agent = Object.create(DKGAgent.prototype) as any;
@@ -268,7 +306,7 @@ describe('review regression boundaries', () => {
     flushBarrier.path = `${path}.tmp`; flushBarrier.captured = entered;
     flushBarrier.release = new Promise<void>(resolve => { release = resolve; }); flushBarrier.fail = true;
     const publish = vi.fn(); agent.publisher = { publish, writeLocks: agent.writeLocks };
-    const repairing = agent._repairConfirmedNamedKaVmLifecycle(input);
+    const repairing = agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input));
     try {
       await captured;
       // The stamp is visible in memory while the captured disk snapshot is held.
@@ -301,7 +339,7 @@ describe('review regression boundaries', () => {
     const wrapped = facade === 'decorated' ? new ChangelogStore(new GraphSetIndexStore(store)) : store;
     agent.store = facade === 'raw' ? wrapped : createListContextGraphsCacheInvalidatingStore(wrapped, vi.fn(), vi.fn());
     const commit = vi.spyOn(store, 'atomicUpdate');
-    expect(await agent._repairConfirmedNamedKaVmLifecycle(input)).toBe(true);
+    expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input))).toBe(true);
     expect(commit).not.toHaveBeenCalled();
     const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
     expect([...journal.values()]).toMatchObject([{ input: { publishedUal: PUBLISHED }, attempts: 1, rejected: false }]);
@@ -364,7 +402,10 @@ describe('review regression boundaries', () => {
       };
       return query(sparql, options);
     });
-    if (tentative) await applyTentativeNamedKaVmLifecycle(store, { ...input, tentative: true, priorMerkleRoot: PRIOR });
+    if (tentative) {
+      const { packedKaId: _confirmedGraph, ...descriptor } = input;
+      await applyTentativeNamedKaVmLifecycle(store, { ...descriptor, tentative: true, priorMerkleRoot: PRIOR });
+    }
     else await applyPublishedNamedKaVmLifecycle(store, input);
     const result = await query(`SELECT ?state ?layer ?wm WHERE { GRAPH <${META}> {
       <${LIFECYCLE}> <${DKG}state> ?state ; <${DKG}memoryLayer> ?layer .
@@ -401,7 +442,7 @@ describe('review regression boundaries', () => {
     agent.store = facade === 'raw' ? remote : createListContextGraphsCacheInvalidatingStore(remote, vi.fn(), vi.fn());
     try {
       expect(agent.store.writesDurableOnAcknowledgement).toBe(true); expect(agent.store.flush).toBeUndefined();
-      expect(await agent._repairConfirmedNamedKaVmLifecycle(input)).toBe(false); expect(fetch).toHaveBeenCalledTimes(2);
+      expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input))).toBe(false); expect(fetch).toHaveBeenCalledTimes(2);
       expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
       const reopened = new OxigraphStore(path); stores.push(reopened);
       expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" } }`)).toMatchObject({ value: true });
@@ -415,7 +456,7 @@ describe('review regression boundaries', () => {
     agent.store = createListContextGraphsCacheInvalidatingStore(remote, vi.fn(), vi.fn());
     try {
       expect(agent.store.writesDurableOnAcknowledgement).toBe(false);
-      expect(await agent._repairConfirmedNamedKaVmLifecycle(input)).toBe(true); expect(fetch).not.toHaveBeenCalled();
+      expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input))).toBe(true); expect(fetch).not.toHaveBeenCalled();
       expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(1);
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await remote.close(); }
   });
@@ -429,7 +470,7 @@ describe('review regression boundaries', () => {
     const invalidate = vi.fn(), dirty = vi.fn();
     agent.store = createListContextGraphsCacheInvalidatingStore(store, invalidate, dirty);
     try {
-      expect(await agent._repairConfirmedNamedKaVmLifecycle({ ...input, priorMerkleRoot: PRIOR })).toBe(false);
+      expect(await agent._repairConfirmedNamedKaVmLifecycle({ ...input, priorMerkleRoot: PRIOR }, confirmedPublicationFor(input))).toBe(false);
       expect(commit).toHaveBeenCalledTimes(1); expect(insert).not.toHaveBeenCalled();
       expect(remove).not.toHaveBeenCalled(); expect(removeWithoutCount).not.toHaveBeenCalled();
       expect(invalidate).toHaveBeenCalledTimes(1); expect(dirty).toHaveBeenCalledTimes(1);
@@ -536,7 +577,7 @@ describe('review regression boundaries', () => {
       if (options?.source === 'agent.publish.confirmedLifecycleWorkspaceGuard') { entered(); await held; }
       return result;
     });
-    const repairing = agent._repairConfirmedNamedKaVmLifecycle(input); await started;
+    const repairing = agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input)); await started;
     let mutationFinished = false;
     const editing = publisher.assertionPullFrom(CG, NAME, AUTHOR, 'vm').then(async () => {
       await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:overlap:draft', predicate: 'urn:text', object: '"editable"', graph: '' }]);

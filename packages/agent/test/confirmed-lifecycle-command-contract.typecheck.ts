@@ -22,3 +22,17 @@ const mistakenRepair: ConfirmedNamedKaVmLifecycleInput = { ...tentative, asserti
 // @ts-expect-error The tentative entry point requires an explicit tentative command.
 void applyTentativeNamedKaVmLifecycle(store, confirmed);
 void mistakenRepair;
+
+// @ts-expect-error Tentative commands cannot claim confirmed VM graph coordinates.
+void applyTentativeNamedKaVmLifecycle(store, { ...tentative, packedKaId: 1n });
+// @ts-expect-error A confirmed command's coordinates remain forbidden through a variable.
+const graphClaim: TentativeNamedKaVmLifecycleInput = { ...confirmed, tentative: true };
+void graphClaim;
+
+import { confirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
+import type { ConfirmedNamedKaVmPublication } from '../src/named-ka-vm-lifecycle-recovery-error.js';
+declare const publication: ConfirmedNamedKaVmPublication;
+// @ts-expect-error Root evidence is owned by the validated publication, not coordinates.
+void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', merkleRoot: '00' });
+// @ts-expect-error Version evidence is owned by the validated publication, not coordinates.
+void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', assertionVersion: '999' });

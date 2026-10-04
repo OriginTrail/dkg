@@ -11,6 +11,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
+import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -5040,12 +5041,10 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   async _repairConfirmedNamedKaVmLifecycle(
-    this: DKGAgent, input: ConfirmedNamedKaVmLifecycleInput,
+    this: DKGAgent, coordinates: ConfirmedNamedKaVmCoordinates,
     confirmedPublication: ConfirmedNamedKaVmPublication,
   ): Promise<boolean> {
-    if (confirmedPublication?.seal) input = { ...input, publicationDeployment: {
-      chainId: confirmedPublication.seal.chainId.toString(), lifecycleAddress: confirmedPublication.seal.kav10Address,
-    } };
+    const input = confirmedNamedKaVmLifecycleInput(confirmedPublication, coordinates);
     try {
       const outcome = await this.getOrCreateNamedKaVmLifecycleRepair().submit(input);
       return outcome === 'pending' || outcome === 'rejected';
@@ -5849,9 +5848,7 @@ export class PublishMethods extends DKGAgentBase {
     const lifecycleRepairPending = result.status === 'confirmed'
       ? await this._repairConfirmedNamedKaVmLifecycle({
           contextGraphId: request.contextGraphId, name: request.name, agentAddress,
-          subGraphName: request.subGraphName, publishedUal: result.ual,
-          packedKaId: packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
-          merkleRoot: ethers.hexlify(seal.merkleRoot), assertionVersion: graphScope.assertionVersion,
+          subGraphName: request.subGraphName, packedKaId: packedKaId ?? seal.reservedKaId,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
         }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
 
@@ -6333,9 +6330,7 @@ export class PublishMethods extends DKGAgentBase {
     const lifecycleRepairPending = result.status === 'confirmed'
       ? await this._repairConfirmedNamedKaVmLifecycle({
           contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName,
-          publishedUal: result.ual, merkleRoot: ethers.hexlify(seal.merkleRoot),
-          assertionVersion: graphScope.assertionVersion,
-          packedKaId: packedKaId ?? result.onChainResult?.kaId ?? result.kaId,
+          packedKaId,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
         }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
 

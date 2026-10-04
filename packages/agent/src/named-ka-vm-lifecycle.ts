@@ -22,17 +22,19 @@ export interface NamedKaVmLifecycleFields {
   readonly publishedUal: string;
   /** The chain-current root to materialize, which may supersede the queued root. */
   readonly merkleRoot: string;
-  readonly packedKaId?: bigint;
   readonly priorMerkleRoot?: string;
 }
 /** A confirmed command cannot bypass the certified persistence barrier. */
 export interface PublishedNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
+  readonly packedKaId?: bigint;
   readonly tentative?: never;
 }
 /** Tentative updates consume the prior sealed WM projection without claiming a VM graph. */
 export interface TentativeNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
   readonly tentative: true;
+  readonly packedKaId?: never;
 }
+type NamedKaVmLifecycleCommand = PublishedNamedKaVmLifecycleInput | TentativeNamedKaVmLifecycleInput;
 
 export interface NamedKaVmLifecycleApplyOptions {
   /** A durable repair journal always selects restart-durable; standalone SDK hosts may select process-local. */
@@ -70,7 +72,7 @@ function checkedRoot(value: string): string {
 
 /** Pure metadata plan: workspace admission is complete before any row is mutated. */
 function planPublishedNamedKaVmLifecycle(
-  input: NamedKaVmLifecycleFields, workspace: WorkspaceLifecycleValues, tentative: boolean,
+  input: NamedKaVmLifecycleCommand, workspace: WorkspaceLifecycleValues,
 ): LifecycleMetadataPlan {
   const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
@@ -78,7 +80,7 @@ function planPublishedNamedKaVmLifecycle(
   const prior = input.priorMerkleRoot === undefined ? undefined : checkedRoot(input.priorMerkleRoot);
   const { wm, swm, activeSeal } = workspace;
   const reopenedDraft = workspace.state === 'created' && workspace.layer === MemoryLayer.WorkingMemory && activeSeal === undefined;
-  const consumedTentativePrior = tentative && prior !== undefined && wm === prior;
+  const consumedTentativePrior = input.tentative === true && prior !== undefined && wm === prior;
   const preserveWorkspace = reopenedDraft || (activeSeal !== undefined && activeSeal !== root)
     || (wm !== undefined && wm !== root && !consumedTentativePrior) || (swm !== undefined && swm !== root);
   const deletes: Pick<Quad, 'subject' | 'predicate'>[] = [], inserts: Omit<Quad, 'graph'>[] = [];
@@ -102,7 +104,7 @@ function planPublishedNamedKaVmLifecycle(
     replace(lifecycleUri, STATE_PRED, '"published"');
   }
   replace(lifecycleUri, PUBLISHED_UAL_PRED, JSON.stringify(input.publishedUal));
-  if (input.packedKaId !== undefined && !preserveWorkspace) {
+  if (input.tentative !== true && input.packedKaId !== undefined && !preserveWorkspace) {
     const author = `0x${(input.packedKaId >> 96n).toString(16).padStart(40, '0')}`;
     const number = input.packedKaId & ((1n << 96n) - 1n);
     replace(lifecycleUri, ASSERTION_GRAPH_PRED, contextGraphLayerUri(input.contextGraphId, MemoryLayer.VerifiableMemory, author, number, input.subGraphName));
@@ -141,18 +143,19 @@ export async function applyPublishedNamedKaVmLifecycle(
   if ('tentative' in input) throw Object.assign(new Error('Confirmed lifecycle commands cannot carry tentative mode'), {
     code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
   });
-  await applyNamedKaVmLifecycle(store, input, false, options.persistence);
+  await applyNamedKaVmLifecycle(store, input, options.persistence);
 }
 export async function applyTentativeNamedKaVmLifecycle(store: TripleStore, input: TentativeNamedKaVmLifecycleInput): Promise<void> {
-  if (input.tentative !== true) throw Object.assign(new Error('Tentative lifecycle commands require tentative mode'), {
+  if (input.tentative !== true || 'packedKaId' in input) throw Object.assign(new Error('Tentative lifecycle commands require tentative mode without confirmed graph coordinates'), {
     code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
   });
-  await applyNamedKaVmLifecycle(store, input, true, 'process-local');
+  await applyNamedKaVmLifecycle(store, input, 'process-local');
 }
 async function applyNamedKaVmLifecycle(
-  store: TripleStore, input: NamedKaVmLifecycleFields, tentative: boolean,
+  store: TripleStore, input: NamedKaVmLifecycleCommand,
   persistenceMode: NamedKaVmLifecycleApplyOptions['persistence'],
 ): Promise<void> {
+  const tentative = input.tentative === true;
   const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const metaGraph = contextGraphMetaUri(input.contextGraphId);
@@ -177,7 +180,7 @@ async function applyNamedKaVmLifecycle(
   if (rows.type !== 'bindings' || rows.bindings.length > 1) {
     throw Object.assign(new Error('Invalid workspace pointers during confirmed lifecycle repair'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
   }
-  await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(input, decodeWorkspaceLifecycleValues(rows.bindings[0]), tentative));
+  await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(input, decodeWorkspaceLifecycleValues(rows.bindings[0])));
   // Graph writes can be visible before the debounced snapshot is on disk. The
   // repair owner may retire its fsynced journal only after this barrier succeeds.
   if (barrier !== undefined) await barrier({ source: 'agent.publish.confirmedLifecycleFlush' });
