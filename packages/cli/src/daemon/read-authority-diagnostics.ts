@@ -3,7 +3,7 @@ import {
   isContextGraphReadAuthorityUnavailableReason,
   type ContextGraphReadAuthoritySource,
   type ContextGraphReadAuthorityDependency,
-} from '@origintrail-official/dkg-agent';
+} from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
 
 /** Where an unavailable read authority came from, as the agent attributes it. */
 export interface ContextGraphReadAuthorityAttribution {

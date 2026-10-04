@@ -1,4 +1,4 @@
-import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import { backpressureRegistry, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import { describe, expect, it } from 'vitest';
 import { createReadAuthorityDiagnostics } from '../src/daemon/read-authority-diagnostics.js';
 
@@ -26,6 +26,19 @@ function harness(options: { cacheMax?: number } = {}) {
 const STORE = { source: 'registered-chain', reason: 'local-existence-unavailable', dependency: 'store' };
 
 describe('read-authority 503 diagnostics (#2834)', () => {
+  it('keeps diagnostics and the source agent on one registered sync scheduler', async () => {
+    // The EVM wallet bridge loads the source agent beside emitted package
+    // dependencies. A diagnostics import must not initialize a second agent.
+    const { DKGAgent } = await import('../../agent/src/dkg-agent.js');
+    expect(DKGAgent).toBeTypeOf('function');
+    expect(backpressureRegistry.capture().schedulers.filter(
+      (scheduler) => scheduler.scheduler === 'sync-global',
+    )).toHaveLength(1);
+    const { lines, diagnostics } = harness();
+    diagnostics.record(createOperationContext('query'), STORE);
+    expect(lines[0]!.message).toContain('reason=local-existence-unavailable');
+  });
+
   it('logs every 503 under its own operation id: a warning per attribution and window, info lines in between', () => {
     const { lines, diagnostics, advance } = harness();
     const ids = [0, 1, 2].map(() => createOperationContext('query'));
