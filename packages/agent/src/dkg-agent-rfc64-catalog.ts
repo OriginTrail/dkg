@@ -67,7 +67,10 @@ import {
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { resolveApprovedPrivateReplicaAuthority } from './approved-private-replica.js';
+import {
+  isApprovedPrivateReplicaDelegationActive,
+  resolveApprovedPrivateReplicaAuthority,
+} from './approved-private-replica.js';
 import {
   Rfc64CatalogReplayConnectionRuntimeV1,
   type Rfc64CatalogReplayConnectionReservationV1,
@@ -2161,6 +2164,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               !== approvedAgent.toLowerCase()
             || this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)
               ?.policyDigest !== accepted.policyDigest
+            // The clock is the one thing the fences above cannot see.
+            || !isApprovedPrivateReplicaDelegationActive(approved.authority)
           ) return null;
           const named = new Set(
             [...own.allowedAgents, ...own.participantAgents]
@@ -3934,6 +3939,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         throw new Rfc64CatalogAuthorityResolutionErrorV1(
           'registered-authority-binding-mismatch',
           'registered RFC-64 Context Graph cannot accept unregistered replica authority',
+        );
+      }
+      // The join proof was taken before the reads above. Its delegation can
+      // pass its deadline in the meantime without any store write, so the
+      // revision fences do not see it: check the deadline in this same pass.
+      if (
+        approvedPrivateReplicaAuthority !== null
+        && !isApprovedPrivateReplicaDelegationActive(approvedPrivateReplicaAuthority)
+      ) {
+        throw new Rfc64CatalogAuthorityResolutionErrorV1(
+          'unregistered-owner-unresolved',
+          'approved private replica delegation expired while its authority was composed',
         );
       }
       const previousAuthority = service.acceptedPolicySnapshot(
