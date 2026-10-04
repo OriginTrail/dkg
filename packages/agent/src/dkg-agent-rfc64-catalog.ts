@@ -3645,9 +3645,25 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           const publishPolicy = stored.publishPolicy === 0 || stored.publishPolicy === 1
             ? stored.publishPolicy
             : accessPolicy === 'private' ? 0 : 1;
-          const members = accessPolicy === 'private'
-            ? await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId)
-            : [];
+          // The approved-replica proof above has already authenticated this
+          // receiver's private definition and is fenced to its metadata
+          // revision. Read that definition's effective roster directly here.
+          // The general recovery helper performs another registration read;
+          // during a catalog refresh that read can lose the accepted-absence
+          // allowance while authority is resolving, making the roster depend
+          // on the very catalog authority this refresh is meant to restore.
+          let members: readonly string[] | null = [];
+          if (accessPolicy === 'private') {
+            if (approvedPrivateReplicaAuthority !== null) {
+              const confirmed = await this.hasConfirmedMetaState(contextGraphId)
+                .catch(() => false);
+              members = confirmed
+                ? await this.getLocalMetadataMemberRecoveryGate(contextGraphId, { signal })
+                : null;
+            } else {
+              members = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+            }
+          }
           if (accessPolicy === 'private' && members === null) {
             throw new Error(
               'unregistered private RFC-64 Context Graph has no authenticated lifecycle roster',

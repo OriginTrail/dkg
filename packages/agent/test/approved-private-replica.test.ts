@@ -1587,6 +1587,39 @@ describe('approved private bare-name replica authorization', () => {
       .toBe('private');
   });
 
+  it('refreshes an approved private catalog without depending on its own active recovery gate', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const recoveryGate = vi.spyOn(fixture.receiver, 'getMemberRecoveryRosterSource')
+      .mockResolvedValue(null);
+
+    await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    )).resolves.toMatchObject({
+      source: 'owner-signed-unregistered',
+      policy: { accessPolicy: 1 },
+    });
+    expect(recoveryGate).not.toHaveBeenCalled();
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBe('private');
+  });
+
+  it('does not use an unconfirmed private definition as a catalog roster', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    vi.spyOn(fixture.receiver, 'hasConfirmedMetaState').mockResolvedValue(false);
+    const localGate = vi.spyOn(fixture.receiver, 'getLocalMetadataMemberRecoveryGate');
+
+    await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    )).rejects.toThrow(/no authenticated lifecycle roster/u);
+    expect(localGate).not.toHaveBeenCalled();
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+  });
+
   it.each([
     ['curator', D.DKG_CURATOR, `did:dkg:agent:${OUTSIDER}`],
     ['creator', D.DKG_CREATOR, `did:dkg:agent:${CURATOR_PEER}-other`],
