@@ -575,7 +575,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
           count: attemptCount,
           maxRetries: maxAttempts,
           nextRetryAt,
-          lastError: job.attempt.lastError,
+          lastError: job.attempt.lastError ? { ...job.attempt.lastError, retryable: true } : undefined,
         },
       };
       await this.writeJob(requeued);
@@ -810,6 +810,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         return { outcome: 'rejected', reason: 'unknown' };
       }
       if (!isTerminalPromoteJobState(job.state as PromoteJobState)) return { outcome: 'rejected', reason: 'nonterminal' };
+      // The recovery sweep owns this replay-safe tail until its budget is spent.
+      // A failed row is temporarily parked between sweeps, not eligible for clear.
+      if (this.isAutomaticallyRecoverablePostCommitFailure({ ...job, state: job.state as PromoteJobState })
+        && Math.max(1, job.attempt.count) < job.attempt.maxRetries) {
+        return { outcome: 'rejected', reason: 'nonterminal' };
+      }
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };
     });

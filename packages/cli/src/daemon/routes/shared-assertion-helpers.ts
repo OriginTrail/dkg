@@ -169,6 +169,7 @@ export function scopedTokenPromoteLane(agentAddress?: string): { agentAddress?: 
 
 export interface PromoteJobErrorView {
   code: string;
+  diagnosticCode?: string;
   message: string;
   retryable: boolean;
 }
@@ -221,6 +222,7 @@ export function promoteJobToView(job: PromoteJob): PromoteJobView {
         code: job.attempt.lastError.classification,
         message: job.attempt.lastError.message,
         retryable: job.attempt.lastError.retryable,
+        ...(job.attempt.lastError.diagnosticCode ? { diagnosticCode: job.attempt.lastError.diagnosticCode } : {}),
       }
     : undefined;
 
