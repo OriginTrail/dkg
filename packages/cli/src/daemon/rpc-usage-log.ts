@@ -16,6 +16,12 @@
  *
  * The shared transport budget emits one state + delta line per window:
  *   rpc_request_governor max_rps=10 background_max_rps=2 foreground_queued=0 background_queued=4 ...
+ *
+ * Background views that left in aggregate requests: one summary line, then the
+ * reads each request carried by their own read label. The requests themselves
+ * are already counted above as `eth_call` under `multicall3.aggregate3`:
+ *   rpc_read_batching batches=9 failed_batches=0 refused_batches=0 calls=74 reads=81 direct_reads=1 window_s=60 chain=base:8453
+ *   rpc_batched_reads consumer=kas.getLatestMerkleRoot count=27 window_s=60 chain=base:8453
  */
 
 import {
@@ -24,6 +30,7 @@ import {
   rpcUsageWindowTotal,
   type RpcUsageDrainable,
   type RpcUsageWindow,
+  type RpcReadBatchingWindow,
   type RpcRequestGovernorWindow,
 } from '@origintrail-official/dkg-chain';
 
@@ -42,6 +49,7 @@ export function formatRpcUsageLines(
   windowSeconds: number,
   chainId?: string,
   requestGovernor?: RpcRequestGovernorWindow,
+  readBatching?: RpcReadBatchingWindow,
 ): string[] {
   if (!usage) return [];
   const normalized = normalizeRpcUsageWindow(usage);
@@ -111,7 +119,39 @@ export function formatRpcUsageLines(
       + `window_s=${windowSeconds}${chain}`,
     );
   }
+  lines.push(...formatRpcReadBatchingLines(readBatching, windowSeconds, chain));
   return lines;
+}
+
+/** Nothing for a window in which no aggregate request was sent. */
+function formatRpcReadBatchingLines(
+  window: RpcReadBatchingWindow | undefined,
+  windowSeconds: number,
+  chain: string,
+): string[] {
+  if (window === undefined) return [];
+  const integer = (value: number) => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  const requests = integer(window.batches) + integer(window.failedBatches) + integer(window.refusedBatches);
+  if (requests <= 0) return [];
+  const readLines: string[] = [];
+  let reads = 0;
+  for (const [label, count] of Object.entries(window.readsByLabel)) {
+    if (integer(count) <= 0) continue;
+    reads += integer(count);
+    readLines.push(
+      `rpc_batched_reads consumer=${safeToken(label, 'other')} count=${integer(count)} `
+      + `window_s=${windowSeconds}${chain}`,
+    );
+  }
+  return [
+    `rpc_read_batching batches=${integer(window.batches)} `
+      + `failed_batches=${integer(window.failedBatches)} `
+      + `refused_batches=${integer(window.refusedBatches)} `
+      + `calls=${integer(window.calls)} reads=${reads} `
+      + `direct_reads=${integer(window.directReads)} `
+      + `window_s=${windowSeconds}${chain}`,
+    ...readLines,
+  ];
 }
 
 /** What the daemon drains: anything (partially) implementing the shared contract. */
@@ -120,6 +160,8 @@ export type RpcUsageSource = Partial<RpcUsageDrainable>;
 /** Process-wide governor state has one drain owner, separate from usage sums. */
 export interface RpcTelemetrySource extends RpcUsageSource {
   drainRpcRequestGovernor?: () => RpcRequestGovernorWindow;
+  /** Process-wide like the governor: one drain owner for every adapter. */
+  drainRpcReadBatching?: () => RpcReadBatchingWindow;
 }
 
 /**
@@ -147,8 +189,14 @@ export function emitRpcUsage(
   } catch {
     // Usage accounting remains useful when the governor snapshot is unavailable.
   }
+  let readBatching: RpcReadBatchingWindow | undefined;
   try {
-    const lines = formatRpcUsageLines(usage, windowSeconds, chainId, governor);
+    readBatching = source?.drainRpcReadBatching?.();
+  } catch {
+    // The batching detail is a companion line; the usage lines do not need it.
+  }
+  try {
+    const lines = formatRpcUsageLines(usage, windowSeconds, chainId, governor, readBatching);
     for (const line of lines) emit(line);
     return lines.length;
   } catch {

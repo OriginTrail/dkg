@@ -1,3 +1,5 @@
+import { respondPromoteRecoveryError, type PromoteRecoveryContext } from './promote-recovery-response.js';
+export { respondPromoteRecoveryError } from './promote-recovery-response.js';
 import type { RequestContext } from './context.js';
 import {
   AMBIGUOUS_ASSERTION_AUTHOR_CODE,
@@ -65,38 +67,6 @@ export function respondPublicationPricingPolicyError(res: RequestContext["res"],
   jsonResponse(res, 409, {
     code: e.code,
     error: e.message ?? String(e),
-  });
-  return true;
-}
-
-interface PromoteRecoveryContext {
-  contextGraphId: string;
-  name: string;
-  phase: string;
-  subGraphName?: string;
-}
-
-export function respondPromoteRecoveryError(
-  res: RequestContext["res"],
-  e: any,
-  context?: PromoteRecoveryContext,
-): boolean {
-  if (e?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') return false;
-  process.stderr.write(`[DKG-Daemon] ${JSON.stringify({
-    event: 'knowledge_asset_recovery_required',
-    code: e.code,
-    ...context,
-  })}\n`);
-  jsonResponse(res, 409, {
-    code: e.code,
-    error: sanitizeRpcMessage(e.message ?? String(e)),
-    retryAction: 'resume_existing_knowledge_asset',
-    retryPhase: 'swm-share',
-    ...(context ? {
-      contextGraphId: context.contextGraphId,
-      retryKnowledgeAssetName: context.name,
-      ...(context.subGraphName ? { subGraphName: context.subGraphName } : {}),
-    } : {}),
   });
   return true;
 }
