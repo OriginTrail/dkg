@@ -70,7 +70,10 @@ import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
   '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
-import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
+import {
+  isRfc64AuthorityRpcCircuitOpenErrorV1,
+  Rfc64AuthorityRpcCircuitOpenErrorV1,
+} from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 import type { Rfc64CatalogRuntimeV1 } from '../src/rfc64/catalog-runtime-v1.js';
@@ -5399,6 +5402,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(isRfc64TransientAuthorityRefreshFailureV1('registered-private-roster-unresolved')).toBe(true);
     expect(isRfc64TransientAuthorityRefreshFailureV1('unregistered-private-roster-unresolved')).toBe(true);
     expect(isRfc64TransientAuthorityRefreshFailureV1('registered-authority-unfinalized')).toBe(true);
+    expect(isRfc64TransientAuthorityRefreshFailureV1('authority-rpc-circuit-open')).toBe(true);
     // Genuine denials must still fail closed.
     for (const denial of [
       'registered-authority-binding-mismatch',
@@ -5485,6 +5489,20 @@ describe('RFC-64 rollout authority integration', () => {
     // fixture does not select the graph, so the fence projection itself is
     // asserted by the public sibling above; what is new here is the typed,
     // retryable classification.)
+    expect((author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
+
+    // A temporarily open authority RPC circuit is likewise an unavailable
+    // read, not evidence of a revoked private graph. Keep the accepted
+    // author lineage and allow the next bounded refresh to restore parity.
+    roster.mockResolvedValue([AUTHOR.toLowerCase()]);
+    vi.spyOn(author as any, 'readRfc64FinalizedAuthoritySnapshotEvidenceV1')
+      .mockRejectedValueOnce(new Rfc64AuthorityRpcCircuitOpenErrorV1(
+        Date.now() + 1_000,
+        1_000,
+      ));
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .rejects.toMatchObject({ code: 'RFC64_AUTHORITY_RPC_CIRCUIT_OPEN' });
     expect((author as any).rfc64PublicCatalogServiceV1
       .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
   });

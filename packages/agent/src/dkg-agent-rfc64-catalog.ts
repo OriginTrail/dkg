@@ -175,9 +175,10 @@ import {
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/catalog-rollout-authority-v1.js';
-import type {
-  Rfc64AuthorityReadCoordinatorSnapshotV1,
-  Rfc64AuthorityReadRunOptionsV1,
+import {
+  isRfc64AuthorityRpcCircuitOpenErrorV1,
+  type Rfc64AuthorityReadCoordinatorSnapshotV1,
+  type Rfc64AuthorityReadRunOptionsV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
@@ -1378,7 +1379,8 @@ type Rfc64CatalogAuthorityFailureCodeV1 =
   | 'registered-private-roster-unresolved'
   | 'unregistered-private-roster-unresolved'
   | 'unregistered-owner-unresolved'
-  | 'access-policy-unresolved';
+  | 'access-policy-unresolved'
+  | 'authority-rpc-circuit-open';
 
 /** Intermediate acceleration-pull WARNs are rate-limited per scope to this window. */
 const RFC64_ACCELERATION_WARN_INTERVAL_MS_V1 = 30_000;
@@ -1424,6 +1426,7 @@ const RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1: ReadonlySet<string> = new S
   'registered-authority-unfinalized',
   'registered-private-roster-unresolved',
   'unregistered-private-roster-unresolved',
+  'authority-rpc-circuit-open',
 ]);
 
 /**
@@ -1438,6 +1441,7 @@ export function isRfc64TransientAuthorityRefreshFailureV1(code: string): boolean
 
 function rfc64CatalogAuthorityFailureCodeV1(error: unknown): string {
   if (error instanceof Rfc64CatalogAuthorityResolutionErrorV1) return error.code;
+  if (isRfc64AuthorityRpcCircuitOpenErrorV1(error)) return 'authority-rpc-circuit-open';
   return 'authority-resolution-failed';
 }
 
@@ -2982,6 +2986,27 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // Preserve their cancellation so the feature owner can drain
           // silently instead of reporting a false authority failure.
           if (ownerSignal.aborted) throw ownerSignal.reason;
+          if (isRfc64AuthorityRpcCircuitOpenErrorV1(error)) {
+            // Awaited subscribe/bootstrap callers do not belong to the
+            // scheduled responsibility batch. A circuit-open read must still
+            // get an owned follow-up after cooldown; otherwise the private
+            // receiver can remain unselected until an unrelated event.
+            this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+              `responsibility-circuit-retry\0${contextGraphId}\0${revision}`,
+              async (signal) => {
+                await waitForRfc64ScheduledResponsibilityDelayV1(
+                  signal,
+                  RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1,
+                );
+                signal.throwIfAborted();
+                if (isCurrentRfc64CatalogResponsibilityRevisionV1(
+                  this,
+                  contextGraphId,
+                  revision,
+                )) this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
+              },
+            );
+          }
           this.log.warn(
             createOperationContext('system'),
             `RFC-64 authority bootstrap incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
@@ -3357,15 +3382,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           pending.clear();
           throw ownerSignal.reason ?? error;
         }
-        if (isRfc64SharedStorePressureFailureV1(error)) {
-          // One managed-store timeout/admission failure represents shared
-          // backend pressure. Do not ask every remaining graph to rediscover
-          // the same unavailable store in this pass. Requeue the untouched
-          // suffix behind one abortable retry delay; accepted authority stays
-          // in place until a later complete projection supersedes it.
+        if (isRfc64SharedStorePressureFailureV1(error)
+          || isRfc64AuthorityRpcCircuitOpenErrorV1(error)) {
+          // Shared store pressure and an open authority RPC circuit are
+          // temporary node-wide conditions. Requeue this graph and the
+          // untouched suffix after one bounded delay instead of leaving a
+          // private receiver parked until an unrelated lifecycle nudge.
           this.log.warn(
             createOperationContext('system'),
-            `RFC-64 background responsibility batch paused after shared store pressure; `
+            `RFC-64 background responsibility batch paused after shared authority pressure; `
             + `${authorityTargets.length - targetIndex} target(s) deferred: ${
               error instanceof Error ? error.message : String(error)
             }`,
