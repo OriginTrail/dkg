@@ -1,21 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
+import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
 export interface ConfirmedNamedKaVmLifecycleInput extends PublishedNamedKaVmLifecycleInput {
   readonly assertionVersion: string;
   readonly priorMerkleRoot?: string;
-}
-type StoredInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'packedKaId'> & { packedKaId?: string };
-interface RepairEntry {
-  input: StoredInput;
-  attempts: number;
-  nextAttemptAt: number;
-  lastError?: string;
-  rejected?: boolean;
 }
 export type NamedKaVmLifecycleRepairOutcome = 'repaired' | 'pending' | 'superseded' | 'rejected';
 
@@ -23,7 +17,9 @@ export type NamedKaVmLifecycleRepairOutcome = 'repaired' | 'pending' | 'supersed
 export class NamedKaVmLifecycleRepair {
   private entries = new Map<string, RepairEntry>();
   private loaded = false;
-  private tail: Promise<unknown> = Promise.resolve();
+  private journalTail: Promise<unknown> = Promise.resolve();
+  private executionLocks = new Map<string, Promise<void>>();
+  private inFlight = new Set<Promise<unknown>>();
   private timer?: ReturnType<typeof setInterval>;
   private stopped = false;
   private workerPending = false;
@@ -38,42 +34,22 @@ export class NamedKaVmLifecycleRepair {
   }) {}
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(work, work);
-    this.tail = result.catch(() => undefined);
+    const result = this.journalTail.then(work, work);
+    this.journalTail = result.catch(() => undefined);
     return result;
   }
   private now(): number { return this.options.now?.() ?? Date.now(); }
-  private key(input: StoredInput): string {
-    return createHash('sha256').update(JSON.stringify([
-      input.contextGraphId, input.agentAddress.toLowerCase(), input.name, input.subGraphName ?? '',
-    ])).digest('hex');
-  }
   private async load(): Promise<void> {
     if (this.loaded) return;
     if (this.options.dataDir) {
       try {
-        const parsed = JSON.parse(await readFile(join(this.options.dataDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
-        if (parsed.version !== 1 || !Array.isArray(parsed.entries)) throw new Error('Invalid named KA lifecycle repair journal');
-        for (const [key, entry] of parsed.entries as Array<[string, RepairEntry]>) {
-          this.validate(entry.input);
-          if (key !== this.key(entry.input) || !Number.isSafeInteger(entry.attempts) || entry.attempts < 0
-            || !Number.isSafeInteger(entry.nextAttemptAt) || entry.nextAttemptAt < 0) throw new Error('Invalid named KA lifecycle repair entry');
-          this.entries.set(key, entry);
-        }
+        const parsed: unknown = JSON.parse(await readFile(join(this.options.dataDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
+        this.entries = decodeLifecycleRepairJournal(parsed);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
     }
     this.loaded = true;
-  }
-  private validate(input: StoredInput): void {
-    if (!input.contextGraphId || !input.agentAddress || !input.name || !input.publishedUal
-      || !/^(0x)?[0-9a-f]{64}$/i.test(input.merkleRoot)
-      || !/^[1-9][0-9]*$/.test(input.assertionVersion)
-      || (input.packedKaId !== undefined && !/^[0-9]+$/.test(input.packedKaId))
-      || (input.priorMerkleRoot !== undefined && !/^(0x)?[0-9a-f]{64}$/i.test(input.priorMerkleRoot))) {
-      throw Object.assign(new Error('Invalid confirmed named KA lifecycle repair evidence'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
-    }
   }
   private async persist(): Promise<void> {
     const dir = this.options.dataDir;
@@ -100,72 +76,90 @@ export class NamedKaVmLifecycleRepair {
   }
 
   async submit(input: ConfirmedNamedKaVmLifecycleInput): Promise<NamedKaVmLifecycleRepairOutcome> {
-    return this.serial(async () => {
+    const admitted = await this.serial<{ outcome: NamedKaVmLifecycleRepairOutcome } | { key: string; entry: RepairEntry }>(async () => {
       if (this.stopped) throw new Error('Named KA lifecycle repair owner is stopped');
       await this.load();
-      const { packedKaId, ...fields } = input;
-      const stored: StoredInput = { ...fields, merkleRoot: input.merkleRoot.toLowerCase().replace(/^0x/, ''),
-        ...(input.priorMerkleRoot ? { priorMerkleRoot: input.priorMerkleRoot.toLowerCase().replace(/^0x/, '') } : {}),
-        ...(packedKaId === undefined ? {} : { packedKaId: packedKaId.toString() }) };
-      this.validate(stored);
-      const key = this.key(stored);
+      const stored = normalizeLifecycleRepairInput(input, true);
+      const key = lifecycleRepairKey(stored);
       const previous = this.entries.get(key);
-      if (previous && BigInt(previous.input.assertionVersion) > BigInt(input.assertionVersion)) return 'superseded';
-      if (previous && previous.input.assertionVersion === input.assertionVersion
-        && previous.input.merkleRoot !== stored.merkleRoot) {
+      if (previous && BigInt(previous.input.assertionVersion) > BigInt(stored.assertionVersion)) return { outcome: 'superseded' as const };
+      if (previous && previous.input.assertionVersion === stored.assertionVersion && previous.input.merkleRoot !== stored.merkleRoot) {
         throw Object.assign(new Error('Conflicting confirmed roots at the same assertion version'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
       }
-      // Persist before the first graph-store call. Any partial stamp can be replayed after restart.
-      const entry = previous?.input.assertionVersion === input.assertionVersion
+      const entry = previous?.input.assertionVersion === stored.assertionVersion
         ? previous : { input: stored, attempts: 0, nextAttemptAt: this.now() };
       this.entries.set(key, entry);
-      await this.persist();
-      if (entry.rejected) return 'rejected';
-      if (entry.nextAttemptAt > this.now()) return 'pending';
-      return this.attempt(key, entry);
+      // Write-ahead admission contains no external chain or graph-store work.
+      try { await this.persist(); }
+      catch (error) {
+        if (previous) this.entries.set(key, previous); else this.entries.delete(key);
+        throw error;
+      }
+      return { key, entry };
     });
+    if ('outcome' in admitted) return admitted.outcome;
+    return this.execute(admitted.key, admitted.entry);
+  }
+
+  private execute(key: string, entry: RepairEntry): Promise<NamedKaVmLifecycleRepairOutcome> {
+    const execution = withKeyedLocks(this.executionLocks, [key], async () => {
+      const ready = await this.serial(async () => {
+        if (this.entries.get(key) !== entry) return 'superseded' as const;
+        if (entry.rejected) return 'rejected' as const;
+        if (this.stopped || entry.nextAttemptAt > this.now()) return 'pending' as const;
+        return undefined;
+      });
+      return ready ?? await this.attempt(key, entry);
+    });
+    this.inFlight.add(execution);
+    void execution.finally(() => this.inFlight.delete(execution)).catch(() => undefined);
+    return execution;
   }
   private async attempt(key: string, entry: RepairEntry): Promise<NamedKaVmLifecycleRepairOutcome> {
     const { packedKaId, ...fields } = entry.input;
     const input: ConfirmedNamedKaVmLifecycleInput = { ...fields,
       ...(packedKaId === undefined ? {} : { packedKaId: BigInt(packedKaId) }) };
     let outcome: NamedKaVmLifecycleRepairOutcome;
+    let failure: unknown;
     try {
-      if (!await this.options.isCurrent(input)) {
-        this.entries.delete(key);
-        outcome = 'superseded';
-      } else {
+      if (!await this.options.isCurrent(input)) outcome = 'superseded';
+      else {
+        // A newer admission may arrive during the chain read. Fence it before applying.
+        if (!await this.serial(async () => this.entries.get(key) === entry)) return 'superseded';
         await this.options.apply(input);
-        this.entries.delete(key);
         outcome = 'repaired';
       }
     } catch (error) {
-      const code = (error as { code?: string })?.code;
-      // Admission/timeouts and RPC availability are transient. Invalid evidence is never retried.
-      const permanent = code === 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY';
-      entry.attempts += 1;
-      entry.lastError = error instanceof Error ? error.message : String(error);
-      entry.rejected = permanent;
-      entry.nextAttemptAt = this.now() + Math.min(300_000, 5_000 * 2 ** Math.min(entry.attempts - 1, 6));
-      const storePressure = isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error);
-      this.options.warn(`Confirmed named KA ${input.name} lifecycle repair ${permanent ? 'rejected' : 'pending'}${storePressure ? ' under store pressure' : ''}: ${entry.lastError}`);
-      outcome = permanent ? 'rejected' : 'pending';
+      failure = error;
+      outcome = (error as { code?: string })?.code === 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' ? 'rejected' : 'pending';
     }
-    await this.persist();
-    return outcome;
+    return this.serial(async () => {
+      if (this.entries.get(key) !== entry) return 'superseded';
+      if (outcome === 'repaired' || outcome === 'superseded') this.entries.delete(key);
+      else {
+        entry.attempts += 1;
+        entry.lastError = failure instanceof Error ? failure.message : String(failure);
+        entry.rejected = outcome === 'rejected';
+        entry.nextAttemptAt = this.now() + Math.min(300_000, 5_000 * 2 ** Math.min(entry.attempts - 1, 6));
+        const pressure = isStoreSchedulerBusyError(failure) || isStoreOperationTimeoutError(failure);
+        this.options.warn(`Confirmed named KA ${input.name} lifecycle repair ${outcome}${pressure ? ' under store pressure' : ''}: ${entry.lastError}`);
+      }
+      try { await this.persist(); }
+      catch (error) { this.entries.set(key, entry); throw error; }
+      return outcome;
+    });
   }
   async runDue(): Promise<void> {
-    return this.serial(async () => {
-      if (this.stopped) return;
+    const due = await this.serial(async () => {
+      if (this.stopped) return [];
       await this.load();
-      // One serialized batch with a finite admission budget; failed entries retain their deadlines.
-      const due = [...this.entries].filter(([, entry]) => !entry.rejected && entry.nextAttemptAt <= this.now())
+      return [...this.entries].filter(([, entry]) => !entry.rejected && entry.nextAttemptAt <= this.now())
         .sort((a, b) => a[1].nextAttemptAt - b[1].nextAttemptAt).slice(0, 10);
-      for (const [key, entry] of due) {
-        if (this.stopped) break;
-        await this.attempt(key, entry);
-      }
     });
+    for (const [key, entry] of due) {
+      if (this.stopped) break;
+      await this.execute(key, entry);
+    }
   }
   start(): void {
     this.stopped = false;
@@ -182,6 +176,8 @@ export class NamedKaVmLifecycleRepair {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    await this.tail;
+    await this.journalTail;
+    await Promise.allSettled(this.inFlight);
+    await this.journalTail;
   }
 }

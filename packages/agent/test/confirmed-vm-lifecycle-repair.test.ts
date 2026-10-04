@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
@@ -12,6 +12,7 @@ import { computeFlatKCRootV10, DKGPublisher, TripleStoreAsyncLiftPublisher,
 import { DKGAgent } from '../src/dkg-agent.js';
 import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
+import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const CG = 'confirmed-lifecycle-repair', NAME = 'repair-asset', UAL = `did:dkg:mock:31337/${AUTHOR}/1`;
@@ -55,6 +56,7 @@ const faults = [
   ['wm divergence pointer', `${DKG}wmCurrentAssertion`, 'delete'], ['memory layer', `${DKG}memoryLayer`, 'insert'],
   ['published state', `${DKG}state`, 'insert'], ['published UAL', `${DKG}publishedUal`, 'insert'],
   ['update provenance', 'http://www.w3.org/ns/prov#wasRevisionOf', 'insert'],
+  ['successful stamp', 'urn:never-fails', 'insert'],
 ] as const;
 for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] as const) {
   describe(`confirmed descriptor recovery: ${mode}`, () => {
@@ -108,7 +110,7 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
           if (processed?.status === 'failed') throw new Error(JSON.stringify(processed));
           expect(processed).toMatchObject({ jobId, status: 'finalized' });
         } else result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
-        expect(result.status).toBe('confirmed'); expect(publish).toHaveBeenCalledTimes(1);
+        expect(result.status).toBe('confirmed'); expect(result.ual).toBe(PUBLISHED); expect(result.lifecycleRepairPending).toBe(label === 'successful stamp' ? undefined : true); expect(publish).toHaveBeenCalledTimes(1);
         await agent.namedKaVmLifecycleRepair?.runDue(); // No retry before the persisted 5s deadline.
         await agent.namedKaVmLifecycleRepair?.stop(); await store.close(); now += 6_000;
         const restartedStore = new OxigraphStore(storePath); stores.push(restartedStore);
@@ -222,5 +224,120 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
     const rows = await store.query(`SELECT ?p ?o WHERE { GRAPH <${META}> { <${LIFECYCLE}> ?p ?o } }`);
     expect(rows).toMatchObject({ bindings: [] });
     await repair.stop(); await store.close();
+  });
+});
+
+describe('review regression boundaries', () => {
+  const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED };
+  it.each([false, true])('preserves a reopened unsealed WM draft with matching pointer=%s', async (matchingPointer) => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-open-wm-repair-')); dirs.push(dir);
+    const store = new OxigraphStore(); stores.push(store);
+    const scope = createGraphKnowledgeAssetScope(UAL, 1), vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope), wmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.WorkingMemory, scope);
+    await store.insert([
+      ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,
+        authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2), authorSchemeVersion: 1,
+        chainId: 31337n, kav10Address: AUTHOR, reservedKaId: PACKED, finalizedAtIso: new Date().toISOString(),
+        contentScopeVersion: 2, kaUal: UAL, assertionVersion: 1, publicTripleCount: 1, privateTripleCount: 0 }),
+      ...QUADS.map(quad => ({ ...quad, graph: vmGraph })),
+      { subject: LIFECYCLE, predicate: `${DKG}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}assertionVersion`, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}kaId`, object: '"1"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}reservedUal`, object: UAL, graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"published"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}memoryLayer`, object: '"VM"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: META },
+    ]);
+    let now = 1_000, fail = true;
+    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now, isCurrent: async () => true, warn: () => undefined,
+      apply: async value => { if (fail) throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'insert', outcome: 'not_started' }); await applyPublishedNamedKaVmLifecycle(store, value); } });
+    expect(await repair.submit(input)).toBe('pending');
+    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+    await publisher.assertionPullFrom(CG, NAME, AUTHOR, 'vm');
+    await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:new:draft', predicate: 'urn:text', object: '"edited"', graph: '' }]);
+    if (matchingPointer) await store.insert([{ subject: LIFECYCLE, predicate: `${DKG}wmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META }]);
+    fail = false; now = 6_000; await repair.runDue();
+    const rows = await store.query(`SELECT ?p ?o WHERE { GRAPH <${META}> { <${LIFECYCLE}> ?p ?o } }`);
+    if (rows.type !== 'bindings') throw new Error('Expected lifecycle rows');
+    const values = Object.fromEntries(rows.bindings.map(row => [row.p, row.o]));
+    expect(values[`${DKG}state`]).toBe('"created"'); expect(values[`${DKG}memoryLayer`]).toBe('"WM"'); expect(values[`${DKG}assertionGraph`]).toBe(wmGraph);
+    expect(values[`${DKG}vmCurrentAssertion`]).toBe(JSON.stringify(HEX.slice(2)));
+    if (matchingPointer) expect(values[`${DKG}wmCurrentAssertion`]).toBe(JSON.stringify(HEX.slice(2)));
+    await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:next:draft', predicate: 'urn:text', object: '"still editable"', graph: '' }]);
+    expect(await store.query(`ASK { GRAPH <${META}> { <${wmGraph}> <${DKG}memoryLayer> "WM" } }`)).toMatchObject({ type: 'boolean', value: true });
+    await repair.stop();
+  });
+  it('admits B durably while unrelated A is held in a repair attempt', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-parallel-admission-')); dirs.push(dir);
+    let release!: () => void, entered!: () => void, bEntered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; }), bStarted = new Promise<void>(resolve => { bEntered = resolve; });
+    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, isCurrent: async () => true, warn: () => undefined,
+      apply: async value => { if (value.name === NAME) entered(); else bEntered(); await held; } });
+    const a = repair.submit(input); await started; const b = repair.submit({ ...input, name: 'independent-B', packedKaId: PACKED + 1n, publishedUal: `${PUBLISHED.slice(0, -1)}2` });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([bStarted, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('B admission blocked by A')), 1_000); })]);
+      const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+      expect(journal.size).toBe(2); expect([...journal.values()].map(entry => entry.input.name)).toContain('independent-B');
+    } finally { if (timeout) clearTimeout(timeout); release(); await Promise.all([a, b]); await repair.stop(); }
+  });
+  it('persists write-ahead evidence before the first apply callback', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-write-ahead-')); dirs.push(dir);
+    const apply = vi.fn(async () => {
+      const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+      expect([...journal.values()]).toMatchObject([{ input: { name: NAME, merkleRoot: HEX.slice(2), assertionVersion: '1' }, attempts: 0 }]);
+    });
+    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
+    expect(await repair.submit(input)).toBe('repaired'); expect(apply).toHaveBeenCalledOnce(); await repair.stop();
+  });
+  it('does not apply after failed durable admission and preserves confirmed evidence in the agent error', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-failed-admission-')); dirs.push(dir);
+    const apply = vi.fn(async () => undefined), repair = new NamedKaVmLifecycleRepair({ dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
+    const persist = vi.spyOn(repair as unknown as { persist: () => Promise<void> }, 'persist').mockRejectedValueOnce(Object.assign(new Error('journal fsync failed'), { code: 'EIO' }));
+    const store = new OxigraphStore(), agent = agentFor(store, dir, 1); agent.namedKaVmLifecycleRepair = repair;
+    await expect(agent._repairConfirmedNamedKaVmLifecycle(input)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1' });
+    expect(persist).toHaveBeenCalledOnce(); expect(apply).not.toHaveBeenCalled(); await repair.stop();
+  });
+  it('round-trips canonical version-1 journal entries and retry state', () => {
+    const normalized = normalizeLifecycleRepairInput({ ...input, merkleRoot: HEX.toUpperCase().replace('0X', '0x'), priorMerkleRoot: `0x${PRIOR.toUpperCase()}` }, true), key = lifecycleRepairKey(normalized);
+    const decoded = decodeLifecycleRepairJournal({ version: 1, entries: [[key, { input: normalized, attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' }]] });
+    expect(decoded.get(key)).toEqual({ input: { ...normalized, merkleRoot: HEX.slice(2), priorMerkleRoot: PRIOR }, attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' });
+  });
+  it.each(['contextGraphId', 'agentAddress', 'name', 'publishedUal', 'merkleRoot', 'assertionVersion', 'packedKaId', 'subGraphName', 'priorMerkleRoot'])('rejects non-string journal field %s', (field) => {
+    const normalized = normalizeLifecycleRepairInput(input, true), key = lifecycleRepairKey(normalized);
+    expect(() => decodeLifecycleRepairJournal({ version: 1, entries: [[key, { input: { ...normalized, [field]: 123 }, attempts: 0, nextAttemptAt: 0 }]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
+  });
+});
+
+describe('tentative normal publication projection', () => {
+  it.each([1, 2])('centralizes tentative mint/update version %s without claiming a VM data graph', async (version) => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-tentative-projection-')); dirs.push(dir);
+    const store = new OxigraphStore(), scope = createGraphKnowledgeAssetScope(UAL, version), swm = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
+    await store.insert([
+      ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,
+        authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2), authorSchemeVersion: 1,
+        chainId: 31337n, kav10Address: AUTHOR, reservedKaId: PACKED, finalizedAtIso: new Date().toISOString(),
+        contentScopeVersion: 2, kaUal: UAL, assertionVersion: version, publicTripleCount: 1, privateTripleCount: 0 }),
+      ...QUADS.map(quad => ({ ...quad, graph: swm })),
+      { subject: LIFECYCLE, predicate: `${DKG}kaId`, object: '"1"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"shared"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}memoryLayer`, object: '"SWM"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}assertionGraph`, object: swm, graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}wmCurrentAssertion`, object: JSON.stringify(version === 2 ? PRIOR : HEX.slice(2)), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}swmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
+      ...(version === 2 ? [{ subject: LIFECYCLE, predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify(PRIOR), graph: META }] : []),
+    ]);
+    const agent = agentFor(store, dir, version), publish = vi.fn(async () => ({ status: 'tentative', ual: PUBLISHED, kaId: PACKED, merkleRoot: ROOT, kaManifest: [] }));
+    agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => undefined, clearPublishedKnowledgeAssetSwm: async () => undefined };
+    agent.publishFromSharedMemory = publish; agent.update = publish;
+    const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
+    expect(result).toMatchObject({ status: 'tentative', ual: PUBLISHED }); expect(result.lifecycleRepairPending).toBeUndefined(); expect(publish).toHaveBeenCalledOnce();
+    const rows = await store.query(`SELECT ?p ?o WHERE { GRAPH <${META}> { <${LIFECYCLE}> ?p ?o } }`);
+    if (rows.type !== 'bindings') throw new Error('Expected projection rows');
+    const values = Object.fromEntries(rows.bindings.map(row => [row.p, row.o]));
+    expect(values[`${DKG}vmCurrentAssertion`]).toBe(JSON.stringify(HEX.slice(2))); expect(values[`${DKG}wmCurrentAssertion`]).toBeUndefined();
+    expect(values[`${DKG}state`]).toBe('"published"'); expect(values[`${DKG}memoryLayer`]).toBe('"VM"'); expect(values[`${DKG}assertionGraph`]).toBe(swm);
+    if (version === 2) expect(values['http://www.w3.org/ns/prov#wasRevisionOf']).toBe(`${LIFECYCLE}#assertion-${PRIOR}`);
+    expect(agent.namedKaVmLifecycleRepair).toBeUndefined();
   });
 });

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  ASSERTION_SEAL_PREDICATES,
   MemoryLayer,
   assertionLifecycleUri,
   contextGraphAssertionUri,
@@ -28,6 +29,8 @@ export interface PublishedNamedKaVmLifecycleInput {
   readonly merkleRoot: string;
   readonly packedKaId?: bigint;
   readonly priorMerkleRoot?: string;
+  /** Tentative updates consume the prior sealed WM projection without claiming a VM graph. */
+  readonly tentative?: boolean;
 }
 
 /** Canonical idempotent writer used by both normal publish and tx recovery. */
@@ -60,9 +63,12 @@ export async function applyPublishedNamedKaVmLifecycle(
     throw Object.assign(new Error('Invalid prior confirmed root during lifecycle repair'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
   }
 
-  const workspacePointers = await store.query(`SELECT ?wm ?swm WHERE { GRAPH <${metaGraph}> {
+  const workspacePointers = await store.query(`SELECT ?wm ?swm ?state ?layer ?activeSeal WHERE { GRAPH <${metaGraph}> {
     OPTIONAL { <${lifecycleUri}> <${WM_CURRENT_ASSERTION_PRED}> ?wm }
     OPTIONAL { <${lifecycleUri}> <${SWM_CURRENT_ASSERTION_PRED}> ?swm }
+    OPTIONAL { <${lifecycleUri}> <${STATE_PRED}> ?state }
+    OPTIONAL { <${lifecycleUri}> <${MEMORY_LAYER_PRED}> ?layer }
+    OPTIONAL { <${assertionUri}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?activeSeal }
   } } LIMIT 2`, { source: 'agent.publish.confirmedLifecycleWorkspaceGuard' });
   if (workspacePointers.type !== 'bindings' || workspacePointers.bindings.length > 1) {
     throw Object.assign(new Error('Invalid workspace pointers during confirmed lifecycle repair'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
@@ -71,7 +77,13 @@ export async function applyPublishedNamedKaVmLifecycle(
   const workspace = workspacePointers.bindings[0];
   const wm = bare(workspace?.wm);
   const swm = bare(workspace?.swm);
-  const preserveWorkspace = [wm, swm].some(root => root !== undefined && root !== bareMerkleRoot);
+  const activeSeal = bare(workspace?.activeSeal);
+  const reopenedDraft = bare(workspace?.state) === 'created' && bare(workspace?.layer) === 'wm' && activeSeal === undefined;
+  const consumedTentativePrior = input.tentative === true && prior !== undefined && wm === prior;
+  const preserveWorkspace = reopenedDraft
+    || (activeSeal !== undefined && activeSeal !== bareMerkleRoot)
+    || (wm !== undefined && wm !== bareMerkleRoot && !consumedTentativePrior)
+    || (swm !== undefined && swm !== bareMerkleRoot);
 
   await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, graph: metaGraph });
   await store.insert([{
@@ -81,7 +93,7 @@ export async function applyPublishedNamedKaVmLifecycle(
     graph: metaGraph,
   }]);
 
-  if (wm === bareMerkleRoot) {
+  if (!preserveWorkspace && (wm === bareMerkleRoot || consumedTentativePrior)) {
     await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: WM_CURRENT_ASSERTION_PRED, graph: metaGraph });
   }
   if (prior !== undefined) {

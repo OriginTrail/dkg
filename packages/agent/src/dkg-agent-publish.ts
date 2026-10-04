@@ -6120,7 +6120,6 @@ export class PublishMethods extends DKGAgentBase {
         `Lifecycle kaId number ${stampedNumberStr} does not match graph-scoped UAL number ${graphScope.kaNumber}`,
       );
     }
-    const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
     if (recoveredReservedKaId !== packedKaId) {
       throw new Error(
@@ -6257,32 +6256,7 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
 
-      // Stamp UPDATE provenance + re-stamp VM/WM pointers to the new merkle.
-      if (result.status === 'tentative') {
-        try {
-          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
-            ? operationPlan.vmCurrentAssertion.slice(2)
-            : operationPlan.vmCurrentAssertion;
-          const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          // Re-point VM to the new merkle (drop-then-set), then record the
-          // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
-          // Phase 2: WM converges back to VM after the update mint, so the
-          // divergence-only stamp DELETES any stale WM row instead of
-          // duplicating the new merkle (readers COALESCE missing wm → vm).
-          await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this.store.insert([
-            { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-            { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
-          ]);
-        } catch (err) {
-          this.log.warn(
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            `Failed to stamp update provenance for <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
+
     } else {
       // ── MINT PATH ──
       // Round 4 review §9 — scope the SWM CONSTRUCT to the seal's
@@ -6392,7 +6366,8 @@ export class PublishMethods extends DKGAgentBase {
       try {
         await applyPublishedNamedKaVmLifecycle(this.store, {
           contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName,
-          publishedUal: result.ual, merkleRoot: ethers.hexlify(seal.merkleRoot),
+          publishedUal: result.ual, merkleRoot: ethers.hexlify(seal.merkleRoot), tentative: true,
+          ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
         });
       } catch (err) {
         this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
