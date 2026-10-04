@@ -176,9 +176,10 @@ import {
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/catalog-rollout-authority-v1.js';
-import type {
-  Rfc64AuthorityReadCoordinatorSnapshotV1,
-  Rfc64AuthorityReadRunOptionsV1,
+import {
+  isRfc64AuthorityRpcCircuitOpenErrorV1,
+  type Rfc64AuthorityReadCoordinatorSnapshotV1,
+  type Rfc64AuthorityReadRunOptionsV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
@@ -1354,7 +1355,8 @@ type Rfc64CatalogAuthorityFailureCodeV1 =
   | 'registered-private-roster-unresolved'
   | 'unregistered-private-roster-unresolved'
   | 'unregistered-owner-unresolved'
-  | 'access-policy-unresolved';
+  | 'access-policy-unresolved'
+  | 'authority-rpc-circuit-open';
 
 /** Intermediate acceleration-pull WARNs are rate-limited per scope to this window. */
 const RFC64_ACCELERATION_WARN_INTERVAL_MS_V1 = 30_000;
@@ -1400,6 +1402,7 @@ const RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1: ReadonlySet<string> = new S
   'registered-authority-unfinalized',
   'registered-private-roster-unresolved',
   'unregistered-private-roster-unresolved',
+  'authority-rpc-circuit-open',
 ]);
 
 /**
@@ -1414,6 +1417,7 @@ export function isRfc64TransientAuthorityRefreshFailureV1(code: string): boolean
 
 function rfc64CatalogAuthorityFailureCodeV1(error: unknown): string {
   if (error instanceof Rfc64CatalogAuthorityResolutionErrorV1) return error.code;
+  if (isRfc64AuthorityRpcCircuitOpenErrorV1(error)) return 'authority-rpc-circuit-open';
   return 'authority-resolution-failed';
 }
 
@@ -2086,9 +2090,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<readonly EvmAddressV1[] | null> {
-    if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
-      return null;
-    }
     // The creator's explicit local-first registration marker already proves
     // this graph has no chain roster. Reading the general member-recovery
     // authority here would ask the accepted catalog policy we are currently
@@ -2097,7 +2098,72 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     // the old policy. Read the creator's own confirmed _meta instead, while
     // keeping merged revocations effective and fencing registration changes.
     const localFirst = await this.isLocalFirstUnregisteredContextGraph(contextGraphId);
-    const gate = localFirst
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
+    let approvedReplicaGate: readonly string[] | undefined;
+    if (
+      !localFirst
+      && approvedAgent !== undefined
+      && accepted?.policy.accessPolicy === 1
+      && accepted.policy.source.kind === 'owner-signed-unregistered'
+    ) {
+      const revision = this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId);
+      const approved = await resolveApprovedPrivateReplicaAuthority(
+        this,
+        contextGraphId,
+        approvedAgent,
+        () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+          === approvedAgent.toLowerCase(),
+        () => this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId) === revision,
+      ).catch(() => null);
+      if (
+        approved?.kind === 'unregistered-private-replica'
+        && approved.authority.ownerAddress === accepted.policy.source.ownerAddress
+      ) {
+        // The approved-member proof authenticates this replica's own private
+        // definition. Check finalized name absence independently, then read
+        // the effective local roster and fence both sources again after the
+        // store awaits. The general recovery helper would ask the accepted
+        // catalog policy to authorize the roster needed to authorize that
+        // same catalog transport, leaving cold approved replicas stuck.
+        const before = await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId)
+          .catch(() => undefined);
+        if (before === undefined) return null;
+        if (before === null) {
+          const merged = await this.getLocalMetadataMemberRecoveryGate(contextGraphId)
+            .catch(() => null);
+          const own = await this.getOwnCgMetaFacts(contextGraphId)
+            .catch(() => null);
+          const after = await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId)
+            .catch(() => undefined);
+          if (
+            merged === null
+            || own === null
+            || after !== null
+            || this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId) !== revision
+            || this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+              !== approvedAgent.toLowerCase()
+            || this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)
+              ?.policyDigest !== accepted.policyDigest
+          ) return null;
+          const named = new Set(
+            [...own.allowedAgents, ...own.participantAgents]
+              .map((address) => address.toLowerCase()),
+          );
+          approvedReplicaGate = merged.filter((address) => named.has(address.toLowerCase()));
+        }
+      }
+    }
+    if (approvedReplicaGate === undefined
+      && !await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+      return null;
+    }
+    const gate = approvedReplicaGate !== undefined
+      ? approvedReplicaGate
+      : localFirst
       ? await (async () => {
           const roster = await this.resolveRfc64ConfirmedOwnMetaRosterV1(contextGraphId);
           return await this.isLocalFirstUnregisteredContextGraph(contextGraphId) ? roster : null;
@@ -2895,6 +2961,27 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // Preserve their cancellation so the feature owner can drain
           // silently instead of reporting a false authority failure.
           if (ownerSignal.aborted) throw ownerSignal.reason;
+          if (isRfc64AuthorityRpcCircuitOpenErrorV1(error)) {
+            // Awaited subscribe/bootstrap callers do not belong to the
+            // scheduled responsibility batch. A circuit-open read must still
+            // get an owned follow-up after cooldown; otherwise the private
+            // receiver can remain unselected until an unrelated event.
+            this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+              `responsibility-circuit-retry\0${contextGraphId}\0${revision}`,
+              async (signal) => {
+                await waitForRfc64ScheduledResponsibilityDelayV1(
+                  signal,
+                  RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1,
+                );
+                signal.throwIfAborted();
+                if (isCurrentRfc64CatalogResponsibilityRevisionV1(
+                  this,
+                  contextGraphId,
+                  revision,
+                )) this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
+              },
+            );
+          }
           this.log.warn(
             createOperationContext('system'),
             `RFC-64 authority bootstrap incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
@@ -3270,15 +3357,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           pending.clear();
           throw ownerSignal.reason ?? error;
         }
-        if (isRfc64SharedStorePressureFailureV1(error)) {
-          // One managed-store timeout/admission failure represents shared
-          // backend pressure. Do not ask every remaining graph to rediscover
-          // the same unavailable store in this pass. Requeue the untouched
-          // suffix behind one abortable retry delay; accepted authority stays
-          // in place until a later complete projection supersedes it.
+        if (isRfc64SharedStorePressureFailureV1(error)
+          || isRfc64AuthorityRpcCircuitOpenErrorV1(error)) {
+          // Shared store pressure and an open authority RPC circuit are
+          // temporary node-wide conditions. Requeue this graph and the
+          // untouched suffix after one bounded delay instead of leaving a
+          // private receiver parked until an unrelated lifecycle nudge.
           this.log.warn(
             createOperationContext('system'),
-            `RFC-64 background responsibility batch paused after shared store pressure; `
+            `RFC-64 background responsibility batch paused after shared authority pressure; `
             + `${authorityTargets.length - targetIndex} target(s) deferred: ${
               error instanceof Error ? error.message : String(error)
             }`,
@@ -3420,6 +3507,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : undefined;
       const boundOnChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
         ?? suppliedAuthorityEvidence?.contextGraphAuthorityIndexId;
+      let approvedPrivateFactsMoved = false;
       const source = await resolveRfc64CatalogLifecycleAuthoritySourceV1({
         bound: boundOnChainId !== undefined,
         finalizedAbsence: authorityRequest.kind === 'finalized-absence',
@@ -3443,6 +3531,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision,
             signal,
           );
+          // A null proof from a moving generation does not withdraw approved
+          // authority. Retry composition before trying another source or retiring it.
+          approvedPrivateFactsMoved = approved === null && approvedAgent !== undefined
+            && (this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId) !== metadataRevision
+              || (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) !== requesterRevision);
           return approved?.kind === 'unregistered-private-replica'
             ? { authority: approved.authority, metadataRevision, requesterRevision } : null;
         },
@@ -3454,6 +3547,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           seeds: this.rfc64UnregisteredAuthoritySeedAccessV1(),
         }),
       });
+      if (approvedPrivateFactsMoved) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
       if (source === null) {
         throw new Rfc64CatalogAuthorityResolutionErrorV1(
           'unregistered-owner-unresolved',

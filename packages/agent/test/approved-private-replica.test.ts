@@ -1700,6 +1700,53 @@ describe('approved private bare-name replica authorization', () => {
       .toBe('private');
   });
 
+  it('retries an approved private catalog proof when its metadata revision moves', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const proof = pauseSuccessfulApprovedPrivateProofOnce(fixture);
+    const reconciliation = fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    await proof.returned;
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+    proof.release();
+
+    await expect(reconciliation).resolves.toMatchObject({
+      source: 'owner-signed-unregistered',
+      policy: { accessPolicy: 1 },
+    });
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBe('private');
+  });
+
+  it('authorizes an approved private catalog peer from the live join proof without a circular recovery read', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    const recoveryGate = vi.spyOn(fixture.receiver, 'getMemberRecoveryRosterSource')
+      .mockResolvedValue(null);
+
+    await expect(fixture.receiver.resolveRfc64VerifiedPrivateRosterV1(CONTEXT_GRAPH_ID))
+      .resolves.toEqual([OWNER, fixture.memberAddress].sort());
+    await expect(fixture.receiver.resolveRfc64CatalogLocalAgentAddressV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe(fixture.memberAddress);
+    expect(recoveryGate).not.toHaveBeenCalled();
+
+    await fixture.receiver.store.insert([{
+      graph: fixture.graph,
+      subject: fixture.subject,
+      predicate: D.DKG_REVOKED_AGENT,
+      object: JSON.stringify(fixture.memberAddress),
+    }]);
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+    await expect(fixture.receiver.resolveRfc64CatalogLocalAgentAddressV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeNull();
+  });
+
   it('does not use an unconfirmed private definition as a catalog roster', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     vi.spyOn(fixture.receiver, 'hasConfirmedMetaState').mockResolvedValue(false);

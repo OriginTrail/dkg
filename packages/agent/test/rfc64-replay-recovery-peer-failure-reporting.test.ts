@@ -963,6 +963,31 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       expectedRowCount: null,
       missingRowCount: null,
     });
+
+    // The roster rotates to one member who is not the owner. The owner's heads
+    // stay applied, but the only author now allowed is someone else.
+    localAgents.mockReturnValue([
+      { agentAddress: AUTHOR },
+    ] as ReturnType<typeof edge.listLocalAgents>);
+    const rotated = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      ownerAddress: AUTHOR,
+      accessPolicy,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses: [`0x${'ab'.repeat(20)}` as typeof AUTHOR],
+      rosterVersion: '1',
+    });
+    (edge as any).rfc64PublicCatalogServiceV1.acceptAuthoritativePolicySnapshot({
+      policy: rotated.policy,
+      policyDigest: rotated.policyDigest,
+      roster: rotated.roster,
+    });
+    const otherSoleMember = (await edge.readRfc64CatalogOperationalStatusV1())
+      .find((row) => row.contextGraphId === contextGraphId);
+    expect(otherSoleMember?.phase).not.toBe('complete');
+    expect(otherSoleMember).toMatchObject({ expectedRowCount: null, missingRowCount: null });
   });
 
   it('reports a verified promised row missing after its head announcement was lost', async () => {
