@@ -7011,8 +7011,7 @@ export class PublishMethods extends DKGAgentBase {
     });
 
     if (
-      graphScopedPublish
-      && result.status === 'confirmed'
+      result.status === 'confirmed'
       && options?.kaUal !== undefined
       && options.assertionVersion !== undefined
     ) {
