@@ -8,7 +8,7 @@ import { tagPromoteStep } from './promote-step-tag.js';
 import { isReservedSubject } from './reserved-subjects.js';
 import { tryResolveKnowledgeAssetWorkspaceHead, type KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { publisherWorkspaceOperationSemanticsKey, workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
-import { readDurablePromoteClaim, durablePromoteClaimMatches, parsePromoteLifecycleLiteral } from './durable-promote-claim.js';
+import { readDurablePromoteClaim, durablePromoteClaimMatches, parsePromoteLifecycleLiteral, type DurablePromoteClaim } from './durable-promote-claim.js';
 import { isInterruptedOwnPromoteHead } from './assertion-promote-head-recovery.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 
@@ -36,8 +36,25 @@ export interface AssertionPromoteSourceContext {
   readonly vmGraphUri: string;
 }
 
+/** Successful source preparation preserves the validated claim's complete state. */
+export interface PreparedAssertionPromoteSource {
+  readonly kind: 'prepared';
+  readonly assertionQuads: Quad[];
+  readonly immutablePrivateQuads: Quad[];
+  readonly sourceIsSwm: boolean;
+  readonly lifecycleLayer: string | undefined;
+  readonly resumingCommittedSwm: boolean;
+  readonly promoteClaim: Exclude<DurablePromoteClaim, { kind: 'corrupt' }>;
+  readonly head: KnowledgeAssetWorkspaceHead | undefined;
+}
+
+export type AssertionPromoteSource = PreparedAssertionPromoteSource | {
+  readonly kind: 'complete';
+  readonly result: { promotedCount: number; promotedAllRoots: boolean; shareOperationId?: string };
+};
+
 /** Coherent source and recovery inspection; caller holds the exact KA SWM lock. */
-export async function readAssertionPromoteSource(host: AssertionPromoteSourceHost, context: AssertionPromoteSourceContext) {
+export async function readAssertionPromoteSource(host: AssertionPromoteSourceHost, context: AssertionPromoteSourceContext): Promise<AssertionPromoteSource> {
   const { promoteMetaGraph, lifecycleSubject, sealSubject, graphUri, swmGraphUri, vmGraphUri } = context;
   const immutablePrivateQuads = await host.readPrivateQuads();
   const maintainMarker = host.maintainMarker;
@@ -182,9 +199,7 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
     await maintainMarker(false);
   }
   if (claim.kind === 'corrupt') throw claim.error;
-  const durableShareOperationId = claim.kind === 'absent' ? undefined : claim.operationId;
-  const durablePromoteIntent = claim.kind === 'modern' ? claim.intent : undefined;
-  if (assertionQuads.length > 0 && durableShareOperationId) {
+  if (assertionQuads.length > 0 && claim.kind !== 'absent') {
     // The exact SWM graph may have committed before a later snapshot/head
     // write failed, while WM is intentionally retained for retry. Recognize
     // that old-or-new atomic outcome only when it matches this sealed KA and
@@ -218,8 +233,8 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
     );
   }
   return { kind: 'prepared' as const, assertionQuads, immutablePrivateQuads, sourceIsSwm, lifecycleLayer,
-    resumingCommittedSwm, durableShareOperationId, durablePromoteIntent,
-    head: await readHead(host, context, resumingCommittedSwm ? durablePromoteIntent : undefined) };
+    resumingCommittedSwm, promoteClaim: claim,
+    head: await readHead(host, context, resumingCommittedSwm && claim.kind === 'modern' ? claim.intent : undefined) };
 }
 
 function readLifecycleLayer(host: AssertionPromoteSourceHost, context: AssertionPromoteSourceContext) {
@@ -253,7 +268,7 @@ function headKey(head: KnowledgeAssetWorkspaceHead) {
 export async function revalidateAssertionPromoteSource(
   host: AssertionPromoteSourceHost,
   context: AssertionPromoteSourceContext,
-  prepared: Extract<Awaited<ReturnType<typeof readAssertionPromoteSource>>, { kind: 'prepared' }>,
+  prepared: PreparedAssertionPromoteSource,
   intent: PromoteOperationIntent,
   publicQuads: readonly Quad[],
   privateMerkleRoot: string | undefined,

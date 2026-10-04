@@ -32,6 +32,7 @@ import { readAssertionPromoteSource, revalidateAssertionPromoteSource } from './
 import {
   createPromoteOperationIntent,
   serializePromoteOperationIntent,
+  type PromoteOperationIntent,
 } from './promote-operation-intent.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
@@ -8599,7 +8600,7 @@ export class DKGPublisher implements Publisher {
     };
     const prepared = await this.withWriteLocks(swmLockKeys, () => readAssertionPromoteSource(sourceHost, sourceContext));
     if (prepared.kind === 'complete') return prepared.result;
-    const { assertionQuads, immutablePrivateQuads, resumingCommittedSwm, durableShareOperationId, durablePromoteIntent } = prepared;
+    const { assertionQuads, immutablePrivateQuads, resumingCommittedSwm, promoteClaim } = prepared;
 
     let quadsToPromote = assertionQuads;
 
@@ -8684,8 +8685,8 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    const operationId = durableShareOperationId
-      ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const operationId = promoteClaim.kind === 'absent'
+      ? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` : promoteClaim.operationId;
 
     // Canonicalize both partitions together so blank-node labels stay stable
     // across the public/private boundary and validate the complete sealed KA.
@@ -8706,27 +8707,33 @@ export class DKGPublisher implements Publisher {
     const promotedPrivateRoot = validatedPayload.privateMerkleRoot;
     // Retire prior completion before fallible preparation; only the durable commit tail re-arms it.
     await maintainMarker(false);
-    if (!durablePromoteIntent && durableShareOperationId) {
-      // Older partial commits persisted the ID but not the exact timestamp and
-      // access envelope used on the wire. Reconstructing those fields from the
-      // later operation record can change a replay under the same ID, so this
-      // state is deliberately query/export-only until explicitly reconciled.
-      throw Object.assign(
-        new Error(
-          `Durable share operation ${durableShareOperationId} has no immutable promote intent and cannot be replayed safely`,
-        ),
-        { code: 'KA_PROMOTE_OPERATION_INTENT_MISSING' },
-      );
+    let operationIntent: PromoteOperationIntent;
+    switch (promoteClaim.kind) {
+      case 'legacy':
+        // Older partial commits persisted the ID but not the exact timestamp and
+        // access envelope used on the wire. Reconstructing those fields from the
+        // later operation record can change a replay under the same ID, so this
+        // state is deliberately query/export-only until explicitly reconciled.
+        throw Object.assign(
+          new Error(
+            `Durable share operation ${promoteClaim.operationId} has no immutable promote intent and cannot be replayed safely`,
+          ),
+          { code: 'KA_PROMOTE_OPERATION_INTENT_MISSING' },
+        );
+      case 'modern':
+        operationIntent = promoteClaim.intent;
+        break;
+      case 'absent':
+        operationIntent = createPromoteOperationIntent({
+          operationId,
+          timestampMs: Date.now(),
+          publisherPeerId: opts?.publisherPeerId,
+          confirmationRequired: opts?.confirmBeforeCommit !== undefined,
+          accessPolicy: opts?.accessPolicy ?? (normalizedPrivateQuads.length > 0 ? 'ownerOnly' : 'public'),
+          allowedPeers: opts?.allowedPeers,
+        });
+        break;
     }
-
-    const operationIntent = durablePromoteIntent ?? createPromoteOperationIntent({
-      operationId,
-      timestampMs: Date.now(),
-      publisherPeerId: opts?.publisherPeerId,
-      confirmationRequired: opts?.confirmBeforeCommit !== undefined,
-      accessPolicy: opts?.accessPolicy ?? (normalizedPrivateQuads.length > 0 ? 'ownerOnly' : 'public'),
-      allowedPeers: opts?.allowedPeers,
-    });
     const accessPolicy = operationIntent.accessPolicy;
     const allowedPeers = operationIntent.allowedPeers;
     if (opts?.confirmBeforeCommit && !operationIntent.publisherPeerId) {
@@ -8829,7 +8836,7 @@ export class DKGPublisher implements Publisher {
       object: JSON.stringify(serializedOperationIntent),
       graph: promoteMetaGraph,
     };
-    if (!durableShareOperationId) {
+    if (promoteClaim.kind === 'absent') {
       await this.store.insert([operationIdQuad, operationIntentQuad]);
 
       // The in-memory lifecycle lock is deliberately instance-local. Re-read
@@ -8891,7 +8898,7 @@ export class DKGPublisher implements Publisher {
             // provisional operation, so a corrected fresh-WM retry may claim a
             // new ID. An ID that existed at method entry is never removed: an
             // earlier ambiguous confirmation may already have applied it.
-            if (!durableShareOperationId) {
+            if (promoteClaim.kind === 'absent') {
               await this.store.delete([operationIdQuad, operationIntentQuad]);
             }
             throw new CuratorRejectedError(contextGraphId);
