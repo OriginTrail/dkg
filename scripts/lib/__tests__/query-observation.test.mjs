@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,10 +88,16 @@ async function serve(t, handler) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-// Exercise sourceable operations used by the suite, without executing its flow
-// or depending on source formatting, variable names or assignment counts.
+// Exercise the operations called by the executable suites without loading
+// startup state or depending on source formatting/assignment counts.
 const helper = join(scripts, 'devnet-observation-helpers.sh');
-const sharing = join(scripts, 'devnet-test-sharing.sh');
+const sharing = join(scripts, 'devnet-sharing-helpers.sh');
+const privacy = join(scripts, 'devnet-privacy-helpers.sh');
+const sharingSetup = `source "$SHARING"; PASS=0; FAIL=0
+ok(){ PASS=$((PASS+1)); echo "  [PASS] $1"; }
+fail(){ FAIL=$((FAIL+1)); echo "  [FAIL] $1"; }
+check(){ if [ "$2" = "$3" ]; then ok "$1"; else fail "$1 (expected=$3, got=$2)"; fi; }
+`;
 const empty = '{"result":{"type":"bindings","bindings":[]}}';
 const select = 'SELECT ?s WHERE { ?s ?p ?o }';
 const count = 'SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }';
@@ -101,7 +108,7 @@ for (const [name, response, http] of [
   ['ambiguous COUNT', empty, 200],
 ]) test(`parent sharing shell rejects ${name}`, async t => {
   const url = await serve(t, (req, res) => { req.resume(); res.writeHead(http); res.end(response); });
-  const result = await runShell(`source "$SHARING"; AUTH=fixture
+  const result = await runShell(`${sharingSetup} AUTH=fixture
 value=$(sharing_api_observe "$PORT" "$QUERY" cnt count '{"contextGraphId":"fixture"}') || devnet_observation_abort
 [ "$value" = 0 ] && echo FALSE_PASS`, { SHARING: sharing, PORT: new URL(url).port, QUERY: count });
   assert.equal(result.status, 1, `parent status=${result.status}, stdout=${result.stdout}, stderr=${result.stderr}`);
@@ -120,7 +127,7 @@ for (const [name, response, http, expected] of [
     let input = ''; req.on('data', c => input += c);
     req.on('end', () => { request = JSON.parse(input); res.writeHead(http); res.end(response); });
   });
-  const result = await runShell('source "$SHARING"; AUTH=fixture; sharing_excluded_swm "$PORT" fixture; exit "$FAIL"', {
+  const result = await runShell(`${sharingSetup} AUTH=fixture; sharing_excluded_swm "$PORT" fixture; exit "$FAIL"`, {
     SHARING: sharing, PORT: new URL(url).port,
   });
   assert.equal(result.status, expected, result.stderr);
@@ -186,7 +193,7 @@ for (const [name, owner, peer, expected] of [
     });
   });
   const dir = directory(t, [config(19401, `${url}/owner`), config(19402, `${url}/peer`)]);
-  const result = await runShell(`source "$SHARING"; sharing_storage_absence 'Peer has no seeded fact' 19401 19402 "$QUERY" s; exit "$FAIL"`, {
+  const result = await runShell(`${sharingSetup} sharing_storage_absence 'Peer has no seeded fact' 19401 19402 "$QUERY" s; exit "$FAIL"`, {
     SHARING: sharing, DEVNET_DIR: dir, QUERY: select,
   });
   assert.equal(result.status, expected, result.stderr);
@@ -260,15 +267,39 @@ test('endpoint resolver rejects a non-loopback API identity without emitting an 
   assert.equal(result.status, 2); assert.equal(result.stdout, '');
 });
 
-for (const [name, response, http] of [['API error', fixture('api-error'), 200], ['malformed', '{', 200], ['HTTP error', empty, 500]]) {
-  test(`shared RC/invite privacy observation parent rejects ${name}`, async t => {
-    const url = await serve(t, (req, res) => { req.resume(); res.writeHead(http); res.end(response); });
-    const result = await runShell(`source "$HELPER"
-value=$(devnet_query_api "$URL" fixture "$QUERY" s rows '{"contextGraphId":"fixture","graphSuffix":"_shared_memory"}') || devnet_observation_abort
-[ "$value" = 0 ] && echo FALSE_PASS`, { HELPER: helper, URL: url, QUERY: select });
-    assert.equal(result.status, 1, result.stderr); assert.doesNotMatch(result.stdout, /FALSE_PASS/);
+for (const [operation, binding, predicate, scope, args] of [
+  ['rc_private_peer_privacy', 'o', 'email', {}, '19402'],
+  ['rc_publisher_privacy', 'o', 'email', {}, ''],
+  ['rc_wm_privacy', 'name', 'name', {}, ''],
+  ['rc_subgraph_root_isolation', 'name', 'name', {}, ''],
+  ['invite_outsider_privacy', 'o', 'name', { graphSuffix: '_shared_memory' }, ''],
+]) for (const [name, response, http, expected] of [
+  ['valid empty', empty, 200, 0],
+  ['leaked row', JSON.stringify({ result: { bindings: [{ [binding]: '"private"' }] } }), 200, 1],
+  ['API error', fixture('api-error'), 200, 1], ['malformed', '{', 200, 1],
+  ['HTTP error', empty, 500, 1],
+  ['missing binding', '{"result":{"bindings":[{"wrong":"<urn:leak>"}]}}', 200, 1],
+]) test(`actual ${operation} assertion handles ${name}`, async t => {
+  let request;
+  const url = await serve(t, (req, res) => {
+    let input = ''; req.on('data', c => input += c);
+    req.on('end', () => { request = JSON.parse(input); res.writeHead(http); res.end(response); });
   });
-}
+  const result = await runShell(`source "$PRIVACY"; FAIL=0
+ok(){ echo PASS; }
+fail(){ FAIL=1; echo FAIL; [ "$OPERATION" != invite_outsider_privacy ] || exit 1; }
+warn(){ echo WARN; }
+"$OPERATION" "$URL" fixture urn:private fixture "$ARGUMENT"
+exit "$FAIL"`, { PRIVACY: privacy, OPERATION: operation, URL: url, ARGUMENT: args });
+  const advisory = operation === 'rc_subgraph_root_isolation' && name === 'leaked row';
+  assert.equal(result.status, advisory ? 0 : expected, result.stderr);
+  assert.deepEqual(request, { contextGraphId: 'fixture', ...scope,
+    sparql: `SELECT ?${binding} WHERE { <urn:private> <http://schema.org/${predicate}> ?${binding} }` });
+  if (advisory) assert.match(result.stdout, /WARN/);
+  if (expected === 0) assert.match(result.stdout, /PASS/);
+  else assert.doesNotMatch(result.stdout, /PASS/);
+  if (name.includes('error') || name === 'malformed' || name === 'missing binding') assert.match(result.stderr, /INCONCLUSIVE/);
+});
 
 for (const [name, crossResponse, http, expected] of [
   ['valid positive', body('12').replace('cnt', 'n'), 200, 0],
@@ -319,16 +350,51 @@ for (const cell of ['', { type: 'uri', value: '' }, { type: 'uri', value: 'inval
   });
 }
 
-test('sourceable sharing owner control sees current numeric WM graphs', async t => {
+test('loading sharing operations preserves caller options and counters', async () => {
+  const result = await runShell(`set +u; set +o pipefail
+PASS=7; FAIL=8; WARN=9
+before=$-; before_pipe=$(set -o | awk '$1 == "pipefail" { print $2 }')
+source "$SHARING"
+[ "$PASS,$FAIL,$WARN" = 7,8,9 ] && [ "$-" = "$before" ] &&
+[ "$(set -o | awk '$1 == "pipefail" { print $2 }')" = "$before_pipe" ]`, { SHARING: sharing });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+// Resolve the already-installed storage engine through its owning workspace.
+// No dependency or test route is added to the tooling lane.
+const require = createRequire(new URL('../../../packages/storage/package.json', import.meta.url));
+const oxigraph = require('oxigraph');
+const numericGraph = 'did:dkg:context-graph:fixture/_working_memory/0xabc/0';
+const legacyGraph = 'did:dkg:context-graph:fixture/assertion/old';
+const unrelatedGraphs = ['did:dkg:context-graph:fixture/_shared_memory',
+  'did:dkg:context-graph:other/_working_memory/0xabc/0'];
+
+for (const [name, graphs, expectedGraphs] of [
+  ['numeric-only WM', [numericGraph, ...unrelatedGraphs], [numericGraph]],
+  ['numeric and legacy WM', [numericGraph, legacyGraph, ...unrelatedGraphs], [numericGraph, legacyGraph]],
+]) test(`generated WM query and owner control execute against ${name} RDF`, async t => {
+  const store = new oxigraph.Store();
+  store.load(graphs.map(g => `<urn:private> <urn:predicate> <urn:object> <${g}> .`).join('\n'), { format: 'application/n-quads' });
+  const generated = await runShell('source "$SHARING"; sharing_wm_graphs_query fixture', { SHARING: sharing });
+  assert.equal(generated.status, 0, generated.stderr);
+  const rows = store.query(generated.stdout);
+  assert.deepEqual(rows.map(row => row.get('g').value).sort(), [...expectedGraphs].sort(), 'generated query selects only this context’s WM graphs');
+  const requests = [];
   const url = await serve(t, (req, res) => {
     let input = ''; req.on('data', c => input += c);
     req.on('end', () => {
-      const query = new URLSearchParams(input).get('query');
-      res.end(query.includes('LIMIT 1') ? raw('s', seeded) : raw('g', query.includes('/_working_memory/')
-        ? [{ g: { type: 'uri', value: 'did:dkg:context-graph:fixture/_working_memory/0xabc/0' } }] : []));
+      try {
+        const query = new URLSearchParams(input).get('query'); requests.push(query);
+        const result = store.query(query);
+        const vars = [...new Set(result.flatMap(row => [...row.keys()]))];
+        const bindings = result.map(row => Object.fromEntries([...row].map(([key, term]) => [key, { type: 'uri', value: term.value }])));
+        res.end(JSON.stringify({ head: { vars }, results: { bindings } }));
+      } catch { res.writeHead(400); res.end('invalid SPARQL'); }
     });
   });
   const dir = directory(t, [config(19401, `${url}/query`)]);
-  const result = await runShell('source "$SHARING"; sharing_owner_wm_control 19401 fixture', { SHARING: sharing, DEVNET_DIR: dir });
+  const result = await runShell(`${sharingSetup} sharing_owner_wm_control 19401 fixture`, { SHARING: sharing, DEVNET_DIR: dir });
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1], generated.stdout.trim());
 });

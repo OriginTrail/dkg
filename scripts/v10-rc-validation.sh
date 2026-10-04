@@ -33,7 +33,7 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 NUM_NODES="${NUM_NODES:-6}"
-source "$SCRIPT_DIR/devnet-observation-helpers.sh"
+source "$SCRIPT_DIR/devnet-privacy-helpers.sh"
 # shellcheck source=devnet-update-helpers.sh
 source "$SCRIPT_DIR/devnet-update-helpers.sh"
 if [ -n "${DKG_AUTH:-}" ]; then
@@ -241,12 +241,7 @@ JSON
   echo ""
   echo "--- 4b: Private triples NOT visible on other nodes ---"
   for PORT in 9202 9203 9204; do
-    BINDINGS=$(devnet_query_api "http://127.0.0.1:$PORT" "$AUTH" "SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }" o rows "{\"contextGraphId\":\"$CG\"}") || devnet_observation_abort
-    if [ "$BINDINGS" = "0" ]; then
-      ok "Node $PORT: no private triple leak"
-    else
-      fail "Node $PORT: private triple leaked! ($BINDINGS bindings)"
-    fi
+    rc_private_peer_privacy "http://127.0.0.1:$PORT" "$AUTH" "$BOB_URI" "$CG" "$PORT"
   done
 
   echo ""
@@ -264,12 +259,7 @@ JSON
   #       on the PUBLISHER itself — not just on §4b's peer nodes. This is
   #       the strongest "privacy boundary" assertion we can make without
   #       leaking the decryption key into a test fixture.
-  PUB_BINDINGS=$(devnet_query_api "http://127.0.0.1:9201" "$AUTH" "SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }" o rows "{\"contextGraphId\":\"$CG\"}") || devnet_observation_abort
-  if [ "$PUB_BINDINGS" = "0" ]; then
-    ok "Publisher (node 9201) public view does NOT leak private email — privacy boundary intact"
-  else
-    fail "Publisher (node 9201) public view leaked private email ($PUB_BINDINGS bindings)"
-  fi
+  rc_publisher_privacy "http://127.0.0.1:9201" "$AUTH" "$BOB_URI" "$CG"
 else
   warn "Skipping §4 — §3 publish did not yield a kaId (private-update path needs an existing KC)"
 fi
@@ -437,12 +427,7 @@ else
 fi
 
 echo "--- 7d: WM data NOT visible on other nodes (isolation) ---"
-WM_LEAK_COUNT=$(devnet_query_api "http://127.0.0.1:9202" "$AUTH" "SELECT ?name WHERE { <$FINDING_URI> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG\"}") || devnet_observation_abort
-if [ "$WM_LEAK_COUNT" = "0" ]; then
-  ok "WM data correctly isolated — not visible on node 2"
-else
-  fail "WM data leaked to node 2 ($WM_LEAK_COUNT bindings)"
-fi
+rc_wm_privacy "http://127.0.0.1:9202" "$AUTH" "$FINDING_URI" "$CG"
 
 # ────────────────────────────────────────────────────────────────────────────
 section "8. PROMOTE WM → SWM"
@@ -521,12 +506,7 @@ else
 fi
 
 echo "--- 10d: Sub-graph data isolated from root graph ---"
-SG_ROOT_COUNT=$(devnet_query_api "http://127.0.0.1:9201" "$AUTH" "SELECT ?name WHERE { <$DECISION_URI> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG\"}") || devnet_observation_abort
-if [ "$SG_ROOT_COUNT" = "0" ]; then
-  ok "Sub-graph data correctly isolated from root graph"
-else
-  warn "Sub-graph data found in root graph ($SG_ROOT_COUNT bindings) — may be expected depending on query behavior"
-fi
+rc_subgraph_root_isolation "http://127.0.0.1:9201" "$AUTH" "$DECISION_URI" "$CG"
 
 # ────────────────────────────────────────────────────────────────────────────
 section "11. QUERY VIEWS"

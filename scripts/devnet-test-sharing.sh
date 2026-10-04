@@ -22,7 +22,6 @@ DEVNET_DIR="${DEVNET_DIR:-$SCRIPT_DIR/../.devnet}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
 N1_PORT=$((API_PORT_BASE)); N2_PORT=$((API_PORT_BASE + 1))
 N3_PORT=$((API_PORT_BASE + 2)); N4_PORT=$((API_PORT_BASE + 3)); N5_PORT=$((API_PORT_BASE + 4))
-source "$SCRIPT_DIR/devnet-observation-helpers.sh"
 
 PASS=0; FAIL=0; WARN=0
 DEVNET_TMPDIR="${TMPDIR:-/tmp}"
@@ -72,42 +71,8 @@ check() {
   if [[ "$actual" == "$expected" ]]; then ok "$desc"; else fail "$desc (expected=$expected, got=$actual)"; fi
 }
 
-# Direct observation operations. The suite is also sourceable for fixture tests.
-sharing_api_observe() {
-  local port="$1"; shift
-  devnet_query_api "http://127.0.0.1:$port" "$AUTH" "$@"
-}
-
-sharing_storage_observe() {
-  devnet_storage_query "$DEVNET_DIR" "$@"
-}
-
-# Legacy assertion adapter: invalid evidence aborts with suite exit 1.
-# The same feature query must expose seeded owner data before peer absence.
-sharing_storage_absence() {
-  local description="$1" owner="$2" peer="$3" sparql="$4" binding="$5" owner_count peer_count
-  owner_count=$(sharing_storage_observe "$owner" "$sparql" "$binding" rows) || devnet_observation_abort
-  devnet_count_at_least "$owner_count" 1 || { fail "Owner storage control did not expose the seeded WM fact"; exit 1; }
-  peer_count=$(sharing_storage_observe "$peer" "$sparql" "$binding" rows) || devnet_observation_abort
-  check "$description" "$peer_count" "0"
-}
-
-sharing_wm_graphs_query() {
-  printf '%s\n' "SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \"$1\") && (CONTAINS(STR(?g), \"/assertion/\") || CONTAINS(STR(?g), \"/_working_memory/\"))) }"
-}
-
-sharing_owner_wm_control() {
-  local port="$1" context="$2" query count
-  query=$(sharing_wm_graphs_query "$context")
-  count=$(sharing_storage_observe "$port" "$query" g rows) || devnet_observation_abort
-  devnet_count_at_least "$count" 1 || { fail "Owner storage positive control is empty"; exit 1; }
-}
-
-sharing_excluded_swm() {
-  local port="$1" context="$2" count
-  count=$(sharing_api_observe "$port" 'SELECT ?s WHERE { ?s ?p ?o }' s rows "{\"contextGraphId\":\"$context\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  check "Node 3 still has 0 SWM entities" "$count" "0"
-}
+# shellcheck source=devnet-sharing-helpers.sh
+source "$SCRIPT_DIR/devnet-sharing-helpers.sh"
 
 q() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"$3\",\"graph\":\"\"}"; }
 ql() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"\\\"$3\\\"\",\"graph\":\"\"}"; }
@@ -155,9 +120,6 @@ for a in d.get('agents',[]):
     print(a.get('peerId','')); break
 " 2>/dev/null
 }
-
-# Sourcing exposes the real suite operations without running the devnet flow.
-if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 
 if [[ -n "${DKG_AUTH:-}" ]]; then
   AUTH="$DKG_AUTH"
