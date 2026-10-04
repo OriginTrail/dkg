@@ -2,6 +2,12 @@ import {
   assertSafeIri,
 } from '@origintrail-official/dkg-core';
 import type {
+  PublicMemoryLayerBinding,
+  PublicMemoryLayerKey,
+  PublicMemoryLayerResult,
+  PublicMemoryLayersResponse,
+} from '@origintrail-official/dkg-core/memory-layer-result';
+import type {
   QueryOptions,
   QueryResult,
 } from '@origintrail-official/dkg-storage';
@@ -20,24 +26,10 @@ export interface ContextGraphReader {
   query(sparql: string, options: QueryOptions, policy: ContextGraphBatchPolicy): Promise<QueryResult>;
 }
 
-export type MemoryLayerKey = 'wm' | 'swm' | 'vm';
-
-export interface MemoryLayerBinding {
-  s: string;
-  p: string;
-  o: string;
-  g: string;
-}
-
-export interface MemoryLayerReadResult {
-  bindings: MemoryLayerBinding[];
-  ok: boolean;
-  truncated: boolean;
-}
-
-export interface MemoryLayersSnapshot {
-  layers: Record<MemoryLayerKey, MemoryLayerReadResult>;
-}
+export type MemoryLayerKey = PublicMemoryLayerKey;
+export type MemoryLayerBinding = PublicMemoryLayerBinding;
+export type MemoryLayerReadResult = PublicMemoryLayerResult;
+export type MemoryLayersSnapshot = Pick<PublicMemoryLayersResponse, 'layers'>;
 
 export interface ContextGraphNamedGraphStats {
   graph: string;

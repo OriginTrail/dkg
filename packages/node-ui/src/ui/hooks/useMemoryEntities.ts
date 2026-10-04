@@ -1,9 +1,6 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import {
-  fetchMemoryLayersDeduped,
-  type MemoryLayerApiResult,
-} from '../api.js';
-import { useMemoryGraphEvents } from './useNodeEvents.js';
+import { useMemo } from 'react';
+import type { MemoryLayerApiResult } from '../api.js';
+import { useMemoryLayersSnapshot } from './useMemoryLayersSnapshot.js';
 import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
 import { decodeRdfStringLiteral } from '../../rdf-literal.js';
 
@@ -484,139 +481,31 @@ export function useMemoryEntities(
   // the failed-vs-empty distinction it needs (Codex).
   const signalErrors = opts?.signalErrors ?? false;
   const includeQueryCatalog = opts?.includeQueryCatalog ?? false;
-  const [ownedSnapshot, setOwnedSnapshot] = useState({
-    contextGraphId, includeQueryCatalog, triples: EMPTY_LAYERED_TRIPLES,
-  });
-  const layeredTriples = ownedSnapshot.contextGraphId === contextGraphId
-    && ownedSnapshot.includeQueryCatalog === includeQueryCatalog
-    ? ownedSnapshot.triples : EMPTY_LAYERED_TRIPLES;
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [partial, setPartial] = useState(false);
-  const [layerStatus, setLayerStatus] = useState<Record<MemoryLayerKey, MemoryLayerStatus>>(
-    LOADING_LAYER_STATUS,
-  );
-  const versionRef = useRef(0);
-  const activeContextGraphRef = useRef(contextGraphId);
-  const signalErrorsRef = useRef(signalErrors);
-  const refreshRunningRef = useRef(false);
-  const refreshPendingRef = useRef(false);
-  const mountedRef = useRef(false);
-  activeContextGraphRef.current = contextGraphId;
-  signalErrorsRef.current = signalErrors;
-  const includeQueryCatalogRef = useRef(includeQueryCatalog);
-  includeQueryCatalogRef.current = includeQueryCatalog;
-
-  const fetchOnce = useCallback(async (requestedContextGraphId: string) => {
-    if (!requestedContextGraphId) return;
-    const requestedIncludeQueryCatalog = includeQueryCatalogRef.current;
-    const version = ++versionRef.current;
-    setLoading(true);
-    setError(null);
-    setPartial(false);
-    setLayerStatus(LOADING_LAYER_STATUS);
-
-    try {
-      const snapshot = await fetchMemoryLayersDeduped(requestedContextGraphId, requestedIncludeQueryCatalog);
-      const wmR = normalizeLayer(snapshot.layers.wm, requestedContextGraphId);
-      const swmR = normalizeLayer(snapshot.layers.swm, requestedContextGraphId);
-      const vmR = normalizeLayer(snapshot.layers.vm, requestedContextGraphId);
-
-      if (
-        version !== versionRef.current
-        || requestedContextGraphId !== activeContextGraphRef.current
-        || requestedIncludeQueryCatalog !== includeQueryCatalogRef.current
-        || !mountedRef.current
-      ) return;
-
-      const all: LayeredTriple[] = [
-        ...wmR.triples.map(t => ({ ...t, layer: 'working' as const })),
-        ...swmR.triples.map(t => ({ ...t, layer: 'shared' as const })),
-        ...vmR.triples.map(t => ({ ...t, layer: 'verified' as const })),
-      ];
-
-      const wmOk = wmR.ok;
-      const swmOk = swmR.ok;
-
-      setOwnedSnapshot({ contextGraphId: requestedContextGraphId,
-        includeQueryCatalog: requestedIncludeQueryCatalog, triples: all });
-      setLayerStatus({
-        wm: wmOk ? 'ok' : 'error',
-        swm: swmOk ? 'ok' : 'error',
-        vm: vmR.ok ? 'ok' : 'error',
-      });
-      const layerResults = [
-        { ok: wmOk, truncated: wmR.truncated },
-        { ok: swmOk, truncated: swmR.truncated },
-        vmR,
-      ];
-      const failed = layerResults.filter(r => !r.ok).length;
-      const clipped = layerResults.some(r => r.truncated);
-      // `partial` is computed UNCONDITIONALLY for every caller — it was
-      // previously dead unless a caller opted in, making truncated
-      // counts look exact in MemoryStackView/ProjectView (Codex).
-      // With same-CG partition scans, a successful layer can also hit
-      // its fixed LIMIT; those counts are lower bounds, not exact totals.
-      // Whether a *total* failure also escalates to a hard `error`
-      // (dashboard assetCount fallback / views' error screen) stays the
-      // configurable part via `signalErrors`.
-      setPartial((failed > 0 && failed < 3) || clipped);
-      setError(signalErrorsRef.current && failed === 3 ? 'Failed to load memory data' : null);
-    } catch (err: any) {
-      if (
-        version === versionRef.current
-        && requestedContextGraphId === activeContextGraphRef.current
-        && requestedIncludeQueryCatalog === includeQueryCatalogRef.current
-        && mountedRef.current
-      ) {
-        setOwnedSnapshot({ contextGraphId: requestedContextGraphId,
-          includeQueryCatalog: requestedIncludeQueryCatalog, triples: EMPTY_LAYERED_TRIPLES });
-        setError(signalErrorsRef.current ? (err.message ?? 'Failed to load memory data') : null);
-        setPartial(false);
-        setLayerStatus(ERROR_LAYER_STATUS);
-      }
-    } finally {
-      if (
-        version === versionRef.current
-        && requestedContextGraphId === activeContextGraphRef.current
-        && requestedIncludeQueryCatalog === includeQueryCatalogRef.current
-        && mountedRef.current
-      ) setLoading(false);
-    }
-  }, []);
-
-  // Serialize refreshes per hook instance. Any number of SSE events received
-  // during a read collapses to one trailing refresh, while the API-level
-  // singleflight coalesces sibling views of the same CG. This keeps live data
-  // fresh without allowing refresh storms to overlap storage work.
-  const fetchAll = useCallback(async () => {
-    if (!mountedRef.current || !activeContextGraphRef.current) return;
-    if (refreshRunningRef.current) {
-      refreshPendingRef.current = true;
-      return;
-    }
-    refreshRunningRef.current = true;
-    try {
-      do {
-        refreshPendingRef.current = false;
-        await fetchOnce(activeContextGraphRef.current);
-      } while (mountedRef.current && refreshPendingRef.current);
-    } finally {
-      refreshRunningRef.current = false;
-    }
-  }, [fetchOnce]);
-
-  useMemoryGraphEvents(contextGraphId, fetchAll);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    fetchAll();
-    return () => {
-      mountedRef.current = false;
-      refreshPendingRef.current = false;
-      versionRef.current++;
-    };
-  }, [contextGraphId, includeQueryCatalog, fetchAll]);
+  const { state, refresh } = useMemoryLayersSnapshot(contextGraphId, includeQueryCatalog);
+  const layers = useMemo(() => state.snapshot ? {
+    wm: normalizeLayer(state.snapshot.layers.wm, contextGraphId),
+    swm: normalizeLayer(state.snapshot.layers.swm, contextGraphId),
+    vm: normalizeLayer(state.snapshot.layers.vm, contextGraphId),
+  } : null, [state.snapshot, contextGraphId]);
+  const layeredTriples = useMemo<LayeredTriple[]>(() => layers ? [
+    ...layers.wm.triples.map(t => ({ ...t, layer: 'working' as const })),
+    ...layers.swm.triples.map(t => ({ ...t, layer: 'shared' as const })),
+    ...layers.vm.triples.map(t => ({ ...t, layer: 'verified' as const })),
+  ] : EMPTY_LAYERED_TRIPLES, [layers]);
+  const loading = state.phase === 'loading';
+  const layerStatus: Record<MemoryLayerKey, MemoryLayerStatus> = loading
+    ? LOADING_LAYER_STATUS : layers ? {
+      wm: layers.wm.ok ? 'ok' : 'error',
+      swm: layers.swm.ok ? 'ok' : 'error',
+      vm: layers.vm.ok ? 'ok' : 'error',
+    } : ERROR_LAYER_STATUS;
+  const results = layers ? Object.values(layers) : [];
+  const failed = results.filter(result => !result.ok).length;
+  // Counts remain lower bounds when a readable layer is clipped or another
+  // layer fails. Only the optional total-failure error depends on the caller.
+  const partial = !loading && ((failed > 0 && failed < 3) || results.some(result => result.truncated));
+  const error = !signalErrors || loading ? null : state.phase === 'failed'
+    ? state.failure : failed === 3 ? 'Failed to load memory data' : null;
 
   const entities = useMemo(() => buildMemoryEntities(layeredTriples), [layeredTriples]);
 
@@ -672,6 +561,6 @@ export function useMemoryEntities(
     error,
     partial,
     layerStatus,
-    refresh: fetchAll,
+    refresh,
   };
 }

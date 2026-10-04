@@ -40,6 +40,11 @@
       "import": "./dist/query-result.js",
       "default": "./dist/query-result.js"
     },
+    "./memory-layer-result": {
+      "types": "./dist/memory-layer-result.d.ts",
+      "import": "./dist/memory-layer-result.js",
+      "default": "./dist/memory-layer-result.js"
+    },
     "./sparql-safe": {
       "types": "./dist/sparql-safe.d.ts",
       "import": "./dist/sparql-safe.js",

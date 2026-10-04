@@ -62,6 +62,7 @@ function Probe({ contextGraphId, includeQueryCatalog = false }: { contextGraphId
       'data-loading': String(memory.loading),
       'data-error': String(memory.error),
       'data-status': memory.layerStatus.wm,
+      'data-uris': memory.entityList.map(entity => entity.uri).sort().join(','),
     },
   );
 }
@@ -203,6 +204,39 @@ describe('useMemoryEntities live updates', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['graph', 'catalog'] as const)('rejects the pending old %s response and completes the queued current read', async change => {
+    const requests: Array<{ contextGraphId: string; includeQueryCatalog: boolean; resolve: (response: Response) => void }> = [];
+    vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => {
+      const scope = JSON.parse(String(init?.body)) as { contextGraphId: string; includeQueryCatalog: boolean };
+      return new Promise<Response>(resolve => requests.push({ ...scope, resolve }));
+    }));
+    const initialGraph = `pending-${change}-a`;
+    const currentGraph = change === 'graph' ? `pending-${change}-b` : initialGraph;
+    const respond = (request: typeof requests[number], subject: string) => request.resolve({
+      ok: true,
+      json: async () => ({ contextGraphId: request.contextGraphId, layers: {
+        wm: { ok: true, truncated: false, bindings: [tripleBinding(subject, `did:dkg:context-graph:${request.contextGraphId}/notes/assertion/agent/a`)] },
+        swm: { ok: true, truncated: false, bindings: [] },
+        vm: { ok: true, truncated: false, bindings: [] },
+      } }),
+    } as Response);
+    await act(async () => root.render(React.createElement(Probe, { contextGraphId: initialGraph, includeQueryCatalog: true })));
+    expect(requests).toHaveLength(1);
+    await act(async () => root.render(React.createElement(Probe, { contextGraphId: currentGraph, includeQueryCatalog: false })));
+    expect(requests).toHaveLength(1);
+    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('');
+    await act(async () => respond(requests[0], 'urn:stale-result'));
+    await flush();
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject({ contextGraphId: currentGraph, includeQueryCatalog: false });
+    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('');
+    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('true');
+    await act(async () => respond(requests[1], 'urn:current-result'));
+    await flush();
+    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('urn:current-result');
+    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
+  });
+
   it('collapses events during an active read to one trailing refresh', async () => {
     let resolveFirst!: (response: Response) => void;
     let calls = 0;
@@ -257,6 +291,27 @@ describe('useMemoryEntities live updates', () => {
     await flush();
 
     expect(fetch).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
+  });
+
+  it('keeps the current scope snapshot visible while its refresh is pending', async () => {
+    const contextGraphId = 'same-scope-refresh';
+    await act(async () => root.render(React.createElement(Probe, { contextGraphId })));
+    const originalUris = container.querySelector('#probe')?.getAttribute('data-uris');
+    let resolveRead!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { resolveRead = resolve; })));
+    await act(async () => {
+      MockEventSource.instances[0].emit('memory_graph_changed', { contextGraphId, layers: ['wm'], operation: 'write' });
+      vi.advanceTimersByTime(350);
+    });
+    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('true');
+    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe(originalUris);
+    await act(async () => resolveRead({ ok: true, json: async () => ({ contextGraphId, layers: {
+      wm: { ok: true, truncated: false, bindings: wmBindings(contextGraphId, 2) },
+      swm: { ok: true, truncated: false, bindings: [] },
+      vm: { ok: true, truncated: false, bindings: [] },
+    } }) } as Response));
+    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
   });
 });

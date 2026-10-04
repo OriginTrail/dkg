@@ -1,28 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { BASE, authHeaders, fetchWithTimeout, HttpError } from './http.js';
+import type {
+  PublicMemoryLayerBinding,
+  PublicMemoryLayerKey,
+  PublicMemoryLayerResult,
+  PublicMemoryLayersResponse,
+} from '@origintrail-official/dkg-core/memory-layer-result';
 
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
 
-export type MemoryLayerApiKey = 'wm' | 'swm' | 'vm';
-
-export interface MemoryLayerApiBinding {
-  s: string;
-  p: string;
-  o: string;
-  g: string;
-}
-
-export interface MemoryLayerApiResult {
-  bindings: MemoryLayerApiBinding[];
-  ok: boolean;
-  truncated: boolean;
-}
-
-export interface MemoryLayersApiResponse {
-  contextGraphId: string;
-  layers: Record<MemoryLayerApiKey, MemoryLayerApiResult>;
-}
+export type MemoryLayerApiKey = PublicMemoryLayerKey;
+export type MemoryLayerApiBinding = PublicMemoryLayerBinding;
+export type MemoryLayerApiResult = PublicMemoryLayerResult;
+export type MemoryLayersApiResponse = PublicMemoryLayersResponse;
 
 // Every mounted view of the same CG consumes the same read model. Keep one
 // browser request in flight per CG so DashboardView, ProjectView, strict-mode

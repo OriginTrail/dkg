@@ -3,18 +3,13 @@
 import {
   ASSERTION_NAMED_GRAPH_PREFIX,
   assertSafeIri,
-  contextGraphDataUri,
   contextGraphMetaUri,
-  contextGraphSharedMemoryMetaUri,
-  contextGraphSharedMemoryUri,
-  contextGraphSubGraphMetaUri,
-  contextGraphSubGraphUri,
   escapeSparqlLiteral,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import { asGraphWriteRevisionSource, type QueryResult, type TripleStore } from '@origintrail-official/dkg-storage';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
-import { isExcludedContentGraphTail, isScopedContentGraph } from './scoped-content-graph-policy.js';
+import { createScopedContentGraphRoutePolicy, isExcludedContentGraphTail, isScopedRoutePartition } from './scoped-content-graph-policy.js';
 import type { QueryOptions } from './query-engine.js';
 
 const METADATA_BATCH_SIZE = 8;
@@ -32,19 +27,10 @@ export async function authorizeExactContextGraphPartitions(
   options: QueryOptions,
 ): Promise<{ allowed: string[]; assertUnchanged(): void }> {
   if (options.includePrivate) throw new ScopedQueryViolationError('Exact partition reads only admit public graphs');
-  const root = assertSafeIri(contextGraphDataUri(contextGraphId));
-  const subGraph = options.subGraphName;
-  const dataGraph = subGraph ? contextGraphSubGraphUri(contextGraphId, subGraph) : root;
-  const sharedGraph = contextGraphSharedMemoryUri(contextGraphId, subGraph);
-  const swmOnly = options.graphSuffix === '_shared_memory';
-  const metadata = new Set([
-    ...(!swmOnly ? [contextGraphMetaUri(contextGraphId), ...(subGraph ? [contextGraphSubGraphMetaUri(contextGraphId, subGraph)] : [])] : []),
-    contextGraphSharedMemoryMetaUri(contextGraphId, subGraph),
-  ]);
-  const staticContent = new Set([
-    ...(!swmOnly ? [dataGraph] : []),
-    ...(swmOnly || (options.includeSharedMemory ?? options.includeWorkspace) ? [sharedGraph] : []),
-  ]);
+  const policy = createScopedContentGraphRoutePolicy(contextGraphId, options);
+  const root = policy.rootGraph;
+  const subGraph = policy.subGraphName;
+  const metadata = new Set(policy.metadataGraphs);
   const relevant = [...new Set(candidates)].filter(graph => {
     if (metadata.has(graph) || graph === root) return true;
     return graph.startsWith(`${root}/`) && !graph.includes('/staging/')
@@ -107,13 +93,8 @@ export async function authorizeExactContextGraphPartitions(
     for (const row of result.bindings) if (row.ctxGraph && childCandidates.has(row.ctxGraph)) children.add(row.ctxGraph);
   }
   return {
-    allowed: relevant.filter(graph => {
-      if (metadata.has(graph)) return true;
-      if ([...children].some(child => graph === child || graph.startsWith(`${child}/`))) return false;
-      if (staticContent.has(graph)) return true;
-      if (swmOnly) return graph.startsWith(`${sharedGraph}/`);
-      return isScopedContentGraph(graph, contextGraphId, registeredNames, registeredAssertions, children, subGraph);
-    }),
+    allowed: relevant.filter(graph => isScopedRoutePartition(policy, graph,
+      registeredNames, registeredAssertions, children)),
     assertUnchanged() {
       for (const [graph, before] of revisions) {
         const after = revisionSource!.getWriteRevision(graph);

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { PublicMemoryLayersResponse } from '@origintrail-official/dkg-core/memory-layer-result';
 import { canAdministerNode } from '../../auth.js';
 import { readMemoryLayers, type ContextGraphReader } from '../context-graph-read-model.js';
 import { admitContextGraphFollow } from '../context-graph-subscription-admission.js';
@@ -42,7 +43,8 @@ export async function handleContextGraphMemoryLayerRoute(ctx: RequestContext): P
   }
   if (admission === 'denied') {
     const empty = { bindings: [], ok: true, truncated: false };
-    return jsonResponse(res, 200, { contextGraphId, layers: { wm: empty, swm: empty, vm: empty } });
+    const response: PublicMemoryLayersResponse = { contextGraphId, layers: { wm: empty, swm: empty, vm: empty } };
+    return jsonResponse(res, 200, response);
   }
   const lifecycle = createStoreQueryRequestLifecycle(req, res, 'node-ui.memory-layers');
   try {
@@ -52,7 +54,8 @@ export async function handleContextGraphMemoryLayerRoute(ctx: RequestContext): P
       includeQueryCatalog: parsed.includeQueryCatalog === true,
     });
     if (!res.writableEnded && !res.destroyed) {
-      return jsonResponse(res, 200, { contextGraphId, ...snapshot });
+      const response: PublicMemoryLayersResponse = { contextGraphId, ...snapshot };
+      return jsonResponse(res, 200, response);
     }
     return;
   } catch (err: any) {

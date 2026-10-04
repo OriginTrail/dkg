@@ -38,6 +38,37 @@ function oxigraphReader(store: TripleStore): ContextGraphReader {
 }
 
 describe('context-graph read model', () => {
+  it.each([false, true])('settles every batch and layer before starting another query (SWM rejection=%s)', async rejectSwm => {
+    const pending: Array<{ source: string | undefined; resolve: (value: QueryResult) => void; reject: (error: Error) => void }> = [];
+    let outstanding = 0;
+    let peakOutstanding = 0;
+    const reader = mockReader([
+      ...Array.from({ length: EXACT_GRAPH_QUERY_BATCH_SIZE + 1 }, (_, i) => `${ROOT}/notes/assertion/0xabc/a-${i}`),
+      `${ROOT}/notes/_shared_memory`, `${ROOT}/notes`,
+    ], (_sparql, options) => {
+      outstanding++;
+      peakOutstanding = Math.max(peakOutstanding, outstanding);
+      return new Promise<QueryResult>((resolve, reject) => pending.push({ source: options?.source, resolve, reject }))
+        .finally(() => { outstanding--; });
+    });
+    const read = readMemoryLayers(reader, CG);
+    const expected = ['wm', 'wm', 'swm', 'vm'];
+    for (let i = 0; i < expected.length; i++) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(pending).toHaveLength(i + 1);
+      expect(outstanding).toBe(1);
+      expect(pending[i].source).toBe(`node-ui.memory-layers.${expected[i]}`);
+      if (rejectSwm && expected[i] === 'swm') pending[i].reject(new Error('selected layer failed'));
+      else pending[i].resolve({ type: 'bindings', bindings: [] });
+    }
+    const snapshot = await read;
+    expect(peakOutstanding).toBe(1);
+    expect(outstanding).toBe(0);
+    expect(snapshot.layers.wm.ok).toBe(true);
+    expect(snapshot.layers.swm.ok).toBe(!rejectSwm);
+    expect(snapshot.layers.vm.ok).toBe(true);
+  });
+
   it.each([false, true])('gates catalog SWM graph counts through canonical shared-memory authority (%s)', async allowed => {
     const store = new OxigraphStore();
     const catalogGraph = `${ROOT}/meta/_shared_memory/0xabc/1`;

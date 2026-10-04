@@ -24,6 +24,7 @@ export { BoundedLruCache } from './bounded-lru-cache.js';
 export * from './coalescing-recurring-task.js';
 export { applyMixins } from './apply-mixins.js';
 export * from './query-result.js';
+export * from './memory-layer-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';

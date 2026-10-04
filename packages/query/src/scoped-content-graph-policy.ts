@@ -1,6 +1,71 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { contextGraphDataUri, isAssertionScopedChildGraph, validateSubGraphName } from '@origintrail-official/dkg-core';
+import {
+  assertSafeIri, contextGraphDataUri, contextGraphMetaUri,
+  contextGraphSharedMemoryMetaUri, contextGraphSharedMemoryUri,
+  contextGraphSubGraphMetaUri, contextGraphSubGraphUri,
+  isAssertionScopedChildGraph, validateSubGraphName,
+} from '@origintrail-official/dkg-core';
+import type { QueryOptions } from './query-engine.js';
+
+export interface ScopedContentGraphRoutePolicy {
+  contextGraphId: string;
+  subGraphName?: string;
+  rootGraph: string;
+  dataGraph: string;
+  sharedMemoryGraph: string;
+  isSwmOnlyRoute: boolean;
+  sharedMemoryRouted: boolean;
+  contentGraphs: string[];
+  metadataGraphs: string[];
+}
+
+/** Static route membership shared by ordinary reads, exact batches and inventory. */
+export function createScopedContentGraphRoutePolicy(
+  contextGraphId: string,
+  options: QueryOptions = {},
+): ScopedContentGraphRoutePolicy {
+  const subGraphName = options.subGraphName;
+  if (subGraphName) {
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) throw new Error(`Invalid sub-graph name for query: ${validation.reason}`);
+  }
+  const rootGraph = assertSafeIri(contextGraphDataUri(contextGraphId));
+  const dataGraph = subGraphName ? contextGraphSubGraphUri(contextGraphId, subGraphName) : rootGraph;
+  const sharedMemoryGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
+  const isSwmOnlyRoute = options.graphSuffix === '_shared_memory';
+  const sharedMemoryRouted = isSwmOnlyRoute || !!(options.includeSharedMemory ?? options.includeWorkspace);
+  return {
+    contextGraphId, subGraphName, rootGraph, dataGraph, sharedMemoryGraph,
+    isSwmOnlyRoute, sharedMemoryRouted,
+    contentGraphs: [...(!isSwmOnlyRoute ? [dataGraph] : []), ...(sharedMemoryRouted ? [sharedMemoryGraph] : [])],
+    // Subgraph provenance is also written to root _meta; SWM-only routes exclude both.
+    metadataGraphs: [
+      ...(!isSwmOnlyRoute ? [contextGraphMetaUri(contextGraphId), ...(subGraphName ? [contextGraphSubGraphMetaUri(contextGraphId, subGraphName)] : [])] : []),
+      contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName),
+    ],
+  };
+}
+
+/** Facts may be exhaustive or candidate-bounded; their loading remains separate. */
+export function isScopedRoutePartition(
+  policy: ScopedContentGraphRoutePolicy,
+  graph: string,
+  registeredSubGraphs: Set<string>,
+  registeredAssertionGraphs: Set<string>,
+  knownChildContextGraphs: Set<string>,
+): boolean {
+  if (policy.metadataGraphs.includes(graph)) return true;
+  if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return false;
+  if (graph !== policy.rootGraph && (
+    !graph.startsWith(`${policy.rootGraph}/`)
+    || isExcludedContentGraphTail(graph.slice(policy.rootGraph.length + 1))
+  )) return false;
+  if (policy.contentGraphs.includes(graph)) return true;
+  if (policy.isSwmOnlyRoute) return graph.startsWith(`${policy.sharedMemoryGraph}/`);
+  return isScopedContentGraph(graph, policy.contextGraphId, registeredSubGraphs,
+    registeredAssertionGraphs, knownChildContextGraphs, policy.subGraphName);
+}
 
 export function isScopedContentGraph(
   graph: string,
@@ -89,7 +154,7 @@ function isKnownChildContextGraphPartition(graph: string, knownChildContextGraph
 }
 
 function isStagingGraphTail(tail: string): boolean {
-  return tail.startsWith('_verifiable_memory/staging/') || tail.includes('/_verifiable_memory/staging/');
+  return tail.includes('/staging/');
 }
 
 export function isExcludedContentGraphTail(tail: string): boolean {
