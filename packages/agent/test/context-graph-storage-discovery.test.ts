@@ -18,6 +18,8 @@ import {
 import { toContextGraphListOnChainFacts } from '../src/context-graph-list-authority-enrichment.js';
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
+/** Paging is exercised with a page smaller than the default, so a few dozen ids span several. */
+const PAGE = 16;
 
 async function chainWith(count: number): Promise<MockChainAdapter> {
   const chain = new MockChainAdapter();
@@ -50,7 +52,11 @@ class RecordingStore implements ContextGraphStorageDiscoveryStore {
 function harness(
   chain: MockChainAdapter,
   store: ContextGraphStorageDiscoveryStore,
-  options: { now?: () => number; apply?: (record: ContextGraphStorageDiscoveryRecord) => void } = {},
+  options: {
+    now?: () => number;
+    apply?: (record: ContextGraphStorageDiscoveryRecord) => void;
+    pageSize?: number | 'default';
+  } = {},
 ) {
   const reads: Array<[bigint, number]> = [];
   const applied: string[] = [];
@@ -73,6 +79,7 @@ function harness(
       return { isNew, changed: isNew };
     },
     log: (message) => logs.push(message),
+    ...(options.pageSize === 'default' ? {} : { pageSize: options.pageSize ?? PAGE }),
     ...(options.now ? { now: options.now } : {}),
   });
   return {
@@ -96,17 +103,57 @@ describe('ContextGraphStorageDiscovery', () => {
     const result = await discovery.discover();
 
     expect(result).toMatchObject({ discovered: 40, read: 40, complete: true, nextId: 41n, latestId: 40n });
-    expect(reads).toEqual([
-      [1n, CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE],
-      [17n, CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE],
-      [33n, CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE],
-    ]);
+    expect(reads).toEqual([[1n, PAGE], [17n, PAGE], [33n, PAGE]]);
     expect(store.saves).toBe(3);
     const saved = store.value as { nextId: string; entries: Array<{ contextGraphId: string }> };
     expect(saved.nextId).toBe('41');
     expect(saved.entries.map((entry) => entry.contextGraphId)).toEqual(
       Array.from({ length: 40 }, (_, i) => String(i + 1)),
     );
+  });
+
+  it('reads a chain with a few dozen graphs as one page by default', async () => {
+    expect(CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE).toBe(64);
+    const chain = await chainWith(37);
+    const store = new RecordingStore();
+    const { discovery, reads } = harness(chain, store, { pageSize: 'default' });
+
+    const result = await discovery.discover();
+
+    expect(result).toMatchObject({ discovered: 37, read: 37, complete: true, nextId: 38n, latestId: 37n });
+    // One range read, so one anchor read and one latest-id read for the whole catalog.
+    expect(reads).toEqual([[1n, CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE]]);
+    expect(store.saves).toBe(1);
+  });
+
+  it('saves the ids before one that cannot be read, stops the cursor there and resumes from it', async () => {
+    const chain = await chainWith(10);
+    const store = new RecordingStore();
+    const { discovery, reads, applied } = harness(chain, store);
+    const graphs = (chain as any).contextGraphs as Map<bigint, unknown>;
+    const readGraph = graphs.get.bind(graphs);
+    let unreadable = true;
+    graphs.get = (id: bigint) => {
+      if (unreadable && id === 6n) throw new Error('RPC timed out');
+      return readGraph(id);
+    };
+
+    // The page ends before id 6 and is saved; the pass then asks for id 6
+    // again and reports why it could not be read.
+    await expect(discovery.discover()).rejects.toThrow('RPC timed out');
+    expect(reads).toEqual([[1n, PAGE], [6n, PAGE]]);
+    expect(applied).toEqual(['1', '2', '3', '4', '5']);
+    await expect(discovery.cursor()).resolves.toBe(6n);
+    const saved = store.value as { nextId: string; entries: Array<{ contextGraphId: string }> };
+    expect(saved.nextId).toBe('6');
+    expect(saved.entries.map((entry) => entry.contextGraphId)).toEqual(['1', '2', '3', '4', '5']);
+
+    unreadable = false;
+    await expect(discovery.discover()).resolves.toMatchObject({
+      discovered: 5, read: 5, complete: true, nextId: 11n,
+    });
+    expect(reads.at(-1)).toEqual([6n, PAGE]);
+    expect(applied).toEqual(Array.from({ length: 10 }, (_, i) => String(i + 1)));
   });
 
   it('bounds a pass by its id budget and resumes at the durable cursor after a restart', async () => {
