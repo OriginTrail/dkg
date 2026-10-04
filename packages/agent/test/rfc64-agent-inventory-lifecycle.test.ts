@@ -1,4 +1,5 @@
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -57,6 +58,7 @@ function syntheticAgent(dataDirectory?: string): any {
   // Production always owns an adapter, including no-chain deployments.
   agent.chain = new MockChainAdapter();
   agent.peerSyncSession = PeerSyncSession.stopped();
+  agent.gossipSession = new GossipSession();
   agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
   agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {

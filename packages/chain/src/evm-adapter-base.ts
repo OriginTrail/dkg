@@ -108,6 +108,7 @@ import { ContextGraphRegistryRepairCoordinator } from
   './context-graph-registry-repair-coordinator.js';
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
+import { BackgroundContractReadBatching } from './evm-background-read-batching.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type {
@@ -691,6 +692,8 @@ export class EVMChainAdapterBase {
    * the adapter and never owns tx-safety state.
    */
   protected readonly rpcFailover: RpcFailoverClient;
+  /** Background views coalesced into one Multicall3 request (see `evm-background-read-batching.ts`). */
+  private readonly backgroundReadBatching: BackgroundContractReadBatching;
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
@@ -1484,6 +1487,12 @@ export class EVMChainAdapterBase {
         stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
       },
     );
+    this.backgroundReadBatching = new BackgroundContractReadBatching({
+      readContract: (descriptor, contract, fn, opts) => this.rpcFailover.readContract(descriptor, contract, fn, opts),
+      readProvider: (label, fn) => this.readProvider(label, fn),
+      // Resolved here at the config boundary, live per read, like the stickiness switch.
+      isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',
+    });
     this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
       config.chainEventLogStore,
       (error) => {
@@ -1802,12 +1811,16 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(
+    const direct = (): Promise<T> => this.rpcFailover.readContract(
       rpcReadDescriptor(label, opts),
       contract,
       (c) => c[method](...args),
       opts,
     );
+    // A background read of a batchable view leaves with the others waiting
+    // for the request budget. Anything else is issued as it always was.
+    return this.backgroundReadBatching.tryRead<T>({ contract, label, method, args, opts, direct })
+      ?? direct();
   }
 
   /** Canonical KAS update-context ABI read shared by storage and publish mixins. */
