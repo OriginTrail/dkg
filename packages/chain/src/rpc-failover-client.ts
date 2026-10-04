@@ -123,18 +123,6 @@ export function createRpcReadDescriptor(
   return Object.freeze({ label, consumer });
 }
 
-/**
- * Bind an adapter read's human label and telemetry owner together.
- *
- * Kept as a module helper so it does not become part of the concrete adapter's
- * prototype API (the mock-adapter parity test intentionally enumerates that
- * surface).
- */
-export function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
-  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
-  return createRpcReadDescriptor(label, consumer);
-}
-
 export type RpcReadDescriptorInput = string | RpcReadDescriptor;
 
 /** Per-read options: timeout/failover behavior plus a compatibility escape
