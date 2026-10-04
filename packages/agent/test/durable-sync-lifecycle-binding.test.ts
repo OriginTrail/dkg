@@ -77,9 +77,9 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
   >();
   return {
     ...actual,
-    reconcileFinalizedSwmTwin: vi.fn(async () => 'head-missing-or-ambiguous' as const),
-    reconcileFinalizedSwmTwinFromDescriptor: vi.fn(
-      async () => 'head-missing-or-ambiguous' as const,
+    reconcileFinalizedSwmTwinWithEvidence: vi.fn(async () => ({ outcome: 'head-missing-or-ambiguous' as const })),
+    reconcileFinalizedSwmTwinFromDescriptorWithEvidence: vi.fn(
+      async () => ({ outcome: 'head-missing-or-ambiguous' as const }),
     ),
   };
 });
@@ -107,8 +107,8 @@ import {
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import {
-  reconcileFinalizedSwmTwin,
-  reconcileFinalizedSwmTwinFromDescriptor,
+  reconcileFinalizedSwmTwinWithEvidence,
+  reconcileFinalizedSwmTwinFromDescriptorWithEvidence,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
@@ -126,9 +126,9 @@ const mockedRunDurableSyncDetailed = vi.mocked(runDurableSyncDetailed);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
 const mockedRunSharedMemorySync = vi.mocked(runSharedMemorySync);
 const mockedRecoverContextGraphSwm = vi.mocked(recoverContextGraphSwm);
-const mockedReconcileFinalizedSwmTwin = vi.mocked(reconcileFinalizedSwmTwin);
+const mockedReconcileFinalizedSwmTwin = vi.mocked(reconcileFinalizedSwmTwinWithEvidence);
 const mockedReconcileFinalizedSwmTwinFromDescriptor = vi.mocked(
-  reconcileFinalizedSwmTwinFromDescriptor,
+  reconcileFinalizedSwmTwinFromDescriptorWithEvidence,
 );
 
 function graphScopedAsset(
@@ -202,6 +202,9 @@ async function captureGraphScopedStore(
     log: { info: () => {}, warn, debug: () => {} },
     publisher: { clearPublishedKnowledgeAssetSwm: async () => {} },
     writeLocks: new Map(),
+    retireLegacySwmAfterVerifiedVmTwin: vi.fn(async () => {}),
+    rfc64BackgroundWorkDispatcherV1: { scheduleKeyed: vi.fn(() => true) },
+    completeFinalizedSwmTwinRetirement: LifecycleSyncMethods.prototype.completeFinalizedSwmTwinRetirement,
   };
   agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.requireLocalCgMatchesOnChainSlot = (
@@ -247,9 +250,9 @@ describe('durable sync lifecycle chain binding', () => {
     mockedRunSharedMemorySync.mockClear();
     mockedRecoverContextGraphSwm.mockClear();
     mockedReconcileFinalizedSwmTwin.mockReset();
-    mockedReconcileFinalizedSwmTwin.mockResolvedValue('not-found');
+    mockedReconcileFinalizedSwmTwin.mockResolvedValue({ outcome: 'head-missing-or-ambiguous' });
     mockedReconcileFinalizedSwmTwinFromDescriptor.mockReset();
-    mockedReconcileFinalizedSwmTwinFromDescriptor.mockResolvedValue('not-found');
+    mockedReconcileFinalizedSwmTwinFromDescriptor.mockResolvedValue({ outcome: 'head-missing-or-ambiguous' });
   });
 
   afterEach(() => {
@@ -1436,14 +1439,15 @@ describe('durable sync lifecycle chain binding', () => {
     const warnings = vi.fn();
     let agentLike!: any;
     mockedReconcileFinalizedSwmTwin.mockImplementationOnce(async ({ retire }) => {
-      await retire({
+      const retirement = {
         contextGraphId,
         kaUal: ual,
         agentAddress: '0x1111111111111111111111111111111111111111',
         kaNumber: 1n,
         swmGraph: 'urn:swm',
-      } satisfies FinalizedSwmTwinRetirement);
-      return 'retired';
+       assertionVersion: 2n } satisfies FinalizedSwmTwinRetirement & { assertionVersion: bigint };
+      await retire(retirement);
+      return { outcome: 'retired', retirement };
     });
     const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings, {
       onAgentLike: (value) => {
@@ -1503,15 +1507,16 @@ describe('durable sync lifecycle chain binding', () => {
       // The reconciler derives the twin's namespace from the authenticated
       // asset and hands it to the retirement callback.
       mockedReconcileFinalizedSwmTwin.mockImplementationOnce(async ({ retire }) => {
-        await retire({
+        const retirement = {
           contextGraphId,
           kaUal: ual,
           agentAddress: '0x1111111111111111111111111111111111111111',
           kaNumber: 1n,
           swmGraph: 'urn:swm',
           ...(subGraphName === undefined ? {} : { subGraphName }),
-        } satisfies FinalizedSwmTwinRetirement);
-        return 'retired';
+         assertionVersion: 2n } satisfies FinalizedSwmTwinRetirement & { assertionVersion: bigint };
+        await retire(retirement);
+        return { outcome: 'retired', retirement };
       });
       const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async () => {});
       const warnings = vi.fn();
@@ -1539,7 +1544,8 @@ describe('durable sync lifecycle chain binding', () => {
   it('maps already-retired SWM recovery evidence to metadata suppression at the lifecycle boundary', async () => {
     let disposition: unknown;
     mockedReconcileFinalizedSwmTwinFromDescriptor.mockResolvedValueOnce(
-      'already-retired-finalized',
+      { outcome: 'already-retired-finalized', retirement: { contextGraphId, kaUal: ual, assertionVersion: 2n,
+        agentAddress: '0x1111111111111111111111111111111111111111', kaNumber: 1n, swmGraph: 'urn:swm' } },
     );
     mockedRunSharedMemorySync.mockImplementationOnce(async (syncContext) => {
       disposition = await syncContext.reconcileFinalizedTwin?.(contextGraphId, {
@@ -1630,7 +1636,7 @@ describe('durable sync lifecycle chain binding', () => {
     mockedReconcileFinalizedSwmTwinFromDescriptor.mockImplementationOnce(
       async ({ retire }) => {
         await retire(retirement);
-        return 'retired';
+        return { outcome: 'retired', retirement: { ...retirement, assertionVersion: 2n } };
       },
     );
     mockedRunSharedMemorySync.mockImplementationOnce(async (syncContext) => {

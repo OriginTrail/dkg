@@ -136,7 +136,7 @@ export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
   }
 }
 
-const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
+export const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
 
 /**
  * The attribution a thrown read-authority marker carries. The agent's error is

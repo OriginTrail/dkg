@@ -568,6 +568,11 @@ export class QueryMethods extends DKGAgentBase {
         // subscription, or graph. Return an empty scoped result without
         // touching the store's graph partitions. A replica that has local
         // data or join intent remains on the retryable authority path.
+        // This deliberately exposes that the node knows a graph by name,
+        // including a private declaration: known names remain retryable,
+        // unknown names settle empty. The daemon's context-graph/exists
+        // endpoint already exposes the same name signal to these callers.
+        // Private content remains behind the read-authority decision.
         // The id comes straight from the caller: a malformed one never gets
         // this answer, so the reply cannot depend on the existence check.
         if (
@@ -1092,8 +1097,7 @@ export class QueryMethods extends DKGAgentBase {
             // the join proof on every read, so an expired delegation or a
             // replaced request keeps failing closed.
             allowAcceptedRfc64FinalizedAbsence:
-              this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true
-              && this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) !== true,
+              this.hasAcceptedRfc64UnregisteredReadAuthorityV1?.(contextGraphId) === true,
             allowApprovedPrivateReplicaFinalizedAbsence: true,
             authorityReadMode,
             // READ authorization, and therefore correctable by the next read.
@@ -1167,16 +1171,12 @@ export class QueryMethods extends DKGAgentBase {
         // Non-RFC-64 identifiers continue through the legacy authorization path.
       }
       if (canonicalNetworkId !== null && canonicalContextGraphId !== null) {
-        const current = service.acceptedPolicySnapshot(
+        const current = service.acceptedPolicySnapshotForReads(
           canonicalNetworkId,
           canonicalContextGraphId,
         );
         if (current !== null) {
           if (current.policy.accessPolicy !== 1) return undefined;
-          // A join-derived roster never authorizes a read on its own.
-          if (this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) === true) {
-            return undefined;
-          }
           if (current.roster === null) return null;
           return Object.freeze(
             current.roster.members.map(({ agentAddress }) => agentAddress),
@@ -1199,7 +1199,7 @@ export class QueryMethods extends DKGAgentBase {
 
     for (const { policyEnvelope } of configured) {
       const policy = policyEnvelope.payload;
-      const current = service.acceptedPolicySnapshot(
+      const current = service.acceptedPolicySnapshotForReads(
         policy.networkId,
         policy.contextGraphId,
       );

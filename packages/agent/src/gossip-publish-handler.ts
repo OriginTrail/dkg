@@ -253,6 +253,7 @@ export class GossipPublishHandler {
     let ctx = createOperationContext('gossip');
     const phase = onPhase ?? this.callbacks.onPhase;
     try {
+      if (!validateContextGraphId(contextGraphId).valid) return;
       phase?.('decode', 'start');
       let request;
       try {
@@ -364,7 +365,7 @@ export class GossipPublishHandler {
           const newContextGraphIds: string[] = [];
           for (const uri of incomingContextGraphUris) {
             const id = uri.startsWith(contextGraphPrefix) ? uri.slice(contextGraphPrefix.length) : null;
-            if (!id) continue;
+            if (!id || !isSafeIri(uri) || !validateContextGraphId(id).valid) continue;
             if (await this.callbacks.contextGraphExists(id)) {
               duplicateUris.add(uri);
             } else if (id !== SYSTEM_CONTEXT_GRAPHS.AGENTS && id !== SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) {

@@ -95,6 +95,19 @@ function cclRouteContext(
 }
 
 describe('/api/query request lifecycle', () => {
+  it.each(['bad> } GRAPH ?g { ?s ?p ?o', '', '../cg', null, 123])(
+    'rejects malformed graph id %j before any agent or store read', async (contextGraphId) => {
+      const req = new RequestStub({ sparql: 'SELECT * WHERE { ?s ?p ?o }', contextGraphId });
+      const res = new ResponseStub();
+      const query = vi.fn();
+      const resolveContextGraphReadAuthority = vi.fn();
+      await handleQueryRoutes(queryRouteContext(req, res, { query, resolveContextGraphReadAuthority }, {}));
+      expect(res.statusCode).toBe(400);
+      expect(query).not.toHaveBeenCalled();
+      expect(resolveContextGraphReadAuthority).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     {
       path: '/api/ccl/policy/approve',

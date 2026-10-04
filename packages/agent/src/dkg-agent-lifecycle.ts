@@ -1,3 +1,4 @@
+import { completeFinalizedSwmRetirement, completeVerifiedVmMarkerRetirement, type VerifiedVmMarkerRetirementEvidence } from './sync/requester/finalized-swm-retirement-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -130,7 +131,8 @@ import {
   type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
-  reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinWithEvidence,
+  type FinalizedSwmTwinReconciliationResult,
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import {
@@ -2061,6 +2063,35 @@ type StructuralCuratorPeerLookup =
     };
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  async completeVerifiedVmMarkerRetirement(
+    this: DKGAgent,
+    evidence: VerifiedVmMarkerRetirementEvidence,
+    ctx: OperationContext,
+  ): Promise<void> {
+    await completeVerifiedVmMarkerRetirement({
+      evidence,
+      retireMarker: (input) => this.retireLegacySwmAfterVerifiedVmTwin(input),
+      warn: (message) => this.log.warn(ctx, message),
+      scheduleRetry: (key, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(key, work),
+    });
+    this.invalidateListContextGraphsCache();
+  }
+
+  async completeFinalizedSwmTwinRetirement(
+    this: DKGAgent,
+    reconcile: () => Promise<FinalizedSwmTwinReconciliationResult>,
+    ctx: OperationContext,
+  ): Promise<FinalizedSwmTwinReconciliationResult> {
+    const result = await completeFinalizedSwmRetirement({
+      reconcile,
+      retireMarker: (evidence) => this.retireLegacySwmAfterVerifiedVmTwin(evidence),
+      warn: (message) => this.log.warn(ctx, message),
+      scheduleRetry: (key, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(key, work),
+    });
+    if ('retirement' in result) this.invalidateListContextGraphsCache();
+    return result;
+  }
+
   async retireLegacySwmAfterVerifiedVmTwin(
     this: DKGAgent,
     input: Readonly<{
@@ -6498,26 +6529,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             this.invalidateListContextGraphsCache();
             this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
-              let retiredTwin: FinalizedSwmTwinRetirement | undefined;
-              const retirement = await reconcileFinalizedSwmTwin({
-                store: this.store,
-                writeLocks: this.writeLocks,
-                asset: authentication.asset,
-                retire: async (candidate) => {
-                  await this.retireFinalizedSwmTwinCandidate(candidate, ctx);
-                  retiredTwin = candidate;
-                },
-              });
-              if (retirement === 'retired') {
-                await this.retireLegacySwmAfterVerifiedVmTwin({
-                  contextGraphId: asset.contextGraphId,
-                  kaUal: asset.ual,
-                  assertionVersion: asset.assertionVersion,
-                  // The marker of the namespace whose twin was verified and
-                  // retired. Without it a twin in a named subgraph would
-                  // retire the root marker of the same asset.
-                  subGraphName: retiredTwin?.subGraphName,
-                });
+              const retirement = await this.completeFinalizedSwmTwinRetirement(
+                () => reconcileFinalizedSwmTwinWithEvidence({
+                  store: this.store,
+                  writeLocks: this.writeLocks,
+                  asset: authentication.asset,
+                  retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+                }),
+                ctx,
+              );
+              if (retirement.outcome === 'retired') {
                 this.invalidateListContextGraphsCache();
                 this.log.info(
                   ctx,

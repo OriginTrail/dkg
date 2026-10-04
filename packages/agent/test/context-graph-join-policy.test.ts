@@ -310,28 +310,41 @@ describe('context graph open enrollment policy', () => {
     expect(replay).toHaveBeenCalledOnce();
   });
 
-  it('retains an exact approved-peer replay demand when authority is still settling', async () => {
+  it('replays only the approved graph and peer on the first background retry after authority settles', async () => {
     const { agent, owner } = await boot();
     vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1')
       .mockReturnValue({ track2Enabled: true } as any);
     vi.spyOn(agent, 'readRfc64CurrentCuratorAuthorityBindingV1').mockResolvedValue(null);
-    vi.spyOn(agent, 'deliverPrivateJoinNotification')
+    const deliver = vi.spyOn(agent, 'deliverPrivateJoinNotification')
       .mockResolvedValue({ delivered: true, peerId: 'approved-peer', error: null });
     const refresh = vi.spyOn(agent, 'reconcileRfc64CatalogAccessAuthorityV1')
       .mockResolvedValue(null);
+    let authorityReady = false;
     const replay = vi.spyOn(agent, 'reannounceRfc64CatalogAfterJoinApprovalV1')
-      .mockResolvedValue(false);
-    const retry = vi.spyOn(agent, 'scheduleRfc64CatalogAfterJoinApprovalRetryV1')
-      .mockReturnValue(true);
-
-    await agent.notifyJoinApproval('private-join-pending-replay', owner.agentAddress, 'generation');
-
-    expect(refresh).toHaveBeenCalledTimes(3);
-    expect(replay).toHaveBeenCalledTimes(3);
-    expect(retry).toHaveBeenCalledOnce();
-    expect(retry).toHaveBeenCalledWith(
-      'private-join-pending-replay', owner.agentAddress, 'approved-peer',
-    );
+      .mockImplementation(async () => authorityReady);
+    vi.useFakeTimers();
+    try {
+      const notification = agent.notifyJoinApproval(
+        'private-join-pending-replay', owner.agentAddress, 'generation',
+      );
+      await vi.advanceTimersByTimeAsync(1_250);
+      await notification;
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(refresh).toHaveBeenCalledTimes(3);
+      expect(replay).toHaveBeenCalledTimes(3);
+      authorityReady = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(refresh).toHaveBeenCalledTimes(4);
+      expect(replay).toHaveBeenCalledTimes(4);
+      for (const call of replay.mock.calls) expect(call).toEqual([
+        'private-join-pending-replay', owner.agentAddress, 'approved-peer',
+      ]);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(replay).toHaveBeenCalledTimes(4);
+      expect(deliver.mock.invocationCallOrder[0]).toBeLessThan(replay.mock.invocationCallOrder[0]!);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   async function buildColdKeyDelegation(input: {

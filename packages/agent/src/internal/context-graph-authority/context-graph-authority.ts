@@ -59,6 +59,8 @@ export function isRetryableContextGraphAuthorityUnavailableReason(
   return CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_RETRYABLE[reason] === true;
 }
 
+export type ContextGraphAuthorityUnavailableOrigin = 'agent-gate-revision';
+
 export type ContextGraphAgentGateAuthority =
   | { kind: 'ungated' }
   | { kind: 'available'; agentAddresses: string[] }
@@ -66,6 +68,7 @@ export type ContextGraphAgentGateAuthority =
       kind: 'unavailable';
       reason: ContextGraphAgentGateUnavailableReason;
       detail?: string;
+      origin?: ContextGraphAuthorityUnavailableOrigin;
     };
 
 export const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE =
@@ -83,21 +86,24 @@ export type ContextGraphAuthorityUnavailableMarker = {
   readonly code: typeof CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE;
   readonly reason: ContextGraphAgentGateUnavailableReason;
   readonly detail?: string;
+  readonly origin?: ContextGraphAuthorityUnavailableOrigin;
 };
 
 export class ContextGraphAuthorityUnavailableError extends Error {
   readonly code = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE;
   readonly reason: ContextGraphAgentGateUnavailableReason;
   readonly detail?: string;
+  readonly origin?: ContextGraphAuthorityUnavailableOrigin;
 
   constructor(
     message: string,
-    options: { reason: ContextGraphAgentGateUnavailableReason; detail?: string },
+    options: { reason: ContextGraphAgentGateUnavailableReason; detail?: string; origin?: ContextGraphAuthorityUnavailableOrigin },
   ) {
     super(message);
     this.name = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME;
     this.reason = options.reason;
     if (options.detail !== undefined) this.detail = options.detail;
+    if (options.origin !== undefined) this.origin = options.origin;
   }
 }
 
@@ -119,10 +125,11 @@ export function isContextGraphAuthorityUnavailableMarker(
 
 export function createContextGraphAuthorityError(
   message: string,
-  failure: { reason: ContextGraphAgentGateUnavailableReason; detail?: string },
+  failure: { reason: ContextGraphAgentGateUnavailableReason; detail?: string; origin?: ContextGraphAuthorityUnavailableOrigin },
 ): ContextGraphAuthorityUnavailableError {
   return new ContextGraphAuthorityUnavailableError(message, {
     reason: failure.reason,
     ...(failure.detail === undefined ? {} : { detail: failure.detail }),
+    ...(failure.origin === undefined ? {} : { origin: failure.origin }),
   });
 }

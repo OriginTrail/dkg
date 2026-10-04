@@ -242,7 +242,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import {
   createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
-  reconcileFinalizedSwmTwinFromCatalogProjection,
+  reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence,
 } from
   './sync/requester/finalized-swm-twin-reconciliation.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -2163,29 +2163,27 @@ export class SwmSubstrateMethods extends DKGAgentBase {
               onTornHeadRemoved: (message, ctx) => this.log.warn(ctx, message),
             });
             return async (candidate, ctx) => {
-              await retireOrphaned(candidate, ctx);
-              await this.retireLegacySwmAfterVerifiedVmTwin({
-                contextGraphId: candidate.contextGraphId,
-                kaUal: candidate.ual,
-                assertionVersion: candidate.assertionVersion,
-                subGraphName: candidate.subGraphName,
-              });
+              if (await retireOrphaned(candidate, ctx)) {
+                await this.completeVerifiedVmMarkerRetirement({
+                  contextGraphId: candidate.contextGraphId,
+                  kaUal: candidate.ual,
+                  assertionVersion: candidate.assertionVersion,
+                  subGraphName: candidate.subGraphName,
+                }, ctx);
+              }
             };
           })(),
           reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
-            const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({
-              store: this.store,
-              writeLocks: this.writeLocks,
-              evidence,
-              retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
-            });
-            if (retirement === 'retired') {
-              await this.retireLegacySwmAfterVerifiedVmTwin({
-                contextGraphId: evidence.contextGraphId,
-                kaUal: evidence.kaUal,
-                assertionVersion: evidence.assertionVersion,
-                subGraphName: evidence.subGraphName,
-              });
+            const retirement = await this.completeFinalizedSwmTwinRetirement(
+              () => reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence({
+                store: this.store,
+                writeLocks: this.writeLocks,
+                evidence,
+                retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+              }),
+              ctx,
+            );
+            if (retirement.outcome === 'retired') {
               this.invalidateListContextGraphsCache();
               this.log.info(
                 ctx,

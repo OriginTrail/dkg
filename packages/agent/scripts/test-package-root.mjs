@@ -275,6 +275,7 @@ const blockedRfc64Modules = [
   'public-catalog-workload-owner-v1.js',
   'catalog-responsibility-registry-v1.js',
   'release-native-catalog-authority-v1.js',
+  'catalog-lifecycle-authority-source-v1.js',
   'legacy-swm-boundary-v1.js',
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-reconciliation-v1.js',

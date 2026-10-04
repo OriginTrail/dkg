@@ -2248,8 +2248,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     publishPolicy?: number;
     publishAuthorityAccountId?: bigint;
   }> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
     const result = await this.store.query(
       `SELECT ?pp ?paa WHERE { GRAPH <${cgMetaGraph}> {
         OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PUBLISH_POLICY}> ?pp }

@@ -35,7 +35,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -1065,7 +1065,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     contextGraphId: string,
     opts?: { callerAgentAddress?: string | null },
   ): Promise<ContextGraphWritePreflightProbe> {
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);

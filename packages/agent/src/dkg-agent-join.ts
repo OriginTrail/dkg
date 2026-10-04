@@ -1336,6 +1336,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     state: RequesterJoinRequestState,
   ): Promise<void> {
+    this.requesterJoinAuthorityRevisionV1.set(contextGraphId,
+      (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) + 1);
+    this.requesterJoinAuthorityMutationsV1.set(contextGraphId,
+      (this.requesterJoinAuthorityMutationsV1.get(contextGraphId) ?? 0) + 1);
+    try {
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
     const cache = this.requesterJoinStateCache();
     const previous = cache.get(key);
@@ -1452,6 +1457,13 @@ export class JoinRequestMethods extends DKGAgentBase {
       cache.delete(key);
       throw error;
     }
+    } finally {
+      this.requesterJoinAuthorityRevisionV1.set(contextGraphId,
+        (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) + 1);
+      const remaining = (this.requesterJoinAuthorityMutationsV1.get(contextGraphId) ?? 1) - 1;
+      if (remaining === 0) this.requesterJoinAuthorityMutationsV1.delete(contextGraphId);
+      else this.requesterJoinAuthorityMutationsV1.set(contextGraphId, remaining);
+    }
   }
 
   async clearRequesterJoinRequestState(
@@ -1459,6 +1471,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     agentAddress: string,
   ): Promise<void> {
+    this.requesterJoinAuthorityRevisionV1.set(contextGraphId,
+      (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) + 1);
+    this.requesterJoinAuthorityMutationsV1.set(contextGraphId,
+      (this.requesterJoinAuthorityMutationsV1.get(contextGraphId) ?? 0) + 1);
+    try {
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
     const cache = this.requesterJoinStateCache();
     try {
@@ -1471,6 +1488,13 @@ export class JoinRequestMethods extends DKGAgentBase {
     } catch (error) {
       cache.delete(key);
       throw error;
+    }
+    } finally {
+      this.requesterJoinAuthorityRevisionV1.set(contextGraphId,
+        (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) + 1);
+      const remaining = (this.requesterJoinAuthorityMutationsV1.get(contextGraphId) ?? 1) - 1;
+      if (remaining === 0) this.requesterJoinAuthorityMutationsV1.delete(contextGraphId);
+      else this.requesterJoinAuthorityMutationsV1.set(contextGraphId, remaining);
     }
   }
 
@@ -2627,27 +2651,7 @@ export class JoinRequestMethods extends DKGAgentBase {
         && result.peerId !== this.peerId
         && this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).track2Enabled
       ) {
-        for (const delayMs of [0, 250, 1_000]) {
-          if (delayMs > 0) {
-            await new Promise<void>((resolve) => { setTimeout(resolve, delayMs); });
-          }
-          try {
-            await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
-            if (await this.reannounceRfc64CatalogAfterJoinApprovalV1(
-              contextGraphId,
-              agentAddress,
-              result.peerId,
-            )) return;
-          } catch {
-            // The approval remains durable. The next bounded attempt can
-            // observe the current authority generation.
-          }
-        }
-        this.log.warn(
-          createOperationContext('system'),
-          `RFC-64 catalog replay remains pending after join approval for "${contextGraphId}"`,
-        );
-        this.scheduleRfc64CatalogAfterJoinApprovalRetryV1(
+        await this.runRfc64CatalogAfterJoinApprovalV1(
           contextGraphId,
           agentAddress,
           result.peerId,

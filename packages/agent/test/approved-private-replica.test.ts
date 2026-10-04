@@ -43,6 +43,7 @@ import type {
 } from '../src/index.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
+import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
 
 const OWNER = '0x4bf5c3c4b96894c7f1e7f7d625e4b48051b443b4';
@@ -491,6 +492,88 @@ describe('approved private bare-name replica authorization', () => {
     });
   });
 
+  it('catches up an existing private catalog head on a cold connected requester after real join approval', async () => {
+    const config = {
+      ...TEST_SNAPSHOT_CONFIG,
+      // Local seal-domain reads are deterministic; registry reads remain the
+      // genuine NoChainAdapter finalized-absence path and no mint is invoked.
+      chainAdapter: Object.assign(new NoChainAdapter(), {
+        chainId: 'otp:20430',
+        getEvmChainId: async () => BigInt(RFC64_ROLLOUT_DEPLOYMENT.assertedAtChainId),
+        getKnowledgeAssetsLifecycleAddress: async () => RFC64_ROLLOUT_DEPLOYMENT.assertedAtKav10Address,
+      }),
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      rfc64CatalogDeploymentProfile: RFC64_ROLLOUT_DEPLOYMENT,
+    };
+    const curator = await h.startAgent({ name: 'catalog-join-curator', config });
+    const member = await h.startAgent({ name: 'catalog-join-requester', config: {
+      ...config, chainAdapter: new NoChainAdapter(), kaNumberAllocator: makeTestKaNumberAllocator(),
+    } });
+    for (const agent of [curator, member]) {
+      const admission = Reflect.get(agent, 'networkAdmissionCoordinator');
+      admission.isAcceptedPeer = () => true;
+      admission.isRejectedPeer = () => false;
+      admission.ensureAdmitted = async () => true;
+    }
+    const address = curator.multiaddrs.find((value) => value.includes('/tcp/'));
+    if (address === undefined) throw new Error('curator has no TCP address');
+    await member.node.libp2p.dial(multiaddr(address));
+    const existingConnection = member.node.libp2p.getConnections().find(
+      (connection) => connection.remotePeer.toString() === curator.peerId,
+    );
+    expect(existingConnection).toBeDefined();
+    const owner = await curator.registerAgent('catalog curator');
+    const requester = await member.registerAgent('cold requester');
+    Reflect.set(curator, 'defaultAgentAddress', owner.agentAddress);
+    await curator.markDefaultAgent(owner.agentAddress);
+    Reflect.set(member, 'defaultAgentAddress', requester.agentAddress);
+    await member.markDefaultAgent(requester.agentAddress);
+    await curator.store.insert([{
+      subject: `did:dkg:agent:${owner.agentAddress}`, predicate: D.DKG_PEER_ID,
+      object: JSON.stringify(curator.peerId), graph: AGENT_PROFILE_GRAPH,
+    }]);
+    const contextGraphId = 'private-catalog-before-approval';
+    await curator.createContextGraph({
+      id: contextGraphId, name: 'Private catalog before approval', accessPolicy: 1,
+      callerAgentAddress: owner.agentAddress,
+    });
+    await curator.whenRfc64CatalogResponsibilitiesIdleV1();
+    await curator.assertion.create(contextGraphId, 'preexisting-private-row', { agentAddress: owner.agentAddress });
+    await curator.assertion.write(contextGraphId, 'preexisting-private-row', [{
+      subject: 'urn:test:private-catalog-row', predicate: 'https://schema.org/name',
+      object: '"private catalog catch-up payload"',
+    }], { agentAddress: owner.agentAddress });
+    await curator.assertion.promote(contextGraphId, 'preexisting-private-row', { agentAddress: owner.agentAddress, authorAgentAddress: owner.agentAddress });
+    await curator.awaitInFlightRfc64SwmInventoryObserversV1();
+    await curator.whenRfc64CatalogSupervisorsIdleV1();
+    expect((await curator.readRfc64CatalogOperationalStatusV1()).find(
+      (row) => row.contextGraphId === contextGraphId,
+    )?.appliedRowCount).toBe('1');
+    expect(member.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)).toBeNull();
+    const delegation = await member.signJoinRequest(contextGraphId, requester.agentAddress);
+    expect((await member.forwardJoinRequest(
+      contextGraphId, delegation, 'cold catalog requester', curator.peerId,
+    )).delivered).toBeGreaterThanOrEqual(1);
+    await vi.waitFor(async () => {
+      expect((await curator.listPendingJoinRequests(contextGraphId, owner.agentAddress)).some(
+        ({ agentAddress }) => agentAddress.toLowerCase() === requester.agentAddress.toLowerCase(),
+      )).toBe(true);
+    }, { timeout: 20_000, interval: 100 });
+    await curator.approveJoinRequest(contextGraphId, requester.agentAddress, owner.agentAddress);
+    await vi.waitFor(async () => {
+      expect((await member.readRfc64CatalogOperationalStatusV1()).find(
+        (row) => row.contextGraphId === contextGraphId,
+      )?.appliedRowCount).toBe('1');
+      const result = await member.query('SELECT ?name WHERE { <urn:test:private-catalog-row> <https://schema.org/name> ?name }', {
+        contextGraphId, view: 'shared-working-memory', callerAgentAddress: requester.agentAddress,
+      });
+      expect(JSON.stringify(result)).toContain('private catalog catch-up payload');
+    }, { timeout: 30_000, interval: 100 });
+    expect(member.node.libp2p.getConnections().some(
+      (connection) => connection.id === existingConnection!.id,
+    )).toBe(true);
+  }, 90_000);
+
   it('keeps a completed NoChainAdapter private join live for sender-key setup and encrypted SWM', async () => {
     const curator = await h.startAgent({
       name: 'legacy-private-join-curator',
@@ -560,13 +643,25 @@ describe('approved private bare-name replica authorization', () => {
       ]));
     }, { timeout: 30_000, interval: 100 });
 
-    await expect(member.resolveSwmTransportAuthority(
+    const transportAuthority = await member.resolveSwmTransportAuthority(
       contextGraphId,
       { authorityReadMode: 'finalized-index-or-live' },
-    )).resolves.toEqual({
-      kind: 'approved-private-replica',
-      allowedPeers: expect.arrayContaining([curator.peerId, member.peerId]),
-    });
+    );
+    if (transportAuthority.kind === 'private-roster') {
+      // The real post-approval replay may already have delivered the owner's
+      // authenticated policy. That independent source legitimately upgrades
+      // the live join proof; a join-derived snapshot alone must never do so.
+      expect(member.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId, 'reads')?.provenance)
+        .toBe('authenticated');
+      expect(transportAuthority.participantAgents).toEqual(expect.arrayContaining([
+        curatorAgent.agentAddress.toLowerCase(), memberAgent.agentAddress.toLowerCase(),
+      ]));
+    } else {
+      expect(transportAuthority).toEqual({
+        kind: 'approved-private-replica',
+        allowedPeers: expect.arrayContaining([curator.peerId, member.peerId]),
+      });
+    }
 
     const sendReliable = vi.spyOn(
       Reflect.get(curator, 'messenger'),
@@ -1410,7 +1505,7 @@ describe('approved private bare-name replica authorization', () => {
     'preserves an accepted %s policy ahead of the local participant proof',
     async (_policy, privateRoster, expected) => {
       const fixture = await approvedBareNameReplicaFixture();
-      vi.spyOn(fixture.receiver, 'hasAcceptedRfc64UnregisteredAuthorityV1')
+      vi.spyOn(fixture.receiver, 'hasAcceptedRfc64UnregisteredReadAuthorityV1')
         .mockReturnValue(true);
       vi.spyOn(fixture.receiver, 'hasAcceptedRfc64PublicUnregisteredAuthorityV1')
         .mockReturnValue(privateRoster === undefined);
@@ -1711,6 +1806,60 @@ describe('approved private bare-name replica authorization', () => {
       .toEqual([OWNER, fixture.memberAddress].sort());
   });
 
+  it.each(['request-replaced', 'owner-mismatch', 'member-missing', 'metadata-moved'] as const)(
+    'refuses approved-private catalog acceptance when %s after the proof succeeds', async (change) => {
+      const fixture = await approvedBareNameReplicaFixture();
+      let releaseRead!: () => void; let enteredRead!: () => void;
+      const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+      const entered = new Promise<void>((resolve) => { enteredRead = resolve; });
+      const original = fixture.receiver.getStoredContextGraphRegistrationOptions.bind(fixture.receiver);
+      vi.spyOn(fixture.receiver, 'getStoredContextGraphRegistrationOptions').mockImplementationOnce(async (id) => {
+        enteredRead(); await release; return original(id);
+      });
+      if (change === 'owner-mismatch') vi.spyOn(fixture.receiver, 'getContextGraphOwner').mockResolvedValue(`did:dkg:agent:${OUTSIDER}`);
+      if (change === 'member-missing') vi.spyOn(fixture.receiver, 'resolveRfc64ConfirmedOwnMetaRosterV1').mockResolvedValue([OWNER]);
+      const composition = fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' })
+        .catch((cause: unknown) => cause);
+      if (change === 'owner-mismatch') {
+        expect(await composition).toBeInstanceOf(Error);
+      } else {
+        await entered;
+        if (change === 'request-replaced') await fixture.receiver.writeRequesterJoinRequestState(CONTEXT_GRAPH_ID, fixture.approvedAddress, {
+          status: 'rejected', requestGeneration: `0x${'34'.repeat(32)}`, curatorPeerId: CURATOR_PEER,
+          curatorAgentAddress: OWNER, curatorAuthorityEra: '0',
+        });
+        if (change === 'metadata-moved') await fixture.receiver.store.insert([{
+          graph: fixture.graph, subject: fixture.subject, predicate: D.DKG_REVOKED_AGENT, object: JSON.stringify(fixture.approvedAddress),
+        }]);
+        releaseRead();
+        expect(await composition).toBeInstanceOf(Error);
+      }
+      expect(fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)).toBeNull();
+    },
+  );
+
+  it('activates a scheduled private-join retry after the authenticated metadata and delegation arrive', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const held = await fixture.receiver.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${fixture.graph}> { ?s ?p ?o } }`);
+    if (held.type !== 'quads') throw new Error('fixture metadata is missing');
+    await fixture.receiver.store.dropGraph(fixture.graph);
+    const subscription = Reflect.get(fixture.receiver, 'subscribedContextGraphs').get(CONTEXT_GRAPH_ID);
+    Reflect.get(fixture.receiver, 'subscribedContextGraphs').set(CONTEXT_GRAPH_ID, {
+      ...subscription, pendingMeta: false, onChainHash: fixture.receiver.contextGraphNameCommitment(CONTEXT_GRAPH_ID),
+    });
+    await fixture.receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+    vi.useFakeTimers();
+    try {
+      fixture.receiver.scheduleRfc64CatalogResponsibilityReconciliationV1(CONTEXT_GRAPH_ID);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)).toBeNull();
+      await fixture.receiver.store.insert(held.quads.map((quad) => ({ ...quad, graph: fixture.graph })));
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)?.provenance).toBe('join-approval');
+      expect(fixture.receiver.readRfc64CatalogResponsibilitiesV1()).toContainEqual(expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID, active: true }));
+    } finally { vi.useRealTimers(); }
+  });
+
   it('keeps reads and shared memory on the live join proof after catalog authority is accepted', async () => {
     const startedAt = 2_000_000_000_000;
     const delegationExpiresAt = startedAt + 60_000;
@@ -1745,7 +1894,7 @@ describe('approved private bare-name replica authorization', () => {
       const accepted = await reconcile();
       expect(accepted?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
         .toEqual([OWNER, fixture.memberAddress, secondMember].sort());
-      expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(true);
+      expect((fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)?.provenance === 'join-approval')).toBe(true);
 
       // The accepted roster is not what authorizes: the proof still does, and
       // it covers this receiver's approved member only.
@@ -1879,7 +2028,7 @@ describe('approved private bare-name replica authorization', () => {
       undefined,
       { kind: 'finalized-absence' },
     );
-    expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(true);
+    expect((fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)?.provenance === 'join-approval')).toBe(true);
 
     // The same policy and roster arrive through an independently verified path.
     fixture.receiver.acceptRfc64CatalogAccessSnapshotV1({
@@ -1888,7 +2037,7 @@ describe('approved private bare-name replica authorization', () => {
       roster: joinDerived!.roster,
     });
 
-    expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(false);
+    expect((fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)?.provenance === 'join-approval')).toBe(false);
     expect(fixture.receiver.resolveRfc64PrivateReadRosterV1(CONTEXT_GRAPH_ID)?.slice().sort())
       .toEqual([OWNER, fixture.memberAddress].sort());
   });
@@ -1900,11 +2049,11 @@ describe('approved private bare-name replica authorization', () => {
       undefined,
       { kind: 'finalized-absence' },
     );
-    expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(true);
+    expect((fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)?.provenance === 'join-approval')).toBe(true);
 
     await fixture.receiver.stop();
 
-    expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(false);
+    expect((fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)?.provenance === 'join-approval')).toBe(false);
   });
 
   it.each([

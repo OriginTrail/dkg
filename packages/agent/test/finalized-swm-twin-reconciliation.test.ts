@@ -16,6 +16,7 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { ethers } from 'ethers';
 import {
   reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinWithEvidence,
   reconcileFinalizedSwmTwinFromCatalogProjection,
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
@@ -262,6 +263,29 @@ describe('durable VM / SWM tier reconciliation', () => {
     expect(query.mock.calls.map(([, options]) => options?.source)).toEqual([
       'agent.durableSync.finalizedSwmTwin.readHead',
     ]);
+  });
+
+  it('returns normalized named-subgraph evidence when a VM arrival finds the exact twin already retired', async () => {
+    const store = new OxigraphStore();
+    const input = fixture('updates');
+    await seedTwin(store, input);
+    const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+      await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      await store.deleteByPattern({ graph: input.swmMetaGraph,
+        subject: `urn:dkg:share:${CG}:${OPERATION_ID}` });
+    });
+    const params = { store, writeLocks: new Map<string, Promise<void>>(), asset: input.asset, retire };
+    const first = await reconcileFinalizedSwmTwinWithEvidence(params);
+    expect(first).toMatchObject({ outcome: 'retired', retirement: {
+      contextGraphId: CG, subGraphName: 'updates', assertionVersion: 3n, kaUal: UAL,
+    } });
+    const retry = await reconcileFinalizedSwmTwinWithEvidence(params);
+    expect(retry).toMatchObject({ outcome: 'already-retired-finalized', retirement: {
+      contextGraphId: CG, subGraphName: 'updates', assertionVersion: 3n, kaUal: UAL,
+    } });
+    expect(retire).toHaveBeenCalledOnce();
+    await store.close();
   });
 
   it('reconciles a later SWM arrival after a VM-first absence check', async () => {

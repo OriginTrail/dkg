@@ -112,6 +112,7 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
   const acceptedPolicy = Object.freeze({
     policy,
     policyDigest: untrustedAcceptedPolicy.policyDigest,
+    provenance: untrustedAcceptedPolicy.provenance,
     roster,
   });
   assertAcceptedPolicyBeforeChainResolution?.(acceptedPolicy);

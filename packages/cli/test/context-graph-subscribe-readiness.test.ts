@@ -4,6 +4,7 @@ import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
+import { readAuthorityDiagnostics } from '../src/daemon/http-utils.js';
 import { daemonState } from '../src/daemon/state.js';
 
 interface TestAuthorityDecision {
@@ -502,8 +503,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.patches).toEqual([]);
   });
 
-  it('logs a bounded unavailable reason without exposing arbitrary decision text', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('records subscription failure at the shared read diagnostic boundary', async () => {
+    const record = vi.spyOn(readAuthorityDiagnostics, 'record').mockImplementation(() => {});
     try {
       const result = await subscribe({
         hasConfirmedMeta: false,
@@ -513,13 +514,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         },
       });
       expect(result.responseStatus).toBe(503);
-      expect(warn).toHaveBeenCalledWith(
-        '[context-graph-subscribe] authority unavailable: reason=other dependency=undefined',
-      );
-      expect(JSON.stringify(warn.mock.calls)).not.toContain('private diagnostic text');
-    } finally {
-      warn.mockRestore();
-    }
+      expect(record).toHaveBeenCalledOnce();
+      expect(record.mock.calls[0]?.[1]).toMatchObject({
+        source: 'registered-chain', reason: 'private diagnostic text',
+      });
+    } finally { record.mockRestore(); }
   });
 
   it('forwards explicit on-demand edge intent without making it always-on', async () => {

@@ -7,6 +7,7 @@ import {
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
+import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { resolveApprovedMemberAcceptanceDecision } from '../src/internal/context-graph-authority/approved-member-acceptance.js';
 import {
@@ -1161,6 +1162,27 @@ describe('private read authorization uses the on-chain participant roster', () =
       reason: 'peer-authority-unavailable',
       onChainId: 7n,
     });
+  });
+
+  it.each(['own metadata', 'shared ontology'] as const)('keeps a known private name retryable but settles an unknown name (%s)', async (source) => {
+    agent = await DKGAgent.create({ name: 'ScopedQueryKnownNameSignal', chainAdapter: new MockChainAdapter() });
+    const known = 'known-private-name';
+    const subject = `did:dkg:context-graph:${known}`;
+    const graph = source === 'own metadata' ? `${subject}/_meta` : 'did:dkg:context-graph:ontology';
+    await agent.store.insert([
+      { graph, subject, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH },
+      { graph, subject, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"' },
+    ]);
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
+      outcome: 'unavailable', source: 'registered-chain', reason: 'finalized-name-absence-unaccepted',
+      dependency: 'chain', metadataBootstrap: 'eligible',
+    });
+    const execute = vi.spyOn(agent.queryEngine, 'query');
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: known, callerAgentAddress: NON_MEMBER }))
+      .rejects.toMatchObject({ code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE, retryable: true });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'unknown-private-name', callerAgentAddress: NON_MEMBER }))
+      .resolves.toMatchObject({ bindings: [] });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('surfaces unavailable scoped query authority instead of returning an empty result', async () => {

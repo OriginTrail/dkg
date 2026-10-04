@@ -91,13 +91,17 @@ export interface Rfc64CatalogAccessAuthorizationV1 {
   readonly policyDigest: Digest32V1;
 }
 
+export type Rfc64AcceptedAuthorityProvenanceV1 = 'authenticated' | 'join-approval';
+
 export interface AcceptRfc64CatalogAccessSnapshotInputV1 {
+  readonly provenance?: Rfc64AcceptedAuthorityProvenanceV1;
   readonly policy: ContextGraphPolicyV1;
   readonly policyDigest: Digest32V1;
   readonly roster?: MemberRosterV1 | null;
 }
 
 export interface AcceptedRfc64CatalogAccessSnapshotV1 {
+  readonly provenance: Rfc64AcceptedAuthorityProvenanceV1;
   readonly policy: Readonly<ContextGraphPolicyV1>;
   readonly policyDigest: Digest32V1;
   readonly roster: Readonly<MemberRosterV1> | null;
@@ -361,7 +365,11 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     }
 
     const key = policyKey(policy.networkId, policy.contextGraphId);
-    const held = Object.freeze({ policy, policyDigest, roster, members });
+    const provenance = input.provenance ?? 'authenticated';
+    if (provenance !== 'authenticated' && provenance !== 'join-approval') {
+      throw new Error('invalid accepted RFC-64 authority provenance');
+    }
+    const held = Object.freeze({ policy, policyDigest, roster, members, provenance });
     const current = this.#byKey.get(key);
     if (current !== undefined) {
       if (!sameSnapshot(current, held)) {
@@ -372,6 +380,10 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
         }
         if (transition === 'linked') assertDirectMonotonicPolicyTransition(current, held);
         else assertAuthoritativeMonotonicPolicyTransition(current, held);
+        this.#byKey.set(key, held);
+        return publicSnapshot(held);
+      }
+      if (current.provenance !== held.provenance) {
         this.#byKey.set(key, held);
         return publicSnapshot(held);
       }
@@ -394,6 +406,12 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   ): AcceptedRfc64CatalogAccessSnapshotV1 | null {
     const held = this.#byKey.get(policyKey(networkId, contextGraphId));
     return held === undefined ? null : publicSnapshot(held);
+  }
+
+  /** Catalog responsibility may use join approval; reads keep proving its live generation. */
+  lookupForReads(networkId: NetworkIdV1, contextGraphId: ContextGraphIdV1): AcceptedRfc64CatalogAccessSnapshotV1 | null {
+    const held = this.lookup(networkId, contextGraphId);
+    return held?.provenance === 'join-approval' ? null : held;
   }
 
   get size(): number {
@@ -742,6 +760,7 @@ function publicSnapshot(
     policy: held.policy,
     policyDigest: held.policyDigest,
     roster: held.roster,
+    provenance: held.provenance,
   });
 }
 

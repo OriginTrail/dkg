@@ -105,6 +105,8 @@ export default defineConfig({
       "test/durable-sync-budget.test.ts",
       "test/durable-sync-graph-scoped-materialization.test.ts",
       "test/finalized-swm-twin-reconciliation.test.ts",
+      "test/finalized-swm-retirement-completion.test.ts",
+      "test/context-graph-request-iri-boundaries.test.ts",
       "test/durable-sync-lifecycle-binding.test.ts",
       "test/durable-manifest-digest.test.ts",
       "test/durable-manifest-continuation.test.ts",

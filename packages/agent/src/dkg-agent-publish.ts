@@ -6552,20 +6552,9 @@ export class PublishMethods extends DKGAgentBase {
     subGraphName: string | undefined,
     ctx: OperationContext,
   ): Promise<void> {
-    try {
-      await this.retireLegacySwmAfterVerifiedVmTwin({
-        contextGraphId,
-        kaUal,
-        assertionVersion,
-        subGraphName,
-      });
-    } catch (err) {
-      this.log.warn(
-        ctx,
-        `Failed to retire the legacy SWM boundary after confirmed local VM publish: ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-    }
+    await this.completeVerifiedVmMarkerRetirement({
+      contextGraphId, kaUal, assertionVersion: BigInt(assertionVersion), subGraphName,
+    }, ctx);
   }
 
   /**

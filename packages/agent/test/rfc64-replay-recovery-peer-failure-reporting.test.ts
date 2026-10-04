@@ -829,7 +829,8 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     expect(status.stableReason).not.toBe('catalog-replay-incomplete');
   });
 
-  it('keeps curated local owner parity when nonproviders cannot corroborate its sole author head', async () => {
+  it.each(['current-sole-private-owner', 'older-owner-head', 'multi-member-private', 'public-curated'] as const)(
+    'requires current sole-author production evidence despite failed replay: %s', async (scenario) => {
     const contextGraphId = `${AUTHOR}/curated-owner-replay`;
     const edge = await startAgent({
       name: 'curated-owner-replay',
@@ -839,10 +840,11 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       networkId: NETWORK_ID,
       contextGraphId,
       ownerAddress: AUTHOR,
-      accessPolicy: 1,
+      accessPolicy: scenario === 'public-curated' ? 0 : 1,
       publishPolicy: 0,
       publishAuthorityAccountId: '0',
-      memberAddresses: [AUTHOR],
+      memberAddresses: scenario === 'multi-member-private'
+        ? [AUTHOR, '0x1111111111111111111111111111111111111111'] : [AUTHOR],
       rosterVersion: '0',
     });
     edge.acceptRfc64CatalogAccessSnapshotV1({
@@ -850,6 +852,18 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       policyDigest: authority.policyDigest,
       roster: authority.roster,
     });
+    // Keep the authority lease current through the real composition boundary;
+    // this suite isolates inventory freshness from lifecycle-source validation.
+    vi.spyOn(edge, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(true);
+    vi.spyOn(edge, 'getContextGraphOwner').mockResolvedValue(`did:dkg:agent:${AUTHOR}`);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(
+      scenario === 'public-curated' ? 'public' : 'private',
+    );
+    vi.spyOn(edge, 'getStoredContextGraphRegistrationOptions').mockResolvedValue({ publishPolicy: 0 });
+    vi.spyOn(edge, 'resolveRfc64VerifiedPrivateRosterV1').mockResolvedValue(
+      scenario === 'multi-member-private' ? [AUTHOR, '0x1111111111111111111111111111111111111111'] : [AUTHOR],
+    );
+    await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, undefined, { kind: 'finalized-absence' });
     const localAgents = vi.spyOn(edge, 'listLocalAgents').mockReturnValue([
       { agentAddress: AUTHOR },
     ] as ReturnType<typeof edge.listLocalAgents>);
@@ -883,6 +897,21 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
     });
+    if (scenario === 'older-owner-head') {
+      // Produce a newer signed head on this node but leave the old head applied.
+      // The local owner key alone cannot establish freshness of that old inventory.
+      await edge.publishAuthorCatalogGenesisV1({
+        scope,
+        author: Object.freeze({
+          address: AUTHOR,
+          signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+        }),
+        peers: [],
+        issuedAt: String(BigInt(GENESIS_ISSUED_AT) + 1n) as TimestampMsV1,
+        catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+        catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+      });
+    }
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
     const persistence = (edge as any).rfc64PersistenceV1;
     persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
@@ -911,15 +940,20 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     await edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
     const status = (await edge.readRfc64CatalogOperationalStatusV1())
       .find((row) => row.contextGraphId === contextGraphId);
-    expect(status).toMatchObject({
-      authorityState: 'accepted',
-      appliedRowCount: '0',
-      expectedRowCount: '0',
-      missingRowCount: '0',
-      stableReason: null,
-    });
-    expect(status?.expectedCatalogHeadDigest).toBe(status?.appliedCatalogHeadDigest);
-    expect(status?.expectedInventoryDigest).toBe(status?.appliedInventoryDigest);
+    if (scenario === 'current-sole-private-owner') {
+      expect(status).toMatchObject({
+        authorityState: 'accepted', phase: 'complete', appliedRowCount: '0',
+        expectedRowCount: '0', missingRowCount: '0', stableReason: null,
+      });
+      expect(status?.expectedCatalogHeadDigest).toBe(status?.appliedCatalogHeadDigest);
+      expect(status?.expectedInventoryDigest).toBe(status?.appliedInventoryDigest);
+    } else {
+      expect(status).toMatchObject({
+        authorityState: 'accepted', phase: 'unknown-freshness',
+        stableReason: 'catalog-replay-unverified', appliedRowCount: '0',
+        expectedRowCount: null, missingRowCount: null,
+      });
+    }
 
     localAgents.mockReturnValue([]);
     const unowned = (await edge.readRfc64CatalogOperationalStatusV1())

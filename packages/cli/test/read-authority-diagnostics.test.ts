@@ -61,10 +61,10 @@ describe('read-authority 503 diagnostics (#2834)', () => {
     const { lines, diagnostics } = harness({ cacheMax: 2 });
     const attribution = (reason: string) => ({ ...STORE, reason });
 
-    diagnostics.record(createOperationContext('query'), attribution('reason-a'));
-    diagnostics.record(createOperationContext('query'), attribution('reason-b'));
-    diagnostics.record(createOperationContext('query'), attribution('reason-c'));
-    diagnostics.record(createOperationContext('query'), attribution('reason-a'));
+    diagnostics.record(createOperationContext('query'), attribution('local-existence-unavailable'));
+    diagnostics.record(createOperationContext('query'), attribution('chain-access-policy-timeout'));
+    diagnostics.record(createOperationContext('query'), attribution('authority-circuit-open'));
+    diagnostics.record(createOperationContext('query'), attribution('local-existence-unavailable'));
 
     // reason-a was evicted by reason-c, so it warns again inside its window.
     expect(lines.map((line) => line.level)).toEqual(['warn', 'warn', 'warn', 'warn']);
@@ -78,6 +78,15 @@ describe('read-authority 503 diagnostics (#2834)', () => {
     diagnostics.record(createOperationContext('query'), STORE);
 
     expect(lines.map((line) => line.level)).toEqual(['warn', 'warn']);
+  });
+
+  it('filters arbitrary well-formed decision tokens through the shared closed boundary', () => {
+    const { lines, diagnostics } = harness();
+    diagnostics.record(createOperationContext('query'), {
+      source: 'private-graph-name', reason: 'private-graph-name', dependency: 'private-graph-name',
+    });
+    expect(lines[0]!.message).toContain('source=unknown reason=unknown dependency=unknown');
+    expect(lines[0]!.message).not.toContain('private-graph-name');
   });
 
   it('logs anything but an attribution token as unknown', () => {

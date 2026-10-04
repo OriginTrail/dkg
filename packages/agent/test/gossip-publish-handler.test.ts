@@ -79,6 +79,21 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
 }
 
 describe('GossipPublishHandler', () => {
+  it('refuses malformed topic ids before decoding, authority lookup or storage', async () => {
+    let queried = false;
+    let checked = false;
+    const { store, handler } = createHandler(undefined, {
+      contextGraphExists: async () => { checked = true; return false; },
+    });
+    const original = store.query.bind(store);
+    store.query = async (...args) => { queried = true; return original(...args); };
+    try {
+      await handler.handlePublishMessage(makePublishMessage({}), 'victim> } UNION { GRAPH ?g { ?s ?p ?o } } #');
+      expect(queried).toBe(false);
+      expect(checked).toBe(false);
+    } finally { await store.close(); }
+  });
+
   it('materializes a graph-scoped KA into one exact VM graph without root metadata', async () => {
     const { store, handler } = createHandler();
     const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';

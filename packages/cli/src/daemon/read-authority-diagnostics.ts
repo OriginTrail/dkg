@@ -22,12 +22,20 @@ export interface ReadAuthorityDiagnostics {
   record(ctx: OperationContext, attribution: ContextGraphReadAuthorityAttribution): void;
 }
 
-const ATTRIBUTION_TOKEN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const SAFE_READ_AUTHORITY_REASONS = new Set([
+  'finalized-name-absence-unaccepted', 'chain-name-binding-unavailable',
+  'registered-authority-error', 'authority-circuit-open', 'local-chain-binding-unavailable',
+  'local-existence-unavailable', 'chain-access-policy-unavailable', 'chain-access-policy-timeout',
+  'chain-access-policy-unknown', 'chain-participant-authority-unavailable',
+  'chain-participant-authority-unsupported', 'chain-participant-authority-invalid',
+  'remote-local-authority-unaccepted', 'rfc64-private-read-roster-unavailable',
+  'no-read-authority', 'unexpected-authority-error', 'pending-authoritative-metadata',
+  'local-access-policy-unavailable', 'peer-authority-unavailable', 'local-agent-authority-unavailable',
+  'legacy-participant-authority-unavailable',
+]);
 
-/** An attribution token as the agent emits them; anything else logs as `unknown`. */
-function attributionToken(value: string): string {
-  return ATTRIBUTION_TOKEN.test(value) ? value : 'unknown';
-}
+const SAFE_READ_AUTHORITY_SOURCES = new Set(['system', 'registered-chain', 'rfc64-private', 'rfc64-public', 'legacy-local']);
+const SAFE_READ_AUTHORITY_DEPENDENCIES = new Set(['store', 'chain', 'local-state', 'unknown']);
 
 /** Whether an attribution warns now, and how many repeats it held back since its last warning. */
 type WarningDecision = { readonly warn: true; readonly heldBack: number } | { readonly warn: false };
@@ -83,9 +91,9 @@ export function createReadAuthorityDiagnostics(
   );
   return {
     record(ctx, attribution) {
-      const detail = `source=${attributionToken(attribution.source)}`
-        + ` reason=${attributionToken(attribution.reason)}`
-        + ` dependency=${attributionToken(attribution.dependency)}`;
+      const detail = `source=${(SAFE_READ_AUTHORITY_SOURCES.has(attribution.source) ? attribution.source : 'unknown')}`
+        + ` reason=${(SAFE_READ_AUTHORITY_REASONS.has(attribution.reason) ? attribution.reason : 'unknown')}`
+        + ` dependency=${(SAFE_READ_AUTHORITY_DEPENDENCIES.has(attribution.dependency) ? attribution.dependency : 'unknown')}`;
       const decision = warningDue(detail);
       if (decision.warn) {
         logger.warn(

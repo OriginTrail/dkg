@@ -15,7 +15,8 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
-  reconcileFinalizedSwmTwinFromDescriptor,
+  reconcileFinalizedSwmTwinFromDescriptorWithEvidence,
+  type FinalizedSwmTwinReconciliationResult,
   type FinalizedSwmTwinRetirement,
 } from './finalized-swm-twin-reconciliation.js';
 import type { RecoveryExecutionGuard } from './recovery-execution-guard.js';
@@ -84,6 +85,10 @@ export interface SwmTargetExecutorPortsV1 {
     assertionVersion: string;
     subGraphName?: string;
   }>) => Promise<void>;
+  readonly completeFinalizedSwmTwinRetirement?: (
+    reconcile: () => Promise<FinalizedSwmTwinReconciliationResult>,
+    ctx: OperationContext,
+  ) => Promise<FinalizedSwmTwinReconciliationResult>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -289,36 +294,30 @@ export class SwmTargetExecutorV1 {
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
-        const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
+        const reconcile = () => reconcileFinalizedSwmTwinFromDescriptorWithEvidence({
           store: this.#ports.store,
           writeLocks: this.#ports.writeLocks,
           contextGraphId,
           descriptor,
           retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
         });
-        const twinRetired = retirement === 'retired'
-          || retirement === 'already-retired-finalized';
-        if (twinRetired) {
-          // The twin's graph and head are already gone at this point. Marker
-          // retirement is a second, separate cleanup: if its failure escaped,
-          // the caller would treat the whole reconciliation as deferred, skip
-          // the suppression below, and its bulk append would write the retired
-          // head and operation rows back without their graph. A marker left
-          // behind is the conservative state (the graph stays reported as
-          // incomplete) until a later pass or a catalog replay retires it.
+        const result = this.#ports.completeFinalizedSwmTwinRetirement
+          ? await this.#ports.completeFinalizedSwmTwinRetirement(reconcile, target.ctx)
+          : await reconcile();
+        const retirement = result.outcome;
+        const twinRetired = 'retirement' in result;
+        if (twinRetired && this.#ports.completeFinalizedSwmTwinRetirement === undefined) {
           try {
             await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
-              contextGraphId,
-              kaUal: descriptor.kaUal,
-              assertionVersion: descriptor.assertionVersion,
-              subGraphName: descriptor.subGraphName,
+              contextGraphId: result.retirement.contextGraphId,
+              kaUal: result.retirement.kaUal,
+              assertionVersion: String(result.retirement.assertionVersion),
+              subGraphName: result.retirement.subGraphName,
             });
           } catch (cause) {
-            this.#ports.logWarn(
-              target.ctx,
+            this.#ports.logWarn(target.ctx,
               `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
-                + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`,
-            );
+                + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`);
           }
         }
         if (retirement === 'retired') {

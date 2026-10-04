@@ -523,6 +523,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const contextGraphId = parsed.contextGraphId === 'all'
       ? undefined
       : parsed.contextGraphId;
+    if (contextGraphId !== undefined && !validateContextGraphId(contextGraphId).valid) {
+      jsonResponse(res, 400, { error: 'Invalid contextGraphId' });
+      return;
+    }
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;

@@ -969,6 +969,9 @@ export class DKGAgent extends DKGAgentBase {
       retireFinalizedSwmTwin: (candidate, ctx) => (
         this.retireFinalizedSwmTwinCandidate(candidate, ctx)
       ),
+      completeFinalizedSwmTwinRetirement: (reconcile, ctx) => (
+        this.completeFinalizedSwmTwinRetirement(reconcile, ctx)
+      ),
       retireLegacySwmAfterVerifiedVmTwin: (input) => (
         this.retireLegacySwmAfterVerifiedVmTwin(input)
       ),
