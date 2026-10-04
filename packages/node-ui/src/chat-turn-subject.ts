@@ -1,7 +1,7 @@
 /**
  * Select an attributable subject for a session/turn coordinate. Scoped subjects
- * take precedence over legacy subjects explicitly; subject spelling/order is
- * never the deciding factor. A subject linked to another session has no
+ * take precedence over legacy subjects; URI order breaks ties within one class.
+ * A subject linked to another session has no
  * attributable state or completion and is excluded from both sessions.
  * Terms are internally constructed SPARQL terms, never raw caller strings.
  */
@@ -18,27 +18,20 @@ export function chatTurnSubjectPattern(session: string, turn: string, turnId: st
       FILTER(?otherTurnSession != ${session})
     }
     FILTER NOT EXISTS {
-      ?preferredTurn <${type}> <${ontology}ChatTurn> .
-      ?preferredTurn <${partOf}> ${session} .
-      ?preferredTurn <${ontology}turnId> ${turnId} .
-      FILTER(STRSTARTS(STR(?preferredTurn), "urn:dkg:chat:session-turn:"))
-      FILTER(!STRSTARTS(STR(${turn}), "urn:dkg:chat:session-turn:"))
+      ?candidateTurn <${type}> <${ontology}ChatTurn> .
+      ?candidateTurn <${partOf}> ${session} .
+      ?candidateTurn <${ontology}turnId> ${turnId} .
       FILTER NOT EXISTS {
-        ?preferredTurn <${partOf}> ?otherPreferredSession .
-        FILTER(?otherPreferredSession != ${session})
+        ?candidateTurn <${partOf}> ?otherCandidateSession .
+        FILTER(?otherCandidateSession != ${session})
       }
-    }
-    FILTER NOT EXISTS {
-      ?selectedTurn <${type}> <${ontology}ChatTurn> .
-      ?selectedTurn <${partOf}> ${session} .
-      ?selectedTurn <${ontology}turnId> ${turnId} .
-      FILTER(STR(?selectedTurn) < STR(${turn}))
-      FILTER(STRSTARTS(STR(?selectedTurn), "urn:dkg:chat:session-turn:")
-        = STRSTARTS(STR(${turn}), "urn:dkg:chat:session-turn:"))
-      FILTER NOT EXISTS {
-        ?selectedTurn <${partOf}> ?otherSelectedSession .
-        FILTER(?otherSelectedSession != ${session})
-      }
+      FILTER(
+        (STRSTARTS(STR(?candidateTurn), "urn:dkg:chat:session-turn:")
+          && !STRSTARTS(STR(${turn}), "urn:dkg:chat:session-turn:"))
+        || (STRSTARTS(STR(?candidateTurn), "urn:dkg:chat:session-turn:")
+          = STRSTARTS(STR(${turn}), "urn:dkg:chat:session-turn:")
+          && STR(?candidateTurn) < STR(${turn}))
+      )
     }
   `;
 }
