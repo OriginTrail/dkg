@@ -96,10 +96,10 @@ export class VmRecoveryPassAuthority {
     return kind === 'unavailable' || kind === 'read-failed';
   }
 
-  /** A miss may be read again, at most once per `minIntervalMs` since the last read began. */
-  retryDue(minIntervalMs: number = this.retryPolicy.kind === 'spaced'
-    ? this.retryPolicy.minIntervalMs : Number.POSITIVE_INFINITY): boolean {
-    return this.missed && this.clock() - this.#lastReadStartedAt >= minIntervalMs;
+  /** A miss may be read again only under the pass's configured retry spacing. */
+  retryDue(): boolean {
+    return this.retryPolicy.kind === 'spaced' && this.missed
+      && this.clock() - this.#lastReadStartedAt >= this.retryPolicy.minIntervalMs;
   }
 
   /** A single bounded miss retry at pass entry; cancellation releases the wait. */
