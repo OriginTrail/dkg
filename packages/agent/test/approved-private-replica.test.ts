@@ -46,6 +46,29 @@ import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-privat
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
 
+// Lets one test act at the await boundary of a successful join proof: after
+// the proof's own final checks, and before its caller resumes.
+const afterApprovedPrivateProof = vi.hoisted(() => ({
+  run: null as null | (() => Promise<void>),
+}));
+vi.mock('../src/approved-private-replica.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/approved-private-replica.js')>();
+  return {
+    ...original,
+    resolveApprovedPrivateReplicaAuthority: async (
+      ...args: Parameters<typeof original.resolveApprovedPrivateReplicaAuthority>
+    ) => {
+      const result = await original.resolveApprovedPrivateReplicaAuthority(...args);
+      const run = afterApprovedPrivateProof.run;
+      if (run !== null && result?.kind === 'unregistered-private-replica') {
+        afterApprovedPrivateProof.run = null;
+        await run();
+      }
+      return result;
+    },
+  };
+});
+
 const OWNER = '0x4bf5c3c4b96894c7f1e7f7d625e4b48051b443b4';
 const OUTSIDER = '0x1111111111111111111111111111111111111111';
 const CONTEXT_GRAPH_ID = 'eu-open-calls';
@@ -1738,6 +1761,28 @@ describe('approved private bare-name replica authorization', () => {
     expect(fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID))
       .toBeNull();
   });
+
+  it.each(REQUESTER_STATE_CHANGES)(
+    'accepts no catalog authority when the join request is %s as its successful proof returns',
+    async (change) => {
+      const fixture = await approvedBareNameReplicaFixture();
+      // The proof has passed its own final checks; the composition that
+      // awaits it has not resumed yet. A revision captured after this point
+      // would already contain the change and could not see it any more.
+      afterApprovedPrivateProof.run = () => changeApprovedJoinRequest(fixture, change);
+      try {
+        await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+          CONTEXT_GRAPH_ID,
+          undefined,
+          { kind: 'finalized-absence' },
+        )).rejects.toThrow('no authenticated owner authority');
+      } finally {
+        afterApprovedPrivateProof.run = null;
+      }
+      expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+        .toBeNull();
+    },
+  );
 
   it('retains an approved private proof when only another graph changes', async () => {
     const fixture = await approvedBareNameReplicaFixture();
