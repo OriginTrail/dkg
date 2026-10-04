@@ -58,11 +58,9 @@ export {
 export {
   HARDEN_DISK_PREFLIGHT_FACTOR,
   HARDEN_EXPORT_FILENAME,
-  hardenStepDefs,
   planHardenMigration,
   type HardenPlanInput,
   type HardenStep,
-  type HardenStepDefsInput,
 } from './harden/steps.js';
 export {
   executeHardenMigration,

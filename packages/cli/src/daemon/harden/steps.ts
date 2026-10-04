@@ -50,9 +50,6 @@ export interface HardenPlanInput {
   running?: boolean;
 }
 
-/** Plan-step inputs that do not depend on the migration state. */
-export type HardenStepDefsInput = Omit<HardenPlanInput, 'state'> & { readonly sourceContainerName?: string };
-
 /** Shell script run inside the seed helper container (same pinned image —
  *  nothing new is pulled). Temp-file + `mv` makes the seed itself
  *  resumable: a crashed copy leaves `.seed.tmp`, never a torn journal.
@@ -178,17 +175,6 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
 function description(phase: HardenExecutablePhase): HardenStep {
   return { id: phase.id, description: phase.description,
     ...(phase.dockerArgs === undefined ? {} : { dockerArgs: [...phase.dockerArgs] }) };
-}
-
-type HardenDockerStepKey = 'journalSize' | 'stop' | 'exportJournal' | 'exportIntegrity'
-  | 'volumeCreate' | 'seedVolume' | 'renameBackup' | 'disableBackupRestart' | 'runHardened' | 'verify';
-type HardenStepDefinitions = Record<HardenDockerStepKey, HardenStep & { dockerArgs: string[] }>
-  & { diskPreflight: HardenStep };
-
-/** Compatibility metadata view, derived from the executable definitions. */
-export function hardenStepDefs(input: HardenStepDefsInput): HardenStepDefinitions {
-  return Object.fromEntries(buildHardenMigration({ ...input, state: 'legacy', running: true }).phases
-    .map(phase => [phase.id.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase()), description(phase)])) as HardenStepDefinitions;
 }
 
 export function planHardenMigration(input: HardenPlanInput): HardenStep[] {

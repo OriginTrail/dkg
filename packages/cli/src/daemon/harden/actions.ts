@@ -4,10 +4,10 @@ import { askOk, identityTagPresent } from './verify.js';
 import type { HardenStateInfo } from './state.js';
 import { parseBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
 import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_CONTAINER_PORT } from '../blazegraph-docker.js';
-import { HARDEN_DISK_PREFLIGHT_FACTOR, type HardenStepDefsInput } from './steps.js';
+import { HARDEN_DISK_PREFLIGHT_FACTOR, type HardenPlanInput } from './steps.js';
 import type { ExecuteHardenMigrationOptions } from './executor.js';
 
-export interface HardenWorkflowInputs extends Readonly<HardenStepDefsInput> {
+export interface HardenWorkflowInputs extends Readonly<Omit<HardenPlanInput, 'state'>> {
   readonly opts: ExecuteHardenMigrationOptions;
   readonly docker: DockerRunner;
   readonly fetchImpl: typeof globalThis.fetch;

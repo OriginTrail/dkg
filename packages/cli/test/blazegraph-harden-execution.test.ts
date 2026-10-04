@@ -571,7 +571,7 @@ describe('executeHardenMigration', () => {
   /**
    * Plan/executor conformance: every docker-backed step of the dry-run plan
    * must be executed with EXACTLY the planned argv, in plan order. The
-   * executor sources its argv from the same hardenStepDefs the plan renders,
+   * executor sources its argv from the same ordered phases the plan renders,
    * so this fails whenever someone hand-writes a docker command in the
    * executor again (or reorders/skips a planned step) — the drift the plan
    * would then silently misreport to the operator.

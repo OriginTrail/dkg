@@ -25,6 +25,7 @@ import {
 import {
   executeHardenMigration,
   type HardenStep,
+  type ExecuteHardenMigrationOptions,
 } from '../daemon/blazegraph-harden.js';
 
 /**
@@ -163,35 +164,22 @@ export function registerStoreCommand(program: Command): void {
         process.exit(1);
       }
 
-      if (opts.dryRun) {
-        const result = await executeHardenMigration({
-          containerName,
-          namespace,
-          migrationDir,
-          dkgHome: dkgDir(),
-          hostPort: opts.port,
-          dryRun: true,
-          log,
-        });
-        console.log(`Container: ${containerName} (port ${result.hostPort}, heap ${result.heapMb} MB)`);
-        printPlan(result.steps ?? []);
-        return;
-      }
-
+      // dkgHome: the harden lock (<dkgHome>/.store-harden.lock) must land in
+      // the SAME config dir the daemon's runtime store monitor watches —
+      // both sides resolve it via dkgDir().
+      const migrationOptions: ExecuteHardenMigrationOptions = {
+        containerName,
+        namespace,
+        migrationDir,
+        dkgHome: dkgDir(),
+        hostPort: opts.port,
+        log,
+      };
       // Show the plan before asking; the executor re-derives state itself.
-      {
-        const preview = await executeHardenMigration({
-          containerName,
-          namespace,
-          migrationDir,
-          dkgHome: dkgDir(),
-          hostPort: opts.port,
-          dryRun: true,
-          log,
-        });
-        console.log(`Container: ${containerName} (port ${preview.hostPort}, heap ${preview.heapMb} MB)`);
-        printPlan(preview.steps ?? []);
-      }
+      const preview = await executeHardenMigration({ ...migrationOptions, dryRun: true });
+      console.log(`Container: ${containerName} (port ${preview.hostPort}, heap ${preview.heapMb} MB)`);
+      printPlan(preview.steps ?? []);
+      if (opts.dryRun) return;
       if (!opts.yes) {
         const ok = await confirm('Proceed with the migration? [y/N] ');
         if (!ok) {
@@ -200,17 +188,7 @@ export function registerStoreCommand(program: Command): void {
         }
       }
 
-      // dkgHome: the harden lock (<dkgHome>/.store-harden.lock) must land in
-      // the SAME config dir the daemon's runtime store monitor watches —
-      // both sides resolve it via dkgDir().
-      const result = await executeHardenMigration({
-        containerName,
-        namespace,
-        migrationDir,
-        dkgHome: dkgDir(),
-        hostPort: opts.port,
-        log,
-      });
+      const result = await executeHardenMigration(migrationOptions);
 
       // Persist the container name so the runtime monitor / boot recovery /
       // future harden runs stop depending on URL parsing. Additive field —
