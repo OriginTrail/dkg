@@ -1552,6 +1552,361 @@ describe('approved private bare-name replica authorization', () => {
       .toBeNull();
   });
 
+  it('retains an approved private proof when only another graph changes', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const proof = pauseApprovedPrivateProofOnce(fixture);
+    const admission = fixture.receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      {
+        callerAgentAddress: fixture.memberAddress,
+        allowSubscriptionFallback: false,
+      },
+    );
+    await proof.entered;
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty('unrelated-graph');
+    proof.release();
+
+    await expect(admission).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'rfc64-private',
+      registration: 'unregistered',
+    });
+  });
+
+  it('accepts catalog authority for a finalized-absent, join-approved private replica', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    )).resolves.toMatchObject({
+      source: 'owner-signed-unregistered',
+      policy: { accessPolicy: 1 },
+    });
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBe('private');
+  });
+
+  it('refreshes an approved private catalog without depending on its own active recovery gate', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const recoveryGate = vi.spyOn(fixture.receiver, 'getMemberRecoveryRosterSource')
+      .mockResolvedValue(null);
+
+    await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    )).resolves.toMatchObject({
+      source: 'owner-signed-unregistered',
+      policy: { accessPolicy: 1 },
+    });
+    expect(recoveryGate).not.toHaveBeenCalled();
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBe('private');
+  });
+
+  it('does not use an unconfirmed private definition as a catalog roster', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    vi.spyOn(fixture.receiver, 'hasConfirmedMetaState').mockResolvedValue(false);
+    const localGate = vi.spyOn(fixture.receiver, 'getLocalMetadataMemberRecoveryGate');
+
+    await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    )).rejects.toThrow(/no authenticated lifecycle roster/u);
+    expect(localGate).not.toHaveBeenCalled();
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+  });
+
+  it.each([
+    ['the shared agents graph', SECONDARY_META_GRAPH],
+    ['the shared ontology graph', contextGraphDataGraphUri('ontology')],
+  ] as const)(
+    'keeps an agent asserted only in %s out of the accepted private roster',
+    async (_label, graph) => {
+      const fixture = await approvedBareNameReplicaFixture();
+      await fixture.receiver.store.insert([{
+        graph,
+        subject: fixture.subject,
+        predicate: D.DKG_ALLOWED_AGENT,
+        object: JSON.stringify(OUTSIDER),
+      }]);
+      Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+      // The merged projection carries the assertion: this is the widening input.
+      expect((await fixture.receiver.getLocalMetadataMemberRecoveryGate(CONTEXT_GRAPH_ID))
+        ?.map((address) => address.toLowerCase())).toContain(OUTSIDER);
+
+      const authority = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+        CONTEXT_GRAPH_ID,
+        undefined,
+        { kind: 'finalized-absence' },
+      );
+
+      expect(authority?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
+        .toEqual([OWNER, fixture.memberAddress].sort());
+      await expect(fixture.receiver.canReadContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress: OUTSIDER,
+        allowSubscriptionFallback: false,
+      })).resolves.toBe(false);
+      await expect(fixture.receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress: OUTSIDER,
+      })).resolves.toBe(false);
+      await expect(fixture.receiver.canReadContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress: fixture.memberAddress,
+        allowSubscriptionFallback: false,
+      })).resolves.toBe(true);
+    },
+  );
+
+  it.each([
+    ['an allowed agent', D.DKG_ALLOWED_AGENT],
+    ['a participant agent', D.DKG_PARTICIPANT_AGENT],
+  ] as const)(
+    'keeps %s named in the graph\'s own metadata in the accepted private roster',
+    async (_label, predicate) => {
+      const secondMember = OUTSIDER;
+      const fixture = await approvedBareNameReplicaFixture();
+      await fixture.receiver.store.insert([{
+        graph: fixture.graph,
+        subject: fixture.subject,
+        predicate,
+        object: JSON.stringify(secondMember),
+      }]);
+      Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+
+      const authority = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+        CONTEXT_GRAPH_ID,
+        undefined,
+        { kind: 'finalized-absence' },
+      );
+
+      expect(authority?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
+        .toEqual([OWNER, fixture.memberAddress, secondMember].sort());
+    },
+  );
+
+  it('applies a revocation from shared metadata to a member named in the graph\'s own metadata', async () => {
+    const secondMember = OUTSIDER;
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [secondMember],
+    });
+    await fixture.receiver.store.insert([{
+      graph: SECONDARY_META_GRAPH,
+      subject: fixture.subject,
+      predicate: D.DKG_REVOKED_AGENT,
+      object: JSON.stringify(secondMember),
+    }]);
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+
+    const authority = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+
+    // Shared metadata may only narrow the roster, never widen it.
+    expect(authority?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
+      .toEqual([OWNER, fixture.memberAddress].sort());
+  });
+
+  it('keeps reads and shared memory on the live join proof after catalog authority is accepted', async () => {
+    const startedAt = 2_000_000_000_000;
+    const delegationExpiresAt = startedAt + 60_000;
+    const secondMember = OUTSIDER;
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [secondMember],
+      delegationIssuedAt: startedAt - 1_000,
+      delegationExpiresAt,
+    });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+    const reconcile = () => fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    const readAuthority = (callerAgentAddress: string) => (
+      fixture.receiver.resolveContextGraphReadAuthority(CONTEXT_GRAPH_ID, {
+        callerAgentAddress,
+        allowSubscriptionFallback: false,
+      })
+    );
+    const canRead = (callerAgentAddress: string) => (
+      fixture.receiver.canReadContextGraph(CONTEXT_GRAPH_ID, {
+        callerAgentAddress,
+        allowSubscriptionFallback: false,
+      })
+    );
+    const canUseSharedMemory = (callerAgentAddress: string) => (
+      fixture.receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID, { callerAgentAddress })
+    );
+    try {
+      const accepted = await reconcile();
+      expect(accepted?.roster?.members.map(({ agentAddress }) => agentAddress).sort())
+        .toEqual([OWNER, fixture.memberAddress, secondMember].sort());
+      expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(true);
+
+      // The accepted roster is not what authorizes: the proof still does, and
+      // it covers this receiver's approved member only.
+      expect(fixture.receiver.resolveRfc64PrivateReadRosterV1(CONTEXT_GRAPH_ID)).toBeUndefined();
+      expect(fixture.receiver.resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1(
+        CONTEXT_GRAPH_ID,
+      )).toBeUndefined();
+      await expect(readAuthority(fixture.memberAddress)).resolves.toMatchObject({
+        outcome: 'allowed',
+        source: 'rfc64-private',
+        reason: 'rfc64-participant',
+      });
+      await expect(canUseSharedMemory(fixture.memberAddress)).resolves.toBe(true);
+      await expect(canRead(secondMember)).resolves.toBe(false);
+      await expect(canUseSharedMemory(secondMember)).resolves.toBe(false);
+
+      // The delegation expires. The policy stays accepted; access does not.
+      now.mockReturnValue(delegationExpiresAt + 1_000);
+      await expect(readAuthority(fixture.memberAddress)).resolves.toMatchObject({
+        outcome: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+      });
+      await expect(canRead(fixture.memberAddress)).resolves.toBe(false);
+      await expect(canUseSharedMemory(fixture.memberAddress)).resolves.toBe(false);
+
+      // A refresh that fails retains the snapshot, and still grants nothing.
+      await expect(reconcile()).rejects.toThrow(/no authenticated owner authority/u);
+      expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+        .toBe('private');
+      await expect(readAuthority(fixture.memberAddress)).resolves.toMatchObject({
+        outcome: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+      });
+      await expect(canUseSharedMemory(fixture.memberAddress)).resolves.toBe(false);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('does not let a join-derived roster govern shared memory while the catalog lane is active', async () => {
+    const secondMember = OUTSIDER;
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [secondMember],
+    });
+    const joinDerived = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    const lane = fixture.receiver.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID);
+    vi.spyOn(fixture.receiver, 'resolveRfc64CatalogReceiverAuthorityV1').mockReturnValue({
+      ...lane,
+      killSwitchActive: false,
+      mode: 'catalog',
+      active: true,
+      reconciliationLane: 'catalog-apply',
+    });
+    expect(fixture.receiver.isRfc64CatalogTransportAuthorityActiveV1(CONTEXT_GRAPH_ID)).toBe(true);
+    const admission = (callerAgentAddress: string) => (
+      fixture.receiver.resolveAcceptedRfc64SharedMemoryAuthorityV1(
+        CONTEXT_GRAPH_ID,
+        { callerAgentAddress },
+      )
+    );
+    const canUseSharedMemory = (callerAgentAddress: string) => (
+      fixture.receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID, { callerAgentAddress })
+    );
+
+    // The accepted roster names the second member, but neither transport nor
+    // admission takes it as authority: both are left to the join proof.
+    expect(fixture.receiver.resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1(
+      CONTEXT_GRAPH_ID,
+    )).toBeUndefined();
+    expect(admission(secondMember)).toBeUndefined();
+    await expect(canUseSharedMemory(secondMember)).resolves.toBe(false);
+    await expect(canUseSharedMemory(fixture.memberAddress)).resolves.toBe(true);
+
+    // The same snapshot does govern once an authenticated path has accepted it.
+    fixture.receiver.acceptRfc64CatalogAccessSnapshotV1({
+      policy: joinDerived!.policy,
+      policyDigest: joinDerived!.policyDigest,
+      roster: joinDerived!.roster,
+    });
+    expect(fixture.receiver.resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1(
+      CONTEXT_GRAPH_ID,
+    )?.slice().sort()).toEqual([OWNER, fixture.memberAddress, secondMember].sort());
+    expect(admission(secondMember)).toBe(true);
+  });
+
+  it('stops reading through accepted catalog authority once the join request is replaced', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    const readAuthority = () => fixture.receiver.resolveContextGraphReadAuthority(
+      CONTEXT_GRAPH_ID,
+      { callerAgentAddress: fixture.memberAddress, allowSubscriptionFallback: false },
+    );
+    await expect(readAuthority()).resolves.toMatchObject({ outcome: 'allowed' });
+
+    // A newer request for the same member is waiting for the curator.
+    await fixture.receiver.writeRequesterJoinRequestState(
+      CONTEXT_GRAPH_ID,
+      fixture.approvedAddress,
+      {
+        status: 'pending',
+        requestGeneration: `0x${'34'.repeat(32)}`,
+        curatorPeerId: CURATOR_PEER,
+        curatorAgentAddress: OWNER,
+        curatorAuthorityEra: '0',
+      },
+    );
+
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBe('private');
+    await expect(readAuthority()).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    await expect(fixture.receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID, {
+      callerAgentAddress: fixture.memberAddress,
+    })).resolves.toBe(false);
+  });
+
+  it('treats the policy as owner authority again once it is accepted from another source', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const joinDerived = await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(true);
+
+    // The same policy and roster arrive through an independently verified path.
+    fixture.receiver.acceptRfc64CatalogAccessSnapshotV1({
+      policy: joinDerived!.policy,
+      policyDigest: joinDerived!.policyDigest,
+      roster: joinDerived!.roster,
+    });
+
+    expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(fixture.receiver.resolveRfc64PrivateReadRosterV1(CONTEXT_GRAPH_ID)?.slice().sort())
+      .toEqual([OWNER, fixture.memberAddress].sort());
+  });
+
+  it('forgets the join-derived mark when the catalog runtime closes', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(true);
+
+    await fixture.receiver.stop();
+
+    expect(fixture.receiver.isRfc64JoinDerivedAcceptedAuthorityV1(CONTEXT_GRAPH_ID)).toBe(false);
+  });
+
   it.each([
     ['curator', D.DKG_CURATOR, `did:dkg:agent:${OUTSIDER}`],
     ['creator', D.DKG_CREATOR, `did:dkg:agent:${CURATOR_PEER}-other`],
