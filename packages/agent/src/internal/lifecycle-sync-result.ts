@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
+import { type RecoverContextGraphSwmResult } from '../sync/requester/swm-recovery.js';
 
 export function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
