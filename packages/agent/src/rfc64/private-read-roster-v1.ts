@@ -6,8 +6,8 @@ import type { Rfc64PublicCatalogServiceV1 } from './public-catalog-service-v1.js
 
 /** Accepted private roster resolution preserves fail-closed configured selections and live join proof. */
 export function resolveRfc64PrivateReadRoster(input: {
-  readonly config: ResolvedDKGAgentConfig;
-  readonly service: Rfc64PublicCatalogServiceV1 | undefined;
+  readonly config: Pick<ResolvedDKGAgentConfig, 'networkIdentity' | 'rfc64CatalogBootstrap'>;
+  readonly service: Pick<Rfc64PublicCatalogServiceV1, 'acceptedPolicySnapshot'> | undefined;
   readonly isJoinDerived: (contextGraphId: string) => boolean;
 }, contextGraphId: string): readonly string[] | null | undefined {
     const service = input.service;
