@@ -402,10 +402,6 @@ import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResu
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
-  createVmReconcilePeerTopology,
-  UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
-} from './vm-reconcile-peer-topology.js';
-import {
   stripLiteral, jsonLdToQuads,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
@@ -484,7 +480,6 @@ import {
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
-  type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
@@ -5453,44 +5448,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return { status: 'deferred', reason: 'store-busy' };
       }
       return { status: 'skipped', reason: 'failed' };
-    }
-  }
-
-  async vmReconcilePeerTopology(
-    this: DKGAgent,
-    localCgId: string,
-  ): Promise<VmReconcilePeerTopology> {
-    try {
-      const preferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
-      const isPrivateContextGraph = await this.isPrivateContextGraph(localCgId);
-      const libp2p = (this.node as any)?.libp2p;
-      const getConnections = libp2p?.getConnections;
-      if (typeof getConnections !== 'function') return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
-      const peerIds = [...new Map(
-        (getConnections.call(libp2p) as Array<{ remotePeer?: { toString(): string } }>)
-          .map((connection) => [connection.remotePeer?.toString(), connection.remotePeer] as const)
-          .filter((entry): entry is readonly [string, { toString(): string }] =>
-            typeof entry[0] === 'string' && entry[0].length > 0 && !!entry[1],
-          ),
-      ).keys()].sort();
-      const orderedPeers = this.selectCatchupPeers(
-        peerIds.map((peerId) => ({ toString: () => peerId })),
-        preferredPeerId,
-        isPrivateContextGraph,
-      );
-      return createVmReconcilePeerTopology({
-        preferredPeerId: preferredPeerId ?? null,
-        privateOnly: isPrivateContextGraph,
-        peers: orderedPeers.map((peer) => {
-          const peerId = peer.toString();
-          return {
-            peerId,
-            core: this.peerCapabilityRegistry.supportsCore(peerId),
-          };
-        }),
-      });
-    } catch {
-      return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
     }
   }
 

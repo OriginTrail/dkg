@@ -420,6 +420,7 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type VmReconcileNegativeRecord,
   type VmReconcilePeerTopology,
   type VmReconcilePeerTopologyEvidence,
   type VmReconcilePeerTopologyPeer,
@@ -524,6 +525,8 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
+// Deprecated compatibility codecs for third-party subscription-store adapters.
+// The recovery runtime does not import this historical persistence surface.
 export {
   createVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,
