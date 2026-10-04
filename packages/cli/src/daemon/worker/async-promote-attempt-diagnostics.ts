@@ -1,6 +1,7 @@
 import type { RegisteredContextGraphAuthorityUnavailableReason } from '@origintrail-official/dkg-agent';
 import type { PromoteJob } from '@origintrail-official/dkg-publisher';
-import { diagnosticPromoteStage, safePromoteErrorIdentity, type ClassifiedPromoteError } from './async-promote-error-classification.js';
+import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
+import { safePromoteErrorIdentity, type ClassifiedPromoteError } from './async-promote-error-classification.js';
 import type { PromoteWorkerSyncLogger } from './async-promote-worker.js';
 
 const SAFE_PROMOTE_AUTHORITY_REASONS = Object.freeze({
