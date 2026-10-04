@@ -22,6 +22,9 @@
  * are already counted above as `eth_call` under `multicall3.aggregate3`:
  *   rpc_read_batching batches=9 failed_batches=0 refused_batches=0 calls=74 reads=81 direct_reads=1 window_s=60 chain=base:8453
  *   rpc_batched_reads consumer=kas.getLatestMerkleRoot count=27 window_s=60 chain=base:8453
+ * An aggregate request that one caller sends for itself (the Context Graph
+ * enumeration) is not in these two lines: it is counted once, as `eth_call`
+ * under that caller's own consumer.
  */
 
 import {

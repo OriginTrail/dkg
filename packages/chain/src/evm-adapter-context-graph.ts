@@ -55,10 +55,15 @@ import type {
 } from './chain-adapter.js';
 import {
   CONTEXT_GRAPH_STORAGE_ENUMERATION_RPC_CONSUMER,
+  contextGraphStorageBatchCalls,
+  decodeContextGraphStorageBatch,
   isContextGraphStorageEnumerationReadRetryable,
   isNonexistentContextGraphStorageRevert,
   readContextGraphStorageRangeV1,
 } from './evm-context-graph-storage-enumeration.js';
+import { hostOnlyRpcText } from './rpc-failover-log.js';
+import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
+import { activeRpcRequestAbortSignal, withRpcRequestContext } from './rpc-request-transport.js';
 
 /** Only the cursor-backed modes that stop at a page budget may carry one. */
 type ContextGraphRegistryLiveScanPlan =
@@ -1661,7 +1666,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       ...readOptions,
       isRetryable: isContextGraphStorageEnumerationReadRetryable,
     };
-    return readContextGraphStorageRangeV1({
+    const range = await readContextGraphStorageRangeV1({
       storageAddress,
       readAnchor: () => this.readTipProvider(
         `${label} anchor`,
@@ -1697,7 +1702,46 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         viewReadOptions,
       ),
       isNonexistentContextGraph: isNonexistentContextGraphStorageRevert,
+      // A background pass reads a whole run of ids in one request, pinned to
+      // the anchor like the reads above and billed to the same consumer.
+      readEntriesBatch: async (contextGraphIds, blockTag) => {
+        try {
+          // The range's own signal ends this wait too, as it does every other read.
+          const results = await withRpcRequestContext(
+            { signal: options.signal },
+            () => this.backgroundReadBatching.aggregateAtBlock(
+              () => contextGraphStorageBatchCalls(storage.interface, storageAddress, contextGraphIds),
+              blockTag,
+              (multicall3, request) => this.readContractWith(
+                multicall3,
+                `${label} aggregate3`,
+                request,
+                viewReadOptions,
+              ),
+            ),
+          );
+          return results === undefined
+            ? undefined
+            : decodeContextGraphStorageBatch(storage.interface, contextGraphIds, results);
+        } catch (error) {
+          // Cancelled, or refused by the node's own request admission: every
+          // id read on its own would meet the same.
+          options.signal?.throwIfAborted();
+          activeRpcRequestAbortSignal()?.throwIfAborted();
+          if (isRpcRequestGovernorQueueFullError(error)) throw error;
+          // Any other failure of the request: each id is read as before.
+          console.warn(
+            `[chain] ${label}: aggregate request failed, reading id by id: `
+              + hostOnlyRpcText(rpcErrorMessage(error)),
+          );
+          return undefined;
+        }
+      },
     }, options);
+    // Cancelled through the request context it runs in: reject, as it does for
+    // its own signal, instead of handing back the ids read before that.
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    return range;
   }
 }
 
