@@ -150,7 +150,7 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
           store.armed = true; // Confirmation precedes the targeted stamp.
           return { status: 'confirmed', ual: PUBLISHED, kaId: PACKED, merkleRoot: ROOT, kaManifest: [],
             onChainResult: { txHash: `0x${'cd'.repeat(32)}`, blockNumber: 2, txIndex: 0, kaId: PACKED, batchId: PACKED,
-              startKAId: PACKED, endKAId: PACKED, publisherAddress: AUTHOR } }; 
+              startKAId: PACKED, endKAId: PACKED, publisherAddress: AUTHOR } };
         });
         agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => undefined,
           clearPublishedKnowledgeAssetSwm: async () => undefined };
