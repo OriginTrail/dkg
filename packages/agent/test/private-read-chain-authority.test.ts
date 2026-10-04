@@ -182,6 +182,61 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   });
 
+  it('answers a crafted context graph id the same way whatever other graphs hold', async () => {
+    const chain = new MockChainAdapter();
+    // A finalized name index that proves absence for every name it is asked about.
+    Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', {
+      readContextGraphAuthorityIndexSnapshots: vi.fn(async () => new Map()),
+      readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: vi.fn(async () => new Map()),
+      whenIdle: vi.fn(async () => undefined),
+    });
+    agent = await DKGAgent.create({
+      name: 'AbsentGraphCraftedId',
+      chainAdapter: chain,
+    });
+    await agent.store.insert([
+      {
+        graph: 'did:dkg:context-graph:known-public/_meta',
+        subject: 'did:dkg:context-graph:known-public',
+        predicate: 'http://schema.org/name',
+        object: '"Known public"',
+      },
+      {
+        graph: 'did:dkg:context-graph:someone-elses-private/_private',
+        subject: 'urn:secret',
+        predicate: 'http://schema.org/name',
+        object: '"guess"',
+      },
+    ]);
+    // Closes the IRI of the existence check early and appends a pattern over
+    // any graph, so the check would match only when that triple is stored.
+    const crafted = (guess: string) => (
+      'known-public> ?p ?o } GRAPH ?h { <urn:secret> <http://schema.org/name> "' + guess + '" } #'
+    );
+    const storeQuery = vi.spyOn(agent.store, 'query');
+    const execution = vi.spyOn(agent.queryEngine, 'query');
+    const sparql = 'SELECT ?s WHERE { ?s ?p ?o }';
+    const answer = (contextGraphId: string) => agent!.query(sparql, { contextGraphId }).then(
+      (result) => ({ result }),
+      (error: unknown) => ({ code: (error as { code?: unknown }).code }),
+    );
+
+    const storedValue = await answer(crafted('guess'));
+    const otherValue = await answer(crafted('not-the-value'));
+
+    expect(storedValue).toEqual({ code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE });
+    expect(otherValue).toEqual(storedValue);
+    await expect(agent.contextGraphExists(crafted('guess'))).resolves.toBe(false);
+    expect(storeQuery.mock.calls.filter(([text]) => String(text).includes('urn:secret')))
+      .toEqual([]);
+    // A well-formed id of a graph this node does not know still gets the settled empty answer.
+    await expect(answer('unregistered-nonmember-probe')).resolves.toEqual({
+      result: expect.objectContaining({ bindings: [] }),
+    });
+    expect(execution).not.toHaveBeenCalled();
+  });
+
   it('serves a scoped public read from finalized authority without a live RPC', async () => {
     const contextGraphId = 'finalized-public';
     const chain = new MockChainAdapter();

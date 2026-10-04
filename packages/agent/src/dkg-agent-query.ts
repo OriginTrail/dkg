@@ -41,6 +41,7 @@ import {
   assertContextGraphIdV1, assertNetworkIdV1,
   type ContextGraphIdV1, type NetworkIdV1,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  validateContextGraphId,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -567,11 +568,14 @@ export class QueryMethods extends DKGAgentBase {
         // subscription, or graph. Return an empty scoped result without
         // touching the store's graph partitions. A replica that has local
         // data or join intent remains on the retryable authority path.
+        // The id comes straight from the caller: a malformed one never gets
+        // this answer, so the reply cannot depend on the existence check.
         if (
           (
             scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
             || scopedReadAuthority.reason === 'authority-circuit-open'
           )
+          && validateContextGraphId(scopedContextGraphId).valid
           && !this.subscribedContextGraphs.has(scopedContextGraphId)
           && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
           && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
