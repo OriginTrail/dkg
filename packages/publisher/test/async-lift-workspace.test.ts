@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { GraphManager, OxigraphStore, PrivateContentStore, SharedMemoryLiteralBlobStore } from '@origintrail-official/dkg-storage';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { DKGPublisher, FileWorkspacePublicSnapshotStore, generateSubGraphRegistration } from '../src/index.js';
+import { TypedEventBus, createGraphKnowledgeAssetScope, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, computePrivateRootV10, generateSubGraphRegistration, storeKnowledgeAssetOperationPublicQuads } from '../src/index.js';
 import { resolveLiftWorkspaceSlice, resolveWorkspaceSelection } from '../src/workspace-resolution.js';
+import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 const CONTEXT_GRAPH = 'test-workspace';
 const ENTITY = 'urn:test:entity:1';
@@ -109,6 +110,40 @@ describe('async lift workspace resolution', () => {
       eventBus: new TypedEventBus(),
       keypair,
     });
+  });
+
+  it.each([undefined, 'notes'])('resolves the queued private commitment after version reuse (subgraph %s)', async subGraphName => {
+    try {
+      const scope = createGraphKnowledgeAssetScope('did:dkg:31337/0x1111111111111111111111111111111111111111/7', 2);
+      const privateStore = new PrivateContentStore(store, graphManager);
+      const shared = [{ subject: 'urn:private:queued', predicate: 'urn:secret', object: '"shared-b"', graph: '' }];
+      const unshared = [{ ...shared[0], object: '"unshared-c"' }];
+      const root = (quads: typeof shared): `0x${string}` => `0x${Buffer.from(computePrivateRootV10(quads)!).toString('hex')}`;
+      const publicQuads = [{ subject: ENTITY, predicate: 'urn:name', object: '"queued-b"', graph: '' }];
+      await privateStore.replaceKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, shared, subGraphName, root(shared));
+      await storeKnowledgeAssetOperationPublicQuads({
+        store, graphManager, contextGraphId: CONTEXT_GRAPH, subGraphName,
+        shareOperationId: 'queued-private-b', kaUal: scope.ual, assertionVersion: scope.assertionVersion,
+        quads: publicQuads, privateMerkleRoot: computePrivateRootV10(shared), privateTripleCount: shared.length,
+      });
+      const queue = new TripleStoreAsyncLiftPublisher(store);
+      const jobId = await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        contextGraphId: CONTEXT_GRAPH, subGraphName, shareOperationId: 'queued-private-b',
+        assertionVersion: scope.assertionVersion, publicTripleCount: publicQuads.length,
+        privateTripleCount: shared.length, privateMerkleRoot: root(shared),
+      }));
+      await privateStore.replaceKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, unshared, subGraphName, root(unshared));
+      expect(await privateStore.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, subGraphName)).toEqual(unshared);
+      const queued = await queue.getStatus(jobId);
+      if (queued?.request.jobType !== 'knowledge-asset-vm-publish') throw new Error('expected persisted named-KA job');
+
+      const resolved = await resolveLiftWorkspaceSlice({ store, graphManager, request: queued.request.knowledgeAssetVmPublish });
+
+      expect(resolved.quads).toEqual(publicQuads);
+      expect(resolved.privateQuads).toEqual(shared);
+      expect(root(resolved.privateQuads!)).toBe(root(shared));
+      expect(root(resolved.privateQuads!)).not.toBe(root(unshared));
+    } finally { await store.close(); }
   });
 
   it('resolves workspace selection by roots with graphless quads', async () => {

@@ -24,9 +24,12 @@ import {
   contextGraphSharedMemoryMetaUri,
 } from '@origintrail-official/dkg-core';
 import {
+  TripleStoreAsyncLiftPublisher,
+  readDraftArtifactReferences,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
+import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -82,6 +85,7 @@ async function seedV2Operation(store: TripleStore, opts: {
   assertionVersion: number;
   ageMs: number;
   subGraphName?: string;
+  kaUal?: string;
 }): Promise<{ opSubject: string; snapshotGraph: string; metaGraph: string }> {
   const graphManager = new GraphManager(store);
   await storeKnowledgeAssetOperationPublicQuads({
@@ -89,7 +93,7 @@ async function seedV2Operation(store: TripleStore, opts: {
     graphManager,
     contextGraphId: opts.contextGraphId,
     shareOperationId: opts.shareOperationId,
-    kaUal: KA_UAL,
+    kaUal: opts.kaUal ?? KA_UAL,
     assertionVersion: opts.assertionVersion,
     quads: [
       { subject: 'urn:v2:entity:1', predicate: 'http://schema.org/name', object: `"v${opts.assertionVersion} payload"`, graph: '' },
@@ -278,4 +282,58 @@ describe('SWM TTL cleanup of graph-scoped V2 operations', () => {
       instrumentedStore.query = originalQuery;
     }
   }, 60_000);
+
+  it('advances past an entirely queued expired page without collecting its snapshots', async () => {
+    const cg = 'swm-ttl-v2-retained-page';
+    await node.createContextGraph({ id: cg, name: 'V2 TTL retained page' });
+    const operations = new Map<string, Awaited<ReturnType<typeof seedV2Operation>> & { kaUal: string }>();
+    for (let index = 0; index < 251; index += 1) {
+      const id = `retained-${index.toString().padStart(3, '0')}`;
+      const kaUal = KA_UAL.slice(0, -1) + String(index + 1);
+      operations.set(id, { ...await seedV2Operation(store, {
+        contextGraphId: cg, shareOperationId: id, assertionVersion: 1, ageMs: TTL_MS * 2,
+        kaUal,
+      }), kaUal });
+    }
+    const meta = contextGraphSharedMemoryMetaUri(cg);
+    const queue = new TripleStoreAsyncLiftPublisher(store);
+    const originalQuery = store.query.bind(store);
+    const retained = new Set<string>();
+    const batchSizes: number[] = [];
+    // Persist jobs for the real first page before cleanup examines its rows.
+    // This avoids assuming an adapter's iteration order and exercises late admission.
+    store.query = async (query, options) => {
+      const result = await originalQuery(query, options);
+      if (options?.source !== 'agent.swmCleanup.expiredOperations' || !query.includes(meta)
+        || result.type !== 'bindings') return result;
+      batchSizes.push(result.bindings.length);
+      if (retained.size === 0) {
+        expect(result.bindings).toHaveLength(250);
+        for (const row of result.bindings) {
+          const id = [...operations].find(([, operation]) => operation.opSubject === row['op'])![0];
+          const operation = operations.get(id)!;
+          retained.add(id);
+          await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+            contextGraphId: cg, name: id, shareOperationId: id, kaUal: operation.kaUal,
+            reservedUal: operation.kaUal, kaNumber: operation.kaUal.split('/').at(-1)!, publicTripleCount: 1,
+            intentKey: `sha256:${retained.size.toString(16).padStart(64, '0')}`,
+          }));
+        }
+      }
+      return result;
+    };
+    try {
+      await node.cleanupExpiredSharedMemory();
+      expect((await readDraftArtifactReferences(store))?.operations.size).toBe(250);
+      expect(batchSizes).toEqual([250, 1, 0]);
+      for (const [id, operation] of operations) {
+        const count = await subjectRowCount(store, operation.metaGraph, operation.opSubject);
+        if (retained.has(id)) expect(count, id).toBeGreaterThan(0);
+        else expect(count, id).toBe(0);
+        expect(await graphTripleCount(store, operation.snapshotGraph), id).toBe(retained.has(id) ? 1 : 0);
+      }
+      await node.cleanupExpiredSharedMemory();
+      expect(batchSizes.slice(3)).toEqual([250, 0]);
+    } finally { store.query = originalQuery; }
+  }, 120_000);
 });

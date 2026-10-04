@@ -1,4 +1,5 @@
 import { collectAbandonedDraftArtifacts, withUnqueuedDraftOperation } from './draft-artifact-gc.js';
+import { readExpiredSwmOperationBatch } from './swm-expiry-batch.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -11579,29 +11580,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
             let wsGraphs: string[] | undefined;
             let ownershipKeys: string[] | undefined;
+            let expiredCursor = '';
             for (;;) {
-              // Retained StorageACK copies are excluded inside the query, not
-              // skipped in the loop: skipped rows would come back in every
-              // batch and stall the no-progress guard below.
-              const expiredOps = await this.store.query(
-                `SELECT DISTINCT ?op WHERE {
-                GRAPH <${wsMetaGraph}> {
-                  ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-                  ?op <http://dkg.io/ontology/publishedAt> ?ts .
-                  FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-                }
-                ${storageAckNotRetained('', '?op', '?ts', 'Expired')}
-              } LIMIT ${DKGAgentBase.SWM_CLEANUP_BATCH_SIZE}`,
-                { source: 'agent.swmCleanup.expiredOperations' },
-              );
-
+              const expiredOps = await readExpiredSwmOperationBatch(this.store, {
+                metaGraph: wsMetaGraph, cutoff, afterOperation: expiredCursor,
+                retentionFilters: storageAckNotRetained('', '?op', '?ts', 'Expired'),
+                limit: DKGAgentBase.SWM_CLEANUP_BATCH_SIZE,
+              });
               if (expiredOps.type !== 'bindings' || expiredOps.bindings.length === 0) break;
-              expiredOpsCount += expiredOps.bindings.length;
+              const nextCursor = expiredOps.bindings.at(-1)?.['op'];
+              if (!nextCursor || nextCursor === expiredCursor) break;
+              expiredCursor = nextCursor;
               wsGraphs ??= await listGraphFamily(this.store, wsGraph);
               ownershipKeys ??= wsGraphs
                 .map((g) => sharedMemoryOwnershipKeyFromGraph(pid, g))
                 .filter((key): key is string => Boolean(key));
-              let metadataDeleted = 0;
 
               for (const row of expiredOps.bindings) {
                 const opUri = row['op'];
@@ -11703,7 +11696,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)
                 const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
                 graphDeleted += metaDeleted;
-                metadataDeleted += metaDeleted;
+                if (metaDeleted > 0) expiredOpsCount += 1;
                 // The copy is gone, so is this core's signed-ACK record of it.
                 await this.store.deleteByPattern({ graph: STORAGE_ACK_LEDGER_GRAPH, subject: opUri });
 
@@ -11726,13 +11719,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   }
                 }
                 });
-              }
-              if (metadataDeleted === 0) {
-                this.log.warn(
-                  ctx,
-                  `SWM cleanup for "${wsMetaGraph}" made no metadata-deletion progress; stopping this batch loop`,
-                );
-                break;
               }
             }
           }
