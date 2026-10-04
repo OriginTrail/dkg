@@ -54,4 +54,3 @@ export function authoritySnapshotV1(
     sourceBlockNumber: state.sourceBlockNumber.toString(10),
   });
 }
-
