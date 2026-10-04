@@ -18,6 +18,7 @@ import {
 import {
   AUTHORITY,
   createAuthorityScenario,
+  FINALIZED_HASH,
   GOVERNANCE,
   LATE_NAME_HASH,
   MEMBER,
@@ -56,6 +57,7 @@ interface IndexedAuthorityProvider {
   getBlock(tag: string | number): Promise<Readonly<{
     number: number;
     hash: string;
+    timestamp?: number;
   }> | null>;
   getNetwork(): Promise<Readonly<{ chainId: bigint }>>;
   getLogs(filter: Readonly<{
@@ -86,6 +88,7 @@ function makeIndexedAuthorityAdapter(
     lateContextGraphNameHash?: string;
     finalizedNumber?: number;
     finalizedHash?: string;
+    headTimestampSeconds?: number;
     authorityIndexPageSize?: number;
     maxLogRangeBlocks?: number;
     /**
@@ -817,6 +820,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   it('does not retain a finalized miss after the authority index advances', async () => {
     const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
       lateContextGraphNameHash: LATE_NAME_HASH,
+      headTimestampSeconds: Math.floor(Date.now() / 1_000),
     });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
 
@@ -835,12 +839,14 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   it('reuses absent name reads only while a fresh finality anchor matches', async () => {
     const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
       lateContextGraphNameHash: LATE_NAME_HASH,
+      headTimestampSeconds: Math.floor(Date.now() / 1_000),
     });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
 
     await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
       .resolves.toBeNull();
     const scannedRanges = [...evidence.indexRanges];
+    const scannedBlockReads = [...evidence.blockReads];
     const initialHeadReads = evidence.headReads.length;
 
     await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
@@ -848,12 +854,288 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
       .resolves.toBeNull();
     expect(evidence.indexRanges).toEqual(scannedRanges);
+    expect(evidence.blockReads).toEqual(scannedBlockReads);
     expect(evidence.headReads.length).toBe(initialHeadReads + 2);
 
     advanceAuthorityHead();
     await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
       .resolves.toMatchObject({ contextGraphId: '11', nameHash: LATE_NAME_HASH });
     expect(evidence.indexRanges.at(-1)).toEqual([31, 35]);
+  });
+
+  it.each([
+    ['head', 'latest', 1],
+    ['finalized anchor', 27, 4],
+  ] as const)(
+    'fails cached name absence over when the first endpoint lacks its %s',
+    async (_stage, unavailableTag, finalityConfirmations) => {
+      const harness = makeIndexedAuthorityAdapter({
+        finalityConfirmations,
+        headTimestampSeconds: Math.floor(Date.now() / 1_000),
+      });
+      const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+      await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+        .resolves.toBeNull();
+      const scannedRanges = [...harness.evidence.indexRanges];
+      const attempts: string[] = [];
+      const unavailable: IndexedAuthorityProvider = {
+        ...harness.provider,
+        getBlock: async (tag) => {
+          attempts.push(`unavailable:${String(tag)}`);
+          if (tag === unavailableTag) return null;
+          return harness.provider.getBlock(tag);
+        },
+      };
+      const healthy: IndexedAuthorityProvider = {
+        ...harness.provider,
+        getBlock: async (tag) => {
+          attempts.push(`healthy:${String(tag)}`);
+          return harness.provider.getBlock(tag);
+        },
+      };
+      bindProductionRpcTipReader(harness, [unavailable, healthy]);
+
+      await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+        .resolves.toBeNull();
+
+      expect(attempts).toContain(`unavailable:${String(unavailableTag)}`);
+      expect(attempts).toContain('healthy:latest');
+      expect(harness.evidence.indexRanges).toEqual(scannedRanges);
+      const readOptions = harness.evidence.readOptions.at(-1);
+      expect(readOptions?.policy).toBeUndefined();
+      expect(readOptions?.isRetryable?.(
+        new ContextGraphAuthorityIndexRetryableError('unavailable authority anchor'),
+      )).toBe(true);
+      expect(readOptions?.isRetryable?.(new Error('programming failure'))).toBe(false);
+    },
+  );
+
+  it('lets one fresh absence proof satisfy retained-tail anchor validation', async () => {
+    const harness = makeIndexedAuthorityAdapter({
+      finalizedNumber: 20_020,
+      authorityIndexPageSize: 25_000,
+      headTimestampSeconds: Math.floor(Date.now() / 1_000),
+    });
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    const scannedRanges = [...harness.evidence.indexRanges];
+    const scannedBlockReads = [...harness.evidence.blockReads];
+    const initialHeadReads = harness.evidence.headReads.length;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+
+    expect(harness.evidence.indexRanges).toEqual(scannedRanges);
+    expect(harness.evidence.blockReads).toEqual(scannedBlockReads);
+    expect(harness.evidence.headReads).toHaveLength(initialHeadReads + 1);
+  });
+
+  it('rejects a cached absent name after a same-height finalized reorg', async () => {
+    const harness = makeIndexedAuthorityAdapter({
+      lateContextGraphNameHash: LATE_NAME_HASH,
+      headTimestampSeconds: Math.floor(Date.now() / 1_000),
+    });
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    harness.replaceAuthorityFork();
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBe(11n);
+
+    expect(harness.evidence.headReads).toEqual([30, 30, 30]);
+    expect(harness.evidence.indexInvalidations).toEqual([4]);
+    expect(harness.evidence.indexRanges).toEqual([
+      [7, 16], [17, 26], [27, 30],
+      [7, 16], [17, 26], [27, 30],
+    ]);
+  });
+
+  it('rejects a lagging negative after the durable authority horizon advances', async () => {
+    const harness = makeIndexedAuthorityAdapter({
+      lateContextGraphNameHash: LATE_NAME_HASH,
+      headTimestampSeconds: Math.floor(Date.now() / 1_000),
+    });
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    const served: string[] = [];
+    const readOptions = {
+      onContextGraphAuthorityProjectionServed: ({ source }: { source: string }) => {
+        served.push(source);
+      },
+    };
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(
+      LATE_NAME_HASH,
+      readOptions,
+    )).resolves.toBeNull();
+    const initialRanges = [...harness.evidence.indexRanges];
+    await harness.adapter.contextGraphAuthorityIndexSnapshots!.refresh();
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(
+      LATE_NAME_HASH,
+      readOptions,
+    )).resolves.toBeNull();
+    expect(harness.evidence.indexRanges).toEqual(initialRanges);
+
+    harness.advanceAuthorityHead();
+    await harness.adapter.contextGraphAuthorityIndexSnapshots!.refresh();
+    const advancedRanges = [...harness.evidence.indexRanges];
+    const attempts: string[] = [];
+    const lagging: IndexedAuthorityProvider = {
+      ...harness.provider,
+      getBlock: async (tag) => {
+        attempts.push(`lagging:${String(tag)}`);
+        if (tag === 'latest' || tag === 30) {
+          return {
+            number: 30,
+            hash: FINALIZED_HASH,
+            timestamp: Math.floor(Date.now() / 1_000),
+          };
+        }
+        return harness.provider.getBlock(tag);
+      },
+      getLogs: async (filter) => {
+        attempts.push(`lagging:logs:${filter.fromBlock}-${filter.toBlock}`);
+        return harness.provider.getLogs(filter);
+      },
+    };
+    const healthy: IndexedAuthorityProvider = {
+      ...harness.provider,
+      getBlock: async (tag) => {
+        attempts.push(`healthy:${String(tag)}`);
+        return harness.provider.getBlock(tag);
+      },
+    };
+    bindProductionRpcTipReader(harness, [lagging, healthy]);
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(
+      LATE_NAME_HASH,
+      readOptions,
+    )).resolves.toBe(11n);
+
+    expect(served).toEqual(['scan', 'cache', 'scan']);
+    expect(harness.evidence.indexRanges).toEqual(advancedRanges);
+    expect(attempts.filter((attempt) => attempt === 'lagging:latest')).toHaveLength(2);
+    expect(attempts.some((attempt) => attempt.startsWith('lagging:logs:'))).toBe(false);
+    expect(attempts).toContain('healthy:latest');
+  });
+
+  it('fails a long-holdback lagging provider over to the durable refresh horizon', async () => {
+    const horizonHash = `0x${'d0'.repeat(32)}`;
+    const laggingHash = `0x${'d1'.repeat(32)}`;
+    const harness = makeIndexedAuthorityAdapter({
+      finalizedNumber: 1_000,
+      finalizedHash: horizonHash,
+      authorityIndexPageSize: 2_000,
+      headTimestampSeconds: Math.floor(Date.now() / 1_000),
+    });
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    // Long history retains a durable cursor at H950, but the publication floor
+    // is the complete H1000 scan rather than that held-back memo boundary.
+    await harness.adapter.contextGraphAuthorityIndexSnapshots!.refresh();
+    const attempts: string[] = [];
+    const lagging: IndexedAuthorityProvider = {
+      ...harness.provider,
+      getBlock: async (tag) => {
+        attempts.push(`lagging:${String(tag)}`);
+        if (tag === 'latest' || tag === 970) {
+          return {
+            number: 970,
+            hash: laggingHash,
+            timestamp: Math.floor(Date.now() / 1_000),
+          };
+        }
+        return harness.provider.getBlock(tag);
+      },
+      getLogs: async (filter) => {
+        attempts.push(`lagging:logs:${filter.fromBlock}-${filter.toBlock}`);
+        return harness.provider.getLogs(filter);
+      },
+    };
+    const healthy: IndexedAuthorityProvider = {
+      ...harness.provider,
+      getBlock: async (tag) => {
+        attempts.push(`healthy:${String(tag)}`);
+        return harness.provider.getBlock(tag);
+      },
+    };
+    bindProductionRpcTipReader(harness, [lagging, healthy]);
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+
+    expect(attempts).toContain('lagging:latest');
+    expect(attempts).toContain('lagging:970');
+    expect(attempts).toContain('lagging:logs:951-970');
+    expect(attempts).toContain('healthy:latest');
+    expect(harness.evidence.indexRanges).toContainEqual([951, 1_000]);
+  });
+
+  it('rolls back a failed high stabilization before a healthy lower provider rebuilds', async () => {
+    const highHash = `0x${'e0'.repeat(32)}`;
+    const movedHighHash = `0x${'e1'.repeat(32)}`;
+    const harness = makeIndexedAuthorityAdapter({
+      finalizedNumber: 26,
+      authorityIndexPageSize: 2_000,
+      headTimestampSeconds: Math.floor(Date.now() / 1_000),
+    });
+    // Seed a durable H26 lineage. The unstable provider will disprove it,
+    // activating its tentative H1000 lease before its final fence fails.
+    await harness.adapter.contextGraphAuthorityIndexSnapshots!.refresh();
+    const attempts: string[] = [];
+    const unstableHigh: IndexedAuthorityProvider = {
+      ...harness.provider,
+      getBlock: async (tag) => {
+        attempts.push(`unstable:${String(tag)}`);
+        if (tag === 'latest') {
+          return {
+            number: 1_000,
+            hash: highHash,
+            timestamp: Math.floor(Date.now() / 1_000),
+          };
+        }
+        if (tag === 1_000) {
+          return { number: 1_000, hash: movedHighHash };
+        }
+        if (tag === 26) {
+          return { number: 26, hash: movedHighHash };
+        }
+        return harness.provider.getBlock(tag);
+      },
+      getLogs: (filter) => harness.provider.getLogs(filter),
+    };
+    const healthyLower: IndexedAuthorityProvider = {
+      ...harness.provider,
+      getBlock: async (tag) => {
+        attempts.push(`healthy:${String(tag)}`);
+        return harness.provider.getBlock(tag);
+      },
+    };
+    bindProductionRpcTipReader(harness, [unstableHigh, healthyLower]);
+
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n))
+      .resolves.toMatchObject({ contextGraphId: '9' });
+
+    expect(attempts).toContain('unstable:latest');
+    expect(attempts).toContain('unstable:26');
+    expect(attempts).toContain('unstable:1000');
+    expect(attempts).toContain('healthy:latest');
+    // The failed H1000 attempt persisted only a provisional H950 memo. The
+    // healthy H26 attempt rejects that deep-fork row and rebuilds instead of
+    // being blocked by a poisoned H1000 floor. Checkpoint rejection deliberately
+    // prevents that same generation from publishing; the next H26 read caches.
+    expect(harness.evidence.indexInvalidations).toHaveLength(2);
+    bindProductionRpcTipReader(harness, [healthyLower]);
+    const reads = harness.evidence.headReads.length;
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n))
+      .resolves.toMatchObject({ contextGraphId: '9' });
+    expect(harness.evidence.headReads).toHaveLength(reads + 1);
+    const cachedReads = harness.evidence.headReads.length;
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n))
+      .resolves.toMatchObject({ contextGraphId: '9' });
+    expect(harness.evidence.headReads).toHaveLength(cachedReads);
   });
 
   it('resolves name identity and authority state at one finalized horizon', async () => {

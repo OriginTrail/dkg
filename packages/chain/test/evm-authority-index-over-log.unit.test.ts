@@ -396,6 +396,55 @@ describe('Context Graph authority index over the one log', () => {
     expect(calls.getLogs).toBe(0);
   });
 
+  it('does not single-flight two log source generations through one provider', async () => {
+    const storeA = seededStore({
+      rows: [creationRow(20, 7n, NAME_HASH, 1)],
+    });
+    const storeB = seededStore({
+      rows: [creationRow(20, 7n, ABSENT_NAME_HASH, 0)],
+    });
+    const originalA = logSource(storeA);
+    const originalB = logSource(storeB);
+    const enteredA = Promise.withResolvers<void>();
+    const releaseA = Promise.withResolvers<void>();
+    const sourceA: ChainEventLogAuthoritySource = {
+      ...originalA,
+      pageSource: {
+        ...originalA.pageSource,
+        async readPage(...args) {
+          enteredA.resolve();
+          await releaseA.promise;
+          return originalA.pageSource.readPage(...args);
+        },
+      },
+    };
+    const readPageB = vi.fn(originalB.pageSource.readPage.bind(originalB.pageSource));
+    const sourceB: ChainEventLogAuthoritySource = {
+      ...originalB,
+      pageSource: { ...originalB.pageSource, readPage: readPageB },
+    };
+    let current: ChainEventLogAuthoritySource | undefined = sourceA;
+    const { reader } = makeReader({
+      sourceProvider: () => current,
+    });
+    const readingA = reader.readContextGraphFinalizedCreation(7n);
+    await enteredA.promise;
+    current = sourceB;
+    const readingB = reader.readContextGraphFinalizedCreation(7n);
+
+    try {
+      await vi.waitFor(() => expect(readPageB).toHaveBeenCalled(), { timeout: 250 });
+      await expect(readingB).resolves.toEqual({
+        nameHash: ABSENT_NAME_HASH,
+        accessPolicy: 0,
+      });
+    } finally {
+      releaseA.resolve();
+      await Promise.allSettled([readingA, readingB]);
+    }
+    await expect(readingA).resolves.toBeUndefined();
+  });
+
   it('returns a proof miss when the source rotates during the point-row lookup', async () => {
     const store = seededStore();
     const original = logSource(store);

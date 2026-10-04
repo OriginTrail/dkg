@@ -36,7 +36,12 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
   readonly finalized: Readonly<{ number: number; hash: string }>;
   readonly lifecycleSignal: AbortSignal;
   /** Evict remotely servable observations as soon as a durable row is rejected. */
-  readonly onRejectedCheckpoint?: () => void;
+  readonly onRejectedCheckpoint?: (rejectedToken: number) => void;
+  /** Record the durable generation returned by that conditional invalidation. */
+  readonly onCheckpointRecovery?: (
+    rejectedToken: number,
+    recoveryToken: number | undefined,
+  ) => void;
   readonly readBlockHash: (
     blockNumber: number,
     lifecycleSignal: AbortSignal,
@@ -56,12 +61,16 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
 ): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
   let record = input.initial;
   let lostInvalidations = 0;
+  // A checkpoint that wins the CAS against an invalidator may have been
+  // reduced from the rejected row by work already in flight. Its cursor hash
+  // alone cannot prove that its materialized prefix belongs to the new fork.
+  let forceCheckpointInvalidation = false;
 
   for (;;) {
     input.lifecycleSignal.throwIfAborted();
     if (record.kind === 'missing' || record.kind === 'tombstone') return record;
 
-    if (record.kind === 'checkpoint') {
+    if (record.kind === 'checkpoint' && !forceCheckpointInvalidation) {
       const checkpoint = record.checkpoint;
       if (checkpoint.cursor.deploymentBlockNumber === input.deploymentBlockNumber) {
         const cursorSkew = checkpoint.cursor.throughBlockNumber - input.finalized.number;
@@ -95,15 +104,22 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
       }
     }
 
-    input.onRejectedCheckpoint?.();
+    input.onRejectedCheckpoint?.(record.token);
     if (lostInvalidations >= MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS) {
       throw new ContextGraphAuthorityIndexRetryableError(
         'Context Graph authority index changed repeatedly during checkpoint recovery',
       );
     }
     const recovery = await input.repository.invalidateOrReloadWinner(record, input.lifecycleSignal);
+    // Only a tombstone is a proven lineage break. A checkpoint CAS winner may
+    // itself have been reduced from the rejected row by pre-rejection work; it
+    // becomes safe only if this rejecting scan re-admits it below.
+    if (recovery.record.kind === 'tombstone') {
+      input.onCheckpointRecovery?.(record.token, recovery.record.token);
+    }
     if (recovery.kind === 'invalidated') return recovery.record;
     lostInvalidations += 1;
     record = recovery.record;
+    forceCheckpointInvalidation = record.kind === 'checkpoint';
   }
 }
