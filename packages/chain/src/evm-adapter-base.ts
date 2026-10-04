@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { rpcReadDescriptor } from './rpc-read-descriptor.js';
+
 /**
  * Shared base class for the EVMChainAdapter mixin split. Holds ALL instance
  * state (providers, signers, caches, config), the constructor, low-level
