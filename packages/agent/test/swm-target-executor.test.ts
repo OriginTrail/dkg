@@ -1,11 +1,25 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from '../src/sync/requester/private-swm-recovery-budget.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   DKG_ENTITY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
+  createGraphKnowledgeAssetScope,
+  createOperationContext,
+  knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
+import {
+  computeFlatKCRootV10,
+  generateKnowledgeAssetShareMetadata,
+  workspacePublicQuadsDigest,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
+import { ethers } from 'ethers';
+import type { FinalizedSwmTwinRetirement } from
+  '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import {
   SwmTargetExecutorV1,
   type SwmTargetExecutorPortsV1,
@@ -250,5 +264,195 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
     );
     expect(currentMeta.type === 'bindings' ? currentMeta.bindings : []).toHaveLength(2);
     expect(ownership.get(contextGraphId)?.get(entity)).toBe(creator);
+  });
+});
+
+describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
+  const stores: OxigraphStore[] = [];
+
+  afterEach(async () => {
+    await Promise.all(stores.splice(0).map((store) => store.close()));
+  });
+
+  it('keeps retired SWM metadata out of the bulk append when legacy marker retirement fails', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const contextGraphId = 'public-finalized-twin-marker-deferral';
+    const author = '0x1111111111111111111111111111111111111111';
+    const ual = `did:dkg:hardhat:31337/${author}/7`;
+    const dkg = 'http://dkg.io/ontology/';
+    const xsdInteger = 'http://www.w3.org/2001/XMLSchema#integer';
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, scope);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      scope,
+    );
+    const vmMetaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const swmMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
+    const shareOperationId = 'finalized-twin-marker-deferral-op';
+    const operationSubject = `urn:dkg:share:${contextGraphId}:${shareOperationId}`;
+    const headSubject = `${ual}#dkg-swm-head`;
+    const payload: Quad[] = [
+      { subject: 'urn:twin:a', predicate: 'http://schema.org/status', object: '"finalized"', graph: '' },
+      { subject: 'urn:twin:b', predicate: 'http://schema.org/status', object: '"finalized"', graph: '' },
+    ];
+    const digest = workspacePublicQuadsDigest(payload);
+    // Finalized VM is already local: the SWM snapshot below arrives second.
+    await store.insert([
+      ...payload.map((quad) => ({ ...quad, graph: vmGraph })),
+      { subject: ual, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: vmMetaGraph },
+      { subject: ual, predicate: `${dkg}assertionGraph`, object: vmGraph, graph: vmMetaGraph },
+      { subject: ual, predicate: `${dkg}status`, object: '"confirmed"', graph: vmMetaGraph },
+      { subject: ual, predicate: `${dkg}publicTripleCount`, object: `"${payload.length}"^^<${xsdInteger}>`, graph: vmMetaGraph },
+      { subject: ual, predicate: `${dkg}privateTripleCount`, object: `"0"^^<${xsdInteger}>`, graph: vmMetaGraph },
+      {
+        subject: ual,
+        predicate: `${dkg}merkleRoot`,
+        object: `"${ethers.hexlify(computeFlatKCRootV10(payload, []))}"`,
+        graph: vmMetaGraph,
+      },
+    ]);
+    const remoteMeta: Quad[] = [
+      ...generateKnowledgeAssetShareMetadata({
+        shareOperationId,
+        contextGraphId,
+        kaUal: ual,
+        assertionVersion: 1,
+        publicTripleCount: payload.length,
+        privateTripleCount: 0,
+        publisherPeerId: 'peer-source',
+        timestamp: new Date(0),
+      }, swmMetaGraph),
+      { subject: operationSubject, predicate: `${dkg}publicQuadsDigest`, object: `"${digest}"`, graph: swmMetaGraph },
+      { subject: operationSubject, predicate: `${dkg}publicSnapshotRef`, object: `"${digest}"`, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${xsdInteger}>`, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}kaUal`, object: ual, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}assertionGraph`, object: swmGraph, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}shareOperationId`, object: `"${shareOperationId}"`, graph: swmMetaGraph },
+    ];
+    const snapshots = new Map<string, Quad[]>([[digest, payload]]);
+    const publicSnapshotStore: WorkspacePublicSnapshotStore = {
+      putSnapshot: async (input) => {
+        snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
+        return { ref: input.digest, byteLength: 0 };
+      },
+      getSnapshot: async (ref) => snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null,
+    };
+    const subjectRows = async (subject: string) => {
+      const result = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${swmMetaGraph}> { <${subject}> ?p ?o } }`,
+      );
+      return result.type === 'bindings' ? result.bindings : [];
+    };
+    const swmRowsWhenRetired: number[] = [];
+    // Stand-in for the publisher's named-lifecycle cleanup: graph, then head and operation.
+    const retireFinalizedSwmTwin = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      swmRowsWhenRetired.push(
+        await store.countQuads(candidate.swmGraph),
+        (await subjectRows(headSubject)).length,
+      );
+      await store.dropGraph(candidate.swmGraph);
+      await store.deleteByPattern({ graph: swmMetaGraph, subject: headSubject });
+      await store.deleteByPattern({ graph: swmMetaGraph, subject: operationSubject });
+    });
+    const invalidateListContextGraphsCache = vi.fn();
+    let invalidationsBeforeMarkerRetirement = -1;
+    const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async () => {
+      invalidationsBeforeMarkerRetirement = invalidateListContextGraphsCache.mock.calls.length;
+      throw new Error('legacy boundary store unavailable');
+    });
+    const logInfo = vi.fn();
+    const logWarn = vi.fn();
+    const ctx = createOperationContext('sync');
+    const executor = new SwmTargetExecutorV1({
+      store,
+      writeLocks: new Map(),
+      listSubGraphs: async () => [],
+      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (
+        _ctx,
+        _peerId,
+        _contextGraphId,
+        _includeSharedMemory,
+        phase,
+      ) => {
+        const quads = phase === 'meta' ? remoteMeta.map((quad) => ({ ...quad })) : [];
+        return {
+          quads,
+          bytesReceived: 0,
+          timedOut: false,
+          resumedFromOffset: 0,
+          nextOffset: quads.length,
+          checkpointKey: `public:${phase}`,
+          completed: true,
+        };
+      },
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
+        verifiedData: dataQuads,
+        verifiedMeta: metaQuads,
+        totalFetchedDataQuads: dataQuads.length,
+        totalFetchedMetaQuads: metaQuads.length,
+        droppedDataTriples: 0,
+        emptyResponses: 0,
+        entityCreators: [],
+      }),
+      publicSnapshotStore,
+      recordDrops: () => undefined,
+      invalidateListContextGraphsCache,
+      markMetaProjectionDirty: () => undefined,
+      recoveryMutation: createSwmRecoveryMutationRuntimeV1({
+        store,
+        recordDrops: () => undefined,
+        invalidateListContextGraphsCache: () => undefined,
+        markMetaProjectionDirty: () => undefined,
+      }),
+      setCheckpoint: () => undefined,
+      deleteCheckpoint: () => undefined,
+      deletePublicCheckpoint: () => undefined,
+      ensureOwnedMap: () => new Map(),
+      retireFinalizedSwmTwin,
+      retireLegacySwmAfterVerifiedVmTwin,
+      logInfo,
+      logWarn,
+      logDebug: () => undefined,
+    });
+
+    const summary = await executor.syncPublicTarget({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId,
+      remainingContextGraphs: 1,
+      mode: { kind: 'ordinary' },
+    });
+
+    expect(summary.failedPhases).toBe(0);
+    // The snapshot was materialized with its head, then the twin was retired.
+    expect(retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(swmRowsWhenRetired).toEqual([payload.length, 5]);
+    expect(retireLegacySwmAfterVerifiedVmTwin).toHaveBeenCalledExactlyOnceWith({
+      contextGraphId,
+      kaUal: ual,
+      assertionVersion: '1',
+      subGraphName: undefined,
+    });
+    // The round's closing bulk append must not put the retired rows back.
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await subjectRows(headSubject)).toEqual([]);
+    expect(await subjectRows(operationSubject)).toEqual([]);
+    expect(await store.countQuads(vmGraph)).toBe(payload.length);
+    // The retirement itself is still completed and reported; only the marker is deferred.
+    expect(invalidateListContextGraphsCache.mock.calls.length)
+      .toBeGreaterThan(invalidationsBeforeMarkerRetirement);
+    expect(logInfo).toHaveBeenCalledWith(
+      ctx,
+      `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${ual}`,
+    );
+    expect(logWarn).toHaveBeenCalledWith(
+      ctx,
+      expect.stringMatching(/legacy SWM boundary.*legacy boundary store unavailable/),
+    );
   });
 });
