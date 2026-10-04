@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createAbortError } from './bounded-operation.js';
+import { createAbortError } from '../bounded-operation.js';
 
 function syncAuthAbortError(reason: unknown): Error {
   return createAbortError(reason);
