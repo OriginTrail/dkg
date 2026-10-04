@@ -40,6 +40,7 @@ export default defineConfig({
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
+          'test/private-share-authority-retry.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
