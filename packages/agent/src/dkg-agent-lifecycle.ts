@@ -11527,7 +11527,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ])];
 
         for (const pid of contextGraphs) {
-          await collectAbandonedDraftArtifacts({ store: this.store, chain: this.chain, writeLocks: this.writeLocks, contextGraphId: pid, now });
+          await collectAbandonedDraftArtifacts({ store: this.store, chain: this.chain, writeLocks: this.writeLocks, contextGraphId: pid, now, pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS });
           let graphDeleted = 0;
           let expiredOpsCount = 0;
 

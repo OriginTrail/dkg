@@ -1,3 +1,4 @@
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 /**
  * GH#2958 — a finalized-but-never-published update must not burn the version number of the
  * next draft. `update()` (and the publisher, StorageACK handler, peers and the chain behind it)
@@ -620,7 +621,7 @@ describe('GH#2964 finalize proof and lifecycle serialization', () => {
     const finalizingA = finalize(agent, undefined, { authorSignTypedData: async (typedData: any) => { entered(); await blocked; return signTypedData(typedData); } });
     await signing;
     let collected = false; let finalizedB = false; let admittedB = false;
-    const collecting = collectAbandonedDraftArtifacts({ store, chain: agent.chain, writeLocks: agent.publisher.writeLocks, contextGraphId: CG, now: Date.now() }).then(() => { collected = true; });
+    const collecting = collectAbandonedDraftArtifacts({ store, chain: agent.chain, writeLocks: agent.publisher.writeLocks, contextGraphId: CG, now: Date.now(), pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS }).then(() => { collected = true; });
     const finalizingB = agent.assertion.finalize(otherCg, otherName, { authorAgentAddress: AUTHOR, authorSignTypedData: signTypedData }).then(() => { finalizedB = true; });
     const queue = new TripleStoreAsyncLiftPublisher(store);
     const admittingB = queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: otherCg, name: otherName })).then(() => { admittedB = true; });

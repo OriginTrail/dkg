@@ -1,5 +1,5 @@
 import { checkWorkspaceDraftReplacementOrder, workspacePublisherOperationTimestamp } from '../src/workspace-draft-replacement.js';
-import { normalizeWorkspaceOperationProvenance } from '../src/workspace-operation-equivalence.js';
+import { isWorkspacePublisherClockEligible, normalizeWorkspaceOperationProvenance } from '../src/workspace-operation-equivalence.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -71,7 +71,13 @@ describe('canonical operation evidence round trips', () => {
     const alias = workspaceOperationAlias({ provenance: { shareOperationId: 'publisher-alias', publishedAtMs: 2000, publisherChronologyAuthenticated: authenticated }, snapshotLocator: { kind: 'store', ref: 'sha256:content' } });
     expect(alias.publisherChronologyAuthenticated).toBe(authenticated);
     expect(normalizeWorkspaceOperationProvenance(alias).publisherChronologyAuthenticated).toBe(authenticated);
+    expect(isWorkspacePublisherClockEligible(normalizeWorkspaceOperationProvenance(alias))).toBe(true);
     expect(workspacePublisherOperationTimestamp([alias, { ...alias, shareOperationId: 'storage-ack-local', publishedAt: '9000', publisherChronologyAuthenticated: true }])).toBe(authenticated ? 2000 : undefined);
+  });
+  it.each([undefined, NaN, Infinity, -Infinity])('refuses a publisher clock that is not finite: %s', publishedAtMs => {
+    const provenance = { shareOperationId: 'publisher-alias', publishedAtMs, publisherChronologyAuthenticated: true };
+    expect(isWorkspacePublisherClockEligible(provenance)).toBe(false);
+    expect(workspacePublisherOperationTimestamp([{ shareOperationId: provenance.shareOperationId, publishedAt: publishedAtMs, publisherChronologyAuthenticated: true }])).toBeUndefined();
   });
   it('normalizes compatibility aliases before policy rather than erasing decoded evidence', () => {
     const legacy = { shareOperationId: 'legacy-publisher', publishedAt: '1000' };

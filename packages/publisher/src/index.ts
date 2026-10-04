@@ -77,6 +77,7 @@ export {
   type KnowledgeAssetWorkspaceSnapshotLocator,
 } from './workspace-resolution.js';
 export {
+  isWorkspacePublisherClockEligible,
   publisherWorkspaceOperationSemanticsKey,
   canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,

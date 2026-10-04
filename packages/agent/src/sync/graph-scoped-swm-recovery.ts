@@ -1,4 +1,3 @@
-import { workspacePublisherOperationTimestamp } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { stripMetadataLiteral as stripLiteral } from './metadata-literal.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -9,6 +8,7 @@ import {
   workspaceKnowledgeAssetOperationSnapshotGraph as knowledgeAssetSnapshotGraph,
 } from '@origintrail-official/dkg-core';
 import {
+  isWorkspacePublisherClockEligible,
   canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,
   workspacePublicQuadsDigest,
@@ -506,10 +506,7 @@ export interface RecoveryOperationCandidate extends WorkspaceOperationModel<Reco
 
 /** Publisher clock eligibility is independent of the local authentication fence. */
 export function isPublisherOperationCandidate(candidate: RecoveryOperationCandidate): boolean {
-  return workspacePublisherOperationTimestamp([{
-    shareOperationId: candidate.provenance.shareOperationId,
-    publishedAt: candidate.provenance.publishedAtMs,
-  }]) !== undefined;
+  return isWorkspacePublisherClockEligible(candidate.provenance);
 }
 
 interface ResolvedHeadOperation {

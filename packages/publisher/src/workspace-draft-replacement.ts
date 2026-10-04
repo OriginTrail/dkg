@@ -2,17 +2,17 @@
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore, GraphManager } from '@origintrail-official/dkg-storage';
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { normalizeWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
+import { isWorkspacePublisherClockEligible, normalizeWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
-import { storageAckOwedCopiesByScopeQuery, STORAGE_ACK_OPERATION_ID_PREFIX } from './storage-ack-ledger.js';
+import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
 
 export type ConfirmedKnowledgeAssetVersionReader = (kaUal: string) => Promise<bigint | null>;
 export type DraftReplacementRejection = { phase: 'validation' | 'corrupt-head'; reason: string };
 
 /** Only publisher aliases establish draft chronology; ACK clocks are local receipts. */
 export function workspacePublisherOperationTimestamp(aliases: readonly { shareOperationId: string; publishedAt?: string | number; publisherChronologyAuthenticated?: boolean }[]): number | undefined {
-  const value = Math.max(...aliases.map(normalizeWorkspaceOperationProvenance).filter(alias => alias.publisherChronologyAuthenticated && !alias.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX))
-    .map(alias => alias.publishedAtMs ?? NaN).filter(Number.isFinite));
+  const value = Math.max(...aliases.map(normalizeWorkspaceOperationProvenance).filter(alias => alias.publisherChronologyAuthenticated === true && isWorkspacePublisherClockEligible(alias))
+    .map(alias => alias.publishedAtMs ?? NaN));
   return Number.isFinite(value) ? value : undefined;
 }
 

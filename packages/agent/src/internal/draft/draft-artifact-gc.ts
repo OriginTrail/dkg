@@ -12,7 +12,6 @@ import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
-const ACK_WINDOW_MS = 5 * 60_000;
 const BATCH_SIZE = 32;
 const cursors = new WeakMap<TripleStore, Map<string, { operation: string; privateGraph: string }>>();
 
@@ -29,6 +28,7 @@ export async function collectAbandonedDraftArtifacts(input: {
   writeLocks: Map<string, Promise<void>>;
   contextGraphId: string;
   now: number;
+  pendingAckTxWindowMs: number;
 }): Promise<{ operations: number; privateGraphs: number }> {
   return withDraftArtifactCollection(input.store, async () => {
     const { store, chain, contextGraphId, now } = input;
@@ -40,7 +40,7 @@ export async function collectAbandonedDraftArtifacts(input: {
     const cursor = storeCursors.get(contextGraphId) ?? { operation: '', privateGraph: '' };
     storeCursors.set(contextGraphId, cursor);
     const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-    const cutoff = new Date(now - ACK_WINDOW_MS).toISOString();
+    const cutoff = new Date(now - input.pendingAckTxWindowMs).toISOString();
     const rootMeta = contextGraphMetaUri(contextGraphId);
     const rows = await store.query(`SELECT DISTINCT ?meta ?op ?id ?ka ?snapshot ?cursor WHERE {
       GRAPH ?meta {

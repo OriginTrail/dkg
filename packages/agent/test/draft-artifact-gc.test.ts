@@ -1,3 +1,4 @@
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
 import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
@@ -27,7 +28,7 @@ async function fixture(contextGraphId = CG, store = new OxigraphStore()) {
   const head = async (id = 'new', version = '2') => storeKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId, kaUal: KA, assertionVersion: version, shareOperationId: id });
   const privateGraph = async (version: number, suffix = '') => { const graph = `did:dkg:context-graph:${contextGraphId}/_private/${AUTHOR}/7/assertions/${version}${suffix}`; await store.insert([{ ...publicQuads[0]!, graph }]); return graph; };
   const has = async (graph: string, subject?: string) => { const result = await store.query(`ASK { GRAPH <${graph}> { ${subject ? `<${subject}>` : '?s'} ?p ?o } }`); if (result.type !== 'boolean') throw new Error('expected ASK'); return result.value; };
-  const collect = () => collectAbandonedDraftArtifacts({ store, chain, writeLocks, contextGraphId, now: NOW });
+  const collect = () => collectAbandonedDraftArtifacts({ store, chain, writeLocks, contextGraphId, now: NOW, pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS });
   return { store, chain, writeLocks, op, head, privateGraph, has, collect };
 }
 describe('reference-safe abandoned draft maintenance', () => {
@@ -198,7 +199,7 @@ describe('reference-safe abandoned draft maintenance', () => {
     const archive = await f.privateGraph(3, `/commitments/${'ab'.repeat(32)}`);
     const queue = new TripleStoreAsyncLiftPublisher(f.store);
     await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: owner, shareOperationId: 'queued', assertionVersion: '3' }));
-    expect(await collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW })).toEqual({ operations: 0, privateGraphs: 0 });
+    expect(await collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW, pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS })).toEqual({ operations: 0, privateGraphs: 0 });
     let deleted = false;
     await withUnqueuedDraftOperation(f.store, 'a', 'b', operation, NOW, async () => { deleted = true; }, { writeLocks: f.writeLocks, cutoffMs: NOW, mayRetire: async () => true });
     expect(deleted).toBe(false);
@@ -213,7 +214,7 @@ describe('reference-safe abandoned draft maintenance', () => {
     const ready = new Promise<void>(resolve => { entered = resolve; });
     const writing = withKeyedLocks(f.writeLocks, [key], async () => { entered(); await gate; });
     await ready; const predecessor = f.writeLocks.get(key);
-    const collecting = collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW });
+    const collecting = collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW, pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS });
     try {
       await vi.waitFor(() => expect(f.writeLocks.get(key)).not.toBe(predecessor));
       await f.store.insert([
@@ -230,7 +231,7 @@ describe('reference-safe abandoned draft maintenance', () => {
     const queue = new TripleStoreAsyncLiftPublisher(f.store);
     await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: owner, shareOperationId: 'queued', assertionVersion: '3' }));
     await deleteByPatternWithoutCount(f.store, { graph: `did:dkg:context-graph:${owner}/_shared_memory_meta`, subject: workspaceOperationSubject(owner, 'queued') });
-    expect(await collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW })).toEqual({ operations: 0, privateGraphs: 0 });
+    expect(await collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW, pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS })).toEqual({ operations: 0, privateGraphs: 0 });
     expect(await f.has(archive)).toBe(true);
   });
   it('retires superseded operations before the 30-day TTL and only removes unreachable burned private versions', async () => {

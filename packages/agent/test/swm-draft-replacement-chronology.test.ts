@@ -17,6 +17,7 @@ import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { commitRecoveredSwmAsset } from '../src/internal/swm-recovery/swm-recovery-commit.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { parseGraphScopedSwmRecoveryDescriptors, decodeRecoveryOperationCandidate, isPublisherOperationCandidate } from '../src/sync/graph-scoped-swm-recovery.js';
+import { workspacePublisherOperationTimestamp } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { isAuthenticatedPublisherCandidate } from '../src/internal/swm-recovery/swm-recovered-provenance.js';
 
 const CG = 'draft-chronology';
@@ -111,6 +112,9 @@ describe('legacy catch-up respects publisher draft chronology', () => {
         metaGraph: rows[0]!.graph, operationSubject: fixture.operationSubject, shareOperationId: fixture.operationId, kaUal: UAL, assertionVersion: '2' });
       expect(isPublisherOperationCandidate(candidate)).toBe(!fixture.operationId.startsWith('storage-ack-'));
       expect(isAuthenticatedPublisherCandidate(candidate)).toBe(false);
+      expect(candidate.provenance.publisherChronologyAuthenticated).toBe(false);
+      expect(workspacePublisherOperationTimestamp([{ shareOperationId: candidate.provenance.shareOperationId,
+        publishedAt: candidate.provenance.publishedAtMs, publisherChronologyAuthenticated: candidate.provenance.publisherChronologyAuthenticated }])).toBeUndefined();
       expect(isAuthenticatedPublisherCandidate({ ...candidate, provenance: { ...candidate.provenance, publisherChronologyAuthenticated: true } })).toBe(!fixture.operationId.startsWith('storage-ack-'));
     }
   });
