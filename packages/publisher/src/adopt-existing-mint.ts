@@ -9,48 +9,6 @@ import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
  * log is unrecoverable) rethrow the ORIGINAL error — never synthesize a
  * txHash (finalization-handler.ts:1345 invariant).
  */
-export async function adoptExistingMintOrRethrow(args: {
-  mintErr: unknown;
-  reservedKaId: bigint | undefined;
-  kcMerkleRoot: Uint8Array;
-  v10CgId: bigint;
-  hasSeal: boolean;
-  ctx: OperationContext;
-}, chain: Pick<ChainAdapter, 'getMintedKnowledgeAssetProvenance'>, log: Pick<Logger, 'warn' | 'info'>): Promise<OnChainPublishResult> {
-  const mintedKaId = getKaIdAlreadyMintedKaId(args.mintErr);
-  const provenanceFn = chain.getMintedKnowledgeAssetProvenance?.bind(chain);
-  if (
-    mintedKaId === undefined
-    || args.reservedKaId === undefined
-    || mintedKaId !== args.reservedKaId
-    || !args.hasSeal
-    || provenanceFn === undefined
-  ) {
-    throw args.mintErr;
-  }
-  log.warn(
-    args.ctx,
-    `[adopt-existing-mint] kaId ${args.reservedKaId} already minted on-chain; `
-      + 'verifying sealed root against chain and recovering mint provenance',
-  );
-  const synthesized = await provenanceFn(args.reservedKaId, args.kcMerkleRoot, args.v10CgId);
-  if (!synthesized) {
-    log.warn(
-      args.ctx,
-      `[adopt-existing-mint] mint provenance unrecoverable for kaId ${args.reservedKaId} `
-        + '(pruned/non-archive RPC?); rethrowing original mint error',
-    );
-    throw args.mintErr;
-  }
-  log.info(
-    args.ctx,
-    `[adopt-existing-mint] adopted kaId ${args.reservedKaId} `
-      + `tx=${synthesized.txHash} block=${synthesized.blockNumber}; continuing confirmed publish path`,
-  );
-  return synthesized;
-}
-
-/** The mint submit and its existing-mint recovery share the exact submitted inputs. */
 export async function createKnowledgeAssetsWithMintAdoption(
   chain: Pick<ChainAdapter, 'createKnowledgeAssets' | 'getMintedKnowledgeAssetProvenance'>,
   params: V10PublishParams,
@@ -61,15 +19,36 @@ export async function createKnowledgeAssetsWithMintAdoption(
   try {
     return await chain.createKnowledgeAssets(params);
   } catch (mintErr) {
-    // Only the structured id and verified mint provenance can recover
-    // this sealed publish; keep the ordinary confirmed path below.
-    return adoptExistingMintOrRethrow({
-      mintErr,
-      reservedKaId: params.reservedKaId,
-      kcMerkleRoot: params.merkleRoot,
-      v10CgId: params.contextGraphId,
-      hasSeal,
+    const mintedKaId = getKaIdAlreadyMintedKaId(mintErr);
+    const provenanceFn = chain.getMintedKnowledgeAssetProvenance?.bind(chain);
+    if (
+      mintedKaId === undefined
+      || params.reservedKaId === undefined
+      || mintedKaId !== params.reservedKaId
+      || !hasSeal
+      || provenanceFn === undefined
+    ) {
+      throw mintErr;
+    }
+    log.warn(
       ctx,
-    }, chain, log);
+      `[adopt-existing-mint] kaId ${params.reservedKaId} already minted on-chain; `
+        + 'verifying sealed root against chain and recovering mint provenance',
+    );
+    const synthesized = await provenanceFn(params.reservedKaId, params.merkleRoot, params.contextGraphId);
+    if (!synthesized) {
+      log.warn(
+        ctx,
+        `[adopt-existing-mint] mint provenance unrecoverable for kaId ${params.reservedKaId} `
+          + '(pruned/non-archive RPC?); rethrowing original mint error',
+      );
+      throw mintErr;
+    }
+    log.info(
+      ctx,
+      `[adopt-existing-mint] adopted kaId ${params.reservedKaId} `
+        + `tx=${synthesized.txHash} block=${synthesized.blockNumber}; continuing confirmed publish path`,
+    );
+    return synthesized;
   }
 }

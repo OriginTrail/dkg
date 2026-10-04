@@ -10,7 +10,7 @@
  */
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
-import { numericChainIdOf } from './evm-adapter-storage-reads.js';
+import { numericChainIdOf, type StorageReadMethods } from './evm-adapter-storage-reads.js';
 import { ethers, Wallet, Contract, type JsonRpcProvider } from 'ethers';
 import type {
   BatchMintParams,
@@ -36,8 +36,8 @@ import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
 import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
-import { getEvmMintedKnowledgeAssetProvenance, type CanonicalFinalizationPublishResolution } from './evm-existing-mint.js';
-import { projectCanonicalFinalizationReceipt, resolveCanonicalFinalizationPublish } from './canonical-finalization-publish.js';
+import { getEvmMintedKnowledgeAssetProvenance } from './evm-existing-mint.js';
+import { projectCanonicalFinalizationReceipt, resolveCanonicalFinalizationPublish, type CanonicalFinalizationPublishResolution } from './canonical-finalization-publish.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
 } from './evm-adapter-constants.js';
@@ -94,6 +94,9 @@ class ChainProofAnchorUnavailableError extends Error {
 }
 
 export class PublishMethods extends EVMChainAdapterBase {
+  // Installed by the concrete adapter's existing storage-read mixin assembly.
+  declare readKnowledgeAssetVersionSnapshot: StorageReadMethods['readKnowledgeAssetVersionSnapshot'];
+  declare knowledgeAssetVersionSnapshotIsCurrent: StorageReadMethods['knowledgeAssetVersionSnapshotIsCurrent'];
   async resolvePublisherPublishPlan(
     request: PublisherPublishPlanRequest,
   ): Promise<PublisherPublishPlan> {
@@ -839,6 +842,8 @@ export class PublishMethods extends EVMChainAdapterBase {
       },
       resolveCanonicalPublish: (hash, options) => this.resolveCanonicalFinalizationPublish(hash, options),
       isReceiptFinalAndCanonical: (receipt) => this.isReceiptBlockFinalAndCanonical(receipt),
+      readCurrentVersion: async (id) => this.readKnowledgeAssetVersionSnapshot?.(id) ?? null,
+      versionIsCurrent: async (id, snapshot) => this.knowledgeAssetVersionSnapshotIsCurrent?.(id, snapshot) ?? false,
     }, kaId, expectedMerkleRoot, expectedContextGraphId);
   }
 

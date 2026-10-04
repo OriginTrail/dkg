@@ -1,4 +1,6 @@
 import { resolveKaUal } from './knowledge-asset-chain-identity.js';
+import { materializeConfirmedGraphPublish } from './confirmed-graph-publish-materialization.js';
+import { replaceExactKnowledgeAssetGraph } from './knowledge-asset-graph-write.js';
 import { createKnowledgeAssetsWithMintAdoption } from './adopt-existing-mint.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
@@ -8,7 +10,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
-import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type BasePublicationOptions, type InitialPublishOptions, type PublishOptions, type UpdateOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
@@ -3677,6 +3679,7 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'start');
 
     let onChainResult: OnChainPublishResult | undefined;
+    let confirmedMaterializationApplied = true;
     let status: 'tentative' | 'confirmed' = 'tentative';
     ensurePublishOperationIdentity();
     // The operation id may be needed earlier as an encryption nonce domain,
@@ -4262,13 +4265,6 @@ export class DKGPublisher implements Publisher {
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
         }
-        if (graphPublish) {
-          await replaceLocallyTrustedKnowledgeAssetControls(
-            this.store,
-            graphPublish.scope.ual,
-            confirmedQuads,
-          );
-        }
         // RC11 / PR2: write the published public quads into the root
         // data graph ONLY after the chain has confirmed (KCCreated
         // returned via `createKnowledgeAssets`). Pre-PR2 this insert
@@ -4293,21 +4289,22 @@ export class DKGPublisher implements Publisher {
           : contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, options.subGraphName);
         const vmQuads = normalizedQuads.map((q) => ({ ...q, graph: vmGraph }));
         this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
-        if (graphPublish) {
-          await this.replaceExactKnowledgeAssetGraph(
-            vmGraph,
-            vmQuads,
-            'Graph-scoped confirmed publish',
-          );
-        } else {
-          await this.store.insert(vmQuads);
-        }
-        await this.store.insert(confirmedQuads);
-        // GH #1078 — supersede/persist private slices only now that the chain
-        // has confirmed (before returning 'confirmed', so no read sees the KA
-        // confirmed without its private data).
-        await persistFinalizedPrivateSlices();
+        const applied = graphPublish ? await materializeConfirmedGraphPublish({
+          store: this.store, privateStore: this.privateStore, scope: graphPublish.scope,
+          contextGraphId, subGraphName: options.subGraphName,
+          metaGraph: options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId),
+          vmGraph, vmQuads, privateQuads: canonicalPrivateQuads, confirmedQuads,
+          version: { blockNumber: onChainResult.blockNumber ?? 0, txIndex: onChainResult.txIndex ?? 0 },
+          persistCatalogEntry,
+        }) : true;
+        confirmedMaterializationApplied = applied;
         if (!graphPublish) {
+          await this.store.insert(vmQuads);
+          await this.store.insert(confirmedQuads);
+          // GH #1078 — supersede/persist private slices only now that the chain
+          // has confirmed (before returning 'confirmed', so no read sees the KA
+          // confirmed without its private data).
+          await persistFinalizedPrivateSlices();
           await stampTrustLevel(
             this.store,
             vmGraph,
@@ -4328,8 +4325,8 @@ export class DKGPublisher implements Publisher {
         // quads are committed — refresh the public catalog entry here, inside
         // the success branch, so a failed ACK/chain publish never exposes one
         // (CLEAR/REPLACE — see persistCatalogEntry).
-        await persistCatalogEntry();
-        lifecycle.emit('vm', 'promote', {
+        if (!graphPublish) await persistCatalogEntry();
+        if (applied) lifecycle.emit('vm', 'promote', {
           metadata: {
             kaId: kaId.toString(),
             vmGraph,
@@ -4400,7 +4397,7 @@ export class DKGPublisher implements Publisher {
       // must NOT fail the publish (the layer-3 heal backstop is the fallback).
       // Skipped for sub-graph publishes (RS samples root CGs; sub-graph KCs use a
       // different layout); remap is not applicable on this one-shot path.
-      if (!options.subGraphName) {
+      if (!options.subGraphName && confirmedMaterializationApplied) {
         try {
           await this.promoteConfirmedKCToScopedGraph(
             contextGraphId,
@@ -7286,16 +7283,7 @@ export class DKGPublisher implements Publisher {
     quads: readonly Quad[],
     operation: string,
   ): Promise<void> {
-    const graphQuads = quads.map((quad) => ({ ...quad, graph: graphUri }));
-    const replaced = await tryReplaceGraphAtomically(this.store, graphUri, graphQuads);
-    if (!replaced) {
-      throw Object.assign(
-        new Error(
-          `${operation} requires atomic complete-graph replacement, but the configured triple store does not support it`,
-        ),
-        { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED', graphUri },
-      );
-    }
+    return replaceExactKnowledgeAssetGraph(this.store, graphUri, quads, operation);
   }
 
   /**

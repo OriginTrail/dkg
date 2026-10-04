@@ -1,5 +1,5 @@
 /**
- * Adopt-existing-mint interception (dkg-publisher `adoptExistingMintOrRethrow`).
+ * Adopt-existing-mint interception (`createKnowledgeAssetsWithMintAdoption`).
  *
  * A transient error during confirm-wait can land the mint on-chain while the
  * publisher records failure; every retry then reverts `KaIdAlreadyMinted`
@@ -26,12 +26,19 @@ import { ethers } from 'ethers';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   TypedEventBus,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  createOperationContext,
+  Logger,
   generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter, type OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { createKnowledgeAssetsWithMintAdoption } from '../src/adopt-existing-mint.js';
+import { computePrivateRootV10 } from '../src/merkle.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import { buildSeal, mockSealCtx } from './_helpers/seal.js';
+import { buildSeal, buildUpdateSeal, mockSealCtx } from './_helpers/seal.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
 
 const TEST_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
@@ -116,11 +123,12 @@ function kaIdAlreadyMintedRevert(kaId: bigint): Error {
  * publisher-no-random-wallet.test.ts: the seal allocates the packed
  * reservedKaId, and the kaUal must derive exactly that id.
  */
-async function setupSealedGraphPublish() {
+async function setupSealedGraphPublish(privateQuads: Quad[] = []) {
   const wallet = new ethers.Wallet(TEST_KEY);
   const chain = new AdoptableMintChain(wallet);
+  const store = new OxigraphStore();
   const publisher = new DKGPublisher({
-    store: new OxigraphStore(),
+    store,
     chain,
     eventBus: new TypedEventBus(),
     keypair: await generateEd25519Keypair(),
@@ -134,6 +142,7 @@ async function setupSealedGraphPublish() {
   };
   const seal = await buildSeal({
     quads: [publishQuad],
+    privateQuads,
     author: wallet,
     contextGraphId: CONTEXT_GRAPH_ID,
     ctx: mockSealCtx(),
@@ -146,15 +155,18 @@ async function setupSealedGraphPublish() {
   const publishOptions = {
     contextGraphId: CONTEXT_GRAPH_ID,
     quads: [publishQuad],
+    privateQuads,
+    publisherPeerId: 'adoption-publisher',
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: ual,
     assertionVersion: 1,
     publicTripleCount: 1,
-    privateTripleCount: 0,
+    privateTripleCount: privateQuads.length,
+    ...(privateQuads.length ? { privateMerkleRoot: computePrivateRootV10(privateQuads)! } : {}),
     precomputedAttestation: seal,
     v10ACKProvider: mockChainStubACKProvider(),
   };
-  return { wallet, chain, publisher, seal, reservedKaId, ual, publishOptions };
+  return { wallet, chain, publisher, store, seal, reservedKaId, ual, publishOptions };
 }
 
 describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
@@ -243,6 +255,115 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
     const collision = Object.assign(new Error('the existing root differs'), { code: 'KA_ID_COLLISION' });
     vi.spyOn(s.chain, 'getMintedKnowledgeAssetProvenance').mockRejectedValue(collision);
     await expect(s.publisher.publish(s.publishOptions)).rejects.toBe(collision);
+  });
+
+  it.each(['public', 'private', 'metadata'] as const)('retains newer %s while the old mint provenance is held', async slice => {
+    const subject = 'urn:test:adopt-existing-mint';
+    const oldPrivate = [{ subject, predicate: 'urn:test:secret', object: '"old private"', graph: '' }];
+    const s = await setupSealedGraphPublish(oldPrivate);
+    try {
+      const initial = await s.publisher.publish(s.publishOptions);
+      expect(initial.status).toBe('confirmed');
+      s.chain.mintError = kaIdAlreadyMintedRevert(s.reservedKaId);
+      let release!: () => void;
+      let entered!: () => void;
+      const enteredProof = new Promise<void>(resolve => { entered = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      vi.spyOn(s.chain, 'getMintedKnowledgeAssetProvenance').mockImplementation(async () => {
+        entered();
+        await held;
+        return initial.onChainResult!;
+      });
+      const retry = s.publisher.publish(s.publishOptions);
+      await enteredProof;
+      const quads = [{ ...s.publishOptions.quads[0], object: '"new public"' }];
+      const privateQuads = [{ ...oldPrivate[0], object: '"new private"' }];
+      const updateSeal = await buildUpdateSeal({ kaId: initial.kaId, quads, privateQuads,
+        author: s.wallet, ctx: mockSealCtx() });
+      const updated = await s.publisher.update(initial.kaId, {
+        contextGraphId: CONTEXT_GRAPH_ID, quads, privateQuads,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: s.ual,
+        assertionVersion: 2, publicTripleCount: 1, privateTripleCount: 1,
+        privateMerkleRoot: computePrivateRootV10(privateQuads)!,
+        precomputedUpdateAttestation: updateSeal, v10ACKProvider: mockChainStubACKProvider(),
+      });
+      expect(updated.status).toBe('confirmed');
+      const scope = createGraphKnowledgeAssetScope(s.ual, 2);
+      const vmGraph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory, scope);
+      const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_meta`;
+      const readMetadata = () => s.store.query(`CONSTRUCT { <${s.ual}> ?p ?o } WHERE {
+        GRAPH <${metaGraph}> { <${s.ual}> ?p ?o } }`);
+      const currentMetadata = await readMetadata();
+      const privateStore = Reflect.get(s.publisher, 'privateStore');
+      const privateWrites = vi.spyOn(privateStore, 'replaceKnowledgeAssetPrivateTriples');
+      const scopedPromotion = vi.spyOn(s.publisher as unknown as {
+        promoteConfirmedKCToScopedGraph: (...args: unknown[]) => Promise<void>;
+      }, 'promoteConfirmedKCToScopedGraph');
+      release();
+      expect((await retry).status).toBe('confirmed');
+      if (slice === 'public') await expect(s.store.query(`SELECT ?o WHERE { GRAPH <${vmGraph}> {
+        <${subject}> <http://schema.org/name> ?o } }`))
+        .resolves.toMatchObject({ type: 'bindings', bindings: [{ o: '"new public"' }] });
+      if (slice === 'private') {
+        await expect(privateStore.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH_ID, scope))
+          .resolves.toEqual(privateQuads);
+        expect(privateWrites).not.toHaveBeenCalled();
+      }
+      if (slice === 'metadata') {
+        expect(await readMetadata()).toEqual(currentMetadata);
+        expect(scopedPromotion).not.toHaveBeenCalled();
+      }
+    } finally {
+      await s.store.close();
+    }
+  });
+
+  it('keeps an otherwise adoptable unsealed submission ineligible', async () => {
+    const s = await setupSealedGraphPublish();
+    try {
+      const submitted = vi.spyOn(s.chain, 'createKnowledgeAssets');
+      const initial = await s.publisher.publish(s.publishOptions);
+      // Capture the actual V10 envelope instead of maintaining a duplicate fixture.
+      const params = submitted.mock.calls[0][0];
+      const original = kaIdAlreadyMintedRevert(s.reservedKaId);
+      s.chain.mintError = original;
+      s.chain.provenanceResult = initial.onChainResult!;
+      await expect(createKnowledgeAssetsWithMintAdoption(s.chain, params, false,
+        createOperationContext('test'), new Logger('test'))).rejects.toBe(original);
+      expect(s.chain.provenanceCalls).toHaveLength(0);
+    } finally { await s.store.close(); }
+  });
+
+  it('preserves ordinary successful mint behavior without a provenance lookup', async () => {
+    const s = await setupSealedGraphPublish();
+    try {
+      const result = await s.publisher.publish({ contextGraphId: CONTEXT_GRAPH_ID,
+        quads: s.publishOptions.quads, precomputedAttestation: s.seal,
+        v10ACKProvider: mockChainStubACKProvider() });
+      expect(result.status).toBe('confirmed');
+      expect(result.onChainResult?.batchId).toBe(s.reservedKaId);
+      expect(s.chain.createAttempts).toBe(1);
+      expect(s.chain.provenanceCalls).toHaveLength(0);
+      const graph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory,
+        createGraphKnowledgeAssetScope(s.ual, 1));
+      await expect(s.store.query(`ASK { GRAPH <${graph}> {
+        <urn:test:adopt-existing-mint> <http://schema.org/name> "adopted" } }`))
+        .resolves.toMatchObject({ type: 'boolean', value: true });
+    } finally { await s.store.close(); }
+  });
+
+  it('keeps an otherwise adoptable ordinary non-graph publish ineligible', async () => {
+    const s = await setupSealedGraphPublish();
+    try {
+      const initial = await s.publisher.publish(s.publishOptions);
+      s.chain.provenanceResult = initial.onChainResult!;
+      const original = kaIdAlreadyMintedRevert(s.reservedKaId);
+      s.chain.mintError = original;
+      await expect(s.publisher.publish({ contextGraphId: CONTEXT_GRAPH_ID,
+        quads: s.publishOptions.quads, precomputedAttestation: s.seal,
+        v10ACKProvider: mockChainStubACKProvider() })).rejects.toBe(original);
+      expect(s.chain.provenanceCalls).toHaveLength(0);
+    } finally { await s.store.close(); }
   });
 
 });

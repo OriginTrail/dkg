@@ -1,6 +1,9 @@
 import type { ethers } from 'ethers';
-import type { CanonicalFinalizationReceipt, CanonicalFinalizationReceiptReadOptions, OnChainPublishResult, PublishReceiptReadOptions } from './chain-adapter.js';
-import type { CanonicalFinalizationPublishResolution } from './evm-existing-mint.js';
+import type { CanonicalFinalizationReceipt, CanonicalFinalizationReceiptReadOptions, CanonicalFinalizationReceiptResolution, OnChainPublishResult, PublishReceiptReadOptions } from './chain-adapter.js';
+/** The shared receipt classification retains the already decoded publish. */
+export type CanonicalFinalizationPublishResolution =
+  | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt; publish: OnChainPublishResult }
+  | Exclude<CanonicalFinalizationReceiptResolution, { status: 'confirmed' }>;
 
 interface CanonicalPublishReadPorts {
   init(): Promise<void>;

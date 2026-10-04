@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ethers, type Contract } from 'ethers';
 import type { ScanProvider } from './evm-adapter-base.js';
-import type { CanonicalFinalizationReceipt, CanonicalFinalizationReceiptReadOptions, CanonicalFinalizationReceiptResolution, OnChainPublishResult } from './chain-adapter.js';
+import type { CanonicalFinalizationReceipt, CanonicalFinalizationReceiptReadOptions, KnowledgeAssetVersionSnapshot, OnChainPublishResult } from './chain-adapter.js';
 import { AdoptExistingMintRefusalError } from './adopt-existing-mint-refusal-error.js';
 
-export type CanonicalFinalizationPublishResolution =
-  | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt; publish: OnChainPublishResult }
-  | Exclude<CanonicalFinalizationReceiptResolution, { status: 'confirmed' }>;
+import type { CanonicalFinalizationPublishResolution } from './canonical-finalization-publish.js';
 
 export interface EvmExistingMintPorts {
   storage?: Contract;
@@ -17,6 +15,8 @@ export interface EvmExistingMintPorts {
   readCreationLogs(storage: Contract, kaId: bigint, from: number, to: number, providers: ReadonlyArray<ScanProvider>): Promise<ReadonlyArray<ethers.EventLog | ethers.Log>>;
   resolveCanonicalPublish(txHash: string, options: CanonicalFinalizationReceiptReadOptions): Promise<CanonicalFinalizationPublishResolution>;
   isReceiptFinalAndCanonical(receipt: CanonicalFinalizationReceipt): Promise<boolean>;
+  readCurrentVersion(kaId: bigint): Promise<KnowledgeAssetVersionSnapshot | null>;
+  versionIsCurrent(kaId: bigint, snapshot: KnowledgeAssetVersionSnapshot): Promise<boolean>;
 }
 
 /**
@@ -86,6 +86,26 @@ export async function getEvmMintedKnowledgeAssetProvenance(
     throw new AdoptExistingMintRefusalError('KA_ID_COLLISION',
       `adopt-existing-mint: kaId ${kaId} mint-event root does not match sealed root`);
   }
+  // Receipt recovery may await archive RPCs for a long time. The early roots
+  // read cannot authorize writing v1 after a concurrent update: refresh the
+  // coherent finalized version, then validate its current physical lease.
+  let current: KnowledgeAssetVersionSnapshot | null;
+  try { current = await ports.readCurrentVersion(kaId); } catch { return null; }
+  if (!current || current.knowledgeAssetId !== kaId
+    || !Number.isSafeInteger(current.blockNumber) || current.blockNumber < receipt.blockNumber
+    || typeof current.rootCount !== 'bigint' || current.rootCount < 1n) return null;
+  if (current.rootCount > 1n) {
+    throw new AdoptExistingMintRefusalError('KA_SUPERSEDED',
+      `adopt-existing-mint: kaId ${kaId} was updated while recovering the mint; use named recovery`);
+  }
+  if (current.latestRoot.toLowerCase() !== expectedHex) {
+    throw new AdoptExistingMintRefusalError('KA_ID_COLLISION',
+      `adopt-existing-mint: kaId ${kaId} current root does not match sealed root`);
+  }
+  if (current.latestPublisher.toLowerCase() !== roots[0].publisher.toLowerCase()
+    || (receipt.authorAddress !== undefined
+      && current.latestAuthor.toLowerCase() !== receipt.authorAddress.toLowerCase())) return null;
+  try { if (!await ports.versionIsCurrent(kaId, current)) return null; } catch { return null; }
   // Retain the receipt parser's provenance. These three overrides come from
   // the verified storage/seal state rather than a second event decoder.
   return { ...publish, merkleRoot: expectedMerkleRoot,

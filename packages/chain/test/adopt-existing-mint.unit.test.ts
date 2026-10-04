@@ -37,6 +37,8 @@ function fixture(finalityConfirmations = 1) {
     init: vi.fn(async () => undefined),
     contracts: { knowledgeAssetStorage: storage, contextGraphStorage: {} },
     readContract, queryEventLogsPage, readPublishReceipt,
+    readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({ knowledgeAssetId: KA_ID, latestRoot: ROOT, rootCount: BigInt(roots.length), latestAuthor: receipt.authorAddress, latestPublisher: ADDRESS, blockNumber: receipt.blockNumber, blockHash: BLOCK_HASH, knowledgeAssetStorageAddress: ADDRESS, knowledgeAssetStorageGeneration: 1 })),
+    knowledgeAssetVersionSnapshotIsCurrent: vi.fn(async () => true),
     getTransactionWithFailover: vi.fn(async () => null),
     receiptFinality: new EvmReceiptFinalityReader(finalityConfirmations, finalityProviderRead),
     resolveKaStorageDeployBlock: vi.fn(async () => ({ fromBlock: 1, head: 10, scanProviders: [] })),
@@ -108,6 +110,71 @@ describe('existing mint provenance', () => {
     const superseded = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID + 1n);
     await expect(superseded).rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
     expect(f.queryEventLogsPage).not.toHaveBeenCalled();
+  });
+
+  it('refreshes coherent current-version evidence after held receipt recovery', async () => {
+    const f = fixture();
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    f.readPublishReceipt.mockImplementation(async () => {
+      entered();
+      await held;
+      return { receipt: f.rawReceipt, publish: f.receipt };
+    });
+    const readCurrent = Reflect.get(f.chain, 'readKnowledgeAssetVersionSnapshot');
+    const adoption = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID);
+    await started;
+    // The unpinned roots read stays at mint v1 while the finalized view sees v2.
+    readCurrent.mockResolvedValue({ knowledgeAssetId: KA_ID, latestRoot: ROOT,
+      rootCount: 2n, latestAuthor: f.receipt.authorAddress, latestPublisher: ADDRESS,
+      blockNumber: 11, blockHash: BLOCK_HASH,
+      knowledgeAssetStorageAddress: ADDRESS, knowledgeAssetStorageGeneration: 1 });
+    const refusal = expect(adoption).rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
+    release();
+    await refusal;
+    expect(readCurrent).toHaveBeenCalledWith(KA_ID);
+  });
+
+  it.each(['unavailable', 'read failure', 'lost lease', 'lease failure', 'missing reader', 'missing lease', 'wrong identity', 'older than mint', 'empty current version', 'different publisher', 'different author'])(
+    'does not adopt when refreshed evidence is %s', async condition => {
+      const f = fixture();
+      const readCurrent = Reflect.get(f.chain, 'readKnowledgeAssetVersionSnapshot');
+      const lease = Reflect.get(f.chain, 'knowledgeAssetVersionSnapshotIsCurrent');
+      if (condition === 'unavailable') readCurrent.mockResolvedValue(null);
+      else if (condition === 'read failure') readCurrent.mockRejectedValue(new Error('RPC unavailable'));
+      else if (condition === 'lost lease') lease.mockResolvedValue(false);
+      else if (condition === 'lease failure') lease.mockRejectedValue(new Error('lease RPC unavailable'));
+      else if (condition === 'missing reader') Reflect.set(f.chain, 'readKnowledgeAssetVersionSnapshot', undefined);
+      else if (condition === 'missing lease') Reflect.set(f.chain, 'knowledgeAssetVersionSnapshotIsCurrent', undefined);
+      else {
+        const snapshot = await readCurrent();
+        readCurrent.mockResolvedValue({ ...snapshot,
+          ...(condition === 'wrong identity' ? { knowledgeAssetId: KA_ID + 1n }
+            : condition === 'empty current version' ? { rootCount: 0n }
+            : condition === 'different publisher' ? { latestPublisher: '0x3333333333333333333333333333333333333333' }
+            : condition === 'different author' ? { latestAuthor: '0x3333333333333333333333333333333333333333' }
+            : { blockNumber: 9 }) });
+      }
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+        .resolves.toBeNull();
+    },
+  );
+
+  it('retains storage publisher provenance when the receipt records another recipient', async () => {
+    const f = fixture();
+    f.receipt.publisherAddress = '0x3333333333333333333333333333333333333333';
+    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+      .resolves.toEqual({ ...f.receipt, publisherAddress: ADDRESS });
+  });
+
+  it('refuses a refreshed current root that no longer matches the seal', async () => {
+    const f = fixture();
+    const readCurrent = Reflect.get(f.chain, 'readKnowledgeAssetVersionSnapshot');
+    readCurrent.mockResolvedValue({ ...await readCurrent(), latestRoot: `0x${'01'.repeat(32)}` });
+    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+      .rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
   });
 
   it('leaves an unrecoverable event without synthesized provenance', async () => {
