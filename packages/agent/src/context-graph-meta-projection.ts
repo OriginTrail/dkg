@@ -302,8 +302,7 @@ export class ContextGraphMetaProjection {
       .then((record) => {
         entry.value = record;
         entry.inflight = undefined;
-        // Keep a mark set while the rebuild ran: a fresh-read request leaves
-        // the version as it is.
+        // A fresh-read request during the rebuild leaves the version as it is.
         entry.dirty ||= entry.invalidationVersion !== rebuildVersion;
         this.entries.set(contextGraphId, entry);
         return record;
@@ -332,13 +331,9 @@ export class ContextGraphMetaProjection {
   }
 
   /**
-   * Rebuild this graph's cached record on its next read, without reporting a
-   * change of authority facts. For a caller that wants a current view but has
-   * written nothing itself: neither the node-wide nor the per-graph
-   * authority-facts revision advances, so a decision fenced on them is not
-   * discarded. Every mutation of a projection source still reports itself
-   * through the `markDirty*` methods. A rebuild already in flight is
-   * superseded, as it is after {@link markDirty}.
+   * Rebuild this graph's cached record on its next read without reporting a
+   * change of authority facts, for a caller that wrote nothing itself: no
+   * authority-facts revision advances. Supersedes a rebuild in flight.
    */
   requireFreshRead(contextGraphId: string): void {
     const existing = this.entries.get(contextGraphId);

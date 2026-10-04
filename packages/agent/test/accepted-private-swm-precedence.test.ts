@@ -631,9 +631,45 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID)).toBe(perGraph);
   });
 
-  it.each([
+  /** What one scenario may read and change while the recipients resolve. */
+  interface RecipientChangeContext {
+    readonly store: ReturnType<typeof recipientHostUnderGossipReconciles>['store'];
+    readonly member: ethers.HDNodeWallet;
+    readonly memberUri: string;
+    readonly memberKey: ReturnType<typeof signedKeyFixture>;
+    readonly peerId: string;
+    readonly other: ethers.HDNodeWallet;
+    readonly otherPeerId: string;
+    /** What the authority reads return. */
+    readonly authority: { roster: string[]; rosterGoverns: boolean };
+  }
+
+  interface RecipientChangeScenario {
+    readonly change: string;
+    /** The facts the store holds before the recipients resolve. */
+    readonly seed: (context: RecipientChangeContext) => Quad[];
+    /** The change, applied during the first confirmation read. */
+    readonly apply: (context: RecipientChangeContext) => Promise<unknown>;
+    /** The authority-facts revisions the change itself moves. */
+    readonly moves: 'neither' | 'node-wide' | 'both';
+    readonly rejects: RegExp | { reason: string };
+  }
+
+  const JOIN_KEY_CACHE_GRAPH = 'urn:dkg:local:join-encryption-key-cache';
+
+  /** Both members' keys in the profile graph, and a peer gate that names both peers. */
+  const profileKeysBehindPeerGate = (context: RecipientChangeContext): Quad[] => [
+    ...context.memberKey.quads,
+    ...signedKeyQuads(context.other, context.otherPeerId),
+    allowedPeerQuad(context.peerId),
+    allowedPeerQuad(context.otherPeerId),
+  ];
+
+  const recipientChangeScenarios: RecipientChangeScenario[] = [
     {
       change: 'a member leaves the roster',
+      seed: profileKeysBehindPeerGate,
+      apply: async ({ authority, member }) => { authority.roster = [member.address]; },
       moves: 'neither',
       rejects: { reason: 'chain-participant-authority-unavailable' },
     },
@@ -641,44 +677,15 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       // What a receiver selection transition does to an accepted private
       // graph: its reconcile runs, and the roster stops governing transport.
       change: 'the accepted roster stops governing transport',
+      seed: profileKeysBehindPeerGate,
+      apply: async ({ authority }) => { authority.rosterGoverns = false; },
       moves: 'neither',
       rejects: { reason: 'chain-participant-authority-unavailable' },
     },
     {
       change: 'a recipient key is revoked in the profile graph',
-      moves: 'node-wide',
-      rejects: /public encryption keys.*revoked/,
-    },
-    {
-      change: 'a peer route is removed in the profile graph',
-      moves: 'both',
-      rejects: /has no recipient key advertised by a peer in the context graph allowlist/,
-    },
-    {
-      change: 'a peer route is replaced in the join key cache',
-      moves: 'node-wide',
-      rejects: { reason: 'chain-participant-authority-unavailable' },
-    },
-    {
-      change: 'a peer leaves the allowlist of the graph',
-      moves: 'both',
-      rejects: /has no recipient key advertised by a peer in the context graph allowlist/,
-    },
-  ] as const)('still fails closed when $change between gossip reconciles', async ({ change, moves, rejects }) => {
-    const member = ethers.Wallet.createRandom();
-    const other = ethers.Wallet.createRandom();
-    const memberUri = `did:dkg:agent:${ethers.getAddress(member.address)}`;
-    const peerId = '12D3KooWAcceptedPrivateReconcileMemberPeer';
-    const otherPeerId = '12D3KooWAcceptedPrivateReconcileOtherPeer';
-    const joinCacheGraph = 'urn:dkg:local:join-encryption-key-cache';
-    const memberKey = signedKeyFixture(member, peerId);
-    let roster = [member.address, other.address];
-    let rosterGoverns = true;
-    let store!: ReturnType<typeof recipientHostUnderGossipReconciles>['store'];
-    const changes: Record<typeof change, () => Promise<unknown>> = {
-      'a member leaves the roster': async () => { roster = [member.address]; },
-      'the accepted roster stops governing transport': async () => { rosterGoverns = false; },
-      'a recipient key is revoked in the profile graph': () => {
+      seed: profileKeysBehindPeerGate,
+      apply: ({ store, member, memberUri, memberKey }) => {
         const revokedAt = new Date().toISOString();
         const proof = member.signingKey.sign(ethers.hashMessage(
           computeWorkspaceAgentEncryptionKeyRevocationPayload({
@@ -699,40 +706,74 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
           graph: PROFILE_GRAPH,
         })));
       },
-      'a peer route is removed in the profile graph': () => store.deleteByPattern({
+      moves: 'node-wide',
+      rejects: /public encryption keys.*revoked/,
+    },
+    {
+      change: 'a peer route is removed in the profile graph',
+      seed: profileKeysBehindPeerGate,
+      apply: ({ store, memberUri }) => store.deleteByPattern({
         graph: PROFILE_GRAPH,
         subject: memberUri,
         predicate: DKG_ONTOLOGY.DKG_PEER_ID,
       }),
-      'a peer route is replaced in the join key cache': () => store.replaceSubject!(
-        joinCacheGraph,
+      moves: 'both',
+      rejects: /has no recipient key advertised by a peer in the context graph allowlist/,
+    },
+    {
+      change: 'a peer route is replaced in the join key cache',
+      // The member's key lives in the join key cache and the peer gate is
+      // open, so that only the replaced route can refuse the recipients.
+      seed: ({ memberKey, other, otherPeerId }) => [
+        ...memberKey.quads.map((quad) => ({ ...quad, graph: JOIN_KEY_CACHE_GRAPH })),
+        ...signedKeyQuads(other, otherPeerId),
+      ],
+      apply: ({ store, member, memberUri }) => store.replaceSubject!(
+        JOIN_KEY_CACHE_GRAPH,
         memberUri,
         signedKeyQuads(member, '12D3KooWAcceptedPrivateReconcileNewRoute')
-          .map((quad) => ({ ...quad, graph: joinCacheGraph })),
+          .map((quad) => ({ ...quad, graph: JOIN_KEY_CACHE_GRAPH })),
       ),
-      'a peer leaves the allowlist of the graph': () => store.deleteByPattern({
+      moves: 'node-wide',
+      rejects: { reason: 'chain-participant-authority-unavailable' },
+    },
+    {
+      change: 'a peer leaves the allowlist of the graph',
+      seed: profileKeysBehindPeerGate,
+      apply: ({ store, peerId }) => store.deleteByPattern({
         graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
         subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
         object: `"${peerId}"`,
       }),
-    };
-    const fixture = recipientHostUnderGossipReconciles({
-      transport: () => (rosterGoverns
-        ? { kind: 'private-roster', participantAgents: [...roster] }
+      moves: 'both',
+      rejects: /has no recipient key advertised by a peer in the context graph allowlist/,
+    },
+  ];
+
+  it.each(recipientChangeScenarios)('still fails closed when $change between gossip reconciles', async (scenario) => {
+    const member = ethers.Wallet.createRandom();
+    const other = ethers.Wallet.createRandom();
+    const peerId = '12D3KooWAcceptedPrivateReconcileMemberPeer';
+    const authority = { roster: [member.address, other.address], rosterGoverns: true };
+    let context!: RecipientChangeContext;
+    const { store, projection, host, reconciles } = recipientHostUnderGossipReconciles({
+      transport: () => (authority.rosterGoverns
+        ? { kind: 'private-roster', participantAgents: [...authority.roster] }
         : { kind: 'legacy-unregistered' }),
-      duringFinalAuthorityRead: () => changes[change](),
+      duringFinalAuthorityRead: () => scenario.apply(context),
     });
-    store = fixture.store;
-    const { projection, host, reconciles } = fixture;
-    const inJoinCache = change === 'a peer route is replaced in the join key cache';
-    await store.insert([
-      ...memberKey.quads.map((quad) => (inJoinCache ? { ...quad, graph: joinCacheGraph } : quad)),
-      ...signedKeyQuads(other, otherPeerId),
-      // The join key cache case keeps the peer gate open, so that only the
-      // replaced route can fail it.
-      ...(inJoinCache ? [] : [allowedPeerQuad(peerId), allowedPeerQuad(otherPeerId)]),
-    ]);
+    context = {
+      store,
+      member,
+      memberUri: `did:dkg:agent:${ethers.getAddress(member.address)}`,
+      memberKey: signedKeyFixture(member, peerId),
+      peerId,
+      other,
+      otherPeerId: '12D3KooWAcceptedPrivateReconcileOtherPeer',
+      authority,
+    };
+    await store.insert(scenario.seed(context));
     const nodeWide = projection.readAuthorityFactsRevision;
     const perGraph = projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID);
 
@@ -740,18 +781,18 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
         contextGraphId: CONTEXT_GRAPH_ID,
       });
-    await (rejects instanceof RegExp
-      ? expect(resolution).rejects.toThrow(rejects)
-      : expect(resolution).rejects.toMatchObject(rejects));
+    await (scenario.rejects instanceof RegExp
+      ? expect(resolution).rejects.toThrow(scenario.rejects)
+      : expect(resolution).rejects.toMatchObject(scenario.rejects));
     await Promise.all(reconciles);
 
     // Refused on the first confirmation read, as without the reconciles.
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
     expect(reconciles).toHaveLength(2);
     // Only the change itself moved a revision, and only the ones it belongs to.
-    expect(projection.readAuthorityFactsRevision !== nodeWide).toBe(moves !== 'neither');
+    expect(projection.readAuthorityFactsRevision !== nodeWide).toBe(scenario.moves !== 'neither');
     expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID) !== perGraph)
-      .toBe(moves === 'both');
+      .toBe(scenario.moves === 'both');
   });
 
   it.each([
