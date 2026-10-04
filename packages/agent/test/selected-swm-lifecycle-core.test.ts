@@ -1147,3 +1147,16 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     }
   });
 });
+
+describe('selected scope admission keeps ordered target identity', () => {
+  it.each([{ ids: ['graph-a'] }, { ids: ['graph-b', 'graph-a'] }])('refuses execution IDs $ids before provider authority work', async ({ ids }) => {
+    const authority = vi.fn(() => { throw new Error('provider authority work started'); });
+    const agent = { config: { durableSyncEnabled: true }, createSwmTargetExecutorSessionV1: () => ({}),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: authority };
+    await expect(LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(agent as never, 'peer', ids,
+      { selectedSwmPriority: true, requestedScope: { kind: 'selected-public', targets: [
+        { contextGraphId: 'graph-a', lane: 'selected-public' }, { contextGraphId: 'graph-b', lane: 'selected-public' },
+      ] } } as never)).rejects.toThrow('Selected shared-memory request targets do not match its execution scope');
+    expect(authority).not.toHaveBeenCalled();
+  });
+});
