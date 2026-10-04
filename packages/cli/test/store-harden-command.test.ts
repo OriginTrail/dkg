@@ -198,6 +198,18 @@ describe('dkg store harden command wrapper', () => {
     expect(saved.store.options.containerName).toBe('dkg-blazegraph-dkg');
   });
 
+  it('forwards explicit recovery through the same preview and execution options', async () => {
+    mocks.executeHardenMigration.mockImplementation(async (opts: { dryRun?: boolean }) =>
+      opts.dryRun ? DRY_RUN_RESULT : { ...HARDENED_RESULT, outcome: 'recovered' });
+    await runHarden('--recover', '--yes', '--migration-dir', join(home, 'recovery'));
+    expect(mocks.executeHardenMigration).toHaveBeenCalledTimes(2);
+    const [preview, execute] = mocks.executeHardenMigration.mock.calls.map(call => call[0]);
+    expect(preview).toMatchObject({ recover: true, dryRun: true, migrationDir: join(home, 'recovery') });
+    const { dryRun: _dryRun, ...previewOptions } = preview;
+    expect(execute).toEqual(previewOptions);
+    expect(mocks.saveConfig).toHaveBeenCalledOnce();
+  });
+
   it('a declined confirmation aborts after the preview without executing or saving', async () => {
     mocks.confirmAnswer.value = 'n';
     await runHarden();

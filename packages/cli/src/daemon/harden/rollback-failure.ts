@@ -23,10 +23,10 @@ export async function rollbackMigrationFailure(ctx: HardenWorkflowInputs,
     log(`ROLLBACK INCOMPLETE: docker invocation failed (${rollback.detail}).`);
   }
   if (rollback.complete) {
-    throw new Error(
+    throw Object.assign(new Error(
       `Harden ${phase} failed and the legacy container was restored. ` +
       `Cause: ${(err as Error).message}. The journal export is retained at ${exportPath}.`,
-    );
+    ), { code: 'STORE_HARDEN_ROLLBACK_COMPLETE' });
   }
   throw new Error(
     `Harden ${phase} failed and the automatic rollback is INCOMPLETE ` +

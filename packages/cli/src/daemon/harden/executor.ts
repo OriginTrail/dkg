@@ -9,6 +9,7 @@ import { assertDaemonStoppedForStoreMigration } from '../store-maintenance-gate.
 import { HARDEN_BACKUP_SUFFIX, inspectHardenState } from './state.js';
 import { HARDEN_EXPORT_FILENAME, buildHardenMigration, planHardenMigration, type HardenStep } from './steps.js';
 import { type HardenWorkflowInputs } from './actions.js';
+import { hardenRecoveryStep, preserveHardenRecoveryBarrier, recoverHardenMigration } from './recovery-barrier.js';
 import { rollbackMigrationFailure } from './rollback-failure.js';
 
 export interface ExecuteHardenMigrationOptions {
@@ -27,6 +28,8 @@ export interface ExecuteHardenMigrationOptions {
   dkgHome: string;
   log: (m: string) => void;
   dryRun?: boolean;
+  /** Verify recovery from an incomplete rollback before clearing its startup barrier. */
+  recover?: boolean;
   /** Host port override; default = the port read off the legacy container. */
   hostPort?: number;
   // Injectables (tests provide these; production callers omit them):
@@ -48,7 +51,7 @@ export interface ExecuteHardenMigrationOptions {
 }
 
 export interface HardenMigrationResult {
-  outcome: 'already-hardened' | 'hardened' | 'dry-run';
+  outcome: 'already-hardened' | 'hardened' | 'dry-run' | 'recovered';
   containerName: string;
   /** Set when a backup container exists that the operator must remove manually. */
   backupContainerName: string | null;
@@ -82,7 +85,7 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
   const migration = buildHardenMigration({ ...input, sourceContainerName: sourceName });
   if (opts.dryRun) return { outcome: 'dry-run', containerName,
     backupContainerName: info.state === 'backup-only' ? backupName : null,
-    hostPort, exportPath: null, journalBytes: null, heapMb, steps: planHardenMigration(input) };
+    hostPort, exportPath: null, journalBytes: null, heapMb, steps: opts.recover ? [hardenRecoveryStep(containerName)] : planHardenMigration(input) };
   const baseUrl = `http://127.0.0.1:${hostPort}`;
   const ctx: HardenWorkflowInputs = { ...input, opts, docker, info, sourceName, backupName, exportPath, baseUrl,
     sparqlUrl: `${baseUrl}/bigdata/namespace/${encodeURIComponent(namespace)}/sparql`,
@@ -90,6 +93,7 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
     stoppedHint: `NOTE: the legacy store container "${sourceName}" is currently STOPPED — `
       + `restore service with: docker start ${sourceName} (then re-run harden when ready).`,
   };
+  if (opts.recover) return recoverHardenMigration(ctx);
   if (info.state === 'hardened') {
     for (const phase of migration.phases) await phase.execute(ctx);
     return { outcome: 'already-hardened', containerName,
@@ -102,22 +106,36 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
   await writeFile(lockPath,
     `${JSON.stringify({ pid: process.pid, containerName, startedAt: new Date().toISOString() })}\n`,
     { encoding: 'utf-8', flag: 'wx' });
+  let recoveryRequired = false;
   try {
     await assertDaemonStoppedForStoreMigration(opts.dkgHome);
     log(`Wrote harden lock ${lockPath} — daemon startup and automatic store restarts stay blocked through verification and rollback.`);
     for (const phase of migration.phases) {
+      // Rename can have an uncertain Docker outcome; retain the barrier until
+      // verification succeeds or rollback positively restores the source.
+      if (phase.id === 'rename-backup' || phase.rollbackPhase !== undefined) recoveryRequired = true;
       try { await phase.execute(ctx); }
       catch (cause) {
         if (phase.rollbackPhase === undefined) throw cause;
-        await rollbackMigrationFailure(ctx, phase.rollbackPhase, cause);
+        try { await rollbackMigrationFailure(ctx, phase.rollbackPhase, cause); }
+        catch (error) {
+          if ((error as { code?: string })?.code === 'STORE_HARDEN_ROLLBACK_COMPLETE') recoveryRequired = false;
+          throw error;
+        }
       }
     }
     const exported = migration.exported;
     if (exported === null) throw new Error('Migration completed without a verified export');
+    recoveryRequired = false;
     log(`Verification passed — ${containerName} is hardened.`);
     return { outcome: 'hardened', containerName, backupContainerName: backupName, hostPort,
       exportPath, journalBytes: exported.bytes, heapMb };
+  } catch (error) {
+    if (recoveryRequired) {
+      await preserveHardenRecoveryBarrier(ctx, migration.exported?.bytes).catch(() => {});
+    }
+    throw error;
   } finally {
-    await rm(lockPath, { force: true }).catch(() => {});
+    if (!recoveryRequired) await rm(lockPath, { force: true }).catch(() => {});
   }
 }

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,7 @@ import {
   reportDaemonShutdownResult,
   waitForDaemonExit,
 } from '../src/daemon/shutdown-wait.js';
+import { DkgHomeFiles } from '../src/config.js';
 import { _autoUpdateIo } from '../src/daemon/manifest.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 import { stopDaemonIfRunning } from '../src/update/stop-daemon.js';
@@ -20,6 +21,7 @@ const temporaryHomes: string[] = [];
 const originalAtomicWriteIo = { ..._autoUpdateIo };
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   Object.assign(_autoUpdateIo, originalAtomicWriteIo);
   if (originalDkgHome === undefined) delete process.env.DKG_HOME;
   else process.env.DKG_HOME = originalDkgHome;
@@ -46,11 +48,16 @@ describe('daemon lifecycle shutdown wait', () => {
     const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-store-migration-race-'));
     temporaryHomes.push(dkgHome);
     process.env.DKG_HOME = dkgHome;
-    _autoUpdateIo.rename = async (from, to) => {
-      await originalAtomicWriteIo.rename(from, to);
+    const writePid = DkgHomeFiles.prototype.writePid;
+    let publishedPid: string | undefined;
+    vi.spyOn(DkgHomeFiles.prototype, 'writePid').mockImplementation(async function (this: DkgHomeFiles, pid) {
+      await writePid.call(this, pid);
+      publishedPid = await readFile(join(dkgHome, 'daemon.pid'), 'utf8');
+      expect(await daemonRuntimeState.readPolicy(pid)).not.toBeNull();
       await writeFile(storeHardenLockPath(dkgHome), '{}');
-    };
+    });
     await expect(daemonRuntimeState.claim(process.pid, resolveShutdownPolicy('60000'))).rejects.toThrow(/Store hardening marker/);
+    expect(publishedPid).toBe(String(process.pid));
     await expect(daemonRuntimeState.readPid()).resolves.toBeNull();
     await expect(daemonRuntimeState.readPolicy(process.pid)).resolves.toBeNull();
   });

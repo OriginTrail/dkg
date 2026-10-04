@@ -70,6 +70,10 @@ function runDevnetBlazegraphSmoke(metadata: string, namespaceStatus = '201'): {
     resolve(REPO_ROOT, 'packages/cli/blazegraph-image-metadata.cjs'),
     join(parserDir, 'blazegraph-image-metadata.cjs'),
   );
+  const storageDir = join(root, 'packages', 'storage');
+  mkdirSync(storageDir, { recursive: true });
+  copyFileSync(resolve(REPO_ROOT, 'packages/storage/blazegraph-namespace-contract.cjs'),
+    join(storageDir, 'blazegraph-namespace-contract.cjs'));
   writeFileSync(join(root, 'blazegraph-image.json'), metadata);
   try {
     const result = spawnSync('bash', [

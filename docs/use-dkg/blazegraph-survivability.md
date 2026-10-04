@@ -45,12 +45,25 @@ and renames the old container to `<name>-backup`. The old container and its
 original volume remain intact. It creates the replacement on the same host
 port and verifies readiness, an ASK, the store identity tag, and journal size.
 
-A failure after the rename triggers rollback. A failed rollback reports the
-remaining commands for manual recovery. No migration path removes the backup
-container or the exported journal. Keep those recovery copies until the
-replacement has been checked. Migration uses an exclusive lock that blocks
-daemon startup and suspends automatic store restarts; if a process is killed, inspect the container and lock
-before removing a stale lock and resuming.
+A failure after the rename triggers rollback. An incomplete rollback keeps the
+migration marker, blocking daemon startup and automatic store restarts. Finish
+the logged Docker restore commands, or repair the replacement, then verify it:
+
+```bash
+dkg store harden --recover --dry-run
+dkg store harden --recover
+dkg start
+```
+
+Use the same `--container`, `--migration-dir`, and `--port` options as the failed
+migration. Recovery checks the recorded migration, retained export, service
+readiness, ASK, identity tag, and journal size. It clears the startup barrier
+only after these checks pass; failed verification leaves writers blocked.
+Recovery itself changes no Docker state. The backup container and exported
+journal remain intact. Keep these copies until the replacement has been checked.
+If a process is killed during migration, keep its marker until the source data
+has been restored and verified; restarting writers before a pending rollback
+can lose their writes.
 
 `--migration-dir` chooses the export directory, `--port` must match the configured
 store endpoint, and `--container` overrides the derived container name. Stop the

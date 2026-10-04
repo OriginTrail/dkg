@@ -95,12 +95,14 @@ export function registerStoreCommand(program: Command): void {
       '(journal volume, JVM heap policy, OOME auto-restart, healthcheck, log rotation)',
     )
     .option('--dry-run', 'Print the migration plan without executing it')
+    .option('--recover', 'Verify a recovered store and clear the incomplete-migration startup barrier')
     .option('--yes', 'Skip the confirmation prompt; the daemon must still be stopped')
     .option('--container <name>', 'Override the container name (default: derived from store URL)')
     .option('--port <port>', 'Host port for the hardened container; must match the configured store endpoint (1-65535)', parseHardenPortOption)
     .option('--migration-dir <dir>', 'Where to export the journal during migration (default: <dkg home>/blazegraph-harden)')
     .action(async (opts: {
       dryRun?: boolean;
+      recover?: boolean;
       yes?: boolean;
       container?: string;
       port?: number;
@@ -173,6 +175,7 @@ export function registerStoreCommand(program: Command): void {
         migrationDir,
         dkgHome: dkgDir(),
         hostPort: opts.port,
+        ...(opts.recover ? { recover: true } : {}),
         log,
       };
       // Show the plan before asking; the executor re-derives state itself.
@@ -197,7 +200,9 @@ export function registerStoreCommand(program: Command): void {
       await saveConfig(config);
 
       console.log('');
-      if (result.outcome === 'already-hardened') {
+      if (result.outcome === 'recovered') {
+        console.log(`Recovered "${result.containerName}" successfully — verified store; daemon startup barrier cleared.`);
+      } else if (result.outcome === 'already-hardened') {
         console.log(`"${result.containerName}" was already hardened — nothing changed.`);
       } else {
         console.log(`Hardened "${result.containerName}" successfully.`);
