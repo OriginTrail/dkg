@@ -1,3 +1,4 @@
+import { forwardAtomicSubjectMutation } from './atomic-subject-forwarding.js';
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
@@ -448,27 +449,22 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     });
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'ChangelogStore');
-    }
-    if (!this.enabled) return this.inner.replaceSubject(graphUri, subject, quads, options);
-    // Structural guard on the TARGET graph only — NOT a scan of the serialized
-    // update string. Every quad targets `graphUri` (the atomic builder enforces
-    // it), so a job term that merely REFERENCES a reserved IRI as a subject/
-    // predicate/object is accepted, matching the insert() path (#1863 regression
-    // the raw-update path reintroduced via assertNoReservedRef).
-    this.assertNotReserved(graphUri, 'replaceSubject');
-    await this.runAtomicMutation({
-      operation: 'replaceSubject',
-      touchedGraphs: [graphUri],
-      options,
-      execute: () => this.inner.replaceSubject!(graphUri, subject, quads, options),
+  async replaceSubject(graph: string, subject: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runSubjectMutation(graph, subject, undefined, quads, options);
+  }
+  async replaceSubjectPredicates(graph: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runSubjectMutation(graph, subject, predicates, quads, options);
+  }
+  private runSubjectMutation(graph: string, subject: string, predicates: readonly string[] | undefined, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return forwardAtomicSubjectMutation(this.inner, 'ChangelogStore', graph, subject, predicates, quads, options, (operation, execute) => {
+      if (!this.enabled) return execute();
+      // Structural guard on the TARGET graph only — NOT a scan of the serialized
+      // update string. Every quad targets the graph (the atomic builder enforces
+      // it), so a job term that merely REFERENCES a reserved IRI as a subject/
+      // predicate/object is accepted, matching the insert() path (#1863 regression
+      // the raw-update path reintroduced via assertNoReservedRef).
+      this.assertNotReserved(graph, operation);
+      return this.runAtomicMutation({ operation, touchedGraphs: [graph], options, execute });
     });
   }
 

@@ -1,3 +1,4 @@
+import { atomicSubjectMutationFacade } from './atomic-subject-mutation-facade.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
 import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
@@ -605,23 +606,12 @@ export function createListContextGraphsCacheInvalidatingStore(
             'replaceGraphAndSubject',
           )
       : undefined,
-    // #1863 — the async-lift publisher persists a job transition via this atomic
-    // single-subject replace. Preserve the optional capability through the agent
-    // decorator just like replaceGraph/replaceGraphAndSubject/update; omitting it
-    // makes every capable production backend appear unsupported, so the publisher
-    // silently falls back to non-atomic delete-then-insert and the fix is a no-op.
-    replaceSubject: innerStore.replaceSubject
-      ? (graphUri, subject, quads, options) =>
-          invalidateAfterMutation(
-            () => innerStore.replaceSubject!(graphUri, subject, quads, options),
-            () => true,
-            // The target graph covers deleted facts; the replacement quads
-            // cover inserted recipient facts. The subject lets downstream
-            // invalidation distinguish exact atomic replacement paths.
-            () => markProjectionDirty?.(quads, graphUri, subject),
-            'replaceSubject',
-          )
-      : undefined,
+    ...atomicSubjectMutationFacade(innerStore, (operation, graphUri, subject, quads, execute) =>
+      invalidateAfterMutation(execute, () => true,
+        // The target graph covers deleted facts; the replacement quads
+        // cover inserted recipient facts. The subject lets downstream
+        // invalidation distinguish exact atomic replacement paths.
+        () => markProjectionDirty?.(quads, graphUri, subject), operation)),
     // RFC-64 author publication moves a complete public-SWM projection and
     // its bounded semantic control state through one backend CAS. Preserve the
     // capability through this cache-invalidation decorator and invalidate only

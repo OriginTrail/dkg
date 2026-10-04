@@ -23,6 +23,7 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildAtomicSubjectPredicatesReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
@@ -476,6 +477,21 @@ export class OxigraphStore implements TripleStore {
     // rolls the whole thing back.
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
     statements.checkIris.replaceSubject(graphUri, subject, quads);
+    this.store.update(update);
+    this.scheduleFlush();
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+  }
+
+  async replaceSubjectPredicates(
+    graphUri: string, subject: string, predicates: readonly string[], quads: DKGQuad[], options?: TripleStoreQueryOptions,
+  ): Promise<void> {
+    throwIfAborted(options?.signal);
+    const guarded = quads.filter(q => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)));
+    assertQuadLiteralsMutf8Safe(guarded, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'OxigraphStore.replaceSubjectPredicates',
+    });
+    const update = buildAtomicSubjectPredicatesReplaceUpdate(graphUri, subject, predicates, quads);
+    statements.checkIris.replaceSubjectPredicates(graphUri, subject, predicates, quads);
     this.store.update(update);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });

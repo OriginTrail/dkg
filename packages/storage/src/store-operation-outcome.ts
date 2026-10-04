@@ -14,6 +14,7 @@ export const STORE_OPERATIONS = [
   'replaceGraph',
   'replaceGraphAndSubject',
   'replaceSubject',
+  'replaceSubjectPredicates',
   'rfc64AuthorCommitCasV1',
   'listGraphs',
   'listGraphsByPrefix',

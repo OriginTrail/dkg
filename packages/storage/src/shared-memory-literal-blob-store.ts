@@ -1,3 +1,4 @@
+import { buildAtomicSubjectPredicatesReplaceUpdate } from './atomic-graph-replace.js';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -173,6 +174,15 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     // inline, keeping the atomic path byte-consistent with the fallback.
     await this.withExternalizedQuads(quads, (externalized) =>
       this.inner.replaceSubject!(graphUri, subject, externalized, options));
+  }
+
+  async replaceSubjectPredicates(
+    graph: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions,
+  ): Promise<void> {
+    const replace = this.inner.replaceSubjectPredicates;
+    if (typeof replace !== 'function') throw new UnsupportedTripleStoreCapabilityError('replaceSubjectPredicates', 'SharedMemoryLiteralBlobStore');
+    buildAtomicSubjectPredicatesReplaceUpdate(graph, subject, predicates, quads);
+    await this.withExternalizedQuads(quads, externalized => replace.call(this.inner, graph, subject, predicates, externalized, options));
   }
 
   async rfc64AuthorCommitCasV1(

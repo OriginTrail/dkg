@@ -1,3 +1,4 @@
+import { forwardAtomicSubjectMutation, runIndexedAtomicSubjectMutation } from './atomic-subject-forwarding.js';
 import { performance } from 'node:perf_hooks';
 import {
   codePointLowerBound,
@@ -51,6 +52,7 @@ export type GraphSetMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectPredicates'
   | 'rfc64AuthorCommitCasV1'
   | 'query'
   | 'update';
@@ -62,6 +64,7 @@ type TouchedGraphMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectPredicates'
   | 'rfc64AuthorCommitCasV1'
   | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
@@ -499,32 +502,18 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     );
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
-    }
-    if (!this.enabled) {
-      await this.inner.replaceSubject(graphUri, subject, quads, options);
-      return;
-    }
-    try {
-      await this.inner.replaceSubject(graphUri, subject, quads, options);
-    } catch (error) {
-      // A committed subject replace could add/remove the graph's first/last row;
-      // dirty the index so a lazy rebuild re-derives membership — unless this was
-      // a clean preflight capability refusal, where nothing was mutated.
-      if (!isStoreOperationNotStarted(error, 'replaceSubject')) {
-        this.scheduleFullRefresh('replaceSubject');
-      }
-      throw error;
-    }
-    this.bumpMutation();
-    await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
+  async replaceSubject(graph: string, subject: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runSubjectMutation(graph, subject, undefined, quads, options);
+  }
+  async replaceSubjectPredicates(graph: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runSubjectMutation(graph, subject, predicates, quads, options);
+  }
+  private runSubjectMutation(graph: string, subject: string, predicates: readonly string[] | undefined, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return forwardAtomicSubjectMutation(this.inner, 'GraphSetIndexStore', graph, subject, predicates, quads, options,
+      (operation, execute) => runIndexedAtomicSubjectMutation(operation, execute, {
+        enabled: this.enabled, uncertain: () => this.scheduleFullRefresh(operation),
+        committed: () => this.bumpMutation(), maintain: () => this.maintainTouchedGraphs([graph], operation, options),
+      }));
   }
 
   async rfc64AuthorCommitCasV1(

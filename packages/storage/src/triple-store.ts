@@ -252,6 +252,18 @@ export interface TripleStore {
     options?: QueryOptions,
   ): Promise<void>;
   /**
+   * Atomically replace only the selected predicates for one skolem subject.
+   * All unrelated rows, including concurrent insertions, MUST survive. The
+   * whole DELETE/INSERT is one backend transaction; generic update availability
+   * is not certification. Between 1 and 32 distinct predicates are permitted and
+   * every replacement quad must match the exact graph, subject and predicate set.
+   * Failure exposes the old or complete new selected state. Unsupported stores
+   * refuse before dispatch; callers must not use delete/insert fallback.
+   */
+  replaceSubjectPredicates?(
+    graphUri: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions,
+  ): Promise<void>;
+  /**
    * RFC-64 `SYNC_AUTHOR_COMMIT_CAS_V1`: atomically replace one complete shared
    * projection, its author-seal subject, the guarded author current-head
    * pointer, and bounded mutation/applied-set subjects.
@@ -454,6 +466,19 @@ export async function tryReplaceGraphAndSubjectAtomically(
     ) {
       return false;
     }
+    throw error;
+  }
+}
+
+/** Certified predicate replacement: only preflight refusal returns false; dispatch errors propagate. */
+export async function tryReplaceSubjectPredicatesAtomically(
+  store: TripleStore, graph: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions,
+): Promise<boolean> {
+  const replace = store.replaceSubjectPredicates;
+  if (typeof replace !== 'function') return false;
+  try { await replace.call(store, graph, subject, predicates, quads, options); return true; }
+  catch (error) {
+    if (error instanceof UnsupportedTripleStoreCapabilityError && error.capability === 'replaceSubjectPredicates') return false;
     throw error;
   }
 }

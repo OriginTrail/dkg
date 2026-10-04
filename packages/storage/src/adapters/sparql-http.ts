@@ -21,6 +21,7 @@
  *   updateEndpoint: same URL
  */
 
+import { prepareRemoteAtomicSubjectWrite } from './remote-atomic-subject-write.js';
 import type {
   TripleStore,
   BoundedQueryResponseCapability,
@@ -47,7 +48,6 @@ import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-que
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
-  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
@@ -1011,30 +1011,22 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     });
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: DKGQuad[],
-    options?: QueryOptions,
-  ): Promise<void> {
+  async replaceSubject(graph: string, subject: string, quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    return this.writeAtomicSubject(graph, subject, quads, options);
+  }
+  async replaceSubjectPredicates(graph: string, subject: string, predicates: readonly string[], quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    return this.writeAtomicSubject(graph, subject, quads, options, predicates);
+  }
+  private async writeAtomicSubject(graph: string, subject: string, quads: DKGQuad[], options?: QueryOptions, predicates?: readonly string[]): Promise<void> {
     if (!this.supportsConsistency('atomic-update')) {
       // A generic endpoint may apply DELETE WHERE; INSERT DATA as separate
       // operations, re-exposing the transient-empty subject. Fail closed before
-      // any request so callers take their non-atomic delete-then-insert fallback.
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
+      // any request so callers retain recovery evidence without a fallback.
+      throw new UnsupportedTripleStoreCapabilityError(predicates === undefined ? 'replaceSubject' : 'replaceSubjectPredicates', 'SparqlHttpStore');
     }
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceSubject',
-    });
-    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris.replaceSubject(graphUri, subject, quads);
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [graphUri] },
-      update,
-      options: { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
-      operation: 'replaceSubject',
-    });
+    const { operation, update } = prepareRemoteAtomicSubjectWrite('sparql-http', graph, subject, quads, predicates);
+    await this.runRemoteGraphMutation({ scope: { kind: 'graphs', graphs: [graph] }, update,
+      options: { ...options, source: options?.source ?? `sparql-http.${operation}` }, operation });
   }
 
   async rfc64AuthorCommitCasV1(

@@ -152,6 +152,30 @@ export function buildAtomicSubjectReplaceUpdate(
   return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;
 }
 
+/** One certified DELETE/INSERT operation replaces selected predicates without reading history. */
+export function buildAtomicSubjectPredicatesReplaceUpdate(
+  graphUri: string, subject: string, predicates: readonly string[], quads: readonly Quad[],
+): string {
+  const graph = assertSafeIri(graphUri), target = assertSafeIri(subject);
+  assertSubjectReplacementPayload(graphUri, subject, quads);
+  if (predicates.length === 0 || predicates.length > 32) {
+    throw new Error('Atomic predicate replacement requires between 1 and 32 predicates');
+  }
+  const selected = predicates.map(predicate => {
+    if (predicate.startsWith('_:')) throw new Error('Atomic predicate replacement requires IRI predicates');
+    return assertSafeIri(predicate);
+  });
+  if (new Set(selected).size !== selected.length) throw new Error('Atomic predicate replacement has duplicate predicates');
+  const allowed = new Set(selected);
+  if (quads.some(quad => !allowed.has(quad.predicate))) throw new Error('Atomic predicate replacement payload escapes selected predicates');
+  const inserted = quads.length ? `INSERT { ${formatGraphBlock(graph, quads)} }` : '';
+  return `DELETE { GRAPH <${graph}> { <${target}> ?predicate ?old } }
+    ${inserted}
+    WHERE { OPTIONAL { GRAPH <${graph}> {
+      <${target}> ?predicate ?old FILTER (?predicate IN (${selected.map(predicate => `<${predicate}>`).join(', ')}))
+    } } }`;
+}
+
 export function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {
   for (const [index, quad] of quads.entries()) {
     if (quad.graph !== graphUri) {

@@ -46,6 +46,7 @@ export interface WriteIriChecks {
     metadataQuads: readonly Quad[],
   ): void;
   replaceSubject(graphUri: string, subject: string, quads: readonly Quad[]): void;
+  replaceSubjectPredicates(graphUri: string, subject: string, predicates: readonly string[], quads: readonly Quad[]): void;
   rfc64AuthorCommitCasV1(
     plan: Pick<Rfc64AuthorCommitCasUpdateV1, 'semanticQuads' | 'controlTerms'>,
   ): void;
@@ -258,6 +259,9 @@ export function sparqlStatements(
           { term: graphUri, position: 'graph' },
           { term: subject, position: 'subject' },
         ]),
+      replaceSubjectPredicates: (graphUri, subject, predicates, quads) =>
+        checkIris('replaceSubjectPredicates', quads, [{ term: graphUri, position: 'graph' },
+          { term: subject, position: 'subject' }, ...predicates.map(term => ({ term, position: 'predicate' as const }))]),
       rfc64AuthorCommitCasV1: (plan) =>
         checkIris('rfc64AuthorCommitCasV1', plan.semanticQuads, plan.controlTerms),
     },
