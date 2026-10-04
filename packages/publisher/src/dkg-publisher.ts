@@ -26,7 +26,8 @@ import {
   classifyPromoteCompanionSettlementFailure,
 } from './promote-replay-safety.js';
 import { finalizeCommittedAssertionPromote } from './assertion-promote-finalization.js';
-import { readAssertionPromoteSource, revalidateAssertionPromoteSource, parsePromoteLifecycleLiteral } from './assertion-promote-source.js';
+import { readDurablePromoteClaim, durablePromoteClaimMatches } from './durable-promote-claim.js';
+import { readAssertionPromoteSource, revalidateAssertionPromoteSource } from './assertion-promote-source.js';
 import {
   createPromoteOperationIntent,
   serializePromoteOperationIntent,
@@ -8585,7 +8586,6 @@ export class DKGPublisher implements Publisher {
     const prepared = await this.withWriteLocks(swmLockKeys, () => readAssertionPromoteSource(sourceHost, sourceContext));
     if (prepared.kind === 'complete') return prepared.result;
     const { assertionQuads, immutablePrivateQuads, resumingCommittedSwm, durableShareOperationId, durablePromoteIntent } = prepared;
-    const parsePlainLiteral = (raw: string | undefined, code: string) => parsePromoteLifecycleLiteral(raw, code, lifecycleSubject);
 
     let quadsToPromote = assertionQuads;
 
@@ -8823,30 +8823,8 @@ export class DKGPublisher implements Publisher {
       // cannot both pass an empty-state check and confirm different IDs. This
       // is a conservative compare-after-insert: a collision may make both
       // callers withdraw, but it can never let both escape externally.
-      const [claimedIdsResult, claimedIntentsResult] = await Promise.all([
-        this.store.query(
-          `SELECT ?id WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
-            <${assertSafeIri(lifecycleSubject)}> <${SHARE_OPERATION_ID_PRED}> ?id
-          } } LIMIT 2`,
-        ),
-        this.store.query(
-          `SELECT ?intent WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
-            <${assertSafeIri(lifecycleSubject)}> <${PROMOTE_OPERATION_INTENT_PRED}> ?intent
-          } } LIMIT 2`,
-        ),
-      ]);
-      const claimedId = claimedIdsResult.type === 'bindings'
-        && claimedIdsResult.bindings.length === 1
-        ? parsePlainLiteral(claimedIdsResult.bindings[0]?.['id'], 'KA_SHARE_OPERATION_ID_CORRUPT')
-        : undefined;
-      const claimedIntent = claimedIntentsResult.type === 'bindings'
-        && claimedIntentsResult.bindings.length === 1
-        ? parsePlainLiteral(
-            claimedIntentsResult.bindings[0]?.['intent'],
-            'KA_PROMOTE_OPERATION_INTENT_CORRUPT',
-          )
-        : undefined;
-      if (claimedId !== operationId || claimedIntent !== serializedOperationIntent) {
+      const claim = await readDurablePromoteClaim(this.store, promoteMetaGraph, lifecycleSubject);
+      if (!durablePromoteClaimMatches(claim, lifecycleSubject, operationIntent)) {
         await this.store.delete([operationIdQuad, operationIntentQuad]);
         throw Object.assign(
           new Error(`A different promote operation already claimed assertion "${name}"`),

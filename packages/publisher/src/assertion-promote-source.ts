@@ -2,12 +2,14 @@
 
 import { assertSafeIri, isTrustLevelQuad, MemoryLayer, type GraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type { GraphManager, Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { SHARE_OPERATION_ID_PRED, PROMOTE_OPERATION_INTENT_PRED } from './metadata.js';
-import { parsePromoteOperationIntent, serializePromoteOperationIntent, type PromoteOperationIntent } from './promote-operation-intent.js';
+import { PROMOTE_OPERATION_INTENT_PRED } from './metadata.js';
+import { parsePromoteOperationIntent, type PromoteOperationIntent } from './promote-operation-intent.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import { isReservedSubject } from './reserved-subjects.js';
 import { tryResolveKnowledgeAssetWorkspaceHead, type KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { publisherWorkspaceOperationSemanticsKey, workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
+import { readDurablePromoteClaim, decodeDurablePromoteClaim, durablePromoteClaimMatches, parsePromoteLifecycleLiteral } from './durable-promote-claim.js';
+import { isInterruptedOwnPromoteHead } from './assertion-promote-head-recovery.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 
 export interface AssertionPromoteSourceHost {
@@ -32,20 +34,6 @@ export interface AssertionPromoteSourceContext {
   readonly graphUri: string;
   readonly swmGraphUri: string;
   readonly vmGraphUri: string;
-}
-
-export function parsePromoteLifecycleLiteral(raw: string | undefined, code: string, lifecycleSubject: string): string | undefined {
-  if (raw === undefined) return undefined;
-  try {
-    const value: unknown = JSON.parse(raw);
-    if (typeof value === 'string' && value.length > 0) return value;
-  } catch {
-    // Fall through to the typed corruption error below.
-  }
-  throw Object.assign(
-    new Error(`Graph-scoped assertion lifecycle <${lifecycleSubject}> contains malformed state`),
-    { code },
-  );
 }
 
 /** Coherent source and recovery inspection; caller holds the exact KA SWM lock. */
@@ -178,18 +166,15 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
   // Keep the operation cardinality checks separate and bounded. Combining
   // OPTIONALs creates a Cartesian product on corrupt rows — precisely the
   // sort of recovery path that should not double as an accidental OOM test.
-  const [operationIdResult, promoteIntentResult] = await readOperationRows(host, context);
+  const claim = await readDurablePromoteClaim(host.store, promoteMetaGraph, lifecycleSubject);
   if (preserveLegacyCompletionMarker) {
     if (
-      operationIdResult.type === 'bindings'
-      && operationIdResult.bindings.length === 1
-      && promoteIntentResult.type === 'bindings'
-      && promoteIntentResult.bindings.length === 0
+      claim.readable && claim.operationIds.length === 1 && claim.intents.length === 0
     ) {
       let legacyOperationId: string | undefined;
       try {
         legacyOperationId = parsePlainLiteral(
-          operationIdResult.bindings[0]?.['shareOperationId'],
+          claim.operationIds[0],
           'KA_SHARE_OPERATION_ID_CORRUPT',
         );
       } catch (error) {
@@ -211,13 +196,13 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
     // before the normal conflict/corruption path reports the exact reason.
     await maintainMarker(false);
   }
-  if (operationIdResult.type !== 'bindings' || promoteIntentResult.type !== 'bindings') {
+  if (!claim.readable) {
     throw Object.assign(
       new Error(`Graph-scoped assertion lifecycle <${lifecycleSubject}> could not be read safely`),
       { code: 'KA_LIFECYCLE_STATE_CORRUPT' },
     );
   }
-  if (operationIdResult.bindings.length > 1) {
+  if (claim.operationIds.length > 1) {
     throw Object.assign(
       new Error(
         `Graph-scoped assertion lifecycle <${lifecycleSubject}> has conflicting durable share operation IDs`,
@@ -225,7 +210,7 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
       { code: 'KA_SHARE_OPERATION_ID_CONFLICT' },
     );
   }
-  if (promoteIntentResult.bindings.length > 1) {
+  if (claim.intents.length > 1) {
     throw Object.assign(
       new Error(
         `Graph-scoped assertion lifecycle <${lifecycleSubject}> has conflicting durable promote intent`,
@@ -233,14 +218,8 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
       { code: 'KA_PROMOTE_OPERATION_INTENT_CONFLICT' },
     );
   }
-  const durableShareOperationId = parsePlainLiteral(
-    operationIdResult.bindings[0]?.['shareOperationId'],
-    'KA_SHARE_OPERATION_ID_CORRUPT',
-  );
-  const durablePromoteIntentValue = parsePlainLiteral(
-    promoteIntentResult.bindings[0]?.['promoteIntent'],
-    'KA_PROMOTE_OPERATION_INTENT_CORRUPT',
-  );
+  const { operationId: durableShareOperationId, serializedIntent: durablePromoteIntentValue } =
+    decodeDurablePromoteClaim(claim, lifecycleSubject);
   if (!durableShareOperationId && durablePromoteIntentValue) {
     throw Object.assign(
       new Error(
@@ -287,7 +266,7 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
   }
   return { kind: 'prepared' as const, assertionQuads, immutablePrivateQuads, sourceIsSwm, lifecycleLayer,
     resumingCommittedSwm, durableShareOperationId, durablePromoteIntent,
-    head: await readHead(host, context) };
+    head: await readHead(host, context, resumingCommittedSwm ? durablePromoteIntent : undefined) };
 }
 
 function readLifecycleLayer(host: AssertionPromoteSourceHost, context: AssertionPromoteSourceContext) {
@@ -299,28 +278,15 @@ function readLifecycleLayer(host: AssertionPromoteSourceHost, context: Assertion
   );
 }
 
-function readOperationRows(host: AssertionPromoteSourceHost, context: AssertionPromoteSourceContext) {
-  const { promoteMetaGraph, lifecycleSubject } = context;
-  return Promise.all([
-    host.store.query(
-      `SELECT ?shareOperationId WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
-        <${assertSafeIri(lifecycleSubject)}> <${SHARE_OPERATION_ID_PRED}> ?shareOperationId
-      } } LIMIT 2`,
-    ),
-    host.store.query(
-      `SELECT ?promoteIntent WHERE { GRAPH <${assertSafeIri(promoteMetaGraph)}> {
-        <${assertSafeIri(lifecycleSubject)}> <${PROMOTE_OPERATION_INTENT_PRED}> ?promoteIntent
-      } } LIMIT 2`,
-    ),
-  ]);
-}
-
-async function readHead(host: AssertionPromoteSourceHost, context: AssertionPromoteSourceContext) {
+async function readHead(host: AssertionPromoteSourceHost, context: AssertionPromoteSourceContext, recoveryIntent?: PromoteOperationIntent) {
   const resolution = await tryResolveKnowledgeAssetWorkspaceHead({
     store: host.store, graphManager: host.graphManager, contextGraphId: context.contextGraphId,
     kaUal: context.contentScope.ual, subGraphName: context.subGraphName,
   });
-  if (resolution.status === 'corrupt') throw resolution.error;
+  if (resolution.status === 'corrupt') {
+    if (recoveryIntent && await isInterruptedOwnPromoteHead(host.store, host.graphManager, context, recoveryIntent.operationId)) return undefined;
+    throw resolution.error;
+  }
   return resolution.status === 'resolved' ? resolution.head : undefined;
 }
 
@@ -342,20 +308,19 @@ export async function revalidateAssertionPromoteSource(
 ): Promise<void> {
   // The lifecycle lease is process-local. Another owner must not replace our
   // durable claim or advance VM while confirmation is outside the store lock.
-  const [[ids, intents], layer] = await Promise.all([
-    readOperationRows(host, context), readLifecycleLayer(host, context),
+  const [claim, layer] = await Promise.all([
+    readDurablePromoteClaim(host.store, context.promoteMetaGraph, context.lifecycleSubject), readLifecycleLayer(host, context),
   ]);
-  if (ids.type !== 'bindings' || intents.type !== 'bindings'
-    || ids.bindings.length !== 1 || intents.bindings.length !== 1
-    || parsePromoteLifecycleLiteral(ids.bindings[0]?.['shareOperationId'], 'KA_SHARE_OPERATION_ID_CORRUPT', context.lifecycleSubject) !== intent.operationId
-    || parsePromoteLifecycleLiteral(intents.bindings[0]?.['promoteIntent'], 'KA_PROMOTE_OPERATION_INTENT_CORRUPT', context.lifecycleSubject) !== serializePromoteOperationIntent(intent)) {
+  if (!durablePromoteClaimMatches(claim, context.lifecycleSubject, intent)) {
     throw Object.assign(new Error('Durable promote claim changed during confirmation'), { code: 'KA_PROMOTE_OPERATION_INTENT_CONFLICT' });
   }
   if (layer.type !== 'bindings' || layer.bindings.length > 1
     || parsePromoteLifecycleLiteral(layer.bindings[0]?.['layer'], 'KA_LIFECYCLE_LAYER_CORRUPT', context.lifecycleSubject) !== prepared.lifecycleLayer) {
     throw Object.assign(new Error('Assertion lifecycle layer changed during confirmation'), { code: 'KA_LIFECYCLE_STATE_CHANGED' });
   }
-  const current = await readHead(host, context);
+  // A sanctioned reopen can reuse confirmed + 1 below a burned SWM version.
+  // That captured head is safe only while its full semantics and alias remain unchanged.
+  const current = await readHead(host, context, prepared.resumingCommittedSwm ? intent : undefined);
   if (current !== undefined) {
     const samePreparedHead = prepared.head !== undefined && headKey(current) === headKey(prepared.head)
       && current.operationAliases.some(alias => workspaceHeadIncludesShareOperationId(prepared.head!, alias.shareOperationId));
@@ -366,8 +331,7 @@ export async function revalidateAssertionPromoteSource(
     })}`;
     const ownConfirmedHead = workspaceHeadIncludesShareOperationId(current, intent.operationId)
       && headKey(current) === expectedKey;
-    if (BigInt(current.assertionVersion) > BigInt(context.contentScope.assertionVersion)
-      || (!samePreparedHead && !ownConfirmedHead)) {
+    if (!samePreparedHead && !ownConfirmedHead) {
       throw Object.assign(new Error('KA SWM head changed while promotion awaited confirmation'), { code: 'KA_PROMOTE_SWM_HEAD_CHANGED' });
     }
   }
