@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { it } from 'vitest';
 import { provisionBlazegraphDocker, defaultDockerRunner, blazegraphVolumeName, blazegraphMigrationVolumeName, BLAZEGRAPH_JOURNAL_FILE, waitForBlazegraphReady } from '../src/daemon/blazegraph-docker.js';
 import { executeHardenMigration } from '../src/daemon/blazegraph-harden.js';
 
 // test-disable-allow: D1 #2974 -- owner=cli lane=bura-cli expires=2026-10-25 Real Docker journal roundtrip runs explicitly in CLI shard 1.
-it.skipIf(process.env.BLAZEGRAPH_HARDEN_INTEGRATION_TEST !== '1').each(['named-volume', 'writable-layer', 'unbounded-logs'] as const)('preserves ordinary RDF records in the replacement and original backup using the pinned image (%s)', async (journalSource) => {
+it.skipIf(process.env.BLAZEGRAPH_HARDEN_INTEGRATION_TEST !== '1').each(['named-volume', 'writable-layer', 'unbounded-logs', 'relative-directory'] as const)('preserves ordinary RDF records in the replacement and original backup using the pinned image (%s)', async (journalSource) => {
 const name = `dkg-harden-test-${process.pid}-${Date.now()}`;
 const namespace = 'harden-roundtrip';
 const docker = defaultDockerRunner();
@@ -17,6 +17,13 @@ for (const container of [name, `${name}-backup`]) {
 }
 for (const volume of volumes) assert.notEqual((await docker.run(['volume', 'inspect', volume])).exitCode, 0, `Existing smoke volume ${volume}`);
 const temporary = await mkdtemp(join(tmpdir(), 'dkg-harden-roundtrip-'));
+const migrationDir = journalSource === 'relative-directory' ? `${name}-export` : `${temporary}/journal`;
+const seedCommands: string[][] = [];
+const migrationDocker = { run: async (args: string[], options?: Parameters<typeof docker.run>[1]) => {
+  if (args[0] === 'run' && args.includes('--rm')) seedCommands.push([...args]);
+  return docker.run(args, options);
+} };
+if (journalSource === 'relative-directory') assert.notEqual((await docker.run(['volume', 'inspect', migrationDir])).exitCode, 0);
 await mkdir(temporary, { recursive: true });
 try {
   const legacyDocker = { run: async (args, options) => {
@@ -46,10 +53,13 @@ try {
     assert.equal(before.HostConfig.LogConfig.Config['max-size'], undefined);
     assert.ok(before.Config.Healthcheck.Test.join(' ').includes('ASK%7B%7D'));
   }
-  const result = await executeHardenMigration({ containerName: name, namespace, migrationDir: `${temporary}/journal`,
-    dkgHome: `${temporary}/config`, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, docker,
+  const result = await executeHardenMigration({ containerName: name, namespace, migrationDir,
+    dkgHome: `${temporary}/config`, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, docker: migrationDocker,
     readyTimeoutMs: 60000, readyIntervalMs: 500, log: console.log });
   assert.equal(result.outcome, 'hardened');
+  assert.equal(result.exportPath, join(resolve(migrationDir), 'bigdata.jnl'));
+  assert.ok(seedCommands[0].includes(`${resolve(migrationDir)}:/seed:ro`));
+  if (journalSource === 'relative-directory') assert.notEqual((await docker.run(['volume', 'inspect', migrationDir])).exitCode, 0, 'The journal export must be a bind mount, never a named volume');
   const after = JSON.parse((await docker.run(['inspect', name])).stdout)[0];
   assert.ok(after.Mounts.some(m => m.Name === volumes[1]));
   assert.ok(after.Config.Env.some(e => e.includes('-Xmx256m') && e.includes('ExitOnOutOfMemoryError')));
@@ -90,7 +100,7 @@ try {
     return docker.run(args, options);
   } };
   await assert.rejects(executeHardenMigration({ containerName: name, namespace,
-    migrationDir: `${temporary}/journal`, dkgHome: `${temporary}/config`, docker: uncertainDocker,
+    migrationDir, dkgHome: `${temporary}/config`, docker: uncertainDocker,
     env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, log: console.log }), /Cannot determine whether primary container/);
   assert.deepEqual(uncertainCalls, [['inspect', name]]);
   const newerRead = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' }, body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:new-after-migration> { <urn:new> <urn:value> ?v } }')}` });
@@ -108,16 +118,21 @@ try {
   assert.equal(updated.ok, true, await updated.text());
   assert.equal((await docker.run(['exec', `${name}-backup`, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE])).stdout.trim(), oldSize);
   assert.equal((await docker.run(['rm', name])).exitCode, 0);
-  const resumed = await executeHardenMigration({ containerName: name, namespace, migrationDir: `${temporary}/journal`,
-    dkgHome: `${temporary}/config`, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, docker,
+  const resumed = await executeHardenMigration({ containerName: name, namespace, migrationDir,
+    dkgHome: `${temporary}/config`, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, docker: migrationDocker,
     readyTimeoutMs: 60000, readyIntervalMs: 500, log: console.log });
   assert.equal(resumed.outcome, 'hardened');
+  assert.ok(seedCommands[1].includes(`${resolve(migrationDir)}:/seed:ro`));
   const latest = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' }, body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:smoke-2974> { <urn:test:subject> <urn:test:predicate> ?v } }')}` });
   assert.equal((await latest.json()).results.bindings[0].v.value, 'latest-copy');
 
 } finally {
   for (const container of [name, `${name}-backup`]) await docker.run(['rm', '-f', container]);
   for (const volume of volumes) await docker.run(['volume', 'rm', volume]);
+  if (journalSource === 'relative-directory') {
+    await docker.run(['volume', 'rm', migrationDir]);
+    await rm(resolve(migrationDir), { recursive: true, force: true });
+  }
   await rm(temporary, { recursive: true, force: true });
 }
 

@@ -1,5 +1,6 @@
 /** Hardening plans, port validation and state inspection. */
 import { describe, it, expect } from 'vitest';
+import { join, resolve } from 'node:path';
 import { inspectHardenState, planHardenMigration, HARDEN_EXPORT_FILENAME } from '../src/daemon/blazegraph-harden.js';
 import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_IMAGE, BLAZEGRAPH_JOURNAL_FILE, type DockerRunner } from '../src/daemon/blazegraph-docker.js';
 import { parseHardenPortOption } from '../src/commands/store.js';
@@ -14,6 +15,15 @@ describe('planHardenMigration', () => {
     migrationDir: '/tmp/harden',
     state: 'legacy' as const,
   };
+
+  it.each(['journal-export', 'migration/journal-export', '/tmp/harden'])('uses one absolute export directory for Docker cp and seed mounts (%s)', (migrationDir) => {
+    const steps = planHardenMigration({ ...input, migrationDir });
+    const absoluteDir = resolve(migrationDir);
+    expect(steps.find(step => step.id === 'export-journal')?.dockerArgs).toEqual([
+      'cp', `${NAME}:${BLAZEGRAPH_JOURNAL_FILE}`, join(absoluteDir, HARDEN_EXPORT_FILENAME),
+    ]);
+    expect(steps.find(step => step.id === 'seed-volume')?.dockerArgs).toContain(`${absoluteDir}:/seed:ro`);
+  });
 
   it('produces the golden step sequence for a legacy container', () => {
     const steps = planHardenMigration(input);

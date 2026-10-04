@@ -9,7 +9,7 @@
  * executed in plan order. See the facade (../blazegraph-harden.ts) for
  * the incident background.
  */
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   BLAZEGRAPH_DATA_DIR,
   BLAZEGRAPH_IMAGE,
@@ -106,9 +106,10 @@ function dockerPhase(id: string, description: string, dockerArgs: string[],
 
 /** One state-selected sequence serves both dry-run rendering and execution. */
 export function buildHardenMigration(input: HardenPlanInput & { sourceContainerName?: string }) {
+  const migrationDir = resolve(input.migrationDir);
   const backupName = `${input.containerName}${HARDEN_BACKUP_SUFFIX}`;
   const sourceName = input.sourceContainerName ?? (input.state === 'backup-only' ? backupName : input.containerName);
-  const exportPath = join(input.migrationDir, HARDEN_EXPORT_FILENAME);
+  const exportPath = join(migrationDir, HARDEN_EXPORT_FILENAME);
   const integrityCommand = ['inspect', '--size', sourceName];
   let preSize: number | null = null;
   let stopped: actions.StoppedContainerSnapshot | null = null;
@@ -131,7 +132,7 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
         ['exec', sourceName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
         async (ctx, command) => { preSize = await actions.readJournalSize(ctx, command); }),
       { id: 'disk-preflight', description:
-        `require free disk at ${input.migrationDir} >= ${HARDEN_DISK_PREFLIGHT_FACTOR}x journal size `
+        `require free disk at ${migrationDir} >= ${HARDEN_DISK_PREFLIGHT_FACTOR}x journal size `
         + `(export copy + docker-volume seed copy usually share the root filesystem)`,
         execute: (ctx: actions.HardenWorkflowInputs) => actions.checkFreeDisk(ctx, preSize) },
     ] : []),
@@ -153,7 +154,7 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
     dockerPhase('seed-volume',
       `seed the volume from ${exportPath} via a helper container (same pinned image; `
       + `the volume journal is ALWAYS overwritten from the current export — equal size `
-      + `does not imply equal content; chown ${BLAZEGRAPH_TOMCAT_UID_GID})`, seedRunArgs(input),
+      + `does not imply equal content; chown ${BLAZEGRAPH_TOMCAT_UID_GID})`, seedRunArgs({ ...input, migrationDir }),
       (ctx, command) => actions.seedVolume(ctx, command, requireExport())),
     ...(input.state === 'legacy' ? [dockerPhase('rename-backup',
       `docker rename ${input.containerName} ${backupName} (backup is NEVER removed by this tool)`,

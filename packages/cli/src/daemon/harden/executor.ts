@@ -1,6 +1,6 @@
 /** Harden migration orchestration over the same ordered phases rendered by dry-run. */
 import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import * as os from 'node:os';
 import { BLAZEGRAPH_CONTAINER_PORT, computeBlazegraphHeapMb, defaultDockerRunner,
   type DockerRunner } from '../blazegraph-docker.js';
@@ -66,7 +66,8 @@ export interface HardenMigrationResult {
 
 export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions): Promise<HardenMigrationResult> {
   const docker = opts.docker ?? defaultDockerRunner();
-  const { containerName, namespace, migrationDir, log } = opts;
+  const { containerName, namespace, log } = opts;
+  const migrationDir = resolve(opts.migrationDir);
   const backupName = `${containerName}${HARDEN_BACKUP_SUFFIX}`;
   const exportPath = join(migrationDir, HARDEN_EXPORT_FILENAME);
   const heapMb = computeBlazegraphHeapMb((opts.totalMemoryBytes ?? os.totalmem)(),

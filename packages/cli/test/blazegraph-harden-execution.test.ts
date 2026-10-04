@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { planHardenMigration, executeHardenMigration, HARDEN_DISK_PREFLIGHT_FACTOR, HARDEN_EXPORT_FILENAME, type HardenStep } from '../src/daemon/blazegraph-harden.js';
 import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_JOURNAL_FILE, type DockerRunner } from '../src/daemon/blazegraph-docker.js';
 import { storeHardenLockPath } from '../src/daemon/store-runtime-monitor.js';
@@ -48,6 +48,22 @@ describe('executeHardenMigration', () => {
     freeDiskBytes: async () => 10 ** 12,
     readyIntervalMs: 1,
     readyTimeoutMs: 200,
+  });
+
+  it('resolves a relative migration directory before disk preflight, export, seeding and result construction', async () => {
+    const relativeDir = relative(process.cwd(), migrationDir);
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
+    const { fn } = verifierFetch();
+    const diskDirectories: string[] = [];
+    const result = await executeHardenMigration({ ...baseOpts(runner, fn), migrationDir: relativeDir,
+      freeDiskBytes: async directory => { diskDirectories.push(directory); return 10 ** 12; } });
+    const absoluteDir = resolve(relativeDir);
+    expect(result.exportPath).toBe(join(absoluteDir, HARDEN_EXPORT_FILENAME));
+    expect(diskDirectories).toEqual([absoluteDir]);
+    expect(calls).toContainEqual(['cp', `${NAME}:${BLAZEGRAPH_JOURNAL_FILE}`, result.exportPath]);
+    expect(calls.find(args => args[0] === 'run' && args.includes('--rm'))).toContain(`${absoluteDir}:/seed:ro`);
+    expect(readFileSync(result.exportPath!)).toHaveLength(JOURNAL_BYTES);
+    assertSafetyInvariants(calls, absoluteDir, true);
   });
 
   it('refuses a daemon that claimed its PID before migration lock acquisition without exposing a replacement', async () => {
