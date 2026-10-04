@@ -26,6 +26,7 @@ import {
   type SwmPointerFault,
 } from '../../agent/test/_helpers/swm-pointer-fault-store.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
+import { promoteJobToView } from '../src/daemon/routes/shared-assertion-helpers.js';
 import { runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
 import { createAsyncPromoteWorkerFixture } from './_helpers/async-promote-worker-fixture.js';
 
@@ -132,10 +133,20 @@ describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
         });
         expect(afterFailure.state).toBe('failed');
         expect(afterFailure.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+        expect(promoteJobToView(afterFailure).lastError).toMatchObject({
+          code: 'fatal', diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE', retryable: false,
+        });
+        // Intentional failed window: the durable sweep owns replay. Clear must
+        // retain this exact repair evidence before a restart or periodic sweep.
+        expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+        expect((await queue.getStatus(jobId))!.state).toBe('failed');
         expect(logs.some((line) => line.includes('"errorCode":"PROMOTE_POST_COMMIT_FAILURE"'))).toBe(true);
         expect(await restartedQueue.recoverPostCommitFailures()).toEqual([{
           jobId, action: 'requeued', attempt: 1, maxAttempts: 5, nextRetryAt: clock.now() + BACKOFF_MS,
         }]);
+        expect(promoteJobToView((await restartedQueue.getStatus(jobId))!).lastError).toMatchObject({
+          code: 'fatal', diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE', retryable: true,
+        });
       }
 
       // Backoff, not a tight loop: nothing is claimable before the retry time.
