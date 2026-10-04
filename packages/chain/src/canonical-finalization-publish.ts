@@ -86,4 +86,3 @@ export async function resolveCanonicalFinalizationPublish(
     ? { status: 'confirmed', receipt: canonicalReceipt, publish: parsedPublish }
     : { status: 'rejected' };
 }
-
