@@ -1143,6 +1143,45 @@ describe('Phase D - local-first VM reconcile and batch recovery', () => {
     });
   });
 
+  it.each(['no-swm', 'verified-vm-metadata-pending', 'corrupt-head'] as const)(
+    'queues chain-backed %s without starting inline recovery or consulting retired cache hooks',
+    async (finalizationOutcome) => {
+      const retiredHook = vi.fn(async () => { throw new Error('retired negative cache was consulted'); });
+      const internals = await boot({
+        loadAll: async () => [], save: async () => {}, delete: async () => {},
+        loadVmReconcileNegative: retiredHook, saveVmReconcileNegative: retiredHook,
+        deleteVmReconcileNegative: retiredHook, deleteVmReconcileNegativesForContextGraph: retiredHook,
+      });
+      const onChainCgId = 669n;
+      const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: STAGED_KA_AUTHOR, kaNumber: 12n });
+      const root = `0x${'a7'.repeat(32)}`;
+      registerUnmatchedKC(internals.chain, kaId, onChainCgId, root);
+      const finalized = vi.fn(async () => {
+        if (finalizationOutcome === 'corrupt-head') throw new KnowledgeAssetWorkspaceHeadCorruptError('corrupt exact head');
+        return finalizationOutcome;
+      });
+      (internals as any).getOrCreateFinalizationHandler = () => ({
+        classifyChainReconcileLocalCandidate: async () => ({ kind: 'present' }),
+        handleChainReconciledKC: finalized,
+      });
+      const inline = vi.fn(async () => { throw new Error('inline recovery started'); });
+      internals.syncContextGraphFromConnectedPeers = inline;
+      internals.recoverVmReconcileBatch = inline;
+
+      const outcome = await internals.reconcileChainOrdinal('669', onChainCgId, 0, 100);
+      expect(finalized).toHaveBeenCalledTimes(1);
+      expect(outcome).toEqual(finalizationOutcome === 'corrupt-head' ? { status: 'pending' } : {
+        status: 'pending', recovery: {
+          localCgId: '669', onChainCgId: '669', ordinal: 0,
+          ual: buildKnowledgeAssetUal(internals.chain.chainId, STAGED_KA_AUTHOR, 12n),
+          merkleRoot: root.slice(2), kaId: kaId.toString(), reason: finalizationOutcome,
+        },
+      });
+      expect(inline).not.toHaveBeenCalled();
+      expect(retiredHook).not.toHaveBeenCalled();
+    },
+  );
+
   it('keeps a corrupt SWM head on one KA from failing the whole graph reconcile', async () => {
     const captured: ReplicationEvent[] = [];
     agent = await DKGAgent.create({
