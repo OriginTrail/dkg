@@ -926,7 +926,20 @@ export class QueryMethods extends DKGAgentBase {
           // a different generation. The next request rechecks the join, while
           // the independent authority refresh loop may accept its stable
           // catalog generation in the meantime.
-          if (this.localApprovedAgentByCG?.has(contextGraphId)) return initial;
+          //
+          // Join intent alone does not say the graph is private: signing a
+          // join request records it for public graphs too, and before any
+          // metadata arrives. Only a graph whose own `_meta` declares it
+          // private is governed by the join proof. Any other graph keeps the
+          // signed-seed path below, or a public join could never bootstrap.
+          if (this.localApprovedAgentByCG?.has(contextGraphId)) {
+            const declaredPrivate = await this.getOwnCgMetaFacts(contextGraphId, { signal }).then(
+              (ownMeta) => ownMeta.accessPolicy?.trim().toLowerCase() === 'private',
+              // Unreadable metadata cannot rule the join proof out.
+              () => true,
+            );
+            if (declaredPrivate) return initial;
+          }
 
           // The finalized index proved exact absence, but a replica cannot
           // consume that fact until it authenticates the owner-signed policy
