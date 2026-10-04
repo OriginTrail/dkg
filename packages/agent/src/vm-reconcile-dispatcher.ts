@@ -123,6 +123,19 @@ export class VmReconcileDispatcher<T> {
     void this.dispatch(key, 'live').catch(() => undefined);
   }
 
+  /**
+   * A live nudge with its completion handle. Undefined in the two cases
+   * `triggerLive` drops without a trace: the nudge is held after a failed
+   * pass, or the bounded queue has no room for it.
+   */
+  protected tryDispatchLive(key: string): Promise<T> | undefined {
+    if (this.states.get(key)?.hold === 'live-blocked') return undefined;
+    const outcome = this.admit(key, 'live');
+    if (!('completion' in outcome)) return undefined;
+    void outcome.completion.catch(() => undefined);
+    return outcome.completion;
+  }
+
   /** A newly established binding is fresh evidence, so its first live nudge must not inherit an old discovery miss. */
   releaseLiveHold(key: string): void {
     const state = this.states.get(key);
@@ -503,6 +516,44 @@ class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
       retainCapacity: (signal: AbortSignal) => this.retainPeriodicCapacity(signal),
     }));
   }
+
+  /** The runtime's nudge for a graph that waited for sync admission. */
+  nudgeLive(key: string): Promise<T> | undefined {
+    return this.tryDispatchLive(key);
+  }
+}
+
+/** A refused retry's delay, and how often a waiting queue re-reads capacity. */
+const LOCAL_ADMISSION_RETRY_MS = 2_500;
+/**
+ * How long a nudged pass holds the next waiter back when it has not settled:
+ * long enough to reach its own admission, after which the capacity read
+ * accounts for it. Without the bound a long fetch on a node with several sync
+ * slots would keep its free ones idle.
+ */
+const LOCAL_ADMISSION_TURN_MAX_MS = 15_000;
+
+export interface LocalAdmissionWaitOptions {
+  signal?: AbortSignal;
+  isCurrent: () => boolean;
+  /** Whether the node's sync admission would take this graph's fetch right now. */
+  canAdmit?: () => boolean;
+}
+
+interface LocalAdmissionWaiter extends LocalAdmissionWaitOptions {
+  /** The earliest this waiter may be nudged. */
+  eligibleAt: number;
+  onAbort: () => void;
+}
+
+/** A capacity read that cannot answer falls back to the plain bounded retry. */
+function localAdmissionAvailable(waiter: LocalAdmissionWaiter): boolean {
+  if (!waiter.canAdmit) return true;
+  try {
+    return waiter.canAdmit();
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -516,8 +567,14 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly dispatcher: VmReconcileRuntimeDispatcher<T>;
   private readonly planner: VmReconcileSweepPlanner;
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
-  private readonly localAdmissionRetries = new Map<string, () => void>();
+  /** Graphs waiting for node-local sync admission, in the order they are served. */
+  private readonly localAdmissionWaiters = new Map<string, LocalAdmissionWaiter>();
   private readonly maxLocalAdmissionRetries: number;
+  /** The waiter nudged last, until its pass settles. */
+  private localAdmissionTurn: { key: string; startedAt: number } | undefined;
+  /** No waiter is nudged before this time: a nudged pass was refused all the same. */
+  private localAdmissionHoldUntil = 0;
+  private localAdmissionTimer: ReturnType<typeof setTimeout> | undefined;
   private closed = false;
 
   constructor(
@@ -528,7 +585,19 @@ export class VmReconcileSchedulingRuntime<T> {
     this.maxLocalAdmissionRetries = options.maxPending ?? 256;
     let sweepAdmission!: VmReconcileSweepAdmission<T>;
     this.dispatcher = new VmReconcileRuntimeDispatcher(
-      run,
+      async (key, source) => {
+        const waitingBefore = this.localAdmissionWaiters.get(key);
+        try {
+          return await run(key, source);
+        } finally {
+          // A pass that was not refused again is no longer waiting. Whatever
+          // it used is free now, so this is also when the next waiter can go.
+          if (waitingBefore !== undefined && this.localAdmissionWaiters.get(key) === waitingBefore) {
+            this.removeLocalAdmissionWaiter(key);
+          }
+          this.wakeLocalAdmissionWaiter();
+        }
+      },
       onFailure,
       options,
       (admission) => { sweepAdmission = admission; },
@@ -542,33 +611,147 @@ export class VmReconcileSchedulingRuntime<T> {
 
   triggerLive(key: string): void { this.dispatcher.triggerLive(key); }
   /**
-   * Local sync pressure earns one bounded retry, rather than peer backoff.
-   * The timer owns no sync lease or VM worker; its nudge re-enters the ordinary
-   * bounded dispatcher, including foreground-burst and periodic fairness.
+   * Local sync pressure earns a bounded retry, rather than peer backoff.
+   *
+   * The graph waits in arrival order and is nudged once the node's sync
+   * admission can take its fetch, one waiter at a time. Repeating the pass on a
+   * timer to find that out costs its chain reads on every attempt, and every
+   * waiting graph pays them at once. A waiter owns no sync lease or VM worker;
+   * its nudge re-enters the ordinary bounded dispatcher, including
+   * foreground-burst and periodic fairness, and the periodic sweep still
+   * visits a waiting graph.
+   *
+   * `canAdmit` reads the admission the fetch will ask. A waiter without it is
+   * nudged once after the retry delay.
    */
-  retryLocalAdmission(key: string, options: {
-    signal?: AbortSignal;
-    isCurrent: () => boolean;
-  }): void {
+  retryLocalAdmission(key: string, options: LocalAdmissionWaitOptions): void {
     if (this.closed || options.signal?.aborted || !options.isCurrent()) return;
-    this.localAdmissionRetries.get(key)?.();
-    if (this.localAdmissionRetries.size >= this.maxLocalAdmissionRetries) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const cancel = () => {
-      if (timer !== undefined) clearTimeout(timer);
-      options.signal?.removeEventListener('abort', cancel);
-      if (this.localAdmissionRetries.get(key) === cancel) this.localAdmissionRetries.delete(key);
+    const refusedTurn = this.localAdmissionTurn?.key === key;
+    // The nudged graph was refused all the same, so the capacity read was
+    // wrong or capacity went elsewhere first. It keeps its place at the head,
+    // and nothing is nudged for one delay so a wrong read cannot spin passes.
+    if (this.parkLocalAdmissionWaiter(key, options, refusedTurn ? 'front' : 'keep') && refusedTurn) {
+      this.localAdmissionHoldUntil = Date.now() + LOCAL_ADMISSION_RETRY_MS;
+    }
+    this.armLocalAdmissionTimer();
+  }
+
+  /**
+   * A graph that just used the node's sync admission and has more to fetch
+   * goes behind the graphs already waiting for it. Returns false, and parks
+   * nothing, when no other graph is waiting.
+   */
+  yieldLocalAdmissionTurn(key: string, options: LocalAdmissionWaitOptions): boolean {
+    if (this.closed || options.signal?.aborted || !options.isCurrent()) return false;
+    let othersWaiting = false;
+    for (const waiting of this.localAdmissionWaiters.keys()) {
+      if (waiting !== key) { othersWaiting = true; break; }
+    }
+    if (!othersWaiting) return false;
+    const parked = this.parkLocalAdmissionWaiter(key, options, 'back');
+    this.armLocalAdmissionTimer();
+    return parked;
+  }
+
+  private parkLocalAdmissionWaiter(
+    key: string,
+    options: LocalAdmissionWaitOptions,
+    position: 'front' | 'back' | 'keep',
+  ): boolean {
+    const existing = this.localAdmissionWaiters.get(key);
+    if (!existing && this.localAdmissionWaiters.size >= this.maxLocalAdmissionRetries) return false;
+    const now = Date.now();
+    const eligibleAt = position === 'keep' && existing
+      ? existing.eligibleAt
+      : options.canAdmit ? now : now + LOCAL_ADMISSION_RETRY_MS;
+    const waiter: LocalAdmissionWaiter = {
+      eligibleAt,
+      isCurrent: options.isCurrent,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.canAdmit ? { canAdmit: options.canAdmit } : {}),
+      onAbort: () => {
+        if (this.localAdmissionWaiters.get(key) !== waiter) return;
+        this.removeLocalAdmissionWaiter(key);
+        this.armLocalAdmissionTimer();
+      },
     };
-    this.localAdmissionRetries.set(key, cancel);
-    options.signal?.addEventListener('abort', cancel, { once: true });
-    timer = setTimeout(() => {
-      cancel();
-      if (!this.closed && !options.signal?.aborted && options.isCurrent()) {
-        this.dispatcher.triggerLive(key);
+    existing?.signal?.removeEventListener('abort', existing.onAbort);
+    if (position === 'front') {
+      const behind = [...this.localAdmissionWaiters].filter(([waiting]) => waiting !== key);
+      this.localAdmissionWaiters.clear();
+      this.localAdmissionWaiters.set(key, waiter);
+      for (const [waiting, entry] of behind) this.localAdmissionWaiters.set(waiting, entry);
+    } else {
+      // Setting an existing key keeps its place; `back` gives it up first.
+      if (position === 'back') this.localAdmissionWaiters.delete(key);
+      this.localAdmissionWaiters.set(key, waiter);
+    }
+    options.signal?.addEventListener('abort', waiter.onAbort, { once: true });
+    return true;
+  }
+
+  private removeLocalAdmissionWaiter(key: string): void {
+    const waiter = this.localAdmissionWaiters.get(key);
+    if (!waiter) return;
+    waiter.signal?.removeEventListener('abort', waiter.onAbort);
+    this.localAdmissionWaiters.delete(key);
+  }
+
+  /**
+   * Nudge the longest waiter the node's sync admission can take, unless a
+   * nudged pass is still out. Waiters are read in arrival order and one that
+   * cannot be admitted yet is passed over, so a graph with capacity of its own
+   * is not held behind one without.
+   */
+  private wakeLocalAdmissionWaiter(): void {
+    if (this.closed) return;
+    const now = Date.now();
+    const turn = this.localAdmissionTurn;
+    const turnIsOut = turn !== undefined && now - turn.startedAt < LOCAL_ADMISSION_TURN_MAX_MS;
+    if (!turnIsOut && now >= this.localAdmissionHoldUntil) {
+      // Removing the entry being visited is safe on a Map.
+      for (const [key, waiter] of this.localAdmissionWaiters) {
+        if (waiter.signal?.aborted || !waiter.isCurrent()) {
+          this.removeLocalAdmissionWaiter(key);
+          continue;
+        }
+        if (waiter.eligibleAt > now || !localAdmissionAvailable(waiter)) continue;
+        this.removeLocalAdmissionWaiter(key);
+        const completion = this.dispatcher.nudgeLive(key);
+        // Held after a failed pass, or no queue room: the periodic sweep owns it.
+        if (!completion) continue;
+        const started = { key, startedAt: now };
+        this.localAdmissionTurn = started;
+        const settle = () => {
+          if (this.localAdmissionTurn === started) this.localAdmissionTurn = undefined;
+          this.wakeLocalAdmissionWaiter();
+        };
+        completion.then(settle, settle);
+        break;
       }
-    }, 2_500);
-    timer.unref?.();
-    if (options.signal?.aborted) cancel();
+    }
+    this.armLocalAdmissionTimer();
+  }
+
+  /** One timer for the whole queue: the next delay to run out, else a capacity re-read per interval. */
+  private armLocalAdmissionTimer(): void {
+    if (this.localAdmissionTimer !== undefined) clearTimeout(this.localAdmissionTimer);
+    this.localAdmissionTimer = undefined;
+    if (this.closed || this.localAdmissionWaiters.size === 0) return;
+    const now = Date.now();
+    let delay = LOCAL_ADMISSION_RETRY_MS;
+    if (this.localAdmissionHoldUntil > now) {
+      delay = this.localAdmissionHoldUntil - now;
+    } else {
+      for (const waiter of this.localAdmissionWaiters.values()) {
+        if (waiter.eligibleAt > now) delay = Math.min(delay, waiter.eligibleAt - now);
+      }
+    }
+    this.localAdmissionTimer = setTimeout(() => {
+      this.localAdmissionTimer = undefined;
+      this.wakeLocalAdmissionWaiter();
+    }, delay);
+    this.localAdmissionTimer.unref?.();
   }
   releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
@@ -621,7 +804,9 @@ export class VmReconcileSchedulingRuntime<T> {
 
   close(): Promise<void> {
     this.closed = true;
-    for (const cancel of this.localAdmissionRetries.values()) cancel();
+    for (const key of this.localAdmissionWaiters.keys()) this.removeLocalAdmissionWaiter(key);
+    this.armLocalAdmissionTimer();
+    this.localAdmissionTurn = undefined;
     this.planner.reset();
     return this.dispatcher.close();
   }
