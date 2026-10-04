@@ -104,7 +104,7 @@ export const daemonState: {
   /** Runtime external-store monitor (store.monitor.*); set by
    *  `runDaemonInner` when the backend is external, read by
    *  `/api/status`. Null for local backends or pre-boot. */
-  storeMonitor: { readonly stats: StoreMonitorStats; stop(): void } | null;
+  storeMonitor: { readonly stats: StoreMonitorStats; stop(): Promise<void> } | null;
 } = {
   catchupRunner: null,
   isUpdating: false,

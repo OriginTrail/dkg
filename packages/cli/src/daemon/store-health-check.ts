@@ -43,6 +43,7 @@
  * wipe but a SPARQL wipe that can't run.
  */
 import { isExternalBackend, getSparqlEndpoint } from '@origintrail-official/dkg-storage';
+import { runWithOperationDeadline } from './operation-deadline.js';
 
 export interface StoreHealthCheckOptions {
   storeConfig:
@@ -53,6 +54,8 @@ export interface StoreHealthCheckOptions {
     | undefined;
   /** Probe timeout in milliseconds. Defaults to 5_000. */
   timeoutMs?: number;
+  /** Runtime-monitor retirement cancels the outstanding probe. */
+  signal?: AbortSignal;
   /**
    * Override for the SPARQL HTTP transport. Tests inject a mock to
    * exercise reachable / unreachable / 404-namespace-missing branches;
@@ -104,55 +107,58 @@ export async function checkExternalStoreReachable(
 
   const fetchImpl = opts.fetch ?? globalThis.fetch;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const res = await fetchImpl(endpoint.queryUrl, {
-      method: 'POST',
-      headers: {
-        ...endpoint.headers,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/sparql-results+json',
-      },
-      body: `query=${encodeURIComponent('ASK { ?s ?p ?o }')}`,
-      signal: controller.signal,
-    });
+    return await runWithOperationDeadline(async signal => {
+      const res = await fetchImpl(endpoint.queryUrl, {
+        method: 'POST',
+        headers: {
+          ...endpoint.headers,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/sparql-results+json',
+        },
+        body: `query=${encodeURIComponent('ASK { ?s ?p ?o }')}`,
+        signal,
+      });
 
-    if (res.ok) {
-      // We don't parse the body — a 200 with any body shape proves the
-      // endpoint speaks SPARQL Protocol well enough to answer.
-      return {
-        ok: true,
-        backend: opts.storeConfig!.backend,
-        endpoint: endpoint.queryUrl,
-      };
-    }
+      if (res.ok) {
+        // We don't parse the body — a 200 with any body shape proves the
+        // endpoint speaks SPARQL Protocol well enough to answer.
+        return {
+          ok: true,
+          backend: opts.storeConfig!.backend,
+          endpoint: endpoint.queryUrl,
+        };
+      }
 
-    // 404 deserves a specific message because the fix is different from
-    // a network failure. Blazegraph returns 404 when the namespace path
-    // doesn't exist (e.g. operator wrote `…/namespace/mynode/sparql`
-    // before running `dkg init`'s Docker provisioner that creates the
-    // `mynode` namespace).
-    if (res.status === 404) {
+      // 404 deserves a specific message because the fix is different from
+      // a network failure. Blazegraph returns 404 when the namespace path
+      // doesn't exist (e.g. operator wrote `…/namespace/mynode/sparql`
+      // before running `dkg init`'s Docker provisioner that creates the
+      // `mynode` namespace).
+      if (res.status === 404) {
+        return {
+          ok: false,
+          backend: opts.storeConfig!.backend,
+          endpoint: endpoint.queryUrl,
+          namespaceMissing: true,
+          error:
+            `endpoint returned 404 — namespace likely doesn't exist. ` +
+            `Create it via the Blazegraph UI / API or use the Docker convenience path (dkg init).`,
+        };
+      }
+
+      const text = await res.text().catch(() => '');
       return {
         ok: false,
         backend: opts.storeConfig!.backend,
         endpoint: endpoint.queryUrl,
-        namespaceMissing: true,
-        error:
-          `endpoint returned 404 — namespace likely doesn't exist. ` +
-          `Create it via the Blazegraph UI / API or use the Docker convenience path (dkg init).`,
+        error: `HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`,
       };
-    }
-
-    const text = await res.text().catch(() => '');
-    return {
-      ok: false,
-      backend: opts.storeConfig!.backend,
-      endpoint: endpoint.queryUrl,
-      error: `HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`,
-    };
+    }, { timeoutMs, signal: opts.signal, timeoutError: () => {
+      const error = new Error(`timed out after ${timeoutMs}ms`);
+      error.name = 'AbortError';
+      return error;
+    } });
   } catch (err) {
     const message = (err as Error).message ?? String(err);
     const isAbort = (err as Error).name === 'AbortError' || /aborted/i.test(message);
@@ -164,8 +170,6 @@ export async function checkExternalStoreReachable(
         ? `timed out after ${timeoutMs}ms`
         : `transport error: ${message}`,
     };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -210,35 +214,25 @@ export async function readStoreIdentityTag(opts: {
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
 }): Promise<StoreIdentityReadResult> {
-  const controller = new AbortController();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const error = new Error(`identity SELECT timed out after ${timeoutMs}ms`);
-      controller.abort(error);
-      reject(error);
-    }, timeoutMs);
-    timer.unref?.();
-  });
   try {
-    return await Promise.race([deadline, (async (): Promise<StoreIdentityReadResult> => {
+    return await runWithOperationDeadline(async (signal): Promise<StoreIdentityReadResult> => {
       const query = `SELECT ?name WHERE { GRAPH <${STORE_META_GRAPH}> { <${STORE_META_SUBJECT}> <${STORE_META_PREDICATE}> ?name } }`;
       const response = await (opts.fetch ?? globalThis.fetch)(opts.endpoint.queryUrl, {
         method: 'POST',
         headers: { ...opts.endpoint.headers, 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/sparql-results+json' },
         body: `query=${encodeURIComponent(query)}`,
-        signal: controller.signal,
+        signal,
       });
       if (!response.ok) return { ok: false, error: `identity SELECT returned HTTP ${response.status} ${response.statusText}` };
       const body = await response.json().catch(() => null) as { results?: { bindings?: Array<{ name?: { value?: unknown } }> } } | null;
       const bindings = Array.isArray(body?.results?.bindings) ? body.results.bindings : [];
       const value = bindings[0]?.name?.value;
       return { ok: true, nodeName: typeof value === 'string' && value.length > 0 ? value : null, bindingCount: bindings.length };
-    })()]);
+    }, { timeoutMs, timeoutError: () => new Error(`identity SELECT timed out after ${timeoutMs}ms`) });
   } catch (error) {
     return { ok: false, error: `identity SELECT failed: ${(error as Error).message}` };
-  } finally { clearTimeout(timer); }
+  }
 }
 
 export interface StoreIdentityTagOptions {

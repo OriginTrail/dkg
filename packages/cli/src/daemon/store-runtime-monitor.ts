@@ -37,6 +37,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultDockerRunner, deriveBlazegraphContainerName, type DockerRunner } from './blazegraph-docker.js';
 import { checkExternalStoreReachable } from './store-health-check.js';
+import { CoalescingRecurringTask } from '@origintrail-official/dkg-core';
 
 function parsePositiveIntegerEnv(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -201,7 +202,8 @@ export interface StoreRuntimeMonitorOptions {
 
 export interface StoreRuntimeMonitor {
   start(): void;
-  stop(): void;
+  /** Cancel the active probe and drain a Docker restart already issued. */
+  stop(): Promise<void>;
   /** One probe cycle; exposed so tests drive the state machine directly. */
   tick(): Promise<void>;
   readonly stats: StoreMonitorStats;
@@ -237,120 +239,123 @@ export function createStoreRuntimeMonitor(
   // the threshold so a post-cooldown restart fires on the next tick, not
   // after another full run of failures.
   let rawConsecutive = 0;
-  let inFlight = false;
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let started = false;
   // Lazily constructed so a log-only monitor never spawns a docker probe.
   let docker: DockerRunner | null = opts.docker ?? null;
 
-  async function tick(): Promise<void> {
-    if (inFlight) return; // a slow probe must not stack a second one
-    inFlight = true;
-    try {
-      const result = await checkExternalStoreReachable({
-        storeConfig: opts.storeConfig,
-        timeoutMs: probeTimeoutMs,
-        fetch: opts.fetch,
-      });
-      stats.probesTotal += 1;
-      if (result.ok) {
-        if (rawConsecutive > 0) {
-          log(`[store.monitor] store recovered after ${rawConsecutive} failed probe(s)`);
-        }
-        rawConsecutive = 0;
-        stats.consecutiveFailures = 0;
-        stats.lastProbeOkAt = now();
-        return;
+  async function probe(signal: AbortSignal): Promise<void> {
+    const result = await checkExternalStoreReachable({
+      storeConfig: opts.storeConfig,
+      timeoutMs: probeTimeoutMs,
+      fetch: opts.fetch,
+      signal,
+    });
+    signal.throwIfAborted();
+    stats.probesTotal += 1;
+    if (result.ok) {
+      if (rawConsecutive > 0) {
+        log(`[store.monitor] store recovered after ${rawConsecutive} failed probe(s)`);
       }
-
-      stats.failuresTotal += 1;
-      rawConsecutive += 1;
-      stats.consecutiveFailures = Math.min(rawConsecutive, failureThreshold);
-      log(
-        `[store.monitor] probe failed (${stats.consecutiveFailures}/${failureThreshold}): ` +
-        `${result.error ?? 'unknown error'}`,
-      );
-      if (stats.consecutiveFailures < failureThreshold) return;
-
-      if (opts.managedContainerName == null) {
-        // Operator-managed store: never touch docker; re-alert at every
-        // threshold multiple rather than every tick.
-        if (rawConsecutive % failureThreshold === 0) {
-          log(
-            `[store.monitor] ERROR store.monitor.unhealthy endpoint=${result.endpoint ?? '<unknown>'} ` +
-            `— NOT daemon-managed; manual intervention required`,
-          );
-        }
-        return;
-      }
-
-      // BLOCKER-1(a): a live `dkg store harden` run deliberately stops the
-      // container and copies its multi-GB journal — a restart here would
-      // tear that export. Skip ANY restart while the lock is live; no
-      // cooldown and no counter reset, so the restart fires on the first
-      // failing tick after the lock clears. Logged at threshold multiples
-      // (every ~failureThreshold ticks), not every tick.
-      if (opts.hardenLockPath && hardenLockIsLive(opts.hardenLockPath, log)) {
-        if (rawConsecutive % failureThreshold === 0) {
-          log(
-            `[store.monitor] store.monitor.suspended-by-harden container=${opts.managedContainerName} ` +
-            `lock=${opts.hardenLockPath} — 'dkg store harden' is in progress; docker restarts suspended`,
-          );
-        }
-        return;
-      }
-
-      const cooldownUntil = stats.cooldownUntilMs ?? 0;
-      if (now() < cooldownUntil) {
-        log(
-          `[store.monitor] store.monitor.cooldown-wait remaining=${cooldownUntil - now()}ms ` +
-          `container=${opts.managedContainerName}`,
-        );
-        return;
-      }
-
-      // Restart-ONLY — the monitor never removes, recreates, or touches
-      // volumes; recreation is exclusively `dkg store harden`. The shared
-      // primitive normalizes spawn rejections, so this timer-driven tick
-      // can never leak an unhandled rejection.
-      docker ??= defaultDockerRunner();
-      const restart = await restartManagedContainer(docker, opts.managedContainerName);
-      if (restart.exitCode === 0) {
-        stats.restartsTotal += 1;
-        stats.lastRestartAt = now();
-        log(
-          `[store.monitor] store.monitor.restart container=${opts.managedContainerName} ` +
-          `restarts=${stats.restartsTotal}`,
-        );
-      } else {
-        stats.restartFailuresTotal += 1;
-        log(
-          `[store.monitor] store.monitor.restart-failed container=${opts.managedContainerName} ` +
-          `exit=${restart.exitCode} stderr=${restart.stderr.trim() || '(empty)'}`,
-        );
-      }
-      // Cooldown starts even on a failed restart attempt — hammering
-      // `docker restart` against a broken engine helps nobody.
-      stats.cooldownUntilMs = now() + restartCooldownMs;
       rawConsecutive = 0;
       stats.consecutiveFailures = 0;
-    } finally {
-      inFlight = false;
+      stats.lastProbeOkAt = now();
+      return;
     }
+
+    stats.failuresTotal += 1;
+    rawConsecutive += 1;
+    stats.consecutiveFailures = Math.min(rawConsecutive, failureThreshold);
+    log(
+      `[store.monitor] probe failed (${stats.consecutiveFailures}/${failureThreshold}): ` +
+      `${result.error ?? 'unknown error'}`,
+    );
+    if (stats.consecutiveFailures < failureThreshold) return;
+
+    if (opts.managedContainerName == null) {
+      // Operator-managed store: never touch docker; re-alert at every
+      // threshold multiple rather than every tick.
+      if (rawConsecutive % failureThreshold === 0) {
+        log(
+          `[store.monitor] ERROR store.monitor.unhealthy endpoint=${result.endpoint ?? '<unknown>'} ` +
+          `— NOT daemon-managed; manual intervention required`,
+        );
+      }
+      return;
+    }
+
+    // BLOCKER-1(a): a live `dkg store harden` run deliberately stops the
+    // container and copies its multi-GB journal — a restart here would
+    // tear that export. Skip ANY restart while the lock is live; no
+    // cooldown and no counter reset, so the restart fires on the first
+    // failing tick after the lock clears. Logged at threshold multiples
+    // (every ~failureThreshold ticks), not every tick.
+    if (opts.hardenLockPath && hardenLockIsLive(opts.hardenLockPath, log)) {
+      if (rawConsecutive % failureThreshold === 0) {
+        log(
+          `[store.monitor] store.monitor.suspended-by-harden container=${opts.managedContainerName} ` +
+          `lock=${opts.hardenLockPath} — 'dkg store harden' is in progress; docker restarts suspended`,
+        );
+      }
+      return;
+    }
+
+    const cooldownUntil = stats.cooldownUntilMs ?? 0;
+    if (now() < cooldownUntil) {
+      log(
+        `[store.monitor] store.monitor.cooldown-wait remaining=${cooldownUntil - now()}ms ` +
+        `container=${opts.managedContainerName}`,
+      );
+      return;
+    }
+
+    // Restart-ONLY — the monitor never removes, recreates, or touches
+    // volumes; recreation is exclusively `dkg store harden`. The shared
+    // primitive normalizes spawn rejections, so this timer-driven tick
+    // can never leak an unhandled rejection.
+    docker ??= defaultDockerRunner();
+    signal.throwIfAborted();
+    const restart = await restartManagedContainer(docker, opts.managedContainerName);
+    if (restart.exitCode === 0) {
+      stats.restartsTotal += 1;
+      stats.lastRestartAt = now();
+      log(
+        `[store.monitor] store.monitor.restart container=${opts.managedContainerName} ` +
+        `restarts=${stats.restartsTotal}`,
+      );
+    } else {
+      stats.restartFailuresTotal += 1;
+      log(
+        `[store.monitor] store.monitor.restart-failed container=${opts.managedContainerName} ` +
+        `exit=${restart.exitCode} stderr=${restart.stderr.trim() || '(empty)'}`,
+      );
+    }
+    // Cooldown starts even on a failed restart attempt — hammering
+    // `docker restart` against a broken engine helps nobody.
+    stats.cooldownUntilMs = now() + restartCooldownMs;
+    rawConsecutive = 0;
+    stats.consecutiveFailures = 0;
   }
+
+  const owner = new CoalescingRecurringTask({
+    retryIntervalMs: intervalMs,
+    requestWhileRunning: 'drop',
+    runPass: async signal => { await probe(signal); return started ? 'rearm' : 'idle'; },
+    onError: error => log(`[store.monitor] probe cycle failed: ${String(error)}`),
+    closingMessage: 'Store runtime monitor stopped',
+  });
 
   return {
     start() {
-      if (timer) return;
-      timer = setInterval(() => { void tick(); }, intervalMs);
-      if (timer.unref) timer.unref();
+      if (owner.closed) return;
+      started = true;
+      owner.schedule(intervalMs);
     },
     stop() {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
+      return owner.close();
     },
-    tick,
+    async tick() {
+      if (owner.request()) await owner.whenIdle();
+    },
     stats,
   };
 }

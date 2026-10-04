@@ -87,7 +87,8 @@ export function startDaemonStoreMonitor(opts: {
   opts.state.storeMonitor = storeMonitor;
 }
 
-export function stopDaemonStoreMonitor(state: StoreMonitorState): void {
-  state.storeMonitor?.stop();
-  state.storeMonitor = null;
+export async function stopDaemonStoreMonitor(state: StoreMonitorState): Promise<void> {
+  const monitor = state.storeMonitor;
+  await monitor?.stop();
+  if (state.storeMonitor === monitor) state.storeMonitor = null;
 }

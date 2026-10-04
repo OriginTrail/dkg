@@ -181,6 +181,55 @@ describe('createStoreRuntimeMonitor', () => {
     expect(monitor.stats.probesTotal).toBe(1);
   });
 
+  it('cancels the delayed threshold probe on stop and never restarts from its late answer', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let probeSignal: AbortSignal | undefined;
+    let calls = 0;
+    const fetch = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      if (++calls === 6) { probeSignal = init?.signal ?? undefined; await gate; }
+      return new Response('dead', { status: 503 });
+    }) as typeof globalThis.fetch;
+    const { monitor, dockerCalls } = makeMonitor({ fetch });
+    for (let i = 0; i < 5; i++) await monitor.tick();
+    const pending = monitor.tick();
+    try {
+      await vi.waitFor(() => expect(calls).toBe(6));
+      await monitor.stop();
+      expect(probeSignal?.aborted).toBe(true);
+      release();
+      await pending;
+      await monitor.tick();
+      expect(restartCalls(dockerCalls)).toEqual([]);
+      expect(calls).toBe(6);
+    } finally { release(); await pending; await monitor.stop(); }
+  });
+
+  it('stop drains a Docker restart already issued and permanently fences further probes', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const run = vi.fn(async () => { await gate; return { stdout: '', stderr: '', exitCode: 0 }; });
+    const { monitor, fetch } = makeMonitor({ docker: { run } });
+    for (let i = 0; i < 5; i++) await monitor.tick();
+    const pending = monitor.tick();
+    let stopped = false;
+    let stopping: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+      stopping = Promise.resolve(monitor.stop()).then(() => { stopped = true; });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(stopped).toBe(false);
+      release();
+      await stopping;
+      await pending;
+      expect(stopped).toBe(true);
+      await monitor.tick();
+      expect(fetch.calls).toHaveLength(6);
+      expect(run).toHaveBeenCalledExactlyOnceWith(['restart', '-t', '30', CONTAINER], { timeoutMs: 120_000 });
+    } finally { release(); await pending; await stopping; await monitor.stop(); }
+  });
+
   it('stats object matches the StoreMonitorStats shape across transitions', async () => {
     const { monitor, fetch, clock } = makeMonitor();
     const expectShape = (s: StoreMonitorStats) => {
@@ -216,7 +265,7 @@ describe('createStoreRuntimeMonitor', () => {
 
   it('honours DKG_STORE_MONITOR_INTERVAL_MS for the timer cadence', () => {
     process.env.DKG_STORE_MONITOR_INTERVAL_MS = '12345';
-    const spy = vi.spyOn(globalThis, 'setInterval');
+    const spy = vi.spyOn(globalThis, 'setTimeout');
     const { monitor } = makeMonitor();
     try {
       monitor.start();

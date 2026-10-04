@@ -3811,7 +3811,7 @@ async function runDaemonInnerWithStartupOwnership(
         autoUpdate.stop();
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
-        stopDaemonStoreMonitor(daemonState);
+        await stopDaemonStoreMonitor(daemonState);
         await runChainDiscoveryScan.close().catch((err: unknown) => {
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });

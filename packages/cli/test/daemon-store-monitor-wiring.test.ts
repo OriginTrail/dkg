@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createFakeDaemonAgent, createFakeDaemonHttpServer } from './_helpers/daemon-boot-doubles.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -127,62 +128,6 @@ const HEALTH_DEAD = {
   error: 'timed out after 5000ms',
 };
 
-function createFakeServer() {
-  const server = {
-    listen: vi.fn((_port: number, _host: string, cb?: () => void) => {
-      cb?.();
-      return server;
-    }),
-    address: vi.fn(() => ({ port: 43124 })),
-    close: vi.fn((cb?: () => void) => {
-      cb?.();
-      return server;
-    }),
-    on: vi.fn(() => server),
-    once: vi.fn(() => server),
-  };
-  return server;
-}
-
-function createFakeAgent() {
-  return {
-    peerId: 'self-peer',
-    // A circuit address up-front, or the boot's relay-reservation loop
-    // polls agent.multiaddrs for a full 10 seconds per test.
-    multiaddrs: ['/ip4/127.0.0.1/tcp/9090/p2p/relay-peer/p2p-circuit/p2p/self-peer'],
-    wallet: {
-      keypair: {
-        publicKey: new Uint8Array([1]),
-        secretKey: new Uint8Array([2]),
-      },
-    },
-    store: {},
-    node: { libp2p: { getMultiaddrs: vi.fn(() => []) } },
-    eventBus: { on: vi.fn() },
-    assertion: { create: vi.fn(), write: vi.fn() },
-    setChatAcl: vi.fn(),
-    setSkillAcl: vi.fn(),
-    onChat: vi.fn(),
-    start: vi.fn(async () => undefined),
-    stop: vi.fn(async () => undefined),
-    publishProfile: vi.fn(async () => undefined),
-    ensureProfilePublished: vi.fn(async () => undefined),
-    publishRelayRegistry: vi.fn(async () => undefined),
-    ensureContextGraphLocal: vi.fn(async () => undefined),
-    getSubscribedContextGraphs: vi.fn(() => new Map()),
-    subscribeToContextGraph: vi.fn(),
-    pingPeers: vi.fn(async () => undefined),
-    listLocalAgents: vi.fn(() => []),
-    registerImportedArtifactByteStore: vi.fn(),
-    getDefaultAgentAddress: vi.fn(() => undefined),
-    query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
-    createContextGraph: vi.fn(),
-    listContextGraphs: vi.fn(async () => []),
-    createACKTransportFactory: vi.fn(() => () => ({})),
-    drainRpcUsage: vi.fn(() => ({ calls: 0, errors: 0, throttledMs: 0, byEndpoint: {} })),
-  };
-}
-
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
     createArg?.chainEventCursorStore?.cursors?.db ??
@@ -231,7 +176,7 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
     sigintListeners = process.listeners('SIGINT') as NodeJS.SignalsListener[];
     sigtermListeners = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
 
-    mocks.createServer.mockImplementation(createFakeServer);
+    mocks.createServer.mockImplementation(() => createFakeDaemonHttpServer({ port: 43124 }));
     mocks.startPublisherRuntimeWithOutcome.mockResolvedValue({
       runtime: null,
       availability: {
@@ -351,9 +296,11 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
 
   it('a healthy managed-store startup installs the runtime monitor into daemonState with the harden lock path, and shutdown stops it', async () => {
     unrefBootTimers();
+    let finishMonitorStop!: () => void;
+    const monitorDrain = new Promise<void>(resolve => { finishMonitorStop = resolve; });
     const fakeMonitor = {
       start: vi.fn(),
-      stop: vi.fn(),
+      stop: vi.fn(() => monitorDrain),
       tick: vi.fn(async () => undefined),
       stats: {
         probesTotal: 0,
@@ -368,7 +315,13 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
       },
     };
     mocks.createStoreRuntimeMonitor.mockReturnValue(fakeMonitor);
-    mocks.agentCreate.mockResolvedValue(createFakeAgent());
+    const fakeAgent = {
+      ...createFakeDaemonAgent(),
+      // Skip the relay-reservation polling loop and retain the ACK factory shape.
+      multiaddrs: ['/ip4/127.0.0.1/tcp/9090/p2p/relay-peer/p2p-circuit/p2p/self-peer'],
+      createACKTransportFactory: vi.fn(() => () => ({})),
+    };
+    mocks.agentCreate.mockResolvedValue(fakeAgent);
 
     await runDaemonInner(true, baseConfig({ store: MANAGED_STORE }), Date.now(), resolveShutdownPolicy(undefined));
 
@@ -391,15 +344,20 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
     const shutdownListeners = (process.listeners('SIGTERM') as NodeJS.SignalsListener[])
       .filter((l) => !sigtermListeners.includes(l));
     expect(shutdownListeners.length).toBeGreaterThan(0);
-    for (const listener of shutdownListeners) {
-      try {
-        await (listener as (signal: string) => unknown)('SIGTERM');
-      } catch (err) {
+    const shuttingDown = Promise.all(shutdownListeners.map(async listener => {
+      try { await (listener as (signal: string) => unknown)('SIGTERM'); }
+      catch (err) {
         // The shutdown path ends in process.exit, which the test mocks to
         // throw — everything before it (including monitor.stop) has run.
         expect((err as Error).message).toMatch(/process\.exit/);
       }
-    }
+    }));
+    try {
+      await vi.waitFor(() => expect(fakeMonitor.stop).toHaveBeenCalled());
+      expect(fakeAgent.stop).not.toHaveBeenCalled();
+      expect(daemonState.storeMonitor).toBe(fakeMonitor);
+    } finally { finishMonitorStop(); await shuttingDown; }
+    expect(fakeAgent.stop).toHaveBeenCalledTimes(1);
     expect(fakeMonitor.stop).toHaveBeenCalled();
     expect(daemonState.storeMonitor).toBeNull();
   });
@@ -408,7 +366,12 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
     process.env.DKG_STORE_MONITOR_DISABLED = '1';
     try {
       unrefBootTimers();
-      mocks.agentCreate.mockResolvedValue(createFakeAgent());
+      mocks.agentCreate.mockResolvedValue({
+        ...createFakeDaemonAgent(),
+        // Skip the relay-reservation polling loop and retain the ACK factory shape.
+        multiaddrs: ['/ip4/127.0.0.1/tcp/9090/p2p/relay-peer/p2p-circuit/p2p/self-peer'],
+        createACKTransportFactory: vi.fn(() => () => ({})),
+      });
       await runDaemonInner(true, baseConfig({ store: MANAGED_STORE }), Date.now(), resolveShutdownPolicy(undefined));
       expect(mocks.createStoreRuntimeMonitor).not.toHaveBeenCalled();
       expect(daemonState.storeMonitor).toBeNull();

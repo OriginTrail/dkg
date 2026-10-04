@@ -1,4 +1,5 @@
 import { blazegraphNamespaceEndpointParts } from '@origintrail-official/dkg-storage';
+import { runWithOperationDeadline } from './operation-deadline.js';
 
 /** Shared JVM, container and probe policy for provisioning and manual migration. */
 export function computeBlazegraphHeapMb(
@@ -137,24 +138,10 @@ export async function fetchWithDeadline(
   init: Parameters<typeof globalThis.fetch>[1],
   timeoutMs: number,
 ): Promise<Response> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const error = new Error(`store probe timed out after ${timeoutMs}ms: ${input}`);
-      controller.abort(error);
-      reject(error);
-    }, timeoutMs);
-    if (timer.unref) timer.unref();
+  return runWithOperationDeadline(signal => fetchImpl(input, { ...init, signal }), {
+    timeoutMs, signal: init?.signal ?? undefined,
+    timeoutError: () => new Error(`store probe timed out after ${timeoutMs}ms: ${input}`),
   });
-  try {
-    return await Promise.race([
-      fetchImpl(input, { ...init, signal: controller.signal }),
-      deadline,
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /** Per-probe fetch deadline used by every readiness/verify probe below. */
