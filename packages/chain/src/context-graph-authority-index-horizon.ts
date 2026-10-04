@@ -42,6 +42,186 @@ interface ContextGraphAuthorityHorizonScopeState {
   recoveryBoundaries?: Map<string, ContextGraphAuthorityRecoveryBoundary>;
 }
 
+type ContextGraphAuthorityRecoveryEvidence =
+  | Readonly<{ kind: 'unproven' }>
+  | Readonly<{
+      kind: 'proven';
+      boundary: ContextGraphAuthorityRecoveryBoundary;
+    }>;
+
+/** The one durable lineage owned by a physical refresh lease. */
+type ContextGraphAuthorityLeaseLineage =
+  | Readonly<{ kind: 'unobserved' }>
+  | Readonly<{
+      kind: 'rooted-missing';
+      repositoryKey: string;
+      rejectionRevision: number;
+    }>
+  | Readonly<{
+      kind: 'rooted';
+      repositoryKey: string;
+      token: number;
+      rejectionRevision: number;
+      recovery: ContextGraphAuthorityRecoveryEvidence;
+    }>
+  | Readonly<{
+      kind: 'admitted';
+      repositoryKey: string;
+      token: number;
+      recovery: ContextGraphAuthorityRecoveryEvidence;
+    }>;
+
+const UNOBSERVED_LEASE_LINEAGE = Object.freeze({ kind: 'unobserved' as const });
+const UNPROVEN_RECOVERY = Object.freeze({ kind: 'unproven' as const });
+
+type PublishRecoveryBoundary = (
+  repositoryKey: string,
+  boundaryToken: number,
+) => ContextGraphAuthorityRecoveryBoundary | undefined;
+
+function recoveryEvidence(
+  token: number,
+  boundary: ContextGraphAuthorityRecoveryBoundary | undefined,
+): ContextGraphAuthorityRecoveryEvidence {
+  return boundary !== undefined && token >= boundary.token
+    ? Object.freeze({ kind: 'proven', boundary })
+    : UNPROVEN_RECOVERY;
+}
+
+/** A rejection invalidates proof, while another key's old root keeps its revision. */
+function rejectLeaseLineage(
+  lineage: ContextGraphAuthorityLeaseLineage,
+  rejectedRepositoryKey: string,
+): ContextGraphAuthorityLeaseLineage {
+  switch (lineage.kind) {
+    case 'unobserved':
+      return lineage;
+    case 'rooted-missing':
+      return lineage.repositoryKey === rejectedRepositoryKey
+        ? UNOBSERVED_LEASE_LINEAGE
+        : lineage;
+    case 'rooted':
+      return lineage.repositoryKey === rejectedRepositoryKey
+        ? Object.freeze({
+            kind: 'admitted',
+            repositoryKey: lineage.repositoryKey,
+            token: lineage.token,
+            recovery: UNPROVEN_RECOVERY,
+          })
+        : Object.freeze({ ...lineage, recovery: UNPROVEN_RECOVERY });
+    case 'admitted':
+      return Object.freeze({ ...lineage, recovery: UNPROVEN_RECOVERY });
+  }
+}
+
+/** Transition the physical lease through one admitted durable observation. */
+function admitLeaseLineage(
+  lineage: ContextGraphAuthorityLeaseLineage,
+  repositoryKey: string,
+  admitted: ContextGraphAuthorityIndexAdmittedRepositoryRecord,
+  state: ContextGraphAuthorityHorizonScopeState,
+  rejectionRevisionAtStart: number,
+  checkpointRejected: boolean,
+  publishRecoveryBoundary: PublishRecoveryBoundary,
+): ContextGraphAuthorityLeaseLineage {
+  if (admitted.kind === 'missing') {
+    return Object.freeze({
+      kind: 'rooted-missing',
+      repositoryKey,
+      rejectionRevision: state.rejectionRevision,
+    });
+  }
+  if (admitted.kind === 'tombstone') {
+    return Object.freeze({
+      kind: 'rooted',
+      repositoryKey,
+      token: admitted.token,
+      rejectionRevision: state.rejectionRevision,
+      recovery: recoveryEvidence(
+        admitted.token,
+        publishRecoveryBoundary(repositoryKey, admitted.token),
+      ),
+    });
+  }
+
+  const rootIsCurrent = (lineage.kind === 'rooted-missing' || lineage.kind === 'rooted')
+    && lineage.repositoryKey === repositoryKey
+    && lineage.rejectionRevision === state.rejectionRevision;
+  const repositoryHasNoRejectedLineage =
+    !state.rejectedDurableThroughTokens?.has(repositoryKey);
+  const followsCompletedRecovery = rejectionRevisionAtStart === state.rejectionRevision
+    && [...(state.recoveryBoundaries?.values() ?? [])]
+      .some((boundary) => boundary.rejectionRevision === state.rejectionRevision);
+  const independentlyReadmitted = repositoryHasNoRejectedLineage
+    && (checkpointRejected || followsCompletedRecovery);
+  const boundary = rootIsCurrent || independentlyReadmitted
+    ? publishRecoveryBoundary(repositoryKey, admitted.token)
+    : state.recoveryBoundaries?.get(repositoryKey);
+  return Object.freeze({
+    kind: 'admitted',
+    repositoryKey,
+    token: admitted.token,
+    recovery: recoveryEvidence(admitted.token, boundary),
+  });
+}
+
+/** Transition the physical lease through a checkpoint CAS descended from its admission. */
+function commitLeaseLineage(
+  lineage: ContextGraphAuthorityLeaseLineage,
+  repositoryKey: string,
+  committed: ContextGraphAuthorityIndexCommittedRepositoryRecord,
+  rejectionRevision: number,
+  publishRecoveryBoundary: PublishRecoveryBoundary,
+): ContextGraphAuthorityLeaseLineage {
+  if ((lineage.kind === 'rooted-missing' || lineage.kind === 'rooted')
+    && lineage.repositoryKey === repositoryKey) {
+    if (lineage.rejectionRevision !== rejectionRevision) {
+      return Object.freeze({
+        kind: 'admitted',
+        repositoryKey,
+        token: committed.token,
+        recovery: UNPROVEN_RECOVERY,
+      });
+    }
+    return Object.freeze({
+      kind: 'rooted',
+      repositoryKey,
+      token: committed.token,
+      rejectionRevision,
+      recovery: recoveryEvidence(
+        committed.token,
+        publishRecoveryBoundary(repositoryKey, committed.token),
+      ),
+    });
+  }
+  const recovery = lineage.kind === 'admitted'
+    && lineage.repositoryKey === repositoryKey
+    && lineage.recovery.kind === 'proven'
+    && committed.token >= lineage.recovery.boundary.token
+    ? lineage.recovery
+    : UNPROVEN_RECOVERY;
+  return Object.freeze({
+    kind: 'admitted',
+    repositoryKey,
+    token: committed.token,
+    recovery,
+  });
+}
+
+/** Return proof still owned by both this lineage and the current scope revision. */
+function activeRecoveryBoundary(
+  lineage: ContextGraphAuthorityLeaseLineage,
+  state: ContextGraphAuthorityHorizonScopeState,
+): ContextGraphAuthorityRecoveryBoundary | undefined {
+  if ((lineage.kind !== 'rooted' && lineage.kind !== 'admitted')
+    || lineage.recovery.kind !== 'proven') return undefined;
+  const boundary = lineage.recovery.boundary;
+  return boundary.rejectionRevision === state.rejectionRevision
+    && state.recoveryBoundaries?.get(lineage.repositoryKey) === boundary
+    ? boundary
+    : undefined;
+}
+
 export interface ContextGraphAuthorityIndexHorizonReader {
   admits(
     scope: string,
@@ -116,12 +296,7 @@ implements ContextGraphAuthorityIndexHorizonReader {
     const rejectionRevisionAtStart = state.rejectionRevision;
     let activated = false;
     let checkpointRejected = false;
-    const rejectedTokens = new Map<string, number>();
-    let durableRepositoryKey: string | undefined;
-    let durableToken: number | undefined;
-    let rootRepositoryKey: string | undefined;
-    let rootRejectionRevision: number | undefined;
-    let recoveryBoundary: ContextGraphAuthorityRecoveryBoundary | undefined;
+    let lineage: ContextGraphAuthorityLeaseLineage = UNOBSERVED_LEASE_LINEAGE;
     let settled = false;
 
     const leaseIsCurrent = (): boolean => (
@@ -156,18 +331,6 @@ implements ContextGraphAuthorityIndexHorizonReader {
       state.recoveryBoundaries = boundaries;
       return boundary;
     };
-    const activeRecoveryBoundary = (): ContextGraphAuthorityRecoveryBoundary | undefined => {
-      if (!leaseIsCurrent()
-        || recoveryBoundary === undefined
-        || durableRepositoryKey !== recoveryBoundary.repositoryKey
-        || durableToken === undefined
-        || durableToken < recoveryBoundary.token
-        || recoveryBoundary.rejectionRevision !== state.rejectionRevision
-        || state.recoveryBoundaries?.get(recoveryBoundary.repositoryKey) !== recoveryBoundary) {
-        return undefined;
-      }
-      return recoveryBoundary;
-    };
     const activate = (): void => {
       if (activated || settled || !leaseIsCurrent()) return;
       const before = this.#constraint(state);
@@ -193,19 +356,13 @@ implements ContextGraphAuthorityIndexHorizonReader {
         // A proof observed before this rejection—on this durable key or an
         // alternate bootstrap/fallback key—cannot discharge the newer fence.
         delete state.recoveryBoundaries;
-        rejectedTokens.set(repositoryKey, Math.max(
-          rejectedTokens.get(repositoryKey) ?? -1,
-          rejectedToken,
-        ));
         const rejectedDurableThroughTokens = state.rejectedDurableThroughTokens ?? new Map();
         rejectedDurableThroughTokens.set(repositoryKey, Math.max(
           rejectedDurableThroughTokens.get(repositoryKey) ?? -1,
           rejectedToken,
         ));
         state.rejectedDurableThroughTokens = rejectedDurableThroughTokens;
-        if (rootRepositoryKey === repositoryKey) rootRepositoryKey = undefined;
-        if (rootRepositoryKey === undefined) rootRejectionRevision = undefined;
-        recoveryBoundary = undefined;
+        lineage = rejectLeaseLineage(lineage, repositoryKey);
         state.rejectedThrough = Math.max(
           state.rejectedThrough ?? -1,
           state.committed?.number ?? -1,
@@ -222,41 +379,15 @@ implements ContextGraphAuthorityIndexHorizonReader {
       ): void => {
         if (settled || !leaseIsCurrent()) return;
         assertRepositoryKey(repositoryKey);
-        durableRepositoryKey = repositoryKey;
-        durableToken = admitted.token;
-        if (admitted.kind === 'missing') {
-          rootRepositoryKey = repositoryKey;
-          rootRejectionRevision = state.rejectionRevision;
-          recoveryBoundary = undefined;
-          return;
-        }
-        const descendedFromRoot = rootRepositoryKey === repositoryKey;
-        const rootIsCurrent = descendedFromRoot
-          && rootRejectionRevision === state.rejectionRevision;
-        rootRepositoryKey = admitted.kind === 'tombstone' ? repositoryKey : undefined;
-        rootRejectionRevision = admitted.kind === 'tombstone'
-          ? state.rejectionRevision
-          : undefined;
-        recoveryBoundary = undefined;
-        if (admitted.kind === 'tombstone') {
-          recoveryBoundary = publishRecoveryBoundary(repositoryKey, admitted.token);
-          return;
-        }
-        const repositoryHasNoRejectedLineage =
-          !state.rejectedDurableThroughTokens?.has(repositoryKey);
-        const followsCompletedRecovery = rejectionRevisionAtStart === state.rejectionRevision
-          && [...(state.recoveryBoundaries?.values() ?? [])]
-            .some((boundary) => boundary.rejectionRevision === state.rejectionRevision);
-        const independentlyReadmitted = repositoryHasNoRejectedLineage && (
-          rejectedTokens.size > 0
-          || followsCompletedRecovery
+        lineage = admitLeaseLineage(
+          lineage,
+          repositoryKey,
+          admitted,
+          state,
+          rejectionRevisionAtStart,
+          checkpointRejected,
+          publishRecoveryBoundary,
         );
-        const boundary = rootIsCurrent || independentlyReadmitted
-          ? publishRecoveryBoundary(repositoryKey, admitted.token)
-          : state.recoveryBoundaries?.get(repositoryKey);
-        if (boundary !== undefined && admitted.token >= boundary.token) {
-          recoveryBoundary = boundary;
-        }
       },
       commitDurableGeneration: (
         repositoryKey: string,
@@ -264,22 +395,13 @@ implements ContextGraphAuthorityIndexHorizonReader {
       ): void => {
         if (settled || !leaseIsCurrent()) return;
         assertRepositoryKey(repositoryKey);
-        durableRepositoryKey = repositoryKey;
-        durableToken = committed.token;
-        if (rootRepositoryKey === repositoryKey
-          && rootRejectionRevision !== state.rejectionRevision) {
-          // This lineage was admitted before a newer rejection. Advancing its
-          // CAS token—once or across many pages—does not make it independent.
-          rootRepositoryKey = undefined;
-          rootRejectionRevision = undefined;
-          recoveryBoundary = undefined;
-        }
-        if (rootRepositoryKey === repositoryKey) {
-          recoveryBoundary = publishRecoveryBoundary(repositoryKey, committed.token);
-        } else if (recoveryBoundary?.repositoryKey !== repositoryKey
-          || committed.token < recoveryBoundary.token) {
-          recoveryBoundary = undefined;
-        }
+        lineage = commitLeaseLineage(
+          lineage,
+          repositoryKey,
+          committed,
+          state.rejectionRevision,
+          publishRecoveryBoundary,
+        );
       },
       commit: (): void => {
         if (settled) return;
@@ -290,7 +412,7 @@ implements ContextGraphAuthorityIndexHorizonReader {
         }
         if (activated) state.active?.delete(activationToken);
         const recoversRejectedGeneration = state.rejectedThrough !== undefined
-          && activeRecoveryBoundary() !== undefined;
+          && activeRecoveryBoundary(lineage, state) !== undefined;
         if (recoversRejectedGeneration) {
           // A successful rebuild proved the prior durable lineage wrong, so a
           // lower or same-height replacement is intentional rather than lag.
