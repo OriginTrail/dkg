@@ -10,7 +10,7 @@
  */
 
 
-import { collectProjectedDelegatees } from './workspace-projected-delegatees.js';
+import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,

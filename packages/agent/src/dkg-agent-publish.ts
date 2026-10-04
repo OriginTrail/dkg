@@ -11,8 +11,8 @@ import { submitOwnedNamedKaVmLifecycleRepair } from './named-ka-vm-publication-r
  */
 
 
-import { planKnowledgeAssetVmPublication, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './knowledge-asset-vm-publish-request.js';
-export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './knowledge-asset-vm-publish-request.js';
+import { planKnowledgeAssetVmPublication, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
 import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
 import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';

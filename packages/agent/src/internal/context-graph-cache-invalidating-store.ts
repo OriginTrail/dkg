@@ -2,7 +2,7 @@
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import { composeTripleStoreCommitment, deleteByPatternWithoutCount, isStoreOperationNotStarted,
   type TripleStore, type Quad, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
-import { atomicSubjectMutationFacade } from './atomic-subject-mutation-facade.js';
+import { atomicSubjectMutationFacade } from '../atomic-subject-mutation-facade.js';
 
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
