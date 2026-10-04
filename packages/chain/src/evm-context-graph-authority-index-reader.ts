@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { setTimeout as sleep } from 'node:timers/promises';
+import { snapshotAuthorityRevisionTargetsV1, snapshotAuthorityNameHashTargetsV1, authoritySnapshotV1 } from './evm-context-graph-authority-snapshot.js';
 import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ContextGraphAuthorityReadOptions,
@@ -15,8 +16,6 @@ import {
   isContextGraphAuthorityIndexRetryableError,
   type ContextGraphAuthorityIndexScanInput,
 } from './context-graph-authority-index.js';
-import type { ContextGraphAuthorityIndexState } from
-  './context-graph-authority-index-checkpoint.js';
 import type { RawContextGraphAuthorityIndexEvent } from
   './context-graph-authority-index-reducer.js';
 import {
@@ -35,7 +34,6 @@ import type {
 import type { ChainEventLogAuthoritySource } from './chain-event-log-binding.js';
 import type { ChainIndexAuthorityAnchor } from './chain-index/index.js';
 import {
-  assertContextGraphAuthorityIndexId,
   contextGraphAuthorityIndexIdFromBigInt,
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
@@ -422,57 +420,6 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
    * coverage recorded for a retired `ContextGraphStorage`.
    */
   readonly chainEventLogAuthority?: () => ChainEventLogAuthoritySource | undefined;
-}
-
-function snapshotAuthorityRevisionTargetsV1(
-  contextGraphIds: unknown,
-): readonly ContextGraphAuthorityIndexId[] {
-  if (!Array.isArray(contextGraphIds)) {
-    throw new Error('Context Graph authority revision target set is invalid');
-  }
-  const targets = new Set<ContextGraphAuthorityIndexId>();
-  for (const contextGraphId of contextGraphIds as readonly unknown[]) {
-    assertContextGraphAuthorityIndexId(
-      contextGraphId,
-      'Context Graph authority revision target id',
-    );
-    targets.add(contextGraphId);
-  }
-  return Object.freeze([...targets]);
-}
-
-function snapshotAuthorityNameHashTargetsV1(
-  nameHashes: unknown,
-): readonly string[] {
-  if (!Array.isArray(nameHashes)) {
-    throw new Error('Context Graph authority name-hash target set is invalid');
-  }
-  const targets = new Set<string>();
-  for (const nameHash of nameHashes as readonly unknown[]) {
-    if (typeof nameHash !== 'string' || !ethers.isHexString(nameHash, 32)) {
-      throw new TypeError('Context Graph authority name-hash target must be bytes32');
-    }
-    const normalized = nameHash.toLowerCase();
-    if (normalized !== ethers.ZeroHash) targets.add(normalized);
-  }
-  return Object.freeze([...targets]);
-}
-
-function authoritySnapshotV1(
-  state: ContextGraphAuthorityIndexState,
-  chainId: string,
-  contractAddress: string,
-): ContextGraphAuthoritySnapshot {
-  return Object.freeze({
-    chainId,
-    governanceContract: contractAddress,
-    ...state,
-    contextGraphId: state.contextGraphId,
-    ownershipEra: state.ownershipEra.toString(10),
-    policyVersion: state.policyVersion.toString(10),
-    rosterVersion: state.rosterVersion.toString(10),
-    sourceBlockNumber: state.sourceBlockNumber.toString(10),
-  });
 }
 
 /** Physical provider attempts outlive a cancelled caller and must be drained. */
