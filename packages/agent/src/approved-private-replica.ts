@@ -218,3 +218,70 @@ export async function resolveApprovedPrivateReplicaAuthority(
     authority,
   });
 }
+
+
+interface RequesterAuthorityMutationState { revision: number; active: number }
+const requesterAuthorityMutations = new WeakMap<object, Map<string, RequesterAuthorityMutationState>>();
+
+function requesterAuthorityMutationState(owner: object, contextGraphId: string): RequesterAuthorityMutationState {
+  let graphs = requesterAuthorityMutations.get(owner);
+  if (graphs === undefined) { graphs = new Map(); requesterAuthorityMutations.set(owner, graphs); }
+  let state = graphs.get(contextGraphId);
+  if (state === undefined) { state = { revision: 0, active: 0 }; graphs.set(contextGraphId, state); }
+  return state;
+}
+
+/** Fence authority proofs across both successful and failed requester-state writes. */
+export async function withRequesterAuthorityMutation<T>(
+  owner: object, contextGraphId: string, operation: () => Promise<T>,
+): Promise<T> {
+  const state = requesterAuthorityMutationState(owner, contextGraphId);
+  state.revision += 1;
+  state.active += 1;
+  try { return await operation(); }
+  finally { state.revision += 1; state.active -= 1; }
+}
+
+/** The proof owns every mutable local fact its authority was taken against. */
+export interface ApprovedPrivateReplicaLifecycleProof {
+  readonly authority: ApprovedPrivateReplicaAuthority;
+  readonly isCurrent: () => boolean;
+}
+
+export type ApprovedPrivateReplicaLifecycleProofResolution =
+  | Readonly<{ kind: 'available'; proof: ApprovedPrivateReplicaLifecycleProof }>
+  | Readonly<{ kind: 'absent' }>
+  | Readonly<{ kind: 'facts-moved' }>;
+
+export async function resolveApprovedPrivateReplicaLifecycleProof(
+  agent: DKGAgent,
+  contextGraphId: string,
+  ports: {
+    readonly readApprovedAgentAddress: () => string | undefined;
+    readonly readMetadataRevision: () => string;
+  },
+  signal?: AbortSignal,
+): Promise<ApprovedPrivateReplicaLifecycleProofResolution> {
+  const approved = ports.readApprovedAgentAddress()?.toLowerCase();
+  const state = requesterAuthorityMutationState(agent, contextGraphId);
+  const revision = state.revision;
+  const metadataRevision = ports.readMetadataRevision();
+  const hasLocalAgent = () => agent.listLocalAgents().some(
+    ({ agentAddress }) => agentAddress.toLowerCase() === approved,
+  );
+  const localMembership = hasLocalAgent();
+  const isCurrent = () => state.revision === revision && state.active === 0
+    && ports.readMetadataRevision() === metadataRevision
+    && ports.readApprovedAgentAddress()?.toLowerCase() === approved
+    && hasLocalAgent() === localMembership;
+  // A moving proof owns retry; it must not continue into seed fallback.
+  if (approved !== undefined && !isCurrent()) return Object.freeze({ kind: 'facts-moved' });
+  const resolved = await resolveApprovedPrivateReplicaAuthority(
+    agent, contextGraphId, approved, isCurrent, isCurrent, signal,
+  );
+  signal?.throwIfAborted();
+  if (approved !== undefined && !isCurrent()) return Object.freeze({ kind: 'facts-moved' });
+  return resolved?.kind === 'unregistered-private-replica'
+    ? Object.freeze({ kind: 'available', proof: Object.freeze({ authority: resolved.authority, isCurrent }) })
+    : Object.freeze({ kind: 'absent' });
+}

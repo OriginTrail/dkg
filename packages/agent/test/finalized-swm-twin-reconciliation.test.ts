@@ -19,6 +19,8 @@ import {
   reconcileFinalizedSwmTwinWithEvidence,
   reconcileFinalizedSwmTwinFromCatalogProjection,
   reconcileFinalizedSwmTwinFromDescriptor,
+  reconcileFinalizedSwmTwinFromDescriptorWithEvidence,
+  reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
@@ -284,8 +286,43 @@ describe('durable VM / SWM tier reconciliation', () => {
     expect(retry).toMatchObject({ outcome: 'already-retired-finalized', retirement: {
       contextGraphId: CG, subGraphName: 'updates', assertionVersion: 3n, kaUal: UAL,
     } });
+    const keys = ['agentAddress', 'assertionVersion', 'contextGraphId', 'kaNumber', 'kaUal', 'subGraphName', 'swmGraph'];
+    for (const result of [first, retry]) {
+      if (!('retirement' in result)) throw new Error('expected settled retirement');
+      expect(Object.keys(result.retirement).sort()).toEqual(keys);
+      expect(Object.isFrozen(result.retirement)).toBe(true);
+    }
+    expect(Object.keys(retire.mock.calls[0][0]).sort()).toEqual(keys);
     expect(retire).toHaveBeenCalledOnce();
     await store.close();
+  });
+
+  it.each(['descriptor', 'catalog'] as const)('projects only public retirement fields for settled %s recovery', async (arrival) => {
+    const store = new OxigraphStore();
+    try {
+      const input = fixture('updates');
+      await seedTwin(store, input);
+      // Authenticated recovery can complete either headless matching bytes or
+      // the metadata-only tail of a prior retirement attempt.
+      if (arrival === 'catalog') await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      else await store.dropGraph(input.swmGraph);
+      const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+        await store.dropGraph(candidate.swmGraph);
+        await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      });
+      const reconcile = () => arrival === 'catalog'
+        ? reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence({ store, writeLocks: new Map(), evidence: catalogEvidenceFor(input), retire })
+        : reconcileFinalizedSwmTwinFromDescriptorWithEvidence({ store, writeLocks: new Map(), contextGraphId: CG, descriptor: descriptorFor(input), retire });
+      const keys = ['agentAddress', 'assertionVersion', 'contextGraphId', 'kaNumber', 'kaUal', 'subGraphName', 'swmGraph'];
+      for (const expected of ['retired', 'already-retired-finalized']) {
+        const result = await reconcile();
+        expect(result.outcome).toBe(expected);
+        if (!('retirement' in result)) throw new Error('expected settled retirement');
+        expect(Object.keys(result.retirement).sort()).toEqual(keys);
+        expect(result.retirement.assertionVersion).toBe(3n);
+      }
+      expect(Object.keys(retire.mock.calls[0][0]).sort()).toEqual(keys);
+    } finally { await store.close(); }
   });
 
   it.each([undefined, 'updates'])('preserves headless nonempty SWM on a VM evidence arrival for subgraph %s', async (subGraphName) => {

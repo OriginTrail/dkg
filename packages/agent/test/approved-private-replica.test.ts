@@ -42,7 +42,7 @@ import type {
   ContextGraphSubscriptionRecord,
 } from '../src/index.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
-import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-private-replica.js';
+import { isApprovedPrivateReplicaDelegationActive, resolveApprovedPrivateReplicaLifecycleProof, withRequesterAuthorityMutation } from '../src/approved-private-replica.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
@@ -56,6 +56,17 @@ vi.mock('../src/approved-private-replica.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/approved-private-replica.js')>();
   return {
     ...original,
+    resolveApprovedPrivateReplicaLifecycleProof: async (
+      ...args: Parameters<typeof original.resolveApprovedPrivateReplicaLifecycleProof>
+    ) => {
+      const result = await original.resolveApprovedPrivateReplicaLifecycleProof(...args);
+      const run = afterApprovedPrivateProof.run;
+      if (run !== null && result.kind === 'available') {
+        afterApprovedPrivateProof.run = null;
+        await run();
+      }
+      return result;
+    },
     resolveApprovedPrivateReplicaAuthority: async (
       ...args: Parameters<typeof original.resolveApprovedPrivateReplicaAuthority>
     ) => {
@@ -2282,6 +2293,36 @@ describe('approved private bare-name replica authorization', () => {
     },
   );
 
+  it.each(['requester-write', 'metadata', 'approval', 'local-membership'] as const)(
+    'keeps the captured authority proof fenced when %s changes', async (change) => {
+      const fixture = await approvedBareNameReplicaFixture();
+      await fixture.receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+      const approvals = Reflect.get(fixture.receiver, 'localApprovedAgentByCG') as Map<string, string>;
+      let metadataRevision = 'captured-own-meta';
+      const ports = { readApprovedAgentAddress: () => approvals.get(CONTEXT_GRAPH_ID),
+        readMetadataRevision: () => metadataRevision };
+      const result = await resolveApprovedPrivateReplicaLifecycleProof(fixture.receiver, CONTEXT_GRAPH_ID, ports);
+      if (result.kind !== 'available') throw new Error('real private authority proof unavailable');
+      expect(result.proof.isCurrent()).toBe(true);
+      if (change === 'metadata') metadataRevision = 'replacement-own-meta';
+      if (change === 'approval') approvals.set(CONTEXT_GRAPH_ID, OUTSIDER);
+      if (change === 'local-membership') vi.spyOn(fixture.receiver, 'listLocalAgents').mockReturnValue([]);
+      if (change === 'requester-write') {
+        const failure = new Error('failed requester attempt');
+        await expect(withRequesterAuthorityMutation(fixture.receiver, CONTEXT_GRAPH_ID, async () => {
+          expect(result.proof.isCurrent()).toBe(false);
+          throw failure;
+        })).rejects.toBe(failure);
+        // The metadata port remains fixed: the proof owner also fences failed
+        // requester attempts independently of own-meta invalidation.
+        const recovered = await resolveApprovedPrivateReplicaLifecycleProof(fixture.receiver, CONTEXT_GRAPH_ID, ports);
+        expect(recovered).toMatchObject({ kind: 'available' });
+        if (recovered.kind === 'available') expect(recovered.proof.isCurrent()).toBe(true);
+      }
+      expect(result.proof.isCurrent()).toBe(false);
+    },
+  );
+
   it.each(['already-active', 'during-proof'] as const)(
     'withholds approved authority for an %s requester mutation and recovers after its failed write', async (timing) => {
       const fixture = await approvedBareNameReplicaFixture();
@@ -2322,8 +2363,6 @@ describe('approved private bare-name replica authorization', () => {
         const failure = new Error('requester backend refused replacement');
         rejectWrite(failure);
         expect(await mutation).toBe(failure);
-        const locks = Reflect.get(fixture.receiver, 'contextGraphJoinAdmissionLockManager');
-        expect(locks.requesterMutationActive(CONTEXT_GRAPH_ID)).toBe(false);
         await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' }))
           .resolves.toMatchObject({ source: 'owner-signed-unregistered', policy: { accessPolicy: 1 } });
         expect(accepted).toHaveBeenCalledOnce();

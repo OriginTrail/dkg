@@ -19,9 +19,9 @@ const registeredEvidence = { expectedOnChainId: 7n, expectedNameHash: `0x${'a'.r
     participantAgents: [], nameHash: `0x${'a'.repeat(64)}`, ownershipEra: '1',
     policyVersion: '1', rosterVersion: '1', sourceBlockNumber: '17',
     sourceBlockHash: `0x${'b'.repeat(64)}` }, 7n) };
-const approved = { kind: 'available' as const, metadataRevision: 'metadata-1', requesterRevision: 3,
+const approved = { kind: 'available' as const, proof: { isCurrent: () => true,
   authority: { approvedAgentAddress: owner, ownerAddress: owner, requestGeneration: 'generation',
-    curatorPeerId: 'peer', memberAddresses: [owner] } };
+    curatorPeerId: 'peer', memberAddresses: [owner] } } };
 function ports() {
   return { bound: false, finalizedAbsence: true, isLocalFirst: vi.fn(async () => false),
     readCompatibility: vi.fn((): AcceptedRfc64CatalogAccessSnapshotV1 | null => null),
@@ -37,13 +37,20 @@ describe('catalog lifecycle authority source', () => {
     expect(p.loadReplicaSeed).not.toHaveBeenCalled();
   });
 
-  it('keeps an available approval and its exact revisions ahead of a signed replica seed', async () => {
+  it('keeps an available authority proof ahead of a signed replica seed', async () => {
     const p = ports(); p.resolveApprovedPrivate.mockResolvedValue(approved);
     expect(await resolveRfc64CatalogLifecycleAuthoritySourceV1(p)).toEqual({ kind: 'available', source: {
-      kind: 'approved-private', authority: approved.authority, metadataRevision: 'metadata-1', requesterRevision: 3,
+      kind: 'approved-private', proof: approved.proof,
     } });
     expect(p.loadReplicaSeed).not.toHaveBeenCalled();
     expect(p.readRegistered).not.toHaveBeenCalled();
+  });
+
+  it('withholds a proof that moved after resolution without loading a seed', async () => {
+    const p = ports();
+    p.resolveApprovedPrivate.mockResolvedValue({ ...approved, proof: { ...approved.proof, isCurrent: () => false } });
+    expect(await resolveRfc64CatalogLifecycleAuthoritySourceV1(p)).toEqual({ kind: 'facts-moved' });
+    expect(p.loadReplicaSeed).not.toHaveBeenCalled();
   });
 
   it('distinguishes genuinely absent authority from an authenticated signed seed', async () => {

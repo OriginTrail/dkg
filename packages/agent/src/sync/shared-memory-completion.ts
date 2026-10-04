@@ -88,3 +88,13 @@ export function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
     completed: true,
   };
 }
+
+/** Public identity of a finalized SWM twin; private proof inputs stay with reconciliation. */
+export interface FinalizedSwmTwinRetirement {
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  readonly kaUal: string;
+  readonly swmGraph: string;
+  readonly agentAddress: string;
+  readonly kaNumber: bigint;
+}

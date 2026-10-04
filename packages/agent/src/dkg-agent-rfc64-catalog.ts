@@ -72,6 +72,7 @@ import type { DKGAgent } from './dkg-agent.js';
 import {
   isApprovedPrivateReplicaDelegationActive,
   resolveApprovedPrivateReplicaAuthority,
+  resolveApprovedPrivateReplicaLifecycleProof,
 } from './approved-private-replica.js';
 import { resolveRfc64CatalogLifecycleAuthoritySourceV1 } from './rfc64/catalog-lifecycle-authority-source-v1.js';
 import { runJoinApprovedCatalogReplayV1, scheduleJoinApprovedCatalogReplayRetryV1 } from './rfc64/join-approved-catalog-replay-v1.js';
@@ -3120,34 +3121,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ?.has(contextGraphId) === true
           ? service.acceptedPolicySnapshot(networkId, contextGraphId as ContextGraphIdV1)
           : null,
-        resolveApprovedPrivate: async () => {
-          const requesterRevision = this.contextGraphJoinAdmissionLockManager.requesterRevision(contextGraphId);
-          const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
-          if (approvedAgent !== undefined && this.contextGraphJoinAdmissionLockManager.requesterMutationActive(contextGraphId)) {
-            return { kind: 'facts-moved' };
-          }
-          const metadataRevision = this.contextGraphMetaProjection
-            .readContextGraphAuthorityFactsRevision(contextGraphId);
-          const approved = await resolveApprovedPrivateReplicaAuthority(
-            this,
-            contextGraphId,
-            approvedAgent,
-            () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
-              === approvedAgent?.toLowerCase(),
-            () => this.contextGraphMetaProjection
-              .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision,
-            signal,
-          );
-          // A moving proof owns retry; it must not continue into seed fallback.
-          if (approvedAgent !== undefined && (
-            this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId) !== metadataRevision
-            || this.contextGraphJoinAdmissionLockManager.requesterRevision(contextGraphId) !== requesterRevision
-            || this.contextGraphJoinAdmissionLockManager.requesterMutationActive(contextGraphId)
-          )) return { kind: 'facts-moved' };
-          return approved?.kind === 'unregistered-private-replica'
-            ? { kind: 'available', authority: approved.authority, metadataRevision, requesterRevision }
-            : { kind: 'absent' };
-        },
+        resolveApprovedPrivate: () => resolveApprovedPrivateReplicaLifecycleProof(
+          this,
+          contextGraphId,
+          {
+            readApprovedAgentAddress: () => this.localApprovedAgentByCG.get(contextGraphId),
+            readMetadataRevision: () => this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId),
+          },
+          signal,
+        ),
         loadReplicaSeed: () => loadRfc64UnregisteredReplicaAuthorityV1({
           store: this.store,
           networkId,
@@ -3236,13 +3219,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // old owner with a new policy/roster generation and still pass the
           // acceptance-time fence.
           //
-          // A join-approved composition keeps the revision its proof was
-          // taken against. Capturing a fresh one here would make a change
-          // that landed between the proof's last check and this line the new
-          // baseline, and the acceptance-time fence could no longer see it.
-          metadataAuthorityRevision = source.kind === 'approved-private'
-            ? source.metadataRevision
-            : this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId);
+          // A join-approved composition keeps its proof's captured revision.
+          // Capturing a fresh one here would make a change that landed after
+          // the proof's last check the new baseline. Its isCurrent check owns
+          // that original generation through the acceptance-time fence.
+          if (source.kind !== 'approved-private') metadataAuthorityRevision = this.contextGraphMetaProjection
+            .readContextGraphAuthorityFactsRevision(contextGraphId);
           const ownerDid = await this.getContextGraphOwner(contextGraphId);
           if (signal?.aborted) throw signal.reason;
           const normalizedOwnerDid = ownerDid
@@ -3290,7 +3272,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           if (
             source.kind === 'approved-private'
             && (accessPolicy !== 'private'
-              || ownerAddress !== source.authority.ownerAddress)
+              || ownerAddress !== source.proof.authority.ownerAddress)
           ) {
             throw new Rfc64CatalogAuthorityResolutionErrorV1(
               'unregistered-owner-unresolved',
@@ -3327,7 +3309,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           if (
             source.kind === 'approved-private'
             && !members?.some((member) => member.toLowerCase()
-              === source.authority.approvedAgentAddress)
+              === source.proof.authority.approvedAgentAddress)
           ) {
             throw new Rfc64CatalogAuthorityResolutionErrorV1(
               'unregistered-owner-unresolved',
@@ -3353,14 +3335,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // The join-state graph and approval hint are independent of own-meta.
       // Fence request replacements/removals synchronously with acceptance,
       // including writes that have started but have not committed yet.
-      if (source.kind === 'approved-private' && (
-        this.contextGraphJoinAdmissionLockManager.requesterRevision(contextGraphId) !== source.requesterRevision
-        || this.contextGraphJoinAdmissionLockManager.requesterMutationActive(contextGraphId)
-        || this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
-          !== source.authority.approvedAgentAddress
-        || !this.listLocalAgents().some(({ agentAddress }) =>
-          agentAddress.toLowerCase() === source.authority.approvedAgentAddress)
-      )) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
+      if (source.kind === 'approved-private' && !source.proof.isCurrent()) {
+        return new Rfc64AuthorityFactsMovedV1(authorityRevision);
+      }
       if (!isCurrentRfc64CatalogAuthorityRevisionV1(
         this,
         contextGraphId,
@@ -3393,7 +3370,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // revision fences do not see it: check the deadline in this same pass.
       if (
         source.kind === 'approved-private'
-        && !isApprovedPrivateReplicaDelegationActive(source.authority)
+        && !isApprovedPrivateReplicaDelegationActive(source.proof.authority)
       ) {
         throw new Rfc64CatalogAuthorityResolutionErrorV1(
           'unregistered-owner-unresolved',

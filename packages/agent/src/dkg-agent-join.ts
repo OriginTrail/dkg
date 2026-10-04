@@ -12,6 +12,7 @@ import type { PeerSyncConnection } from './p2p/peer-connection.js';
  */
 
 import { createHash } from 'node:crypto';
+import { withRequesterAuthorityMutation } from './approved-private-replica.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -1246,7 +1247,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     state: RequesterJoinRequestState,
   ): Promise<void> {
-    await this.contextGraphJoinAdmissionLockManager.withRequesterMutation(contextGraphId, async () => {
+    await withRequesterAuthorityMutation(this, contextGraphId, async () => {
       const key = requesterJoinStateKey(contextGraphId, agentAddress);
       const cache = this.requesterJoinStateCache();
       const previous = cache.get(key);
@@ -1385,7 +1386,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     agentAddress: string,
   ): Promise<void> {
-    await this.contextGraphJoinAdmissionLockManager.withRequesterMutation(contextGraphId, async () => {
+    await withRequesterAuthorityMutation(this, contextGraphId, async () => {
       const key = requesterJoinStateKey(contextGraphId, agentAddress);
       const cache = this.requesterJoinStateCache();
       try {

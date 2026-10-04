@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ApprovedPrivateReplicaAuthority } from '../approved-private-replica.js';
+import type { ApprovedPrivateReplicaLifecycleProof, ApprovedPrivateReplicaLifecycleProofResolution } from '../approved-private-replica.js';
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type { Rfc64ParsedAuthoritySnapshotV1, Rfc64ReleaseNativeAuthoritySnapshotV1 } from './release-native-catalog-authority-v1.js';
 
@@ -14,14 +14,11 @@ export interface Rfc64RegisteredLifecycleAuthorityEvidenceV1 {
 export type Rfc64CatalogLifecycleAuthoritySourceV1 =
   | Readonly<{ kind: 'local-first' }>
   | Readonly<{ kind: 'compatibility'; snapshot: AcceptedRfc64CatalogAccessSnapshotV1 }>
-  | Readonly<{ kind: 'approved-private'; authority: ApprovedPrivateReplicaAuthority; metadataRevision: string; requesterRevision: number }>
+  | Readonly<{ kind: 'approved-private'; proof: ApprovedPrivateReplicaLifecycleProof }>
   | Readonly<{ kind: 'replica-seed'; snapshot: Rfc64ReleaseNativeAuthoritySnapshotV1 }>
   | Readonly<{ kind: 'registered'; evidence: Rfc64RegisteredLifecycleAuthorityEvidenceV1 }>;
 
-export type Rfc64ApprovedPrivateLifecycleSourceResolutionV1 =
-  | Readonly<{ kind: 'available'; authority: ApprovedPrivateReplicaAuthority; metadataRevision: string; requesterRevision: number }>
-  | Readonly<{ kind: 'absent' }>
-  | Readonly<{ kind: 'facts-moved' }>;
+export type Rfc64ApprovedPrivateLifecycleSourceResolutionV1 = ApprovedPrivateReplicaLifecycleProofResolution;
 
 export type Rfc64CatalogLifecycleAuthoritySourceResolutionV1 =
   | Readonly<{ kind: 'available'; source: Rfc64CatalogLifecycleAuthoritySourceV1 }>
@@ -61,8 +58,9 @@ export async function resolveRfc64CatalogLifecycleAuthoritySourceV1(ports: {
   }
   const approved = await ports.resolveApprovedPrivate();
   if (approved.kind === 'facts-moved') return approved;
-  if (approved.kind === 'available') return available({ kind: 'approved-private',
-    authority: approved.authority, metadataRevision: approved.metadataRevision, requesterRevision: approved.requesterRevision });
+  if (approved.kind === 'available') return approved.proof.isCurrent()
+    ? available({ kind: 'approved-private', proof: approved.proof })
+    : Object.freeze({ kind: 'facts-moved' });
   if (!ports.finalizedAbsence) return Object.freeze({ kind: 'absent' });
   const replica = await ports.loadReplicaSeed();
   return replica === null ? Object.freeze({ kind: 'absent' }) : available({ kind: 'replica-seed', snapshot: replica });

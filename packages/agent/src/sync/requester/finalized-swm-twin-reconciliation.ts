@@ -1,3 +1,4 @@
+import type { FinalizedSwmTwinRetirement } from '../shared-memory-completion.js';
 import { readExactGraph, parseInteger, parseSafeCount, literalValue, normalizeHex32, optionalHex32 } from '../../internal/finalized-swm-twin-storage.js';
 import {
   MemoryLayer,
@@ -46,14 +47,7 @@ export type FinalizedSwmTwinReconciliationResult =
   | Readonly<{ outcome: 'retired' | 'already-retired-finalized'; retirement: FinalizedSwmTwinRetirement & { readonly assertionVersion: bigint } }>
   | Readonly<{ outcome: Exclude<FinalizedSwmTwinReconciliationOutcome, 'retired' | 'already-retired-finalized'> }>;
 
-export interface FinalizedSwmTwinRetirement {
-  readonly contextGraphId: string;
-  readonly subGraphName?: string;
-  readonly kaUal: string;
-  readonly swmGraph: string;
-  readonly agentAddress: string;
-  readonly kaNumber: bigint;
-}
+export type { FinalizedSwmTwinRetirement } from '../shared-memory-completion.js';
 
 export interface FinalizedSwmTwinCatalogProjectionEvidence {
   readonly contextGraphId: string;
@@ -387,11 +381,11 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       // head with remaining bytes is terminal only for a just-authenticated
       // SWM/catalog arrival; a VM arrival cannot infer a mutable commitment.
       const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
-      if (swmQuads.length === 0) return Object.freeze({ outcome: 'already-retired-finalized', retirement: evidence });
+      if (swmQuads.length === 0) return Object.freeze({ outcome: 'already-retired-finalized', retirement: projectRetirement(evidence) });
       if (evidence.arrival === 'vm') return Object.freeze({ outcome: 'head-missing-or-ambiguous' });
       if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return Object.freeze({ outcome: 'content-mismatch' });
       await retireAndInvalidate(params, evidence);
-      return Object.freeze({ outcome: 'retired', retirement: evidence });
+      return Object.freeze({ outcome: 'retired', retirement: projectRetirement(evidence) });
     }
     if (head.version !== evidence.assertionVersion) return Object.freeze({ outcome: 'head-version-mismatch' });
     if (head.kaUal !== evidence.kaUal || head.assertionGraph !== evidence.swmGraph) {
@@ -411,12 +405,17 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     // cleanup instead of permanently returning early on an absent graph.
     if (swmQuads.length === 0) {
       await retireAndInvalidate(params, evidence);
-      return Object.freeze({ outcome: 'retired', retirement: evidence });
+      return Object.freeze({ outcome: 'retired', retirement: projectRetirement(evidence) });
     }
     if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return Object.freeze({ outcome: 'content-mismatch' });
     await retireAndInvalidate(params, evidence);
-    return Object.freeze({ outcome: 'retired', retirement: evidence });
+    return Object.freeze({ outcome: 'retired', retirement: projectRetirement(evidence) });
   });
+}
+
+function projectRetirement(evidence: FinalizedSwmTwinEvidence) {
+  const { contextGraphId, subGraphName, kaUal, swmGraph, agentAddress, kaNumber, assertionVersion } = evidence;
+  return Object.freeze({ contextGraphId, subGraphName, kaUal, swmGraph, agentAddress, kaNumber, assertionVersion });
 }
 
 async function retireAndInvalidate(
@@ -426,7 +425,7 @@ async function retireAndInvalidate(
   },
   evidence: FinalizedSwmTwinEvidence,
 ): Promise<void> {
-  await params.retire(evidence);
+  await params.retire(projectRetirement(evidence));
   await invalidateSwmMaterializationWitness(params.store, evidence.swmGraph, {
     priority: 'background',
     source: 'agent.durableSync.finalizedSwmTwin.witnessInvalidate',
