@@ -36,23 +36,6 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
-/**
- * Count the store-side chain reconciles a visit reaches. A visit answered by
- * the negative cache returns before the finalization handler is asked.
- */
-function countChainReconciles(internals: object): { count: number } {
-  const handler = (internals as {
-    getOrCreateFinalizationHandler(): { handleChainReconciledKC(...args: unknown[]): Promise<unknown> };
-  }).getOrCreateFinalizationHandler();
-  const reconcile = handler.handleChainReconciledKC.bind(handler);
-  const reconciles = { count: 0 };
-  handler.handleChainReconciledKC = async (...args: unknown[]) => {
-    reconciles.count += 1;
-    return reconcile(...args);
-  };
-  return reconciles;
-}
-
 /** Model admitted exact (argument four) or legacy (argument seven) work explicitly.
  * Uncalled readiness/cancellation sentinels remain outside this boundary. */
 function admittedRecoveryWork<Args extends unknown[], Result extends object>(
@@ -71,19 +54,17 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   DKG_ONTOLOGY,
-  PROTOCOL_STORAGE_ACK,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
   createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import { type TripleStore } from '@origintrail-official/dkg-storage';
 import type {
   ReplicationEvent,
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
-  VmReconcileNegativeRecord,
 } from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
@@ -100,7 +81,6 @@ import {
   stageKnowledgeAssetInSharedMemory,
 } from './_helpers/staged-knowledge-asset.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
-import { createVmReconcilePeerTopology } from '../src/vm-reconcile-peer-topology.js';
 import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js';
 
 interface AgentInternals {
@@ -113,10 +93,7 @@ interface AgentInternals {
     ordinal: number,
     headBlock: number | undefined,
     options?: {
-      acquireActiveFetchPermit?: () => boolean;
-      maxPeerAttempts?: number;
       isTargetCurrent?: () => boolean;
-      deferActiveFetch?: boolean;
     },
   ): Promise<OrdinalOutcome>;
   recoverVmReconcileBatch(
@@ -222,76 +199,6 @@ function vmRecoveryTarget(
   };
 }
 
-function noProtocolCatchupStats() {
-  return {
-    ...emptyCatchupStats(),
-    syncCapablePeers: 0,
-    peersTried: 0,
-    peersSucceeded: 0,
-  };
-}
-
-async function insertWorkspaceOperationMeta(
-  store: TripleStore,
-  metaGraph: string,
-  opId: string,
-  rootEntity: string,
-  publishedAt: string,
-): Promise<void> {
-  const subject = `urn:dkg:share:${opId}`;
-  await store.insert([
-    { graph: metaGraph, subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
-    { graph: metaGraph, subject, predicate: 'http://dkg.io/ontology/rootEntity', object: rootEntity },
-    { graph: metaGraph, subject, predicate: 'http://dkg.io/ontology/publishedAt', object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
-  ]);
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return `0x${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
-async function insertWorkspaceDataTriple(
-  store: TripleStore,
-  localCgId: string,
-  entity: string,
-  value: string,
-): Promise<void> {
-  await store.insert([{
-    subject: entity,
-    predicate: 'http://schema.org/name',
-    object: `"${value}"`,
-    graph: contextGraphWorkspaceGraphUri(localCgId),
-  }]);
-}
-
-async function replaceWorkspaceDataTriple(
-  store: TripleStore,
-  localCgId: string,
-  entity: string,
-  value: string,
-): Promise<void> {
-  await store.deleteByPattern({
-    subject: entity,
-    predicate: 'http://schema.org/name',
-    graph: contextGraphWorkspaceGraphUri(localCgId),
-  });
-  await insertWorkspaceDataTriple(store, localCgId, entity, value);
-}
-
-async function insertPrivateMerkleRoot(
-  store: TripleStore,
-  localCgId: string,
-  entity: string,
-  privateRoot: Uint8Array,
-): Promise<void> {
-  await store.insert([{
-    subject: entity,
-    predicate: 'http://dkg.io/ontology/privateMerkleRoot',
-    object: `"${bytesToHex(privateRoot)}"`,
-    graph: contextGraphWorkspaceMetaGraphUri(localCgId),
-  }]);
-}
-
 /** Seed a local SWM snapshot for one KA under a CG and return its flat-KC root. */
 async function seedSwmSnapshot(store: TripleStore, localCgId: string, entity: string, value: string): Promise<Uint8Array> {
   const wsGraph = contextGraphWorkspaceGraphUri(localCgId);
@@ -299,25 +206,6 @@ async function seedSwmSnapshot(store: TripleStore, localCgId: string, entity: st
   await store.insert([
     { subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: wsGraph },
     { subject: `urn:dkg:share:${entity}`, predicate: 'http://dkg.io/ontology/rootEntity', object: entity, graph: wsMetaGraph },
-  ]);
-  return computeFlatKCRootV10(
-    [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-    [],
-  );
-}
-
-async function seedSwmSnapshotInSubGraph(
-  store: TripleStore,
-  localCgId: string,
-  subGraphName: string,
-  entity: string,
-  value: string,
-): Promise<Uint8Array> {
-  const graphManager = new GraphManager(store);
-  await store.insert([
-    { subject: `urn:test:subgraph-marker:${subGraphName}`, predicate: 'http://schema.org/name', object: '"marker"', graph: graphManager.subGraphUri(localCgId, subGraphName) },
-    { subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: graphManager.sharedMemoryUri(localCgId, subGraphName) },
-    { subject: `urn:dkg:share:${subGraphName}`, predicate: 'http://dkg.io/ontology/rootEntity', object: entity, graph: graphManager.sharedMemoryMetaUri(localCgId, subGraphName) },
   ]);
   return computeFlatKCRootV10(
     [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
@@ -1131,8 +1019,6 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     root[31] = 4;
     const recentKey = (internals as any).vmReconcileCacheKey(localCgId, ual, root);
     const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
-    const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, unknown>;
-    const negativeKeysByCg = (internals as any).vmReconcileNegativeCacheKeysByCg as Map<string, Set<string>>;
     const fetchCooldown = (internals as any).vmReconcileFetchCooldowns as Map<
       string,
       { startedAt: number; owner: symbol }
@@ -1141,15 +1027,6 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, unknown>;
     const reconcileCursors = (internals as any).reconcileCursors as Map<string, unknown>;
     recent.add(recentKey);
-    negativeCache.set(recentKey, {
-      localCgId,
-      failures: 1,
-      nextRetryAt: Date.now() + 60_000,
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopology: { kind: 'unreadable' },
-    });
-    negativeKeysByCg.set(localCgId, new Set([recentKey]));
     fetchCooldown.set(localCgId, { startedAt: Date.now(), owner: Symbol(localCgId) });
     peerCursor.set(localCgId, 2);
     peerOrder.set(localCgId, { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
@@ -1163,8 +1040,6 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(sub?.syncMode).toBe('always-on');
     expect(sub?.lastReconciledOrdinal).toBe(0);
     expect(recent.has(recentKey)).toBe(false);
-    expect(negativeCache.has(recentKey)).toBe(false);
-    expect(negativeKeysByCg.has(localCgId)).toBe(false);
     expect(fetchCooldown.has(localCgId)).toBe(false);
     expect(peerCursor.has(localCgId)).toBe(false);
     expect(peerOrder.has(localCgId)).toBe(false);
@@ -1210,7 +1085,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
   });
 });
 
-describe('Phase D - VM reconcile damping', () => {
+describe('Phase D - local-first VM reconcile and batch recovery', () => {
   let agent: DKGAgent | null = null;
 
   afterEach(async () => {
@@ -1267,6 +1142,45 @@ describe('Phase D - VM reconcile damping', () => {
       ual: buildKnowledgeAssetUal(internals.chain.chainId, authorAddress, kaNumber),
     });
   });
+
+  it.each(['no-swm', 'verified-vm-metadata-pending', 'corrupt-head'] as const)(
+    'queues chain-backed %s without starting inline recovery or consulting retired cache hooks',
+    async (finalizationOutcome) => {
+      const retiredHook = vi.fn(async () => { throw new Error('retired negative cache was consulted'); });
+      const internals = await boot({
+        loadAll: async () => [], save: async () => {}, delete: async () => {},
+        loadVmReconcileNegative: retiredHook, saveVmReconcileNegative: retiredHook,
+        deleteVmReconcileNegative: retiredHook, deleteVmReconcileNegativesForContextGraph: retiredHook,
+      });
+      const onChainCgId = 669n;
+      const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: STAGED_KA_AUTHOR, kaNumber: 12n });
+      const root = `0x${'a7'.repeat(32)}`;
+      registerUnmatchedKC(internals.chain, kaId, onChainCgId, root);
+      const finalized = vi.fn(async () => {
+        if (finalizationOutcome === 'corrupt-head') throw new KnowledgeAssetWorkspaceHeadCorruptError('corrupt exact head');
+        return finalizationOutcome;
+      });
+      (internals as any).getOrCreateFinalizationHandler = () => ({
+        classifyChainReconcileLocalCandidate: async () => ({ kind: 'present' }),
+        handleChainReconciledKC: finalized,
+      });
+      const inline = vi.fn(async () => { throw new Error('inline recovery started'); });
+      internals.syncContextGraphFromConnectedPeers = inline;
+      internals.recoverVmReconcileBatch = inline;
+
+      const outcome = await internals.reconcileChainOrdinal('669', onChainCgId, 0, 100);
+      expect(finalized).toHaveBeenCalledTimes(1);
+      expect(outcome).toEqual(finalizationOutcome === 'corrupt-head' ? { status: 'pending' } : {
+        status: 'pending', recovery: {
+          localCgId: '669', onChainCgId: '669', ordinal: 0,
+          ual: buildKnowledgeAssetUal(internals.chain.chainId, STAGED_KA_AUTHOR, 12n),
+          merkleRoot: root.slice(2), kaId: kaId.toString(), reason: finalizationOutcome,
+        },
+      });
+      expect(inline).not.toHaveBeenCalled();
+      expect(retiredHook).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps a corrupt SWM head on one KA from failing the whole graph reconcile', async () => {
     const captured: ReplicationEvent[] = [];
@@ -1613,7 +1527,7 @@ describe('Phase D - VM reconcile damping', () => {
       const reads = countRootReads(chain);
       const ual = buildKnowledgeAssetUal(chain.chainId, await chain.getDKGKnowledgeAssetsAddress(), 9301n);
 
-      const outcome = await internals.reconcileChainOrdinal('301', 301n, 0, 100, { deferActiveFetch: true });
+      const outcome = await internals.reconcileChainOrdinal('301', 301n, 0, 100);
 
       expect(outcome).toEqual({
         status: 'pending',
@@ -1692,7 +1606,7 @@ describe('Phase D - VM reconcile damping', () => {
       );
       const reads = countRootReads(chain);
 
-      await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, 100, { deferActiveFetch: true }))
+      await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, 100))
         .resolves.toEqual({ status: 'reconciled', blockNumber: 100 });
       const rootReads = reads.getLatestMerkleRoot.calls.length;
       const publisherReads = reads.getLatestMerkleRootPublisher.calls.length;
@@ -1712,7 +1626,7 @@ describe('Phase D - VM reconcile damping', () => {
       };
       const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
       (internals as any).prepareVmReconcileRotationTarget(target, ['12D3KooWSettledPeer'], 100);
-      await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, 101, { deferActiveFetch: true }))
+      await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, 101))
         .resolves.toEqual({ status: 'already', blockNumber: 101 });
       expect(reads.getLatestMerkleRoot.calls).toHaveLength(rootReads);
       expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(publisherReads);
@@ -1740,7 +1654,7 @@ describe('Phase D - VM reconcile damping', () => {
       registerUnmatchedKC(chain, 9304n, 304n);
       const reads = countRootReads(chain);
 
-      await expect(internals.reconcileChainOrdinal('304', 304n, 0, 100, { deferActiveFetch: true }))
+      await expect(internals.reconcileChainOrdinal('304', 304n, 0, 100))
         .resolves.toMatchObject({ status: 'pending', recovery: { reason: 'no-swm', merkleRoot: '' } });
       expect(reads.getLatestMerkleRoot.calls).toHaveLength(0);
       expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(0);
@@ -1752,467 +1666,7 @@ describe('Phase D - VM reconcile damping', () => {
     });
   });
 
-  it('negative-caches a missing KA and skips the reconcile plus active fetch during backoff', async () => {
-    const internals = await boot();
-    const onChainCgId = 42n;
-    registerUnmatchedKC(internals.chain, 9001n, onChainCgId);
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-
-    reconciles.count = 0;
-    await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBe(0);
-  });
-
-  it('rehydrates a generation-gated miss after restart without repeating the reconcile', async () => {
-    type LegacyVmReconcileNegativeRecord = Omit<
-      VmReconcileNegativeRecord,
-      'peerTopology' | 'cleanMissPeerIds'
-    >;
-    const durable = new Map<string, LegacyVmReconcileNegativeRecord>();
-    const subscriptionStore: ContextGraphSubscriptionStore = {
-      loadAll: async () => [],
-      save: async () => undefined,
-      delete: async () => undefined,
-      loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
-      saveVmReconcileNegative: async (record) => {
-        durable.set(record.cacheKey, {
-          cacheKey: record.cacheKey,
-          localCgId: record.localCgId,
-          failures: record.failures,
-          nextRetryAt: record.nextRetryAt,
-          swmGen: record.swmGen,
-          candidateNamespaces: record.candidateNamespaces,
-          peerTopologyKey: record.peerTopologyKey,
-        });
-      },
-      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
-      deleteVmReconcileNegativesForContextGraph: async (cg) => {
-        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
-      },
-    };
-    const onChainCgId = 52n;
-    let internals = await boot(subscriptionStore);
-    registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
-    (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
-    await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
-    expect(durable.size).toBe(1);
-    const savedLegacyRecord = [...durable.values()][0]!;
-    expect(savedLegacyRecord.peerTopologyKey).toEqual(expect.any(String));
-    expect('peerTopology' in savedLegacyRecord).toBe(false);
-    expect('cleanMissPeerIds' in savedLegacyRecord).toBe(false);
-
-    await agent!.stop();
-    agent = null;
-    internals = await boot(subscriptionStore);
-    registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
-    const reconciles = countChainReconciles(internals);
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
-    expect(reconciles.count).toBe(0);
-    expect(fetch.calls).toHaveLength(0);
-  });
-
-  it('rehydrates clean-miss evidence and reuses it after a peer disappears', async () => {
-    const durable = new Map<string, VmReconcileNegativeRecord>();
-    let durableLoads = 0;
-    let durableSaves = 0;
-    const subscriptionStore: ContextGraphSubscriptionStore = {
-      loadAll: async () => [],
-      save: async () => undefined,
-      delete: async () => undefined,
-      loadVmReconcileNegative: async (key) => {
-        durableLoads += 1;
-        const record = durable.get(key);
-        return record ? structuredClone(record) : null;
-      },
-      saveVmReconcileNegative: async (record) => {
-        durableSaves += 1;
-        durable.set(record.cacheKey, structuredClone(record));
-      },
-      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
-      deleteVmReconcileNegativesForContextGraph: async (cg) => {
-        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
-      },
-    };
-    const localCgId = '59';
-    const onChainCgId = 59n;
-    const kaId = 9059n;
-    let connectedPeers = ['peer-stable', 'peer-flaky'];
-    let internals = await boot(subscriptionStore);
-    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
-    (agent as any).node.libp2p.getConnections = () =>
-      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
-    const provenPeers = ['peer-stable', 'peer-flaky'];
-    const initialFetch = recorder(async () => ({
-      catchup: emptyCatchupStats(),
-      cleanMissPeerIds: [provenPeers.shift()!],
-    }));
-    (internals as any).syncVmRecoveryFromConnectedPeers = initialFetch;
-
-    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'pending' });
-    expect(initialFetch.calls).toHaveLength(2);
-    expect(durableSaves).toBe(1);
-    expect(durable.size).toBe(1);
-    const savedRecord = [...durable.values()][0]!;
-    expect(savedRecord.peerTopology).toMatchObject({
-      kind: 'readable',
-      peers: expect.arrayContaining([
-        { peerId: 'peer-stable', core: false },
-        { peerId: 'peer-flaky', core: false },
-      ]),
-    });
-    expect(savedRecord.cleanMissPeerIds).toEqual(['peer-stable', 'peer-flaky']);
-
-    const loadsBeforeRestart = durableLoads;
-    await agent!.stop();
-    agent = null;
-    connectedPeers = ['peer-stable'];
-    internals = await boot(subscriptionStore);
-    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
-    (agent as any).node.libp2p.getConnections = () =>
-      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
-    const restartedFetch = recorder(async () => ({
-      catchup: emptyCatchupStats(),
-      cleanMissPeerIds: ['peer-stable'],
-    }));
-    (internals as any).syncVmRecoveryFromConnectedPeers = restartedFetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'pending' });
-    expect(durableLoads).toBeGreaterThan(loadsBeforeRestart);
-    expect(restartedFetch.calls).toHaveLength(0);
-    expect(reconciles.count).toBe(0);
-  });
-
-  it('tries again after restart when workspace operations kept the miss out of the durable cache', async () => {
-    const durable = new Map<string, VmReconcileNegativeRecord>();
-    const subscriptionStore: ContextGraphSubscriptionStore = {
-      loadAll: async () => [],
-      save: async () => undefined,
-      delete: async () => undefined,
-      loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
-      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
-      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
-      deleteVmReconcileNegativesForContextGraph: async (cg) => {
-        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
-      },
-    };
-    const localCgId = '65';
-    const onChainCgId = 65n;
-    const kaId = 9065n;
-    const entity = 'urn:fact:child-after-restart';
-    const value = 'Payload persisted in a per-KA SWM graph';
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-      [],
-    );
-    const publishedAt = '2035-01-01T00:00:00.000Z';
-
-    let internals = await boot(subscriptionStore);
-    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
-    (internals.store as TripleStore & {
-      getWriteRevision?: (prefix: string) => { generation: number; stable: boolean };
-    }).getWriteRevision = () => ({ generation: 0, stable: true });
-    await insertWorkspaceOperationMeta(
-      internals.store,
-      contextGraphWorkspaceMetaGraphUri(localCgId),
-      'child-after-restart',
-      entity,
-      publishedAt,
-    );
-    (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
-
-    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'pending' });
-    expect(durable.size).toBe(0);
-
-    await agent!.stop();
-    agent = null;
-    internals = await boot(subscriptionStore);
-    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
-    (internals.store as TripleStore & {
-      getWriteRevision?: (prefix: string) => { generation: number; stable: boolean };
-    }).getWriteRevision = () => ({ generation: 0, stable: true });
-    await insertWorkspaceOperationMeta(
-      internals.store,
-      contextGraphWorkspaceMetaGraphUri(localCgId),
-      'child-after-restart',
-      entity,
-      publishedAt,
-    );
-
-    const reconciles = countChainReconciles(internals);
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'pending' });
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(fetch.calls).toHaveLength(1);
-  });
-
-  it('does not reuse a negative cache entry after catchup peer topology changes', async () => {
-    const internals = await boot();
-    const onChainCgId = 54n;
-    registerUnmatchedKC(internals.chain, 9014n, onChainCgId);
-
-    let connectedPeers = ['peer-empty'];
-    (agent as any).node.libp2p.getConnections = () =>
-      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    reconciles.count = 0;
-    connectedPeers = ['peer-empty', 'peer-newly-reachable'];
-
-    await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    // The cache entry is not reused: the reconcile ran again and the fetch
-    // re-ran for the new topology (1 → 3 calls).
-    expect(fetch.calls).toHaveLength(3);
-    expect(reconciles.count).toBeGreaterThan(0);
-  });
-
-  it.each([
-    ['preferred peer', 154n, 'peer-new', false],
-    ['privacy mode', 155n, 'peer-stable', true],
-  ] as const)(
-    'refetches after a cached miss when the %s changes',
-    async (_field, onChainCgId, preferredPeerId, privateOnly) => {
-      const internals = await boot();
-      const localCgId = onChainCgId.toString();
-      registerUnmatchedKC(internals.chain, 9_000n + onChainCgId, onChainCgId);
-      let peerTopology = createVmReconcilePeerTopology({
-        preferredPeerId: 'peer-stable',
-        privateOnly: false,
-        peers: [{ peerId: 'peer-stable', core: false }],
-      });
-      (internals as any).vmReconcilePeerTopology = async () => peerTopology;
-      const fetch = recorder(async () => emptyCatchupStats());
-      (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-      await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-        .resolves.toEqual({ status: 'pending' });
-      const initialFetches = fetch.calls.length;
-      expect(initialFetches).toBeGreaterThan(0);
-
-      peerTopology = createVmReconcilePeerTopology({
-        preferredPeerId,
-        privateOnly,
-        peers: [{ peerId: 'peer-stable', core: false }],
-      });
-      await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-        .resolves.toEqual({ status: 'pending' });
-      expect(fetch.calls.length).toBeGreaterThan(initialFetches);
-    },
-  );
-
-  it('reuses a negative cache entry when a previously checked peer disappears', async () => {
-    const internals = await boot();
-    const onChainCgId = 58n;
-    registerUnmatchedKC(internals.chain, 9018n, onChainCgId);
-
-    let connectedPeers = ['peer-stable', 'peer-flaky'];
-    (agent as any).node.libp2p.getConnections = () =>
-      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
-
-    const provenPeers = ['peer-stable', 'peer-flaky'];
-    const fetch = recorder(async () => ({
-      catchup: emptyCatchupStats(),
-      cleanMissPeerIds: [provenPeers.shift() ?? 'peer-stable'],
-    }));
-    (internals as any).syncVmRecoveryFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    const fetchesAfterFirstMiss = fetch.calls.length;
-    expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
-    expect(reconciles.count).toBeGreaterThan(0);
-
-    reconciles.count = 0;
-    connectedPeers = ['peer-stable'];
-
-    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
-    expect(reconciles.count).toBe(0);
-  });
-
-  it('rechecks a remaining peer that was skipped before another clean peer disappeared', async () => {
-    const internals = await boot();
-    const onChainCgId = 60n;
-    registerUnmatchedKC(internals.chain, 9020n, onChainCgId);
-
-    let connectedPeers = ['peer-skipped', 'peer-clean'];
-    (agent as any).node.libp2p.getConnections = () =>
-      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
-    let fetchCalls = 0;
-    let snapshotAvailable = false;
-    const fetch = recorder(async () => {
-      fetchCalls += 1;
-      if (fetchCalls === 1) {
-        return { catchup: noProtocolCatchupStats(), cleanMissPeerIds: [] };
-      }
-      if (fetchCalls === 2) {
-        return { catchup: emptyCatchupStats(), cleanMissPeerIds: ['peer-clean'] };
-      }
-      snapshotAvailable = true;
-      return { catchup: emptyCatchupStats(), cleanMissPeerIds: ['peer-skipped'] };
-    });
-    (internals as any).syncVmRecoveryFromConnectedPeers = fetch;
-    (internals as any).getOrCreateFinalizationHandler = () => ({
-      handleChainReconciledKC: async () => snapshotAvailable ? 'promoted' : 'no-swm',
-    });
-
-    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(2);
-
-    connectedPeers = ['peer-skipped'];
-    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch.calls).toHaveLength(3);
-  });
-
-  it('reuses a negative cache entry when connected peers only reorder', async () => {
-    const internals = await boot();
-    const onChainCgId = 55n;
-    registerUnmatchedKC(internals.chain, 9015n, onChainCgId);
-
-    let connectedPeers = ['peer-a', 'peer-b'];
-    (agent as any).node.libp2p.getConnections = () =>
-      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    const fetchesAfterFirstMiss = fetch.calls.length;
-    expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    reconciles.count = 0;
-    connectedPeers = ['peer-b', 'peer-a'];
-
-    await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
-    expect(reconciles.count).toBe(0);
-  });
-
-  it('primes catchup connections before reusing a negative cache entry', async () => {
-    const internals = await boot();
-    const onChainCgId = 57n;
-    registerUnmatchedKC(internals.chain, 9017n, onChainCgId);
-
-    let connectedPeers = ['peer-empty'];
-    (agent as any).node.libp2p.getConnections = () =>
-      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
-
-    let primeCalls = 0;
-    (internals as any).primeCatchupConnections = recorder(async () => {
-      primeCalls += 1;
-      if (primeCalls >= 1) {
-        connectedPeers = ['peer-empty', 'peer-discovered'];
-      }
-    });
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('57', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    reconciles.count = 0;
-
-    await expect(internals.reconcileChainOrdinal('57', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(primeCalls).toBeGreaterThanOrEqual(1);
-    // The reconcile and the fetch re-ran against the primed topology: the
-    // cache entry is not reused.
-    expect(fetch.calls).toHaveLength(3);
-    expect(reconciles.count).toBeGreaterThan(0);
-  });
-
-  it('does not reuse a negative cache entry when catchup ranking changes for the same peer set', async () => {
-    const internals = await boot();
-    const onChainCgId = 56n;
-    registerUnmatchedKC(internals.chain, 9016n, onChainCgId);
-
-    (agent as any).node.libp2p.getConnections = () => [
-      { remotePeer: { toString: () => 'peer-reclassified' } },
-    ];
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-
-    reconciles.count = 0;
-    (internals as any).peerCapabilityRegistry.observe('peer-reclassified', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
-
-    await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    // The reconcile and the fetch re-ran for the reclassified peer: the cache
-    // entry is not reused.
-    expect(fetch.calls).toHaveLength(2);
-    expect(reconciles.count).toBeGreaterThan(0);
-  });
-
-  it('does not reuse a negative cache entry when the same KA has a newer merkle root', async () => {
-    const internals = await boot();
-    const onChainCgId = 46n;
-    registerUnmatchedKC(internals.chain, 9006n, onChainCgId, '0x' + '11'.repeat(32));
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-
-    reconciles.count = 0;
-    await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBe(0);
-
-    registerUnmatchedKC(internals.chain, 9006n, onChainCgId, '0x' + '22'.repeat(32));
-    await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    // New root bypasses the negative-cache deferral and re-runs the reconcile;
-    // the independent per-CG active-fetch cooldown may still suppress another
-    // network fetch in the same sweep interval.
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-    const cacheKeys = Array.from(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).keys());
-    expect(cacheKeys).toHaveLength(2);
-    expect(cacheKeys.some((key) => key.includes('11'.repeat(32)))).toBe(true);
-    expect(cacheKeys.some((key) => key.includes('22'.repeat(32)))).toBe(true);
-  });
-
-  it('promotes per-KA shared memory that arrives while its miss is cached', async () => {
+  it('promotes per-KA shared memory that arrives after an earlier recovery miss', async () => {
     const internals = await boot();
     const { contextGraphId } = await internals.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1 });
     const localCgId = contextGraphId.toString();
@@ -2221,19 +1675,16 @@ describe('Phase D - VM reconcile damping', () => {
     registerKnowledgeAsset(internals.chain, contextGraphId, 1n, entity, value);
     const fetch = recorder(async () => emptyCatchupStats());
     (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, unknown>;
 
     await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, undefined))
-      .resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(negativeCache.size).toBe(1);
+      .resolves.toMatchObject({ status: 'pending', recovery: { reason: 'no-swm' } });
+    expect(fetch.calls).toHaveLength(0);
 
     await stageKnowledgeAssetSharedMemory(internals.store, internals.chain, localCgId, 1n, entity, value);
 
     await expect(internals.reconcileChainOrdinal(localCgId, contextGraphId, 0, undefined))
       .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch.calls).toHaveLength(1);
-    expect(negativeCache.size).toBe(0);
+    expect(fetch.calls).toHaveLength(0);
     await expect(graphHoldsTriple(
       internals.store,
       stagedVerifiedMemoryGraph(internals.chain, localCgId, 1n),
@@ -2241,683 +1692,8 @@ describe('Phase D - VM reconcile damping', () => {
     )).resolves.toBe(true);
   });
 
-  it('tries again when workspace data arrives without operation-meta changes', async () => {
-    const internals = await boot();
-    const onChainCgId = 48n;
-    const entity = 'urn:fact:data-arrival';
-    const value = 'Data arrived after cache';
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-      [],
-    );
-    registerUnmatchedKC(internals.chain, 9008n, onChainCgId, bytesToHex(root));
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    await insertWorkspaceOperationMeta(
-      internals.store,
-      contextGraphWorkspaceMetaGraphUri('48'),
-      'data-arrival-op',
-      entity,
-      '2030-01-01T00:00:00.000Z',
-    );
-
-    await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    await insertWorkspaceDataTriple(internals.store, '48', entity, value);
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-  });
-
-  it('tries the reconcile again after shared-memory fetch progress even when peer success is zero', async () => {
-    const internals = await boot();
-    const onChainCgId = 61n;
-    const entity = 'urn:fact:shared-progress';
-    const value = 'Shared memory fetched despite durable failure';
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-      [],
-    );
-    registerUnmatchedKC(internals.chain, 9022n, onChainCgId, bytesToHex(root));
-
-    const fetch = recorder(async () => {
-      await seedSwmSnapshot(internals.store, '61', entity, value);
-      return {
-        ...emptyCatchupStats(),
-        peersSucceeded: 0,
-        sharedMemorySynced: 2,
-        diagnostics: {
-          ...emptyCatchupStats().diagnostics,
-          sharedMemory: {
-            ...emptyCatchupStats().diagnostics.sharedMemory,
-            insertedDataTriples: 1,
-            insertedMetaTriples: 1,
-          },
-        },
-      };
-    });
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('61', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    // Before the fetch and again after it: the progress is a usable response.
-    expect(reconciles.count).toBe(2);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-  });
-
-  it('actively fetches provenance metadata when exact VM content is metadata-pending', async () => {
-    const internals = await boot();
-    const onChainCgId = 62n;
-    const root = new Uint8Array(32);
-    root[31] = 62;
-    registerUnmatchedKC(internals.chain, 9062n, onChainCgId, bytesToHex(root));
-
-    let finalizationAttempt = 0;
-    const handleChainReconciledKC = recorder(async () => {
-      finalizationAttempt += 1;
-      return finalizationAttempt === 1
-        ? 'verified-vm-metadata-pending'
-        : 'already-confirmed';
-    });
-    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
-      handleChainReconciledKC,
-    }));
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('62', onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'already', blockNumber: 0 });
-
-    expect(fetch.calls).toHaveLength(1);
-    expect(handleChainReconciledKC.calls).toHaveLength(2);
-  });
-
-  it('tries again when workspace data changes without triple-count changes', async () => {
-    const internals = await boot();
-    const onChainCgId = 52n;
-    const entity = 'urn:fact:data-replacement';
-    const staleValue = 'Stale value';
-    const freshValue = 'Fresh value';
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${freshValue}"`, graph: '' }],
-      [],
-    );
-    registerUnmatchedKC(internals.chain, 9012n, onChainCgId, bytesToHex(root));
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    await insertWorkspaceOperationMeta(
-      internals.store,
-      contextGraphWorkspaceMetaGraphUri('52'),
-      'data-replacement-op',
-      entity,
-      '2030-01-01T00:00:00.000Z',
-    );
-    await insertWorkspaceDataTriple(internals.store, '52', entity, staleValue);
-
-    await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    await replaceWorkspaceDataTriple(internals.store, '52', entity, freshValue);
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-  });
-
-  it('tries again when private-root metadata arrives without operation-meta changes', async () => {
-    const internals = await boot();
-    const onChainCgId = 49n;
-    const entity = 'urn:fact:private-arrival';
-    const value = 'Private root arrived after cache';
-    const privateRoot = new Uint8Array(32);
-    privateRoot[31] = 7;
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-      [privateRoot],
-    );
-    registerUnmatchedKC(internals.chain, 9009n, onChainCgId, bytesToHex(root));
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    await insertWorkspaceOperationMeta(
-      internals.store,
-      contextGraphWorkspaceMetaGraphUri('49'),
-      'private-arrival-op',
-      entity,
-      '2030-01-01T00:00:00.000Z',
-    );
-    await insertWorkspaceDataTriple(internals.store, '49', entity, value);
-
-    await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-  });
-
-  it('invalidates a negative cache entry when workspace content arrives in a new subgraph namespace', async () => {
-    const internals = await boot();
-    const onChainCgId = 53n;
-    const entity = 'urn:fact:new-subgraph-arrival';
-    const value = 'Subgraph SWM arrived after cache';
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-      [],
-    );
-    registerUnmatchedKC(internals.chain, 9013n, onChainCgId, bytesToHex(root));
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('53', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    await seedSwmSnapshotInSubGraph(internals.store, '53', 'code', entity, value);
-    const reconciles = countChainReconciles(internals);
-
-    await expect(internals.reconcileChainOrdinal('53', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-  });
-
-  it('rechecks the root SWM generation when subgraph enumeration fails during negative-cache validation', async () => {
-    const internals = await boot();
-    const onChainCgId = 58n;
-    const entity = 'urn:fact:root-fallback-arrival';
-    const value = 'Root fallback arrived after cache';
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-      [],
-    );
-    registerUnmatchedKC(internals.chain, 9018n, onChainCgId, bytesToHex(root));
-
-    const originalListSubGraphs = GraphManager.prototype.listSubGraphs;
-    GraphManager.prototype.listSubGraphs = recorder(async () => { throw new Error('subgraph listing failed'); }) as typeof originalListSubGraphs;
-    try {
-      const fetch = recorder(async () => emptyCatchupStats());
-      (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-      await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-      await seedSwmSnapshot(internals.store, '58', entity, value);
-      const reconciles = countChainReconciles(internals);
-
-      await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-      expect(reconciles.count).toBeGreaterThan(0);
-      expect(fetch.calls).toHaveLength(1);
-      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-    } finally {
-      GraphManager.prototype.listSubGraphs = originalListSubGraphs;
-    }
-  });
-
-  it('keeps a negative cache entry when subgraph enumeration fails during namespace validation', async () => {
-    const internals = await boot();
-    const onChainCgId = 60n;
-    registerUnmatchedKC(internals.chain, 9020n, onChainCgId);
-
-    const graphManager = new GraphManager(internals.store);
-    await internals.store.insert([{
-      subject: 'urn:test:subgraph-marker:code',
-      predicate: 'http://schema.org/name',
-      object: '"marker"',
-      graph: graphManager.subGraphUri('60', 'code'),
-    }]);
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    const fetchesAfterFirstMiss = fetch.calls.length;
-    expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    const originalListSubGraphs = GraphManager.prototype.listSubGraphs;
-    GraphManager.prototype.listSubGraphs = recorder(async () => { throw new Error('transient subgraph listing failure'); }) as typeof originalListSubGraphs;
-    try {
-      await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-      expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
-      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-    } finally {
-      GraphManager.prototype.listSubGraphs = originalListSubGraphs;
-    }
-  });
-
-  it('invalidates a negative cache entry when root workspace content changes while subgraph enumeration fails', async () => {
-    const internals = await boot();
-    const onChainCgId = 65n;
-    const entity = 'urn:fact:root-arrival-after-subgraph-cache';
-    const value = 'Root SWM arrived after subgraph cache';
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-      [],
-    );
-    registerUnmatchedKC(internals.chain, 9025n, onChainCgId, bytesToHex(root));
-
-    const graphManager = new GraphManager(internals.store);
-    await internals.store.insert([{
-      subject: 'urn:test:subgraph-marker:code',
-      predicate: 'http://schema.org/name',
-      object: '"marker"',
-      graph: graphManager.subGraphUri('65', 'code'),
-    }]);
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    const fetchesAfterFirstMiss = fetch.calls.length;
-    expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    const originalListSubGraphs = GraphManager.prototype.listSubGraphs;
-    GraphManager.prototype.listSubGraphs = recorder(async () => { throw new Error('transient subgraph listing failure'); }) as typeof originalListSubGraphs;
-    try {
-      await seedSwmSnapshot(internals.store, '65', entity, value);
-      const reconciles = countChainReconciles(internals);
-
-      await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-      expect(reconciles.count).toBeGreaterThan(0);
-      expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
-      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-    } finally {
-      GraphManager.prototype.listSubGraphs = originalListSubGraphs;
-    }
-  });
-
-  it('does not reuse a negative cache entry across local CGs for the same KA root', async () => {
-    const internals = await boot();
-    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
-    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, 9021n);
-    const root = new Uint8Array(32);
-    root[31] = 21;
-    const keyA = (internals as any).vmReconcileCacheKey('61', ual, root);
-    const keyB = (internals as any).vmReconcileCacheKey('62', ual, root);
-    expect(keyA).not.toBe(keyB);
-
-    (internals as any).recordVmReconcileNegativeCache(keyA, '61', {
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopology: { kind: 'unreadable' },
-    });
-
-    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(keyB, '62')).resolves.toBe(false);
-
-    (internals as any).recordVmReconcileNegativeCache(keyB, '62', {
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopology: { kind: 'unreadable' },
-    });
-
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(2);
-  });
-
-  it('does not negative-cache an unreadable SWM generation and retries before backoff', async () => {
-    const internals = await boot();
-    const onChainCgId = 45n;
-    const entity = 'urn:fact:after-unreadable';
-    const value = 'Visible right after a probe failure';
-    const root = computeFlatKCRootV10(
-      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
-      [],
-    );
-    registerUnmatchedKC(internals.chain, 9005n, onChainCgId, bytesToHex(root));
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const originalQuery = internals.store.query.bind(internals.store);
-    const reconciles = countChainReconciles(internals);
-    let generationReads = 0;
-    (internals.store as any).query = recorder(async (sparql: string) => {
-      if (sparql.includes('SELECT ?op ?root ?ts WHERE')) {
-        generationReads++;
-        if (generationReads <= 2) throw new Error('transient generation read failure');
-      }
-      return originalQuery(sparql);
-    });
-
-    await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-    expect(generationReads).toBe(2);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
-
-    reconciles.count = 0;
-    await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-    // The generation is readable now, so this miss is cached.
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-  });
-
-  it('invalidates a negative cache entry when same-count SWM data changes', async () => {
-    const internals = await boot();
-    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
-    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, 9023n);
-    const root = new Uint8Array(32);
-    root[31] = 23;
-    const cacheKey = (internals as any).vmReconcileCacheKey('63', ual, root);
-
-    await insertWorkspaceDataTriple(internals.store, '63', 'urn:fact:same-count', 'old');
-    const stateBefore = await (internals as any).collectVmReconcileSwmCandidateState('63');
-    expect(stateBefore.swmGen).toContain('dataTriples:1');
-
-    (internals as any).recordVmReconcileNegativeCache(cacheKey, '63', stateBefore);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    await replaceWorkspaceDataTriple(internals.store, '63', 'urn:fact:same-count', 'new');
-
-    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(cacheKey, '63')).resolves.toBe(false);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
-  });
-
-  it('negative-caches unchanged workspace operations and invalidates on namespace/content changes', async () => {
-    const internals = await boot();
-    const onChainCgId = 43n;
-    registerUnmatchedKC(internals.chain, 9002n, onChainCgId);
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-    const reconciles = countChainReconciles(internals);
-
-    await insertWorkspaceOperationMeta(
-      internals.store,
-      contextGraphWorkspaceMetaGraphUri('43'),
-      'existing-root-op',
-      'urn:fact:existing',
-      '2030-01-01T00:00:00.000Z',
-    );
-
-    await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
-    expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
-
-    await insertWorkspaceOperationMeta(
-      internals.store,
-      'did:dkg:context-graph:43/code/_shared_memory_meta',
-      'unrelated-subgraph-op',
-      'urn:fact:unrelated',
-      '2040-01-01T00:00:00.000Z',
-    );
-
-    reconciles.count = 0;
-    await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-
-    await insertWorkspaceOperationMeta(
-      internals.store,
-      contextGraphWorkspaceMetaGraphUri('43'),
-      'candidate-root-op-with-older-timestamp',
-      'urn:fact:candidate',
-      '2020-01-01T00:00:00.000Z',
-    );
-
-    reconciles.count = 0;
-    await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
-    expect(fetch.calls).toHaveLength(1);
-    expect(reconciles.count).toBeGreaterThan(0);
-  });
-
-  it('runs at most one active fetch per CG sweep interval across different pending ordinals', async () => {
-    const internals = await boot();
-    const onChainCgId = 44n;
-    registerUnmatchedKC(internals.chain, 9003n, onChainCgId);
-    registerUnmatchedKC(internals.chain, 9004n, onChainCgId);
-
-    const fetch = recorder(async () => emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await internals.reconcileChainOrdinal('44', onChainCgId, 0, undefined);
-    await internals.reconcileChainOrdinal('44', onChainCgId, 1, undefined);
-
-    expect(fetch.calls).toHaveLength(1);
-  });
-
-  it('falls through a no-protocol active-fetch peer before caching a miss', async () => {
-    const internals = await boot();
-    const onChainCgId = 47n;
-    registerUnmatchedKC(internals.chain, 9007n, onChainCgId);
-    (agent as any).node.libp2p.getConnections = () => [
-      { remotePeer: { toString: () => 'peer-no-protocol' } },
-      { remotePeer: { toString: () => 'peer-empty' } },
-    ];
-
-    const fetchResults = [noProtocolCatchupStats(), emptyCatchupStats()];
-    const fetch = recorder(async () => fetchResults.shift() ?? emptyCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('47', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-
-    expect(fetch.calls).toHaveLength(2);
-    // W1 §5.5 — `sourceOverride` is attribution only: it changes no peer
-    // selection, no rotation and no admission priority, which is why this
-    // options object is otherwise unchanged. Pinned as an EXACT literal
-    // because "not catchup-background" would also be satisfied by dropping
-    // the override entirely and landing on some other excluded source.
-    expect(fetch.calls[0]).toEqual(['47', {
-      includeSharedMemory: true,
-      maxPeers: 1,
-      peerRotationKey: '47',
-      sourceOverride: 'vm-recovery',
-    }]);
-    expect(fetch.calls[1]).toEqual(['47', {
-      includeSharedMemory: true,
-      maxPeers: 1,
-      peerRotationKey: '47',
-      sourceOverride: 'vm-recovery',
-    }]);
-  });
-
-  it('extends active-fetch attempts after the first fetch round dials another peer', async () => {
-    const internals = await boot();
-    const onChainCgId = 59n;
-    registerUnmatchedKC(internals.chain, 9019n, onChainCgId);
-
-    let connectedPeers = ['peer-initial'];
-    (agent as any).node.libp2p.getConnections = () =>
-      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
-
-    const fetch = recorder(async () => {
-      if (connectedPeers.length === 1) {
-        connectedPeers = ['peer-initial', 'peer-dialed'];
-      }
-      return {
-        ...emptyCatchupStats(),
-        connectedPeers: connectedPeers.length,
-        totalPeers: connectedPeers.length,
-        selectedPeers: 1,
-      };
-    });
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('59', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-
-    expect(fetch.calls).toHaveLength(2);
-  });
-
-  it('attempts every connected peer before recording a miss', async () => {
-    const internals = await boot();
-    const onChainCgId = 64n;
-    registerUnmatchedKC(internals.chain, 9024n, onChainCgId);
-
-    const fetch = recorder(async () => ({
-      ...emptyCatchupStats(),
-      connectedPeers: 33,
-      totalPeers: 33,
-      selectedPeers: 1,
-    }));
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('64', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-
-    expect(fetch.calls).toHaveLength(33);
-  });
-
-  it('does not negative-cache no-swm when active fetch reaches no sync-capable peer', async () => {
-    const internals = await boot();
-    const onChainCgId = 50n;
-    registerUnmatchedKC(internals.chain, 9010n, onChainCgId);
-    (agent as any).node.libp2p.getConnections = () => [
-      { remotePeer: { toString: () => 'peer-no-protocol-a' } },
-      { remotePeer: { toString: () => 'peer-no-protocol-b' } },
-    ];
-
-    const fetch = recorder(async () => noProtocolCatchupStats());
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('50', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-
-    expect(fetch.calls).toHaveLength(2);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
-    expect(((internals as any).vmReconcileFetchCooldowns as Map<string, unknown>).has('50')).toBe(false);
-  });
-
-  it('does not negative-cache no-swm when every active fetch attempt fails', async () => {
-    const internals = await boot();
-    const onChainCgId = 51n;
-    registerUnmatchedKC(internals.chain, 9011n, onChainCgId);
-    (agent as any).node.libp2p.getConnections = () => [
-      { remotePeer: { toString: () => 'peer-fails-a' } },
-      { remotePeer: { toString: () => 'peer-fails-b' } },
-    ];
-
-    const fetch = recorder(async () => { throw new Error('fetch failed'); });
-    (internals as any).syncContextGraphFromConnectedPeers = fetch;
-
-    await expect(internals.reconcileChainOrdinal('51', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-
-    expect(fetch.calls).toHaveLength(2);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
-    expect(((internals as any).vmReconcileFetchCooldowns as Map<string, unknown>).has('51')).toBe(false);
-  });
-
-  it('does not prune newer root cache state when a stale root is replayed', async () => {
-    const internals = await boot();
-    const onChainCgId = 55n;
-    const kaId = 9015n;
-    const staleRoot = new Uint8Array(32);
-    const freshRoot = new Uint8Array(32);
-    staleRoot[31] = 1;
-    freshRoot[31] = 2;
-    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(staleRoot));
-
-    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
-    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, kaId);
-    const staleKey = (internals as any).vmReconcileCacheKey('55', ual, staleRoot);
-    const freshKey = (internals as any).vmReconcileCacheKey('55', ual, freshRoot);
-    ((internals as any).recentReconciledUals as { add(key: string): void }).add(freshKey);
-    ((internals as any).vmReconcileNegativeCache as Map<string, unknown>).set(freshKey, {
-      localCgId: '55',
-      failures: 1,
-      nextRetryAt: Date.now() + 60_000,
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopology: { kind: 'unreadable' },
-    });
-    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
-      handleChainReconciledKC: recorder(async () => 'stale-target'),
-    }));
-
-    await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'already', blockNumber: 0 });
-
-    expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(freshKey)).toBe(true);
-    expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(staleKey)).toBe(true);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).has(freshKey)).toBe(true);
-  });
-
-  it('keeps expired negative-cache entries as bounded retry history', async () => {
-    const internals = await boot();
-    const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, {
-      failures: number;
-      nextRetryAt: number;
-      swmGen: string;
-      candidateNamespaces: unknown[];
-      peerTopology: { kind: 'unreadable' };
-    }>;
-    const now = Date.now();
-    const cacheKey = 'retry-history-key';
-
-    negativeCache.set(cacheKey, {
-      localCgId: 'retry-cg',
-      failures: 1,
-      nextRetryAt: now - 1,
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopology: { kind: 'unreadable' },
-    } as any);
-
-    (internals as any).pruneVmReconcileState(now);
-    expect(negativeCache.has(cacheKey)).toBe(true);
-    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(cacheKey, 'retry-cg')).resolves.toBe(false);
-
-    (internals as any).recordVmReconcileNegativeCache(cacheKey, 'retry-cg', {
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopology: { kind: 'unreadable' },
-    });
-
-    expect(negativeCache.get(cacheKey)?.failures).toBe(2);
-    expect(negativeCache.get(cacheKey)?.nextRetryAt).toBeGreaterThan(now);
-  });
-
-  it('bounds durable negative-cache hydration guards and safely reloads evicted keys', async () => {
-    const loads: string[] = [];
-    const internals = await boot({
-      loadAll: async () => [],
-      save: async () => undefined,
-      delete: async () => undefined,
-      loadVmReconcileNegative: async (cacheKey) => {
-        loads.push(cacheKey);
-        return undefined;
-      },
-    });
-    const hydrated = (internals as any).vmReconcileNegativeCacheHydrated as Map<string, string>;
-    const cap = DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES;
-
-    for (let index = 0; index < cap + 2; index += 1) {
-      (internals as any).markVmReconcileNegativeCacheHydrated(
-        `hydrated-cg\0ual-${index}#root`,
-        'hydrated-cg',
-      );
-    }
-
-    expect(hydrated.size).toBe(cap);
-    expect(hydrated.has('hydrated-cg\0ual-0#root')).toBe(false);
-    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(
-      'hydrated-cg\0ual-0#root',
-      'hydrated-cg',
-    )).resolves.toBe(false);
-    expect(loads).toEqual(['hydrated-cg\0ual-0#root']);
-    expect(hydrated.size).toBe(cap);
-  });
-
   it('prunes oversized VM reconcile state and clears non-hosted CG state on unsubscribe', async () => {
     const internals = await boot();
-    const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, {
-      failures: number;
-      nextRetryAt: number;
-      swmGen: string;
-      candidateNamespaces: unknown[];
-      peerTopology: { kind: 'unreadable' };
-    }>;
     const fetchCooldown = (internals as any).vmReconcileFetchCooldowns as Map<
       string,
       { startedAt: number; owner: symbol }
@@ -2925,20 +1701,9 @@ describe('Phase D - VM reconcile damping', () => {
     const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, { orderedPeers: string[]; nextPeerId?: string }>;
     const rotationState = (internals as any).vmReconcileRotationState as Map<string, unknown>;
-    const hydrated = (internals as any).vmReconcileNegativeCacheHydrated as Map<string, string>;
     const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
     const now = Date.now();
 
-    for (let i = 0; i < DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES + 2; i += 1) {
-      negativeCache.set(`future-${i}`, {
-        localCgId: `future-cg-${i}`,
-        failures: 1,
-        nextRetryAt: now + 60_000,
-        swmGen: 'empty:0',
-        candidateNamespaces: [],
-        peerTopology: { kind: 'unreadable' },
-      });
-    }
     fetchCooldown.set('expired-cg', {
       startedAt: now - DKGAgent.VM_RECONCILE_SWEEP_INTERVAL_MS - 1,
       owner: Symbol('expired-cg'),
@@ -2951,23 +1716,13 @@ describe('Phase D - VM reconcile damping', () => {
 
     (internals as any).pruneVmReconcileState(now);
 
-    expect(negativeCache.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES);
     expect(fetchCooldown.has('expired-cg')).toBe(false);
     expect(fetchCooldown.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
     expect(peerCursor.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
     expect(peerOrder.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
 
     internals.subscribedContextGraphs.set('cleanup-cg', { subscribed: true });
-    negativeCache.set('cleanup-cache', {
-      localCgId: 'cleanup-cg',
-      failures: 1,
-      nextRetryAt: now + 60_000,
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopology: { kind: 'unreadable' },
-    });
-    (internals as any).indexVmReconcileNegativeCacheEntry('cleanup-cg', 'cleanup-cache');
-    (internals as any).markVmReconcileNegativeCacheHydrated('cleanup-hydrated', 'cleanup-cg');
+
     fetchCooldown.set('cleanup-cg', { startedAt: now, owner: Symbol('cleanup-cg') });
     peerCursor.set('cleanup-cg', 7);
     peerOrder.set('cleanup-cg', { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
@@ -2977,8 +1732,6 @@ describe('Phase D - VM reconcile damping', () => {
     rotationState.set(cleanupRotationKey, {});
     recent.add('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01');
     (agent as any).unsubscribeFromContextGraph('cleanup-cg');
-    expect(negativeCache.has('cleanup-cache')).toBe(false);
-    expect(hydrated.has('cleanup-hydrated')).toBe(false);
     expect(fetchCooldown.has('cleanup-cg')).toBe(false);
     expect(peerCursor.has('cleanup-cg')).toBe(false);
     expect(peerOrder.has('cleanup-cg')).toBe(false);
@@ -2986,16 +1739,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(recent.has('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01')).toBe(false);
 
     internals.subscribedContextGraphs.set('hosted-cg', { subscribed: true, coreHosted: true });
-    negativeCache.set('hosted-cache', {
-      localCgId: 'hosted-cg',
-      failures: 1,
-      nextRetryAt: now + 60_000,
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopology: { kind: 'unreadable' },
-    });
-    (internals as any).indexVmReconcileNegativeCacheEntry('hosted-cg', 'hosted-cache');
-    (internals as any).markVmReconcileNegativeCacheHydrated('hosted-hydrated', 'hosted-cg');
+
     fetchCooldown.set('hosted-cg', now);
     peerCursor.set('hosted-cg', 3);
     peerOrder.set('hosted-cg', { orderedPeers: ['peer-b'], nextPeerId: 'peer-b' });
@@ -3005,8 +1749,6 @@ describe('Phase D - VM reconcile damping', () => {
     rotationState.set(hostedRotationKey, {});
     recent.add('hosted-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/2#02');
     (agent as any).unsubscribeFromContextGraph('hosted-cg');
-    expect(negativeCache.has('hosted-cache')).toBe(true);
-    expect(hydrated.has('hosted-hydrated')).toBe(true);
     expect(fetchCooldown.has('hosted-cg')).toBe(true);
     expect(peerCursor.has('hosted-cg')).toBe(true);
     expect(peerOrder.has('hosted-cg')).toBe(true);
@@ -3133,7 +1875,6 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     chain.getContextGraphKCCount = async () => 3n;
 
     const scannedOrdinals: number[] = [];
-    const deferredFetches: boolean[] = [];
     (internals as any).reconcileChainOrdinal = async (
       _lcg: string,
       _ocg: bigint,
@@ -3141,11 +1882,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       _headBlock: number | undefined,
       options: {
         isTargetCurrent?: () => boolean;
-        deferActiveFetch?: boolean;
       },
     ) => {
       scannedOrdinals.push(ordinal);
-      deferredFetches.push(options.deferActiveFetch ?? false);
       expect(options.isTargetCurrent?.()).toBe(true);
       if (ordinal === 0) return { status: 'already', blockNumber: 0 };
       return {
@@ -3180,7 +1919,6 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     expect(result.watermarkAfter).toBe(3);
     expect(scannedOrdinals).toEqual([0, 1, 2]);
-    expect(deferredFetches).toEqual([true, true, true]);
     expect(recoveryBatches).toEqual([[1, 2]]);
   });
 

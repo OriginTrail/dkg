@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { setTimeout as sleep } from 'node:timers/promises';
 import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ContextGraphAuthorityReadOptions,
@@ -62,6 +63,26 @@ import { withRpcUsageConsumer } from './rpc-usage.js';
  * range reader below.
  */
 const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
+
+/** Refresh an ethers-cached tip once before classifying cursor skew as endpoint failure. */
+async function retryCachedAuthorityIndexHeadV1<T>(
+  read: () => Promise<T>,
+  lifecycleSignal: AbortSignal,
+  callerSignal?: AbortSignal,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (!isContextGraphAuthorityIndexRetryableError(error)
+      || error.reason !== 'cursor-ahead') throw error;
+    // Rapid writes can advance the durable cursor while `getBlock('latest')`
+    // still returns a recently cached block from this very endpoint. A
+    // persistent lag remains retryable and takes the usual endpoint failover.
+    await sleep(300, undefined, { signal: lifecycleSignal });
+    callerSignal?.throwIfAborted();
+    return read();
+  }
+}
 
 /** Bound one physical authority-index RPC without capping the durable scan. */
 export function readEvmContextGraphAuthorityIndexRpcV1<T>(
@@ -646,7 +667,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     const base = dependencies.requireContextGraphStorage();
     return dependencies.readTipProvider(
       operationLabel,
-      (provider) => withRpcRequestContext({ signal: projectionSignal }, () => lifecycle.run(async () => {
+      (provider) => retryCachedAuthorityIndexHeadV1(
+        () => withRpcRequestContext({ signal: projectionSignal }, () => lifecycle.run(async () => {
         assertOpen();
         projectionSignal.throwIfAborted();
         const contract = base.connect(provider) as Contract;
@@ -679,13 +701,18 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // Bound to the address the TICK walked. A rotation the adapter has not
         // yet rebuilt around leaves these unequal, and reading the log then
         // would prove a range against coverage recorded for a retired proxy.
-        const source = dependencies.chainEventLogAuthority?.();
-        if (source !== undefined && source.contractAddress === contractAddress) {
+        for (let logAttempt = 0; logAttempt < 2; logAttempt += 1) {
+          // A concurrent reader may advance the durable authority cursor after
+          // this tick supplied an anchor. Reacquire the live log generation
+          // once before spending an RPC scan on that ordinary local race.
+          const source = dependencies.chainEventLogAuthority?.();
+          if (source === undefined || source.contractAddress !== contractAddress) break;
           const anchor = (await source.resolveAnchor({
             deploymentBlockNumber,
             finalityConfirmations: dependencies.finalityConfirmations(),
           })).anchor;
-          if (anchor !== undefined) {
+          if (anchor === undefined) break;
+          try {
             const logged = await readEvmContextGraphAuthorityIndexProjectionV1(
               { ...readInput, finalized: anchor.finalized, logSource: { anchor, source } },
               (scan) => project(scan, {
@@ -725,6 +752,17 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                 return contextGraphAuthorityIndexProjectionFault(admission.fault);
               }
             }
+          } catch (error) {
+            options.signal?.throwIfAborted();
+            projectionSignal.throwIfAborted();
+            if (!isContextGraphAuthorityIndexRetryableError(error)
+              || error.reason !== 'cursor-ahead') throw error;
+            if (logAttempt === 0) {
+              await sleep(300, undefined, { signal: projectionSignal });
+              continue;
+            }
+            // The second local anchor also lags the durable cursor. Let the
+            // fresh provider scan below establish a new finalized boundary.
           }
         }
 
@@ -776,7 +814,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         );
         await indexed.stabilize();
         return indexed.value;
-      })),
+        })),
+        projectionSignal,
+        options.signal,
+      ),
       {
         signal: options.signal,
         isRetryable: (error: unknown) => (
