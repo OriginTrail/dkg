@@ -286,6 +286,7 @@ const blockedRfc64Modules = [
   'legacy-swm-boundary-codec-v1.js',
   'catalog-operational-targets-v1.js',
   'private-read-roster-v1.js',
+  'join-approved-catalog-replay-v1.js',
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-reconciliation-v1.js',
   'applied-catalog-authority-transition-v1.js',
