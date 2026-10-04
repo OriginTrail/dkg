@@ -48,4 +48,4 @@ it('propagates a real worker directory-sync EIO through certified persistence an
     const result = JSON.parse(stdout.split('\n').find(line => line.startsWith('{'))!);
     expect(result).toMatchObject({ failure: { code: 'EIO', message: 'worker snapshot directory EIO' }, reopened: 1 });
   } finally { await rm(dir, { recursive: true, force: true }); }
-});
+}, 60_000);

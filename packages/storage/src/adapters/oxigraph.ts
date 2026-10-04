@@ -4,6 +4,7 @@ import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-que
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { persistFileAndParent } from '../file-durability.js';
 import type {
   TripleStore,
   QueryOptions,
@@ -184,7 +185,8 @@ export class OxigraphStore implements TripleStore {
    *   2. fsync the tmp file so the bytes are on stable storage.
    *   3. Atomic rename(tmp -> persistPath) — POSIX guarantees atomicity, so
    *      a crash mid-step leaves the old persistPath intact.
-   *   4. fsync the containing directory so the rename itself is durable.
+   *   4. fsync the renamed file through a writable handle (Windows
+   *      FlushFileBuffers), and fsync its containing directory on POSIX.
    *
    * Previously a single `writeFile(persistPath, dump)` left the store
    * vulnerable to torn writes on SIGKILL (the file would be partially
@@ -221,17 +223,12 @@ export class OxigraphStore implements TripleStore {
       // 3: atomic rename — POSIX-atomic on the same filesystem.
       await rename(tmpPath, this.persistPath);
 
-      // 4: fsync the directory so the rename itself survives a power loss.
-      // A visible rename is not proof of durability. In particular, certified
-      // commitment callers may erase recovery evidence only after this sync
-      // succeeds. Unsupported directory sync and I/O failures both propagate;
-      // a retry can re-dump the already visible in-memory state safely.
-      const dirFh = await open(dir, 'r');
-      try {
-        await dirFh.sync();
-      } finally {
-        await dirFh.close();
-      }
+      // 4: the visible file must flush through a writable handle on Windows;
+      // POSIX additionally requires the containing directory's sync. A visible
+      // rename is not proof of durability. Certified commitment callers may
+      // erase recovery evidence only after the supported barrier succeeds.
+      // Real file/dir I/O failures propagate; retries can re-dump visible state.
+      await persistFileAndParent(this.persistPath);
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
       // re-throw so explicit callers fail loudly. (Background callers
