@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { replaceDurableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
-import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
@@ -27,6 +27,8 @@ export class NamedKaVmLifecycleRepair {
   constructor(private readonly options: {
     dataDir?: string;
     now?: () => number;
+    /** Share the publisher's lifecycle domain for currency, admission and mutation. */
+    writeLocks?: Map<string, Promise<void>>;
     /** Resolve only after metadata persistence is durable, before retiring evidence. */
     apply: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<void>;
     /** Coherent chain version evidence; a newer chain version fences an old repair. */
@@ -106,13 +108,16 @@ export class NamedKaVmLifecycleRepair {
     let outcome: NamedKaVmLifecycleRepairOutcome;
     let failure: unknown;
     try {
-      if (!await this.options.isCurrent(input)) outcome = 'superseded';
-      else {
-        // A newer admission may arrive during the chain read. Fence it before applying.
+      outcome = await withKeyedLocks(this.options.writeLocks ?? this.executionLocks, [
+        assertionLifecycleWriteLockKey(input.contextGraphId, input.name, input.agentAddress, input.subGraphName),
+      ], async () => {
+        // Both fences run after any prior lifecycle writer has physically retired.
+        if (!await this.serial(async () => this.entries.get(key) === entry)) return 'superseded';
+        if (!await this.options.isCurrent(input)) return 'superseded';
         if (!await this.serial(async () => this.entries.get(key) === entry)) return 'superseded';
         await this.options.apply(input);
-        outcome = 'repaired';
-      }
+        return 'repaired';
+      });
     } catch (error) {
       failure = error;
       outcome = (error as { code?: string })?.code === 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' ? 'rejected' : 'pending';

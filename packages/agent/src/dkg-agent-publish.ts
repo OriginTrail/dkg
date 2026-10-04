@@ -10,6 +10,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -5028,32 +5029,11 @@ export class PublishMethods extends DKGAgentBase {
   getOrCreateNamedKaVmLifecycleRepair(this: DKGAgent): NamedKaVmLifecycleRepair {
     return this.namedKaVmLifecycleRepair ??= new NamedKaVmLifecycleRepair({
       dataDir: this.config?.dataDir,
-      apply: input => withKeyedLocks(this.writeLocks ?? this.publisher?.writeLocks ?? new Map(), [
-        assertionLifecycleWriteLockKey(input.contextGraphId, input.name, input.agentAddress, input.subGraphName),
-      ], () => applyPublishedNamedKaVmLifecycle(this.store, input)),
-      isCurrent: async input => {
-        if (input.packedKaId === undefined || !this.chain.readKnowledgeAssetVersionSnapshot) {
-          // Standalone/no-chain hosts cannot independently observe a later chain version.
-          if (this.config?.dataDir && typeof this.chain.getEvmChainId === 'function') {
-            throw new Error('Named KA lifecycle repair awaits coherent chain-version support');
-          }
-          return true;
-        }
-        const snapshot = await this.chain.readKnowledgeAssetVersionSnapshot(input.packedKaId, {
-          signal: AbortSignal.timeout(this.chainAuthorityReadBudgets.requestTimeoutMs),
-        });
-        if (!snapshot || snapshot.rootCount < BigInt(input.assertionVersion)) {
-          throw new Error('Confirmed named KA lifecycle repair awaits its finalized chain version');
-        }
-        if (snapshot.rootCount > BigInt(input.assertionVersion)) return false;
-        if (snapshot.latestRoot.toLowerCase().replace(/^0x/, '')
-          !== input.merkleRoot.toLowerCase().replace(/^0x/, '')) {
-          throw Object.assign(new Error('Confirmed named KA lifecycle repair root differs from the chain'), {
-            code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
-          });
-        }
-        return true;
-      },
+      writeLocks: this.writeLocks ?? this.publisher?.writeLocks ?? new Map(),
+      apply: input => applyPublishedNamedKaVmLifecycle(this.store, input),
+      isCurrent: input => isConfirmedNamedKaVmLifecycleCurrent(
+        this.chain, input, this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir),
+      ),
       warn: message => this.log.warn(createOperationContext('publish'), message),
     });
   }
@@ -5079,20 +5059,23 @@ export class PublishMethods extends DKGAgentBase {
     publishedUal: string,
     packedKaId?: bigint,
     merkleRoot: string = request.sealMerkleRoot,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    await withKeyedLocks(this.writeLocks ?? this.publisher?.writeLocks ?? new Map(), [
+    return withKeyedLocks(this.writeLocks ?? this.publisher?.writeLocks ?? new Map(), [
       assertionLifecycleWriteLockKey(request.contextGraphId, request.name, agentAddress, request.subGraphName),
-    ], () => applyPublishedNamedKaVmLifecycle(this.store, {
-      contextGraphId: request.contextGraphId,
-      agentAddress,
-      name: request.name,
-      subGraphName: request.subGraphName,
-      publishedUal,
-      merkleRoot,
-      packedKaId,
-      ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
-    }));
+    ], async () => {
+      const input: ConfirmedNamedKaVmLifecycleInput = {
+        contextGraphId: request.contextGraphId, agentAddress, name: request.name,
+        subGraphName: request.subGraphName, publishedUal, merkleRoot, packedKaId,
+        assertionVersion: request.assertionVersion!,
+        ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
+      };
+      if (!await isConfirmedNamedKaVmLifecycleCurrent(
+        this.chain, input, this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir),
+      ) || !await this._canStampRecoveredKnowledgeAssetVmLifecycle(request)) return false;
+      await applyPublishedNamedKaVmLifecycle(this.store, input);
+      return true;
+    });
   }
 
   async _writeQueuedKnowledgeAssetVmPublishReceipt(
@@ -5404,16 +5387,9 @@ export class PublishMethods extends DKGAgentBase {
     );
     // `stale-target` means a still-newer local version won the race. Do not
     // regress its pointer; the exact publish receipt is nevertheless repaired.
-    const canStampLifecycle = materialization !== 'stale-target'
-      && await this._canStampRecoveredKnowledgeAssetVmLifecycle(request);
-    if (canStampLifecycle) {
-      await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-        request,
-        recovered.localUal,
-        recovered.reservedKaId,
-        recovered.materialization.merkleRoot,
-      );
-    } else if (materialization !== 'stale-target') {
+    if (materialization !== 'stale-target' && !await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
+      request, recovered.localUal, recovered.reservedKaId, recovered.materialization.merkleRoot,
+    )) {
       this.log.info(
         ctx,
         `Recovered receipt for "${request.name}" without lifecycle stamping because `

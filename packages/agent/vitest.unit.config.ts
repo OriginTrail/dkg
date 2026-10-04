@@ -42,6 +42,7 @@ export default defineConfig({
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
       "test/confirmed-vm-lifecycle-repair.test.ts",
+      "test/confirmed-vm-lifecycle-lock-fence.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
