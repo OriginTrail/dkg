@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,12 +37,21 @@ function launch(dir, overrides = {}) {
   return { child, done };
 }
 const report = dir => JSON.parse(readFileSync(join(dir, 'results/REPORT.json'), 'utf8'));
+function matchingReports(dir) {
+  const receipt = report(dir);
+  const markdown = readFileSync(join(dir, 'results/REPORT.md'), 'utf8');
+  for (const [key, value] of Object.entries(receipt.totals)) assert.ok(markdown.includes(`| ${key.toUpperCase()} | ${value} |`), key);
+  for (const suite of receipt.suites) assert.ok(markdown.includes(`| \`${suite.id}\` | ${suite.group} | ${suite.result} | ${suite.elapsedSeconds}s |`), suite.id);
+  assert.ok(markdown.includes(`**Outcome**: ${receipt.outcome}`));
+  assert.ok(markdown.includes(`**Selection outcome**: ${receipt.selectionOutcome}`));
+  return receipt;
+}
 
 test('complete valid run succeeds and snapshots every registered suite before execution', async t => {
   const dir = setup(t);
   const result = await launch(dir).done;
   assert.equal(result.status, 0, result.stderr);
-  const receipt = report(dir);
+  const receipt = matchingReports(dir);
   assert.equal(receipt.outcome, 'PASS'); assert.equal(receipt.completeSuccess, true);
   assert.equal(receipt.totals.pass, suiteFiles.length);
   const plan = JSON.parse(readFileSync(join(dir, 'results/PLAN.json'), 'utf8'));
@@ -53,7 +62,7 @@ test('complete valid run succeeds and snapshots every registered suite before ex
 test('missing-only run is incomplete and nonzero', async t => {
   const dir = setup(t, { missing: suiteFiles });
   const result = await launch(dir).done;
-  const receipt = report(dir);
+  const receipt = matchingReports(dir);
   assert.equal(receipt.totals.missing, suiteFiles.length);
   assert.equal(result.status, 1, `MISSING=${receipt.totals.missing}, PASS=${receipt.totals.pass}, FAIL=${receipt.totals.fail}: missing-only run must block success`);
   assert.equal(receipt.outcome, 'INCONCLUSIVE'); assert.equal(receipt.totals.executed, 0);
@@ -64,14 +73,14 @@ test('empty filtered run never succeeds', async t => {
   const dir = setup(t);
   const result = await launch(dir, { SOAK_ONLY: '1', SKIP_SOAK: '1' }).done;
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(report(dir).outcome, 'INCONCLUSIVE'); assert.equal(report(dir).totals.registered, 0);
+  assert.equal(matchingReports(dir).outcome, 'INCONCLUSIVE'); assert.equal(report(dir).totals.registered, 0);
 });
 
 test('valid exploratory selection remains usable and is explicitly partial', async t => {
   const dir = setup(t);
   const result = await launch(dir, { SKIP_SOAK: '1' }).done;
   assert.equal(result.status, 0, result.stderr);
-  const receipt = report(dir);
+  const receipt = matchingReports(dir);
   assert.equal(receipt.outcome, 'INCONCLUSIVE'); assert.equal(receipt.selectionOutcome, 'PASS');
   assert.equal(receipt.partial, true); assert.equal(receipt.completeSuccess, false);
   assert.deepEqual(receipt.filters, ['SKIP_SOAK=1']); assert.match(result.stdout, /PARTIAL exploratory/);
@@ -81,14 +90,14 @@ test('legacy exit 2 remains an individual FAIL:2 and does not get reinterpreted'
   const dir = setup(t, { first: 'exit 2' });
   const result = await launch(dir).done;
   assert.equal(result.status, 1, result.stderr);
-  const receipt = report(dir);
+  const receipt = matchingReports(dir);
   assert.equal(receipt.outcome, 'FAIL'); assert.equal(receipt.suites[0].result, 'FAIL:2');
 });
 
 test('confirmed failure and missing evidence are both retained', async t => {
   const dir = setup(t, { first: 'exit 1', missing: [suiteFiles[1]] });
   assert.equal((await launch(dir).done).status, 1);
-  const receipt = report(dir);
+  const receipt = matchingReports(dir);
   assert.equal(receipt.outcome, 'INCONCLUSIVE'); assert.equal(receipt.totals.fail, 1); assert.equal(receipt.totals.missing, 1);
   assert.equal(receipt.suites[0].result, 'FAIL:1'); assert.equal(receipt.suites[1].result, 'MISSING');
 });
@@ -96,7 +105,7 @@ test('confirmed failure and missing evidence are both retained', async t => {
 test('fail-fast preserves failure and unexecuted registered work', async t => {
   const dir = setup(t, { first: 'exit 1' });
   assert.equal((await launch(dir, { FAIL_FAST: '1' }).done).status, 1);
-  const receipt = report(dir);
+  const receipt = matchingReports(dir);
   assert.equal(receipt.outcome, 'INCONCLUSIVE'); assert.equal(receipt.suites[0].result, 'FAIL:1');
   assert.ok(receipt.suites.slice(1).every(s => s.result === 'NOT_RUN'));
 });
@@ -117,22 +126,34 @@ async function until(predicate, timeout = 5000) {
   return false;
 }
 
-test('interruption terminates the ready suite and descendant and records unfinished work', async t => {
+for (const [signal, expectedExit, waitRecovery] of [['SIGTERM', 143, true], ['SIGINT', 130, true], ['SIGTERM', 143, false]]) test(`interruption waits for delayed recovery and descendants before finalizing (${signal}${waitRecovery ? '' : '; detached recovery'})`, async t => {
   const dir = setup(t, { first: `
 echo $$ > "$SUITE_PID_FILE"
 bash -c 'echo $$ > "$DESCENDANT_PID_FILE"; exec sleep 300' &
 descendant=$!
-trap 'wait "$descendant" 2>/dev/null || true; exit 0' TERM
+cleanup() {
+  wait "$descendant" 2>/dev/null || true
+  bash -c 'echo $$ > "$CLEANUP_PID_FILE"; sleep 1; echo recovered > "$CLEANUP_DONE_FILE"' &
+  recovery=$!
+  ${waitRecovery ? 'wait "$recovery"' : ': # recovery continues after the suite leader exits'}
+  exit 0
+}
+trap cleanup TERM
 wait "$descendant"
 ` });
   const suiteFile = join(dir, 'suite.pid'), descendantFile = join(dir, 'descendant.pid');
-  const run = launch(dir, { SUITE_PID_FILE: suiteFile, DESCENDANT_PID_FILE: descendantFile });
-  let suitePid, descendantPid;
+  const cleanupFile = join(dir, 'cleanup.pid'), cleanupDone = join(dir, 'cleanup.done');
+  const run = launch(dir, { SUITE_PID_FILE: suiteFile, DESCENDANT_PID_FILE: descendantFile, CLEANUP_PID_FILE: cleanupFile, CLEANUP_DONE_FILE: cleanupDone });
+  let suitePid, descendantPid, cleanupPid;
   t.after(async () => {
     // Always stop our fixture processes, including when a lifetime assertion fails.
-    for (const pid of [descendantPid, suitePid, run.child.pid]) if (alive(pid)) process.kill(pid, 'SIGTERM');
+    try { cleanupPid = Number(readFileSync(cleanupFile, 'utf8').trim()); } catch {}
+    for (const pid of [cleanupPid, descendantPid, suitePid, run.child.pid]) if (alive(pid)) process.kill(pid, 'SIGTERM');
     await until(() => !alive(suitePid) && !alive(descendantPid), 1000);
-    for (const pid of [descendantPid, suitePid, run.child.pid]) if (alive(pid)) process.kill(pid, 'SIGKILL');
+    // The fixture runs in its own group; also stop recovery spawned after the
+    // leader exits when intentionally testing the old early-exit defect.
+    if (suitePid) try { process.kill(-suitePid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    for (const pid of [cleanupPid, descendantPid, suitePid, run.child.pid]) if (alive(pid)) process.kill(pid, 'SIGKILL');
     await run.done;
   });
   const ready = await until(() => {
@@ -143,15 +164,49 @@ wait "$descendant"
     } catch { return false; }
   });
   assert.ok(ready, 'suite and descendant are alive and the runner records RUNNING');
-  run.child.kill('SIGTERM');
+  run.child.kill(signal);
   const result = await run.done;
-  assert.equal(result.status, 143, result.stderr);
-  assert.ok(await until(() => !alive(suitePid)), `suite PID ${suitePid} terminated`);
-  assert.ok(await until(() => !alive(descendantPid)), `descendant PID ${descendantPid} terminated`);
-  const receipt = report(dir);
+  assert.equal(result.status, expectedExit, result.stderr);
+  assert.ok(existsSync(cleanupDone), 'runner must wait for delayed recovery before exiting');
+  assert.equal(readFileSync(cleanupDone, 'utf8').trim(), 'recovered', 'recovery completed before the runner exit');
+  cleanupPid = Number(readFileSync(cleanupFile, 'utf8').trim());
+  assert.equal(alive(cleanupPid), false, `recovery PID ${cleanupPid} already terminated`);
+  assert.equal(alive(suitePid), false, `suite PID ${suitePid} already terminated`);
+  assert.equal(alive(descendantPid), false, `descendant PID ${descendantPid} already terminated`);
+  const receipt = matchingReports(dir);
   assert.equal(receipt.outcome, 'INCONCLUSIVE'); assert.equal(receipt.interrupted, true);
   assert.equal(receipt.suites[0].result, 'CANCELLED');
   assert.ok(receipt.suites.slice(1).every(s => s.result === 'NOT_RUN'));
+});
+
+test('cancellation bounds an unresponsive suite and preserves signal exit', async t => {
+  const dir = setup(t, { first: 'trap "" TERM; echo $$ > "$SUITE_PID_FILE"; while :; do :; done' });
+  const suiteFile = join(dir, 'stubborn.pid');
+  const run = launch(dir, { SUITE_PID_FILE: suiteFile, DEVNET_CANCEL_GRACE_SECONDS: '1' });
+  let suitePid;
+  t.after(async () => {
+    for (const pid of [suitePid, run.child.pid]) if (alive(pid)) process.kill(pid, 'SIGKILL');
+    await run.done;
+  });
+  assert.ok(await until(() => {
+    try { suitePid = Number(readFileSync(suiteFile, 'utf8').trim()); return alive(suitePid); } catch { return false; }
+  }), 'unresponsive fixture is ready');
+  const started = Date.now();
+  run.child.kill('SIGTERM');
+  const result = await run.done;
+  assert.equal(result.status, 143, result.stderr);
+  assert.ok(Date.now() - started < 5000, 'cancellation is bounded');
+  assert.equal(alive(suitePid), false, 'unresponsive suite is reaped before runner exits');
+  assert.match(result.stdout, /Cleanup grace expired/);
+  assert.equal(matchingReports(dir).outcome, 'INCONCLUSIVE');
+});
+
+test('preflight failure preserves exit 2 and incomplete matching reports', async t => {
+  const dir = setup(t);
+  writeFileSync(join(dir, 'bin/curl'), '#!/bin/bash\nexit 7\n', { mode: 0o755 });
+  const result = await launch(dir).done;
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(matchingReports(dir).outcome, 'INCONCLUSIVE');
 });
 
 test('pure reducer never passes empty, unknown or unfinished states', () => {

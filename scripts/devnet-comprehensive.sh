@@ -30,6 +30,7 @@
 #   SKIP_RFC38_EXTRAS=1 skip the rfc38-all suite
 #   SKIP_UI=1           skip the node-ui smoke
 #   FAIL_FAST=1         stop on first FAIL
+#   DEVNET_CANCEL_GRACE_SECONDS  cleanup grace before SIGKILL (default 300)
 #   SOAK_RS_SECONDS     length of the devnet-soak-rs run (default 1800)
 #   SOAK_LIBP2P_CYCLES  libp2p-soak cycle count (default 5; each cycle ~60s)
 #   SOAK_SWM_CYCLES     swm-soak cycle count (default 10)
@@ -70,7 +71,7 @@ for flag in SKIP_RFC49 SKIP_RFC38_EXTRAS SKIP_PROBES SKIP_UI SKIP_SOAK SOAK_ONLY
   fi
 done
 
-write_json_report() {
+write_report() {
   local destination="$1" phase="$2" idx=0
   {
     while [ "$idx" -lt "${#SUITE_IDS[@]}" ]; do
@@ -93,23 +94,48 @@ finish() {
     esac
     idx=$((idx + 1))
   done
-  if write_json_report "$RESULTS/REPORT.json" complete; then FINAL_EXIT=0; else FINAL_EXIT=1; fi
+  if write_report "$RESULTS/REPORT.json" complete; then FINAL_EXIT=0; else FINAL_EXIT=1; fi
+  log "Report: $RESULTS/REPORT.md"
+  log "JSON:   $RESULTS/REPORT.json"
   if [ "$PARTIAL" -eq 1 ]; then log "PARTIAL exploratory run: $FILTERS (see selectionOutcome in REPORT.json)"; fi
   [ "$original_exit" -eq 0 ] || FINAL_EXIT="$original_exit"
   exit "$FINAL_EXIT"
 }
 
-terminate_tree() {
-  local pid="$1" child
-  for child in $(pgrep -P "$pid" 2>/dev/null); do terminate_tree "$child"; done
-  kill -TERM "$pid" 2>/dev/null || true
+# Each suite has its own process group. This includes descendants launched by
+# EXIT recovery after the initial signal, even if their parents exit first.
+# Ignore zombies here; wait below reaps the direct child.
+active_group_running() {
+  ps -eo pgid=,stat= | awk -v group="$ACTIVE_PID" '$1 == group && $2 !~ /^Z/ { active=1 } END { exit !active }'
 }
 
 cancel() {
+  local signal_exit="$1" deadline grace="${DEVNET_CANCEL_GRACE_SECONDS:-300}"
   INTERRUPTED=1
-  [ -z "$ACTIVE_PID" ] || terminate_tree "$ACTIVE_PID"
-  exit "$1"
+  # A second signal must not interrupt the bounded cleanup wait.
+  trap '' INT TERM
+  if [ -n "$ACTIVE_PID" ]; then
+    case "$grace" in ''|*[!0-9]*) grace=300 ;; esac
+    { [ "$grace" -gt 0 ] && [ "$grace" -le 3600 ]; } 2>/dev/null || grace=300
+    log "Cancelling active suite; allowing up to ${grace}s for recovery cleanup"
+    kill -TERM -- "-$ACTIVE_PID" 2>/dev/null || true
+    deadline=$(( $(date +%s) + 10#$grace ))
+    while active_group_running && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.1; done
+    if active_group_running; then
+      log "Cleanup grace expired; killing remaining suite processes"
+      kill -KILL -- "-$ACTIVE_PID" 2>/dev/null || true
+      deadline=$(( $(date +%s) + 2 ))
+      while active_group_running && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.1; done
+      if active_group_running; then log "Suite processes remain active after SIGKILL; recovery is incomplete"; fi
+    fi
+    # Reap the suite once stopped; an uninterruptible process must not turn
+    # the bounded cancellation path into an infinite wait.
+    if ! active_group_running; then wait "$ACTIVE_PID" 2>/dev/null || true; fi
+    ACTIVE_PID=""
+  fi
+  exit "$signal_exit"
 }
+
 trap finish EXIT
 trap 'cancel 130' INT
 trap 'cancel 143' TERM
@@ -255,7 +281,7 @@ if [ "${SOAK_ONLY:-0}" = "1" ]; then
   fi
 fi
 
-write_json_report "$RESULTS/PLAN.json" plan || exit 2
+write_report "$RESULTS/PLAN.json" plan || exit 2
 log "Registered ${#SUITE_IDS[@]} suite(s):"
 i=0
 while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
@@ -264,10 +290,6 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
 done
 
 # ── Run loop ────────────────────────────────────────────────────
-TOTAL_PASS=0
-TOTAL_FAIL=0
-TOTAL_MISSING=0
-
 i=0
 while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
   id="${SUITE_IDS[$i]}"
@@ -288,7 +310,6 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
   if [ ! -e "$bare_path" ]; then
     log "MISSING: $id ($bare_path)"
     SUITE_RESULTS[$i]="MISSING"
-    TOTAL_MISSING=$((TOTAL_MISSING + 1))
     i=$((i + 1))
     if [ "${FAIL_FAST:-0}" = "1" ]; then
       log "FAIL_FAST=1 — aborting"
@@ -302,9 +323,12 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
   log "============================================================"
   suite_start=$(date +%s)
   SUITE_RESULTS[$i]="RUNNING"
-  write_json_report "$RESULTS/REPORT.json" running || true
+  write_report "$RESULTS/REPORT.json" running || true
+  # Bash monitor mode assigns this job a separate process group (Bash 3.2).
+  set -m
   ( cd "$REPO_ROOT" && bash -c "$cmd" ) > "$logfile" 2>&1 &
   ACTIVE_PID=$!
+  set +m
   wait "$ACTIVE_PID"
   ec=$?
   ACTIVE_PID=""
@@ -314,11 +338,9 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
 
   if [ "$ec" -eq 0 ]; then
     SUITE_RESULTS[$i]="PASS"
-    TOTAL_PASS=$((TOTAL_PASS + 1))
     log "PASS $id  (${elapsed}s)"
   else
     SUITE_RESULTS[$i]="FAIL:$ec"
-    TOTAL_FAIL=$((TOTAL_FAIL + 1))
     log "FAIL $id  (exit=$ec, ${elapsed}s)"
     log "  last 12 lines of $logfile:"
     tail -n 12 "$logfile" 2>/dev/null | sed 's/^/      /' | tee -a "$RESULTS/orchestrator.log"
@@ -330,74 +352,6 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
   i=$((i + 1))
 done
 
-END=$(date +%s)
-WALL=$((END - START))
-
-# ── Reports ─────────────────────────────────────────────────────
-log ""
-log "============================================================"
-log "FINISHED — ${WALL}s wall (~$((WALL/60))m)"
-log "PASS=$TOTAL_PASS FAIL=$TOTAL_FAIL MISSING=$TOTAL_MISSING TOTAL=${#SUITE_IDS[@]}"
-log "============================================================"
-
-# Markdown report
-MD="$RESULTS/REPORT.md"
-{
-  echo "# Comprehensive devnet test report"
-  echo
-  echo "- **Started**: $(date -u -r $START +'%Y-%m-%dT%H:%M:%SZ')"
-  echo "- **Ended**: $(date -u -r $END +'%Y-%m-%dT%H:%M:%SZ')"
-  echo "- **Wall**: ${WALL}s (~$((WALL/60))m)"
-  echo "- **Branch**: $(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD) @ $(cd "$REPO_ROOT" && git rev-parse --short HEAD)"
-  echo "- **Results dir**: \`$RESULTS\`"
-  echo
-  echo "## Summary"
-  echo
-  echo "| | count |"
-  echo "|---|---|"
-  echo "| PASS | $TOTAL_PASS |"
-  echo "| FAIL | $TOTAL_FAIL |"
-  echo "| MISSING | $TOTAL_MISSING |"
-  echo "| Total registered | ${#SUITE_IDS[@]} |"
-  echo
-  echo "## Suites"
-  echo
-  echo "| id | group | result | elapsed | log |"
-  echo "|---|---|---|---:|---|"
-  i=0
-  while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
-    logf=$(basename "${SUITE_LOGS[$i]}")
-    echo "| \`${SUITE_IDS[$i]}\` | ${SUITE_GROUPS[$i]} | ${SUITE_RESULTS[$i]} | ${SUITE_ELAPSEDS[$i]}s | \`$logf\` |"
-    i=$((i + 1))
-  done
-  echo
-  if [ "$TOTAL_FAIL" -gt 0 ]; then
-    echo "## Failures — last 25 lines of each failing log"
-    echo
-    i=0
-    while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
-      case "${SUITE_RESULTS[$i]}" in
-        FAIL:*)
-          echo "### ${SUITE_IDS[$i]}"
-          echo
-          echo '```'
-          tail -n 25 "${SUITE_LOGS[$i]}" 2>/dev/null || echo "(no log)"
-          echo '```'
-          echo
-          ;;
-      esac
-      i=$((i + 1))
-    done
-  fi
-} > "$MD"
-
-# EXIT trap writes the structured report and applies the legacy adapter.
-JSON="$RESULTS/REPORT.json"
-
-log "Report: $MD"
-log "JSON:   $JSON"
-
-if [ "$TOTAL_FAIL" -gt 0 ]; then
-  exit 1
-fi
+# EXIT finalizes the suite snapshot once. The report reducer owns totals,
+# Markdown/JSON rendering and the legacy selection exit adapter.
 exit 0
