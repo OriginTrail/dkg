@@ -5197,7 +5197,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       const original = await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
         ...common, asset: abandoned,
       });
-      const chain = (author as unknown as { chain: ChainAdapter }).chain;
+      const chain = catalogProofChain(author);
       const snapshot = {
         knowledgeAssetId: BigInt(replacement.seal.reservedKaId), rootCount: 1n,
         latestRoot: replacement.seal.assertionMerkleRoot,
@@ -5245,7 +5245,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       const original = await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
         ...common, asset: abandoned,
       });
-      const chain = (author as unknown as { chain: ChainAdapter }).chain;
+      const chain = catalogProofChain(author);
       let published = false;
       const read = vi.fn(async () => ({
         knowledgeAssetId: BigInt(replacement.seal.reservedKaId), rootCount: published ? 2n : 1n,
@@ -5324,7 +5324,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       const original = await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
         ...common, asset: abandoned,
       });
-      const chain = (author as unknown as { chain: ChainAdapter }).chain;
+      const chain = catalogProofChain(author);
       chain.readKnowledgeAssetVersionSnapshot = vi.fn(async () => proof === 'unavailable'
         ? null : {
           knowledgeAssetId: BigInt(replacement.seal.reservedKaId),
@@ -5338,6 +5338,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       await expect(author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
         ...common, asset: replacement,
       })).rejects.toThrow(/published|proof|snapshot/u);
+      expect(chain.readKnowledgeAssetVersionSnapshot).toHaveBeenCalledOnce();
+      expect(chain.knowledgeAssetVersionSnapshotIsCurrent).toHaveBeenCalledTimes(proof === 'stale-anchor' ? 1 : 0);
       expect(author.readRfc64AppliedCatalogHeadV1({
         catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
       })).toEqual(original);
@@ -5519,7 +5521,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seed.assertionCoordinate,
         lifecycleAgentAddress: AUTHOR, shareOperationId: 'commit-fence-C',
       })).resolves.toMatchObject({ status: 'applied' });
-      const chain = (author as unknown as { chain: ChainAdapter }).chain;
+      const chain = catalogProofChain(author);
       let published = false;
       const read = vi.fn(async () => ({
         knowledgeAssetId: BigInt(replacement.canonicalSeal.reservedKaId), rootCount: published ? 2n : 1n,
@@ -9952,11 +9954,16 @@ describe('RFC-64 M0 recovery scenarios', () => {
   }
 });
 
-function stubUnpublishedCatalogState(agent: DKGAgent) {
+/** Bind explicit catalog proof fixtures to the same chain as their signed seals. */
+function catalogProofChain(agent: DKGAgent): ChainAdapter {
   const chain = (agent as unknown as { chain: ChainAdapter }).chain;
-  // The coherent fixture represents this catalog's network, rather than
-  // attaching a zero-root response to an unbound NoChain adapter.
+  expect(chain.chainType).toBe('evm');
   Object.defineProperty(chain, 'chainId', { value: NETWORK_ID });
+  return chain;
+}
+
+function stubUnpublishedCatalogState(agent: DKGAgent) {
+  const chain = catalogProofChain(agent);
   chain.readKnowledgeAssetVersionSnapshot = vi.fn(async (kaId) => ({
     knowledgeAssetId: kaId, rootCount: 0n, latestRoot: ethers.ZeroHash,
     latestAuthor: ethers.ZeroAddress, latestPublisher: ethers.ZeroAddress, blockNumber: 100,

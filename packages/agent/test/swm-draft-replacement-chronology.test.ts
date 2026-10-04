@@ -16,7 +16,8 @@ import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { commitRecoveredSwmAsset } from '../src/sync/requester/swm-recovery-commit.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import { parseGraphScopedSwmRecoveryDescriptors, decodeRecoveryOperationCandidate, isPublisherOperationCandidate } from '../src/sync/graph-scoped-swm-recovery.js';
+import { isAuthenticatedPublisherCandidate } from '../src/sync/requester/swm-recovered-provenance.js';
 
 const CG = 'draft-chronology';
 const UAL = 'did:dkg:hardhat:31337/0xcccccccccccccccccccccccccccccccccccccccc/3';
@@ -78,6 +79,42 @@ const staleCases = (['publicRun', 'privateRun'] as const).flatMap(lane =>
     [undefined, 'team'].flatMap(subGraph => [false, true].map(graphLocator => ({ lane, oldVersion, currentVersion, subGraph, scope: subGraph ?? 'root', graphLocator })))));
 
 describe('legacy catch-up respects publisher draft chronology', () => {
+  it.each([
+    { ids: ['storage-ack-receipt', 'publisher-B', 'publisher-A'], clocks: [3000, 2000, 1000], expected: { id: 'publisher-B', timestampMs: 2000 } },
+    { ids: ['storage-ack-receipt', 'publisher-A', 'publisher-B'], clocks: [3000, 2000, 2000], expected: { id: 'publisher-B', timestampMs: 2000 } },
+    { ids: ['publisher-B', 'publisher-A', 'storage-ack-receipt'], clocks: [2000, 2000, 3000], expected: { id: 'publisher-B', timestampMs: 2000 } },
+    { ids: ['storage-ack-receipt', 'storage-ack-older'], clocks: [3000, 2000], expected: undefined },
+  ])('selects one intact publisher candidate from ordered aliases $ids', async ({ ids, clocks, expected }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const fixtures = ids.map((id, index) => swmFixtures(CG).share({
+      version: 2, operationId: id, marker: 'equivalent-candidates', ual: UAL,
+      timestamp: new Date(clocks[index]!),
+    }));
+    const first = fixtures[0]!;
+    const rows = [
+      ...first.meta.filter(row => row.subject === first.headSubject),
+      ...fixtures.flatMap(fixture => fixture.meta.filter(row => row.subject === fixture.operationSubject)),
+      ...fixtures.slice(1).flatMap(fixture => fixture.meta.filter(row => row.subject === first.headSubject && row.predicate === `${DKG}shareOperationId`)),
+    ];
+    await store.insert(rows);
+    const persisted = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${rows[0]!.graph}> { ?s ?p ?o } }`);
+    expect(persisted.type).toBe('quads');
+    if (persisted.type !== 'quads') throw new Error('Expected exact native metadata rows');
+    const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: persisted.quads.map(row => ({ ...row, graph: rows[0]!.graph })) });
+    expect(descriptor?.providerPublisherOperation).toEqual(expected);
+    expect(descriptor?.shareOperationId).toBe('storage-ack-receipt');
+    const ordered = [...fixtures].sort((a, b) => clocks[ids.indexOf(b.operationId)]! - clocks[ids.indexOf(a.operationId)]! || b.operationId.localeCompare(a.operationId));
+    expect(descriptor?.equivalentOperationSubjects).toEqual(ordered.map(fixture => fixture.operationSubject));
+    expect(new Set(descriptor?.metadataQuads.filter(row => row.subject === first.headSubject && row.predicate === `${DKG}shareOperationId`).map(row => JSON.parse(row.object.split('^^')[0]!)))).toEqual(new Set(ids));
+    for (const fixture of fixtures) {
+      const candidate = decodeRecoveryOperationCandidate({ rows: fixture.meta.filter(row => row.subject === fixture.operationSubject), contextGraphId: CG,
+        metaGraph: rows[0]!.graph, operationSubject: fixture.operationSubject, shareOperationId: fixture.operationId, kaUal: UAL, assertionVersion: '2' });
+      expect(isPublisherOperationCandidate(candidate)).toBe(!fixture.operationId.startsWith('storage-ack-'));
+      expect(isAuthenticatedPublisherCandidate(candidate)).toBe(false);
+      expect(isAuthenticatedPublisherCandidate({ ...candidate, provenance: { ...candidate.provenance, publisherChronologyAuthenticated: true } })).toBe(!fixture.operationId.startsWith('storage-ack-'));
+    }
+  });
+
   it.each((['publicRun', 'privateRun'] as const).flatMap(lane => [false, true].map(foreign => ({ lane, foreign }))))('$lane preserves a confirmed foreign-chain asset without treating its packed ID as unpublished ($foreign)', async ({ lane, foreign }) => {
     const store = new OxigraphStore(); stores.push(store);
     const current = share(1, 'bound-current', 1000), incoming = share(1, 'bound-incoming', 2000);

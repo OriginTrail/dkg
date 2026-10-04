@@ -256,7 +256,12 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
       publisherPeerId: semantics.publisherIdentity,
       ...(subGraphName ? { subGraphName } : {}),
-      ...(operation.publisherOperationTimestampMs === undefined ? {} : { providerPublisherOperation: { timestampMs: operation.publisherOperationTimestampMs, id: operation.publisherOperation!.shareOperationId } }),
+      ...(operation.publisherOperation === undefined ? {} : {
+        providerPublisherOperation: {
+          id: operation.publisherOperation.provenance.shareOperationId,
+          timestampMs: operation.publisherOperation.provenance.publishedAtMs,
+        },
+      }),
       metadataQuads: [
         ...headRows,
         // Every validated alias is settled under the KA lock. Unselected
@@ -499,8 +504,15 @@ export interface RecoveryOperationCandidate extends WorkspaceOperationModel<Reco
   readonly provenance: Readonly<{ shareOperationId: string; publishedAtMs: number; publisherChronologyAuthenticated: boolean }>;
 }
 
+/** Publisher clock eligibility is independent of the local authentication fence. */
+export function isPublisherOperationCandidate(candidate: RecoveryOperationCandidate): boolean {
+  return workspacePublisherOperationTimestamp([{
+    shareOperationId: candidate.provenance.shareOperationId,
+    publishedAt: candidate.provenance.publishedAtMs,
+  }]) !== undefined;
+}
+
 interface ResolvedHeadOperation {
-  readonly publisherOperationTimestampMs?: number;
   readonly publisherOperation?: RecoveryOperationCandidate;
   readonly shareOperationId: string;
   readonly operationSubject: string;
@@ -629,10 +641,9 @@ function resolveEquivalentHeadOperation(params: {
       && selected.snapshotLocator.provenance === 'persisted-ref'
       ? selected
       : persistedRefSource ?? selected);
-  const publisherOperationTimestampMs = workspacePublisherOperationTimestamp(orderedCandidates.map(candidate => ({ shareOperationId: candidate.provenance.shareOperationId, publishedAt: candidate.provenance.publishedAtMs })));
-  const publisherOperation = orderedCandidates.find(candidate => candidate.provenance.publishedAtMs === publisherOperationTimestampMs && workspacePublisherOperationTimestamp([{ shareOperationId: candidate.shareOperationId, publishedAt: candidate.provenance.publishedAtMs }]) !== undefined);
+  const publisherOperation = orderedCandidates.find(isPublisherOperationCandidate);
   return {
-    ...(publisherOperationTimestampMs === undefined ? {} : { publisherOperationTimestampMs, publisherOperation }),
+    ...(publisherOperation === undefined ? {} : { publisherOperation }),
     shareOperationId: selected.provenance.shareOperationId,
     operationSubject: selected.operationSubject,
     operationRows: selected.operationRows,

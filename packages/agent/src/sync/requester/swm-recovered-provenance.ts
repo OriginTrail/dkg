@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import { workspacePublisherOperationTimestamp } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import { KnowledgeAssetWorkspaceHeadCorruptError, resolveAcquiredKnowledgeAssetWorkspaceHead, readAuthenticatedWorkspaceOperations, type KnowledgeAssetWorkspaceHeadResolution } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { decodeRecoveryOperationCandidate, type RecoveryOperationCandidate, type GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
+import { decodeRecoveryOperationCandidate, isPublisherOperationCandidate, type RecoveryOperationCandidate, type GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { stripMetadataLiteral } from '../metadata-literal.js';
 import { canonicalQuadKey } from './quad-key.js';
 
@@ -14,8 +13,7 @@ type AuthenticatedCandidate = RecoveryOperationCandidate & {
 /** Authentication and ACK exclusion follow the publisher's shared chronology policy. */
 export function isAuthenticatedPublisherCandidate(candidate: RecoveryOperationCandidate): candidate is AuthenticatedCandidate {
   return candidate.provenance.publisherChronologyAuthenticated === true
-    && workspacePublisherOperationTimestamp([{ shareOperationId: candidate.shareOperationId,
-      publishedAt: candidate.provenance.publishedAtMs, publisherChronologyAuthenticated: candidate.provenance.publisherChronologyAuthenticated }]) !== undefined;
+    && isPublisherOperationCandidate(candidate);
 }
 /** The prepared boundary separates decoded local evidence from provider claims. */
 export interface PreparedSwmRecoveryDescriptor extends GraphScopedSwmRecoveryDescriptor {
