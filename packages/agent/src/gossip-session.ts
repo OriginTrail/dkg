@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { GossipSubManager, SubscriptionSource } from '@origintrail-official/dkg-core';
+import type { ContextGraphSub } from './dkg-agent-types.js';
 
 /** All bookkeeping belongs to the manager whose wiring it describes. */
 export class GossipSession {
@@ -9,7 +10,7 @@ export class GossipSession {
   readonly swmHostModeCurated = new Map<string, boolean>();
   readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
   /** Live intents snapshotted before the durable startup plan is read. */
-  readonly startupLiveIntents = new Map<string, { syncMode?: 'always-on' | 'on-demand' }>();
+  readonly startupLiveIntents = new Map<string, Pick<ContextGraphSub, 'syncMode'>>();
   #retired = false;
 
   readonly #manager: GossipSubManager | undefined;

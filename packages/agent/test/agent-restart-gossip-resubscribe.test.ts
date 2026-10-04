@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   GossipSubManager,
   SYSTEM_CONTEXT_GRAPHS,
@@ -33,11 +37,15 @@ interface RestartInternals {
   gossipSession: { gossipRegistered: Set<string>; sharedMemoryGossipRegistered: Set<string>; active: boolean };
   reconcileSharedMemoryGossipSubscription(contextGraphId: string): Promise<void>;
   canUseSharedMemoryForContextGraph(contextGraphId: string): Promise<boolean>;
+  isCuratedForHostMode(contextGraphId: string): Promise<boolean>;
+  reconcileSwmHostModeSubscription(contextGraphId: string): Promise<void>;
+  enableSwmHostModeFor(contextGraphId: string): Promise<unknown>;
   gossipRegistered: Set<string>;
   sharedMemoryGossipRegistered: Set<string>;
   swmHostModeSubscribed: Map<string, unknown>;
   swmHostModeCurated: Map<string, boolean>;
   swmHostModeHandlers: Map<string, unknown>;
+  swmHostModeStore?: { listHostModeSubscribedCgs(): Promise<string[]> };
   lastSyncDisconnectedAt: Map<string, number>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: string; pendingMeta?: boolean }>;
   config: { syncContextGraphs?: string[] };
@@ -117,11 +125,16 @@ async function createLocalContextGraph(agent: DKGAgent, id = CG): Promise<void> 
 
 describe('DKGAgent same-instance restart re-subscribes gossip', () => {
   let agent: DKGAgent | null = null;
+  const temporaryDirectories: string[] = [];
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    if (agent) await agent.stop().catch(() => undefined);
+    if (agent) {
+      await agent.stop().catch(() => undefined);
+      await agent.store.close();
+    }
     agent = null;
+    await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
 
   it('re-subscribes a subscribed context graph and the system graphs on the fresh manager, on every restart', async () => {
@@ -254,6 +267,54 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     expect(internals.sharedMemoryGossipRegistered.has(OTHER_CG)).toBe(false);
     expect(manager.subscribedTopics).not.toContain(contextGraphSharedMemoryTopic(internals.gossipWireIdFor(OTHER_CG)));
   }, 60_000);
+
+  it.each(['reconcileSwmHostModeSubscription', 'enableSwmHostModeFor'] as const)(
+    'ignores retired asynchronous %s activation and persists live activation', async (method) => {
+      const dataDir = await mkdtemp(join(tmpdir(), 'dkg-host-retirement-'));
+      temporaryDirectories.push(dataDir);
+      const durable = createSubscriptionStore();
+      const boot = await createEdgeAgent(`RestartGossipHostProbe-${method}`, {
+        nodeRole: 'core', dataDir, store: new OxigraphStore(),
+        rfc64CatalogActivation: { enabled: false },
+        swmHostMode: { stripCiphertext: false },
+        contextGraphSubscriptionStore: durable.store,
+      });
+      agent = boot.agent;
+      const { internals } = boot;
+      await agent.start();
+      let releaseProbe!: (curated: boolean) => void;
+      let probeEntered!: () => void;
+      const entered = new Promise<void>((resolve) => { probeEntered = resolve; });
+      const probe = new Promise<boolean>((resolve) => { releaseProbe = resolve; });
+      const curation = vi.spyOn(internals, 'isCuratedForHostMode').mockImplementationOnce(() => {
+        probeEntered();
+        return probe;
+      });
+      const retiredActivation = internals[method](OTHER_CG);
+      await entered;
+      await agent.stop();
+      await agent.start();
+      const freshManager = internals.gossip;
+      const onMessage = vi.spyOn(freshManager, 'onMessage');
+      releaseProbe(true);
+      await retiredActivation;
+      const hostKey = internals.gossipWireIdFor(OTHER_CG);
+      const hostTopic = contextGraphSharedMemoryTopic(hostKey);
+      expect(internals.swmHostModeHandlers.has(hostKey)).toBe(false);
+      expect(internals.swmHostModeSubscribed.has(hostKey)).toBe(false);
+      expect(freshManager.subscribedTopics).not.toContain(hostTopic);
+      expect(onMessage.mock.calls.filter(([topic]) => topic === hostTopic)).toHaveLength(0);
+      expect(await internals.swmHostModeStore!.listHostModeSubscribedCgs()).not.toContain(OTHER_CG);
+
+      curation.mockResolvedValue(true);
+      await internals[method](OTHER_CG);
+      expect(internals.swmHostModeHandlers.has(hostKey)).toBe(true);
+      expect(internals.swmHostModeSubscribed.has(hostKey)).toBe(true);
+      expect(freshManager.subscribedTopics).toContain(hostTopic);
+      expect(onMessage.mock.calls.filter(([topic]) => topic === hostTopic)).toHaveLength(1);
+      expect(await internals.swmHostModeStore!.listHostModeSubscribedCgs()).toContain(OTHER_CG);
+    }, 60_000,
+  );
 
   it('lets a host-mode handler be wired again on the fresh manager', async () => {
     const boot = await createEdgeAgent('RestartGossipHostMode');
