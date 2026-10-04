@@ -69,6 +69,7 @@ import {
 import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
+  rpcReadDescriptor,
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
@@ -1762,7 +1763,7 @@ export class EVMChainAdapterBase {
     opts?: ReadOpts,
   ): Promise<T> {
     const direct = (): Promise<T> => this.rpcFailover.readContract(
-      label,
+      rpcReadDescriptor(label, opts),
       contract,
       (c) => c[method](...args),
       opts,
@@ -1802,7 +1803,7 @@ export class EVMChainAdapterBase {
     opts?: ReadOpts,
   ): Promise<T> {
     return this.rpcFailover.readContract(
-      label,
+      rpcReadDescriptor(label, opts),
       contract,
       fn,
       opts,
@@ -1821,7 +1822,7 @@ export class EVMChainAdapterBase {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.read(label, fn, opts);
+    return this.rpcFailover.read(rpcReadDescriptor(label, opts), fn, opts);
   }
 
   /**
