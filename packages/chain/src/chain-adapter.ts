@@ -897,15 +897,13 @@ export interface ContextGraphStorageRange {
   /** `getLatestContextGraphId()` at the anchor: the highest id minted so far. */
   readonly latestId: bigint;
   /**
-   * Entries in ascending id order for `[fromId, nextId)`, with no gap. The
-   * range ends before the first id that the chain proves nonexistent
-   * (`ERC721NonexistentToken`) or that could not be read.
+   * Entries for `[fromId, nextId)`, ascending and with no gap: the range ends
+   * before the first id that is nonexistent on chain or could not be read.
    */
   readonly entries: readonly ContextGraphStorageEntry[];
   /**
    * The first id this call did NOT read. Equals `fromId` when `fromId` is
-   * already above `latestId`, so a caller's cursor never moves past the chain,
-   * and it never moves over an id that was not read.
+   * already above `latestId`, so a caller's cursor never moves past the chain.
    */
   readonly nextId: bigint;
 }
@@ -1769,13 +1767,9 @@ export interface ChainAdapter {
     /**
      * Read ContextGraphStorage slots `[fromId, fromId + maxIds)` (capped at
      * `getLatestContextGraphId()`) with view calls pinned to one block: the
-     * node's finality anchor (`chain.finalityConfirmations`). Ids are
-     * sequential, so this enumerates every Context Graph that exists on chain
-     * without event logs or archive state. Stateless: callers own any cursor.
-     *
-     * Resolves with the longest prefix of the range that could be read: an id
-     * that fails to read ends the range and keeps the ids before it. Rejects
-     * when `fromId` itself could not be read.
+     * node's finality anchor (`chain.finalityConfirmations`). Ids are sequential,
+     * so this lists every Context Graph without event logs or archive state.
+     * Stateless: callers own any cursor. Rejects only when `fromId` is unreadable.
      */
     readContextGraphStorageRange?(
       options: ContextGraphStorageRangeOptions,

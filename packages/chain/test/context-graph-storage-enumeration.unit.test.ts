@@ -651,6 +651,19 @@ describe('EVMChainAdapter.readContextGraphStorageRange', () => {
     expect(range.anchorBlockNumber).toBe(77);
   });
 
+  it('fails closed, before any view, when the anchor block cannot be read', async () => {
+    const { adapter, provider, blockTags } = makeStorageAdapter({
+      head: 77,
+      graphs: new Map([[1, {}]]),
+      latestId: 1,
+    });
+    provider.getBlock.setImpl(async () => null as never);
+
+    await expect(adapter.readContextGraphStorageRange({ fromId: 1n, maxIds: 1 }))
+      .rejects.toThrow(/Context Graph storage enumeration anchor unavailable/);
+    expect(blockTags).toEqual([]);
+  });
+
   it('fails over a data-less CALL_EXCEPTION from a backend behind the anchor', async () => {
     const graphs = new Map<number, FakeGraph>([[1, { nameHash: nameHashFor(1) }]]);
     const first = makeStorageAdapter({ head: 10, graphs, latestId: 1 });
