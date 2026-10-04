@@ -10726,9 +10726,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
-    const session = this.gossipSession;
-    const previouslyDurableIds = new Set(this.contextGraphSubscriptionRehydrationAccountedIds);
-    let durablePlanRead = false;
+    const startupPlan = this.gossipSession.beginDurableStartupPlan(
+      this.contextGraphSubscriptionRehydrationAccountedIds,
+    );
     try {
       // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
       // by start(); their persisted rows must NOT be rehydrated here too. Re-
@@ -10737,10 +10737,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // dormant. Exclude them from the rehydration set entirely.
       const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
       const persistedRows = await store.loadAll();
-      // Durable activation (or dormancy) wins over the pre-read live snapshot.
-      // A later save completion cannot change this session's startup plan.
-      for (const row of persistedRows) session.startupLiveIntents.delete(row.id);
-      durablePlanRead = true;
+      startupPlan.claimDurableRows(persistedRows);
       // A name-hash placeholder whose verified cleartext row is also durable
       // was adopted earlier; the crash window between the two writes can
       // leave both. Never reactivate the placeholder. Record the adoption as
@@ -11154,11 +11151,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       authorityBudget?.dispose();
-      // A failed store read must not bypass authority for an intent already
-      // known to be durable. The fallback is fixed before the awaited read.
-      if (!durablePlanRead) {
-        for (const id of previouslyDurableIds) session.startupLiveIntents.delete(id);
-      }
+      startupPlan.finish();
     }
   }
 

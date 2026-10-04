@@ -29,5 +29,29 @@ export class GossipSession {
     return live.manager;
   }
 
+  /** Capture startup ownership before any durable read can yield. */
+  beginDurableStartupPlan(previouslyDurableIds: Iterable<string>): Readonly<{
+    claimDurableRows(rows: Iterable<{ id: string }>): void;
+    finish(): void;
+  }> {
+    const fallbackIds = new Set(previouslyDurableIds);
+    let durablePlanRead = false;
+    return Object.freeze({
+      claimDurableRows: (rows: Iterable<{ id: string }>) => {
+        // Durable activation (or dormancy) wins over the pre-read live snapshot.
+        // A later save completion cannot change this session's startup plan.
+        for (const row of rows) this.startupLiveIntents.delete(row.id);
+        durablePlanRead = true;
+      },
+      finish: () => {
+        // A failed store read must not bypass authority for an intent already
+        // known to be durable. The fallback is fixed before the awaited read.
+        if (!durablePlanRead) {
+          for (const id of fallbackIds) this.startupLiveIntents.delete(id);
+        }
+      },
+    });
+  }
+
   retire(): void { this.#retired = true; }
 }
