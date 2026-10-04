@@ -1596,6 +1596,35 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     gate.release();
   });
 
+  it('fails over when a provider cannot supply the selected finalized head', async () => {
+    const { adapter, provider } = makeIndexedAuthorityAdapter();
+    const attempts: string[] = [];
+    const unavailable: IndexedAuthorityProvider = {
+      ...provider,
+      getBlock: async (tag) => tag === 'latest' ? null : provider.getBlock(tag),
+    };
+    (adapter as any).readTipProvider = async (
+      _label: string,
+      read: (selected: IndexedAuthorityProvider) => Promise<unknown>,
+      options: Readonly<{ isRetryable?: (error: unknown) => boolean }>,
+    ) => {
+      try {
+        attempts.push('unavailable');
+        return await read(unavailable);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ContextGraphAuthorityIndexRetryableError);
+        expect(options.isRetryable?.(error)).toBe(true);
+        attempts.push('healthy');
+        return read(provider);
+      }
+    };
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      contextGraphId: '9',
+    });
+    expect(attempts).toEqual(['unavailable', 'healthy']);
+  });
+
   it('fails over when a provider cannot revalidate the durable authority anchor', async () => {
     const { adapter, provider, advanceAuthorityHead } = makeIndexedAuthorityAdapter();
     await adapter.getContextGraphAuthoritySnapshot(9n);
