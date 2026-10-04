@@ -87,6 +87,19 @@ describe('reference-safe abandoned draft maintenance', () => {
     await withUnqueuedDraftOperation(f.store, CG, undefined, workspaceOperationSubject(CG, 'queued'), NOW, async () => { deleted = true; });
     expect(deleted).toBe(false);
   });
+  it.each(['missing', 'conflicting'] as const)('refuses TTL collection with a %s operation ID', async (mode) => {
+    const f = await fixture(); await f.op('damaged');
+    const operation = workspaceOperationSubject(CG, 'damaged');
+    if (mode === 'missing') {
+      await deleteByPatternWithoutCount(f.store, { graph: META, subject: operation, predicate: `${DKG}shareOperationId` });
+    } else {
+      await f.store.insert([{ graph: META, subject: operation, predicate: `${DKG}shareOperationId`, object: '"other"' }]);
+    }
+    let deleted = false;
+    await withUnqueuedDraftOperation(f.store, CG, undefined, operation, NOW, async () => { deleted = true; });
+    expect(deleted).toBe(false);
+    expect(await f.has(META, operation)).toBe(true);
+  });
   it('advances the operation cursor beyond 32 retained ACK copies to collect later drafts', async () => {
     const f = await fixture();
     for (let index = 0; index < 40; index += 1) await f.op(`old-${index}`);

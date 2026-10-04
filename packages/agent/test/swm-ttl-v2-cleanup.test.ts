@@ -244,6 +244,7 @@ describe('SWM TTL cleanup of graph-scoped V2 operations', () => {
       const subject = opSubject(cg, `batch-${i}`);
       quads.push(
         { graph: metaGraph, subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${DKG}WorkspaceOperation` },
+        { graph: metaGraph, subject, predicate: `${DKG}shareOperationId`, object: `"batch-${i}"` },
         { graph: metaGraph, subject, predicate: `${DKG}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
         { graph: metaGraph, subject, predicate: `${DKG}rootEntity`, object: `urn:v2:batch:${i}` },
       );

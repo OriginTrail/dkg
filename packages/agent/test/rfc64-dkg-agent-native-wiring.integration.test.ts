@@ -5046,9 +5046,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
       });
       expect(oldHead).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
-      await vi.waitFor(() => expect(receiver.readRfc64AppliedCatalogHeadV1({
+      // Wait for the real announced-head fetch and activation. V8 coverage of
+      // the large projection can exceed a separate 20-second polling budget;
+      // the whole scenario keeps its existing 120-second deadline.
+      await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+      expect(receiver.readRfc64AppliedCatalogHeadV1({
         catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
-      })?.currentCatalogHeadDigest).toBe(oldHead?.currentCatalogHeadDigest), { timeout: 20_000, interval: 100 });
+      })?.currentCatalogHeadDigest).toBe(oldHead?.currentCatalogHeadDigest);
 
       await author.assertion.pullFrom(CONTEXT_GRAPH_ID, name, 'swm', { onConflict: 'replace' });
       await author.assertion.write(CONTEXT_GRAPH_ID, name, [{
@@ -5072,9 +5076,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
       expect(newHead).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
       expect(newHead?.appliedInventoryDigest).not.toBe(oldHead?.appliedInventoryDigest);
-      await vi.waitFor(() => expect(receiver.readRfc64AppliedCatalogHeadV1({
+      await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+      expect(receiver.readRfc64AppliedCatalogHeadV1({
         catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
-      })?.currentCatalogHeadDigest).toBe(newHead?.currentCatalogHeadDigest), { timeout: 20_000, interval: 100 });
+      })?.currentCatalogHeadDigest).toBe(newHead?.currentCatalogHeadDigest);
       const graph = contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory,
         AUTHOR, Number(replacement.kaUal.split('/').at(-1)));
       await expect(receiver.store.query(`SELECT ?name WHERE { GRAPH <${graph}> {
