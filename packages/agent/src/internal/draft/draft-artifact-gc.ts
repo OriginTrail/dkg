@@ -3,11 +3,12 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { assertSafeIri, contextGraphMetaUri, resolveWithinAbort, sparqlString } from '@origintrail-official/dkg-core';
 import { deleteByPatternWithoutCount, knowledgeAssetPrivateArtifactOwnerCandidates, readKnowledgeAssetPrivateArtifactsPage, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  STORAGE_ACK_LEDGER_GRAPH, draftOperationReferenceKey, draftPrivateReferenceKey,
-  markDraftOperationRetired, readDraftArtifactReferences, swmKaWriteLockKey,
+  STORAGE_ACK_LEDGER_GRAPH, draftPrivateReferenceKey,
+  readDraftArtifactReferences, swmKaWriteLockKey,
   withDraftArtifactCollection, withKeyedLocks, workspaceOperationSubject,
 } from '@origintrail-official/dkg-publisher';
 import { stripMetadataLiteral as literal } from '../../sync/metadata-literal.js';
+import { collectUnreferencedDraftOperation } from './draft-operation-retirement.js';
 import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -66,25 +67,32 @@ export async function collectAbandonedDraftArtifacts(input: {
       if (workspaceOperationSubject(contextGraphId, id) !== op) continue;
       const rest = meta.slice(prefix.length);
       const subGraphName = rest === '_shared_memory_meta' ? undefined : rest.slice(0, -'/_shared_memory_meta'.length);
-      if (id.startsWith('storage-ack-') || references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, id))) continue;
-      await withKeyedLocks(input.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, ka)], async () => {
-        assertSafeIri(meta); assertSafeIri(op); assertSafeIri(ka);
-        // Recheck the current head under the receiver's lock, including equivalent aliases.
-        if (await exists(store, `GRAPH <${meta}> { ?head <${DKG}kaUal> <${ka}> ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ${sparqlString(id)} }`)) return;
-        if (!await exists(store, `GRAPH <${meta}> { ?head <${DKG}kaUal> <${ka}> ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ?current . FILTER(?current != ${sparqlString(id)}) }`)) return;
-        if (await exists(store, `GRAPH <${meta}> {
-          ?head <${DKG}kaUal> <${ka}> ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ?current .
-          ?currentOp <${DKG}shareOperationId> ?current ; <${DKG}assertionVersion> ?version ; <${DKG}publicQuadsDigest> ?digest .
-          <${op}> <${DKG}assertionVersion> ?version ; <${DKG}publicQuadsDigest> ?digest .
-        }`)) return;
-        if (await exists(store, `GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <${op}> ?p ?o }`)) return;
-        if (await exists(store, `GRAPH <${rootMeta}> { ?descriptor <${DKG}currentShareOperationId> ${sparqlString(id)} }`)) return;
-        // Private collection below also requires proof that the version was burned.
-        await markDraftOperationRetired(store, contextGraphId, subGraphName, id, now);
-        await deleteByPatternWithoutCount(store, { graph: meta, subject: op });
-        const snapshot = row['snapshot'];
-        if (snapshot && !await exists(store, `GRAPH ?g { ?owner <${DKG}publicSnapshotGraph> <${assertSafeIri(snapshot)}> }`)) await store.dropGraph(snapshot);
-        counts.operations += 1;
+      if (id.startsWith('storage-ack-')) continue;
+      await collectUnreferencedDraftOperation({
+        store, references, contextGraphId, subGraphName, operationSubject: op, now,
+        writeLocks: input.writeLocks, cutoffMs: now - input.pendingAckTxWindowMs,
+        mayRetire: async owner => {
+          if (owner.id !== id || owner.kaUal !== ka || owner.metaGraph !== meta) return false;
+          assertSafeIri(meta); assertSafeIri(op); assertSafeIri(ka);
+          // Recheck the current head under the receiver's lock, including equivalent aliases.
+          if (await exists(store, `GRAPH <${meta}> { ?head <${DKG}kaUal> <${ka}> ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ${sparqlString(id)} }`)) return false;
+          if (!await exists(store, `GRAPH <${meta}> { ?head <${DKG}kaUal> <${ka}> ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ?current . FILTER(?current != ${sparqlString(id)}) }`)) return false;
+          if (await exists(store, `GRAPH <${meta}> {
+            ?head <${DKG}kaUal> <${ka}> ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ?current .
+            ?currentOp <${DKG}shareOperationId> ?current ; <${DKG}assertionVersion> ?version ; <${DKG}publicQuadsDigest> ?digest .
+            <${op}> <${DKG}assertionVersion> ?version ; <${DKG}publicQuadsDigest> ?digest .
+          }`)) return false;
+          if (await exists(store, `GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <${op}> ?p ?o }`)) return false;
+          if (await exists(store, `GRAPH <${rootMeta}> { ?descriptor <${DKG}currentShareOperationId> ${sparqlString(id)} }`)) return false;
+          return true;
+        },
+        collect: async () => {
+          // Private collection below also requires proof that the version was burned.
+          await deleteByPatternWithoutCount(store, { graph: meta, subject: op });
+          const snapshot = row['snapshot'];
+          if (snapshot && !await exists(store, `GRAPH ?g { ?owner <${DKG}publicSnapshotGraph> <${assertSafeIri(snapshot)}> }`)) await store.dropGraph(snapshot);
+          counts.operations += 1;
+        },
       });
     }
     // Old counter bugs left /assertions/N above the confirmed next version. Only

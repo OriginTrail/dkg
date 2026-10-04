@@ -6,7 +6,7 @@ import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-pu
 import { describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { GraphManager, OxigraphStore, deleteByPatternWithoutCount, type Quad, UnsupportedTripleStoreCapabilityError } from '@origintrail-official/dkg-storage';
-import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, swmKaWriteLockKey, withKeyedLocks, workspaceOperationSubject, storageAckLedgerEntryQuads } from '@origintrail-official/dkg-publisher';
+import { STORAGE_ACK_LEDGER_GRAPH, withWorkspaceOperationWriteLock, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, swmKaWriteLockKey, withKeyedLocks, workspaceOperationSubject, storageAckLedgerEntryQuads } from '@origintrail-official/dkg-publisher';
 import { storageAckNotRetainedFilters } from '../src/storage-ack-retention.js';
 import { expiredSwmOperationMayRetire } from '../src/internal/swm-expiry/swm-expiry-batch.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
@@ -32,6 +32,73 @@ async function fixture(contextGraphId = CG, store = new OxigraphStore()) {
   return { store, chain, writeLocks, op, head, privateGraph, has, collect };
 }
 describe('reference-safe abandoned draft maintenance', () => {
+  it('superseded collection rechecks a refreshed publisher clock after waiting for its KA writer', async () => {
+    const f = await fixture(); const id = 'superseded-clock-refresh';
+    await f.op(id); await f.op('new', '2'); await f.head();
+    const op = workspaceOperationSubject(CG, id), key = swmKaWriteLockKey(CG, undefined, KA);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; }), ready = new Promise<void>(resolve => { entered = resolve; });
+    const writer = withKeyedLocks(f.writeLocks, [key], async () => { entered(); await gate; });
+    await ready; const prior = f.writeLocks.get(key); const collecting = f.collect();
+    try {
+      await vi.waitFor(() => expect(f.writeLocks.get(key)).not.toBe(prior));
+      await deleteByPatternWithoutCount(f.store, { graph: META, subject: op, predicate: `${DKG}publishedAt` });
+      await f.store.insert([{ graph: META, subject: op, predicate: `${DKG}publishedAt`, object: `"${new Date(NOW).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` }]);
+      release(); await writer;
+      expect(await collecting).toEqual({ operations: 0, privateGraphs: 0 });
+      expect(await f.has(META, op)).toBe(true);
+    } finally { release(); await Promise.allSettled([writer, collecting]); await f.store.close(); }
+  });
+
+  it('superseded collection waits for its operation identity writer and revalidates switched KA ownership', async () => {
+    const f = await fixture(); const id = 'superseded-owner-switch';
+    await f.op(id); await f.op('new', '2'); await f.head();
+    const op = workspaceOperationSubject(CG, id), key = swmKaWriteLockKey(CG, undefined, KA);
+    const rows = await f.store.query(`SELECT ?g WHERE { GRAPH <${META}> { <${op}> <${DKG}publicSnapshotGraph> ?g } }`);
+    if (rows.type !== 'bindings' || !rows.bindings[0]?.['g']) throw new Error('Missing immutable snapshot');
+    const snapshot = rows.bindings[0]['g'];
+    let release!: () => void, entered!: () => void, allowDelete!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; }), ready = new Promise<void>(resolve => { entered = resolve; });
+    const deleteGate = new Promise<void>(resolve => { allowDelete = resolve; });
+    let deletionStarted = false;
+    const original = f.store.deleteByPatternWithoutCount.bind(f.store);
+    const remove = vi.spyOn(f.store, 'deleteByPatternWithoutCount').mockImplementation(async pattern => {
+      if (pattern.subject === op && pattern.predicate === undefined) { deletionStarted = true; await deleteGate; }
+      return original(pattern);
+    });
+    const writer = withWorkspaceOperationWriteLock({ store: f.store, contextGraphId: CG, shareOperationId: id }, async () => { entered(); await gate; });
+    await ready; const collecting = f.collect();
+    try {
+      await vi.waitFor(() => expect(f.writeLocks.has(key)).toBe(true));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(deletionStarted).toBe(false);
+      await original({ graph: META, subject: op, predicate: `${DKG}kaUal` });
+      await f.store.insert([{ graph: META, subject: op, predicate: `${DKG}kaUal`, object: `${KA}-different` }]);
+      release(); await writer; allowDelete();
+      expect(await collecting).toEqual({ operations: 0, privateGraphs: 0 });
+      expect(await f.has(META, op)).toBe(true); expect(await f.has(snapshot)).toBe(true);
+    } finally { release(); allowDelete(); await Promise.allSettled([writer, collecting]); remove.mockRestore(); await f.store.close(); }
+  });
+
+  it.each(['TTL', 'superseded'] as const)('%s retirement prevents late queue admission after deletion through the shared boundary', async lane => {
+    const f = await fixture(); const id = `${lane.toLowerCase()}-retired`; await f.op(id);
+    const op = workspaceOperationSubject(CG, id);
+    try {
+      if (lane === 'TTL') {
+        await withUnqueuedDraftOperation(f.store, CG, undefined, op, NOW, () => deleteByPatternWithoutCount(f.store, { graph: META, subject: op }).then(() => {}), {
+          writeLocks: f.writeLocks, cutoffMs: NOW, mayRetire: async () => true,
+        });
+      } else {
+        await f.op('new', '2'); await f.head();
+        expect(await f.collect()).toEqual({ operations: 1, privateGraphs: 0 });
+      }
+      expect(await f.has(META, op)).toBe(false);
+      const queue = new TripleStoreAsyncLiftPublisher(f.store);
+      await expect(queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: CG, shareOperationId: id, assertionVersion: '3', kaUal: KA }))).rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+      expect(await queue.list()).toEqual([]);
+    } finally { await f.store.close(); }
+  });
+
   it.each(['absent', 'refused'] as const)('retains queued operation and snapshot during a real %s atomic-capability fallback transition', async mode => {
     const inner = new OxigraphStore();
     const gate = () => { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; };
