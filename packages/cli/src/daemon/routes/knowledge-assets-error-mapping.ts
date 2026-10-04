@@ -15,7 +15,6 @@ import {
   respondIfReconcileUnavailable,
   respondIfStoreUnavailable,
   respondIfChainRpcTransportError,
-  sanitizeRpcMessage,
 } from '../http-utils.js';
 
 /**
