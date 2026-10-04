@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { persistOpenFile, persistDirectoryRange, type DirectorySyncPolicy } from '@origintrail-official/dkg-storage';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, rename, rm, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -7,6 +8,8 @@ export interface DurableFileReplacePermissions {
   /** Creation modes are filtered by the process umask; existing directories keep their mode. */
   readonly fileMode: number;
   readonly directoryMode: number;
+  /** Strict by default; only historical source-worker state opts into unsupported-directory tolerance. */
+  readonly directorySyncPolicy?: DirectorySyncPolicy;
 }
 
 /** Same-directory replacement: fsync bytes, rename, then fsync the parent directory. */
@@ -18,27 +21,14 @@ export async function replaceDurableFile(path: string, contents: string, permiss
   try {
     file = await open(temporary, 'wx', permissions.fileMode);
     await file.writeFile(contents, 'utf8');
-    await file.sync();
+    await persistOpenFile(file);
     await file.close();
     file = undefined;
     await rename(temporary, path);
-    await syncDirectory(directory);
+    await persistDirectoryRange(directory, directory, process.platform, permissions.directorySyncPolicy);
   } catch (error) {
     await file?.close().catch(() => undefined);
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
-  }
-}
-
-async function syncDirectory(path: string): Promise<void> {
-  let directory: FileHandle | undefined;
-  try {
-    directory = await open(path, 'r');
-    await directory.sync();
-  } catch (error) {
-    // These platforms cannot fsync a directory; the replaced file was already fsynced.
-    if (!['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-  } finally {
-    await directory?.close().catch(() => undefined);
   }
 }

@@ -103,7 +103,7 @@ export async function loadSourceWorkerState(path: string): Promise<SourceWorkerS
 }
 
 export async function saveSourceWorkerState(path: string, state: SourceWorkerState): Promise<void> {
-  await replaceDurableFile(path, JSON.stringify(state, null, 2) + '\n', { fileMode: 0o666, directoryMode: 0o777 });
+  await replaceDurableFile(path, JSON.stringify(state, null, 2) + '\n', { fileMode: 0o666, directoryMode: 0o777, directorySyncPolicy: 'allow-unsupported' });
 }
 
 export async function runSourceWorkerOnce<TSource extends SourceWorkerSource>(
