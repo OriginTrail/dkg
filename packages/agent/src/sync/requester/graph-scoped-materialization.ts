@@ -214,6 +214,12 @@ export async function authenticateVerifiedGraphScopedAsset(
   if (roots.length !== 1) {
     throw new Error(`Graph-scoped durable sync ${asset.ual} has ${roots.length} Merkle roots`);
   }
+  // What the asset claims as provenance is fixed by its own metadata, so the
+  // receipt of a first publish is requested with the views instead of after
+  // them. Only the request moves: a malformed claim is still reported after
+  // the checks on the views, and the receipt is still consulted last.
+  const provenanceClaim = captureProvenanceClaim(asset);
+  const publishReceipt = startPublishReceiptRead(chain, asset, provenanceClaim, options.signal);
   const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
     chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
     chain.getMerkleRootCount(kaId, { signal: options.signal }),
@@ -261,31 +267,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
     );
   }
-  const transactionHashes = asset.metadataQuads
-    .filter((quad) => quad.predicate === TRANSACTION_HASH)
-    .map((quad) => parseTransactionHashLiteral(quad.object));
-  if (transactionHashes.length > 1) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} allows at most one receipt transaction hash, `
-          + `got ${transactionHashes.length}`,
-      ),
-      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
-    );
-  }
+  if ('error' in provenanceClaim) throw provenanceClaim.error;
 
-  const confirmationKind = readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads);
   let materializedBlock: number;
   let materializedTxIndex: number;
-  if (confirmationKind === 'finalized-materialization') {
-    if (transactionHashes.length !== 0) {
-      throw Object.assign(
-        new Error(
-          `Graph-scoped durable sync ${asset.ual} finalized materialization must not claim a receipt`,
-        ),
-        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
-      );
-    }
+  if (provenanceClaim.kind === 'finalized-materialization') {
     // RFC-64 finalized VM materialization deliberately has no receipt claim:
     // it is reconstructed from a pinned finalized chain snapshot. A later
     // durable-sync requester must not trust the serving peer's local
@@ -296,27 +282,17 @@ export async function authenticateVerifiedGraphScopedAsset(
     // remains the authoritative stale-write guard for this receiptless lane.
     materializedBlock = 0;
     materializedTxIndex = 0;
-  } else if (transactionHashes.length !== 1) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} receipt-backed confirmation requires one transaction hash`,
-      ),
-      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
-    );
   } else if (asset.assertionVersion === 1n) {
-    const transactionHash = transactionHashes[0]!;
-    if (!chain.resolvePublishByTxHash) {
+    const { transactionHash } = provenanceClaim;
+    // The read was started for every first publish with a receipt claim, so
+    // it is missing only on a chain that cannot resolve a publish.
+    if (!publishReceipt) {
       throw Object.assign(
         new Error('Graph-scoped durable sync requires receipt-backed publish verification'),
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
-    // Only the receipt's batch, root, hash and ordering are consumed below, so
-    // the adapter's unused block-header lookup for `blockTimestamp` is skipped.
-    const resolved = await chain.resolvePublishByTxHash(transactionHash, {
-      signal: options.signal,
-      skipBlockTimestamp: true,
-    });
+    const resolved = await publishReceipt;
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (
       !resolved
@@ -333,7 +309,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     materializedBlock = resolved.blockNumber;
     materializedTxIndex = resolved.txIndex ?? 0;
   } else {
-    const transactionHash = transactionHashes[0]!;
+    const { transactionHash } = provenanceClaim;
     if (!chain.verifyKAUpdate || !chain.getLatestMerkleRootPublisher) {
       throw Object.assign(
         new Error('Graph-scoped durable sync requires receipt-backed update verification'),
@@ -580,6 +556,84 @@ function parseBytes32Literal(raw: string, field: string): Uint8Array {
     throw new Error(`Graph-scoped durable sync ${field} must be 32 bytes of hexadecimal data`);
   }
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
+}
+
+/** What a verified asset's own metadata claims as its provenance. */
+type ProvenanceClaim =
+  | { readonly kind: 'finalized-materialization' }
+  | { readonly kind: 'receipt'; readonly transactionHash: string };
+
+/** Throws what authentication reports for a malformed claim. */
+function readProvenanceClaim(asset: VerifiedGraphScopedAsset): ProvenanceClaim {
+  const transactionHashes = asset.metadataQuads
+    .filter((quad) => quad.predicate === TRANSACTION_HASH)
+    .map((quad) => parseTransactionHashLiteral(quad.object));
+  if (transactionHashes.length > 1) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} allows at most one receipt transaction hash, `
+          + `got ${transactionHashes.length}`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
+  }
+  if (readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads) === 'finalized-materialization') {
+    if (transactionHashes.length !== 0) {
+      throw Object.assign(
+        new Error(
+          `Graph-scoped durable sync ${asset.ual} finalized materialization must not claim a receipt`,
+        ),
+        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      );
+    }
+    return { kind: 'finalized-materialization' };
+  }
+  if (transactionHashes.length !== 1) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} receipt-backed confirmation requires one transaction hash`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
+  }
+  return { kind: 'receipt', transactionHash: transactionHashes[0]! };
+}
+
+/** {@link readProvenanceClaim}, with a malformed claim held for the caller to report in its turn. */
+function captureProvenanceClaim(
+  asset: VerifiedGraphScopedAsset,
+): ProvenanceClaim | { readonly error: unknown } {
+  try {
+    return readProvenanceClaim(asset);
+  } catch (error) {
+    return { error };
+  }
+}
+
+/**
+ * Request the receipt that authenticates a first publish. Started before the
+ * views have answered, so a check that fails first leaves this read unawaited:
+ * it is observed here, and its own failure is still reported where it is
+ * awaited. Nothing is started for any other asset.
+ */
+function startPublishReceiptRead(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  claim: ProvenanceClaim | { readonly error: unknown },
+  signal: AbortSignal | undefined,
+): ReturnType<NonNullable<ChainAdapter['resolvePublishByTxHash']>> | undefined {
+  if ('error' in claim || claim.kind !== 'receipt' || asset.assertionVersion !== 1n) return undefined;
+  const { resolvePublishByTxHash } = chain;
+  if (!resolvePublishByTxHash) return undefined;
+  const { transactionHash } = claim;
+  // Only the receipt's batch, root, hash and ordering are consumed, so the
+  // adapter's unused block-header lookup for `blockTimestamp` is skipped.
+  const receipt = (async () => resolvePublishByTxHash.call(chain, transactionHash, {
+    signal,
+    skipBlockTimestamp: true,
+  }))();
+  receipt.catch(() => undefined);
+  return receipt;
 }
 
 function parseTransactionHashLiteral(raw: string): string {
