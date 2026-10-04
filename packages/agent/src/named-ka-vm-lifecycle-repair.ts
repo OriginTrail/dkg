@@ -6,7 +6,7 @@ import { replaceDurableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
 import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
-import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
+import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
 export interface ConfirmedNamedKaVmPublicationDeployment {
@@ -70,14 +70,14 @@ export class NamedKaVmLifecycleRepair {
     const dir = this.options.dataDir;
     if (!dir) return;
     await replaceDurableFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'),
-      JSON.stringify({ version: 2, entries: [...this.entries] }), { fileMode: 0o600, directoryMode: 0o700 });
+      JSON.stringify(encodeLifecycleRepairJournal(this.entries)), { fileMode: 0o600, directoryMode: 0o700 });
   }
 
   async submit(input: ConfirmedNamedKaVmLifecycleInput): Promise<NamedKaVmLifecycleRepairOutcome> {
     const admitted = await this.serial<{ outcome: NamedKaVmLifecycleRepairOutcome } | { key: string; entry: RepairEntry }>(async () => {
       if (this.stopped) throw new Error('Named KA lifecycle repair owner is stopped');
       await this.load();
-      const stored = normalizeLifecycleRepairInput(input, true);
+      const stored = normalizeLifecycleRepairInput(input);
       const key = lifecycleRepairKey(stored);
       const previous = this.entries.get(key);
       if (previous && BigInt(previous.input.assertionVersion) > BigInt(stored.assertionVersion)) return { outcome: 'superseded' as const };
@@ -114,9 +114,7 @@ export class NamedKaVmLifecycleRepair {
     return execution;
   }
   private async attempt(key: string, entry: RepairEntry): Promise<NamedKaVmLifecycleRepairOutcome> {
-    const { packedKaId, ...fields } = entry.input;
-    const input: ConfirmedNamedKaVmLifecycleInput = { ...fields,
-      ...(packedKaId === undefined ? {} : { packedKaId: BigInt(packedKaId) }) };
+    const input = entry.input;
     let outcome: NamedKaVmLifecycleRepairOutcome;
     let failure: unknown;
     try {

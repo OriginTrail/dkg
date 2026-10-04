@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { persistOpenFile, persistDirectoryRange, type DirectorySyncPolicy } from '@origintrail-official/dkg-storage';
+import { persistDirectoryRange, type DirectorySyncPolicy } from '@origintrail-official/dkg-storage';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, rename, rm, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -21,7 +21,7 @@ export async function replaceDurableFile(path: string, contents: string, permiss
   try {
     file = await open(temporary, 'wx', permissions.fileMode);
     await file.writeFile(contents, 'utf8');
-    await persistOpenFile(file);
+    await file.sync();
     await file.close();
     file = undefined;
     await rename(temporary, path);

@@ -5,7 +5,7 @@ import { assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publis
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 export type StoredLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'packedKaId' | 'tentative'> & { packedKaId?: string };
 export interface LifecycleRepairEntry {
-  input: StoredLifecycleRepairInput;
+  input: ConfirmedNamedKaVmLifecycleInput;
   attempts: number;
   nextAttemptAt: number;
   lastError?: string;
@@ -27,17 +27,16 @@ function root(value: unknown): string {
   if (!/^(0x)?[0-9a-f]{64}$/i.test(text)) return invalid();
   return text.toLowerCase().replace(/^0x/, '');
 }
-export function normalizeLifecycleRepairInput(value: unknown, submission = false): StoredLifecycleRepairInput {
+export function normalizeLifecycleRepairInput(value: unknown): ConfirmedNamedKaVmLifecycleInput {
   const input = record(value);
   if ('tentative' in input) return invalid();
   const assertionVersion = string(input['assertionVersion']);
   if (!/^[1-9][0-9]*$/.test(assertionVersion)) return invalid();
   const packed = input['packedKaId'];
-  let packedKaId: string | undefined;
+  let packedKaId: bigint | undefined;
   if (packed !== undefined) {
-    packedKaId = submission && typeof packed === 'bigint' ? packed.toString() : string(packed);
-    if (!/^[0-9]+$/.test(packedKaId) || BigInt(packedKaId) >= 1n << 256n) return invalid();
-    packedKaId = BigInt(packedKaId).toString();
+    if (typeof packed !== 'bigint' || packed < 0n || packed >= 1n << 256n) return invalid();
+    packedKaId = packed;
   }
   let publicationDeployment: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'];
   if (input['publicationDeployment'] !== undefined) {
@@ -55,7 +54,7 @@ export function normalizeLifecycleRepairInput(value: unknown, submission = false
     ...(publicationDeployment === undefined ? {} : { publicationDeployment }),
   };
 }
-export function lifecycleRepairKey(input: StoredLifecycleRepairInput): string {
+export function lifecycleRepairKey(input: ConfirmedNamedKaVmLifecycleInput): string {
   const hash = createHash('sha256').update(assertionLifecycleWriteLockKey(
     input.contextGraphId, input.name, input.agentAddress, input.subGraphName,
   ));
@@ -66,8 +65,25 @@ export function lifecycleRepairKey(input: StoredLifecycleRepairInput): string {
 }
 // Read-only compatibility with the original journal encoding. New writes use
 // the publisher's identity contract; validate the old key before migrating it.
-function historicalRepairKey(input: StoredLifecycleRepairInput): string {
+function historicalRepairKey(input: ConfirmedNamedKaVmLifecycleInput): string {
   return createHash('sha256').update(JSON.stringify([input.contextGraphId, input.agentAddress.toLowerCase(), input.name, input.subGraphName ?? ''])).digest('hex');
+}
+/** Encode only at the JSON file boundary; worker entries retain confirmed bigint coordinates. */
+export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, LifecycleRepairEntry>): {
+  version: 2; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInput }]>;
+} {
+  return { version: 2, entries: [...entries].map(([key, entry]) => {
+    const normalized = normalizeLifecycleRepairInput(entry.input);
+    const input: StoredLifecycleRepairInput = { ...normalized, packedKaId: normalized.packedKaId?.toString() };
+    return [key, { ...entry, input }];
+  }) };
+}
+function decodeLifecycleRepairInput(value: unknown): ConfirmedNamedKaVmLifecycleInput {
+  const input = record(value), packed = input['packedKaId'];
+  if (packed !== undefined && !/^[0-9]+$/.test(string(packed))) return invalid();
+  return normalizeLifecycleRepairInput({ ...input,
+    ...(packed === undefined ? {} : { packedKaId: BigInt(string(packed)) }),
+  });
 }
 export function decodeLifecycleRepairJournal(value: unknown): Map<string, LifecycleRepairEntry> {
   const journal = record(value);
@@ -76,7 +92,7 @@ export function decodeLifecycleRepairJournal(value: unknown): Map<string, Lifecy
   const storedKeys = new Set<string>();
   for (const tuple of journal['entries']) {
     if (!Array.isArray(tuple) || tuple.length !== 2 || typeof tuple[0] !== 'string') return invalid();
-    const entry = record(tuple[1]); const input = normalizeLifecycleRepairInput(entry['input']);
+    const entry = record(tuple[1]); const input = decodeLifecycleRepairInput(entry['input']);
     const key = lifecycleRepairKey(input), attempts = entry['attempts'], nextAttemptAt = entry['nextAttemptAt'];
     const storedKey = journal['version'] === 1 ? historicalRepairKey(input) : key;
     if (tuple[0] !== storedKey || storedKeys.has(storedKey) || entries.has(key) || typeof attempts !== 'number' || !Number.isSafeInteger(attempts) || attempts < 0

@@ -1,22 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-import { open, type FileHandle } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
 /** Only callers maintaining a historical best-effort state file may tolerate these directory refusals. */
 export type DirectorySyncPolicy = 'strict' | 'allow-unsupported';
 const UNSUPPORTED_DIRECTORY_CODES = new Set(['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR']);
 
-/** The caller owns opening/closing the writable handle and replacement orchestration. */
-export async function persistOpenFile(file: Pick<FileHandle, 'sync'>): Promise<void> {
-  await file.sync();
-}
-
 /** Flush the visible file through a writable handle, then its supported parent-directory barrier. */
 export async function persistFileAndParent(path: string, platform: NodeJS.Platform = process.platform): Promise<void> {
   const absolutePath = resolve(path);
   // Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle fails.
   const file = await open(absolutePath, 'r+');
-  try { await persistOpenFile(file); } finally { await file.close(); }
+  try { await file.sync(); } finally { await file.close(); }
   const directory = dirname(absolutePath);
   await persistDirectoryRange(directory, directory, platform);
 }

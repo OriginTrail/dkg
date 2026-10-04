@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { composeTripleStoreCommitment } from '../src/persistence.js';
 import type { TripleStore } from '../src/triple-store.js';
 import { ChangelogStore, GraphSetIndexStore, OxigraphStore, OxigraphWorkerStore, SharedMemoryLiteralBlobStore, SparqlHttpStore,
   createManagedOxigraphRuntimeStoreConfigV1, createTripleStore } from '../src/index.js';
@@ -68,13 +69,21 @@ describe('explicit persistence certification', () => {
   it('uses an explicit callable without inspecting a decorator topology or flush', async () => {
     const commit = vi.fn(async () => {});
     const store = { commitment: { durability: 'restart-durable', commit }, get innerStore() { throw new Error('topology is not a persistence contract'); } } as unknown as TripleStore;
-    const options = { source: 'explicit-capability' };
-    await store.commitment!.commit(options);
+    const options = { source: 'explicit-capability' }, drain = vi.fn(async () => {});
+    const capability = composeTripleStoreCommitment(store, drain);
+    expect(capability?.durability).toBe('restart-durable');
+    await capability!.commit(options);
+    expect(drain).toHaveBeenCalledOnce();
     expect(commit).toHaveBeenCalledExactlyOnceWith(options);
+    expect(drain.mock.invocationCallOrder[0]).toBeLessThan(commit.mock.invocationCallOrder[0]!);
   });
   it('refuses an arbitrary flush-only leaf and an acknowledgement flag without a callable', () => {
-    expect(({ flush: vi.fn(async () => {}) } as unknown as TripleStore).commitment).toBeUndefined();
-    expect(({ writesDurableOnAcknowledgement: true } as unknown as TripleStore).commitment).toBeUndefined();
+    const flush = vi.fn(async () => {});
+    for (const fixture of [{ flush }, { writesDurableOnAcknowledgement: true },
+      { flush, writesDurableOnAcknowledgement: true },
+      { get innerStore() { throw new Error('topology is not a persistence contract'); } },
+    ]) expect(composeTripleStoreCommitment(fixture as unknown as TripleStore)).toBeUndefined();
+    expect(flush).not.toHaveBeenCalled();
   });
   it('does not certify an in-memory adapter whose optional flush cannot survive restart', async () => {
     const store = new OxigraphStore();

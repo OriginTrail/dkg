@@ -29,7 +29,7 @@ describe('named KA lifecycle integrity contract', () => {
     }
   });
   it('uses the same producer contract for journal and confirmed publication evidence', () => {
-    expect(() => normalizeLifecycleRepairInput({ ...input, assertionVersion: '0' }, true)).toThrow(NamedKaVmLifecycleIntegrityError);
+    expect(() => normalizeLifecycleRepairInput({ ...input, assertionVersion: '0' })).toThrow(NamedKaVmLifecycleIntegrityError);
     const { publication } = confirmedLifecycleRecoveryFixture();
     expect(() => confirmedNamedKaVmLifecycleInput({ ...publication, seal: { ...publication.seal, kaUal: undefined } }, input))
       .toThrow(NamedKaVmLifecycleIntegrityError);

@@ -1,6 +1,6 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
-import type { StoredLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import type { LifecycleRepairEntry, StoredLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle, type TentativeNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
 declare const confirmed: ConfirmedNamedKaVmLifecycleInput;
 declare const stored: StoredLifecycleRepairInput;
@@ -36,3 +36,10 @@ declare const publication: ConfirmedNamedKaVmPublication;
 void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', merkleRoot: '00' });
 // @ts-expect-error Version evidence is owned by the validated publication, not coordinates.
 void confirmedNamedKaVmLifecycleInput(publication, { contextGraphId: 'cg', name: 'ka', agentAddress: 'agent', assertionVersion: '999' });
+
+declare const entry: LifecycleRepairEntry;
+const workerInput: ConfirmedNamedKaVmLifecycleInput = entry.input;
+const workerPackedId: bigint | undefined = entry.input.packedKaId;
+// @ts-expect-error The disk encoding cannot enter scheduling or execution.
+const wireEntry: LifecycleRepairEntry = { input: stored, attempts: 0, nextAttemptAt: 0 };
+void workerInput; void workerPackedId; void wireEntry;

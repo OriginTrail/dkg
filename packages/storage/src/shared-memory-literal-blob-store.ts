@@ -1,4 +1,5 @@
-import { DurableDirectoryPreparation, persistContentAddressedFile } from './durable-content-addressed-file.js';
+import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
+import { persistFileAndParent } from './file-durability.js';
 import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -410,7 +411,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
 
     await this.readBlob(hash);
-    await persistContentAddressedFile(path);
+    await persistFileAndParent(path);
   }
 
   private async readBlob(hash: string): Promise<string> {
