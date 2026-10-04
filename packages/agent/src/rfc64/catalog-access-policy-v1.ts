@@ -18,13 +18,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
-  assertCanonicalDigest,
   assertContextGraphIdV1,
   assertNetworkIdV1,
   canonicalizeContextGraphPolicyPayloadV1,
   canonicalizeMemberRosterPayloadV1,
-  parseCanonicalContextGraphPolicyPayloadV1,
-  parseCanonicalMemberRosterPayloadV1,
   type ContextGraphIdV1,
   type ContextGraphPolicyV1,
   type Digest32V1,
@@ -35,6 +32,7 @@ import {
   type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
 
+import { publicSnapshot, snapshotPolicy, snapshotRoster, snapshotDigest } from './catalog-access-snapshot-v1.js';
 import { classifyRfc64PolicyCellV1 } from './policy-cell-v1.js';
 
 export type Rfc64CatalogAccessOperationV1 =
@@ -753,34 +751,6 @@ function snapshotOperation(input: unknown): Rfc64CatalogAccessOperationV1 {
   }
 }
 
-function publicSnapshot(
-  held: HeldCatalogAccessSnapshotV1,
-): AcceptedRfc64CatalogAccessSnapshotV1 {
-  return Object.freeze({
-    policy: held.policy,
-    policyDigest: held.policyDigest,
-    roster: held.roster,
-    provenance: held.provenance,
-  });
-}
-
-function snapshotPolicy(input: ContextGraphPolicyV1): Readonly<ContextGraphPolicyV1> {
-  return deepFreeze(parseCanonicalContextGraphPolicyPayloadV1(
-    canonicalizeContextGraphPolicyPayloadV1(input),
-  ));
-}
-
-function snapshotRoster(input: MemberRosterV1): Readonly<MemberRosterV1> {
-  return deepFreeze(parseCanonicalMemberRosterPayloadV1(
-    canonicalizeMemberRosterPayloadV1(input),
-  ));
-}
-
-function snapshotDigest(input: Digest32V1, label: string): Digest32V1 {
-  assertCanonicalDigest(input, label);
-  return input;
-}
-
 function snapshotAgentAddress(input: EvmAddressV1, label: string): EvmAddressV1 {
   if (typeof input !== 'string' || !EVM_ADDRESS.test(input) || input === ZERO_ADDRESS) {
     throw new TypeError(`${label} must be a canonical nonzero EVM address`);
@@ -839,14 +809,4 @@ function assertDirectMonotonicPolicyTransition(
 
 function policyKey(networkId: NetworkIdV1, contextGraphId: ContextGraphIdV1): string {
   return `${networkId}\n${contextGraphId}`;
-}
-
-function deepFreeze<T>(value: T): Readonly<T> {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const child of Object.values(value as Record<string, unknown>)) {
-      deepFreeze(child);
-    }
-    Object.freeze(value);
-  }
-  return value as Readonly<T>;
 }

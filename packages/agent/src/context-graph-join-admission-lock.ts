@@ -24,6 +24,31 @@ export type ContextGraphJoinAdmissionLockToken = Readonly<{
 export class ContextGraphJoinAdmissionLockManager {
   private readonly queues = new Map<string, Promise<void>>();
   private readonly liveTokens = new WeakMap<object, string>();
+  private readonly requesterRevisions = new Map<string, number>();
+  private readonly requesterMutations = new Map<string, number>();
+
+  requesterRevision(contextGraphId: string): number {
+    return this.requesterRevisions.get(contextGraphId) ?? 0;
+  }
+
+  requesterMutationActive(contextGraphId: string): boolean {
+    return this.requesterMutations.has(contextGraphId);
+  }
+
+  /** Fence authority consumers across both successful and failed state writes. */
+  async withRequesterMutation<T>(contextGraphId: string, operation: () => Promise<T>): Promise<T> {
+    this.requesterRevisions.set(contextGraphId, this.requesterRevision(contextGraphId) + 1);
+    this.requesterMutations.set(contextGraphId,
+      (this.requesterMutations.get(contextGraphId) ?? 0) + 1);
+    try {
+      return await operation();
+    } finally {
+      this.requesterRevisions.set(contextGraphId, this.requesterRevision(contextGraphId) + 1);
+      const remaining = (this.requesterMutations.get(contextGraphId) ?? 1) - 1;
+      if (remaining === 0) this.requesterMutations.delete(contextGraphId);
+      else this.requesterMutations.set(contextGraphId, remaining);
+    }
+  }
 
   async withLock<T>(
     contextGraphId: string,

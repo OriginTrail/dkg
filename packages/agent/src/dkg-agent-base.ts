@@ -2020,8 +2020,6 @@ export class DKGAgentBase {
    * Keyed by raw `contextGraphId` (no normalisation needed — every
    * caller already has the canonical id).
    */
-  protected readonly requesterJoinAuthorityRevisionV1 = new Map<string, number>();
-  protected readonly requesterJoinAuthorityMutationsV1 = new Map<string, number>();
   protected readonly localApprovedAgentByCG = new Map<string, string>();
   /**
    * Symmetric companion to `joinRequestOriginPeers`, populated on the

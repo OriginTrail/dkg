@@ -1,3 +1,4 @@
+import { decodeGossipPublishForTopic } from './gossip-publish-decode.js';
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, type OntologyBindingSlotClass,
@@ -253,33 +254,12 @@ export class GossipPublishHandler {
     let ctx = createOperationContext('gossip');
     const phase = onPhase ?? this.callbacks.onPhase;
     try {
-      if (!validateContextGraphId(contextGraphId).valid) return;
-      phase?.('decode', 'start');
-      let request;
-      try {
-        request = decodePublishRequest(data);
-        if (request.operationId) {
-          ctx = createOperationContext('gossip', request.operationId);
-        }
-
-        if (!request.contextGraphId) {
-          request.contextGraphId = contextGraphId;
-        } else if (request.contextGraphId !== contextGraphId) {
-          // #1100: protobuf decoding is structurally permissive — agent-profile
-          // and other non-publish gossip frames "successfully" decode as publish
-          // requests with multi-KB RDF garbage in the contextGraphId field. The
-          // old guard only skipped on non-printable characters, so any payload
-          // that happened to be printable ASCII was dumped wholesale into the
-          // log as a WARN, every few seconds, forever. A real cross-topic
-          // mismatch always carries a *well-formed* CG id, so validate the
-          // decoded value first and silently skip mis-decoded frames.
-          if (!validateContextGraphId(request.contextGraphId).valid) return;
-          this.log.warn(ctx, `Gossip: request contextGraphId "${request.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
-          return;
-        }
-      } finally {
-        phase?.('decode', 'end');
-      }
+      const request = decodeGossipPublishForTopic(data, contextGraphId, {
+        phase,
+        setContext: (context) => { ctx = context; },
+        warn: (message) => this.log.warn(ctx, message),
+      });
+      if (request === null) return;
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
       const quads = parseSimpleNQuads(nquadsStr);

@@ -1336,134 +1336,124 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     state: RequesterJoinRequestState,
   ): Promise<void> {
-    this.requesterJoinAuthorityRevisionV1.set(contextGraphId,
-      (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) + 1);
-    this.requesterJoinAuthorityMutationsV1.set(contextGraphId,
-      (this.requesterJoinAuthorityMutationsV1.get(contextGraphId) ?? 0) + 1);
-    try {
-    const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    const cache = this.requesterJoinStateCache();
-    const previous = cache.get(key);
-    const subject = requesterJoinStateSubject(contextGraphId, agentAddress);
-    const curatorPeerId = state.curatorPeerId?.trim();
-    if (state.curatorPeerId !== undefined && !curatorPeerId) {
-      throw new Error('Invalid requester join-state curator peer id');
-    }
-    const curatorAgentAddress = state.curatorAgentAddress?.trim().toLowerCase();
-    const curatorAuthorityEra = state.curatorAuthorityEra?.trim();
-    if (
-      (curatorAgentAddress === undefined) !== (curatorAuthorityEra === undefined)
-      || (curatorAgentAddress !== undefined && !/^0x[0-9a-f]{40}$/u.test(curatorAgentAddress))
-      || (curatorAuthorityEra !== undefined && !/^(0|[1-9][0-9]*)$/u.test(curatorAuthorityEra))
-    ) {
-      throw new Error('Invalid requester join-state curator authority binding');
-    }
-    const quads: Quad[] = [{
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_STATUS,
-      object: `"${state.status}"`,
-    }, {
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_GENERATION,
-      object: `"${state.requestGeneration}"`,
-    }, ...(curatorPeerId ? [{
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_CURATOR,
-      object: `"${escapeSparqlLiteral(curatorPeerId)}"`,
-    }] : []), ...(curatorAgentAddress && curatorAuthorityEra ? [{
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
-      object: `"${curatorAgentAddress}"`,
-    }, {
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
-      object: `"${curatorAuthorityEra}"`,
-    }] : [])];
-    const curatorInsert = curatorPeerId
-      ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR}> "${escapeSparqlLiteral(curatorPeerId)}"`
-      : '';
-    const curatorAuthorityInsert = curatorAgentAddress && curatorAuthorityEra
-      ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_AGENT}> "${curatorAgentAddress}"`
-        + ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_ERA}> "${curatorAuthorityEra}"`
-      : '';
-    try {
-      const updatedAtomically = await tryUpdateWithTouchedGraphs(
-        this.store,
-        `DELETE {
-          GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . }
-        }
-        INSERT {
-          GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> {
-            <${subject}> <${REQUESTER_JOIN_STATE_STATUS}> "${state.status}" ;
-                        <${REQUESTER_JOIN_STATE_GENERATION}> "${state.requestGeneration}"${curatorInsert}${curatorAuthorityInsert} .
+    await this.contextGraphJoinAdmissionLockManager.withRequesterMutation(contextGraphId, async () => {
+      const key = requesterJoinStateKey(contextGraphId, agentAddress);
+      const cache = this.requesterJoinStateCache();
+      const previous = cache.get(key);
+      const subject = requesterJoinStateSubject(contextGraphId, agentAddress);
+      const curatorPeerId = state.curatorPeerId?.trim();
+      if (state.curatorPeerId !== undefined && !curatorPeerId) {
+        throw new Error('Invalid requester join-state curator peer id');
+      }
+      const curatorAgentAddress = state.curatorAgentAddress?.trim().toLowerCase();
+      const curatorAuthorityEra = state.curatorAuthorityEra?.trim();
+      if (
+        (curatorAgentAddress === undefined) !== (curatorAuthorityEra === undefined)
+        || (curatorAgentAddress !== undefined && !/^0x[0-9a-f]{40}$/u.test(curatorAgentAddress))
+        || (curatorAuthorityEra !== undefined && !/^(0|[1-9][0-9]*)$/u.test(curatorAuthorityEra))
+      ) {
+        throw new Error('Invalid requester join-state curator authority binding');
+      }
+      const quads: Quad[] = [{
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_STATUS,
+        object: `"${state.status}"`,
+      }, {
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_GENERATION,
+        object: `"${state.requestGeneration}"`,
+      }, ...(curatorPeerId ? [{
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_CURATOR,
+        object: `"${escapeSparqlLiteral(curatorPeerId)}"`,
+      }] : []), ...(curatorAgentAddress && curatorAuthorityEra ? [{
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
+        object: `"${curatorAgentAddress}"`,
+      }, {
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
+        object: `"${curatorAuthorityEra}"`,
+      }] : [])];
+      const curatorInsert = curatorPeerId
+        ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR}> "${escapeSparqlLiteral(curatorPeerId)}"`
+        : '';
+      const curatorAuthorityInsert = curatorAgentAddress && curatorAuthorityEra
+        ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_AGENT}> "${curatorAgentAddress}"`
+          + ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_ERA}> "${curatorAuthorityEra}"`
+        : '';
+      try {
+        const updatedAtomically = await tryUpdateWithTouchedGraphs(
+          this.store,
+          `DELETE {
+            GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . }
           }
-        }
-        WHERE {
-          OPTIONAL { GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . } }
-        }`,
-        [REQUESTER_JOIN_STATE_GRAPH],
-      );
-      if (!updatedAtomically) {
-        // Compatibility fallback for custom stores without SPARQL UPDATE.
-        // Restore the prior row best-effort if the replacement insert fails.
-        await deleteByPatternWithoutCount(this.store, { graph: REQUESTER_JOIN_STATE_GRAPH, subject });
-        try {
-          await this.store.insert(quads);
-        } catch (error) {
-          if (previous) {
-            try {
-              await this.store.insert([{
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_STATUS,
-                object: `"${previous.status}"`,
-              }, {
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_GENERATION,
-                object: `"${previous.requestGeneration}"`,
-              }, ...(previous.curatorPeerId ? [{
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_CURATOR,
-                object: `"${escapeSparqlLiteral(previous.curatorPeerId)}"`,
-              }] : []), ...(previous.curatorAgentAddress && previous.curatorAuthorityEra ? [{
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
-                object: `"${previous.curatorAgentAddress}"`,
-              }, {
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
-                object: `"${previous.curatorAuthorityEra}"`,
-              }] : [])]);
-            } catch {
-              // Preserve the original mutation failure; the cache is evicted
-              // below so a later read observes the backend's actual state.
+          INSERT {
+            GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> {
+              <${subject}> <${REQUESTER_JOIN_STATE_STATUS}> "${state.status}" ;
+                          <${REQUESTER_JOIN_STATE_GENERATION}> "${state.requestGeneration}"${curatorInsert}${curatorAuthorityInsert} .
             }
           }
-          throw error;
+          WHERE {
+            OPTIONAL { GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . } }
+          }`,
+          [REQUESTER_JOIN_STATE_GRAPH],
+        );
+        if (!updatedAtomically) {
+          // Compatibility fallback for custom stores without SPARQL UPDATE.
+          // Restore the prior row best-effort if the replacement insert fails.
+          await deleteByPatternWithoutCount(this.store, { graph: REQUESTER_JOIN_STATE_GRAPH, subject });
+          try {
+            await this.store.insert(quads);
+          } catch (error) {
+            if (previous) {
+              try {
+                await this.store.insert([{
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_STATUS,
+                  object: `"${previous.status}"`,
+                }, {
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_GENERATION,
+                  object: `"${previous.requestGeneration}"`,
+                }, ...(previous.curatorPeerId ? [{
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_CURATOR,
+                  object: `"${escapeSparqlLiteral(previous.curatorPeerId)}"`,
+                }] : []), ...(previous.curatorAgentAddress && previous.curatorAuthorityEra ? [{
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
+                  object: `"${previous.curatorAgentAddress}"`,
+                }, {
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
+                  object: `"${previous.curatorAuthorityEra}"`,
+                }] : [])]);
+              } catch {
+                // Preserve the original mutation failure; the cache is evicted
+                // below so a later read observes the backend's actual state.
+              }
+            }
+            throw error;
+          }
         }
+        await this.store.flush?.();
+        cache.set(key, state);
+      } catch (error) {
+        cache.delete(key);
+        throw error;
       }
-      await this.store.flush?.();
-      cache.set(key, state);
-    } catch (error) {
-      cache.delete(key);
-      throw error;
-    }
-    } finally {
-      this.requesterJoinAuthorityRevisionV1.set(contextGraphId,
-        (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) + 1);
-      const remaining = (this.requesterJoinAuthorityMutationsV1.get(contextGraphId) ?? 1) - 1;
-      if (remaining === 0) this.requesterJoinAuthorityMutationsV1.delete(contextGraphId);
-      else this.requesterJoinAuthorityMutationsV1.set(contextGraphId, remaining);
-    }
+    });
   }
 
   async clearRequesterJoinRequestState(
@@ -1471,17 +1461,13 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     agentAddress: string,
   ): Promise<void> {
-    this.requesterJoinAuthorityRevisionV1.set(contextGraphId,
-      (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) + 1);
-    this.requesterJoinAuthorityMutationsV1.set(contextGraphId,
-      (this.requesterJoinAuthorityMutationsV1.get(contextGraphId) ?? 0) + 1);
-    try {
-    const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    const cache = this.requesterJoinStateCache();
-    try {
-      await deleteByPatternWithoutCount(this.store, {
-        graph: REQUESTER_JOIN_STATE_GRAPH,
-        subject: requesterJoinStateSubject(contextGraphId, agentAddress),
+    await this.contextGraphJoinAdmissionLockManager.withRequesterMutation(contextGraphId, async () => {
+      const key = requesterJoinStateKey(contextGraphId, agentAddress);
+      const cache = this.requesterJoinStateCache();
+      try {
+        await deleteByPatternWithoutCount(this.store, {
+          graph: REQUESTER_JOIN_STATE_GRAPH,
+          subject: requesterJoinStateSubject(contextGraphId, agentAddress),
       });
       await this.store.flush?.();
       cache.delete(key);
@@ -1489,13 +1475,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       cache.delete(key);
       throw error;
     }
-    } finally {
-      this.requesterJoinAuthorityRevisionV1.set(contextGraphId,
-        (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) + 1);
-      const remaining = (this.requesterJoinAuthorityMutationsV1.get(contextGraphId) ?? 1) - 1;
-      if (remaining === 0) this.requesterJoinAuthorityMutationsV1.delete(contextGraphId);
-      else this.requesterJoinAuthorityMutationsV1.set(contextGraphId, remaining);
-    }
+    });
   }
 
   /** Start a fresh requester-side generation and reset its local status. */

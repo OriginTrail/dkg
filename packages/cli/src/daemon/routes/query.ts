@@ -17,6 +17,8 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { normalizePublicApiQueryResult } from './query-result.js';
+export { normalizePublicApiQueryResult, type PublicApiQueryResult } from './query-result.js';
 import { isClientQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -58,7 +60,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -366,33 +368,6 @@ export function createApiQueryRequestLifecycle(
   res: ServerResponse,
 ): ApiQueryRequestLifecycle {
   return createStoreQueryRequestLifecycle(req, res, 'api.query') as ApiQueryRequestLifecycle;
-}
-
-type LegacyApiQueryResult = {
-  bindings: Array<Record<string, string>>;
-  quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
-};
-
-export type PublicApiQueryResult = import('@origintrail-official/dkg-core').PublicQueryResult<
-  Record<string, string>,
-  { subject: string; predicate: string; object: string; graph: string }
->;
-
-/** Normalize the legacy engine shape at the public daemon boundary. */
-export function normalizePublicApiQueryResult(
-  sparql: string,
-  result: LegacyApiQueryResult,
-): PublicApiQueryResult {
-  const operation = classifySparqlOperation(sparql);
-  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
-    return { type: 'quads', quads: result.quads ?? [], bindings: [] };
-  }
-  if (operation.kind === 'read' && operation.form === 'ASK') {
-    const raw = result.bindings[0]?.result;
-    const value = String(raw).toLowerCase() === 'true';
-    return { type: 'boolean', value, bindings: [{ result: String(value) }] };
-  }
-  return { type: 'bindings', bindings: result.bindings };
 }
 
 function parseVerifyTimeoutMs(

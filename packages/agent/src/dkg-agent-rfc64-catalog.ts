@@ -3517,7 +3517,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ? service.acceptedPolicySnapshot(networkId, contextGraphId as ContextGraphIdV1)
           : null,
         resolveApprovedPrivate: async () => {
-          const requesterRevision = this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0;
+          const requesterRevision = this.contextGraphJoinAdmissionLockManager.requesterRevision(contextGraphId);
           const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
           const metadataRevision = this.contextGraphMetaProjection
             .readContextGraphAuthorityFactsRevision(contextGraphId);
@@ -3535,7 +3535,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // authority. Retry composition before trying another source or retiring it.
           approvedPrivateFactsMoved = approved === null && approvedAgent !== undefined
             && (this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId) !== metadataRevision
-              || (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) !== requesterRevision);
+              || this.contextGraphJoinAdmissionLockManager.requesterRevision(contextGraphId) !== requesterRevision);
           return approved?.kind === 'unregistered-private-replica'
             ? { authority: approved.authority, metadataRevision, requesterRevision } : null;
         },
@@ -3812,8 +3812,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // Fence request replacements/removals synchronously with acceptance,
       // including writes that have started but have not committed yet.
       if (source.kind === 'approved-private' && (
-        (this.requesterJoinAuthorityRevisionV1.get(contextGraphId) ?? 0) !== source.requesterRevision
-        || this.requesterJoinAuthorityMutationsV1.has(contextGraphId)
+        this.contextGraphJoinAdmissionLockManager.requesterRevision(contextGraphId) !== source.requesterRevision
+        || this.contextGraphJoinAdmissionLockManager.requesterMutationActive(contextGraphId)
         || this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
           !== source.authority.approvedAgentAddress
         || !this.listLocalAgents().some(({ agentAddress }) =>

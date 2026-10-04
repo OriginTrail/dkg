@@ -266,6 +266,8 @@ const blockedRfc64Modules = [
   'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
+  'catalog-access-snapshot-v1.js',
+  'catalog-policy-scope-v1.js',
   'catalog-authority-config-v1.js',
   'catalog-authority-refresh-binding-v1.js',
   'catalog-authority-refresh-loop-v1.js',

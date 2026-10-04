@@ -1,4 +1,4 @@
-import { completeFinalizedSwmRetirement, completeVerifiedVmMarkerRetirement, type VerifiedVmMarkerRetirementEvidence } from './sync/requester/finalized-swm-retirement-completion.js';
+import { FinalizedSwmRetirementMethods } from './dkg-agent-finalized-swm-retirement.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -132,8 +132,6 @@ import {
 } from './sync/requester/graph-scoped-materialization.js';
 import {
   reconcileFinalizedSwmTwinWithEvidence,
-  type FinalizedSwmTwinReconciliationResult,
-  type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import {
   storageAckNotRetainedFilters,
@@ -856,7 +854,6 @@ import { reconcileRfc64CatalogAuthorityPlanV1 } from
 import {
   initializeRfc64LegacySwmBoundaryV1,
   prepareRfc64LateLegacySwmBoundaryV1,
-  retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
 
@@ -2062,73 +2059,7 @@ type StructuralCuratorPeerLookup =
       readonly nextPageAfterPeerId?: never;
     };
 
-export class LifecycleSyncMethods extends DKGAgentBase {
-  async completeVerifiedVmMarkerRetirement(
-    this: DKGAgent,
-    evidence: VerifiedVmMarkerRetirementEvidence,
-    ctx: OperationContext,
-  ): Promise<void> {
-    await completeVerifiedVmMarkerRetirement({
-      evidence,
-      retireMarker: (input) => this.retireLegacySwmAfterVerifiedVmTwin(input),
-      warn: (message) => this.log.warn(ctx, message),
-      scheduleRetry: (key, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(key, work),
-    });
-    this.invalidateListContextGraphsCache();
-  }
-
-  async completeFinalizedSwmTwinRetirement(
-    this: DKGAgent,
-    reconcile: () => Promise<FinalizedSwmTwinReconciliationResult>,
-    ctx: OperationContext,
-  ): Promise<FinalizedSwmTwinReconciliationResult> {
-    const result = await completeFinalizedSwmRetirement({
-      reconcile,
-      retireMarker: (evidence) => this.retireLegacySwmAfterVerifiedVmTwin(evidence),
-      warn: (message) => this.log.warn(ctx, message),
-      scheduleRetry: (key, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(key, work),
-    });
-    if ('retirement' in result) this.invalidateListContextGraphsCache();
-    return result;
-  }
-
-  async retireLegacySwmAfterVerifiedVmTwin(
-    this: DKGAgent,
-    input: Readonly<{
-      contextGraphId: string;
-      kaUal: string;
-      assertionVersion: string | bigint;
-      subGraphName?: string;
-    }>,
-  ): Promise<void> {
-    await retireRfc64LegacySwmAfterFinalizedVmV1(
-      this,
-      input.contextGraphId,
-      input.kaUal,
-      String(input.assertionVersion),
-      input.subGraphName,
-    );
-  }
-
-  async retireFinalizedSwmTwinCandidate(
-    candidate: FinalizedSwmTwinRetirement,
-    ctx: OperationContext,
-  ): Promise<void> {
-    await this.publisher.clearPublishedKnowledgeAssetSwm(
-      candidate.contextGraphId,
-      {
-        kind: 'named-lifecycle',
-        identity: {
-          agentAddress: candidate.agentAddress,
-          kaNumber: candidate.kaNumber,
-        },
-      },
-      candidate.subGraphName,
-      ctx,
-      candidate.kaUal,
-    );
-  }
-
+export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
   async runContextGraphSyncWithBackpressure<T>(this: DKGAgent,
     ctx: OperationContext,
     contextGraphId: string,
