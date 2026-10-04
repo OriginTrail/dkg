@@ -35,6 +35,7 @@
  * keccak256 fileHash; share-async → 200 {state:'queued'}.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { retryPrivateShareAuthority } from './helpers/private-share-authority-retry.js';
 import {
   startLiveDaemon,
   stopLiveDaemon,
@@ -642,9 +643,9 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
         expect(created.status, `full share create: ${JSON.stringify(created.body)}`).toBe(201);
         const written = await write(REG, 'share-full-default', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
         expect(written.status, `full share write: ${JSON.stringify(written.body)}`).toBe(200);
-        const res = await postJson(daemon, '/api/knowledge-assets/share-full-default/swm/share', {
+        const res = await retryPrivateShareAuthority(() => postJson(daemon, '/api/knowledge-assets/share-full-default/swm/share', {
           contextGraphId: REG,
-        });
+        }));
         expect(res.status, `full share: ${JSON.stringify(res.body)}`).toBe(200);
         expect(res.body.swmShared).toBe(true);
         expect(res.body.promotedCount).toBeGreaterThan(0);

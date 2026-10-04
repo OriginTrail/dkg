@@ -1,6 +1,8 @@
 import { assertSubjectPredicatesReplacementPayload } from './atomic-graph-replace.js';
+import { DurableDirectoryPreparation, persistContentAddressedFile } from './durable-content-addressed-file.js';
+import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   ConstructResult,
@@ -56,10 +58,12 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   readonly innerStore: TripleStore;
+  readonly commitment?: TripleStoreCommitCapability;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
+  private readonly blobDirectory: DurableDirectoryPreparation;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -70,8 +74,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     this.inner = inner;
     this.innerStore = inner;
+    this.commitment = composeTripleStoreCommitment(inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
+    this.blobDirectory = new DurableDirectoryPreparation(this.blobDir);
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
     });
@@ -209,6 +215,13 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput),
       options,
     );
+  }
+
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    if (typeof this.inner.atomicUpdate !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'SharedMemoryLiteralBlobStore');
+    }
+    return this.inner.atomicUpdate(sparql, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
@@ -397,20 +410,17 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   private async writeBlobFile(hash: string, term: string): Promise<void> {
-    await mkdir(this.blobDir, { recursive: true });
+    await this.blobDirectory.prepare();
     const path = this.blobPath(hash);
 
     try {
       await writeFile(path, term, { encoding: 'utf8', flag: 'wx' });
     } catch (err) {
-      if (isNodeError(err, 'EEXIST')) {
-        await this.readBlob(hash);
-        return;
-      }
-      throw err;
+      if (!isNodeError(err, 'EEXIST')) throw err;
     }
 
     await this.readBlob(hash);
+    await persistContentAddressedFile(path);
   }
 
   private async readBlob(hash: string): Promise<string> {

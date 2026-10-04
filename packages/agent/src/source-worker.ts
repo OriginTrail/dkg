@@ -1,6 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { open, readFile, mkdir, rename, rm, type FileHandle } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { replaceDurableFile } from './durable-file-replace.js';
 
 export interface SourceWorkerJobState {
   fingerprint?: string;
@@ -104,27 +103,7 @@ export async function loadSourceWorkerState(path: string): Promise<SourceWorkerS
 }
 
 export async function saveSourceWorkerState(path: string, state: SourceWorkerState): Promise<void> {
-  const dir = dirname(path);
-  await mkdir(dir, { recursive: true });
-  const tempPath = join(dir, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-  let tempFile: FileHandle | undefined;
-
-  try {
-    tempFile = await open(tempPath, 'wx');
-    await tempFile.writeFile(JSON.stringify(state, null, 2) + '\n', 'utf8');
-    await tempFile.sync();
-    await tempFile.close();
-    tempFile = undefined;
-
-    await rename(tempPath, path);
-    await syncDirectory(dir);
-  } catch (error) {
-    if (tempFile) {
-      await tempFile.close().catch(() => undefined);
-    }
-    await rm(tempPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  await replaceDurableFile(path, JSON.stringify(state, null, 2) + '\n', { fileMode: 0o666, directoryMode: 0o777 });
 }
 
 export async function runSourceWorkerOnce<TSource extends SourceWorkerSource>(
@@ -465,20 +444,4 @@ function deriveFailureDetails(
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
-}
-
-async function syncDirectory(path: string): Promise<void> {
-  let dir: FileHandle | undefined;
-  try {
-    dir = await open(path, 'r');
-    await dir.sync();
-  } catch (error: any) {
-    if (!['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR'].includes(error?.code)) {
-      throw error;
-    }
-  } finally {
-    if (dir) {
-      await dir.close().catch(() => undefined);
-    }
-  }
 }

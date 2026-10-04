@@ -921,6 +921,7 @@ function makeQueuedAgentHarness(options: {
   }));
   const agentLike: any = {
     peerId: options.peerId,
+    writeLocks: new Map(),
     defaultAgentAddress: QUEUED_TEST_AUTHOR,
     chain: options.chain ?? {},
     store: {
@@ -944,6 +945,7 @@ function makeQueuedAgentHarness(options: {
     _stampPointer: recorder(async () => undefined),
     resolveRfc64CatalogAuthoringLaneV1: () => null,
   };
+  Object.setPrototypeOf(agentLike, DKGAgent.prototype);
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   agentLike.retireLegacySwmAfterConfirmedLocalPublish =

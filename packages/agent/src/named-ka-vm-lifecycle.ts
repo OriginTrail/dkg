@@ -1,27 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
-
+import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import {
-  MemoryLayer,
-  assertionLifecycleUri,
-  contextGraphAssertionUri,
-  contextGraphLayerUri,
-  contextGraphMetaUri,
+  ASSERTION_SEAL_PREDICATES, MemoryLayer, assertionLifecycleUri,
+  contextGraphAssertionUri, contextGraphLayerUri, contextGraphMetaUri, formatSparqlTerm,
 } from '@origintrail-official/dkg-core';
-import {
-  deleteByPatternWithoutCount,
-  type TripleStore,
-} from '@origintrail-official/dkg-storage';
-import type { DKGPublisher } from '@origintrail-official/dkg-publisher';
-import { VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
-import { stampLifecyclePointerIfDivergedFromVm } from './lifecycle-pointer-writer.js';
-import { replaceNamedKaVmDraftSubject, withNamedKaVmMetadataLock } from './named-ka-vm-metadata.js';
+import { deleteByPatternWithoutCount, UnsupportedTripleStoreCapabilityError,
+  tryReplaceSubjectPredicatesAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED,
+  readPublishedAssertionOperation, type DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { requireNamedKaVmCompletionCapability, withNamedKaVmMetadataLock } from './named-ka-vm-metadata.js';
+
+import { stripMetadataLiteral } from './sync/metadata-literal.js';
 
 const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
 const STATE_PRED = 'http://dkg.io/ontology/state';
 const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
 const ASSERTION_GRAPH_PRED = 'http://dkg.io/ontology/assertionGraph';
 
-export interface PublishedNamedKaVmLifecycleInput {
+export interface NamedKaVmLifecycleFields {
   readonly contextGraphId: string;
   readonly agentAddress: string;
   readonly name: string;
@@ -29,176 +25,212 @@ export interface PublishedNamedKaVmLifecycleInput {
   readonly publishedUal: string;
   /** The chain-current root to materialize, which may supersede the queued root. */
   readonly merkleRoot: string;
+  readonly priorMerkleRoot?: string;
+  /** Captured publisher operation; null means explicit legacy absence. */
+  readonly publicationShareOperationId?: string | null;
+  /** Record permanent chain history without changing a replacement draft. */
+  readonly preserveWorkspace?: boolean;
+}
+/** A confirmed command cannot bypass the certified persistence barrier. */
+export interface PublishedNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
   readonly packedKaId?: bigint;
-  /** An update converges its owned WM pointer with VM; a replacement keeps its own pointer. */
-  readonly convergeWorkingMemory?: boolean;
+  readonly tentative?: never;
+}
+/** Tentative updates consume the prior sealed WM projection without claiming a VM graph. */
+export interface TentativeNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
+  readonly tentative: true;
+  readonly packedKaId?: never;
+}
+type NamedKaVmLifecycleCommand = PublishedNamedKaVmLifecycleInput | TentativeNamedKaVmLifecycleInput;
+
+export interface NamedKaVmLifecycleApplyOptions {
+  /** A durable repair journal always selects restart-durable; standalone SDK hosts may select process-local. */
+  readonly persistence: 'restart-durable' | 'process-local';
+}
+/** A filesystem journal selects durability; a standalone SDK may commit within its process. */
+export function confirmedNamedKaVmLifecycleApplyOptions(dataDir?: string): NamedKaVmLifecycleApplyOptions {
+  return { persistence: dataDir ? 'restart-durable' : 'process-local' };
 }
 
-/** Canonical confirmed-chain bookkeeping, independent of the mutable draft owner. */
-async function recordPublishedNamedKaVm(store: TripleStore, input: PublishedNamedKaVmLifecycleInput) {
-  const assertionUri = contextGraphAssertionUri(
-    input.contextGraphId,
-    input.agentAddress,
-    input.name,
-    input.subGraphName,
-  );
-  const lifecycleUri = assertionLifecycleUri(
-    input.contextGraphId,
-    input.agentAddress,
-    input.name,
-    input.subGraphName,
-  );
-  const metaGraph = contextGraphMetaUri(input.contextGraphId);
-  const bareMerkleRoot = input.merkleRoot.toLowerCase().replace(/^0x/, '');
-  if (!/^[0-9a-f]{64}$/.test(bareMerkleRoot)) {
-    throw new Error(
-      `Cannot stamp named KA VM lifecycle for "${input.name}": invalid merkle root ${input.merkleRoot}`,
+interface LifecycleMetadataPlan {
+  readonly deletes: readonly Pick<Quad, 'subject' | 'predicate'>[];
+  readonly inserts: readonly Omit<Quad, 'graph'>[];
+  readonly metaGraph: string;
+}
+interface WorkspaceLifecycleValues {
+  readonly wm?: string;
+  readonly swm?: string;
+  readonly activeSeal?: string;
+  readonly state?: string;
+  readonly layer?: string;
+}
+
+/** Decode RDF once at the storage boundary, then apply each field's normalization contract. */
+function decodeWorkspaceLifecycleValues(bindings: Record<string, string> | undefined): WorkspaceLifecycleValues {
+  const root = (term?: string) => stripMetadataLiteral(term)?.toLowerCase().replace(/^0x/, '');
+  return { wm: root(bindings?.wm), swm: root(bindings?.swm), activeSeal: root(bindings?.activeSeal),
+    state: stripMetadataLiteral(bindings?.state)?.toLowerCase(), layer: stripMetadataLiteral(bindings?.layer)?.toUpperCase() };
+}
+function checkedRoot(value: string): string {
+  const root = value.toLowerCase().replace(/^0x/, '');
+  if (!/^[0-9a-f]{64}$/.test(root)) throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed lifecycle root');
+  return root;
+}
+
+/** Pure metadata plan: workspace admission is complete before any row is mutated. */
+function planPublishedNamedKaVmLifecycle(
+  input: NamedKaVmLifecycleCommand, workspace: WorkspaceLifecycleValues,
+): LifecycleMetadataPlan {
+  const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
+  const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
+  const metaGraph = contextGraphMetaUri(input.contextGraphId), root = checkedRoot(input.merkleRoot);
+  const prior = input.priorMerkleRoot === undefined ? undefined : checkedRoot(input.priorMerkleRoot);
+  const { wm, swm, activeSeal } = workspace;
+  const reopenedDraft = workspace.state === 'created' && workspace.layer === MemoryLayer.WorkingMemory && activeSeal === undefined;
+  const consumedTentativePrior = input.tentative === true && prior !== undefined && wm === prior;
+  const preserveWorkspace = input.preserveWorkspace === true || reopenedDraft || (activeSeal !== undefined && activeSeal !== root)
+    || (wm !== undefined && wm !== root && !consumedTentativePrior) || (swm !== undefined && swm !== root);
+  const deletes: Pick<Quad, 'subject' | 'predicate'>[] = [], inserts: Omit<Quad, 'graph'>[] = [];
+  const replace = (subject: string, predicate: string, object: string) => {
+    deletes.push({ subject, predicate });
+    inserts.push({ subject, predicate, object });
+  };
+  replace(lifecycleUri, VM_CURRENT_ASSERTION_PRED, JSON.stringify(root));
+  if (!preserveWorkspace && (wm === root || consumedTentativePrior)) {
+    deletes.push({ subject: lifecycleUri, predicate: WM_CURRENT_ASSERTION_PRED });
+  }
+  if (prior !== undefined) {
+    const priorUri = `${lifecycleUri}#assertion-${prior}`;
+    inserts.push(
+      { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri },
+      { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: JSON.stringify(prior) },
     );
   }
-
-  return withNamedKaVmMetadataLock(store, metaGraph, lifecycleUri, async () => {
-    await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, graph: metaGraph });
-    await store.insert([{
-      subject: lifecycleUri,
-      predicate: VM_CURRENT_ASSERTION_PRED,
-      object: JSON.stringify(bareMerkleRoot),
-      graph: metaGraph,
-    }]);
-
-    // #1104: reconcile the KA's dual identity. `dkg:reservedUal`
-    // (chain/author/kaNumber, stamped at finalize) and the published
-    // UAL (chain/contract/tokenId, returned by vm/publish) are both
-    // permanent — record the published UAL on the lifecycle URN
-    // (drop-then-set, so updates re-point to the latest published UAL).
-    //
-    // Merge note (PR #1107 ← main): #1095's separate `published`
-    // prov:Activity EVENT minting was dropped here — main's RFC
-    // ka-metadata-trim deliberately removed `generateAssertionPublishedMetadata`,
-    // and main already stamps `dkg:state="published"` above (which
-    // `deriveStatus` maps to `vm-confirmed`), so the lifecycle STATE fix
-    // #1095 targeted is satisfied without the trimmed event entity.
-    await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
-    await store.insert([{
-      subject: lifecycleUri,
-      predicate: PUBLISHED_UAL_PRED,
-      object: JSON.stringify(input.publishedUal),
-      graph: metaGraph,
-    }]);
-
-    return { lifecycleUri, assertionUri, metaGraph };
-  });
+  if (!preserveWorkspace) {
+    for (const subject of [lifecycleUri, assertionUri]) replace(subject, MEMORY_LAYER_PRED, JSON.stringify(MemoryLayer.VerifiableMemory));
+    replace(lifecycleUri, STATE_PRED, '"published"');
+    if (input.tentative !== true && input.publicationShareOperationId !== undefined) {
+      deletes.push({ subject: lifecycleUri, predicate: 'http://dkg.io/ontology/swmShareComplete' });
+    }
+  }
+  replace(lifecycleUri, PUBLISHED_UAL_PRED, JSON.stringify(input.publishedUal));
+  if (input.tentative !== true && input.packedKaId !== undefined && !preserveWorkspace) {
+    const author = `0x${(input.packedKaId >> 96n).toString(16).padStart(40, '0')}`;
+    const number = input.packedKaId & ((1n << 96n) - 1n);
+    replace(lifecycleUri, ASSERTION_GRAPH_PRED, contextGraphLayerUri(input.contextGraphId, MemoryLayer.VerifiableMemory, author, number, input.subGraphName));
+    replace(contextGraphLayerUri(input.contextGraphId, MemoryLayer.WorkingMemory, author, number, input.subGraphName), MEMORY_LAYER_PRED, JSON.stringify(MemoryLayer.VerifiableMemory));
+  }
+  return { deletes, inserts, metaGraph };
 }
 
-/** Idempotent materializer for callers already owning the draft lifecycle. */
-export async function applyPublishedNamedKaVmLifecycle(store: TripleStore, input: PublishedNamedKaVmLifecycleInput): Promise<void> {
-  const { lifecycleUri, assertionUri, metaGraph } = await recordPublishedNamedKaVm(store, input);
-  await withNamedKaVmMetadataLock(store, metaGraph, lifecycleUri,
-    () => applyPublishedNamedKaDraftLifecycle(store, input, lifecycleUri, assertionUri, metaGraph));
+/** One request on certified atomic backends; typed preflight refusal alone permits fallback. */
+async function commitLifecycleMetadata(store: TripleStore, plan: LifecycleMetadataPlan, guarded: boolean): Promise<void> {
+  if (store.atomicUpdate) {
+    const term = (value: string, position: 'subject' | 'predicate' | 'object' | 'graph') => formatSparqlTerm(value, { position });
+    const graph = term(plan.metaGraph, 'graph');
+    const deletes = plan.deletes.map(q => `DELETE WHERE { GRAPH ${graph} { ${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ?o } }`);
+    const inserts = plan.inserts.map(q => `${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ${term(q.object, 'object')} .`).join('\n');
+    try {
+      await store.atomicUpdate([...deletes, `INSERT DATA { GRAPH ${graph} { ${inserts} } }`].join(';\n'), {
+        source: 'agent.publish.confirmedLifecycleCommit', touchedGraphs: [plan.metaGraph],
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof UnsupportedTripleStoreCapabilityError) || error.capability !== 'atomicUpdate') throw error;
+    }
+  }
+  if (guarded) {
+    for (const subject of new Set(plan.deletes.map(q => q.subject))) {
+      const predicates = plan.deletes.filter(q => q.subject === subject).map(q => q.predicate);
+      const quads = plan.inserts.filter(q => q.subject === subject && predicates.includes(q.predicate)).map(q => ({ ...q, graph: plan.metaGraph }));
+      if (!await tryReplaceSubjectPredicatesAtomically(store, plan.metaGraph, subject, predicates, quads, {
+        source: 'agent.publish.confirmedLifecycleCommit',
+      })) throw new UnsupportedTripleStoreCapabilityError('replaceSubjectPredicates', 'Named KA VM completion');
+    }
+    // Append-only history is separate from replaced owner predicates.
+    const historical = plan.inserts.filter(q => !plan.deletes.some(d => d.subject === q.subject && d.predicate === q.predicate));
+    if (historical.length) await store.insert(historical.map(q => ({ ...q, graph: plan.metaGraph })));
+    return;
+  }
+  // Compatibility stores expose partial writes. The admitted durable repair journal
+  // retries this idempotent plan after failures; update() alone is never certification.
+  for (const target of plan.deletes) await deleteByPatternWithoutCount(store, { ...target, graph: plan.metaGraph });
+  await store.insert(plan.inserts.map(triple => ({ ...triple, graph: plan.metaGraph })));
 }
 
-/** Confirmed VM bookkeeping survives a replacement; only its captured draft may transition. */
+/** Caller holds the publisher's same-KA lifecycle lock across admission and commit. */
+export async function applyPublishedNamedKaVmLifecycle(
+  store: TripleStore, input: PublishedNamedKaVmLifecycleInput,
+  options: NamedKaVmLifecycleApplyOptions = { persistence: 'restart-durable' },
+): Promise<void> {
+  if ('tentative' in input) throw new NamedKaVmLifecycleIntegrityError('Confirmed lifecycle commands cannot carry tentative mode');
+  await applyNamedKaVmLifecycle(store, input, options.persistence);
+}
+
+/** Capture operation ownership before waiting for the lifecycle lock; replacements retain their draft. */
 export async function applyOwnedPublishedNamedKaVmLifecycle(
   store: TripleStore, publisher: DKGPublisher, input: PublishedNamedKaVmLifecycleInput,
   expectedShareOperationId: string | null,
 ): Promise<void> {
-  const { lifecycleUri, assertionUri, metaGraph } = await recordPublishedNamedKaVm(store, input);
-  await publisher.withPublishedAssertionLifecycle(input.contextGraphId, input.name, input.agentAddress, expectedShareOperationId,
-    () => withNamedKaVmMetadataLock(store, metaGraph, lifecycleUri,
-      () => applyPublishedNamedKaDraftLifecycle(store, input, lifecycleUri, assertionUri, metaGraph)), input.subGraphName);
+  const options = { persistence: 'process-local' as const };
+  const owned = await publisher.withPublishedAssertionLifecycle(input.contextGraphId, input.name, input.agentAddress,
+    expectedShareOperationId, () => applyPublishedNamedKaVmLifecycle(store,
+      { ...input, publicationShareOperationId: expectedShareOperationId }, options), input.subGraphName);
+  if (!owned) await applyPublishedNamedKaVmLifecycle(store, { ...input, preserveWorkspace: true }, options);
 }
-
-// These current-draft markers require the captured publication owner.
-// OT-RFC-44 Design B — the assertion now lives at Verifiable Memory, so
-// make its lifecycle marker match the on-chain reality: flip
-// dkg:memoryLayer -> "VM" and dkg:state -> "published". The VM record is
-// thus equivalent to the WM/SWM ones, with the extra transaction metadata
-// (dkg:vmCurrentAssertion + dkg:kaId + the on-chain UAL) layered on top.
-// Promote stamps memoryLayer "SWM" on BOTH the lifecycle-URN and the
-// data-graph-URI forms, so flip both — otherwise the published assertion
-// lingers in the Shared-Memory layer (the dedicated published-metadata
-// flip never fired: its trigger gate joins on dkg:rootEntity/dkg:agent
-// predicates the lifecycle record does not carry).
-// SUBSTRATE-2 — re-point dkg:assertionGraph to the per-KA verifiable-
-// memory graph this publish actually wrote
-// (…/_verifiable_memory/{author}/{number}). promote() left the pointer on
-// the SWM graph, which the post-confirm SWM cleanup then empties — so
-// without this re-stamp the _meta index follows a stale pointer to an
-// empty graph instead of the live VM data. Mirrors the wm→swm re-stamp
-// in generateAssertionPromotedMetadata, for the swm→vm transition. The
-// graph URI is derived from the minted kaId exactly as the data write
-// (publishFromSharedMemory at dkg-publisher.ts: VerifiableMemory layer,
-// {kaId>>96}, {kaId & 2^96-1}, subGraphName) derives it, so the pointer
-// and the data always name the same graph.
-//
-// Gated on confirmed + onChainResult: that's the exact branch that ran
-// the post-confirmation VM data write, so the graph is guaranteed to
-// exist. A `tentative` publish (no on-chain result yet) hasn't written
-// VM data, so we leave the pointer alone rather than aim it at a graph
-// that doesn't exist yet.
-// Derive the VM graph URI from the packed KA id (author<<96 | number)
-// that named the …/_verifiable_memory/{author}/{number} graph. Prefer
-// the finalize-reserved id we threaded down as `reservedKaId`, then an
-// explicit on-chain `kaId` if the adapter reports one. Only fall back
-// to `result.kaId` for legacy/no-chain shapes. Do NOT use
-// `onChainResult.batchId`: on some adapters batchId is batch metadata,
-// not the packed KA id.
-// RFC ka-metadata-trim Phase 2 (corrected by adversarial review
-// F4) — WM-graph marker flip at the VM transition.
-// `assertionCreate` stamps `<wmGraph> dkg:memoryLayer "WM"` on the
-// per-KA number-keyed WM graph URI (assertionPromote flips it in
-// place to "SWM"). The flip above only covers the lifecycle URN
-// and the legacy name-keyed assertion URI; the data-graph-URI
-// marker would otherwise read "SWM" forever — misleading, since
-// the data now lives at VM. We UPDATE it to "VM" rather than
-// DELETE it: `assertAssertionDataPersisted` (dkg-publisher.ts)
-// reads this exact row as its "already promoted → harmless no-op"
-// witness, so deleting it would make a stale re-promote after a
-// successful publish misfire AssertionNotPersistedError when the
-// preserved extraction markers are present (Codex #898 case).
-// Any non-"WM" value short-circuits that guard, so "VM" keeps the
-// no-op witness AND tells the truth about the layer.
-async function applyPublishedNamedKaDraftLifecycle(
-  store: TripleStore, input: PublishedNamedKaVmLifecycleInput, lifecycleUri: string, assertionUri: string, metaGraph: string,
+export async function applyTentativeNamedKaVmLifecycle(store: TripleStore, input: TentativeNamedKaVmLifecycleInput): Promise<void> {
+  if (input.tentative !== true || 'packedKaId' in input) throw new NamedKaVmLifecycleIntegrityError('Tentative lifecycle commands require tentative mode without confirmed graph coordinates');
+  await applyNamedKaVmLifecycle(store, input, 'process-local');
+}
+async function applyNamedKaVmLifecycle(
+  store: TripleStore, input: NamedKaVmLifecycleCommand,
+  persistenceMode: NamedKaVmLifecycleApplyOptions['persistence'],
 ): Promise<void> {
-  if (input.convergeWorkingMemory) {
-    await stampLifecyclePointerIfDivergedFromVm(
-      store, lifecycleUri, WM_CURRENT_ASSERTION_PRED, input.merkleRoot.toLowerCase().replace(/^0x/, ''), metaGraph,
-    );
+  const tentative = input.tentative === true;
+  const guarded = !tentative && input.publicationShareOperationId !== undefined;
+  const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
+  const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
+  const metaGraph = contextGraphMetaUri(input.contextGraphId);
+  // Validate inputs before I/O and use the shared RDF serializer at the query boundary.
+  checkedRoot(input.merkleRoot);
+  if (input.priorMerkleRoot !== undefined) checkedRoot(input.priorMerkleRoot);
+  if (guarded) await requireNamedKaVmCompletionCapability(store, metaGraph);
+  const capability = store.commitment;
+  const barrier = capability !== undefined
+    && (capability.durability === 'restart-durable' || persistenceMode === 'process-local')
+    ? capability.commit.bind(capability) : undefined;
+  if (!tentative && barrier === undefined) {
+    throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), {
+      code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',
+    });
   }
-  const lifecycleReplacements = [
-    { subject: lifecycleUri, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
-    { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
-  ];
-  if (input.packedKaId === undefined) {
-    await replaceNamedKaVmDraftSubject(store, metaGraph, lifecycleUri, lifecycleReplacements);
-    await replaceNamedKaVmDraftSubject(store, metaGraph, assertionUri, [{
-      subject: assertionUri, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph,
-    }]);
-    return;
-  }
-  const vmAuthor = `0x${(input.packedKaId >> 96n).toString(16).padStart(40, '0')}`;
-  const vmNumber = input.packedKaId & ((1n << 96n) - 1n);
-  const vmGraph = contextGraphLayerUri(
-    input.contextGraphId,
-    MemoryLayer.VerifiableMemory,
-    vmAuthor,
-    vmNumber,
-    input.subGraphName,
-  );
-  lifecycleReplacements.push({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph });
-  await replaceNamedKaVmDraftSubject(store, metaGraph, lifecycleUri, lifecycleReplacements);
-  await replaceNamedKaVmDraftSubject(store, metaGraph, assertionUri, [{
-    subject: assertionUri, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph,
-  }]);
-
-  const wmGraph = contextGraphLayerUri(
-    input.contextGraphId,
-    MemoryLayer.WorkingMemory,
-    vmAuthor,
-    vmNumber,
-    input.subGraphName,
-  );
-  await replaceNamedKaVmDraftSubject(store, metaGraph, wmGraph, [{
-    subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph,
-  }]);
+  const iri = (value: string) => formatSparqlTerm(value, { position: 'subject' });
+  await withNamedKaVmMetadataLock(store, metaGraph, lifecycleUri, async () => {
+    const ownsOperation = input.publicationShareOperationId === undefined
+      || await readPublishedAssertionOperation(store, metaGraph, lifecycleUri) === input.publicationShareOperationId;
+    let workspace: WorkspaceLifecycleValues = {};
+    if (ownsOperation) {
+      const rows = await store.query(`SELECT ?wm ?swm ?state ?layer ?activeSeal WHERE { GRAPH ${iri(metaGraph)} {
+        OPTIONAL { ${iri(lifecycleUri)} <${WM_CURRENT_ASSERTION_PRED}> ?wm }
+        OPTIONAL { ${iri(lifecycleUri)} <${SWM_CURRENT_ASSERTION_PRED}> ?swm }
+        OPTIONAL { ${iri(lifecycleUri)} <${STATE_PRED}> ?state }
+        OPTIONAL { ${iri(lifecycleUri)} <${MEMORY_LAYER_PRED}> ?layer }
+        OPTIONAL { ${iri(assertionUri)} <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?activeSeal }
+      } } LIMIT 2`, { source: 'agent.publish.confirmedLifecycleWorkspaceGuard' });
+      if (rows.type !== 'bindings' || rows.bindings.length > 1) {
+        throw new NamedKaVmLifecycleIntegrityError('Invalid workspace pointers during confirmed lifecycle repair');
+      }
+      workspace = decodeWorkspaceLifecycleValues(rows.bindings[0]);
+    }
+    // Permanent chain history does not need to interpret a different owner's
+    // draft rows. Missing/corrupt layers still cannot admit a draft transition.
+    const owns = ownsOperation && (!guarded || workspace.layer === MemoryLayer.SharedWorkingMemory
+      || workspace.layer === MemoryLayer.VerifiableMemory);
+    await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(
+      owns ? input : { ...input, preserveWorkspace: true }, workspace), guarded);
+    // Visible writes do not certify persistence: retire evidence only after
+    // the selected process-local or restart-durable commit barrier succeeds.
+    if (barrier !== undefined) await barrier({ source: 'agent.publish.confirmedLifecycleFlush' });
+    else await store.flush?.({ source: 'agent.publish.confirmedLifecycleFlush' });
+  });
 }

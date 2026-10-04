@@ -13,9 +13,11 @@ const AUTHOR = '0x1111111111111111111111111111111111111111', CG = 'completion-ra
 const DKG = 'http://dkg.io/ontology/';
 const payload = [{ subject: 'urn:original', predicate: 'urn:title', object: '"original"', graph: '' }];
 const stores: OxigraphStore[] = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close(); });
+const agents: any[] = [];
+afterEach(async () => { vi.restoreAllMocks(); for (const agent of agents.splice(0)) await agent.namedKaVmLifecycleRepair?.stop(); for (const store of stores.splice(0)) await store.close(); });
 
 async function fixture(alias = false, updating = false) {
+  let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
   const store = new OxigraphStore(); stores.push(store);
   const publisher = new DKGPublisher({ store, chain: new NoChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
   await publisher.assertionCreate(CG, NAME, AUTHOR); await publisher.assertionWrite(CG, NAME, AUTHOR, payload);
@@ -32,14 +34,17 @@ async function fixture(alias = false, updating = false) {
   }
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.gossipSession = new GossipSession();
-  agent.store = store; agent.publisher = publisher; agent.chain = {}; agent.config = {}; agent.defaultAgentAddress = AUTHOR;
+  agent.store = store; agent.publisher = publisher; agent.config = {}; agent.defaultAgentAddress = AUTHOR;
+  agent.writeLocks = publisher.writeLocks; agents.push(agent);
+  agent.chain = { getEvmChainId: async () => 31337n, getKnowledgeAssetsLifecycleAddress: async () => '0x0000000000000000000000000000000000000001',
+    readKnowledgeAssetVersionSnapshot: async () => ({ latestRoot: Buffer.from(computeFlatKCRootV10(first.publicQuads, [])).toString('hex'), rootCount: 1n }) };
   agent.localAgents = new Map();
   agent.log = { warn() {}, info() {}, debug() {}, error() {} };
   Object.defineProperty(agent, 'peerId', { value: 'publisher-peer' });
   agent.createV10ACKProvider = () => undefined; agent._resolveEncryptInlinePayload = async () => undefined; agent._resolveEncryptInlineChunked = async () => undefined;
   agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined; agent.gossip = { publish: async () => undefined };
   // Resolve chain metadata externally; keep the inherited agent publication path intact.
-  agent.getContextGraphOnChainId = async () => undefined;
+  agent.getContextGraphOnChainId = async () => '1';
   if (updating) {
     await store.insert([{ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AUTHOR, NAME),
       predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify('ff'.repeat(32)) }]);
@@ -55,7 +60,7 @@ async function fixture(alias = false, updating = false) {
     return publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: 'publisher-peer', localOnly: true });
   };
   const result = { status: 'confirmed' as const, ual: first.kaUal, kaId: packed, merkleRoot: computeFlatKCRootV10(first.publicQuads, []), kaManifest: [], publicQuads: first.publicQuads, onChainResult: { txHash: `0x${'ab'.repeat(32)}`, blockNumber: 1, blockTimestamp: 1, batchId: packed, kaId: packed, startKAId: packed, endKAId: packed, publisherAddress: AUTHOR } };
-  return { store, publisher, agent, first, promoted, replace, result };
+  return { store, publisher, agent, first, promoted, replace, result, advanceRepairTime: () => { now += 6_000; } };
 }
 
 async function modelLegacyPublicationOwner(f: Awaited<ReturnType<typeof fixture>>) {
@@ -94,10 +99,10 @@ describe('agent publication completion marker fencing', () => {
     const submit = vi.spyOn(f.publisher, 'publish').mockImplementation(async options => {
       await options.onBeforeBroadcast?.({ txHash, nonce: 0 }); return f.result;
     });
-    const replace = f.store.replaceSubjectPredicates.bind(f.store); let failCompletion = true;
-    vi.spyOn(f.store, 'replaceSubjectPredicates').mockImplementation(async (graph, subject, predicates, quads, options) => {
-      if (failCompletion && quads.some(q => q.predicate === `${DKG}memoryLayer` && q.object === '"VM"')) throw new Error('interrupted confirmed completion');
-      return replace(graph, subject, predicates, quads, options);
+    const commit = f.store.atomicUpdate.bind(f.store); let failCompletion = true;
+    vi.spyOn(f.store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
+      if (failCompletion && options?.source === 'agent.publish.confirmedLifecycleCommit') throw new Error('interrupted confirmed completion');
+      return commit(sparql, options);
     });
     const queue = new TripleStoreAsyncLiftPublisher(f.store, {
       knowledgeAssetVmPublishRecoveryResolver: async () => recovery,
@@ -110,12 +115,14 @@ describe('agent publication completion marker fencing', () => {
       },
     });
     const jobId = await queue.enqueueKnowledgeAssetVmPublish(request);
-    expect(await queue.processNext('wallet')).toMatchObject({ status: 'broadcast', broadcast: { txHash } });
+    const processed = await queue.processNext('wallet');
+    if (processed?.status === 'failed') throw new Error(JSON.stringify(processed.failure));
+    expect(processed).toMatchObject({ status: 'broadcast', broadcast: { txHash } });
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
     expect(await queue.recover()).toBe(0);
     expect(await queue.getStatus(jobId)).toMatchObject({ status: 'broadcast', broadcast: { txHash } });
-    failCompletion = false;
-    expect(await queue.recover()).toBe(1);
+    failCompletion = false; f.advanceRepairTime();
+    f.advanceRepairTime(); expect(await queue.recover()).toBe(1);
     expect(await queue.getStatus(jobId)).toMatchObject({ status: 'finalized', jobId });
     expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'VM', state: 'published' });
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
@@ -152,12 +159,11 @@ describe('agent publication completion marker fencing', () => {
       if (options?.source === 'agent.publish.namedKaVmTransition' && sparql.includes(`<${subject}>`)) { entered(); await gate; }
       return result;
     });
-    // Both the old whole-subject snapshot and the predicate-scoped dispatch
-    // seam pause immediately before the layer commit; the receipt writer is real.
-    const predicates = (f.store as any).replaceSubjectPredicates?.bind(f.store);
-    if (predicates) vi.spyOn(f.store as any, 'replaceSubjectPredicates').mockImplementation(async (targetGraph, targetSubject, ...args) => {
-      if (targetGraph === graph && targetSubject === subject) { entered(); await gate; }
-      return predicates(targetGraph, targetSubject, ...args);
+    // Pause the certified metadata commit while the real recovery receipt writer runs.
+    const commit = f.store.atomicUpdate.bind(f.store);
+    vi.spyOn(f.store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
+      if (options?.source === 'agent.publish.confirmedLifecycleCommit') { entered(); await gate; }
+      return commit(sparql, options);
     });
     const completing = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
     const reached = await Promise.race([paused.then(() => true), completing.then(() => false)]);
@@ -182,23 +188,16 @@ describe('agent publication completion marker fencing', () => {
       const scope = createGraphKnowledgeAssetScope(f.first.kaUal, 1);
       const vmGraph = contextGraphLayerUri(CG, MemoryLayer.VerifiableMemory, AUTHOR, BigInt(scope.kaNumber));
       await f.store.insert([{ graph, subject, predicate: 'urn:unrelated:metadata', object: '"keep"' }]);
-      const originalInsert = f.store.insert.bind(f.store), originalReplace = f.store.replaceSubjectPredicates.bind(f.store);
+      const originalCommit = f.store.atomicUpdate.bind(f.store);
       const failure = new Error(`transient ${fault}`); let armed = true;
-      // Cover the old delete/insert boundary and the replacement commit boundary.
-      vi.spyOn(f.store, 'insert').mockImplementation(async (quads, options) => {
-        if (armed && quads.some(q => q.graph === graph && q.subject === subject && q.predicate === `${DKG}memoryLayer` && q.object === '"VM"')) {
-          armed = false; if (fault === 'response-lost') await originalInsert(quads, options); throw failure;
+      vi.spyOn(f.store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
+        if (armed && options?.source === 'agent.publish.confirmedLifecycleCommit') {
+          armed = false; if (fault === 'response-lost') await originalCommit(sparql, options); throw failure;
         }
-        return originalInsert(quads, options);
-      });
-      vi.spyOn(f.store, 'replaceSubjectPredicates').mockImplementation(async (targetGraph, targetSubject, predicates, quads) => {
-        if (armed && targetGraph === graph && targetSubject === subject) {
-          armed = false; if (fault === 'response-lost') await originalReplace(targetGraph, targetSubject, predicates, quads); throw failure;
-        }
-        return originalReplace(targetGraph, targetSubject, predicates, quads);
+        return originalCommit(sparql, options);
       });
       const stamp = () => f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
-      await expect(stamp()).rejects.toBe(failure);
+      await expect(stamp()).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED' });
       expect(armed).toBe(false);
       const interrupted = await f.agent.assertion.history(CG, NAME);
       expect(interrupted).toMatchObject(fault === 'before-commit'
@@ -210,6 +209,7 @@ describe('agent publication completion marker fencing', () => {
         expect(await f.store.query(`ASK { GRAPH <${graph}> { <${subject}> <${DKG}assertionGraph> <${vmGraph}> } }`))
           .toEqual({ type: 'boolean', value: true });
       }
+      f.advanceRepairTime();
       if (replacement) {
         const replaced = await f.replace();
         // Reopen creates its new draft metadata; the deferred prior publication
@@ -241,7 +241,7 @@ describe('agent publication completion marker fencing', () => {
     if (capability === 'absent') Object.defineProperty(f.store, 'replaceSubjectPredicates', { value: undefined });
     else vi.spyOn(f.store, 'replaceSubjectPredicates').mockRejectedValue(new UnsupportedTripleStoreCapabilityError('replaceSubjectPredicates', 'test'));
     await expect(f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId))
-      .rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
+      .rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED' });
     expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'SWM', state: 'promoted' });
     expect(update).not.toHaveBeenCalled();
   });
@@ -268,15 +268,15 @@ describe('agent publication completion marker fencing', () => {
     });
     const jobId = await queue.enqueueKnowledgeAssetVmPublish(request);
     expect(await queue.processNext('wallet')).toMatchObject({ status: 'broadcast' });
-    const replace = f.store.replaceSubjectPredicates.bind(f.store); let armed = true;
-    vi.spyOn(f.store, 'replaceSubjectPredicates').mockImplementation(async (targetGraph, targetSubject, predicates, quads) => {
-      if (armed && targetGraph === graph && targetSubject === subject) { armed = false; throw new Error('transient atomic repair'); }
-      return replace(targetGraph, targetSubject, predicates, quads);
+    const commit = f.store.atomicUpdate.bind(f.store); let armed = true;
+    vi.spyOn(f.store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
+      if (armed && options?.source === 'agent.publish.confirmedLifecycleCommit') { armed = false; throw new Error('transient atomic repair'); }
+      return commit(sparql, options);
     });
     expect(await queue.recover()).toBe(0);
     expect(await queue.getStatus(jobId)).toMatchObject({ status: 'broadcast', broadcast: { txHash } });
     expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'SWM', state: 'promoted' });
-    expect(await queue.recover()).toBe(1);
+    f.advanceRepairTime(); expect(await queue.recover()).toBe(1);
     expect(await queue.getStatus(jobId)).toMatchObject({ status: 'finalized', jobId });
     expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'VM', state: 'published' });
     expect(executions).toBe(1);
@@ -285,11 +285,11 @@ describe('agent publication completion marker fencing', () => {
   it('serializes permanent VM bookkeeping with the owned predicate transition', async () => {
     const f = await fixture(), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
     const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
-    const replace = f.store.replaceSubjectPredicates.bind(f.store); let release!: () => void, entered!: () => void;
+    const commit = f.store.atomicUpdate.bind(f.store); let release!: () => void, entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; }), paused = new Promise<void>(resolve => { entered = resolve; });
-    vi.spyOn(f.store, 'replaceSubjectPredicates').mockImplementation(async (graph, target, predicates, quads, options) => {
-      if (options?.source === 'agent.publish.namedKaVmTransition' && target === subject) { entered(); await gate; }
-      return replace(graph, target, predicates, quads, options);
+    vi.spyOn(f.store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
+      if (options?.source === 'agent.publish.confirmedLifecycleCommit') { entered(); await gate; }
+      return commit(sparql, options);
     });
     const first = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
     // Fail rather than hang if the selected lifecycle transition never dispatches.
@@ -310,7 +310,7 @@ describe('agent publication completion marker fencing', () => {
 
   it.each(['synchronous', 'queued'] as const)('materializes a %s update VM pointer once and converges its owned WM pointer', async lane => {
     const f = await fixture(false, true), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
-    const insert = vi.spyOn(f.store, 'insert');
+    const commit = vi.spyOn(f.store, 'atomicUpdate');
     vi.spyOn(f.agent, 'update').mockResolvedValueOnce(f.result);
     if (lane === 'synchronous') await f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
     else {
@@ -318,9 +318,9 @@ describe('agent publication completion marker fencing', () => {
       const queue = new TripleStoreAsyncLiftPublisher(f.store, { knowledgeAssetVmPublishHandler: { execute: ({ request, publishOptions }) => f.agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions) } });
       await queue.enqueueKnowledgeAssetVmPublish(request); expect(await queue.processNext('wallet')).toMatchObject({ status: 'finalized' });
     }
-    const vmWrites = insert.mock.calls.flatMap(([quads]) => quads).filter(quad =>
-      quad.subject === subject && quad.graph === graph && quad.predicate === `${DKG}vmCurrentAssertion`);
+    const vmWrites = commit.mock.calls.filter(([, options]) => options?.source === 'agent.publish.confirmedLifecycleCommit');
     expect(vmWrites).toHaveLength(1);
+    expect(vmWrites[0]![0]).toContain(`<${subject}> <${DKG}vmCurrentAssertion>`);
     expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ state: 'published', memoryLayer: 'VM',
       wmCurrentAssertion: Buffer.from(f.result.merkleRoot).toString('hex'), vmCurrentAssertion: Buffer.from(f.result.merkleRoot).toString('hex') });
     expect(await f.store.query(`ASK { GRAPH <${graph}> { <${subject}> <${DKG}wmCurrentAssertion> ?wm } }`))
@@ -394,9 +394,13 @@ describe('agent publication completion marker fencing', () => {
       const publicationHeld = new Promise<void>(resolve => { releasePublication = resolve; });
       const publicationStarted = new Promise<void>(resolve => { publicationEntered = resolve; });
       const submission = updating ? vi.spyOn(f.agent, 'update') : vi.spyOn(f.publisher, 'publish');
-      submission.mockImplementationOnce(async () => { publicationEntered(); await publicationHeld; return f.result; });
+      submission.mockImplementationOnce(async (...args: any[]) => {
+        const options = updating ? args.at(-1) : args[0];
+        await options?.onBeforeBroadcast?.({ txHash: f.result.onChainResult.txHash, nonce: 0 });
+        publicationEntered(); await publicationHeld; return f.result;
+      });
       const publishing = (async () => {
-        if (lane === 'synchronous') return f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
+        if (lane === 'synchronous') return f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR }).catch((error: unknown) => ({ recoveryError: error }));
         const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
         const queue = new TripleStoreAsyncLiftPublisher(f.store, { knowledgeAssetVmPublishHandler: { execute: ({ request, publishOptions }) => f.agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions) } });
         await queue.enqueueKnowledgeAssetVmPublish(request); return queue.processNext('wallet');
@@ -424,10 +428,23 @@ describe('agent publication completion marker fencing', () => {
         const completed = await Promise.race([publishing.then(value => ({ value })), new Promise<{ timedOut: true }>(resolve => setTimeout(() => resolve({ timedOut: true }), 500))]);
         expect(completed).not.toHaveProperty('timedOut');
         if (!('value' in completed)) throw new Error('Publication completion waited for the replacement curator');
-        if (lane === 'queued') expect(completed.value).toMatchObject({ status: 'finalized' });
-        const layers = await f.store.query(`SELECT ?layer ?vm WHERE { GRAPH <${graph}> { <${lifecycle}> <${DKG}memoryLayer> ?layer ; <${DKG}vmCurrentAssertion> ?vm } }`);
-        expect(layers.type === 'bindings' ? layers.bindings : []).toEqual([{ layer: JSON.stringify(change === 'unchanged' ? 'VM' : 'WM'), vm: JSON.stringify(Buffer.from(f.result.merkleRoot).toString('hex')) }]);
+        if (change === 'unchanged') {
+          if (lane === 'queued') expect(completed.value).toMatchObject({ status: 'finalized' });
+          expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'VM', state: 'published' });
+        } else {
+          if (lane === 'queued') expect(completed.value).toMatchObject({ status: 'broadcast', broadcast: { txHash: f.result.onChainResult.txHash } });
+          else expect(completed.value).toMatchObject({ recoveryError: { code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', lifecycleRecovery: { publicationRetrySafe: false } } });
+          const layers = await f.store.query(`SELECT ?layer WHERE { GRAPH <${graph}> { <${lifecycle}> <${DKG}memoryLayer> ?layer } }`);
+          expect(layers.type === 'bindings' ? layers.bindings : []).toEqual([{ layer: '"WM"' }]);
+          expect(submission).toHaveBeenCalledTimes(1);
+        }
       } finally { releaseCurator(); await publishing; if (promotion) await promotion; }
+      if (change !== 'unchanged') {
+        await f.agent.getOrCreateNamedKaVmLifecycleRepair().runDue();
+        const history = await f.agent.assertion.history(CG, NAME);
+        expect(history).toMatchObject({ memoryLayer: 'SWM', state: 'promoted', vmCurrentAssertion: Buffer.from(f.result.merkleRoot).toString('hex') });
+        expect(submission).toHaveBeenCalledTimes(1);
+      }
       if (promotion) {
         const promoted = await promotion; expect(promoted.error).toBeUndefined();
         if (!promoted.value) throw promoted.error;
@@ -441,7 +458,7 @@ describe('agent publication completion marker fencing', () => {
     });
 
   it.each([false, true])('rechecks draft ownership after publication preflight queues behind a sanctioned reopen (legacy: %s)', async legacy => {
-    const f = await fixture();
+    const f = await fixture(), capturedRequest = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
     if (legacy) {
       await modelLegacyPublicationOwner(f);
     }
@@ -458,24 +475,23 @@ describe('agent publication completion marker fencing', () => {
       if (sparql.startsWith(legacy ? 'SELECT ?layer' : 'SELECT ?operation')) preflightRead();
       return result;
     });
-    const request = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, shareOperationId: legacy ? undefined : f.promoted.shareOperationId,
-      sealMerkleRoot: Buffer.from(f.result.merkleRoot).toString('hex') };
+    const request = { ...capturedRequest, shareOperationId: legacy ? null : f.promoted.shareOperationId };
     const completion = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
     await preflight;
     release(); await Promise.all([holding, reopening, completion]);
     const graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
     const layers = await f.store.query(`SELECT ?layer ?vm WHERE { GRAPH <${graph}> { <${subject}> <${DKG}memoryLayer> ?layer ; <${DKG}vmCurrentAssertion> ?vm } }`);
-    expect(layers.type === 'bindings' ? layers.bindings : []).toEqual([{ layer: '"WM"', vm: JSON.stringify(request.sealMerkleRoot) }]);
+    expect(layers.type === 'bindings' ? layers.bindings : []).toEqual([{ layer: '"WM"', vm: JSON.stringify(request.sealMerkleRoot.replace(/^0x/, '')) }]);
     expect(await f.publisher.assertionQuery(CG, NAME, AUTHOR)).toHaveLength(1);
   });
 
   it.each(['conflicting', 'iri', 'empty'] as const)('records confirmed VM history without consuming a %s lifecycle owner', async corruption => {
     const f = await fixture(), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
     if (corruption !== 'conflicting') await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}shareOperationId` });
     await f.store.insert([{ graph, subject, predicate: `${DKG}shareOperationId`,
       object: corruption === 'iri' ? 'urn:invalid:operation' : corruption === 'empty' ? '""' : '"another-owner"' }]);
-    await f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle({ contextGraphId: CG, name: NAME, agentAddress: AUTHOR,
-      shareOperationId: f.promoted.shareOperationId, sealMerkleRoot: Buffer.from(f.result.merkleRoot).toString('hex') }, f.result.ual, f.result.kaId);
+    await f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
     await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, f.promoted.shareOperationId!);
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
     const layer = await f.store.query(`SELECT ?layer WHERE { GRAPH <${graph}> { <${subject}> <${DKG}memoryLayer> ?layer } }`);

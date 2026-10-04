@@ -1,3 +1,4 @@
+import { submitOwnedNamedKaVmLifecycleRepair } from './named-ka-vm-publication-repair.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -10,6 +11,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
+import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -197,6 +200,7 @@ export interface ResolveAssertionAuthorOptions {
   selectedAuthorAgentAddress?: string;
 }
 import { RootlessUpdateError, isRootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
+import { ConfirmedNamedKaVmLifecycleRecoveryError, type ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -302,9 +306,11 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { applyOwnedPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle, confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
+import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import { stampLifecyclePointer, stampLifecyclePointerIfDivergedFromVm } from './lifecycle-pointer-writer.js';
-import { withNamedKaVmMetadataLock } from './named-ka-vm-metadata.js';
+import { requireNamedKaVmCompletionCapability, withNamedKaVmMetadataLock } from './named-ka-vm-metadata.js';
+import { isPublishedAssertionOwner } from '@origintrail-official/dkg-publisher';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -4678,6 +4684,7 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
     }
+    await requireNamedKaVmCompletionCapability(this.store, metaGraph);
     if (opts?.entityProofs === true) {
       throw new Error('Graph-scoped async publish does not support entityProofs');
     }
@@ -4877,6 +4884,7 @@ export class PublishMethods extends DKGAgentBase {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
     createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+    await requireNamedKaVmCompletionCapability(this.store, contextGraphMetaUri(request.contextGraphId));
     const bareRoot = (value?: string | null): string | undefined => {
       const trimmed = value?.trim().toLowerCase();
       if (!trimmed) return undefined;
@@ -5015,25 +5023,61 @@ export class PublishMethods extends DKGAgentBase {
     return { action: 'execute' };
   }
 
+  /** Own only local repair after confirmation; never enter the publication primitive here. */
+  getOrCreateNamedKaVmLifecycleRepair(this: DKGAgent): NamedKaVmLifecycleRepair {
+    return this.namedKaVmLifecycleRepair ??= new NamedKaVmLifecycleRepair({
+      dataDir: this.config?.dataDir,
+      writeLocks: this.writeLocks,
+      apply: input => applyPublishedNamedKaVmLifecycle(this.store, input, confirmedNamedKaVmLifecycleApplyOptions(this.config?.dataDir)),
+      isCurrent: input => isConfirmedNamedKaVmLifecycleCurrent(
+        this.chain, input, this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir),
+      ),
+      warn: message => this.log.warn(createOperationContext('publish'), message),
+    });
+  }
+
+  async _repairConfirmedNamedKaVmLifecycle(
+    this: DKGAgent, coordinates: ConfirmedNamedKaVmCoordinates,
+    confirmedPublication: ConfirmedNamedKaVmPublication,
+  ): Promise<boolean> {
+    const input = confirmedNamedKaVmLifecycleInput(confirmedPublication, coordinates);
+    try {
+      const outcome = await submitOwnedNamedKaVmLifecycleRepair(this.store, this.writeLocks,
+        this.getOrCreateNamedKaVmLifecycleRepair(), input);
+      if (outcome === 'pending' || outcome === 'rejected') throw new Error(`Confirmed lifecycle completion remains ${outcome}`);
+      return false;
+    } catch (error) {
+      // Losing the durable admission is different from a scheduled graph-store retry.
+      throw new ConfirmedNamedKaVmLifecycleRecoveryError(confirmedPublication, input, error);
+    }
+  }
+
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
     publishedUal: string,
-    packedKaId?: bigint,
+    packedKaId: bigint,
     merkleRoot: string = request.sealMerkleRoot,
-    convergeWorkingMemory = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    await applyOwnedPublishedNamedKaVmLifecycle(this.store, this.publisher, {
-      contextGraphId: request.contextGraphId,
-      agentAddress,
-      name: request.name,
-      subGraphName: request.subGraphName,
-      publishedUal,
-      merkleRoot,
-      packedKaId,
-      convergeWorkingMemory,
-    }, request.shareOperationId ?? null);
+    const input: ConfirmedNamedKaVmLifecycleInput = {
+      contextGraphId: request.contextGraphId, agentAddress, name: request.name,
+      subGraphName: request.subGraphName, publishedUal, merkleRoot, packedKaId,
+      assertionVersion: request.assertionVersion!,
+      publicationDeployment: { chainId: request.sealChainId, lifecycleAddress: request.sealKav10Address },
+      publicationShareOperationId: request.shareOperationId,
+      ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
+    };
+    const outcome = await submitOwnedNamedKaVmLifecycleRepair(this.store, this.writeLocks,
+      this.getOrCreateNamedKaVmLifecycleRepair(), input);
+    if (outcome === 'pending' || outcome === 'rejected') {
+      const publication = { status: 'confirmed' as const, ual: publishedUal, kaId: packedKaId,
+        merkleRoot: ethers.getBytes(merkleRoot.startsWith('0x') ? merkleRoot : `0x${merkleRoot}`), kaManifest: [],
+        assertionUri: contextGraphAssertionUri(request.contextGraphId, agentAddress, request.name, request.subGraphName),
+        seal: assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request) };
+      throw new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, new Error(`Confirmed lifecycle completion remains ${outcome}`));
+    }
+    return outcome === 'repaired';
   }
 
   async _writeQueuedKnowledgeAssetVmPublishReceipt(
@@ -5337,16 +5381,9 @@ export class PublishMethods extends DKGAgentBase {
     );
     // `stale-target` means a still-newer local version won the race. Do not
     // regress its pointer; the exact publish receipt is nevertheless repaired.
-    const canStampLifecycle = materialization !== 'stale-target'
-      && await this._canStampRecoveredKnowledgeAssetVmLifecycle(request);
-    if (canStampLifecycle) {
-      await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-        request,
-        recovered.localUal,
-        recovered.reservedKaId,
-        recovered.materialization.merkleRoot,
-      );
-    } else if (materialization !== 'stale-target') {
+    if (materialization !== 'stale-target' && !await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
+      request, recovered.localUal, recovered.reservedKaId, recovered.materialization.merkleRoot,
+    )) {
       this.log.info(
         ctx,
         `Recovered receipt for "${request.name}" without lifecycle stamping because `
@@ -5435,6 +5472,7 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new Error('Queued graph-scoped VM publish has an incomplete KA content envelope');
     }
+    await requireNamedKaVmCompletionCapability(this.store, contextGraphMetaUri(request.contextGraphId));
     const graphScope = createGraphKnowledgeAssetScope(
       request.kaUal,
       request.assertionVersion,
@@ -5575,7 +5613,6 @@ export class PublishMethods extends DKGAgentBase {
       },
     };
 
-    const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
     const clearPublishedGraph = async (label: string): Promise<void> => {
       try {
@@ -5668,24 +5705,6 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
 
-      if (result.status === 'confirmed') {
-        try {
-          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
-            ? operationPlan.vmCurrentAssertion.slice(2)
-            : operationPlan.vmCurrentAssertion;
-          const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          await this.store.insert([
-            { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-            { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
-          ]);
-        } catch (err) {
-          this.log.warn(
-            ctx,
-            `Failed to stamp queued update provenance for <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
     } else {
       const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
       if (recoveredReservedKaId === undefined && onChainCapable) {
@@ -5833,23 +5852,13 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    if (result.status === 'confirmed') {
-      try {
-        await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-          request,
-          result.ual,
-          packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
-          newMerkleHexBare,
-          operationPlan.kind === 'update',
-        );
-      } catch (err) {
-        this.log.warn(
-          ctx,
-          `Failed to stamp queued VM lifecycle marker for <${lifecycleUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
-    }
+    const lifecycleRepairPending = result.status === 'confirmed'
+      ? await this._repairConfirmedNamedKaVmLifecycle({
+          contextGraphId: request.contextGraphId, name: request.name, agentAddress,
+           subGraphName: request.subGraphName, packedKaId: packedKaId ?? seal.reservedKaId,
+           publicationShareOperationId: request.shareOperationId,
+          ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
+        }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
 
     if (result.status === 'confirmed' && result.onChainResult) {
       const rootEntities: string[] = [];
@@ -5915,7 +5924,7 @@ export class PublishMethods extends DKGAgentBase {
       publicationLabel: 'queued publish',
     });
 
-    return { ...result, assertionUri, seal };
+    return { ...result, ...(lifecycleRepairPending ? { lifecycleRepairPending: true } : {}), assertionUri, seal };
   }
 
   async publishFromFinalizedAssertion(this: DKGAgent,
@@ -5973,6 +5982,7 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
     }
+    await requireNamedKaVmCompletionCapability(this.store, metaGraph);
     const graphScope = createGraphKnowledgeAssetScope(
       seal.kaUal,
       seal.assertionVersion,
@@ -6089,7 +6099,6 @@ export class PublishMethods extends DKGAgentBase {
         `Lifecycle kaId number ${stampedNumberStr} does not match graph-scoped UAL number ${graphScope.kaNumber}`,
       );
     }
-    const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
     if (recoveredReservedKaId !== packedKaId) {
       throw new Error(
@@ -6239,26 +6248,7 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
 
-      // Revision provenance is permanent chain history. The canonical
-      // materializer below owns VM and the guarded draft pointer transition.
-      if (result.status === 'confirmed' || result.status === 'tentative') {
-        try {
-          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
-            ? operationPlan.vmCurrentAssertion.slice(2)
-            : operationPlan.vmCurrentAssertion;
-          const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          await this.store.insert([
-            { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-            { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
-          ]);
-        } catch (err) {
-          this.log.warn(
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            `Failed to stamp update provenance for <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
+
     } else {
       // ── MINT PATH ──
       // Round 4 review §9 — scope the SWM CONSTRUCT to the seal's
@@ -6345,24 +6335,26 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // OT-RFC-43 A2 (decision 2) — record VM once for mint and update, then
-    // transition the WM pointer and other draft markers under one owner guard.
-    if (result.status === 'confirmed' || result.status === 'tentative') {
+    const lifecycleRepairPending = result.status === 'confirmed'
+      ? await this._repairConfirmedNamedKaVmLifecycle({
+           contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName,
+           packedKaId,
+           publicationShareOperationId: originalShareOperationId,
+          ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
+        }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
+
+    // Preserve the standalone tentative publication projection. Confirmed work
+    // above uses the durable repair owner; no VM data graph is claimed here.
+    if (result.status === 'tentative') {
       try {
-        await applyOwnedPublishedNamedKaVmLifecycle(this.store, publisher, {
-          contextGraphId, agentAddress, name, subGraphName: opts?.subGraphName,
-          publishedUal: result.ual, merkleRoot: newMerkleHexBare,
-          convergeWorkingMemory: operationPlan.kind === 'update',
-          // Tentative publication has no confirmed VM graph to point at.
-          packedKaId: result.status === 'confirmed' && result.onChainResult
-            ? packedKaId ?? result.onChainResult.kaId ?? result.kaId : undefined,
-        }, originalShareOperationId);
+        await applyTentativeNamedKaVmLifecycle(this.store, {
+          contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName,
+          publishedUal: result.ual, merkleRoot: ethers.hexlify(seal.merkleRoot), tentative: true,
+          ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
+        });
       } catch (err) {
-        this.log.warn(
-          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          `Failed to stamp VM lifecycle marker for <${lifecycleUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
+        this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Failed to stamp tentative VM lifecycle marker for <${lifecycleUri}>: ${String(err)}`);
       }
     }
 
@@ -6391,7 +6383,7 @@ export class PublishMethods extends DKGAgentBase {
       publicationLabel: 'publish',
     });
 
-    return { ...result, assertionUri, seal };
+    return { ...result, ...(lifecycleRepairPending ? { lifecycleRepairPending: true } : {}), assertionUri, seal };
   }
 
   private async afterConfirmedGraphScopedVmPublishV1(

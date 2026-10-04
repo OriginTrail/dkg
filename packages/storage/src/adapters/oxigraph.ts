@@ -1,3 +1,4 @@
+import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
@@ -5,6 +6,7 @@ import { mkdir, open, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type {
   TripleStore,
+  QueryOptions,
   Quad as DKGQuad,
   QueryResult,
   SelectResult,
@@ -60,6 +62,7 @@ type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
+  readonly commitment: TripleStoreCommitCapability;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -81,6 +84,9 @@ export class OxigraphStore implements TripleStore {
   constructor(persistPath?: string) {
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
+    this.commitment = certifiedTripleStoreCommitment(
+      persistPath ? 'restart-durable' : 'process-local', options => this.flush(options),
+    );
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
@@ -217,20 +223,15 @@ export class OxigraphStore implements TripleStore {
       await rename(tmpPath, this.persistPath);
 
       // 4: fsync the directory so the rename itself survives a power loss.
-      // Best-effort: some filesystems / Node versions don't expose dir-fd
-      // sync; swallow ENOENT/EPERM since the rename itself already
-      // succeeded and the cache will eventually flush. The rename itself
-      // landed bytes on disk; only the directory entry's durability
-      // depends on this step.
+      // A visible rename is not proof of durability. In particular, certified
+      // commitment callers may erase recovery evidence only after this sync
+      // succeeds. Unsupported directory sync and I/O failures both propagate;
+      // a retry can re-dump the already visible in-memory state safely.
+      const dirFh = await open(dir, 'r');
       try {
-        const dirFh = await open(dir, 'r');
-        try {
-          await dirFh.sync();
-        } finally {
-          await dirFh.close();
-        }
-      } catch {
-        // Best-effort dir fsync — see comment above.
+        await dirFh.sync();
+      } finally {
+        await dirFh.close();
       }
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
@@ -581,6 +582,11 @@ export class OxigraphStore implements TripleStore {
    * termToString→parseTerm round-trip). See {@link TripleStore.update}.
    */
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  /** Oxigraph commits the entire request as one transaction. */
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    await this.update(sparql, options);
+  }
+
   async update(sparql: string, _options?: UpdateOptions): Promise<void> {
     // In-process oxigraph is never wrapped by a graph-set index, so the
     // `touchedGraphs` hint is inapplicable here — accepted for a uniform
@@ -619,7 +625,7 @@ export class OxigraphStore implements TripleStore {
    * rejection as a hard error — previous behaviour swallowed these and
    * returned success even when the data never landed.
    */
-  async flush(): Promise<void> {
+  async flush(_options?: QueryOptions): Promise<void> {
     if (!this.persistPath) return;
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);

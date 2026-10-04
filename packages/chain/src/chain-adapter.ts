@@ -2282,7 +2282,7 @@ export interface ChainAdapter {
    * must also implement this so the digest inputs match the on-chain
    * contract that will verify them. Throws if the contract is not deployed.
    */
-  getKnowledgeAssetsLifecycleAddress(): Promise<string>;
+  getKnowledgeAssetsLifecycleAddress(options?: ChainReadOptions): Promise<string>;
 
   /**
    * Returns the numeric EVM chain id (e.g. 31337n for hardhat). Distinct
@@ -2290,7 +2290,7 @@ export interface ChainAdapter {
    * and not directly parseable with `BigInt()`. Required — used by the
    * publisher to build the H5-prefixed publish digests.
    */
-  getEvmChainId(): Promise<bigint>;
+  getEvmChainId(options?: ChainReadOptions): Promise<bigint>;
 
   /**
    * The RESOLVED `chain.finalityConfirmations` this adapter is using — the

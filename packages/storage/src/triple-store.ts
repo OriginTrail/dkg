@@ -5,6 +5,7 @@
  */
 
 import { dirname, join } from 'node:path';
+import type { TripleStoreCommitCapability } from './persistence.js';
 import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
   SharedMemoryLiteralBlobStore,
@@ -149,6 +150,8 @@ export interface UpdateOptions extends QueryOptions {
 }
 
 export interface TripleStore {
+  /** Explicit commit boundary and durability guarantee, composed through every decorator. */
+  readonly commitment?: TripleStoreCommitCapability;
   /** Present only when query response limits are enforced before decoding. */
   readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
 
@@ -294,6 +297,14 @@ export interface TripleStore {
    * fall back to `insert(quads)` for already-stored terms.
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
+
+  /**
+   * Explicit whole-request transaction capability: every UPDATE statement commits
+   * together, or none becomes visible. Generic update() does not certify this.
+   * Unsupported implementations must refuse before execution with the typed
+   * capability error; execution failures must propagate without fallback.
+   */
+  atomicUpdate?(sparql: string, options?: UpdateOptions): Promise<void>;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
