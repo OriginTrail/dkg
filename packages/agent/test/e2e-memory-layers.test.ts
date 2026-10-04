@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { waitForSharedMemorySubscriber } from './_helpers/gossip-readiness.js';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
@@ -2023,14 +2023,16 @@ describe('rootless graph-scoped KA lifecycle', () => {
       const publisher = (firstAgent as any).publisher;
       const publish = publisher.publish.bind(publisher);
       let armed = false;
+      let rejectedCommits = 0;
       const author = firstAgent.defaultAgentAddress ?? firstAgent.peerId;
       const lifecycle = assertionLifecycleUri(CG_ID, author, name);
-      const insert = store.insert.bind(store);
-      const fault = vi.spyOn(store, 'insert').mockImplementation(async quads => {
-        if (armed && quads.some(q => q.subject === lifecycle && q.predicate === 'http://dkg.io/ontology/state')) {
-          throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'insert', outcome: 'not_started' });
+      const atomicUpdate = store.atomicUpdate.bind(store);
+      const fault = vi.spyOn(store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
+        if (armed && options?.source === 'agent.publish.confirmedLifecycleCommit') {
+          rejectedCommits += 1;
+          throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'update', outcome: 'not_started' });
         }
-        await insert(quads);
+        await atomicUpdate(sparql, options);
       });
       const submitted = vi.spyOn(publisher, 'publish').mockImplementation(async (...args: any[]) => {
         const result = await publish(...args);
@@ -2048,10 +2050,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
       const kaId = BigInt(intent.seal.reservedKaId!);
       const rootCount = await (firstAgent as any).chain.getMerkleRootCount(kaId);
       expect(rootCount).toBe(1n);
+      expect(rejectedCommits).toBeGreaterThan(0);
       const before = await firstAgent.assertion.history(CG_ID, name);
       expect(before?.state).not.toBe('published');
       await firstAgent.stop();
       agents.splice(agents.indexOf(firstAgent), 1);
+      const journal = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
+      expect(journal.entries).toHaveLength(1);
       fault.mockRestore();
       restartedAgent = await createAgent('ConfirmedLifecycleRepairAfterRestart', {
         dataDir: dir, store: new OxigraphStore(storePath), sharedMemoryPublicSnapshotStorage: { enabled: false },
