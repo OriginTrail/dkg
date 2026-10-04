@@ -26,6 +26,8 @@
 
 import { AsyncResource } from 'node:async_hooks';
 
+import { rpcRequestAbortReason } from './rpc-request-transport.js';
+
 export interface BatchedContractCall {
   readonly target: string;
   readonly callData: string;
@@ -102,15 +104,6 @@ interface TakenBatch {
   readonly entries: Array<{ readonly pending: PendingRead; readonly callIndex: number }>;
 }
 
-function abortReason(signal: AbortSignal): unknown {
-  if (signal.reason instanceof Error) return signal.reason;
-  const error = new Error(
-    typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted',
-  );
-  error.name = 'AbortError';
-  return error;
-}
-
 export class ContractReadBatcher {
   readonly #options: ContractReadBatcherOptions;
   readonly #maxCalls: number;
@@ -158,10 +151,10 @@ export class ContractReadBatcher {
       (signal): signal is AbortSignal => signal !== undefined,
     );
     const aborted = signals.find((signal) => signal.aborted);
-    if (aborted) return Promise.reject(abortReason(aborted));
+    if (aborted) return Promise.reject(rpcRequestAbortReason(aborted));
     return new Promise<T>((resolve, reject) => {
       const listeners = signals.map((signal) => {
-        const onAbort = () => this.#settle(pending, () => reject(abortReason(signal)));
+        const onAbort = () => this.#settle(pending, () => reject(rpcRequestAbortReason(signal)));
         signal.addEventListener('abort', onAbort, { once: true });
         return () => signal.removeEventListener('abort', onAbort);
       });

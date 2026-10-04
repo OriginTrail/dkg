@@ -157,12 +157,17 @@ export function activeRpcRequestAbortSignal(): AbortSignal | undefined {
   return activeRpcRequestContext().signal;
 }
 
-/** Normalize caller/deadline cancellation consistently at every transport gate. */
-export function throwRpcRequestAbortReason(signal: AbortSignal): never {
-  if (signal.reason instanceof Error) throw signal.reason;
+/** The error an aborted RPC request settles with: the signal's own, or an AbortError. */
+export function rpcRequestAbortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
   const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted');
   error.name = 'AbortError';
-  throw error;
+  return error;
+}
+
+/** Normalize caller/deadline cancellation consistently at every transport gate. */
+export function throwRpcRequestAbortReason(signal: AbortSignal): never {
+  throw rpcRequestAbortReason(signal);
 }
 
 /**

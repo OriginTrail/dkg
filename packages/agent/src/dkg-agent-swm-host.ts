@@ -551,7 +551,7 @@ import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
 import { resolveExactBatchStreamEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
-import { mapWithConcurrency } from './map-with-concurrency.js';
+import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
 import { finalizedContextGraphSnapshotMismatchV1 } from
   './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
@@ -7066,10 +7066,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
     // The batch's targets are re-verified side by side, with the scan's own
-    // bound, so their chain reads can leave in one request. They are settled
-    // in order below: each step still sees the rotation state its
-    // predecessor left.
-    const revalidateBatch = (): Promise<OrdinalOutcome[]> => mapWithConcurrency(
+    // bound, so their chain reads can leave in one request. Like the scan, a
+    // target that throws stops the ones not yet started and the batch rejects
+    // only once the ones in flight have finished: nothing here outlives the
+    // pass. They are settled in order below: each step still sees the rotation
+    // state its predecessor left.
+    const revalidateBatch = (): Promise<OrdinalOutcome[]> => mapWithConcurrencyDrained(
       attempts,
       DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY,
       (attempt) => this.reconcileChainOrdinal(
