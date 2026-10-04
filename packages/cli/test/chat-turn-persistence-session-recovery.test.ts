@@ -4,46 +4,13 @@ import { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { persistDurableChatTurn } from '../src/daemon/chat-turn-persistence.js';
 
-const GRAPH = 'urn:test:chat-ownership';
-const CHAT = 'urn:dkg:chat:';
-const DKG = 'http://dkg.io/ontology/';
-const SCHEMA = 'http://schema.org/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+import { GRAPH, CHAT, DKG, SCHEMA, createChatTurnStoreFixture } from '../../../test-systems/fixtures/chat-turn-store.js';
 
 async function fixture() {
   const store = new OxigraphStore();
-  const manager = new ChatMemoryManager({
-    query: (sparql: string) => store.query(sparql.replace(/\bWHERE\b/, `FROM <${GRAPH}> WHERE`)),
-    listContextGraphs: async () => [{ id: 'agent-context' }],
-    createContextGraph: async () => {},
-    createAssertion: async () => ({ assertionUri: GRAPH, alreadyExists: true }),
-    writeAssertion: async (_cg, _name, quads) => {
-      await store.insert(quads.map((quad) => ({ ...quad, graph: GRAPH })));
-      return { written: quads.length };
-    },
-  }, { apiKey: '' });
-  const insert = (...triples: Array<[string, string, string]>) => store.insert(triples.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: GRAPH })));
-  const seed = async (session: string, turn: string, reply: string, state = 'pending', turnId = '1', timestamp = '2026-10-01T00:00:00Z') => {
-    const sessionUri = `${CHAT}session:${session}`;
-    const messageUri = `${CHAT}message:${session}:${encodeURIComponent(turn)}`;
-    await insert(
-      [sessionUri, RDF_TYPE, `${SCHEMA}Conversation`],
-      [sessionUri, `${DKG}sessionId`, JSON.stringify(session)],
-      [turn, RDF_TYPE, `${DKG}ChatTurn`],
-      [turn, `${SCHEMA}isPartOf`, sessionUri],
-      [turn, `${DKG}turnId`, JSON.stringify(turnId)],
-      [turn, `${DKG}persistenceState`, JSON.stringify(state)],
-      [turn, `${SCHEMA}dateCreated`, `"${timestamp}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`],
-      [turn, `${DKG}hasUserMessage`, messageUri],
-      [turn, `${DKG}hasAssistantMessage`, messageUri],
-      [messageUri, `${SCHEMA}isPartOf`, sessionUri],
-      [messageUri, `${SCHEMA}author`, `${CHAT}agent`],
-      [messageUri, `${SCHEMA}text`, JSON.stringify(reply)],
-      [messageUri, `${DKG}turnId`, JSON.stringify(turnId)],
-      [messageUri, `${SCHEMA}dateCreated`, `"${timestamp}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`],
-    );
-  };
-  return { store, manager, seed };
+  const { tools, insert, seed } = createChatTurnStoreFixture(store);
+  const manager = new ChatMemoryManager(tools, { apiKey: '' });
+  return { store, manager, insert, seed };
 }
 
 describe('daemon durable chat-turn session recovery', () => {
