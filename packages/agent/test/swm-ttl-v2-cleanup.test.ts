@@ -242,18 +242,14 @@ describe('SWM TTL cleanup of graph-scoped V2 operations', () => {
     const cg = 'swm-ttl-v2-bounded-batch';
     await node.createContextGraph({ id: cg, name: 'V2 TTL bounded batch', description: 'batch cleanup' });
     const metaGraph = contextGraphSharedMemoryMetaUri(cg);
-    const publishedAt = new Date(Date.now() - TTL_MS * 2).toISOString();
-    const quads: Quad[] = [];
+    const operations: Awaited<ReturnType<typeof seedV2Operation>>[] = [];
     for (let i = 0; i < 251; i += 1) {
-      const subject = opSubject(cg, `batch-${i}`);
-      quads.push(
-        { graph: metaGraph, subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${DKG}WorkspaceOperation` },
-        { graph: metaGraph, subject, predicate: `${DKG}shareOperationId`, object: `"batch-${i}"` },
-        { graph: metaGraph, subject, predicate: `${DKG}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
-        { graph: metaGraph, subject, predicate: `${DKG}rootEntity`, object: `urn:v2:batch:${i}` },
-      );
+      operations.push(await seedV2Operation(store, {
+        contextGraphId: cg, shareOperationId: `batch-${i}`, assertionVersion: 1,
+        ageMs: TTL_MS * 2, kaUal: KA_UAL.slice(0, -1) + String(i + 1),
+      }));
     }
-    await store.insert(quads);
+    expect(await graphTripleCount(store, operations[0]!.snapshotGraph)).toBe(1);
 
     const originalQuery = store.query.bind(store);
     const expiryBatchSizes: number[] = [];
@@ -278,6 +274,10 @@ describe('SWM TTL cleanup of graph-scoped V2 operations', () => {
       expect(secondDeleted).toBe(firstDeleted);
       expect(expiryBatchSizes).toEqual([250, 1, 0]);
       expect(expiryBatchSizes.every((size) => size <= 250)).toBe(true);
+      for (const operation of operations) {
+        expect(await subjectRowCount(store, operation.metaGraph, operation.opSubject), operation.opSubject).toBe(0);
+        expect(await graphTripleCount(store, operation.snapshotGraph), operation.snapshotGraph).toBe(0);
+      }
     } finally {
       instrumentedStore.query = originalQuery;
     }

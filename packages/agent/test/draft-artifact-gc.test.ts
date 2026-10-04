@@ -9,7 +9,8 @@ import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledge
 import { storageAckNotRetainedFilters } from '../src/storage-ack-retention.js';
 import { expiredSwmOperationMayRetire } from '../src/swm-expiry-batch.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
-import { collectAbandonedDraftArtifacts, withUnqueuedDraftOperation, withDraftOperationCollectionBatches } from '../src/draft-artifact-gc.js';
+import { collectAbandonedDraftArtifacts } from '../src/draft-artifact-gc.js';
+import { withUnqueuedDraftOperation, withDraftOperationCollectionBatches } from '../src/swm-operation-expiry.js';
 const CG = 'draft-gc';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const KA = `did:dkg:31337/${AUTHOR}/7`;

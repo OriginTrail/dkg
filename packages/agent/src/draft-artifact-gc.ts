@@ -10,17 +10,10 @@ import {
 import { stripMetadataLiteral as literal } from './sync/metadata-literal.js';
 import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 
-type DraftArtifactReferences = NonNullable<Awaited<ReturnType<typeof readDraftArtifactReferences>>>;
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const ACK_WINDOW_MS = 5 * 60_000;
 const BATCH_SIZE = 32;
-/** Complete TTL policy, shared by operation and alias retirement under one KA lock. */
-export interface DraftOperationRetirementPolicy {
-  readonly writeLocks: Map<string, Promise<void>>;
-  readonly cutoffMs: number;
-  readonly mayRetire: (operationSubject: string) => Promise<boolean>;
-}
 const cursors = new WeakMap<TripleStore, Map<string, { operation: string; privateGraph: string }>>();
 
 async function exists(store: TripleStore, query: string): Promise<boolean> {
@@ -121,94 +114,5 @@ export async function collectAbandonedDraftArtifacts(input: {
       });
     }
     return counts;
-  });
-}
-
-/** The older TTL lane uses the same admission fence and immutable queue references. */
-async function collectUnqueuedDraftOperation(
-  store: TripleStore,
-  references: DraftArtifactReferences,
-  contextGraphId: string,
-  subGraphName: string | undefined,
-  operationSubject: string,
-  now: number,
-  collect: () => Promise<void>,
-  ownership: DraftOperationRetirementPolicy,
-): Promise<void> {
-  if (references.rawNamespaces.has(JSON.stringify([contextGraphId, subGraphName ?? '']))) return;
-  const meta = `did:dkg:context-graph:${contextGraphId}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory_meta`;
-  const rows = await store.query(`SELECT ?id ?ka WHERE { GRAPH <${assertSafeIri(meta)}> {
-    <${assertSafeIri(operationSubject)}> <${DKG}shareOperationId> ?id
-    OPTIONAL { <${operationSubject}> <${DKG}kaUal> ?ka }
-  } } LIMIT 2`, { source: 'agent.draftArtifacts.ttlOperationReference', priority: 'background' });
-  if (rows.type !== 'bindings' || rows.bindings.length !== 1 || !rows.bindings[0]?.['id']) return;
-  const id = literal(rows.bindings[0]['id']);
-  if (workspaceOperationSubject(contextGraphId, id) !== operationSubject) return;
-  if (references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, id))) return;
-  const retire = async () => {
-    const current = await store.query(`SELECT ?at WHERE { GRAPH <${meta}> { <${operationSubject}> <${DKG}publishedAt> ?at } }`, { source: 'agent.draftArtifacts.ttlCurrentExpiry', priority: 'background' });
-    if (current.type !== 'bindings' || current.bindings.length === 0
-      || current.bindings.some(row => !row['at'] || !Number.isFinite(Date.parse(literal(row['at']))) || Date.parse(literal(row['at'])) >= ownership.cutoffMs)) return;
-    if (!await ownership.mayRetire(operationSubject)) return;
-    // Every pointer in the current alias class owns the same assertion.
-    // A live, queued, ACK-owned, or unreadable alias keeps the entire class,
-    // including the older publisher clock. This read and all TTL mutations
-    // share the receiver's KA lock; the collection fence owns queue admission.
-    const aliases = await store.query(`SELECT DISTINCT ?alias ?at WHERE { GRAPH <${meta}> {
-      ?head <${DKG}shareOperationId> ${sparqlString(id)} ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ?alias .
-      FILTER(?alias != ${sparqlString(id)})
-      OPTIONAL { ?op <${DKG}shareOperationId> ?alias ; <${DKG}publishedAt> ?at }
-    } }`, { source: 'agent.draftArtifacts.ttlHeadAliases', priority: 'background' });
-    if (aliases.type !== 'bindings') return;
-    for (const row of aliases.bindings) {
-      if (!row['alias'] || !row['at']) return;
-      const alias = literal(row['alias']);
-      const at = Date.parse(literal(row['at']));
-      if (!Number.isFinite(at) || at >= ownership.cutoffMs
-        || references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, alias))) return;
-      const aliasSubject = workspaceOperationSubject(contextGraphId, alias);
-      if (!await ownership.mayRetire(aliasSubject)) return;
-    }
-    await markDraftOperationRetired(store, contextGraphId, subGraphName, id, now);
-    await collect();
-  };
-  const ka = rows.bindings[0]?.['ka'];
-  if (!ka) return; // Unknown KA ownership cannot certify retirement.
-  await withKeyedLocks(ownership.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, ka)], retire);
-}
-
-
-export interface DraftOperationCollectionSession {
-  withUnqueuedOperation: (
-    contextGraphId: string, subGraphName: string | undefined, operationSubject: string,
-    now: number, collect: () => Promise<void>,
-    ownership: DraftOperationRetirementPolicy,
-  ) => Promise<void>;
-}
-
-/** One immutable queue snapshot per bounded chunk, with admission between chunks. */
-export async function withDraftOperationCollectionBatches<T>(
-  store: TripleStore, items: readonly T[], collect: (item: T, session: DraftOperationCollectionSession) => Promise<void>,
-): Promise<void> {
-  for (let offset = 0; offset < items.length; offset += BATCH_SIZE) {
-    await withDraftArtifactCollection(store, async () => {
-      const references = await readDraftArtifactReferences(store);
-      if (!references) return;
-      const session: DraftOperationCollectionSession = {
-        withUnqueuedOperation: (...args) => collectUnqueuedDraftOperation(store, references, ...args),
-      };
-      for (const item of items.slice(offset, offset + BATCH_SIZE)) await collect(item, session);
-    });
-  }
-}
-
-/** Single-operation entry using the same complete TTL ownership policy. */
-export async function withUnqueuedDraftOperation(
-  store: TripleStore, contextGraphId: string, subGraphName: string | undefined,
-  operationSubject: string, now: number, collect: () => Promise<void>,
-  ownership: DraftOperationRetirementPolicy,
-): Promise<void> {
-  await withDraftOperationCollectionBatches(store, [operationSubject], async (subject, session) => {
-    await session.withUnqueuedOperation(contextGraphId, subGraphName, subject, now, collect, ownership);
   });
 }

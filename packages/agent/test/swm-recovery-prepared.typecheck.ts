@@ -43,14 +43,14 @@ if (prepared.authenticatedPublisherOperation) {
 const incompleteCandidate: typeof candidate = { provenance: { shareOperationId: 'B', publishedAtMs: 1 } };
 void [decodedOwner, decodedClock, immutableIdentity, incompleteCandidate, authenticatedChronology, storedOutcome];
 
-import type { DraftOperationRetirementPolicy } from '../src/draft-artifact-gc.js';
+import type { DraftOperationRetirementPolicy } from '../src/swm-operation-expiry.js';
 // @ts-expect-error retirement cannot omit the shared KA ownership map
 const unlocked: DraftOperationRetirementPolicy = { cutoffMs: 1, mayRetire: async () => true };
 // @ts-expect-error retirement always requires the complete ACK/alias policy
 const ungated: DraftOperationRetirementPolicy = { writeLocks: new Map(), cutoffMs: 1 };
 void [unlocked, ungated];
 
-import { withUnqueuedDraftOperation } from '../src/draft-artifact-gc.js';
+import { withUnqueuedDraftOperation } from '../src/swm-operation-expiry.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 declare const store: TripleStore;
 // @ts-expect-error collection cannot enter a queue-only optional mode

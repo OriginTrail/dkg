@@ -2,6 +2,7 @@ import { acquireKnowledgeAssetWorkspaceHead } from './workspace-head-acquisition
 export { RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
 import { workspaceOperationAlias, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
 import { snapshotOperation } from './workspace-snapshot-lifecycle.js';
+import { withWorkspaceOperationWriteLock } from './workspace-operation-write-lock.js';
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject, normalizeWorkspaceSubGraphName as normalizeOptionalSubGraphName } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
@@ -792,7 +793,7 @@ type StoreWorkspaceOperationPublicQuadsParams = {
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 };
 
-export const storeWorkspaceOperationPublicQuads = snapshotOperation<StoreWorkspaceOperationPublicQuadsParams, void>(async params => {
+export const storeWorkspaceOperationPublicQuads = snapshotOperation<StoreWorkspaceOperationPublicQuadsParams, void>(async params => withWorkspaceOperationWriteLock(params, async () => {
   const roots = normalizeRoots(params.rootEntities);
   if (roots.length === 0) return;
 
@@ -877,7 +878,7 @@ export const storeWorkspaceOperationPublicQuads = snapshotOperation<StoreWorkspa
     // read-both (an explicit legacy ref row wins when present).
   }
   await params.store.insert(snapshotQuads);
-});
+}));
 
 /**
  * Store one immutable public snapshot for one complete graph-scoped KA.
@@ -902,7 +903,7 @@ type StoreKnowledgeAssetOperationPublicQuadsParams = {
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 };
 
-export const storeKnowledgeAssetOperationPublicQuads = snapshotOperation<StoreKnowledgeAssetOperationPublicQuadsParams, void>(async params => {
+export const storeKnowledgeAssetOperationPublicQuads = snapshotOperation<StoreKnowledgeAssetOperationPublicQuadsParams, void>(async params => withWorkspaceOperationWriteLock(params, async () => {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
   const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(
@@ -970,7 +971,7 @@ export const storeKnowledgeAssetOperationPublicQuads = snapshotOperation<StoreKn
   }
   await params.store.insert(metadata);
   await persistWorkspaceOperationEvidence(params.store, metadata);
-});
+}));
 
 /** Resolve and integrity-check a complete graph-scoped KA operation snapshot. */
 export async function resolveKnowledgeAssetOperationPublicQuads(params: {

@@ -82,3 +82,9 @@ export function assertionLifecycleWriteLockKey(
     ? agentAddress.toLowerCase() : agentAddress;
   return `assertion-lifecycle:${JSON.stringify([contextGraphId, subGraphName ?? '', normalizedAgentAddress, name])}`;
 }
+
+/** Entity ownership shared by legacy share, conditional writes and expiry. */
+export function swmEntityWriteLockKey(contextGraphId: string, subGraphName: string | undefined, subject: string): string {
+  const namespace = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+  return `${namespace}\0${subject}`;
+}

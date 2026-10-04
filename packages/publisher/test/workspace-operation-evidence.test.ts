@@ -3,7 +3,7 @@ import { normalizeWorkspaceOperationProvenance } from '../src/workspace-operatio
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { persistWorkspaceOperationEvidence, readAuthenticatedWorkspaceOperations, RECOVERED_OPERATION_CHRONOLOGY, workspaceOperationAlias } from '../src/workspace-operation-alias.js';
 
 const SUBJECT = 'urn:test:operation', GRAPH = 'urn:test:operation-meta', DKG = 'http://dkg.io/ontology/';
@@ -42,6 +42,61 @@ describe('canonical operation evidence round trips', () => {
     const result = await f.store.query(`SELECT ?digest WHERE { GRAPH <${EVIDENCE_GRAPH}> { <${SUBJECT}> ?p ?digest } }`);
     expect(result.type === 'bindings' ? result.bindings : []).toEqual([{ digest: JSON.stringify(CANONICAL_DIGEST) }]);
     expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set([SUBJECT]));
+  });
+
+  it('refreshes evidence in one native subject transaction without exposing an empty subject or touching siblings', async () => {
+    const f = await fixture(), sibling = rows().map(row => ({ ...row, subject: `${SUBJECT}:sibling` }));
+    await persistWorkspaceOperationEvidence(f.store, sibling);
+    const changed = rows().map(row => row.predicate === `${DKG}publisherPeerId` ? { ...row, object: '"next-peer"' } : row);
+    const embedded = (f.store as unknown as { store: { update: (sparql: string) => void } }).store;
+    const update = vi.spyOn(embedded, 'update');
+    const remove = vi.spyOn(f.store, 'deleteByPatternWithoutCount');
+    const insert = vi.spyOn(f.store, 'insert');
+    await persistWorkspaceOperationEvidence(f.store, changed);
+    expect(await readAuthenticatedWorkspaceOperations(f.store, changed)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(f.store, sibling)).toEqual(new Set([`${SUBJECT}:sibling`]));
+    expect(update).toHaveBeenCalledOnce();
+    expect(update.mock.calls[0][0]).toContain('DELETE WHERE');
+    expect(update.mock.calls[0][0]).toContain('INSERT DATA');
+    expect(remove).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it('retains prior evidence when the native atomic replacement fails and never falls back after execution failure', async () => {
+    const f = await fixture();
+    const changed = rows().map(row => row.predicate === `${DKG}publisherPeerId` ? { ...row, object: '"next-peer"' } : row);
+    const embedded = (f.store as unknown as { store: { update: (sparql: string) => void } }).store;
+    const nativeUpdate = embedded.update.bind(embedded);
+    // LOAD fails after the DELETE/INSERT within the real native transaction. A fallback
+    // insert outage reproduces the destructive delete/insert predecessor.
+    const update = vi.spyOn(embedded, 'update').mockImplementationOnce(sparql => nativeUpdate(`${sparql}; LOAD <urn:test:unavailable-operation-evidence>`));
+    const insert = vi.spyOn(f.store, 'insert').mockRejectedValueOnce(new Error('Evidence insertion unavailable'));
+    await expect(persistWorkspaceOperationEvidence(f.store, changed)).rejects.toThrow();
+    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, changed)).toEqual(new Set());
+    expect(update).toHaveBeenCalledOnce();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it.each(['absent', 'refused'] as const)('keeps canonical digest refresh and sibling evidence with %s atomic capability', async mode => {
+    const f = await fixture(), sibling = rows().map(row => ({ ...row, subject: `${SUBJECT}:sibling` }));
+    await persistWorkspaceOperationEvidence(f.store, sibling);
+    const changed = rows().map(row => row.predicate === `${DKG}publisherPeerId` ? { ...row, object: '"next-peer"' } : row);
+    const refuse = vi.fn(async () => { throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'EvidenceTestStore'); });
+    const store = new Proxy(f.store, { get(target, property) {
+      if (property === 'replaceSubject') return mode === 'absent' ? undefined : refuse;
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const remove = vi.spyOn(f.store, 'deleteByPatternWithoutCount');
+    await persistWorkspaceOperationEvidence(store, changed);
+    expect(await readAuthenticatedWorkspaceOperations(f.store, changed)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(f.store, sibling)).toEqual(new Set([`${SUBJECT}:sibling`]));
+    expect(remove).toHaveBeenCalledOnce();
+    expect(remove.mock.calls[0][0]).toEqual({ graph: EVIDENCE_GRAPH, subject: SUBJECT });
+    expect(refuse).toHaveBeenCalledTimes(mode === 'refused' ? 1 : 0);
   });
 
   it.each([

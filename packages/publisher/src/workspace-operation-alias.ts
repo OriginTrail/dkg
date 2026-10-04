@@ -2,7 +2,8 @@
 import { createHash } from 'node:crypto';
 import { assertSafeIri, canonicalizeObjectTermForHash, sparqlString, type TimestampMsV1 } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
-import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import type { NormalizedWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceOperationAlias, KnowledgeAssetWorkspaceSnapshotLocator } from './workspace-resolution.js';
 
@@ -43,8 +44,9 @@ function evidenceDigest(rows: readonly Quad[]): string {
 export async function persistWorkspaceOperationEvidence(store: TripleStore, rows: readonly Quad[]): Promise<void> {
   const subject = rows[0]?.subject;
   if (!subject || rows.some(row => row.subject !== subject)) throw new Error('Invalid immutable operation evidence');
-  await deleteByPatternWithoutCount(store, { graph: LOCAL_EVIDENCE_GRAPH, subject });
-  await store.insert([{ subject, predicate: EVIDENCE_DIGEST, object: sparqlString(evidenceDigest(rows)), graph: LOCAL_EVIDENCE_GRAPH }]);
+  await replaceSubjectAtomicallyOrFallback(store, LOCAL_EVIDENCE_GRAPH, subject,
+    [{ subject, predicate: EVIDENCE_DIGEST, object: sparqlString(evidenceDigest(rows)), graph: LOCAL_EVIDENCE_GRAPH }],
+    'publisher.workspace.authenticatedOperationEvidence');
 }
 
 /** Reserved local graph evidence cannot arrive through provider metadata unions. */
