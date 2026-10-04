@@ -41,13 +41,15 @@ const STORE_CONFIG = {
 
 function mockDocker(exitCode = 0) {
   const calls: string[][] = [];
+  const options: Array<Parameters<DockerRunner['run']>[1]> = [];
   const runner: DockerRunner = {
-    async run(args) {
+    async run(args, opts) {
       calls.push([...args]);
+      options.push(opts);
       return { stdout: '', stderr: exitCode === 0 ? '' : 'engine sad', exitCode };
     },
   };
-  return { runner, calls };
+  return { runner, calls, options };
 }
 
 /** Fetch whose health answer is flipped per test via `state.ok`. */
@@ -68,7 +70,7 @@ function switchableFetch() {
 }
 
 function makeMonitor(overrides: Partial<Parameters<typeof createStoreRuntimeMonitor>[0]> = {}) {
-  const { runner, calls: dockerCalls } = mockDocker();
+  const { runner, calls: dockerCalls, options: dockerOptions } = mockDocker();
   const fetch = switchableFetch();
   const logs: string[] = [];
   const clock = { t: 1_000_000 };
@@ -81,7 +83,7 @@ function makeMonitor(overrides: Partial<Parameters<typeof createStoreRuntimeMoni
     now: () => clock.t,
     ...overrides,
   });
-  return { monitor, dockerCalls, fetch, logs, clock };
+  return { monitor, dockerCalls, dockerOptions, fetch, logs, clock };
 }
 
 const restartCalls = (calls: string[][]) => calls.filter((c) => c[0] === 'restart');
@@ -94,9 +96,10 @@ describe('createStoreRuntimeMonitor', () => {
   });
 
   it('issues exactly one bounded docker restart after 6 consecutive failures', async () => {
-    const { monitor, dockerCalls } = makeMonitor();
+    const { monitor, dockerCalls, dockerOptions } = makeMonitor();
     for (let i = 0; i < 6; i++) await monitor.tick();
     expect(restartCalls(dockerCalls)).toEqual([['restart', '-t', '30', CONTAINER]]);
+    expect(dockerOptions).toEqual([{ timeoutMs: 120_000 }]);
     expect(monitor.stats.restartsTotal).toBe(1);
     expect(monitor.stats.consecutiveFailures).toBe(0);
     // Restart-ONLY: the monitor must never rm/recreate/touch volumes.
@@ -290,7 +293,7 @@ describe('createStoreRuntimeMonitor', () => {
 
 describe('attemptManagedStoreBootRecovery', () => {
   it('returns true when the store answers after one restart', async () => {
-    const { runner, calls } = mockDocker();
+    const { runner, calls, options } = mockDocker();
     const fetch = switchableFetch();
     fetch.state.ok = true;
     const logs: string[] = [];
@@ -304,6 +307,7 @@ describe('attemptManagedStoreBootRecovery', () => {
       pollIntervalMs: 1,
     })).resolves.toBe(true);
     expect(restartCalls(calls)).toEqual([['restart', '-t', '30', CONTAINER]]);
+    expect(options).toEqual([{ timeoutMs: 120_000 }]);
     expect(logs.some((l) => l.includes('boot-recovery succeeded'))).toBe(true);
   });
 

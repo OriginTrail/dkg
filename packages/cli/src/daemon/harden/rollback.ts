@@ -41,10 +41,6 @@ export async function rollbackToBackup(opts: {
   log: (m: string) => void;
 }): Promise<RollbackResult> {
   const { docker, containerName, backupName, log } = opts;
-  const cmdRm = `docker rm -f ${containerName}`;
-  const cmdRename = `docker rename ${backupName} ${containerName}`;
-  const cmdPolicy = `docker update --restart=unless-stopped ${containerName}`;
-  const cmdStart = `docker start ${containerName}`;
   const failStep = (
     step: string,
     detail: string,
@@ -79,38 +75,24 @@ export async function rollbackToBackup(opts: {
         detail: `"${containerName}" does not mount ${blazegraphVolumeName(containerName)}; rm refused`,
       };
     }
-    const rmResult = await docker.run(['rm', '-f', containerName]);
-    if (rmResult.exitCode !== 0) {
-      return failStep(
-        'rm-failed-container',
-        `docker rm -f exited ${rmResult.exitCode}: ${rmResult.stderr.trim() || '(no stderr)'}`,
-        [cmdRm, cmdRename, cmdPolicy, cmdStart],
-      );
+  }
+  const commands = [
+    ...(inspect.exitCode === 0 ? [{ id: 'rm-failed-container', args: ['rm', '-f', containerName] }] : []),
+    { id: 'rename-backup', args: ['rename', backupName, containerName] },
+    { id: 'restore-restart-policy', args: ['update', '--restart=unless-stopped', containerName] },
+    { id: 'start-legacy-container', args: ['start', containerName] },
+  ];
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index]!;
+    let result;
+    try { result = await docker.run(command.args); }
+    catch (error) {
+      return failStep(command.id, `docker ${command.args[0]} invocation failed: ${String(error)}`,
+        commands.slice(index).map(({ args }) => `docker ${args.join(' ')}`));
     }
-  }
-  const renameResult = await docker.run(['rename', backupName, containerName]);
-  if (renameResult.exitCode !== 0) {
-    return failStep(
-      'rename-backup',
-      `docker rename exited ${renameResult.exitCode}: ${renameResult.stderr.trim() || '(no stderr)'}`,
-      [cmdRename, cmdPolicy, cmdStart],
-    );
-  }
-  const policyResult = await docker.run(['update', '--restart=unless-stopped', containerName]);
-  if (policyResult.exitCode !== 0) {
-    return failStep(
-      'restore-restart-policy',
-      `docker update exited ${policyResult.exitCode}: ${policyResult.stderr.trim() || '(no stderr)'}`,
-      [cmdPolicy, cmdStart],
-    );
-  }
-  const startResult = await docker.run(['start', containerName]);
-  if (startResult.exitCode !== 0) {
-    return failStep(
-      'start-legacy-container',
-      `docker start exited ${startResult.exitCode}: ${startResult.stderr.trim() || '(no stderr)'}`,
-      [cmdStart],
-    );
+    if (result.exitCode !== 0) return failStep(command.id,
+      `docker ${command.args[0]} exited ${result.exitCode}: ${result.stderr.trim() || '(no stderr)'}`,
+      commands.slice(index).map(({ args }) => `docker ${args.join(' ')}`));
   }
   log(`Rollback complete: ${containerName} restored and started.`);
   return { complete: true };

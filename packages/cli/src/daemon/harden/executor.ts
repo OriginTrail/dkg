@@ -7,8 +7,9 @@ import { BLAZEGRAPH_CONTAINER_PORT, computeBlazegraphHeapMb, defaultDockerRunner
 import { storeHardenLockPath } from '../store-runtime-monitor.js';
 import { assertDaemonStoppedForStoreMigration } from '../store-maintenance-gate.js';
 import { HARDEN_BACKUP_SUFFIX, inspectHardenState } from './state.js';
-import { HARDEN_EXPORT_FILENAME, hardenMigrationWorkflow, planHardenMigration, type HardenStep } from './steps.js';
-import { fileSize, type HardenWorkflowContext } from './actions.js';
+import { HARDEN_EXPORT_FILENAME, hardenStepDefs, planHardenMigration, type HardenStep } from './steps.js';
+import * as actions from './actions.js';
+import { fileSize, type HardenWorkflowInputs } from './actions.js';
 import { rollbackMigrationFailure } from './rollback-failure.js';
 
 export interface ExecuteHardenMigrationOptions {
@@ -78,24 +79,35 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
     + `HostConfig.PortBindings nor NetworkSettings.Ports carries a binding for ${BLAZEGRAPH_CONTAINER_PORT}/tcp (or 8080/tcp). `
     + 'Refusing to guess. Pass --port <port> (the port in your store URL, typically 9999).');
   const input = { containerName, namespace, hostPort, heapMb, migrationDir, state: info.state, running: info.running };
-  const workflow = hardenMigrationWorkflow(input);
+  const sourceName = info.state === 'backup-only' ? backupName : containerName;
+  const defs = hardenStepDefs({ ...input, sourceContainerName: sourceName });
   if (opts.dryRun) return { outcome: 'dry-run', containerName,
     backupContainerName: info.state === 'backup-only' ? backupName : null,
     hostPort, exportPath: null, journalBytes: null, heapMb, steps: planHardenMigration(input) };
-  const sourceName = info.state === 'backup-only' ? backupName : containerName;
   const baseUrl = `http://127.0.0.1:${hostPort}`;
-  const ctx: HardenWorkflowContext = { ...input, opts, docker, info, sourceName, backupName, exportPath, baseUrl,
+  const ctx: HardenWorkflowInputs = { ...input, opts, docker, info, sourceName, backupName, exportPath, baseUrl,
     sparqlUrl: `${baseUrl}/bigdata/namespace/${encodeURIComponent(namespace)}/sparql`,
-    fetchImpl: opts.fetch ?? globalThis.fetch, log, preSize: null, exportedSize: null,
-    integrityArgs: workflow.find(phase => phase.id === 'export-integrity')?.dockerArgs ?? [],
+    fetchImpl: opts.fetch ?? globalThis.fetch, log,
     stoppedHint: `NOTE: the legacy store container "${sourceName}" is currently STOPPED — `
       + `restore service with: docker start ${sourceName} (then re-run harden when ready).`,
   };
   if (info.state === 'hardened') {
-    for (const phase of workflow) await phase.execute(ctx);
-    const backupExists = (await docker.run(['inspect', backupName])).exitCode === 0;
+    const backup = await docker.run(['inspect', backupName]);
+    if (backup.exitCode !== 0 && !/no such (?:object|container)/i.test(backup.stderr)) throw new Error(
+      `Cannot determine whether migration backup "${backupName}" remains: ${backup.stderr.trim() || 'Docker inspect failed'}. `
+      + 'Refusing ASK-only verification while migration state is unknown.');
+    const backupExists = backup.exitCode === 0;
+    const savedSize = await fileSize(exportPath);
+    if (backupExists || savedSize !== null) {
+      if (savedSize === null || savedSize <= 0) throw new Error(
+        `Migration replacement "${containerName}" has no valid retained export for journal verification. `
+        + `Keep backup "${backupName}" and restore or locate the export before retrying.`);
+      // Docker's hardened shape is reached before first-run verification.
+      // Retained migration copies require the same identity/size proof on retry.
+      await actions.verifyReplacement(ctx, defs.verify, { path: exportPath, bytes: savedSize });
+    } else await actions.verifyExisting(ctx);
     return { outcome: 'already-hardened', containerName, backupContainerName: backupExists ? backupName : null,
-      hostPort, exportPath: await fileSize(exportPath) === null ? null : exportPath, journalBytes: null, heapMb };
+      hostPort, exportPath: savedSize === null ? null : exportPath, journalBytes: savedSize, heapMb };
   }
   await mkdir(migrationDir, { recursive: true });
   await mkdir(opts.dkgHome, { recursive: true });
@@ -106,16 +118,23 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
   try {
     await assertDaemonStoppedForStoreMigration(opts.dkgHome);
     log(`Wrote harden lock ${lockPath} — daemon startup and automatic store restarts stay blocked through verification and rollback.`);
-    for (const phase of workflow) {
-      try { await phase.execute(ctx); }
-      catch (cause) {
-        if (phase.recovery !== 'after-swap') throw cause;
-        await rollbackMigrationFailure(ctx, phase.id === 'verify' ? 'verification' : 'post-swap setup', cause);
-      }
-    }
+    const preSize = info.running ? await actions.readJournalSize(ctx, defs.journalSize) : null;
+    if (info.running) await actions.checkFreeDisk(ctx, preSize);
+    const stopped = await actions.stopSource(ctx, defs.stop, defs.exportIntegrity);
+    await actions.exportJournal(ctx, defs.exportJournal);
+    const exported = await actions.verifyExport(ctx, stopped, preSize, defs.exportIntegrity);
+    await actions.createVolume(ctx, defs.volumeCreate);
+    await actions.seedVolume(ctx, defs.seedVolume, exported);
+    if (info.state === 'legacy') await actions.renameBackup(ctx, defs.renameBackup);
+    try {
+      await actions.disableBackupRestart(ctx, defs.disableBackupRestart);
+      await actions.runHardened(ctx, defs.runHardened);
+    } catch (cause) { await rollbackMigrationFailure(ctx, 'post-swap setup', cause); }
+    try { await actions.verifyReplacement(ctx, defs.verify, exported); }
+    catch (cause) { await rollbackMigrationFailure(ctx, 'verification', cause); }
     log(`Verification passed — ${containerName} is hardened.`);
     return { outcome: 'hardened', containerName, backupContainerName: backupName, hostPort,
-      exportPath, journalBytes: ctx.exportedSize, heapMb };
+      exportPath, journalBytes: exported.bytes, heapMb };
   } finally {
     await rm(lockPath, { force: true }).catch(() => {});
   }

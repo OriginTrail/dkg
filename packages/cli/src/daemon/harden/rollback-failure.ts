@@ -1,8 +1,8 @@
 import { rollbackToBackup, type RollbackResult } from './rollback.js';
-import type { HardenWorkflowContext } from './actions.js';
+import type { HardenWorkflowInputs } from './actions.js';
 
 /** Only phases after the authoritative source rename enter automatic rollback. */
-export async function rollbackMigrationFailure(ctx: HardenWorkflowContext,
+export async function rollbackMigrationFailure(ctx: HardenWorkflowInputs,
   phase: 'post-swap setup' | 'verification', err: unknown): Promise<never> {
   const { log, docker, containerName, backupName, exportPath } = ctx;
   log(

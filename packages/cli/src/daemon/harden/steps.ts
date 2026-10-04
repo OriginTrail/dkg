@@ -11,8 +11,6 @@
  * the incident background.
  */
 import { join } from 'node:path';
-import * as actions from './actions.js';
-import type { HardenWorkflowContext } from './actions.js';
 import {
   BLAZEGRAPH_DATA_DIR,
   BLAZEGRAPH_IMAGE,
@@ -189,39 +187,18 @@ export function hardenStepDefs(input: HardenStepDefsInput) {
   } satisfies Record<string, HardenStep>;
 }
 
-export interface HardenMigrationPhase extends HardenStep {
-  readonly recovery: 'before-swap' | 'after-swap' | 'existing';
-  readonly execute: (context: HardenWorkflowContext) => Promise<void>;
-}
-
-/** Both rendering and execution select this exact ordered workflow. */
-export function hardenMigrationWorkflow(input: HardenPlanInput): HardenMigrationPhase[] {
+/** The plan shares the executor's named command definitions and their order. */
+export function planHardenMigration(input: HardenPlanInput): HardenStep[] {
   const defs = hardenStepDefs({ ...input, sourceContainerName: input.state === 'backup-only'
     ? `${input.containerName}${HARDEN_BACKUP_SUFFIX}` : input.containerName });
-  const phase = (step: HardenStep, execute: (context: HardenWorkflowContext, step: HardenStep) => Promise<void>,
-    recovery: HardenMigrationPhase['recovery'] = 'before-swap'): HardenMigrationPhase => ({
-    ...step, recovery, execute: context => execute(context, step),
-  });
   if (input.state === 'absent') return [];
-  if (input.state === 'hardened') return [phase({ id: 'verify',
-    description: 'verify the existing hardened store answers ASK {} at its configured namespace endpoint',
-  }, actions.verifyExisting, 'existing')];
+  if (input.state === 'hardened') return [{ id: 'verify', description:
+    'verify ASK; repeat identity and journal verification when migration backup/export remains' }];
   const readableJournal = input.running ?? (input.state !== 'backup-only');
   return [
-    ...(readableJournal ? [phase(defs.journalSize, actions.readJournalSize),
-      phase(defs.diskPreflight, actions.checkFreeDisk)] : []),
-    phase(defs.stop, actions.stopSource),
-    phase(defs.exportJournal, actions.exportJournal),
-    phase(defs.exportIntegrity, actions.verifyExport),
-    phase(defs.volumeCreate, actions.createVolume),
-    phase(defs.seedVolume, actions.seedVolume),
-    ...(input.state === 'legacy' ? [phase(defs.renameBackup, actions.renameBackup)] : []),
-    phase(defs.disableBackupRestart, actions.disableBackupRestart, 'after-swap'),
-    phase(defs.runHardened, actions.runHardened, 'after-swap'),
-    phase(defs.verify, actions.verifyReplacement, 'after-swap'),
+    ...(readableJournal ? [defs.journalSize, defs.diskPreflight] : []),
+    defs.stop, defs.exportJournal, defs.exportIntegrity, defs.volumeCreate, defs.seedVolume,
+    ...(input.state === 'legacy' ? [defs.renameBackup] : []),
+    defs.disableBackupRestart, defs.runHardened, defs.verify,
   ];
-}
-
-export function planHardenMigration(input: HardenPlanInput): HardenStep[] {
-  return hardenMigrationWorkflow(input).map(({ execute: _execute, recovery: _recovery, ...step }) => step);
 }

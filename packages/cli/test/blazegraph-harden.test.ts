@@ -36,6 +36,7 @@ import {
   type DockerCommandResult,
 } from '../src/daemon/blazegraph-docker.js';
 import { storeHardenLockPath } from '../src/daemon/store-runtime-monitor.js';
+import { rollbackToBackup } from '../src/daemon/harden/rollback.js';
 import { parseHardenPortOption } from '../src/commands/store.js';
 
 const NAME = 'dkg-blazegraph-dkg';
@@ -525,6 +526,94 @@ describe('executeHardenMigration', () => {
     }
   });
 
+  it.each(['identity', 'journal'] as const)(
+    'repeats %s verification after failed rollback leaves a hardened-shaped replacement', async (failure) => {
+      let created = false;
+      let journalInvalid = failure === 'journal';
+      const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir,
+        failOn: args => {
+          if (args[0] === 'run' && args[1] === '-d') created = true;
+          if (args[0] === 'rm') return { stdout: '', stderr: 'replacement busy', exitCode: 1 };
+          if (created && journalInvalid && args[0] === 'exec') return ok(String(JOURNAL_BYTES - 1));
+          return null;
+        },
+      });
+      const failing = verifierFetch({ identityPresent: failure !== 'identity' });
+      await expect(executeHardenMigration(baseOpts(runner, failing.fn)))
+        .rejects.toThrow(/rollback is INCOMPLETE/);
+      const retryStart = calls.length;
+      await expect(executeHardenMigration(baseOpts(runner, failing.fn)))
+        .rejects.toThrow(failure === 'identity' ? /identity-tag/ : /migrated journal/);
+      expect(calls.slice(retryStart).every(args => args[0] === 'inspect' || args[0] === 'exec')).toBe(true);
+      expect(readFileSync(join(migrationDir, HARDEN_EXPORT_FILENAME))).toHaveLength(JOURNAL_BYTES);
+      // Success requires the formerly failed proof to pass, rather than ASK alone.
+      journalInvalid = false;
+      const recovered = verifierFetch();
+      await expect(executeHardenMigration(baseOpts(runner, recovered.fn))).resolves.toMatchObject({
+        outcome: 'already-hardened', journalBytes: JOURNAL_BYTES, backupContainerName: BACKUP,
+      });
+    },
+  );
+
+  it('refuses a migration-shaped retry without its retained export', async () => {
+    const { runner } = scriptedDocker({ initial: 'legacy', migrationDir,
+      failOn: args => args[0] === 'rm' ? { stdout: '', stderr: 'busy', exitCode: 1 } : null,
+    });
+    const failing = verifierFetch({ identityPresent: false });
+    await expect(executeHardenMigration(baseOpts(runner, failing.fn))).rejects.toThrow(/rollback is INCOMPLETE/);
+    rmSync(join(migrationDir, HARDEN_EXPORT_FILENAME));
+    await expect(executeHardenMigration(baseOpts(runner, verifierFetch().fn)))
+      .rejects.toThrow(/no valid retained export/);
+  });
+
+  it.each([0, 1, 2, 3])('reports exactly the rollback suffix beginning at failed command %s', async (failed) => {
+    const commands = [
+      ['rm', '-f', NAME], ['rename', BACKUP, NAME],
+      ['update', '--restart=unless-stopped', NAME], ['start', NAME],
+    ];
+    const calls: string[][] = [];
+    const logs: string[] = [];
+    const docker: DockerRunner = { run: async args => {
+      calls.push([...args]);
+      if (args[0] === 'inspect') return ok(inspectJson({ hardened: true }));
+      return args.join(' ') === commands[failed]!.join(' ')
+        ? { stdout: '', stderr: 'forced failure', exitCode: 1 } : ok();
+    } };
+    await expect(rollbackToBackup({ docker, containerName: NAME, backupName: BACKUP, log: m => logs.push(m) }))
+      .resolves.toMatchObject({ complete: false });
+    expect(calls.slice(1)).toEqual(commands.slice(0, failed + 1));
+    expect(logs.join('\n').split('\n').filter(line => line.startsWith('  docker ')))
+      .toEqual(commands.slice(failed).map(args => `  docker ${args.join(' ')}`));
+  });
+
+  it('refuses ASK-only success when backup inspection fails and the export is absent', async () => {
+    const { runner } = scriptedDocker({ initial: 'hardened', migrationDir,
+      failOn: args => args[0] === 'inspect' && args[1] === BACKUP
+        ? { stdout: '', stderr: 'Cannot connect to the Docker daemon', exitCode: 1 } : null,
+    });
+    const fetch = verifierFetch();
+    await expect(executeHardenMigration(baseOpts(runner, fetch.fn)))
+      .rejects.toThrow(/Cannot determine whether migration backup/);
+    expect(fetch.calls).toEqual([]);
+  });
+
+  it('reports the failed rollback command and suffix when Docker rejects its invocation', async () => {
+    const calls: string[][] = [];
+    const logs: string[] = [];
+    const docker: DockerRunner = { run: async args => {
+      calls.push([...args]);
+      if (args[0] === 'inspect') return notFound;
+      if (args[0] === 'update') throw new Error('spawn unavailable');
+      return ok();
+    } };
+    await expect(rollbackToBackup({ docker, containerName: NAME, backupName: BACKUP, log: m => logs.push(m) }))
+      .resolves.toMatchObject({ complete: false, failedStep: 'restore-restart-policy' });
+    expect(calls.some(args => args[0] === 'start')).toBe(false);
+    expect(logs.join('\n').split('\n').filter(line => line.startsWith('  docker '))).toEqual([
+      `  docker update --restart=unless-stopped ${NAME}`, `  docker start ${NAME}`,
+    ]);
+  });
+
   it('dry-run only inspects and returns the plan', async () => {
     const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
     const { fn } = verifierFetch();
@@ -953,7 +1042,9 @@ describe('executeHardenMigration', () => {
     const second = await executeHardenMigration(baseOpts(runner, fn));
     expect(second.outcome).toBe('already-hardened');
     const secondCalls = calls.slice(before);
-    expect(secondCalls.every((c) => c[0] === 'inspect')).toBe(true);
+    expect(secondCalls.every((c) => c[0] === 'inspect' || c[0] === 'exec')).toBe(true);
+    expect(secondCalls).toContainEqual(['exec', NAME, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE]);
+    expect(second.journalBytes).toBe(JOURNAL_BYTES);
   });
 
   it.each([true, false])('exports current backup bytes even if a stale same-size export exists: %s', async (savedExport) => {
