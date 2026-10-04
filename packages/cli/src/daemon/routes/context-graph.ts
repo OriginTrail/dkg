@@ -470,23 +470,6 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
   return jsonResponse(res, 500, { error: message });
 }
 
-const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
-  'finalized-name-absence-unaccepted',
-  'chain-name-binding-unavailable',
-  'registered-authority-error',
-  'authority-circuit-open',
-  'local-chain-binding-unavailable',
-  'local-existence-unavailable',
-  'chain-access-policy-unavailable',
-  'chain-access-policy-timeout',
-  'chain-access-policy-unknown',
-  'chain-participant-authority-unavailable',
-  'chain-participant-authority-unsupported',
-  'chain-participant-authority-invalid',
-  'remote-local-authority-unaccepted',
-  'rfc64-private-read-roster-unavailable',
-  'no-read-authority',
-]);
 
 /** How the subscribe route answers an on-chain id that names nothing subscribable. */
 const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {

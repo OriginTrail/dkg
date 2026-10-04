@@ -101,4 +101,3 @@ export function logPromoteAttemptFailure(input: {
     // Diagnostics must never prevent fail-closed queue bookkeeping.
   }
 }
-

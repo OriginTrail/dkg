@@ -21,4 +21,3 @@ export function cloneMetaRecord(record: ContextGraphMetaRecord): ContextGraphMet
     subGraphs: record.subGraphs.map((subGraph) => ({ ...subGraph })),
   };
 }
-
