@@ -152,20 +152,27 @@ describe('VM recovery under node-local admission pressure', () => {
     }
   });
 
-  it('sends a graph that just fetched behind a graph already waiting for the same admission', async () => {
+  it('sends a graph that just fetched behind a graph already waiting, then lets it continue at once', async () => {
+    // Three slices of two: the first yields to the waiting graph, the second
+    // finds nobody waiting and continues at once, the third finishes.
     const { h, internals, cursor, wirePeers } = await reconcilingHost({
-      targetCount: 4, maxOrdinalsPerPass: 2,
+      targetCount: 6, maxOrdinalsPerPass: 2,
     });
     const passes: string[] = [];
+    const watermarks: number[] = [];
     const runtime = new VmReconcileSchedulingRuntime(
-      (key, source) => {
+      async (key, source) => {
         passes.push(key);
-        return key === localCgId ? internals.executeVmReconcileForCg(key, source) : Promise.resolve(undefined);
+        if (key !== localCgId) return undefined;
+        const result = await internals.executeVmReconcileForCg(key, source);
+        watermarks.push(cursor.watermark);
+        return result;
       },
       vi.fn(),
     );
     internals.vmReconcileScheduling = runtime;
     const yielded = vi.spyOn(runtime, 'yieldLocalAdmissionTurn');
+    const continued = vi.spyOn(runtime, 'triggerLive');
     vi.useFakeTimers();
     try {
       // Another graph was refused earlier and is waiting for the node's sync admission.
@@ -174,14 +181,19 @@ describe('VM recovery under node-local admission pressure', () => {
       // The first slice fetched and has more to do. It does not run again
       // ahead of the waiting graph: it takes its next turn behind it.
       expect(wirePeers.length).toBeGreaterThan(0);
-      expect(cursor.watermark).toBeLessThan(4);
+      expect(watermarks).toHaveLength(1);
+      expect(cursor.watermark).toBeLessThan(6);
       expect(yielded.mock.results.map((result) => result.value)).toEqual([true]);
-      await vi.advanceTimersByTimeAsync(0);
+      expect(continued).not.toHaveBeenCalled();
+
+      // No timer is advanced from here on: every later pass is a nudge or an
+      // immediate continuation.
       await runtime.waitForIdle();
-      expect(passes.slice(0, 3)).toEqual([localCgId, 'waiting-graph', localCgId]);
-      // With nobody left waiting, later slices continue at once.
-      expect(cursor.watermark).toBe(4);
-      expect(yielded.mock.results.slice(1).every((result) => result.value === false)).toBe(true);
+      expect(passes).toEqual([localCgId, 'waiting-graph', localCgId, localCgId]);
+      // The second slice asked to yield, found nobody waiting, and continued.
+      expect(yielded.mock.results.map((result) => result.value)).toEqual([true, false]);
+      expect(continued.mock.calls).toEqual([[localCgId]]);
+      expect(watermarks.at(-1)).toBe(6);
       expect(getSyncBackpressureSnapshot().inflight).toBe(0);
     } finally {
       await runtime.close();
