@@ -1,3 +1,6 @@
+import type { OnChainPublishResult } from './publish-provenance.js';
+export type { OnChainPublishResult } from './publish-provenance.js';
+import type { ExistingMintProvenanceReader } from './existing-mint-provenance.js';
 import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
@@ -259,66 +262,6 @@ export function buildKnowledgeAssetUal(
   kaId: bigint,
 ): string {
   return `did:dkg:${chainId}/${knowledgeAssetsContract.toLowerCase()}/${kaId.toString()}`;
-}
-
-export interface OnChainPublishResult {
-  batchId: bigint;
-  /** Greenfield: equals `batchId` when tokenId == kaId. */
-  kaId?: bigint;
-  /** Merkle root emitted by the exact publish transaction being resolved. */
-  merkleRoot?: Uint8Array;
-  /** `DKGKnowledgeAssets` contract address used in the UAL path segment. */
-  knowledgeAssetsContract?: string;
-  /** Absent for updates (no new KAs minted). */
-  startKAId?: bigint;
-  /** Absent for updates (no new KAs minted). */
-  endKAId?: bigint;
-  txHash: string;
-  blockNumber: number;
-  /**
-   * Transaction index within the block. Required as the tiebreaker in the
-   * GH#842 last-writer-wins guard so a publish and a same-block update don't
-   * compare equal (which would let a late stale publish-promotion clobber the
-   * already-applied update). Optional for back-compat with adapters that
-   * don't yet populate it. Best-effort callers may fall back to `0`; recovery
-   * paths that persist trusted provenance MUST defer or independently resolve
-   * the receipt index rather than inventing ordering evidence.
-   */
-  txIndex?: number;
-  blockTimestamp: number;
-  publisherAddress: string;
-  /**
-   * Chain-confirmed author identity for this publish. Sourced from the
-   * `KnowledgeAssetCreated` event's indexed `author` topic, which the
-   * V10.1 contract sets to the address recovered (or wallet address
-   * verified via EIP-1271) from the EIP-712 author attestation. Absent /
-   * `undefined` for legacy V9-ish publishes that go through
-   * `KnowledgeCollection.sol` (no attestation), and for adapter paths
-   * that don't read the event (callers SHOULD then fall back to
-   * `KnowledgeCollectionStorage.getLatestMerkleRootAuthor(batchId)` for
-   * the canonical chain truth).
-   */
-  authorAddress?: string;
-  gasUsed?: bigint;
-  effectiveGasPrice?: bigint;
-  gasCostWei?: bigint;
-  tokenAmount?: bigint;
-  /**
-   * B8 — present only when this publish drew on a Publishing Conviction
-   * Account (the `CostCovered` event was emitted). The cost fields are bigint
-   * (serialized as decimal strings via the daemon's bigint→string JSON replacer);
-   * `epoch` is a small int (number). The UI derives the discount bps from
-   * `baseCost`/`discountedCost`. Absent for a normal (non-PCA) publish → the
-   * confirmed-discount badge degrades hidden.
-   */
-  convictionCostCovered?: {
-    accountId: bigint;
-    epoch: number;
-    baseCost: bigint;
-    discountedCost: bigint;
-    drawnFromEpoch: bigint;
-    drawnFromTopUp: bigint;
-  };
 }
 
 /**
@@ -1559,7 +1502,7 @@ export interface KnowledgeAssetUpdateContext {
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
-export interface ChainAdapter {
+export interface ChainAdapter extends ExistingMintProvenanceReader {
   chainType: 'evm' | 'solana';
   chainId: string;
   /**
@@ -2104,24 +2047,6 @@ export interface ChainAdapter {
    * adapters that cannot resolve ownership must fail that preparation closed.
    */
   getKnowledgeAssetOwner?(kaId: bigint): Promise<string>;
-
-  /**
-   * Adopt-existing-mint support: for a kaId the contract reports as already
-   * minted, verify chain truth (single merkle root == expectedMerkleRoot,
-   * KA bound to expectedContextGraphId) and recover the mint transaction's
-   * provenance from the `KnowledgeAssetCreated` event log. Returns a
-   * synthesized OnChainPublishResult equivalent to what the original mint
-   * receipt would have produced, or `null` when the log cannot be recovered
-   * (pruned / non-archive RPCs) — callers must then rethrow their original
-   * error, never synthesize a txHash (finalization-handler invariant).
-   * Throws AdoptExistingMintRefusalError (KA_ID_COLLISION / KA_SUPERSEDED /
-   * KA_CG_MISMATCH) when chain truth contradicts the caller's content.
-   */
-  getMintedKnowledgeAssetProvenance?(
-    kaId: bigint,
-    expectedMerkleRoot: Uint8Array,
-    expectedContextGraphId: bigint,
-  ): Promise<OnChainPublishResult | null>;
 
   /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
   getMinimumRequiredSignatures?(): Promise<number>;

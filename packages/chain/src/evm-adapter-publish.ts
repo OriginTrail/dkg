@@ -36,7 +36,8 @@ import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
 import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
-import { AdoptExistingMintRefusalError } from './adopt-existing-mint-refusal-error.js';
+import { getEvmMintedKnowledgeAssetProvenance, type CanonicalFinalizationPublishResolution } from './evm-existing-mint.js';
+import { projectCanonicalFinalizationReceipt, resolveCanonicalFinalizationPublish } from './canonical-finalization-publish.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
 } from './evm-adapter-constants.js';
@@ -815,162 +816,30 @@ export class PublishMethods extends EVMChainAdapterBase {
     return { receipt, publish: v9 };
   }
 
-  /**
-   * Project the strict recovery receipt from the exact receipt/publish pair a
-   * caller already read. This is deliberately pure: the caller owns the live
-   * canonicality/finality gate, and an incomplete projection simply leaves
-   * the existing canonical-receipt fallback in place.
-   */
-  private projectCanonicalFinalizationReceipt(
-    receipt: ethers.TransactionReceipt,
-    parsedPublish: OnChainPublishResult,
-  ): CanonicalFinalizationReceipt | null {
-    if (
-      !parsedPublish.merkleRoot
-      || !parsedPublish.publisherAddress
-      || !Number.isSafeInteger(receipt.index)
-      || receipt.index < 0
-      || !receipt.blockHash
-    ) {
-      return null;
-    }
-    const kaId = parsedPublish.kaId ?? parsedPublish.batchId;
-    const startKAId = parsedPublish.startKAId ?? kaId;
-    const endKAId = parsedPublish.endKAId ?? kaId;
-    return {
-      txHash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-      blockHash: receipt.blockHash,
-      txIndex: receipt.index,
-      merkleRoot: parsedPublish.merkleRoot,
-      publisherAddress: parsedPublish.publisherAddress,
-      ...(parsedPublish.authorAddress
-        ? { authorAddress: parsedPublish.authorAddress }
-        : {}),
-      batchId: parsedPublish.batchId,
-      kaId,
-      startKAId,
-      endKAId,
-      ...(parsedPublish.knowledgeAssetsContract
-        ? { knowledgeAssetsContract: parsedPublish.knowledgeAssetsContract }
-        : {}),
-    };
+  private projectCanonicalFinalizationReceipt(receipt: ethers.TransactionReceipt, parsedPublish: OnChainPublishResult): CanonicalFinalizationReceipt | null {
+    return projectCanonicalFinalizationReceipt(receipt, parsedPublish);
   }
 
-  /**
-   * Adopt-existing-mint (ChainAdapter.getMintedKnowledgeAssetProvenance):
-   * verify chain truth for an already-minted kaId and recover the mint tx's
-   * provenance from the KnowledgeAssetCreated log. See chain-adapter.ts for
-   * the contract. Verification failures throw typed errors; an unrecoverable
-   * log (pruned RPC) returns null so the caller rethrows its original error.
-   */
   async getMintedKnowledgeAssetProvenance(
     kaId: bigint,
     expectedMerkleRoot: Uint8Array,
     expectedContextGraphId: bigint,
   ): Promise<OnChainPublishResult | null> {
-    const storage = this.contracts.knowledgeAssetStorage;
-    if (!storage) return null;
-    const expectedHex = ethers.hexlify(expectedMerkleRoot).toLowerCase();
-
-    // 1. Chain root must be EXACTLY the locally sealed root, and exactly one
-    //    version (a superseded mint must go through named recovery — adopting
-    //    index 0 would later stamp vmCurrentAssertion to a stale version).
-    const roots: Array<{ publisher: string; merkleRoot: string; timestamp: bigint }> =
-      await this.readContract(storage, 'kas.getMerkleRoots', 'getMerkleRoots', kaId);
-    if (!roots || roots.length === 0) {
-      throw new AdoptExistingMintRefusalError(
-        'KA_ID_COLLISION',
-        `adopt-existing-mint: kaId ${kaId} reported minted but has no on-chain merkle roots`,
-      );
-    }
-    if (ethers.hexlify(roots[0].merkleRoot).toLowerCase() !== expectedHex) {
-      throw new AdoptExistingMintRefusalError(
-        'KA_ID_COLLISION',
-        `adopt-existing-mint: kaId ${kaId} on-chain root ${ethers.hexlify(roots[0].merkleRoot)} `
-          + `does not match locally sealed root ${expectedHex} — refusing to adopt someone else's content`,
-      );
-    }
-    if (roots.length > 1) {
-      throw new AdoptExistingMintRefusalError(
-        'KA_SUPERSEDED',
-        `adopt-existing-mint: kaId ${kaId} has ${roots.length} merkle roots (updated since mint); use named recovery`,
-      );
-    }
-
-    // 2. CG binding: the minted KA must belong to the CG this publish targets.
-    if (!this.contracts.contextGraphStorage) return null;
-    {
-      const boundCg = BigInt(
-        await this.readContract(
-          this.contracts.contextGraphStorage, 'cgStorage.kaToContextGraph',
-          'kaToContextGraph', kaId,
-        ),
-      );
-      if (boundCg !== expectedContextGraphId) {
-        throw new AdoptExistingMintRefusalError(
-          'KA_CG_MISMATCH',
-          `adopt-existing-mint: kaId ${kaId} bound to CG ${boundCg}, expected ${expectedContextGraphId}`,
-        );
-      }
-    }
-
-    const observation = await this.readExistingMintObservation(storage, kaId, Number(roots[0].timestamp));
-    if (observation === null) return null;
-    const { receipt, publish, eventRoot } = observation;
-    // Content refusals are deliberately outside the best-effort read boundary.
-    if (receipt.kaId !== kaId || receipt.startKAId !== kaId || receipt.endKAId !== kaId
-      || ethers.hexlify(receipt.merkleRoot).toLowerCase() !== expectedHex) {
-      throw new AdoptExistingMintRefusalError('KA_ID_COLLISION',
-        `adopt-existing-mint: kaId ${kaId} receipt does not match the sealed mint`);
-    }
-    if (eventRoot !== expectedHex) {
-      throw new AdoptExistingMintRefusalError('KA_ID_COLLISION',
-        `adopt-existing-mint: kaId ${kaId} mint-event root does not match sealed root`);
-    }
-    // Retain the receipt parser's provenance. These three overrides come from
-    // the verified storage/seal state rather than a second event decoder.
-    return { ...publish, merkleRoot: expectedMerkleRoot,
-      blockTimestamp: Number(roots[0].timestamp), publisherAddress: roots[0].publisher };
-  }
-
-  /** Pruned/unavailable RPC evidence leaves adoption unavailable; no refusals are thrown here. */
-  private async readExistingMintObservation(storage: Contract, kaId: bigint, mintTs: number): Promise<{
-    receipt: CanonicalFinalizationReceipt; publish: OnChainPublishResult; eventRoot: string;
-  } | null> {
-    try {
-      // Storage records block.timestamp verbatim: locate the mint within a
-      // bounded padded window, including adjacent blocks sharing a timestamp.
-      const { fromBlock, head, scanProviders } = await this.resolveKaStorageDeployBlock(String(storage.target));
-      let lo = fromBlock;
-      let hi = head;
-      while (lo < hi) {
-        const mid = lo + Math.floor((hi - lo) / 2);
-        const ts = await this.getBlockTimestamp(mid);
-        if (ts >= mintTs) hi = mid; else lo = mid + 1;
-      }
-      const padding = 128;
-      const filter = storage.filters.KnowledgeAssetCreated(kaId);
-      const { logs } = await this.queryEventLogsPage(storage, filter,
-        Math.max(fromBlock, lo - padding), Math.min(head, lo + padding), scanProviders,
-        new Map<JsonRpcProvider, Contract>(), 'adoptExistingMint');
-      if (logs.length === 0) return null;
-      const found = logs[0];
-      const args = 'args' in found && (found as ethers.EventLog).args
-        ? (found as ethers.EventLog).args : storage.interface.parseLog(found)?.args;
-      if (!args || BigInt(args.id) !== kaId) return null;
-      const canonical = await this.resolveCanonicalFinalizationPublish(found.transactionHash, {
-        expectedBlockNumber: found.blockNumber, expectedBlockHash: found.blockHash,
-      });
-      if (canonical.status !== 'confirmed') return null;
-      // Matching the recovered log is necessary, but only the live receipt
-      // gate proves the configured confirmation depth and hash at that height.
-      if (!await this.isReceiptBlockFinalAndCanonical(canonical.receipt)) return null;
-      return { receipt: canonical.receipt, publish: canonical.publish,
-        eventRoot: ethers.hexlify(args.merkleRoot).toLowerCase() };
-    } catch {
-      return null;
-    }
+    return getEvmMintedKnowledgeAssetProvenance({
+      storage: this.contracts.knowledgeAssetStorage,
+      readRoots: (storage, id) => this.readContract(storage, 'kas.getMerkleRoots', 'getMerkleRoots', id),
+      readContextGraphId: async (id) => this.contracts.contextGraphStorage
+        ? BigInt(await this.readContract(this.contracts.contextGraphStorage, 'cgStorage.kaToContextGraph', 'kaToContextGraph', id)) : null,
+      resolveDeployBlock: (address) => this.resolveKaStorageDeployBlock(address),
+      readBlockTimestamp: (block) => this.getBlockTimestamp(block),
+      readCreationLogs: async (storage, id, from, to, providers) => {
+        const { logs } = await this.queryEventLogsPage(storage, storage.filters.KnowledgeAssetCreated(id),
+          from, to, providers, new Map<JsonRpcProvider, Contract>(), 'adoptExistingMint');
+        return logs;
+      },
+      resolveCanonicalPublish: (hash, options) => this.resolveCanonicalFinalizationPublish(hash, options),
+      isReceiptFinalAndCanonical: (receipt) => this.isReceiptBlockFinalAndCanonical(receipt),
+    }, kaId, expectedMerkleRoot, expectedContextGraphId);
   }
 
   async resolveCanonicalFinalizationReceipt(
@@ -982,39 +851,15 @@ export class PublishMethods extends EVMChainAdapterBase {
       ? { status: 'confirmed', receipt: resolution.receipt } : resolution;
   }
 
-  /** Shared receipt classification retains the already decoded publish for adoption. */
   private async resolveCanonicalFinalizationPublish(
     txHash: string,
     options: CanonicalFinalizationReceiptReadOptions = {},
-  ): Promise<
-    | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt; publish: OnChainPublishResult }
-    | Exclude<CanonicalFinalizationReceiptResolution, { status: 'confirmed' }>
-  > {
-    await this.init();
-    const { receipt, publish: parsedPublish } = await this.readPublishReceipt(
-      txHash,
-      options,
-      'canonical finalization receipt',
-    );
-    if (!receipt) {
-      const transaction = await this.getTransactionWithFailover(txHash, options);
-      return transaction ? { status: 'pending' } : { status: 'not-found' };
-    }
-    if (receipt.status !== 1) return { status: 'rejected' };
-    if (
-      (options.expectedBlockHash !== undefined
-        && receipt.blockHash.toLowerCase() !== options.expectedBlockHash.toLowerCase())
-      || (options.expectedBlockNumber !== undefined
-        && receipt.blockNumber !== options.expectedBlockNumber)
-    ) {
-      return { status: 'reorged' };
-    }
-
-    if (!parsedPublish) return { status: 'rejected' };
-    const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, parsedPublish);
-    return canonicalReceipt
-      ? { status: 'confirmed', receipt: canonicalReceipt, publish: parsedPublish }
-      : { status: 'rejected' };
+  ): Promise<CanonicalFinalizationPublishResolution> {
+    return resolveCanonicalFinalizationPublish({
+      init: () => this.init(),
+      readPublishReceipt: (hash, readOptions, label) => this.readPublishReceipt(hash, readOptions, label),
+      hasTransaction: async (hash, readOptions) => Boolean(await this.getTransactionWithFailover(hash, readOptions)),
+    }, txHash, options);
   }
 
   /**
