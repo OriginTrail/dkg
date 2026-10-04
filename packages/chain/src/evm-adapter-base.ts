@@ -644,7 +644,7 @@ export class EVMChainAdapterBase {
    */
   protected readonly rpcFailover: RpcFailoverClient;
   /** Background views coalesced into one Multicall3 request (see `evm-background-read-batching.ts`). */
-  private readonly backgroundReadBatching: BackgroundContractReadBatching;
+  protected readonly backgroundReadBatching: BackgroundContractReadBatching;
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
@@ -1440,7 +1440,7 @@ export class EVMChainAdapterBase {
     );
     this.backgroundReadBatching = new BackgroundContractReadBatching({
       readContract: (descriptor, contract, fn, opts) => this.rpcFailover.readContract(descriptor, contract, fn, opts),
-      readProvider: (label, fn) => this.readProvider(label, fn),
+      readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
       // Resolved here at the config boundary, live per read, like the stickiness switch.
       isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',
     });

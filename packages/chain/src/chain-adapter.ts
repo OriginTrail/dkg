@@ -841,8 +841,8 @@ export interface ContextGraphStorageRange {
   /** `getLatestContextGraphId()` at the anchor: the highest id minted so far. */
   readonly latestId: bigint;
   /**
-   * Entries in ascending id order for `[fromId, nextId)`. An id the chain
-   * proves nonexistent (`ERC721NonexistentToken`) is omitted, not an error.
+   * Entries for `[fromId, nextId)`, ascending and with no gap: the range ends
+   * before the first id that is nonexistent on chain or could not be read.
    */
   readonly entries: readonly ContextGraphStorageEntry[];
   /**
@@ -1711,9 +1711,9 @@ export interface ChainAdapter extends ExistingMintProvenanceReader {
     /**
      * Read ContextGraphStorage slots `[fromId, fromId + maxIds)` (capped at
      * `getLatestContextGraphId()`) with view calls pinned to one block: the
-     * node's finality anchor (`chain.finalityConfirmations`). Ids are
-     * sequential, so this enumerates every Context Graph that exists on chain
-     * without event logs or archive state. Stateless: callers own any cursor.
+     * node's finality anchor (`chain.finalityConfirmations`). Ids are sequential,
+     * so this lists every Context Graph without event logs or archive state.
+     * Stateless: callers own any cursor. Rejects only when `fromId` is unreadable.
      */
     readContextGraphStorageRange?(
       options: ContextGraphStorageRangeOptions,
