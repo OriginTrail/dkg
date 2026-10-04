@@ -277,6 +277,7 @@ export default defineConfig({
       "test/encrypt-inline-policy.test.ts",
       "test/queued-publish-options.test.ts",
       "test/queued-ka-seal-envelope.test.ts",
+      "test/sync-switch-policy.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
       "test/network-identity-proof.test.ts",

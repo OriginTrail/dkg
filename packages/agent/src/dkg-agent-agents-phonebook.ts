@@ -18,7 +18,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
-import { resolveBooleanSwitch } from './sync/backpressure.js';
+import { resolveDurableSyncEnabled } from './sync/backpressure.js';
 import { systemContextGraphSyncOptionsOf } from './sync/system-context-graph-policy.js';
 import {
   OnDemandAgentsPhonebookFetcher,
@@ -37,7 +37,7 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
    */
   onDemandAgentsPhonebookEnabled(this: DKGAgent): boolean {
     return this.started === true
-      && resolveBooleanSwitch(this.config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true)
+      && resolveDurableSyncEnabled(this.config.durableSyncEnabled)
       && resolveOnDemandAgentsPhonebookFetch({
         ...systemContextGraphSyncOptionsOf(this.config),
         onDemandConfigValue: this.config.onDemandAgentsPhonebook,

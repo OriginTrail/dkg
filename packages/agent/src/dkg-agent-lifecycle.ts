@@ -1,4 +1,3 @@
-import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
@@ -473,6 +472,9 @@ import  {
   resolveNonNegativeIntegerSwitch,
   resolveExactBatchStreamEnabled,
   resolveSyncGlobalBackpressure,
+  resolveSyncReconcilerEnabled,
+  resolveSyncOnConnectEnabled,
+  resolveDurableSyncEnabled,
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
@@ -3983,7 +3985,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // the top of this file (`SYNC_RECONCILER_INTERVAL_MS`,
     // `SYNC_STALENESS_THRESHOLD_MS`) and `reconcileSyncFromConnectedPeers`
     // for the full design rationale.
-    if (syncReconcilerEnabled(this.config)) {
+    if (resolveSyncReconcilerEnabled(this.config.syncReconcilerEnabled)) {
       const syncTiming = this.config.syncReconcilerTiming;
       this.syncReconcilerTimer = setInterval(() => {
         void peerEvents.run(() => this.reconcileSyncFromConnectedPeers(), (err: unknown) => {
@@ -4540,7 +4542,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   > {
     const source = options.source ?? 'on-connect';
     const jobAdmittedByInitialProbe = options.initialProbe !== undefined;
-    const automaticSelectedContextGraphIds = syncOnConnectEnabled(this.config)
+    const automaticSelectedContextGraphIds = resolveSyncOnConnectEnabled(this.config.syncOnConnectEnabled)
       && (this.config.syncSharedMemoryOnConnect ?? true)
       ? this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer)
       : [];
@@ -4620,7 +4622,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         options.selectedSwmRetry === true
         && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
       );
-    if (!syncOnConnectEnabled(this.config) && !selectedSwmRetryRequired) return false;
+    if (!resolveSyncOnConnectEnabled(this.config.syncOnConnectEnabled) && !selectedSwmRetryRequired) return false;
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return false;
     }
@@ -4696,7 +4698,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncReconcilerAttemptOutcome> {
     if (!this.peerSyncSession.checkpoint()) return 'not-started';
-    if (!syncOnConnectEnabled(this.config)) return 'not-started';
+    if (!resolveSyncOnConnectEnabled(this.config.syncOnConnectEnabled)) return 'not-started';
     const runner = this.createSyncOnConnectPeerJobRunner(remotePeer, {
       initialProbe: probe,
       source,
@@ -4745,7 +4747,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const session = this.peerSyncSession;
     const { signal } = session;
     if (!session.checkpoint()) return 'not-started';
-    if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
+    if (!this.started || !resolveSyncOnConnectEnabled(this.config.syncOnConnectEnabled)) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
@@ -4898,7 +4900,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           });
         },
       },
-      syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config)
+      syncSharedMemoryOnConnect: resolveSyncOnConnectEnabled(this.config.syncOnConnectEnabled)
         && (this.config.syncSharedMemoryOnConnect ?? true),
       logInfo: (ctx, message) => session.commit(() => this.log.info(ctx, message)),
       onPeerSkippedNoSync: (peerId) => {
@@ -5244,7 +5246,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // populated update no longer advertises the core-only ACK protocol.
     this.peerCapabilityRegistry.observe(peerId, { source: 'peer-update', protocols: protocols });
     if (!peerEvents.isSkippedNoSync(peerId)) return;
-    if (!syncOnConnectEnabled(this.config)) return;
+    if (!resolveSyncOnConnectEnabled(this.config.syncOnConnectEnabled)) return;
     if (!advertisesSyncProtocol(protocols)) return;
     const ctx = createOperationContext('sync');
     void peerEvents.run(
@@ -5291,7 +5293,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const session = this.peerSyncSession;
     return session.run(async (signal) => {
       if (!this.started) return;
-      if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
+      if (!resolveSyncReconcilerEnabled(this.config.syncReconcilerEnabled) || !resolveSyncOnConnectEnabled(this.config.syncOnConnectEnabled)) return;
       const now = Date.now();
       const syncTiming = this.config.syncReconcilerTiming;
       const ctx = createOperationContext('sync');
@@ -5698,7 +5700,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: DurableSyncOptions,
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
-    if (!durableSyncEnabled(this.config)) {
+    if (!resolveDurableSyncEnabled(this.config.durableSyncEnabled)) {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return createIncompleteDurableSyncResult();
     }
@@ -7477,7 +7479,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         completedTargetKeys,
       )
       : { kind: 'ordinary-shared-memory', shared };
-    if (!durableSyncEnabled(this.config)) {
+    if (!resolveDurableSyncEnabled(this.config.durableSyncEnabled)) {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return execution(emptySharedMemorySyncResult());
     }
@@ -7926,7 +7928,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
   ): Promise<RecoverContextGraphSwmResult> {
     const ctx = createOperationContext('sync');
-    if (!durableSyncEnabled(this.config)) {
+    if (!resolveDurableSyncEnabled(this.config.durableSyncEnabled)) {
       this.log.warn(ctx, `Skipping SWM recovery from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return emptySwmRecoveryResult();
     }

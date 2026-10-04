@@ -563,6 +563,16 @@ export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
   );
 }
 
+/** Effective automatic peer-connect sync, evaluated at each admission. */
+export function resolveSyncOnConnectEnabled(configValue?: boolean): boolean {
+  return resolveBooleanSwitch(configValue, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
+}
+
+/** Effective durable recovery, shared by lifecycle and phonebook admission. */
+export function resolveDurableSyncEnabled(configValue?: boolean): boolean {
+  return resolveBooleanSwitch(configValue, 'DKG_DURABLE_SYNC_ENABLED', true);
+}
+
 /** Effective activation of chain-driven VM reconciliation: core-hosted
  * recording, the KA-registered nudge, and the VM reconcile sweep. A core's
  * StorageACK finality gate keys off this switch, so a core with it off
