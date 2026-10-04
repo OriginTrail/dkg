@@ -34,7 +34,8 @@ async function fixture(alias = false) {
   Object.defineProperty(agent, 'peerId', { value: 'publisher-peer' });
   agent.createV10ACKProvider = () => undefined; agent._resolveEncryptInlinePayload = async () => undefined; agent._resolveEncryptInlineChunked = async () => undefined;
   agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined; agent.gossip = { publish: async () => undefined };
-  agent.publishFromSharedMemory = publisher.publishFromSharedMemory.bind(publisher);
+  // Resolve chain metadata externally; keep the inherited agent publication path intact.
+  agent.getContextGraphOnChainId = async () => undefined;
   const replace = async (sameContent = false) => {
     await publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm');
     if (!sameContent) await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:replacement', predicate: 'urn:title', object: '"replacement"', graph: '' }]);
@@ -81,6 +82,8 @@ describe('agent publication completion marker fencing', () => {
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
     expect(clear.mock.calls.at(-1)?.[3]).toBe(f.promoted.shareOperationId);
     expect(await f.store.countQuads(f.first.sharedGraphUri)).toBe(sameContent ? 1 : 2);
+    expect(await resolveKnowledgeAssetWorkspaceHead({ store: f.store, graphManager: new GraphManager(f.store), contextGraphId: CG, kaUal: f.first.kaUal }))
+      .toMatchObject({ shareOperationId: replacement!.shareOperationId });
   });
 
   it.each([false, true])('fences a captured legacy marker without an operation ID (replacement: %s)', async (replacement) => {
