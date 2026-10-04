@@ -14,6 +14,7 @@ import {
   type Quad,
 } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
+import { readSealedKnowledgeAssetPrivateGraph, type SealedKnowledgeAssetPrivateCommitment, type SealedKnowledgeAssetPrivateReadOptions } from './sealed-private-read.js';
 import {
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
@@ -24,8 +25,6 @@ export interface KnowledgeAssetPrivateReadOptions
   extends Omit<ReadExactGraphPagedOptions, 'expectedQuadCount' | 'outputGraph'> {
   /** Trusted metadata count. When omitted, the store's current count is used. */
   expectedQuadCount?: number;
-  /** Exact immutable payload selected by an authenticated seal/private commitment. */
-  commitmentId?: string;
 }
 
 /**
@@ -357,13 +356,7 @@ export class PrivateContentStore {
     subGraphName?: string,
     readOptions?: KnowledgeAssetPrivateReadOptions,
   ): Promise<Quad[]> {
-    let graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
-    if (readOptions?.commitmentId !== undefined) {
-      const archive = this.knowledgeAssetPrivateCommitmentGraphUri(contextGraphId, scope, readOptions.commitmentId, subGraphName);
-      // Pre-upgrade content has only the version graph; consumers still verify
-      // its count/root. New drafts always write their immutable archive first.
-      if (await this.store.countQuads(archive) > 0) graphUri = archive;
-    }
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
     if (readOptions?.expectedQuadCount !== undefined) {
       return readExactGraphPaged(this.store, graphUri, {
         ...readOptions,
@@ -375,6 +368,16 @@ export class PrivateContentStore {
       ...readOptions,
       outputGraph: '',
     });
+  }
+
+  /** Read the immutable payload selected by an authenticated seal, including public-only seals. */
+  getSealedKnowledgeAssetPrivateTriples(contextGraphId: string, scope: GraphKnowledgeAssetScope,
+    seal: SealedKnowledgeAssetPrivateCommitment, subGraphName?: string,
+    options?: SealedKnowledgeAssetPrivateReadOptions): Promise<Quad[]> {
+    return readSealedKnowledgeAssetPrivateGraph(this.store, seal, {
+      version: () => this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName),
+      commitment: root => this.knowledgeAssetPrivateCommitmentGraphUri(contextGraphId, scope, root, subGraphName),
+    }, options);
   }
 
   async deleteKnowledgeAssetPrivateTriples(

@@ -2350,13 +2350,11 @@ export class DKGPublisher implements Publisher {
       sharedMemoryScope,
       loadOptions,
     );
-    const privateQuads = graphPublish && graphPublish.privateTripleCount > 0
-      ? await this.privateStore.getKnowledgeAssetPrivateTriples(
-          contextGraphId,
-          graphPublish.scope,
+    const privateQuads = graphPublish
+      ? await this.privateStore.getSealedKnowledgeAssetPrivateTriples(
+          contextGraphId, graphPublish.scope,
+          { privateTripleCount: graphPublish.privateTripleCount, privateMerkleRoot: graphPublish.expectedPrivateMerkleRoot },
           options?.subGraphName,
-          { expectedQuadCount: graphPublish.privateTripleCount,
-            commitmentId: graphPublish.expectedPrivateMerkleRoot ? ethers.hexlify(graphPublish.expectedPrivateMerkleRoot) : undefined },
         )
       : [];
 
@@ -8284,11 +8282,10 @@ export class DKGPublisher implements Publisher {
         const sourcePublicQuads = (await this.assertionScopedQuads(sourceGraph)).filter(
           (quad) => !isSwmMerkleExcludedQuad(quad),
         );
-        const sourcePrivateQuads = seal.privateTripleCount === 0 ? [] : await this.privateStore.getKnowledgeAssetPrivateTriples(
-          contextGraphId,
-          scope,
+        const sourcePrivateQuads = await this.privateStore.getSealedKnowledgeAssetPrivateTriples(
+          contextGraphId, scope,
+          { privateTripleCount: seal.privateTripleCount, privateMerkleRoot: seal.privateMerkleRoot },
           subGraphName,
-          { commitmentId: seal.privateMerkleRoot ? ethers.hexlify(seal.privateMerkleRoot) : undefined },
         );
         if (sourcePublicQuads.length === 0 && sourcePrivateQuads.length === 0) {
           throw Object.assign(
@@ -8505,11 +8502,10 @@ export class DKGPublisher implements Publisher {
     const contentScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
     const immutablePrivateQuads = await tagPromoteStep(
       'knowledgeAssetPrivateQuads',
-      () => seal.privateTripleCount === 0 ? Promise.resolve([]) : this.privateStore.getKnowledgeAssetPrivateTriples(
-        contextGraphId,
-        contentScope,
+      () => this.privateStore.getSealedKnowledgeAssetPrivateTriples(
+        contextGraphId, contentScope,
+        { privateTripleCount: seal.privateTripleCount!, privateMerkleRoot: seal.privateMerkleRoot },
         opts?.subGraphName,
-        { commitmentId: seal.privateMerkleRoot ? ethers.hexlify(seal.privateMerkleRoot) : undefined },
       ),
     );
     const graphUri = knowledgeAssetLayerGraphUri(

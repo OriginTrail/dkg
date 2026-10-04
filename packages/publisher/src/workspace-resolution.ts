@@ -1280,11 +1280,10 @@ export async function resolveLiftWorkspaceSlice(params: {
       );
     }
     const privateStore = new PrivateContentStore(params.store, params.graphManager);
-    const privateQuads = request.privateTripleCount === 0 ? [] : await privateStore.getKnowledgeAssetPrivateTriples(
-      request.contextGraphId,
-      scope,
+    const privateQuads = await privateStore.getSealedKnowledgeAssetPrivateTriples(
+      request.contextGraphId, scope,
+      { privateTripleCount: request.privateTripleCount, privateMerkleRoot: request.privateMerkleRoot },
       subGraphName,
-      { commitmentId: request.privateMerkleRoot },
     );
     if (privateQuads.length !== request.privateTripleCount) {
       throw new Error(

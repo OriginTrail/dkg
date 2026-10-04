@@ -310,3 +310,4 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+export type { SealedKnowledgeAssetPrivateCommitment, SealedKnowledgeAssetPrivateReadOptions } from './sealed-private-read.js';

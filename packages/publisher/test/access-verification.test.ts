@@ -22,6 +22,7 @@ import {
 import { OxigraphStore, GraphManager, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
 import { AccessHandler } from '../src/access-handler.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
+import { parseSimpleNQuads } from '../src/publish-handler.js';
 import {
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
@@ -354,6 +355,44 @@ describe('I-005: Access handler signature verification', () => {
 });
 
 describe('graph-scoped private access', () => {
+  it('serves the accepted private commitment after an unshared same-version draft replaces the latest partition', async () => {
+    const store = new OxigraphStore();
+    try {
+      const graphManager = new GraphManager(store);
+      const privateStore = new PrivateContentStore(store, graphManager);
+      const ual = 'did:dkg:mock:31337/0x1111111111111111111111111111111111111111/11';
+      const scope = createGraphKnowledgeAssetScope(ual, 1);
+      const shared: Quad[] = [{ subject: 'urn:rootless:private', predicate: 'urn:p:secret', object: '"shared-b"', graph: '' }];
+      const unshared: Quad[] = [{ ...shared[0], object: '"unshared-c"' }];
+      const privateMerkleRoot = computePrivateRootV10(shared)!;
+      await privateStore.replaceKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, shared, undefined, toHex(privateMerkleRoot));
+      await storeKnowledgeAssetOperationPublicQuads({
+        store, graphManager, contextGraphId: CONTEXT_GRAPH,
+        shareOperationId: 'accepted-private-b', kaUal: ual, assertionVersion: scope.assertionVersion,
+        quads: [], privateMerkleRoot, privateTripleCount: shared.length,
+        publisherPeerId: 'owner-peer', accessPolicy: 'allowList', allowedPeers: ['reader-peer'],
+      });
+      await storeKnowledgeAssetWorkspaceHead({
+        store, graphManager, contextGraphId: CONTEXT_GRAPH,
+        shareOperationId: 'accepted-private-b', kaUal: ual, assertionVersion: scope.assertionVersion,
+      });
+      await privateStore.replaceKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, unshared, undefined, toHex(computePrivateRootV10(unshared)!));
+      expect(await privateStore.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope)).toEqual(unshared);
+      const keypair = await generateEd25519Keypair();
+      const signature = await ed25519Sign(new TextEncoder().encode(ual), keypair.secretKey);
+      const response = decodeAccessResponse(await new AccessHandler(store, new TypedEventBus()).handler(encodeAccessRequest({
+        kaUal: ual, requesterPeerId: 'reader-peer', paymentProof: new Uint8Array(0),
+        requesterSignature: signature, requesterPublicKey: keypair.publicKey,
+      }), 'reader-peer' as any));
+      expect(response.granted).toBe(true);
+      const bytes = new TextDecoder().decode(response.nquads);
+      expect(bytes).toContain('"shared-b"');
+      expect(bytes).not.toContain('unshared-c');
+      expect(toHex(response.privateMerkleRoot)).toBe(toHex(privateMerkleRoot));
+      expect(toHex(computePrivateRootV10(parseSimpleNQuads(bytes))!)).toBe(toHex(response.privateMerkleRoot));
+    } finally { await store.close(); }
+  });
+
   it('serves the exact assertion-version private graph through its durable head', async () => {
     const store = new OxigraphStore();
     const graphManager = new GraphManager(store);

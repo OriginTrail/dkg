@@ -207,15 +207,11 @@ export class AccessHandler {
       return async () => {
         let quads: Quad[];
         try {
-          quads = await this.privateStore.getKnowledgeAssetPrivateTriples(
-            meta.contextGraphId,
-            meta.scope,
+          quads = await this.privateStore.getSealedKnowledgeAssetPrivateTriples(
+            meta.contextGraphId, meta.scope,
+            { privateTripleCount: meta.privateTripleCount, privateMerkleRoot: meta.privateMerkleRoot },
             meta.subGraphName,
-            {
-              expectedQuadCount: meta.privateTripleCount,
-              commitmentId: meta.privateMerkleRoot ? `0x${toHex(meta.privateMerkleRoot)}` : undefined,
-              queryOptions: { source: 'publisher.access' },
-            },
+            { queryOptions: { source: 'publisher.access' } },
           );
         } catch (error) {
           if (

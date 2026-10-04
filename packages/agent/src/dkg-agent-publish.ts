@@ -2974,11 +2974,11 @@ export class PublishMethods extends DKGAgentBase {
       && existingSeal.assertionVersion !== undefined
       && (existingSeal.privateTripleCount ?? 0) > 0
     ) {
-      rawPrivateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
+      rawPrivateQuads = await privateStore.getSealedKnowledgeAssetPrivateTriples(
         contextGraphId,
         createGraphKnowledgeAssetScope(existingSeal.kaUal, existingSeal.assertionVersion),
+        { privateTripleCount: existingSeal.privateTripleCount ?? 0, privateMerkleRoot: existingSeal.privateMerkleRoot },
         opts?.subGraphName,
-        { commitmentId: existingSeal.privateMerkleRoot ? ethers.hexlify(existingSeal.privateMerkleRoot) : undefined },
       );
     }
     if (rawQuads.length === 0 && rawPrivateQuads.length === 0) {
@@ -6109,11 +6109,11 @@ export class PublishMethods extends DKGAgentBase {
       sharedMemoryScope,
     );
     const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
-    const scopedPrivateQuads = seal.privateTripleCount === 0 ? [] : await privateStore.getKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      graphScope,
+    if (seal.privateTripleCount === undefined) throw new Error('Graph-scoped assertion seal has no private triple count');
+    const scopedPrivateQuads = await privateStore.getSealedKnowledgeAssetPrivateTriples(
+      contextGraphId, graphScope,
+      { privateTripleCount: seal.privateTripleCount, privateMerkleRoot: seal.privateMerkleRoot },
       opts?.subGraphName,
-      { commitmentId: seal.privateMerkleRoot ? ethers.hexlify(seal.privateMerkleRoot) : undefined },
     );
     if (scopedSwmQuads.length === 0 && scopedPrivateQuads.length === 0) {
       throw new Error(
