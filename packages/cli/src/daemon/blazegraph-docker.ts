@@ -33,7 +33,7 @@ import { spawn } from 'node:child_process';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import { blazegraphHealthCmd as policyHealthCmd, buildBlazegraphPolicyRunArgs, computeBlazegraphHeapMb, fetchWithDeadline, sanitiseContainerName, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
-export { computeBlazegraphHeapMb, blazegraphVolumeName, deriveBlazegraphContainerName, parseBlazegraphNamespaceEndpoint, fetchWithDeadline, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
+export { blazegraphMigrationVolumeName, computeBlazegraphHeapMb, blazegraphVolumeName, deriveBlazegraphContainerName, parseBlazegraphNamespaceEndpoint, fetchWithDeadline, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
 import blazegraphRuntimeContract from
   '@origintrail-official/dkg/blazegraph-runtime-contract';
 import {
@@ -42,6 +42,7 @@ import {
   normalizeBlazegraphNamespace,
   type BlazegraphNamespaceEnsureResult,
 } from '@origintrail-official/dkg-storage';
+import { inspectBlazegraphContainerFacts } from './blazegraph-container-inspection.js';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
 const {
@@ -253,6 +254,7 @@ async function findFreePort(
 
 interface BlazegraphContainerPolicyStatus {
   durableStorage: boolean;
+  journalVolumeName?: string;
   boundedLogs: boolean;
   boundedJvm: boolean;
   healthProbe: boolean;
@@ -265,13 +267,9 @@ interface BlazegraphContainerSpec {
   mountSpec: string;
   logDriver: string;
   logOptions: readonly { name: string; value: string }[];
-  dockerRunArgs(hostPort: number): readonly string[];
+  dockerRunArgs(hostPort: number, journalVolumeName?: string): readonly string[];
   inspectPolicy(info: unknown): BlazegraphContainerPolicyStatus;
   warningMessages(status: BlazegraphContainerPolicyStatus): string[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function createBlazegraphContainerSpec(containerName: string, namespace: string, heapMb: number): BlazegraphContainerSpec {
@@ -291,29 +289,19 @@ function createBlazegraphContainerSpec(containerName: string, namespace: string,
     mountSpec,
     logDriver,
     logOptions,
-    dockerRunArgs(hostPort) {
-      return buildBlazegraphRunArgs({ containerName, hostPort, namespace, heapMb });
+    dockerRunArgs(hostPort, journalVolumeName) {
+      return buildBlazegraphRunArgs({ containerName, hostPort, namespace, heapMb, volumeName: journalVolumeName });
     },
     inspectPolicy(info) {
-      if (!isRecord(info)) return { durableStorage: false, boundedLogs: false, boundedJvm: false, healthProbe: false };
-      const mounts: unknown[] = Array.isArray(info.Mounts) ? info.Mounts : [];
-      const durableStorage = mounts.some((mount) => {
-        if (!isRecord(mount)) return false;
-        return mount.Type === 'volume'
-          && (mount.Name === volumeName || mount.Name === blazegraphMigrationVolumeName(containerName))
-          && mount.Destination === dataPath;
+      const facts = inspectBlazegraphContainerFacts(info, {
+        containerName, dataPath, containerPort: BLAZEGRAPH_CONTAINER_PORT,
+        logMaxSize: BLAZEGRAPH_LOG_MAX_SIZE, logMaxFile: BLAZEGRAPH_LOG_MAX_FILE,
       });
-      const hostConfig = isRecord(info.HostConfig) ? info.HostConfig : undefined;
-      const logConfig = isRecord(hostConfig?.LogConfig) ? hostConfig.LogConfig : undefined;
-      const config = isRecord(logConfig?.Config) ? logConfig.Config : undefined;
-      const boundedLogs = logConfig?.Type === logDriver
-        && logOptions.every(({ name, value }) => config?.[name] === value);
-      const configInfo = isRecord(info.Config) ? info.Config : undefined;
-      const env = Array.isArray(configInfo?.Env) ? configInfo.Env : [];
-      const boundedJvm = env.some(value => typeof value === 'string' && value.startsWith('TOMCAT_JAVA_OPTS=') && /-Xmx[1-9]\d*[mMgG](?:\s|$)/.test(value) && /-XX:\+ExitOnOutOfMemoryError(?:\s|$)/.test(value));
-      const health = isRecord(configInfo?.Healthcheck) ? configInfo.Healthcheck : undefined;
-      const healthProbe = Array.isArray(health?.Test) && health.Test.some(value => typeof value === 'string' && value.includes('ASK%7B%7D'));
-      return { durableStorage, boundedLogs, boundedJvm, healthProbe };
+      return { durableStorage: facts.journalMountIsVolume,
+        journalVolumeName: facts.journalVolumeName,
+        boundedLogs: facts.boundedLogs, boundedJvm: facts.boundedJvm,
+        healthProbe: facts.healthProbe };
+
     },
     warningMessages(status) {
       const warnings: string[] = [];
@@ -555,6 +543,8 @@ export async function provisionBlazegraphDocker(
     });
   }
 
+  let recreationVolumeName: string | undefined;
+
   // 3. Stopped-but-exists path — start it back up before re-creating.
   if (inspectInfo.exists && !inspectInfo.running) {
     log(`  Container "${containerName}" exists but is stopped; starting it.`);
@@ -570,6 +560,7 @@ export async function provisionBlazegraphDocker(
       }
       // The expected named volume preserves the journal, so removing only the
       // broken container is safe. The fresh path below reattaches that volume.
+      recreationVolumeName = inspectInfo.journalVolumeName;
       log(`  docker start failed (${startResult.stderr.trim() || 'unknown'}); recreating.`);
       await docker.run(['rm', '-f', containerName]);
     } else {
@@ -592,7 +583,7 @@ export async function provisionBlazegraphDocker(
   const portStart = opts.port ?? DEFAULT_HOST_PORT_START;
   const chosenPort = await findFreePort(portStart, portRange, isPortFree, log);
   log(`  Starting Blazegraph container "${containerName}" on port ${chosenPort}…`);
-  const runResult = await docker.run(containerSpec.dockerRunArgs(chosenPort));
+  const runResult = await docker.run(containerSpec.dockerRunArgs(chosenPort, recreationVolumeName));
   if (runResult.exitCode !== 0) {
     throw new Error(
       `Failed to start Blazegraph container — docker run exited ${runResult.exitCode}. ` +
@@ -643,6 +634,3 @@ export function blazegraphHealthCmd(namespace: string): string {
 }
 
 /** Migration gets a separate volume so a pre-existing volume remains untouched. */
-export function blazegraphMigrationVolumeName(containerName: string): string {
-  return `${containerName}-hardened-data`;
-}

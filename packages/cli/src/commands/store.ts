@@ -51,6 +51,17 @@ export function parseHardenPortOption(value: string): number {
 }
 
 
+/** A migration must keep the daemon's configured store endpoint reachable. */
+export function assertHardenConfiguredPort(endpoint: string, port: number | undefined): void {
+  if (port === undefined) return;
+  const configured = new URL(endpoint);
+  const configuredPort = Number(configured.port || (configured.protocol === 'https:' ? 443 : 80));
+  if (configuredPort !== port) {
+    throw new Error(`--port ${port} conflicts with the configured store endpoint on port ${configuredPort}. Keep the configured port when hardening; change the store endpoint separately with the daemon stopped.`);
+  }
+}
+
+
 function printPlan(steps: HardenStep[]): void {
   console.log('\nMigration plan:');
   for (const [i, step] of steps.entries()) {
@@ -85,7 +96,7 @@ export function registerStoreCommand(program: Command): void {
     .option('--dry-run', 'Print the migration plan without executing it')
     .option('--yes', 'Skip the confirmation prompt (required when the daemon is running)')
     .option('--container <name>', 'Override the container name (default: derived from store URL)')
-    .option('--port <port>', 'Override the host port for the hardened container (1-65535)', parseHardenPortOption)
+    .option('--port <port>', 'Host port for the hardened container; must match the configured store endpoint (1-65535)', parseHardenPortOption)
     .option('--migration-dir <dir>', 'Where to export the journal during migration (default: <dkg home>/blazegraph-harden)')
     .action(async (opts: {
       dryRun?: boolean;
@@ -137,6 +148,8 @@ export function registerStoreCommand(program: Command): void {
         );
         process.exit(1);
       }
+
+      assertHardenConfiguredPort(String(storeConfig.options?.url), opts.port);
 
       const migrationDir = opts.migrationDir ?? join(dkgDir(), 'blazegraph-harden');
       const log = (m: string) => console.log(m);

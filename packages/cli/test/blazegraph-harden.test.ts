@@ -15,7 +15,7 @@
  * tmp dir.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -95,6 +95,7 @@ function scriptedDocker(opts: {
   migrationDir: string;
   /** Bytes `docker cp` writes to the export file. Default JOURNAL_BYTES. */
   cpBytes?: number;
+  cpFill?: number;
   /** Seed helper stdout. Default String(JOURNAL_BYTES). */
   seedStdout?: string;
   /** In-container journal size reported by `docker exec stat`. */
@@ -160,7 +161,7 @@ function scriptedDocker(opts: {
       if (cmd === 'cp') {
         writeFileSync(
           join(opts.migrationDir, HARDEN_EXPORT_FILENAME),
-          Buffer.alloc(opts.cpBytes ?? JOURNAL_BYTES, 1),
+          Buffer.alloc(opts.cpBytes ?? JOURNAL_BYTES, opts.cpFill ?? 1),
         );
         cpDone = true;
         return ok();
@@ -273,14 +274,10 @@ describe('planHardenMigration', () => {
     expect(byId['run-hardened'].dockerArgs?.join(' ')).toContain(`source=${VOLUME},target=${BLAZEGRAPH_DATA_DIR}`);
   });
 
-  it('resumes from backup-only with only the non-destructive tail', () => {
+  it('resumes from backup-only by re-exporting the current stopped backup', () => {
     const steps = planHardenMigration({ ...input, state: 'backup-only' });
-    // disable-backup-restart is in the resume plan too: the executor has
-    // always re-run it on resume (idempotent — the crashed run may have died
-    // between the rename and the restart-policy update), but the plan used
-    // to omit it, under-reporting the dry-run. Plan and executor now share
-    // one step model, and the conformance tests below pin them together.
     expect(steps.map((s) => s.id)).toEqual([
+      'stop', 'export-journal', 'export-integrity',
       'volume-create', 'seed-volume', 'disable-backup-restart', 'run-hardened', 'verify',
     ]);
   });
@@ -734,6 +731,24 @@ describe('executeHardenMigration', () => {
     assertSafetyInvariants(calls, migrationDir, true);
   });
 
+  it('refuses rollback deletion when the replacement does not own the journal volume', async () => {
+    let created = false;
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir,
+      failOn: args => {
+        if (args[0] === 'run' && args[1] === '-d') created = true;
+        if (created && args[0] === 'inspect' && args[1] === NAME) {
+          return ok(JSON.stringify([{ State: { Running: true }, Mounts: [] }]));
+        }
+        return null;
+      },
+    });
+    const { fn } = verifierFetch({ askOk: false });
+    await expect(executeHardenMigration(baseOpts(runner, fn))).rejects.toThrow(/volume-gate/);
+    expect(calls.some(args => args[0] === 'rm')).toBe(false);
+    expect(calls).not.toContainEqual(['rename', BACKUP, NAME]);
+    expect(calls).not.toContainEqual(['start', NAME]);
+  });
+
   it('rolls back to the backup when `docker run` fails AFTER the rename (post-swap setup, not just verify)', async () => {
     // The reviewer scenario: another process binds the host port between the
     // rename and the hardened `docker run`. Before the fix only verification
@@ -845,16 +860,16 @@ describe('executeHardenMigration', () => {
     assertSafetyInvariants(calls, migrationDir, true);
   });
 
-  it('resumes from backup-only without repeating destructive steps', async () => {
+  it('resumes from backup-only by replacing the export without renaming the backup', async () => {
     // Simulated crash after the rename: export exists, volume not yet run.
     writeFileSync(join(migrationDir, HARDEN_EXPORT_FILENAME), Buffer.alloc(JOURNAL_BYTES, 1));
     const { runner, calls } = scriptedDocker({ initial: 'backup-only', migrationDir });
     const { fn } = verifierFetch();
     const result = await executeHardenMigration(baseOpts(runner, fn));
     expect(result.outcome).toBe('hardened');
-    // Nothing destructive re-runs: no stop, no cp, no rename of the backup.
-    expect(calls.some((c) => c[0] === 'stop')).toBe(false);
-    expect(calls.some((c) => c[0] === 'cp')).toBe(false);
+    // Re-export the authoritative backup, preserving its name and data.
+    expect(calls).toContainEqual(['stop', '-t', '120', BACKUP]);
+    expect(calls).toContainEqual(['cp', `${BACKUP}:${BLAZEGRAPH_JOURNAL_FILE}`, join(migrationDir, HARDEN_EXPORT_FILENAME)]);
     expect(calls.some((c) => c[0] === 'rename')).toBe(false);
     // The tail still runs: volume create → seed → hardened run.
     expect(calls.some((c) => c[0] === 'volume')).toBe(true);
@@ -895,7 +910,7 @@ describe('executeHardenMigration', () => {
       containerName: NAME, namespace: NAMESPACE, hostPort: 9999,
       heapMb: 3072, migrationDir, state: 'legacy',
     });
-    expect(plan.filter((s) => s.dockerArgs).length).toBe(9);
+    expect(plan.filter((s) => s.dockerArgs).length).toBe(10);
     assertExecutionFollowsPlan(plan, calls);
   });
 
@@ -922,13 +937,20 @@ describe('executeHardenMigration', () => {
     expect(secondCalls.every((c) => c[0] === 'inspect')).toBe(true);
   });
 
-  it('refuses to guess when resuming backup-only without an export on disk', async () => {
-    const { runner, calls } = scriptedDocker({ initial: 'backup-only', migrationDir });
+  it.each([true, false])('exports current backup bytes even if a stale same-size export exists: %s', async (savedExport) => {
+    const path = join(migrationDir, HARDEN_EXPORT_FILENAME);
+    if (savedExport) writeFileSync(path, Buffer.alloc(JOURNAL_BYTES, 1));
+    let seeded!: Buffer;
+    const { runner, calls } = scriptedDocker({ initial: 'backup-only', migrationDir, cpFill: 2,
+      failOn: args => { if (args[0] === 'run' && args[1] === '--rm') seeded = readFileSync(path); return null; },
+    });
     const { fn } = verifierFetch();
-    await expect(executeHardenMigration(baseOpts(runner, fn)))
-      .rejects.toThrow(/no journal export.*restore it manually/is);
-    // Only inspects ran; the backup is untouched.
-    expect(calls.every((c) => c[0] === 'inspect')).toBe(true);
+    await expect(executeHardenMigration(baseOpts(runner, fn))).resolves.toMatchObject({ outcome: 'hardened' });
+    expect(seeded).toEqual(Buffer.alloc(JOURNAL_BYTES, 2));
+    expect(calls.filter(args => args[0] === 'inspect' && args[1] === '--size'))
+      .toEqual([['inspect', '--size', BACKUP], ['inspect', '--size', BACKUP]]);
+    expect(calls.some(args => args[0] === 'rename')).toBe(false);
+    assertSafetyInvariants(calls, migrationDir, true);
   });
 
   it('refuses to seed a replacement volume that already contains the authoritative journal', async () => {

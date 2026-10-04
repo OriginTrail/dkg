@@ -1,3 +1,5 @@
+import { blazegraphNamespaceEndpointParts } from '@origintrail-official/dkg-storage';
+
 /** Shared JVM, container and probe policy for provisioning and manual migration. */
 export function computeBlazegraphHeapMb(
   totalMemBytes: number,
@@ -20,6 +22,10 @@ export function computeBlazegraphHeapMb(
 /** Named docker volume holding the journal for a given container. */
 export function blazegraphVolumeName(containerName: string): string {
   return `${containerName}-data`;
+}
+
+export function blazegraphMigrationVolumeName(containerName: string): string {
+  return `${containerName}-hardened-data`;
 }
 
 /**
@@ -92,7 +98,7 @@ export interface BlazegraphNamespaceEndpoint {
 }
 
 /**
- * THE parser for the managed Blazegraph endpoint shape
+ * CLI wrapper over the storage-owned parser for the managed endpoint shape
  * (`…/bigdata/namespace/<ns>/sparql`). The harden command, the container-name
  * derivation and the monitor all reason about the same store URL; parsing it
  * in one place keeps their interpretations from drifting when the endpoint
@@ -102,15 +108,9 @@ export function parseBlazegraphNamespaceEndpoint(
   url: unknown,
 ): BlazegraphNamespaceEndpoint | null {
   if (typeof url !== 'string') return null;
-  const match = url.match(/^(.*)\/bigdata\/namespace\/([^/]+)\/sparql\/?$/);
-  if (!match) return null;
   try {
-    const namespace = decodeURIComponent(match[2]);
-    return {
-      namespace,
-      baseUrl: match[1],
-      sparqlUrl: sparqlUrlForNamespace(match[1], namespace),
-    };
+    const { namespace, baseUrl, sparqlUrl } = blazegraphNamespaceEndpointParts(url);
+    return { namespace, baseUrl, sparqlUrl };
   } catch {
     return null;
   }
@@ -124,10 +124,6 @@ export function deriveBlazegraphContainerName(
   }
   const endpoint = parseBlazegraphNamespaceEndpoint(storeOptions?.url);
   return endpoint ? sanitiseContainerName(endpoint.namespace) : null;
-}
-
-function sparqlUrlForNamespace(baseUrl: string, namespace: string): string {
-  return `${baseUrl}/bigdata/namespace/${encodeURIComponent(namespace)}/sparql`;
 }
 
 export function sanitiseContainerName(namespace: string): string {

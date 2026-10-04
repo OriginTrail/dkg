@@ -62,7 +62,7 @@ vi.mock('node:readline', () => ({
   }),
 }));
 
-const { registerStoreCommand } = await import('../src/commands/store.js');
+const { registerStoreCommand, assertHardenConfiguredPort } = await import('../src/commands/store.js');
 
 const MANAGED_STORE = () => ({
   backend: 'blazegraph',
@@ -206,7 +206,14 @@ describe('dkg store harden command wrapper', () => {
     expect(mocks.saveConfig).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects a port change before any migration or config write', async () => {
+    await expect(runHarden('--yes', '--port', '10123')).rejects.toThrow(/conflicts with the configured store endpoint/);
+    expect(mocks.executeHardenMigration).not.toHaveBeenCalled();
+    expect(mocks.saveConfig).not.toHaveBeenCalled();
+  });
+
   it('passes --container, --port and --migration-dir through to the executor', async () => {
+    mocks.loadConfig.mockResolvedValue({ name: 'test-node', store: { ...MANAGED_STORE(), options: { ...MANAGED_STORE().options, url: 'http://127.0.0.1:10123/bigdata/namespace/dkg/sparql' } } });
     await runHarden('--yes', '--container', 'my-bg', '--port', '10123', '--migration-dir', '/mnt/big');
     const realCall = mocks.executeHardenMigration.mock.calls.at(-1)![0];
     expect(realCall).toMatchObject({
@@ -214,5 +221,14 @@ describe('dkg store harden command wrapper', () => {
       hostPort: 10123,
       migrationDir: '/mnt/big',
     });
+  });
+});
+
+
+describe('harden endpoint consistency', () => {
+  it('refuses an override that would strand the daemon before migration', () => {
+    expect(() => assertHardenConfiguredPort('http://127.0.0.1:9999/bigdata/namespace/dkg/sparql', 10123)).toThrow(/conflicts with the configured store endpoint/);
+    expect(() => assertHardenConfiguredPort('http://127.0.0.1:9999/bigdata/namespace/dkg/sparql', 9999)).not.toThrow();
+    expect(() => assertHardenConfiguredPort('http://127.0.0.1:9999/bigdata/namespace/dkg/sparql', undefined)).not.toThrow();
   });
 });

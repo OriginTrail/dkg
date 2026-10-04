@@ -10,10 +10,11 @@
 import {
   BLAZEGRAPH_CONTAINER_PORT,
   BLAZEGRAPH_DATA_DIR,
-  blazegraphVolumeName,
   blazegraphMigrationVolumeName,
   type DockerRunner,
 } from '../blazegraph-docker.js';
+
+import { inspectBlazegraphContainerFacts } from '../blazegraph-container-inspection.js';
 
 /** Suffix for the renamed legacy container kept as the recovery path. */
 export const HARDEN_BACKUP_SUFFIX = '-backup';
@@ -49,26 +50,6 @@ export function parseInspect(stdout: string): DockerInspectShape | null {
   }
 }
 
-function portFromBindingMap(map: PortBindingMap | undefined): number | undefined {
-  // Fleet-verified binding shape: '8080/tcp' → [{HostIp: '127.0.0.1',
-  // HostPort: '9999'}]. Prefer the current image contract, fall back to
-  // the literal 8080 the deployed islandora image exposes.
-  const binding = map?.[`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]
-    ?? (BLAZEGRAPH_CONTAINER_PORT === 8080 ? undefined : map?.['8080/tcp']);
-  if (!Array.isArray(binding) || binding.length === 0) return undefined;
-  const port = Number(binding[0].HostPort);
-  return Number.isInteger(port) && port > 0 ? port : undefined;
-}
-
-function inspectHostPort(info: DockerInspectShape | null): number | undefined {
-  // HostConfig.PortBindings is the DURABLE configuration and stays
-  // populated for stopped containers; NetworkSettings.Ports is runtime
-  // state and is EMPTY once the container stops (which is exactly the
-  // state a backup-only resume or a stopped-legacy run inspects).
-  return portFromBindingMap(info?.HostConfig?.PortBindings)
-    ?? portFromBindingMap(info?.NetworkSettings?.Ports);
-}
-
 /**
  * Classify the container into the migration state machine. State is
  * derived exclusively from docker — no state file — so a crashed
@@ -89,24 +70,25 @@ export async function inspectHardenState(
   const result = await docker.run(['inspect', containerName]);
   if (result.exitCode === 0) {
     const info = parseInspect(result.stdout);
-    const volume = blazegraphVolumeName(containerName);
-    const hardened = info?.Mounts?.some(
-      (m) => m.Destination === BLAZEGRAPH_DATA_DIR && (m.Name === volume || m.Name === blazegraphMigrationVolumeName(containerName)),
-    ) === true && info?.Config?.Env?.some(value => value.startsWith('TOMCAT_JAVA_OPTS=')
-      && /-Xmx[1-9]\d*[mMgG](?:\s|$)/.test(value) && /-XX:\+ExitOnOutOfMemoryError(?:\s|$)/.test(value)) === true
-      && info?.Config?.Healthcheck?.Test?.some(value => value.includes('ASK%7B%7D')) === true;
-    return {
-      state: hardened ? 'hardened' : 'legacy',
-      hostPort: inspectHostPort(info),
-      running: info?.State?.Running === true,
-      ...(!hardened && info?.Mounts?.some(m => m.Destination === BLAZEGRAPH_DATA_DIR && m.Name === blazegraphMigrationVolumeName(containerName)) ? { usesMigrationVolume: true as const } : {}),
-    };
+    const facts = inspectBlazegraphContainerFacts(info, {
+      containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT,
+    });
+    const hardened = facts.journalVolumeName !== undefined && facts.boundedJvm && facts.healthProbe;
+    return { state: hardened ? 'hardened' : 'legacy', hostPort: facts.hostPort, running: facts.running,
+      ...(!hardened && facts.journalVolumeName === blazegraphMigrationVolumeName(containerName)
+        ? { usesMigrationVolume: true as const } : {}) };
+
   }
   const backup = await docker.run(['inspect', `${containerName}${HARDEN_BACKUP_SUFFIX}`]);
   if (backup.exitCode === 0) {
     const info = parseInspect(backup.stdout);
-    return { state: 'backup-only', hostPort: inspectHostPort(info),
-      ...(info?.Mounts?.some(m => m.Destination === BLAZEGRAPH_DATA_DIR && m.Name === blazegraphMigrationVolumeName(containerName)) ? { usesMigrationVolume: true as const } : {}) };
+    const facts = inspectBlazegraphContainerFacts(info, {
+      containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT,
+    });
+    return { state: 'backup-only', hostPort: facts.hostPort, running: facts.running,
+      ...(facts.journalVolumeName === blazegraphMigrationVolumeName(containerName)
+        ? { usesMigrationVolume: true as const } : {}) };
+
   }
   return { state: 'absent' };
 }

@@ -43,9 +43,9 @@
  * This file is the public facade; the implementation lives in harden/
  * with one module per responsibility:
  *   - harden/state.ts    — docker-inspect state classification
- *   - harden/steps.ts    — step definitions + dry-run plan (the single
- *                          source of truth for every docker argv)
- *   - harden/executor.ts — execution/resume with predicate checks
+ *   - harden/steps.ts    — ordered phases shared by planning and execution
+ *   - harden/actions.ts  — phase commands and their success checks
+ *   - harden/executor.ts — execution/resume orchestration
  *   - harden/verify.ts   — post-swap SPARQL verification probes
  *   - harden/rollback.ts — automatic rollback to the backup container
  */

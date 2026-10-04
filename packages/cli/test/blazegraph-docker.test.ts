@@ -447,6 +447,36 @@ describe('provisionBlazegraphDocker', () => {
     expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
   });
 
+  it('reattaches the migrated journal volume when a stopped container cannot start', async () => {
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: () => { const result = dockerInspectStopped(); const rows = JSON.parse(result.stdout); rows[0].Mounts[0].Name = 'dkg-blazegraph-mynode-hardened-data'; return { ...result, stdout: JSON.stringify(rows) }; } },
+        { when: (a) => a[0] === 'start', respond: () => ({ stdout: '', stderr: 'config drift', exitCode: 1 }) },
+        { when: (a) => a[0] === 'rm', respond: () => ({ stdout: '', stderr: '', exitCode: 0 }) },
+        { when: (a) => a[0] === 'run', respond: () => ({ stdout: 'container-id', stderr: '', exitCode: 0 }) },
+      ],
+    });
+    const { fn, calls: httpCalls } = mockFetch((url) => {
+      if (url.endsWith('/bigdata/status')) return new Response('ok', { status: 200 });
+      if (url.includes('/sparql/properties')) return new Response(null, { status: 200 });
+      if (url.endsWith('/bigdata/namespace')) return new Response('unexpected', { status: 500 });
+      return new Response(null, { status: 200 });
+    });
+    const result = await provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: fn,
+      isPortFree: async () => true,
+      log: () => {},
+    });
+    expect(result.reused).toBe(false);
+    expect(result.namespaceCreated).toBe(false);
+    expect(calls.some((c) => c[0] === 'rm')).toBe(true);
+    expect(calls.find((c) => c[0] === 'run')).toContain(`type=volume,source=dkg-blazegraph-mynode-hardened-data,target=${BLAZEGRAPH_DATA_PATH}`);
+    expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
+  });
+
   it('does not delete a stopped legacy container when `docker start` fails', async () => {
     const { runner, calls } = mockDocker({
       matchers: [

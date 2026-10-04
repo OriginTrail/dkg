@@ -11,6 +11,8 @@
  * the incident background.
  */
 import { join } from 'node:path';
+import * as actions from './actions.js';
+import type { HardenWorkflowContext } from './actions.js';
 import {
   BLAZEGRAPH_DATA_DIR,
   BLAZEGRAPH_IMAGE,
@@ -37,8 +39,6 @@ export interface HardenStep {
   description: string;
   /** Present when the step is a docker invocation. */
   dockerArgs?: string[];
-  /** Postcondition that must hold before the next step runs. */
-  predicate: string;
 }
 
 export interface HardenPlanInput {
@@ -48,10 +48,12 @@ export interface HardenPlanInput {
   heapMb: number;
   migrationDir: string;
   state: HardenState;
+  /** Docker exec size preflight is available only while the source is running. */
+  running?: boolean;
 }
 
 /** Plan-step inputs that do not depend on the migration state. */
-export type HardenStepDefsInput = Omit<HardenPlanInput, 'state'>;
+export type HardenStepDefsInput = Omit<HardenPlanInput, 'state'> & { readonly sourceContainerName?: string };
 
 /** Shell script run inside the seed helper container (same pinned image —
  *  nothing new is pulled). Temp-file + `mv` makes the seed itself
@@ -106,50 +108,44 @@ function seedRunArgs(input: { containerName: string; migrationDir: string }): st
  */
 export function hardenStepDefs(input: HardenStepDefsInput) {
   const backupName = `${input.containerName}${HARDEN_BACKUP_SUFFIX}`;
+  const sourceName = input.sourceContainerName ?? input.containerName;
   const exportPath = join(input.migrationDir, HARDEN_EXPORT_FILENAME);
 
   return {
     journalSize: {
       id: 'journal-size',
       description: `read in-container journal size (docker exec stat ${BLAZEGRAPH_JOURNAL_FILE})`,
-      dockerArgs: ['exec', input.containerName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
-      predicate: 'journal size known (skipped when the container is stopped)',
+      dockerArgs: ['exec', sourceName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
     },
     diskPreflight: {
       id: 'disk-preflight',
       description:
         `require free disk at ${input.migrationDir} >= ${HARDEN_DISK_PREFLIGHT_FACTOR}x journal size ` +
         `(export copy + docker-volume seed copy usually share the root filesystem)`,
-      predicate: 'enough free space for the journal export AND the volume seed copy',
     },
     stop: {
       id: 'stop',
-      description: `docker stop -t 120 ${input.containerName} (graceful s6 -> Tomcat shutdown flushes RWStore)`,
-      dockerArgs: ['stop', '-t', '120', input.containerName],
-      predicate: 'container stopped',
+      description: `docker stop -t 120 ${sourceName} (graceful s6 -> Tomcat shutdown flushes RWStore)`,
+      dockerArgs: ['stop', '-t', '120', sourceName],
     },
     exportJournal: {
       id: 'export-journal',
       description:
-        `docker cp the journal out to ${exportPath} (always re-exported in the legacy ` +
-        `path — an older export on disk is stale by construction)`,
-      dockerArgs: ['cp', `${input.containerName}:${BLAZEGRAPH_JOURNAL_FILE}`, exportPath],
-      predicate: 'exported size > 0 and >= in-container size; abort BEFORE any rename on mismatch',
+        `docker cp the current journal from ${sourceName} to ${exportPath} (always re-exported; saved exports may be stale)`,
+      dockerArgs: ['cp', `${sourceName}:${BLAZEGRAPH_JOURNAL_FILE}`, exportPath],
     },
     exportIntegrity: {
       id: 'export-integrity',
       description:
-        `re-inspect ${input.containerName} after the export: it must NOT have run during the ` +
+        `re-inspect ${sourceName} after the export: it must NOT have run during the ` +
         `copy (Running false, StartedAt/FinishedAt unchanged since the post-stop baseline) and ` +
         `the writable-layer size (SizeRw) must be unchanged`,
-      dockerArgs: ['inspect', '--size', input.containerName],
-      predicate: 'container stayed stopped for the whole export and the journal bytes never moved; abort BEFORE any rename otherwise',
+      dockerArgs: ['inspect', '--size', sourceName],
     },
     volumeCreate: {
       id: 'volume-create',
       description: `create named journal volume ${blazegraphVolumeName(input.containerName)} (idempotent)`,
       dockerArgs: ['volume', 'create', blazegraphVolumeName(input.containerName)],
-      predicate: 'volume exists',
     },
     seedVolume: {
       id: 'seed-volume',
@@ -158,19 +154,16 @@ export function hardenStepDefs(input: HardenStepDefsInput) {
         `the volume journal is ALWAYS overwritten from the current export — equal size ` +
         `does not imply equal content; chown ${BLAZEGRAPH_TOMCAT_UID_GID})`,
       dockerArgs: seedRunArgs(input),
-      predicate: 'seed helper stdout (journal size in volume) equals the CURRENT exported size',
     },
     renameBackup: {
       id: 'rename-backup',
       description: `docker rename ${input.containerName} ${backupName} (backup is NEVER removed by this tool)`,
       dockerArgs: ['rename', input.containerName, backupName],
-      predicate: 'legacy container preserved under the backup name',
     },
     disableBackupRestart: {
       id: 'disable-backup-restart',
       description: `docker update --restart=no ${backupName} (backup can never auto-start on host reboot)`,
       dockerArgs: ['update', '--restart=no', backupName],
-      predicate: 'backup restart policy disabled',
     },
     runHardened: {
       id: 'run-hardened',
@@ -184,47 +177,51 @@ export function hardenStepDefs(input: HardenStepDefsInput) {
         heapMb: input.heapMb,
         volumeName: blazegraphVolumeName(input.containerName),
       }),
-      predicate: 'container created and starts',
     },
     verify: {
       id: 'verify',
+      dockerArgs: ['exec', input.containerName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
       description:
         `verify: /bigdata/status ready + ASK {} HTTP 200 + identity-tag SELECT returns a ` +
         `binding + in-container journal size >= exported size (on failure: automatic ` +
         `rollback to ${backupName}; exported journal kept at ${exportPath})`,
-      predicate: 'store answers queries and provably carries the migrated data',
     },
   } satisfies Record<string, HardenStep>;
 }
 
+export interface HardenMigrationPhase extends HardenStep {
+  readonly recovery: 'before-swap' | 'after-swap' | 'existing';
+  readonly execute: (context: HardenWorkflowContext) => Promise<void>;
+}
+
+/** Both rendering and execution select this exact ordered workflow. */
+export function hardenMigrationWorkflow(input: HardenPlanInput): HardenMigrationPhase[] {
+  const defs = hardenStepDefs({ ...input, sourceContainerName: input.state === 'backup-only'
+    ? `${input.containerName}${HARDEN_BACKUP_SUFFIX}` : input.containerName });
+  const phase = (step: HardenStep, execute: (context: HardenWorkflowContext, step: HardenStep) => Promise<void>,
+    recovery: HardenMigrationPhase['recovery'] = 'before-swap'): HardenMigrationPhase => ({
+    ...step, recovery, execute: context => execute(context, step),
+  });
+  if (input.state === 'absent') return [];
+  if (input.state === 'hardened') return [phase({ id: 'verify',
+    description: 'verify the existing hardened store answers ASK {} at its configured namespace endpoint',
+  }, actions.verifyExisting, 'existing')];
+  const readableJournal = input.running ?? (input.state !== 'backup-only');
+  return [
+    ...(readableJournal ? [phase(defs.journalSize, actions.readJournalSize),
+      phase(defs.diskPreflight, actions.checkFreeDisk)] : []),
+    phase(defs.stop, actions.stopSource),
+    phase(defs.exportJournal, actions.exportJournal),
+    phase(defs.exportIntegrity, actions.verifyExport),
+    phase(defs.volumeCreate, actions.createVolume),
+    phase(defs.seedVolume, actions.seedVolume),
+    ...(input.state === 'legacy' ? [phase(defs.renameBackup, actions.renameBackup)] : []),
+    phase(defs.disableBackupRestart, actions.disableBackupRestart, 'after-swap'),
+    phase(defs.runHardened, actions.runHardened, 'after-swap'),
+    phase(defs.verify, actions.verifyReplacement, 'after-swap'),
+  ];
+}
+
 export function planHardenMigration(input: HardenPlanInput): HardenStep[] {
-  const s = hardenStepDefs(input);
-  switch (input.state) {
-    case 'hardened':
-      return [s.verify];
-    case 'backup-only':
-      // Resume after a crash past the rename. The export must already
-      // exist on disk; the executor refuses to proceed otherwise (the
-      // backup container still holds the data either way). The
-      // disable-backup-restart step re-runs idempotently — the crashed
-      // run may have died between the rename and the restart-policy
-      // update, and the backup must never auto-start on host reboot.
-      return [s.volumeCreate, s.seedVolume, s.disableBackupRestart, s.runHardened, s.verify];
-    case 'legacy':
-      return [
-        s.journalSize,
-        s.diskPreflight,
-        s.stop,
-        s.exportJournal,
-        s.exportIntegrity,
-        s.volumeCreate,
-        s.seedVolume,
-        s.renameBackup,
-        s.disableBackupRestart,
-        s.runHardened,
-        s.verify,
-      ];
-    case 'absent':
-      return [];
-  }
+  return hardenMigrationWorkflow(input).map(({ execute: _execute, recovery: _recovery, ...step }) => step);
 }
