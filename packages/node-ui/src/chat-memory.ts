@@ -617,7 +617,7 @@ export class ChatMemoryManager {
     const failureReason = typeof opts?.failureReason === 'string'
       ? opts.failureReason.trim()
       : (opts?.failureReason === null ? null : undefined);
-    const turnUri = turnId ? (await this.selectChatTurn(sessionId, turnId)).uri : undefined;
+    const turnUri = turnId ? (await this.findExistingChatTurn(sessionId, turnId))?.uri ?? scopedChatTurnUri(sessionId, turnId) : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
 
@@ -737,11 +737,11 @@ export class ChatMemoryManager {
     return null;
   }
 
-  private async selectChatTurn(sessionId: string, turnId: string): Promise<{
+  private async findExistingChatTurn(sessionId: string, turnId: string): Promise<{
     uri: string;
-    turnId: string | null;
+    turnId: string;
     createdAt: string | null;
-  }> {
+  } | null> {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
       `SELECT ?turn ?tid ?ts WHERE {
@@ -753,13 +753,9 @@ export class ChatMemoryManager {
     );
     const selected = result.bindings?.[0];
     const found = String(selected?.turn ?? '').replace(/[<>]/g, '');
-    return {
-      // Missing/invalid selection uses a fresh scoped coordinate, so recovery
-      // cannot append to a legacy subject rejected by the ownership filter.
-      uri: found && isSafeIri(found) ? found : scopedChatTurnUri(sessionId, turnId),
-      turnId: stripRdfLiteral(selected?.tid ?? '').trim() || null,
-      createdAt: stripRdfLiteral(selected?.ts ?? '').trim() || null,
-    };
+    const existingTurnId = stripRdfLiteral(selected?.tid ?? '').trim();
+    if (!found || !isSafeIri(found) || !existingTurnId || existingTurnId !== turnId) return null;
+    return { uri: found, turnId: existingTurnId, createdAt: stripRdfLiteral(selected?.ts ?? '').trim() || null };
   }
 
   async recordChatTurnPersistenceTransition(
@@ -777,7 +773,7 @@ export class ChatMemoryManager {
     const trimmedTurnId = turnId.trim();
     if (!trimmedTurnId) return;
     const transitionId = crypto.randomUUID().slice(0, 8);
-    const turnUri = (await this.selectChatTurn(sessionId, trimmedTurnId)).uri;
+    const turnUri = (await this.findExistingChatTurn(sessionId, trimmedTurnId))?.uri ?? scopedChatTurnUri(sessionId, trimmedTurnId);
     const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
     const now = new Date().toISOString();
     const failureReason = typeof opts?.failureReason === 'string'
@@ -1291,10 +1287,7 @@ export class ChatMemoryManager {
       };
     }
 
-    const currentTurn = await this.selectChatTurn(sessionId, turnId);
-    const turnUri = currentTurn.uri;
-    const currentTurnId = currentTurn.turnId;
-    const currentTurnTs = currentTurn.createdAt;
+    const currentTurn = await this.findExistingChatTurn(sessionId, turnId);
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
         ${chatTurnSubjectPattern(`<${sessionUri}>`, '?latestTurn', '?latestTurnId')}
@@ -1303,7 +1296,7 @@ export class ChatMemoryManager {
       this.wmReadOpts(),
     );
     const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
-    if (!currentTurnId || currentTurnId !== turnId) {
+    if (!currentTurn) {
       return {
         mode: 'full_refresh_required',
         reason: 'turn_not_found',
@@ -1321,6 +1314,7 @@ export class ChatMemoryManager {
       };
     }
 
+    const { uri: turnUri, turnId: currentTurnId, createdAt: currentTurnTs } = currentTurn;
     const currentTurnIdLiteral = JSON.stringify(currentTurnId);
     const currentTsLiteral = currentTurnTs
       ? `"${currentTurnTs}"^^<${XSD_DATETIME}>`
