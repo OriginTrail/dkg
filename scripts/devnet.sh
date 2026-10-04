@@ -1037,10 +1037,13 @@ start_node() {
     // unregistered-CG subscription can prove finalized name absence without
     // repeatedly cold-scanning the same chain on every receiver. Preserve an
     // explicit operator override when adding a node to an existing devnet.
+    // The daemon rejects a trust list longer than eight Cores
+    // (CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS), so a larger
+    // Core mesh trusts its first eight; bootstrapPeers above stays complete.
     if (cfg.nodeRole === 'edge' && peers.length && !cfg.authorityIndex) {
       cfg.authorityIndex = {
         mode: 'core-snapshot',
-        trustedCorePeers: peers,
+        trustedCorePeers: peers.slice(0, 8),
         maxTailBlocks: 2000,
       };
     }
