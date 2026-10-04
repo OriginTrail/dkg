@@ -133,6 +133,12 @@ const RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1 = Object.freeze([
   8_000,
 ] as const);
 
+class Rfc64SwmInventoryAuthorityTransitionV1 extends Error {
+  constructor() {
+    super('RFC-64 SWM inventory authority changed before commit');
+  }
+}
+
 function waitForRfc64DefaultResponsibilitySettlementV1(
   delayMs: number,
   signal: AbortSignal,
@@ -684,7 +690,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
         let lastResponsibilityFailure: unknown = null;
         for (const delayMs of RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1) {
-          if (result.status !== 'dormant' || result.dormantReason !== 'inactive-lane') break;
+          if (result.status !== 'dormant' || (
+            result.dormantReason !== 'inactive-lane'
+            && result.dormantReason !== 'authority-transition'
+          )) break;
           if (shutdownSignal.aborted) return;
           // A durable promotion can race the asynchronous default-responsibility
           // and authority transition for a newly created CG. Refresh and retry
@@ -709,10 +718,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             )) return;
             continue;
           }
-          if (
-            responsibility.selectionSource !== 'default'
-            || responsibility.mode !== 'catalog'
-          ) {
+          if (responsibility.mode === 'legacy' || (
+            result.dormantReason === 'inactive-lane'
+            && (responsibility.selectionSource !== 'default'
+              || responsibility.mode !== 'catalog')
+          )) {
             break;
           }
           if (!await waitForRfc64DefaultResponsibilitySettlementV1(
@@ -723,10 +733,18 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         }
         if (
           result.status === 'dormant'
-          && result.dormantReason === 'inactive-lane'
+          && (result.dormantReason === 'inactive-lane'
+            || result.dormantReason === 'authority-transition')
           && lastResponsibilityFailure !== null
         ) {
           throw lastResponsibilityFailure;
+        }
+        if (result.status === 'dormant'
+          && result.dormantReason === 'authority-transition') {
+          this.log.warn(
+            params.ctx,
+            'RFC-64 SWM inventory authority did not settle after bounded post-commit retries',
+          );
         }
         if (result.status === 'applied' || result.status === 'existing') {
           const projection = {
@@ -1137,7 +1155,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           if (
             currentLane === null
             || currentLane.kind !== prepared.laneKind
-          ) throw new Error('RFC-64 SWM inventory authority changed before commit');
+          ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
           const currentScope = Object.freeze({
             ...currentLane.scopeBase,
             authorAddress: prepared.scope.authorAddress,
@@ -1145,7 +1163,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           if (
             computeSwmAuthorInventoryScopeDigestV1(currentScope)
             !== inventoryScopeDigest
-          ) throw new Error('RFC-64 SWM inventory scope changed before commit');
+          ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
           return maintainRfc64SwmAuthorInventoryV1(
             persistence.swmAuthorInventory,
             {
@@ -1172,6 +1190,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         kaUal,
       );
     } catch (cause) {
+      if (cause instanceof Rfc64SwmInventoryAuthorityTransitionV1) {
+        return shadowResult('dormant', 'upsert', 0, null, null, 'authority-transition');
+      }
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause),
         params.contextGraphId,

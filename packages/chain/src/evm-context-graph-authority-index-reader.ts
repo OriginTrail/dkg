@@ -871,6 +871,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       complete: boolean;
       value: T;
     }>,
+    validateIncomplete?: (projection: ContextGraphAuthorityIndexProjection) => Promise<boolean>,
   ): Promise<T> => {
     assertOpen();
     options.signal?.throwIfAborted();
@@ -892,6 +893,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       scope,
       signal: options.signal,
       project: read,
+      ...(validateIncomplete === undefined ? {} : { validateIncomplete }),
       validateAnchor: async (cached) => {
         const provenByLog = await contextGraphAuthorityProjectionAnchorProvenByLogV1(
           cached,
@@ -1000,6 +1002,43 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return projected;
   };
 
+  // An absent name binding is reusable only at the SAME finalized block and
+  // hash. A fresh head check is much cheaper than replaying the contract's
+  // event log for every read, while a new registration or reorg still forces
+  // the ordinary live scan before any unregistered authority is accepted.
+  const validateFinalizedNameAbsence = (
+    operationLabel: string,
+    options: ContextGraphAuthorityReadOptions,
+  ) => async (cached: ContextGraphAuthorityIndexProjection): Promise<boolean> => {
+    const current = await dependencies.readTipProvider(
+      `${operationLabel} absent-name finality`,
+      (provider) => resolveEvmFinalityAnchorWithHeadV1({
+        finalityConfirmations: dependencies.finalityConfirmations(),
+        readHead: () => withRpcUsageConsumer(
+          'authorityProjection.absentNameHead',
+          () => readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} absent-name chain head`,
+            () => provider.getBlock('latest'),
+            options.signal,
+          ),
+        ),
+        readBlockAt: (blockNumber) => withRpcUsageConsumer(
+          'authorityProjection.absentNameAnchor',
+          () => readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} absent-name anchor block ${blockNumber}`,
+            () => provider.getBlock(blockNumber),
+            options.signal,
+          ),
+        ),
+        unavailable: contextGraphAuthorityAnchorUnavailableV1,
+      }),
+      { signal: options.signal },
+    );
+    options.signal?.throwIfAborted();
+    return cached.finalized.number === current.finalized.number
+      && cached.finalized.hash.toLowerCase() === current.finalized.hash.toLowerCase();
+  };
+
   const resolveFinalizedIdsByNameHashes = async (
     rawNameHashes: readonly string[],
     options: ContextGraphAuthorityReadOptions,
@@ -1018,6 +1057,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         }
         return { complete: resolved.size === nameHashes.length, value: resolved };
       },
+      validateFinalizedNameAbsence(operationLabel, options),
     );
   };
 
@@ -1039,6 +1079,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         }
         return { complete: snapshots.size === nameHashes.length, value: snapshots };
       },
+      validateFinalizedNameAbsence(operationLabel, options),
     );
   };
 
