@@ -1,18 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
 import { assertionLifecycleUri, buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
   createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { OxigraphStore, StoreOperationTimeoutError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
+import { ChangelogStore, GraphSetIndexStore, OxigraphStore, SparqlHttpStore, StoreOperationTimeoutError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, DKGPublisher, TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish.js';
-import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
+import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -24,7 +25,21 @@ const ROOT = computeFlatKCRootV10(QUADS, []), HEX = ethers.hexlify(ROOT);
 const META = contextGraphMetaUri(CG), LIFECYCLE = assertionLifecycleUri(CG, AUTHOR, NAME), ASSERTION = contextGraphAssertionUri(CG, AUTHOR, NAME);
 const dirs: string[] = [];
 const stores: OxigraphStore[] = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const store of new Set(stores.splice(0))) await store.close().catch(() => undefined); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+const flushBarrier = vi.hoisted(() => ({ path: null as string | null, captured: null as (() => void) | null,
+  release: null as Promise<void> | null, fail: false }));
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+    if (String(args[0]) === flushBarrier.path && args[1] === 'w') {
+      flushBarrier.captured?.();
+      await flushBarrier.release;
+      if (flushBarrier.fail) throw Object.assign(new Error('snapshot persistence failed'), { code: 'EIO' });
+    }
+    return actual.open(...args);
+  } };
+});
+afterEach(async () => { flushBarrier.path = null; flushBarrier.captured = null; flushBarrier.release = null; flushBarrier.fail = false;
+  vi.restoreAllMocks(); for (const store of new Set(stores.splice(0))) await store.close().catch(() => undefined); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 class FaultStore extends OxigraphStore {
   armed = false;
   constructor(path: string, readonly predicate: string, readonly operation: 'insert' | 'delete') { super(path); Object.defineProperty(this, 'atomicUpdate', { value: undefined }); }
@@ -230,6 +245,59 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
 
 describe('review regression boundaries', () => {
   const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED };
+  it.each(['raw', 'agent-facade'] as const)('retains %s repair evidence across a failed snapshot and abrupt reopen, then durably retires it', async facade => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-crash-stamp-')), crashDir = await mkdtemp(join(tmpdir(), 'dkg-crash-reopen-'));
+    dirs.push(dir, crashDir);
+    let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const path = join(dir, 'store.nq'), store = new OxigraphStore(path), agent = agentFor(store, dir, 1);
+    if (facade === 'agent-facade') agent.store = createListContextGraphsCacheInvalidatingStore(store, vi.fn(), vi.fn());
+    await store.insert([{ subject: LIFECYCLE, predicate: `${DKG}state`, object: '"shared"', graph: META }]);
+    await store.flush();
+    let entered!: () => void, release!: () => void;
+    const captured = new Promise<void>(resolve => { entered = resolve; });
+    const flush = vi.spyOn(store, 'flush');
+    flushBarrier.path = `${path}.tmp`; flushBarrier.captured = entered;
+    flushBarrier.release = new Promise<void>(resolve => { release = resolve; }); flushBarrier.fail = true;
+    const publish = vi.fn(); agent.publisher = { publish, writeLocks: new Map() };
+    const repairing = agent._repairConfirmedNamedKaVmLifecycle(input);
+    try {
+      await captured;
+      // The stamp is visible in memory while the captured disk snapshot is held.
+      expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: true });
+    } finally { release(); }
+    expect(await repairing).toBe(true);
+    expect(flush).toHaveBeenCalledWith({ source: 'agent.publish.confirmedLifecycleFlush' });
+    const journalPath = join(dir, 'named-ka-vm-lifecycle-repairs.json');
+    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journalPath, 'utf8'))).size).toBe(1);
+    // Copy only durable bytes, without closing the store or stopping the agent.
+    const crashPath = join(crashDir, 'store.nq');
+    await copyFile(path, crashPath); await copyFile(journalPath, join(crashDir, 'named-ka-vm-lifecycle-repairs.json'));
+    flushBarrier.path = null;
+    const reopened = new OxigraphStore(crashPath), fresh = agentFor(reopened, crashDir, 1);
+    if (facade === 'agent-facade') fresh.store = createListContextGraphsCacheInvalidatingStore(reopened, vi.fn(), vi.fn());
+    fresh.publisher = { publish, writeLocks: new Map() };
+    expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: false });
+    now += 6_000; await fresh.getOrCreateNamedKaVmLifecycleRepair().runDue();
+    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(crashDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
+    // Reopen again immediately after retirement, still without any graceful flush.
+    const durable = new OxigraphStore(crashPath); stores.push(durable);
+    expect(await durable.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" ; <${DKG}publishedUal> ${JSON.stringify(PUBLISHED)} } }`)).toMatchObject({ value: true });
+    expect(publish).not.toHaveBeenCalled();
+    await fresh.namedKaVmLifecycleRepair.stop(); await agent.namedKaVmLifecycleRepair.stop();
+  });
+  it.each(['raw', 'agent-facade', 'decorated'] as const)('retains the journal when the %s backend cannot certify durable completion', async facade => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-uncertified-stamp-')); dirs.push(dir);
+    const store = new OxigraphStore(), agent = agentFor(store, dir, 1);
+    Object.defineProperty(store, 'flush', { value: undefined, configurable: true });
+    const wrapped = facade === 'decorated' ? new ChangelogStore(new GraphSetIndexStore(store)) : store;
+    agent.store = facade === 'raw' ? wrapped : createListContextGraphsCacheInvalidatingStore(wrapped, vi.fn(), vi.fn());
+    const commit = vi.spyOn(store, 'atomicUpdate');
+    expect(await agent._repairConfirmedNamedKaVmLifecycle(input)).toBe(true);
+    expect(commit).not.toHaveBeenCalled();
+    const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+    expect([...journal.values()]).toMatchObject([{ input: { publishedUal: PUBLISHED }, attempts: 1, rejected: false }]);
+    await agent.namedKaVmLifecycleRepair.stop();
+  });
   it.each([false, true])('preserves a reopened unsealed WM draft with matching pointer=%s', async (matchingPointer) => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-open-wm-repair-')); dirs.push(dir);
     const store = new OxigraphStore(); stores.push(store);
@@ -306,6 +374,41 @@ describe('review regression boundaries', () => {
     { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"unrelated graph"', graph: 'urn:unrelated:metadata' },
   ];
   const metadataSnapshot = (store: OxigraphStore) => store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+
+  it.each(['raw', 'agent-facade'] as const)('retires the journal after an explicitly durable remote acknowledgement through %s', async facade => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-durable-remote-stamp-')); dirs.push(dir);
+    const path = join(dir, 'remote.nq'), backing = new OxigraphStore(path), agent = agentFor(backing, dir, 1);
+    await backing.insert(metadataRows()); await backing.flush();
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = String(init?.body);
+      if (body.startsWith('SELECT')) return Response.json({ head: { vars: ['wm', 'state', 'layer'] }, results: { bindings: [{
+        wm: { type: 'literal', value: HEX.slice(2) }, state: { type: 'literal', value: 'shared' }, layer: { type: 'literal', value: 'SWM' },
+      }] } });
+      await backing.atomicUpdate(body); await backing.flush(); // Endpoint contract: acknowledgement follows durable commit.
+      return new Response(null, { status: 204 });
+    });
+    const remote = new SparqlHttpStore({ queryEndpoint: 'http://durable-remote.test/sparql', consistencyProfile: 'atomic-update', writesDurableOnAcknowledgement: true });
+    agent.store = facade === 'raw' ? remote : createListContextGraphsCacheInvalidatingStore(remote, vi.fn(), vi.fn());
+    try {
+      expect(agent.store.writesDurableOnAcknowledgement).toBe(true); expect(agent.store.flush).toBeUndefined();
+      expect(await agent._repairConfirmedNamedKaVmLifecycle(input)).toBe(false); expect(fetch).toHaveBeenCalledTimes(2);
+      expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
+      const reopened = new OxigraphStore(path); stores.push(reopened);
+      expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" } }`)).toMatchObject({ value: true });
+    } finally { await agent.namedKaVmLifecycleRepair?.stop(); await remote.close(); }
+  });
+
+  it('does not infer remote persistence from atomicity and readback guarantees', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-uncertified-remote-stamp-')); dirs.push(dir);
+    const agent = agentFor(new OxigraphStore(), dir, 1), fetch = vi.spyOn(globalThis, 'fetch');
+    const remote = new SparqlHttpStore({ queryEndpoint: 'http://uncertified-remote.test/sparql', consistencyProfile: 'atomic-readback' });
+    agent.store = createListContextGraphsCacheInvalidatingStore(remote, vi.fn(), vi.fn());
+    try {
+      expect(agent.store.writesDurableOnAcknowledgement).toBe(false);
+      expect(await agent._repairConfirmedNamedKaVmLifecycle(input)).toBe(true); expect(fetch).not.toHaveBeenCalled();
+      expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(1);
+    } finally { await agent.namedKaVmLifecycleRepair?.stop(); await remote.close(); }
+  });
 
   it('commits once through the production agent wrapper without separate lifecycle writes', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-wrapped-atomic-repair-')); dirs.push(dir);
@@ -477,14 +580,69 @@ describe('review regression boundaries', () => {
     await expect(agent._repairConfirmedNamedKaVmLifecycle(input)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1' });
     expect(persist).toHaveBeenCalledOnce(); expect(apply).not.toHaveBeenCalled(); await repair.stop();
   });
-  it('round-trips canonical version-1 journal entries and retry state', () => {
+  it('round-trips canonical version-2 journal entries and retry state', () => {
     const normalized = normalizeLifecycleRepairInput({ ...input, merkleRoot: HEX.toUpperCase().replace('0X', '0x'), priorMerkleRoot: `0x${PRIOR.toUpperCase()}` }, true), key = lifecycleRepairKey(normalized);
-    const decoded = decodeLifecycleRepairJournal({ version: 1, entries: [[key, { input: normalized, attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' }]] });
+    const decoded = decodeLifecycleRepairJournal({ version: 2, entries: [[key, { input: normalized, attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' }]] });
     expect(decoded.get(key)).toEqual({ input: { ...normalized, merkleRoot: HEX.slice(2), priorMerkleRoot: PRIOR }, attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' });
+  });
+  it('keeps peer case identities independent through durable retry and restart', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-peer-identity-repair-')); dirs.push(dir);
+    let now = 1_000;
+    const fail = vi.fn(async () => { throw new Error('temporary store failure'); });
+    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now, apply: fail, isCurrent: async () => true, warn: () => undefined });
+    for (const agentAddress of ['PeerABC', 'peerabc']) await repair.submit({ ...input, agentAddress });
+    const file = join(dir, 'named-ka-vm-lifecycle-repairs.json');
+    const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(file, 'utf8')));
+    expect(journal.size).toBe(2); expect(new Set([...journal.values()].map(entry => entry.input.agentAddress))).toEqual(new Set(['PeerABC', 'peerabc']));
+    await repair.stop(); now = 6_000;
+    const apply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => undefined), fresh = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
+    await fresh.runDue(); expect(new Set(apply.mock.calls.map(call => call[0].agentAddress))).toEqual(new Set(['PeerABC', 'peerabc']));
+    await fresh.stop();
+  });
+  it('selects versions across equivalent EVM identities and migrates historical journal keys', async () => {
+    const mixed = `0x${'aB'.repeat(20)}`, lower = mixed.toLowerCase();
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-evm-identity-repair-')); dirs.push(dir);
+    const apply = vi.fn(async () => { throw new Error('temporary store failure'); });
+    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => 1_000, apply, isCurrent: async () => true, warn: () => undefined });
+    await repair.submit({ ...input, agentAddress: mixed });
+    await repair.submit({ ...input, agentAddress: lower, assertionVersion: '2' });
+    expect(await repair.submit({ ...input, agentAddress: mixed })).toBe('superseded');
+    const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+    expect([...journal.values()]).toMatchObject([{ input: { agentAddress: lower, assertionVersion: '2' } }]);
+    await repair.stop();
+    const normalized = normalizeLifecycleRepairInput({ ...input, agentAddress: mixed }, true);
+    const historical = createHash('sha256').update(JSON.stringify([CG, lower, NAME, ''])).digest('hex');
+    await writeFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), JSON.stringify({ version: 1, entries: [[historical, { input: normalized, attempts: 2, nextAttemptAt: 6_000 }]] }));
+    const migrated = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+    expect(migrated.get(lifecycleRepairKey(normalized))).toMatchObject({ input: normalized, attempts: 2, nextAttemptAt: 6_000 });
+    const freshApply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => { throw new Error('retry remains pending'); });
+    const fresh = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => 6_000, apply: freshApply, isCurrent: async () => true, warn: () => undefined });
+    await fresh.runDue(); expect(freshApply).toHaveBeenCalledWith({ ...normalized, packedKaId: PACKED });
+    const rewritten = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
+    expect(rewritten.version).toBe(2); expect(decodeLifecycleRepairJournal(rewritten).get(lifecycleRepairKey(normalized))).toMatchObject({ attempts: 3 });
+    await fresh.stop();
+  });
+  it.each([1, 2])('rejects mismatched and duplicate version-%s journal identities before migration', version => {
+    const normalized = normalizeLifecycleRepairInput(input, true);
+    const historical = createHash('sha256').update(JSON.stringify([CG, AUTHOR, NAME, ''])).digest('hex');
+    const key = version === 1 ? historical : lifecycleRepairKey(normalized);
+    const entry = { input: normalized, attempts: 0, nextAttemptAt: 0 };
+    expect(() => decodeLifecycleRepairJournal({ version, entries: [['bad-key', entry]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
+    expect(() => decodeLifecycleRepairJournal({ version, entries: [[key, entry], [key, entry]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
+  });
+  it('migrates a historical peer key while preserving its case-sensitive identity', () => {
+    const normalized = normalizeLifecycleRepairInput({ ...input, agentAddress: 'PeerABC' }, true);
+    const historical = createHash('sha256').update(JSON.stringify([CG, 'peerabc', NAME, ''])).digest('hex');
+    const entry = { input: normalized, attempts: 2, nextAttemptAt: 6_000 };
+    const journal = decodeLifecycleRepairJournal({ version: 1, entries: [[historical, entry]] });
+    expect(journal.get(lifecycleRepairKey(normalized))).toEqual(entry);
+    expect(journal.has(lifecycleRepairKey({ ...normalized, agentAddress: 'peerabc' }))).toBe(false);
+    // Historical key collisions are corruption, not permission to merge two principals.
+    expect(() => decodeLifecycleRepairJournal({ version: 1, entries: [[historical, entry], [historical, { ...entry, input: { ...normalized, agentAddress: 'peerabc' } }]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
   });
   it.each(['contextGraphId', 'agentAddress', 'name', 'publishedUal', 'merkleRoot', 'assertionVersion', 'packedKaId', 'subGraphName', 'priorMerkleRoot'])('rejects non-string journal field %s', (field) => {
     const normalized = normalizeLifecycleRepairInput(input, true), key = lifecycleRepairKey(normalized);
-    expect(() => decodeLifecycleRepairJournal({ version: 1, entries: [[key, { input: { ...normalized, [field]: 123 }, attempts: 0, nextAttemptAt: 0 }]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
+    expect(() => decodeLifecycleRepairJournal({ version: 2, entries: [[key, { input: { ...normalized, [field]: 123 }, attempts: 0, nextAttemptAt: 0 }]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
   });
 });
 

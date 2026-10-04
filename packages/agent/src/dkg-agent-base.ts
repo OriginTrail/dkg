@@ -516,6 +516,7 @@ export function createListContextGraphsCacheInvalidatingStore(
     & Partial<SortedGraphSetSource>
     & { readonly innerStore: TripleStore } = {
     innerStore,
+    get writesDurableOnAcknowledgement() { return innerStore.writesDurableOnAcknowledgement; },
     get queryCancellation() {
       return innerStore.queryCancellation;
     },

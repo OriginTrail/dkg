@@ -1,3 +1,4 @@
+import { sleep, normalizeNonNegativeInt } from './oxigraph-worker-timing.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
@@ -77,14 +78,6 @@ const RESPAWN_BACKOFF_MS = [0, 1_000, 5_000, 30_000];
  */
 const MAX_CONSECUTIVE_RESPAWNS = 5;
 
-/** Unref'd sleep — a respawn backoff timer must not keep the process alive on its own. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    if (typeof t.unref === 'function') t.unref();
-  });
-}
-
 export interface OxigraphWorkerStoreOptions {
   /**
    * Per-operation timeout in milliseconds for READ-ONLY ops. Default 120_000.
@@ -93,17 +86,6 @@ export interface OxigraphWorkerStoreOptions {
    * clean failure while it is still in flight.
    */
   operationTimeoutMs?: number;
-}
-
-/**
- * Accept only a finite, non-negative override; otherwise fall back. The result
- * is floored to an INTEGER — the timeout is a millisecond count, so a fractional
- * value is meaningless noise.
- */
-function normalizeNonNegativeInt(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
-    : fallback;
 }
 
 function asAbortError(reason: unknown): Error {

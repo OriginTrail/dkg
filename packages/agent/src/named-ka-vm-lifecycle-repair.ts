@@ -27,6 +27,7 @@ export class NamedKaVmLifecycleRepair {
   constructor(private readonly options: {
     dataDir?: string;
     now?: () => number;
+    /** Resolve only after metadata persistence is durable, before retiring evidence. */
     apply: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<void>;
     /** Coherent chain version evidence; a newer chain version fences an old repair. */
     isCurrent: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<boolean>;
@@ -55,7 +56,7 @@ export class NamedKaVmLifecycleRepair {
     const dir = this.options.dataDir;
     if (!dir) return;
     await replaceDurableFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'),
-      JSON.stringify({ version: 1, entries: [...this.entries] }), { fileMode: 0o600, directoryMode: 0o700 });
+      JSON.stringify({ version: 2, entries: [...this.entries] }), { fileMode: 0o600, directoryMode: 0o700 });
   }
 
   async submit(input: ConfirmedNamedKaVmLifecycleInput): Promise<NamedKaVmLifecycleRepairOutcome> {

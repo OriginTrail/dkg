@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ChangelogStore, GraphSetIndexStore, OxigraphStore, OxigraphWorkerStore,
   SharedMemoryLiteralBlobStore, SparqlHttpStore, UnsupportedTripleStoreCapabilityError,
-  type TripleStore } from '../src/index.js';
+  createTripleStore, type TripleStore } from '../src/index.js';
 
 const GRAPH = 'urn:atomic:metadata';
 const insert = `INSERT DATA { GRAPH <${GRAPH}> { <urn:a> <urn:p> "new" . <urn:b> <urn:p> "new" } }`;
@@ -37,6 +37,14 @@ describe('explicit whole-request atomic UPDATE capability', () => {
     expect(fetch).toHaveBeenCalledTimes(1); expect(fetch.mock.calls[0]?.[1]?.body).toBe(replace);
   });
 
+  it('preserves explicit acknowledgement durability in direct and factory construction', async () => {
+    const direct = new SparqlHttpStore({ queryEndpoint: 'http://example.test/sparql', writesDurableOnAcknowledgement: true }); stores.push(direct);
+    const factory = await createTripleStore({ backend: 'sparql-http', options: { queryEndpoint: 'http://example.test/sparql', writesDurableOnAcknowledgement: true } }); stores.push(factory);
+    expect(direct.writesDurableOnAcknowledgement).toBe(true); expect(factory.writesDurableOnAcknowledgement).toBe(true);
+    expect(() => new SparqlHttpStore({ queryEndpoint: 'http://example.test/sparql', writesDurableOnAcknowledgement: 'true' as unknown as boolean })).toThrow('must be boolean');
+    expect(() => new SparqlHttpStore({ queryEndpoint: 'http://example.test/sparql', consistencyProfile: 'unsupported' as never })).toThrow('consistencyProfile must be');
+  });
+
   it('preserves transaction rollback through production decorators', async () => {
     const base = new OxigraphStore();
     const blobs = new SharedMemoryLiteralBlobStore(base, { blobDir: '/tmp/dkg-atomic-unused-blobs', thresholdBytes: 65_536 });
@@ -47,12 +55,15 @@ describe('explicit whole-request atomic UPDATE capability', () => {
     expect(await store.countQuads(GRAPH)).toBe(2); expect(await store.hasGraph(GRAPH)).toBe(true);
   });
 
-  it('does not treat a generic update method as certification through decorators', async () => {
+  it.each(['changelog', 'graph-index', 'literal-blob'] as const)('refuses a generic-update-only backend before mutation through %s', async decorator => {
     const base = new OxigraphStore(); stores.push(base);
     Object.defineProperty(base, 'atomicUpdate', { value: undefined });
     const update = vi.spyOn(base, 'update');
-    const indexed = new GraphSetIndexStore(base);
-    await expect(indexed.atomicUpdate(insert)).rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
+    const store = decorator === 'changelog' ? new ChangelogStore(base) : decorator === 'graph-index'
+      ? new GraphSetIndexStore(base) : new SharedMemoryLiteralBlobStore(base, { blobDir: '/tmp/dkg-atomic-unused-blobs', thresholdBytes: 65_536 });
+    await expect(store.atomicUpdate(insert)).rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
+    await expect(store.atomicUpdate(insert)).rejects.toMatchObject({ capability: 'atomicUpdate', outcome: 'not_started' });
     expect(update).not.toHaveBeenCalled();
+    expect(await base.countQuads()).toBe(0);
   });
 });

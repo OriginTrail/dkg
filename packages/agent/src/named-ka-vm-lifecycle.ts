@@ -118,6 +118,22 @@ async function commitLifecycleMetadata(store: TripleStore, plan: LifecycleMetada
   await store.insert(plan.inserts.map(triple => ({ ...triple, graph: plan.metaGraph })));
 }
 
+/** A decorator's no-op flush cannot certify a backend which lacks the capability. */
+function canPersistStore(store: TripleStore): boolean {
+  let candidate: unknown = store;
+  let flushAvailable = true;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 16; depth += 1) {
+    if (typeof candidate !== 'object' || candidate === null || seen.has(candidate)) return false;
+    if ((candidate as Partial<TripleStore>).writesDurableOnAcknowledgement === true) return true;
+    flushAvailable &&= typeof (candidate as Partial<TripleStore>).flush === 'function';
+    seen.add(candidate);
+    if (!('innerStore' in candidate)) return flushAvailable;
+    candidate = candidate.innerStore;
+  }
+  return false;
+}
+
 /** Caller holds the publisher's same-KA lifecycle lock across admission and commit. */
 export async function applyPublishedNamedKaVmLifecycle(store: TripleStore, input: PublishedNamedKaVmLifecycleInput): Promise<void> {
   const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
@@ -126,6 +142,11 @@ export async function applyPublishedNamedKaVmLifecycle(store: TripleStore, input
   // Validate inputs before I/O and use the shared RDF serializer at the query boundary.
   checkedRoot(input.merkleRoot);
   if (input.priorMerkleRoot !== undefined) checkedRoot(input.priorMerkleRoot);
+  if (!input.tentative && !canPersistStore(store)) {
+    throw Object.assign(new Error('Confirmed lifecycle repair awaits certified persistence or durable flush support'), {
+      code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',
+    });
+  }
   const iri = (value: string) => formatSparqlTerm(value, { position: 'subject' });
   const rows = await store.query(`SELECT ?wm ?swm ?state ?layer ?activeSeal WHERE { GRAPH ${iri(metaGraph)} {
     OPTIONAL { ${iri(lifecycleUri)} <${WM_CURRENT_ASSERTION_PRED}> ?wm }
@@ -138,4 +159,7 @@ export async function applyPublishedNamedKaVmLifecycle(store: TripleStore, input
     throw Object.assign(new Error('Invalid workspace pointers during confirmed lifecycle repair'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
   }
   await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(input, decodeWorkspaceLifecycleValues(rows.bindings[0])));
+  // Graph writes can be visible before the debounced snapshot is on disk. The
+  // repair owner may retire its fsynced journal only after this barrier succeeds.
+  await store.flush?.({ source: 'agent.publish.confirmedLifecycleFlush' });
 }

@@ -1,3 +1,4 @@
+import { LocalFinalizationRecoveryMethods } from './local-finalization-recovery.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
@@ -2773,8 +2774,7 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
-    const namedLifecycleRepairDrain = this.namedKaVmLifecycleRepair?.stop();
-    void namedLifecycleRepairDrain?.catch(() => {});
+    const namedLifecycleRepairDrain = this.beginNamedLifecycleRepairDrain();
     // Fence ACK routes, retries, and self sends before shutdown awaits.
     const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
     void storageACKDrain.catch(() => {});
@@ -3071,12 +3071,7 @@ export class DKGAgent extends DKGAgentBase {
         );
       }
     }
-    // Stop admission and await the active finalization recovery batch while
-    // chain and graph-store dependencies are still alive. No new retry may
-    // begin after this boundary.
-    await namedLifecycleRepairDrain;
-    this.namedKaVmLifecycleRepair = undefined;
-    await this.finalizationHandler?.stopRecoveryWorker();
+    await this.finishLocalFinalizationRecoveryDrain(namedLifecycleRepairDrain);
     // OT-RFC-64 Gate 1: unregister the public catalog protocols and drain the
     // receiver scheduler (awaiting in-flight durable stage writes) while the
     // router, node, and control-object store are all still live — before
@@ -4598,5 +4593,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);
+export interface DKGAgent extends LocalFinalizationRecoveryMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
+applyMixins(DKGAgent, [LocalFinalizationRecoveryMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);

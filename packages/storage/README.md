@@ -35,6 +35,17 @@ const result = await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
 
 ## Oxigraph persistence contract
 
+Confirmed named KA lifecycle repair keeps its fsynced journal until the metadata
+store certifies persistence. Snapshot stores must complete `flush()` before the
+journal entry is retired. A SPARQL endpoint that durably commits before returning
+successful mutation responses may opt in with
+`options.writesDurableOnAcknowledgement: true`; this promise is independent of
+its `consistencyProfile` transaction/readback guarantees. Use that option only
+when the endpoint guarantees persistence. Without either a durability barrier
+or that acknowledgement contract, confirmed repair remains pending with its
+journal evidence retained. Transparent decorators and the agent store facade
+preserve the backend contract.
+
 This contract applies to `OxigraphStore` when it is created with a persistence
 path (`oxigraph-persistent`) and to `oxigraph-worker` when that worker is given
 a persistence path. Plain `oxigraph`, and a worker without a persistence path,
