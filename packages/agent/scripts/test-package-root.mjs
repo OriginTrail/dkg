@@ -8,6 +8,8 @@ if ('createRandomSamplingRuntime' in root.DKGAgent.prototype) {
   throw new Error('internal Random Sampling runtime factory leaked from the agent surface');
 }
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const legacyAgentBase = await import('@origintrail-official/dkg-agent/dist/dkg-agent-base.js');
+const legacyAgentPublish = await import('@origintrail-official/dkg-agent/dist/dkg-agent-publish.js');
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
 );
@@ -48,6 +50,8 @@ const expectedRfc64PublicCatalogReconciliationOutcomes = [
 if (
   typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
+  || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
+  || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
   || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
   || typeof root.computeRfc64AppliedInventoryDigestV1 !== 'function'
   || typeof root.classifyRfc64PolicyCellV1 !== 'function'
@@ -413,6 +417,38 @@ for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.j
     throw new Error(`internal Random Sampling module unexpectedly resolved: ${path}`);
   } catch (error) {
     if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+}
+
+// Decomposition must preserve historical entrypoints without publishing new helpers.
+const privateImplementationModules = [
+  'context-graph-binding-abort',
+  'context-graph-cache-invalidating-store',
+  'context-graph-meta-record-copy',
+  'context-graph-sync-abort',
+  'join-encryption-key-bundle',
+  'knowledge-asset-vm-publish-request',
+  'lifecycle-sync-policy',
+  'lifecycle-sync-result',
+  'local-private-member',
+  'storage-ack-owned-request',
+  'workspace-projected-delegatees',
+];
+for (const module of privateImplementationModules) {
+  for (const extension of ['', '.js', '.d.ts', '.js.map', '.d.ts.map']) {
+    const specifier = `@origintrail-official/dkg-agent/dist/${module}${extension}`;
+    try {
+      await import(specifier);
+      throw new Error(`private implementation module unexpectedly imported: ${specifier}`);
+    } catch (error) {
+      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+    }
+    try {
+      require.resolve(specifier);
+      throw new Error(`private implementation module unexpectedly resolved: ${specifier}`);
+    } catch (error) {
+      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+    }
   }
 }
 
