@@ -39,6 +39,16 @@ describe('shared Blazegraph inspection facts', () => {
       });
     }
   });
+
+  it('expresses published reuse and configured migration port policies over the same parser', () => {
+    const info = { HostConfig: { PortBindings: { '8080/tcp': [{ HostPort: '9998' }] } },
+      NetworkSettings: { Ports: { '8080/tcp': [{ HostPort: '9999' }] } } };
+    expect(inspectBlazegraphContainerFacts(info, policy).hostPort).toBe(9998);
+    expect(inspectBlazegraphContainerFacts(info, { ...policy, portSource: 'published' }).hostPort).toBe(9999);
+    delete (info.NetworkSettings as { Ports?: unknown }).Ports;
+    expect(inspectBlazegraphContainerFacts(info, policy).hostPort).toBe(9998);
+    expect(inspectBlazegraphContainerFacts(info, { ...policy, portSource: 'published' }).hostPort).toBeUndefined();
+  });
 });
 
 describe('storage-owned managed endpoint parser', () => {

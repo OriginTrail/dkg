@@ -48,11 +48,12 @@ port and verifies readiness, an ASK, the store identity tag, and journal size.
 A failure after the rename triggers rollback. A failed rollback reports the
 remaining commands for manual recovery. No migration path removes the backup
 container or the exported journal. Keep those recovery copies until the
-replacement has been checked. Migration uses an exclusive lock that suspends
-automatic restarts; if a process is killed, inspect the container and lock
+replacement has been checked. Migration uses an exclusive lock that blocks
+daemon startup and suspends automatic store restarts; if a process is killed, inspect the container and lock
 before removing a stale lock and resuming.
 
-`--migration-dir` chooses the export directory, `--port` selects a host port,
-and `--container` overrides the derived container name. Running with the daemon
-still active requires explicit `--yes`; stopping it first avoids an outage
-inside live node operations. This command does not deploy changes to other nodes.
+`--migration-dir` chooses the export directory, `--port` must match the configured
+store endpoint, and `--container` overrides the derived container name. Stop the
+daemon with `dkg stop` before executing a migration. `--yes` only skips the
+confirmation prompt; it cannot permit live writers during verification or rollback.
+Read-only `--dry-run` remains available while the daemon is running.

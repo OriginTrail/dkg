@@ -61,14 +61,10 @@ function parsePositiveIntegerEnv(name: string, fallback: number): number {
  * imports them so writer and reader can never drift. Callers plumb the
  * config dir (`dkgDir()`) the same way `dkg store harden` resolves it.
  */
-export const STORE_HARDEN_LOCK_FILENAME = '.store-harden.lock';
+export { STORE_HARDEN_LOCK_FILENAME, storeHardenLockPath } from './store-maintenance-gate.js';
 
 /** Boot-recovery restart-attempt timestamp (`<DKG_HOME>/.store-boot-restart-ts`). */
 export const STORE_BOOT_RESTART_TS_FILENAME = '.store-boot-restart-ts';
-
-export function storeHardenLockPath(dkgHome: string): string {
-  return join(dkgHome, STORE_HARDEN_LOCK_FILENAME);
-}
 
 export function storeBootRestartTsPath(dkgHome: string): string {
   return join(dkgHome, STORE_BOOT_RESTART_TS_FILENAME);

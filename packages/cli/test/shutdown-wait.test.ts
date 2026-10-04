@@ -12,6 +12,7 @@ import {
 import { _autoUpdateIo } from '../src/daemon/manifest.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 import { stopDaemonIfRunning } from '../src/update/stop-daemon.js';
+import { storeHardenLockPath } from '../src/daemon/store-maintenance-gate.js';
 
 const originalDkgHome = process.env.DKG_HOME;
 const originalShutdownTimeout = process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS;
@@ -31,6 +32,29 @@ afterEach(async () => {
 });
 
 describe('daemon lifecycle shutdown wait', () => {
+  it('refuses startup while store migration holds its marker', async () => {
+    const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-store-migration-'));
+    temporaryHomes.push(dkgHome);
+    process.env.DKG_HOME = dkgHome;
+    await writeFile(storeHardenLockPath(dkgHome), '{}');
+    await expect(daemonRuntimeState.claim(process.pid, resolveShutdownPolicy('60000'))).rejects.toThrow(/Store hardening marker/);
+    await expect(daemonRuntimeState.readPid()).resolves.toBeNull();
+    await expect(daemonRuntimeState.readPolicy(process.pid)).resolves.toBeNull();
+  });
+
+  it('releases startup ownership if migration acquires its marker during the PID claim', async () => {
+    const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-store-migration-race-'));
+    temporaryHomes.push(dkgHome);
+    process.env.DKG_HOME = dkgHome;
+    _autoUpdateIo.rename = async (from, to) => {
+      await originalAtomicWriteIo.rename(from, to);
+      await writeFile(storeHardenLockPath(dkgHome), '{}');
+    };
+    await expect(daemonRuntimeState.claim(process.pid, resolveShutdownPolicy('60000'))).rejects.toThrow(/Store hardening marker/);
+    await expect(daemonRuntimeState.readPid()).resolves.toBeNull();
+    await expect(daemonRuntimeState.readPolicy(process.pid)).resolves.toBeNull();
+  });
+
   it('rejects malformed and structurally invalid persisted policy state', async () => {
     const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-shutdown-policy-invalid-'));
     temporaryHomes.push(dkgHome);

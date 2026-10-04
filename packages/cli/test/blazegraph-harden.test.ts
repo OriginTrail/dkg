@@ -15,7 +15,7 @@
  * tmp dir.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -430,6 +430,25 @@ describe('executeHardenMigration', () => {
     freeDiskBytes: async () => 10 ** 12,
     readyIntervalMs: 1,
     readyTimeoutMs: 200,
+  });
+
+  it('refuses a daemon that claimed its PID before migration lock acquisition without exposing a replacement', async () => {
+    mkdirSync(dkgHome, { recursive: true });
+    writeFileSync(join(dkgHome, 'daemon.pid'), String(process.pid));
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
+    const { fn, calls: queries } = verifierFetch();
+    await expect(executeHardenMigration(baseOpts(runner, fn))).rejects.toThrow(/Stop it with `dkg stop`/);
+    expect(calls.every(args => args[0] === 'inspect')).toBe(true);
+    expect(queries).toEqual([]);
+    expect(existsSync(storeHardenLockPath(dkgHome))).toBe(false);
+  });
+
+  it('releases the startup barrier when initial migration logging fails before any container mutation', async () => {
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
+    const { fn } = verifierFetch();
+    await expect(executeHardenMigration({ ...baseOpts(runner, fn), log: () => { throw new Error('logging failed'); } })).rejects.toThrow('logging failed');
+    expect(calls.every(args => args[0] === 'inspect')).toBe(true);
+    expect(existsSync(storeHardenLockPath(dkgHome))).toBe(false);
   });
 
   it('refuses an existing migration lock before any container mutation', async () => {

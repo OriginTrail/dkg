@@ -32,7 +32,7 @@
 import { spawn } from 'node:child_process';
 import * as net from 'node:net';
 import * as os from 'node:os';
-import { blazegraphHealthCmd as policyHealthCmd, buildBlazegraphPolicyRunArgs, computeBlazegraphHeapMb, fetchWithDeadline, sanitiseContainerName, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
+import { blazegraphHealthCmd as policyHealthCmd, buildBlazegraphPolicyRunArgs, computeBlazegraphHeapMb, fetchWithDeadline, sanitiseContainerName, blazegraphVolumeName, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
 export { blazegraphMigrationVolumeName, computeBlazegraphHeapMb, blazegraphVolumeName, deriveBlazegraphContainerName, parseBlazegraphNamespaceEndpoint, fetchWithDeadline, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
 import blazegraphRuntimeContract from
   '@origintrail-official/dkg/blazegraph-runtime-contract';
@@ -42,7 +42,7 @@ import {
   normalizeBlazegraphNamespace,
   type BlazegraphNamespaceEnsureResult,
 } from '@origintrail-official/dkg-storage';
-import { inspectBlazegraphContainerFacts } from './blazegraph-container-inspection.js';
+import { inspectBlazegraphContainerFacts, type BlazegraphContainerFacts } from './blazegraph-container-inspection.js';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
 const {
@@ -252,153 +252,39 @@ async function findFreePort(
   );
 }
 
-interface BlazegraphContainerPolicyStatus {
-  durableStorage: boolean;
-  journalVolumeName?: string;
-  boundedLogs: boolean;
-  boundedJvm: boolean;
-  healthProbe: boolean;
-}
+interface ContainerInspectInfo extends BlazegraphContainerFacts { exists: boolean }
 
-interface BlazegraphContainerSpec {
-  containerName: string;
-  volumeName: string;
-  dataPath: string;
-  mountSpec: string;
-  logDriver: string;
-  logOptions: readonly { name: string; value: string }[];
-  dockerRunArgs(hostPort: number, journalVolumeName?: string): readonly string[];
-  inspectPolicy(info: unknown): BlazegraphContainerPolicyStatus;
-  warningMessages(status: BlazegraphContainerPolicyStatus): string[];
-}
-
-function createBlazegraphContainerSpec(containerName: string, namespace: string, heapMb: number): BlazegraphContainerSpec {
-  const volumeName = `${containerName}-data`;
-  const dataPath = BLAZEGRAPH_DATA_PATH;
-  const mountSpec = `type=volume,source=${volumeName},target=${dataPath}`;
-  const logDriver = 'local';
-  const logOptions = [
-    { name: 'max-size', value: BLAZEGRAPH_LOG_MAX_SIZE },
-    { name: 'max-file', value: BLAZEGRAPH_LOG_MAX_FILE },
-  ] as const;
-
-  return {
-    containerName,
-    volumeName,
-    dataPath,
-    mountSpec,
-    logDriver,
-    logOptions,
-    dockerRunArgs(hostPort, journalVolumeName) {
-      return buildBlazegraphRunArgs({ containerName, hostPort, namespace, heapMb, volumeName: journalVolumeName });
-    },
-    inspectPolicy(info) {
-      const facts = inspectBlazegraphContainerFacts(info, {
-        containerName, dataPath, containerPort: BLAZEGRAPH_CONTAINER_PORT,
-        logMaxSize: BLAZEGRAPH_LOG_MAX_SIZE, logMaxFile: BLAZEGRAPH_LOG_MAX_FILE,
-      });
-      return { durableStorage: facts.journalMountIsVolume,
-        journalVolumeName: facts.journalVolumeName,
-        boundedLogs: facts.boundedLogs, boundedJvm: facts.boundedJvm,
-        healthProbe: facts.healthProbe };
-
-    },
-    warningMessages(status) {
-      const warnings: string[] = [];
-      if (!status.durableStorage) {
-        warnings.push(
-          `  WARNING: Reused container "${containerName}" is not confirmed to use the expected named Docker volume ` +
-          `"${volumeName}" at ${dataPath}. ` +
-          'DKG will not recreate it automatically because that could discard Blazegraph data; back up the journal before migrating or recreating the container.',
-        );
-      }
-      if (!status.boundedLogs) {
-        const policy = logOptions.map(({ name, value }) => `${name}=${value}`).join(', ');
-        warnings.push(
-          `  WARNING: Reused container "${containerName}" does not use the bounded ${logDriver} log policy ` +
-          `(${policy}). Its Docker logs remain outside the configured 4 GB rotation budget.`,
-        );
-      }
-      if (!status.boundedJvm || !status.healthProbe) {
-        warnings.push(`  WARNING: Reused container "${containerName}" lacks a bounded JVM with exit on OOM or a store health probe. Run dkg store harden --dry-run to inspect a data-preserving migration.`);
-      }
-      return warnings;
-    },
-  };
-}
-
-interface ContainerInspectInfo extends BlazegraphContainerPolicyStatus {
-  exists: boolean;
-  running: boolean;
-  hostPort?: number;
-}
-
-async function inspectContainer(
-  docker: DockerRunner,
-  spec: BlazegraphContainerSpec,
-): Promise<ContainerInspectInfo> {
-  // `docker inspect <name>` exits non-zero with "No such object" when
-  // the container doesn't exist; non-zero is our "doesn't exist"
-  // signal. Otherwise parse the JSON to get state + port mapping.
-  const result = await docker.run(['inspect', spec.containerName]);
-  if (result.exitCode !== 0) {
-    return {
-      exists: false,
-      running: false,
-      durableStorage: false,
-      boundedLogs: false,
-        boundedJvm: false,
-        healthProbe: false,
-    };
+async function inspectContainer(docker: DockerRunner, containerName: string): Promise<ContainerInspectInfo> {
+  const result = await docker.run(['inspect', containerName]);
+  let info: unknown = null;
+  if (result.exitCode === 0) {
+    try { const rows = JSON.parse(result.stdout); info = Array.isArray(rows) ? rows[0] : null; }
+    catch { /* An unreadable existing container retains conservative facts. */ }
   }
-  try {
-    const arr = JSON.parse(result.stdout);
-    const info = Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
-    if (!info) {
-      return {
-        exists: true,
-        running: false,
-        durableStorage: false,
-        boundedLogs: false,
-      boundedJvm: false,
-      healthProbe: false,
-      };
-    }
-    const running = info.State?.Running === true;
-    const ports = info.NetworkSettings?.Ports;
-    // Containers provisioned before the islandora image migration expose the
-    // old image's 8080/tcp port. Prefer the current image contract, but retain
-    // the real host mapping for an already-created legacy container instead of
-    // silently falling back to 9999 and potentially targeting another store.
-    const portBinding = ports?.[`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]
-      ?? (BLAZEGRAPH_CONTAINER_PORT === 8080 ? undefined : ports?.['8080/tcp']);
-    const hostPort = Array.isArray(portBinding) && portBinding.length > 0
-      ? Number(portBinding[0].HostPort)
-      : undefined;
-    return {
-      exists: true,
-      running,
-      hostPort,
-      ...spec.inspectPolicy(info),
-    };
-  } catch {
-    return {
-      exists: true,
-      running: false,
-      durableStorage: false,
-      boundedLogs: false,
-      boundedJvm: false,
-      healthProbe: false,
-    };
-  }
+  return { exists: result.exitCode === 0, ...inspectBlazegraphContainerFacts(info, {
+    containerName, dataPath: BLAZEGRAPH_DATA_PATH, containerPort: BLAZEGRAPH_CONTAINER_PORT,
+    logMaxSize: BLAZEGRAPH_LOG_MAX_SIZE, logMaxFile: BLAZEGRAPH_LOG_MAX_FILE,
+    // Reuse follows the actual published port; migration uses configured-first
+    // inspection because stopped containers may have no published bindings.
+    portSource: 'published',
+  }) };
 }
 
 function warnForLegacyContainerConfiguration(
-  info: ContainerInspectInfo,
-  spec: BlazegraphContainerSpec,
+  info: BlazegraphContainerFacts,
+  containerName: string,
   log: (msg: string) => void,
 ): void {
-  for (const warning of spec.warningMessages(info)) log(warning);
+  if (!info.journalMountIsVolume) log(
+    `  WARNING: Reused container "${containerName}" is not confirmed to use the expected named Docker volume ` +
+    `"${blazegraphVolumeName(containerName)}" at ${BLAZEGRAPH_DATA_PATH}. ` +
+    'DKG will not recreate it automatically because that could discard Blazegraph data; back up the journal before migrating or recreating the container.',
+  );
+  if (!info.boundedLogs) log(
+    `  WARNING: Reused container "${containerName}" does not use the bounded local log policy ` +
+    `(max-size=${BLAZEGRAPH_LOG_MAX_SIZE}, max-file=${BLAZEGRAPH_LOG_MAX_FILE}). Its Docker logs remain outside the configured 4 GB rotation budget.`,
+  );
+  if (!info.boundedJvm || !info.healthProbe) log(`  WARNING: Reused container "${containerName}" lacks a bounded JVM with exit on OOM or a store health probe. Run dkg store harden --dry-run to inspect a data-preserving migration.`);
 }
 
 /**
@@ -457,7 +343,7 @@ async function reconcileNamespace(opts: {
 
 async function finaliseReusedContainer(opts: {
   inspectInfo: ContainerInspectInfo;
-  spec: BlazegraphContainerSpec;
+  containerName: string;
   fallbackPort: number;
   namespace: string;
   fetch: typeof globalThis.fetch;
@@ -469,9 +355,9 @@ async function finaliseReusedContainer(opts: {
   const port = opts.inspectInfo.hostPort ?? opts.fallbackPort;
   const url = `http://127.0.0.1:${port}`;
   if (opts.announceReuse) {
-    opts.log(`  Reusing running container "${opts.spec.containerName}" on port ${port}.`);
+    opts.log(`  Reusing running container "${opts.containerName}" on port ${port}.`);
   }
-  warnForLegacyContainerConfiguration(opts.inspectInfo, opts.spec, opts.log);
+  warnForLegacyContainerConfiguration(opts.inspectInfo, opts.containerName, opts.log);
   await waitForBlazegraphReady({
     url,
     fetch: opts.fetch,
@@ -488,7 +374,7 @@ async function finaliseReusedContainer(opts: {
   return {
     url: namespaceResult.sparqlUrl,
     port,
-    containerName: opts.spec.containerName,
+    containerName: opts.containerName,
     managedByDkg: true,
     reused: true,
     namespaceCreated: namespaceResult.created,
@@ -515,7 +401,6 @@ export async function provisionBlazegraphDocker(
   }
   const containerName = opts.containerName ?? sanitiseContainerName(namespace);
   const heapMb = computeBlazegraphHeapMb((opts.totalMemoryBytes ?? os.totalmem)(), (opts.env ?? process.env).DKG_BLAZEGRAPH_HEAP_MB);
-  const containerSpec = createBlazegraphContainerSpec(containerName, namespace, heapMb);
 
   // 1. Pre-flight: is docker installed?
   const versionResult = await docker.run(['--version'], { timeoutMs: 5000 });
@@ -528,11 +413,11 @@ export async function provisionBlazegraphDocker(
   log(`  Docker available: ${versionResult.stdout.trim().split('\n')[0]}`);
 
   // 2. Reuse path — is the container already running?
-  const inspectInfo = await inspectContainer(docker, containerSpec);
+  const inspectInfo = await inspectContainer(docker, containerName);
   if (inspectInfo.exists && inspectInfo.running) {
     return finaliseReusedContainer({
       inspectInfo,
-      spec: containerSpec,
+      containerName,
       fallbackPort: opts.port ?? DEFAULT_HOST_PORT_START,
       namespace,
       fetch,
@@ -550,12 +435,12 @@ export async function provisionBlazegraphDocker(
     log(`  Container "${containerName}" exists but is stopped; starting it.`);
     const startResult = await docker.run(['start', containerName]);
     if (startResult.exitCode !== 0) {
-      if (!inspectInfo.durableStorage) {
-        warnForLegacyContainerConfiguration(inspectInfo, containerSpec, log);
+      if (!inspectInfo.journalMountIsVolume) {
+        warnForLegacyContainerConfiguration(inspectInfo, containerName, log);
         throw new Error(
           `Cannot safely recreate stopped legacy container "${containerName}" after docker start failed ` +
           `(${startResult.stderr.trim() || 'unknown'}): its Blazegraph journal could not be confirmed in the expected ` +
-          `named volume "${containerSpec.volumeName}". Back up and migrate it before retrying.`,
+          `named volume "${blazegraphVolumeName(containerName)}". Back up and migrate it before retrying.`,
         );
       }
       // The expected named volume preserves the journal, so removing only the
@@ -564,10 +449,10 @@ export async function provisionBlazegraphDocker(
       log(`  docker start failed (${startResult.stderr.trim() || 'unknown'}); recreating.`);
       await docker.run(['rm', '-f', containerName]);
     } else {
-      const restartedInfo = await inspectContainer(docker, containerSpec);
+      const restartedInfo = await inspectContainer(docker, containerName);
       return finaliseReusedContainer({
         inspectInfo: restartedInfo,
-        spec: containerSpec,
+        containerName,
         fallbackPort: opts.port ?? DEFAULT_HOST_PORT_START,
         namespace,
         fetch,
@@ -583,7 +468,7 @@ export async function provisionBlazegraphDocker(
   const portStart = opts.port ?? DEFAULT_HOST_PORT_START;
   const chosenPort = await findFreePort(portStart, portRange, isPortFree, log);
   log(`  Starting Blazegraph container "${containerName}" on port ${chosenPort}…`);
-  const runResult = await docker.run(containerSpec.dockerRunArgs(chosenPort, recreationVolumeName));
+  const runResult = await docker.run(buildBlazegraphRunArgs({ containerName, hostPort: chosenPort, namespace, heapMb, volumeName: recreationVolumeName }));
   if (runResult.exitCode !== 0) {
     throw new Error(
       `Failed to start Blazegraph container — docker run exited ${runResult.exitCode}. ` +

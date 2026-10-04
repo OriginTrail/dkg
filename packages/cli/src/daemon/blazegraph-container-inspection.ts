@@ -22,6 +22,8 @@ export function inspectBlazegraphContainerFacts(info: unknown, policy: {
   readonly containerPort: number;
   readonly logMaxSize?: string;
   readonly logMaxFile?: string;
+  /** Provisioning follows published ports; migration also needs stopped-container bindings. */
+  readonly portSource?: 'published' | 'configured-first';
 }): BlazegraphContainerFacts {
   const root = record(info);
   const mounts = Array.isArray(root?.Mounts) ? root.Mounts : [];
@@ -54,6 +56,8 @@ export function inspectBlazegraphContainerFacts(info: unknown, policy: {
   };
   return Object.freeze({ journalVolumeName: typeof journal?.Name === 'string' ? journal.Name : undefined,
     journalMountIsVolume: journal?.Type === 'volume', boundedJvm, healthProbe, boundedLogs,
-    hostPort: portFrom(hostConfig?.PortBindings) ?? portFrom(record(root?.NetworkSettings)?.Ports),
+    hostPort: policy.portSource === 'published'
+      ? portFrom(record(root?.NetworkSettings)?.Ports)
+      : portFrom(hostConfig?.PortBindings) ?? portFrom(record(root?.NetworkSettings)?.Ports),
     running: record(root?.State)?.Running === true });
 }

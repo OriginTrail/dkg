@@ -45,6 +45,21 @@ try {
   assert.ok(after.Mounts.some(m => m.Name === volumes[1]));
   assert.ok(after.Config.Env.some(e => e.includes('-Xmx256m') && e.includes('ExitOnOutOfMemoryError')));
   assert.ok(after.Config.Healthcheck.Test.join(' ').includes('ASK%7B%7D'));
+  // Inspect the running JVM rather than merely trusting Docker's saved env.
+  const jvms = await docker.run(['exec', '--user', 'tomcat', name, 'jcmd', '-l']);
+  assert.equal(jvms.exitCode, 0, jvms.stderr);
+  const javaPid = jvms.stdout.match(/^(\d+)\s+org\.apache\.catalina\.startup\.Bootstrap\b/m)?.[1];
+  assert.ok(javaPid, jvms.stdout);
+  const flags = await docker.run(['exec', '--user', 'tomcat', name, 'jcmd', javaPid, 'VM.flags', '-all']);
+  assert.equal(flags.exitCode, 0, flags.stderr);
+  assert.match(flags.stdout, /MaxHeapSize\s*=\s*268435456\b/);
+  assert.match(flags.stdout, /ExitOnOutOfMemoryError\s*=\s*true\b/);
+  const health = after.Config.Healthcheck.Test;
+  assert.equal(health[0], 'CMD-SHELL');
+  assert.equal(health.length, 2);
+  const healthResult = await docker.run(['exec', name, 'sh', '-c', health[1]]);
+  assert.equal(healthResult.exitCode, 0, healthResult.stderr);
+  assert.match(healthResult.stdout, /(?:"boolean"\s*:\s*true|<boolean>\s*true\s*<\/boolean>)/);
   const backup = JSON.parse((await docker.run(['inspect', `${name}-backup`])).stdout)[0];
   assert.ok(backup.Mounts.some(m => m.Name === volumes[0]));
   const response = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' }, body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:smoke-2974> { <urn:test:subject> <urn:test:predicate> ?v } }')}` });

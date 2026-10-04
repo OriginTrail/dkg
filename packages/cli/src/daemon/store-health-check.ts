@@ -200,6 +200,47 @@ export const STORE_META_GRAPH = 'urn:dkg:store-meta';
 export const STORE_META_SUBJECT = 'urn:dkg:store-tag';
 export const STORE_META_PREDICATE = 'urn:dkg:storeTaggedFor';
 
+export type StoreIdentityReadResult =
+  | { ok: true; nodeName: string | null; bindingCount: number }
+  | { ok: false; error: string };
+
+/** Canonical read-only tag operation; boot and migration choose their own policy. */
+export async function readStoreIdentityTag(opts: {
+  endpoint: Pick<ReturnType<typeof getSparqlEndpoint>, 'queryUrl' | 'headers'>;
+  fetch?: typeof globalThis.fetch;
+  timeoutMs?: number;
+}): Promise<StoreIdentityReadResult> {
+  const controller = new AbortController();
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`identity SELECT timed out after ${timeoutMs}ms`);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([deadline, (async (): Promise<StoreIdentityReadResult> => {
+      const query = `SELECT ?name WHERE { GRAPH <${STORE_META_GRAPH}> { <${STORE_META_SUBJECT}> <${STORE_META_PREDICATE}> ?name } }`;
+      const response = await (opts.fetch ?? globalThis.fetch)(opts.endpoint.queryUrl, {
+        method: 'POST',
+        headers: { ...opts.endpoint.headers, 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/sparql-results+json' },
+        body: `query=${encodeURIComponent(query)}`,
+        signal: controller.signal,
+      });
+      if (!response.ok) return { ok: false, error: `identity SELECT returned HTTP ${response.status} ${response.statusText}` };
+      const body = await response.json().catch(() => null) as { results?: { bindings?: Array<{ name?: { value?: unknown } }> } } | null;
+      const bindings = Array.isArray(body?.results?.bindings) ? body.results.bindings : [];
+      const value = bindings[0]?.name?.value;
+      return { ok: true, nodeName: typeof value === 'string' && value.length > 0 ? value : null, bindingCount: bindings.length };
+    })()]);
+  } catch (error) {
+    return { ok: false, error: `identity SELECT failed: ${(error as Error).message}` };
+  } finally { clearTimeout(timer); }
+}
+
 export interface StoreIdentityTagOptions {
   storeConfig:
     | {
@@ -253,45 +294,9 @@ export async function checkOrSetStoreIdentity(
   const fetchImpl = opts.fetch ?? globalThis.fetch;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  // 1. SELECT the existing tag value (if any).
-  const selectQuery =
-    `SELECT ?name WHERE { GRAPH <${STORE_META_GRAPH}> { ` +
-    `<${STORE_META_SUBJECT}> <${STORE_META_PREDICATE}> ?name } }`;
-  const selectController = new AbortController();
-  const selectTimer = setTimeout(() => selectController.abort(), timeoutMs);
-  let existing: string | null;
-  try {
-    const res = await fetchImpl(endpoint.queryUrl, {
-      method: 'POST',
-      headers: {
-        ...endpoint.headers,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/sparql-results+json',
-      },
-      body: `query=${encodeURIComponent(selectQuery)}`,
-      signal: selectController.signal,
-    });
-    if (!res.ok) {
-      return {
-        ok: false,
-        action: 'transport-error',
-        error: `identity SELECT returned HTTP ${res.status} ${res.statusText}`,
-      };
-    }
-    const body = await res.json().catch(() => null) as
-      | { results?: { bindings?: Array<{ name?: { value?: string } }> } }
-      | null;
-    const binding = body?.results?.bindings?.[0]?.name?.value;
-    existing = typeof binding === 'string' && binding.length > 0 ? binding : null;
-  } catch (err) {
-    return {
-      ok: false,
-      action: 'transport-error',
-      error: `identity SELECT failed: ${(err as Error).message}`,
-    };
-  } finally {
-    clearTimeout(selectTimer);
-  }
+  const read = await readStoreIdentityTag({ endpoint, fetch: fetchImpl, timeoutMs });
+  if (!read.ok) return { ok: false, action: 'transport-error', error: read.error };
+  const existing = read.nodeName;
 
   // 2a. Match: nothing to do.
   if (existing != null && existing === opts.nodeName) {

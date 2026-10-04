@@ -94,7 +94,7 @@ export function registerStoreCommand(program: Command): void {
       '(journal volume, JVM heap policy, OOME auto-restart, healthcheck, log rotation)',
     )
     .option('--dry-run', 'Print the migration plan without executing it')
-    .option('--yes', 'Skip the confirmation prompt (required when the daemon is running)')
+    .option('--yes', 'Skip the confirmation prompt; the daemon must still be stopped')
     .option('--container <name>', 'Override the container name (default: derived from store URL)')
     .option('--port <port>', 'Host port for the hardened container; must match the configured store endpoint (1-65535)', parseHardenPortOption)
     .option('--migration-dir <dir>', 'Where to export the journal during migration (default: <dkg home>/blazegraph-harden)')
@@ -154,23 +154,13 @@ export function registerStoreCommand(program: Command): void {
       const migrationDir = opts.migrationDir ?? join(dkgDir(), 'blazegraph-harden');
       const log = (m: string) => console.log(m);
 
-      // A running daemon will see its store vanish mid-swap. Its retries
-      // tolerate the outage (and the harden lock written by the executor
-      // suspends the runtime monitor's docker restarts so it can never
-      // fight the migration), but a stopped daemon makes the swap strictly
-      // safer — warn loudly and require the explicit --yes opt-in.
+      // Writers must remain stopped through verification and any rollback:
+      // an acknowledged replacement write would be absent from the backup.
       const pid = existsSync(join(dkgDir(), 'daemon.pid')) ? await readPid() : null;
       const daemonRunning = pid != null && isProcessRunning(pid);
       if (daemonRunning && !opts.dryRun) {
-        console.log(
-          '\nWARNING: the DKG daemon is running (pid ' + pid + '). During the swap it ' +
-          'will see the store go away; its retries tolerate this, but stopping it ' +
-          'first (`dkg stop`) is safer.\n',
-        );
-        if (!opts.yes) {
-          console.error('Refusing to continue against a running daemon without --yes.');
-          process.exit(1);
-        }
+        console.error(`DKG daemon is running (pid ${pid}). Stop it with \`dkg stop\` before hardening the store; --yes only skips confirmation.`);
+        process.exit(1);
       }
 
       if (opts.dryRun) {

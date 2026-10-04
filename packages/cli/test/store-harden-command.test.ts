@@ -146,13 +146,24 @@ describe('dkg store harden command wrapper', () => {
     expect(mocks.saveConfig).not.toHaveBeenCalled();
   });
 
-  it('a running daemon WITH --yes proceeds to the executor', async () => {
+  it('refuses a running daemon even WITH --yes before any preview or mutation', async () => {
     writeFileSync(join(home, 'daemon.pid'), '4242\n');
     mocks.readPid.mockResolvedValue(4242);
     mocks.isProcessRunning.mockReturnValue(true);
-    await runHarden('--yes');
-    const dryRunFlags = mocks.executeHardenMigration.mock.calls.map((c) => c[0].dryRun === true);
-    expect(dryRunFlags).toEqual([true, false]); // preview, then the real run
+    await expect(runHarden('--yes')).rejects.toThrow('process.exit:1');
+    expect(mocks.executeHardenMigration).not.toHaveBeenCalled();
+    expect(mocks.saveConfig).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Stop it with `dkg stop`'));
+  });
+
+  it('allows a read-only dry-run while the daemon is running', async () => {
+    writeFileSync(join(home, 'daemon.pid'), '4242\n');
+    mocks.readPid.mockResolvedValue(4242);
+    mocks.isProcessRunning.mockReturnValue(true);
+    await runHarden('--dry-run', '--yes');
+    expect(mocks.executeHardenMigration).toHaveBeenCalledOnce();
+    expect(mocks.executeHardenMigration.mock.calls[0][0].dryRun).toBe(true);
+    expect(mocks.saveConfig).not.toHaveBeenCalled();
   });
 
   it('--dry-run routes to the executor exactly once, dryRun: true, and never saves config', async () => {

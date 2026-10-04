@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { BLAZEGRAPH_CONTAINER_PORT, computeBlazegraphHeapMb, defaultDockerRunner,
   type DockerRunner } from '../blazegraph-docker.js';
 import { storeHardenLockPath } from '../store-runtime-monitor.js';
+import { assertDaemonStoppedForStoreMigration } from '../store-maintenance-gate.js';
 import { HARDEN_BACKUP_SUFFIX, inspectHardenState } from './state.js';
 import { HARDEN_EXPORT_FILENAME, hardenMigrationWorkflow, planHardenMigration, type HardenStep } from './steps.js';
 import { fileSize, type HardenWorkflowContext } from './actions.js';
@@ -102,8 +103,9 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
   await writeFile(lockPath,
     `${JSON.stringify({ pid: process.pid, containerName, startedAt: new Date().toISOString() })}\n`,
     { encoding: 'utf-8', flag: 'wx' });
-  log(`Wrote harden lock ${lockPath} — the daemon's store monitor suspends restarts while it exists.`);
   try {
+    await assertDaemonStoppedForStoreMigration(opts.dkgHome);
+    log(`Wrote harden lock ${lockPath} — daemon startup and automatic store restarts stay blocked through verification and rollback.`);
     for (const phase of workflow) {
       try { await phase.execute(ctx); }
       catch (cause) {

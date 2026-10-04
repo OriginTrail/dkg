@@ -22,7 +22,9 @@ import { describe, it, expect } from 'vitest';
 import {
   checkOrSetStoreIdentity,
   formatIdentityTagMismatch,
+  readStoreIdentityTag,
 } from '../src/daemon/store-health-check.js';
+import { identityTagPresent } from '../src/daemon/harden/verify.js';
 
 function mockFetch(handler: (url: string, init?: any) => Response | Promise<Response>) {
   const calls: Array<{ url: string; init?: RequestInit; body?: string }> = [];
@@ -38,6 +40,34 @@ const BLAZEGRAPH_CONFIG = {
   backend: 'blazegraph',
   options: { url: 'http://blaze.test/sparql' },
 };
+
+describe('canonical store identity reader', () => {
+  it('preserves endpoint headers and one SELECT while leaving policy to callers', async () => {
+    const { fn, calls } = mockFetch(() => new Response(JSON.stringify({ results: { bindings: [{ name: { value: 'owner' } }] } }), { status: 200 }));
+    expect(await readStoreIdentityTag({ endpoint: { queryUrl: 'http://store.test/sparql', headers: { Authorization: 'Bearer store-token' } }, fetch: fn })).toEqual({ ok: true, nodeName: 'owner', bindingCount: 1 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init?.headers).toMatchObject({ Authorization: 'Bearer store-token', Accept: 'application/sparql-results+json' });
+    expect(decodeURIComponent(calls[0].body!.slice(6))).toBe('SELECT ?name WHERE { GRAPH <urn:dkg:store-meta> { <urn:dkg:store-tag> <urn:dkg:storeTaggedFor> ?name } }');
+  });
+
+  it('retains migration binding-presence policy even when no nonempty node name is available', async () => {
+    const { fn } = mockFetch(() => new Response(JSON.stringify({ results: { bindings: [{}] } }), { status: 200 }));
+    expect(await readStoreIdentityTag({ endpoint: { queryUrl: 'http://store.test/sparql', headers: {} }, fetch: fn })).toEqual({ ok: true, nodeName: null, bindingCount: 1 });
+    expect(await identityTagPresent(fn, 'http://store.test/sparql')).toBe(true);
+  });
+
+  it.each(['headers', 'body'])('bounds a never-settling identity %s read, including transports ignoring abort', async phase => {
+    let signal: AbortSignal | undefined;
+    const { fn } = mockFetch((_url, init) => {
+      signal = init.signal;
+      if (phase === 'headers') return new Promise<Response>(() => {});
+      return { ok: true, json: () => new Promise(() => {}) } as Response;
+    });
+    expect(await readStoreIdentityTag({ endpoint: { queryUrl: 'http://store.test/sparql', headers: {} }, fetch: fn, timeoutMs: 10 })).toMatchObject({ ok: false, error: expect.stringContaining('timed out') });
+    expect(signal?.aborted).toBe(true);
+    expect(await identityTagPresent(fn, 'http://store.test/sparql', 10)).toBe(false);
+  });
+});
 
 describe('checkOrSetStoreIdentity', () => {
   it('skips for local oxigraph backend', async () => {
