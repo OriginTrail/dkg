@@ -64,6 +64,8 @@ import {
 } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { EndpointReadRefusals } from './endpoint-read-refusals.js';
+import { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
+export { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
 import {
   ChainRpcTransportError,
   RpcEndpointsExhaustedError,
@@ -77,9 +79,6 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import {
-  RPC_READ_STALL_TIMEOUT_MS,
-  RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS,
-  RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
@@ -97,32 +96,6 @@ export interface RpcEndpoint {
   provider: JsonRpcProvider;
   rpcUrl: string;
 }
-
-/**
- * Named per-attempt timeout policy for a failover read: callers pick an intent,
- * not a millisecond value. The exact cap each policy yields is in
- * {@link resolveCapMs}.
- *   - `pointRead`           — a single `eth_call` / point provider read.
- *   - `wideLogScan`         — a multi-thousand-block `eth_getLogs` scan.
- *   - `durablePagedLogScan` — a checkpointed scan whose physical requests
- *     carry their own deadlines, so the complete projection is uncapped.
- *   - `watchdogPointRead`   — a background point read that must not wedge a
- *     one-RPC node.
- *   - `watchdogWideLogScan` — a background log scan that must not wedge a
- *     one-RPC node.
- *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
- *     stall selection (capped on EVERY attempt, including single-RPC).
- *   - `securityGatePointRead` — a live authorization read whose multi-RPC
- *     attempts must fail over inside the caller's 2.5s fail-closed deadline.
- */
-export type ReadPolicy =
-  | 'pointRead'
-  | 'wideLogScan'
-  | 'durablePagedLogScan'
-  | 'watchdogPointRead'
-  | 'watchdogWideLogScan'
-  | 'failOpenFundingRead'
-  | 'securityGatePointRead';
 
 /**
  * The human-facing label and the low-cardinality telemetry owner for one RPC
@@ -148,6 +121,18 @@ export function createRpcReadDescriptor(
     throw new TypeError('RPC read consumer must be a non-empty string or null');
   }
   return Object.freeze({ label, consumer });
+}
+
+/**
+ * Bind an adapter read's human label and telemetry owner together.
+ *
+ * Kept as a module helper so it does not become part of the concrete adapter's
+ * prototype API (the mock-adapter parity test intentionally enumerates that
+ * surface).
+ */
+export function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
+  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
+  return createRpcReadDescriptor(label, consumer);
 }
 
 export type RpcReadDescriptorInput = string | RpcReadDescriptor;
@@ -284,35 +269,6 @@ export interface StickinessOptions {
  */
 export function isContractViewRetryable(err: unknown): boolean {
   return isRpcEndpointFailoverEligible(err) && errorCode(err) !== 'BAD_DATA';
-}
-
-/**
- * The timeout-policy matrix — the per-attempt cap each named policy yields:
- *
- *   | policy              | multi-RPC cap            | single-RPC cap          |
- *   |---------------------|--------------------------|-------------------------|
- *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         |
- *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
- *   | durablePagedLogScan | uncapped                 | uncapped                |
- *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
- *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
- *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
- *   | securityGatePointRead | SECURITY_GATE (1s)     | uncapped                |
- *
- * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
- * to; #894). The watchdog policies are for background reads that must clear
- * their scheduler gate even on one-RPC nodes, without imposing a poll-level
- * deadline over a multi-RPC failover sequence.
- */
-export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
-  if (policy === 'durablePagedLogScan') return undefined;
-  if (policy === 'failOpenFundingRead' || policy === 'watchdogPointRead') {
-    return RPC_READ_STALL_TIMEOUT_MS;
-  }
-  if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
-  if (providerCount <= 1) return undefined;
-  if (policy === 'securityGatePointRead') return RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS;
-  return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
 }
 
 export class RpcFailoverClient {
