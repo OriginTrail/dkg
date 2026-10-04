@@ -42,6 +42,7 @@ import type {
   ContextGraphSubscriptionRecord,
 } from '../src/index.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
+import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-private-replica.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
@@ -464,6 +465,30 @@ async function replaceApprovedJoinRequestWithPending(
   );
 }
 
+describe('approved private replica delegation deadline', () => {
+  const authority = {
+    approvedAgentAddress: `0x${'11'.repeat(20)}`,
+    ownerAddress: `0x${'22'.repeat(20)}`,
+    requestGeneration: `0x${'12'.repeat(32)}`,
+    curatorPeerId: 'curator-peer',
+    memberAddresses: [`0x${'11'.repeat(20)}`],
+  };
+
+  it.each([
+    { deadline: 'before now', delegationExpiresAtMs: 999, active: false },
+    { deadline: 'exactly now', delegationExpiresAtMs: 1_000, active: false },
+    { deadline: 'after now', delegationExpiresAtMs: 1_001, active: true },
+    { deadline: 'none (unbounded delegation)', delegationExpiresAtMs: null, active: true },
+  ])('is active only before its deadline (deadline: $deadline)', ({ delegationExpiresAtMs, active }) => {
+    expect(isApprovedPrivateReplicaDelegationActive({ ...authority, delegationExpiresAtMs }, 1_000))
+      .toBe(active);
+  });
+
+  it('does not extend an authority that records no deadline', () => {
+    expect(isApprovedPrivateReplicaDelegationActive(authority, 1_000)).toBe(false);
+  });
+});
+
 describe('approved private bare-name replica authorization', () => {
   it('retains the proved private authority for a legacy adapter registered-metadata shape', async () => {
     const fixture = await approvedBareNameReplicaFixture({
@@ -578,7 +603,16 @@ describe('approved private bare-name replica authorization', () => {
       id: contextGraphId, name: 'Private catalog before approval', accessPolicy: 1,
       callerAgentAddress: owner.agentAddress,
     });
-    await curator.whenRfc64CatalogResponsibilitiesIdleV1();
+    // Provider recovery deliberately stays live while this connected requester
+    // has no join approval. Wait for the local authority needed by promotion,
+    // rather than draining that recovery demand before the test can approve it.
+    await vi.waitFor(() => {
+      expect(curator.readRfc64CatalogResponsibilityV1(contextGraphId)).toMatchObject({
+        active: true, mode: 'catalog',
+      });
+      expect(curator.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId))
+        .not.toBeNull();
+    }, { timeout: 20_000, interval: 100 });
     await curator.assertion.create(contextGraphId, 'preexisting-private-row', { agentAddress: owner.agentAddress });
     await curator.assertion.write(contextGraphId, 'preexisting-private-row', [{
       subject: 'urn:test:private-catalog-row', predicate: 'https://schema.org/name',
@@ -1581,13 +1615,17 @@ describe('approved private bare-name replica authorization', () => {
     ['ambiguous creators', { creators: [CURATOR_PEER, `${CURATOR_PEER}-other`] }],
     ['pending registration', { registrationStatus: 'pending' }],
     ['revoked approved member', { revokeApproved: true }],
-    ['future delegation', { delegationIssuedAt: Date.now() + 60_000 }],
-    ['expired delegation', { delegationExpiresAt: Date.now() - 1_000 }],
+    ['future delegation', () => ({ delegationIssuedAt: Date.now() + 60_000 })],
+    ['expired delegation', () => ({ delegationExpiresAt: Date.now() - 1_000 })],
     ['wrong delegatee peer', { delegationPeer: CURATOR_PEER }],
-  ] satisfies ReadonlyArray<readonly [string, ApprovedReplicaFixtureOptions]>) (
+  ] satisfies ReadonlyArray<readonly [string, ApprovedReplicaFixtureOptions | (() => ApprovedReplicaFixtureOptions)]>) (
     'fails closed for %s',
     async (_label, options) => {
-      const fixture = await approvedBareNameReplicaFixture(options);
+      // Relative deadlines are created when this case starts, after earlier
+      // integration scenarios have completed.
+      const fixture = await approvedBareNameReplicaFixture(
+        typeof options === 'function' ? options() : options,
+      );
       await expect(fixture.receiver.resolveContextGraphSubscriptionBootstrapAuthority(
         CONTEXT_GRAPH_ID,
         {
@@ -1709,6 +1747,37 @@ describe('approved private bare-name replica authorization', () => {
     paused.release();
 
     await expect(reconciliation).rejects.toThrow('no authenticated owner authority');
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+  });
+
+  it.each([
+    // The roster read that follows the owner read refuses an expired
+    // delegation itself; after the last read only the acceptance pass can.
+    { read: 'getContextGraphOwner', message: 'no authenticated lifecycle roster' },
+    { read: 'readRfc64PrivateRosterVersionV1', message: 'delegation expired' },
+  ])('accepts no catalog authority when the delegation expires during $read', async ({ read, message }) => {
+    const startedAt = 2_000_000_000_000;
+    const delegationExpiresAt = startedAt + 60_000;
+    const fixture = await approvedBareNameReplicaFixture({
+      delegationIssuedAt: startedAt - 1_000,
+      delegationExpiresAt,
+    });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+    const proofReturned = pauseSuccessfulApprovedPrivateProofOnce(fixture);
+    const paused = pauseReceiverMethodOnce(fixture, read);
+    const reconciliation = fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    await proofReturned.returned;
+    proofReturned.release();
+    await paused.entered;
+    now.mockReturnValue(delegationExpiresAt);
+    paused.release();
+
+    await expect(reconciliation).rejects.toThrow(message);
     expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
       .toBeNull();
   });
@@ -1841,6 +1910,39 @@ describe('approved private bare-name replica authorization', () => {
     await expect(roster).resolves.toBeNull();
     await expect(fixture.receiver.resolveRfc64CatalogLocalAgentAddressV1(CONTEXT_GRAPH_ID))
       .resolves.toBeNull();
+  });
+
+  it.each([
+    { read: 'readRfc64RegisteredAuthoritySnapshotV1' },
+    { read: 'getLocalMetadataMemberRecoveryGate' },
+  ])('returns no catalog peer roster when the delegation expires during $read', async ({ read }) => {
+    const startedAt = 2_000_000_000_000;
+    const delegationExpiresAt = startedAt + 60_000;
+    const fixture = await approvedBareNameReplicaFixture({
+      delegationIssuedAt: startedAt - 1_000,
+      delegationExpiresAt,
+    });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    await expect(fixture.receiver.resolveRfc64VerifiedPrivateRosterV1(CONTEXT_GRAPH_ID))
+      .resolves.toEqual([OWNER, fixture.memberAddress].sort());
+
+    const proofReturned = pauseSuccessfulApprovedPrivateProofOnce(fixture);
+    const paused = pauseReceiverMethodOnce(fixture, read);
+    const roster = fixture.receiver.resolveRfc64VerifiedPrivateRosterV1(CONTEXT_GRAPH_ID);
+    await proofReturned.returned;
+    proofReturned.release();
+    await paused.entered;
+    // Nothing in the store changes, so no revision moves: only the clock
+    // passes the deadline the proof rested on.
+    now.mockReturnValue(delegationExpiresAt);
+    paused.release();
+
+    await expect(roster).resolves.toBeNull();
   });
 
   it('does not use an unconfirmed private definition as a catalog roster', async () => {

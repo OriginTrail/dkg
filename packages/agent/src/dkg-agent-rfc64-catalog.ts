@@ -67,7 +67,10 @@ import {
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { resolveApprovedPrivateReplicaAuthority } from './approved-private-replica.js';
+import {
+  isApprovedPrivateReplicaDelegationActive,
+  resolveApprovedPrivateReplicaAuthority,
+} from './approved-private-replica.js';
 import { resolveRfc64CatalogLifecycleAuthoritySourceV1 } from './rfc64/catalog-lifecycle-authority-source-v1.js';
 import {
   Rfc64CatalogReplayConnectionRuntimeV1,
@@ -580,6 +583,9 @@ const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
   250,
   1_000,
   4_000,
+  15_000,
+  30_000,
+  60_000,
 ]);
 const RFC64_JOIN_APPROVAL_CATALOG_REPLAY_RETRY_DELAYS_MS_V1 = Object.freeze([
   5_000,
@@ -2148,6 +2154,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               !== approvedAgent.toLowerCase()
             || this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)
               ?.policyDigest !== accepted.policyDigest
+            // The clock is the one thing the fences above cannot see.
+            || !isApprovedPrivateReplicaDelegationActive(approved.authority)
           ) return null;
           const named = new Set(
             [...own.allowedAgents, ...own.participantAgents]
@@ -3846,6 +3854,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           'registered RFC-64 Context Graph cannot accept unregistered replica authority',
         );
       }
+      // The join proof was taken before the reads above. Its delegation can
+      // pass its deadline in the meantime without any store write, so the
+      // revision fences do not see it: check the deadline in this same pass.
+      if (
+        source.kind === 'approved-private'
+        && !isApprovedPrivateReplicaDelegationActive(source.authority)
+      ) {
+        throw new Rfc64CatalogAuthorityResolutionErrorV1(
+          'unregistered-owner-unresolved',
+          'approved private replica delegation expired while its authority was composed',
+        );
+      }
       const previousAuthority = service.acceptedPolicySnapshot(
         authority.policy.networkId,
         authority.policy.contextGraphId,
@@ -3959,11 +3979,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           await this.promoteRfc64OwnerSignedSwmInventoriesV1(contextGraphId, signal);
           signal.throwIfAborted();
-          await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+          const replay = await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
             contextGraphId,
             signal,
           );
-          return;
+          // A private join may accept its owner-signed policy before both
+          // peers have the current member roster. Every peer can then answer
+          // "not provider" even though an authorized provider becomes
+          // reachable shortly afterward. Zero completed replays corroborate
+          // no catalog rows, so keep the bounded recovery demand alive.
+          if (replay.requested > 0) return;
         } catch (error) {
           if (signal.aborted) throw signal.reason ?? error;
           const retryDelayMs = RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1[
@@ -3971,7 +3996,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ];
           if (retryDelayMs === undefined) throw error;
           await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
+          continue;
         }
+        const retryDelayMs = RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1[
+          attempt
+        ];
+        if (retryDelayMs === undefined) return;
+        await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
       }
     });
   }
