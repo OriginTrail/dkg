@@ -1,4 +1,4 @@
-import { readExactGraph, parseInteger, parseSafeCount, literalValue, normalizeHex32, optionalHex32 } from './finalized-swm-twin-storage.js';
+import { readExactGraph, parseInteger, parseSafeCount, literalValue, normalizeHex32, optionalHex32 } from '../../internal/finalized-swm-twin-storage.js';
 import {
   MemoryLayer,
   assertSafeIri,
@@ -88,7 +88,15 @@ export type RetireConfirmedGraphScopedSwmTwinIfOrphaned = (
  * The owner captures publisher locks and cleanup mechanics so finalization
  * supplies policy only and can never accidentally select an unlocked mode.
  */
-export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(params: {
+export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(
+  params: Parameters<typeof createRetireConfirmedGraphScopedSwmTwinIfOrphanedWithEvidence>[0],
+): RetireConfirmedGraphScopedSwmTwinIfOrphaned {
+  const retire = createRetireConfirmedGraphScopedSwmTwinIfOrphanedWithEvidence(params);
+  return async (candidate, ctx) => { await retire(candidate, ctx); };
+}
+
+/** Agent completion consumes evidence without changing the historical void callback. */
+export function createRetireConfirmedGraphScopedSwmTwinIfOrphanedWithEvidence(params: {
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly retire: RetireConfirmedGraphScopedSwmTwinIfOrphaned;

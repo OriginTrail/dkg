@@ -9,7 +9,7 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { bindFinalizedSwmRetirement } from '../src/dkg-agent-finalized-swm-retirement.js';
+import { bindFinalizedSwmRetirement } from '../src/internal/dkg-agent-finalized-swm-retirement.js';
 import type { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
 import {
   initializeRfc64LegacySwmBoundaryV1,
@@ -89,7 +89,7 @@ describe('agent-owned finalized SWM retirement', () => {
         } };
         // These callbacks are passed to the executor without a receiver.
         const complete = callbacks.completeFinalizedSwmTwinRetirement;
-        expect(await complete(async () => result, ctx)).toBe(result);
+        expect(await complete(result, ctx)).toBe(result);
       }
       expect(warn).toHaveBeenCalledWith(ctx, expect.stringContaining('marker store unavailable'));
       expect(scheduled).toHaveBeenCalledWith(
@@ -131,7 +131,7 @@ describe('agent-owned finalized SWM retirement', () => {
     const before = internals.listContextGraphsCacheGeneration;
     const result = { outcome: 'head-version-mismatch' as const };
     const complete = callbacks.completeFinalizedSwmTwinRetirement;
-    expect(await complete(async () => result, ctx)).toBe(result);
+    expect(await complete(result, ctx)).toBe(result);
     expect(query).not.toHaveBeenCalled();
     expect(scheduled).not.toHaveBeenCalled();
     expect(internals.listContextGraphsCacheGeneration).toBe(before);

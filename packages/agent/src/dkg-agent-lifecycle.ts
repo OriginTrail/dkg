@@ -1,4 +1,4 @@
-import { FinalizedSwmRetirementMethods } from './dkg-agent-finalized-swm-retirement.js';
+import { FinalizedSwmRetirementMethods } from './internal/dkg-agent-finalized-swm-retirement.js';
 
 
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
@@ -6439,7 +6439,7 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
             this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
               const retirement = await this.completeFinalizedSwmTwinRetirement(
-                () => reconcileFinalizedSwmTwinWithEvidence({
+                await reconcileFinalizedSwmTwinWithEvidence({
                   store: this.store,
                   writeLocks: this.writeLocks,
                   asset: authentication.asset,

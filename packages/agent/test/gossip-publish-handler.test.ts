@@ -661,6 +661,28 @@ describe('GossipPublishHandler', () => {
     expect(bindings.length).toBeGreaterThan(0);
   });
 
+  it('rejects malformed ontology definition IDs without hiding a valid neighboring definition', async () => {
+    const exists = vi.fn(async (_id: string) => false);
+    const discovered = vi.fn();
+    const { store, handler } = createHandler(undefined, {
+      contextGraphExists: exists, recordDiscoveredContextGraph: discovered,
+    });
+    const validId = 'valid-ontology-neighbor';
+    const graph = `did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}`;
+    const data = makePublishMessage({
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      nquads: ['../cg', validId].map((id) =>
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> <${graph}> .`,
+      ).join('\n'),
+    });
+    try {
+      await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      expect(exists.mock.calls.map(([id]) => id)).toEqual([validId]);
+      expect(discovered).toHaveBeenCalledExactlyOnceWith(validId, { name: validId, onChainId: undefined });
+      expect(await store.countQuads(graph)).toBe(2);
+    } finally { await store.close(); }
+  });
+
   it('inserts validated ontology definitions without activating a member subscription', async () => {
     const { store, handler, subscriptions } = createHandler();
     const id = 'ontology-discovery-only';

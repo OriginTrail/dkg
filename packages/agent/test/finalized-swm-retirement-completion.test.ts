@@ -1,5 +1,6 @@
+import { completeSettledSwmRetirement } from './_helpers/finalized-swm-retirement.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { completeFinalizedSwmRetirement, completeVerifiedVmMarkerRetirement } from '../src/sync/requester/finalized-swm-retirement-completion.js';
+import { completeVerifiedVmMarkerRetirement } from '../src/internal/finalized-swm-retirement-completion.js';
 
 const evidence = Object.freeze({ contextGraphId: 'cg', subGraphName: 'code', kaUal: 'ka', assertionVersion: 4n,
   swmGraph: 'graph', agentAddress: 'author', kaNumber: 1n });
@@ -13,8 +14,11 @@ describe('finalized SWM retirement completion', () => {
     const marker = vi.fn(async () => { expect(locked).toBe(false); });
     marker.mockImplementationOnce(async () => { expect(locked).toBe(false); throw new Error('store unavailable'); });
     const warn = vi.fn();
-    const result = await completeFinalizedSwmRetirement({
-      reconcile: async () => { locked = true; await Promise.resolve(); locked = false; return { outcome, retirement: evidence }; },
+    locked = true;
+    await Promise.resolve();
+    const reconciled = { outcome, retirement: evidence };
+    locked = false;
+    const result = await completeSettledSwmRetirement(reconciled, {
       retireMarker: marker,
       warn,
       scheduleRetry: (_key, work) => { retry = work; return true; },
@@ -41,8 +45,7 @@ describe('finalized SWM retirement completion', () => {
 
   it('keeps successful cleanup terminal even when its warning logger throws', async () => {
     const scheduled = vi.fn(() => true);
-    await expect(completeFinalizedSwmRetirement({
-      reconcile: async () => ({ outcome: 'retired', retirement: evidence }),
+    await expect(completeSettledSwmRetirement({ outcome: 'retired', retirement: evidence }, {
       retireMarker: async () => { throw new Error('marker store unavailable'); },
       warn: () => { throw new Error('logger unavailable'); }, scheduleRetry: scheduled,
     })).resolves.toEqual({ outcome: 'retired', retirement: evidence });
@@ -51,7 +54,7 @@ describe('finalized SWM retirement completion', () => {
 
   it('preserves unresolved physical outcomes without attempting the marker', async () => {
     const marker = vi.fn(); const schedule = vi.fn();
-    await expect(completeFinalizedSwmRetirement({ reconcile: async () => ({ outcome: 'head-version-mismatch' }),
+    await expect(completeSettledSwmRetirement({ outcome: 'head-version-mismatch' }, {
       retireMarker: marker, warn: vi.fn(), scheduleRetry: schedule })).resolves.toEqual({ outcome: 'head-version-mismatch' });
     expect(marker).not.toHaveBeenCalled(); expect(schedule).not.toHaveBeenCalled();
   });

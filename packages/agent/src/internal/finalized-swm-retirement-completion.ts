@@ -1,19 +1,4 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import type { FinalizedSwmTwinReconciliationResult } from './finalized-swm-twin-reconciliation.js';
-
-/** Physical cleanup owns its KA lock; marker work begins only after it returns. */
-export async function completeFinalizedSwmRetirement(params: {
-  readonly reconcile: () => Promise<FinalizedSwmTwinReconciliationResult>;
-  readonly retireMarker: (input: VerifiedVmMarkerRetirementEvidence) => Promise<void>;
-  readonly warn: (message: string) => void;
-  readonly scheduleRetry: (key: string, work: (signal: AbortSignal) => Promise<void>) => boolean;
-}): Promise<FinalizedSwmTwinReconciliationResult> {
-  const result = await params.reconcile();
-  if (!('retirement' in result)) return result;
-  await completeVerifiedVmMarkerRetirement({ ...params, evidence: result.retirement });
-  return result;
-}
-
 export interface VerifiedVmMarkerRetirementEvidence {
   readonly contextGraphId: string;
   readonly subGraphName?: string;

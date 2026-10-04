@@ -1,4 +1,4 @@
-import { decodeGossipPublishForTopic } from './gossip-publish-decode.js';
+import { decodeGossipPublishForTopic } from './internal/gossip-publish-decode.js';
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, type OntologyBindingSlotClass,

@@ -56,6 +56,7 @@ if (
   || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
   || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
   || typeof root.GossipPublishHandler !== 'function'
+  || typeof legacyFinalizedSwmTwin.createRetireConfirmedGraphScopedSwmTwinIfOrphaned !== 'function'
   || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwin !== 'function'
   || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwinFromDescriptor !== 'function'
   || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwinFromCatalogProjection !== 'function'
@@ -436,32 +437,6 @@ for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.j
     throw new Error(`internal Random Sampling module unexpectedly resolved: ${path}`);
   } catch (error) {
     if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-  }
-}
-
-// Decomposition must preserve historical entrypoints without publishing new helpers.
-const privateImplementationModules = [
-  'dkg-agent-finalized-swm-retirement',
-  'gossip-publish-decode',
-  'sync/requester/finalized-swm-retirement-completion',
-  'sync/requester/finalized-swm-twin-storage',
-];
-for (const module of privateImplementationModules) {
-  for (const extension of ['', '.js', '.d.ts', '.js.map', '.d.ts.map']) {
-    const path = `${module}${extension}`;
-    const specifier = `@origintrail-official/dkg-agent/dist/${path}`;
-    try {
-      await import(`@origintrail-official/dkg-agent/dist/${path}`);
-      throw new Error(`private implementation module unexpectedly imported: ${specifier}`);
-    } catch (error) {
-      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-    }
-    try {
-      require.resolve(specifier);
-      throw new Error(`private implementation module unexpectedly resolved: ${specifier}`);
-    } catch (error) {
-      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-    }
   }
 }
 

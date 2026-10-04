@@ -1,4 +1,4 @@
-import { completeFinalizedSwmRetirement } from '../../src/sync/requester/finalized-swm-retirement-completion.js';
+import { completeSettledSwmRetirement } from './finalized-swm-retirement.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from '../../src/sync/requester/private-swm-recovery-budget.js';
 import { deleteSyncPageCheckpoint } from
   '../../src/sync/requester/page-fetch.js';
@@ -84,8 +84,8 @@ export function createSwmTargetExecutorSessionFactoryForTest(owner: {
     retireFinalizedSwmTwin: (...args) => owner.retireFinalizedSwmTwinCandidate
       ? owner.retireFinalizedSwmTwinCandidate(...args)
       : Promise.resolve(),
-    completeFinalizedSwmTwinRetirement: (reconcile, ctx) => completeFinalizedSwmRetirement({
-      reconcile, retireMarker: async () => {}, scheduleRetry: () => false,
+    completeFinalizedSwmTwinRetirement: (result, ctx) => completeSettledSwmRetirement(result, {
+      retireMarker: async () => {}, scheduleRetry: () => false,
       warn: (message) => owner.log?.warn?.(ctx, message),
     }),
     logInfo: (...args) => owner.log?.info?.(...args),

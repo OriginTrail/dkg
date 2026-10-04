@@ -525,7 +525,7 @@ import { QueryMethods } from './dkg-agent-query.js';
 import { AgentRegistryMethods } from './dkg-agent-registry.js';
 import { WorkspaceCryptoMethods } from './dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
-import { FinalizedSwmRetirementMethods, bindFinalizedSwmRetirement } from './dkg-agent-finalized-swm-retirement.js';
+import { FinalizedSwmRetirementMethods, bindFinalizedSwmRetirement } from './internal/dkg-agent-finalized-swm-retirement.js';
 import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,

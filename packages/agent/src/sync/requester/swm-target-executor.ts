@@ -80,7 +80,7 @@ export interface SwmTargetExecutorPortsV1 {
     ctx: OperationContext,
   ) => Promise<void>;
   readonly completeFinalizedSwmTwinRetirement: (
-    reconcile: () => Promise<FinalizedSwmTwinReconciliationResult>,
+    result: FinalizedSwmTwinReconciliationResult,
     ctx: OperationContext,
   ) => Promise<FinalizedSwmTwinReconciliationResult>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
@@ -288,14 +288,14 @@ export class SwmTargetExecutorV1 {
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
-        const reconcile = () => reconcileFinalizedSwmTwinFromDescriptorWithEvidence({
+        const reconciled = await reconcileFinalizedSwmTwinFromDescriptorWithEvidence({
           store: this.#ports.store,
           writeLocks: this.#ports.writeLocks,
           contextGraphId,
           descriptor,
           retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
         });
-        const result = await this.#ports.completeFinalizedSwmTwinRetirement(reconcile, target.ctx);
+        const result = await this.#ports.completeFinalizedSwmTwinRetirement(reconciled, target.ctx);
         const retirement = result.outcome;
         const twinRetired = 'retirement' in result;
         if (retirement === 'retired') {

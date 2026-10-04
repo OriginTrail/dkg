@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { decodePublishRequest, validateContextGraphId, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
-import type { GossipPhaseCallback } from './gossip-publish-handler.js';
+import type { GossipPhaseCallback } from '../gossip-publish-handler.js';
 
 /** Admit one decoded publish frame only under its validated topic context graph. */
 export function decodeGossipPublishForTopic(

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import { DKGAgentBase } from './dkg-agent-base.js';
-import type { DKGAgent } from './dkg-agent.js';
-import { retireRfc64LegacySwmAfterFinalizedVmV1 } from './rfc64/legacy-swm-boundary-v1.js';
-import { completeFinalizedSwmRetirement, completeVerifiedVmMarkerRetirement, type VerifiedVmMarkerRetirementEvidence } from './sync/requester/finalized-swm-retirement-completion.js';
-import type { FinalizedSwmTwinReconciliationResult, FinalizedSwmTwinRetirement } from './sync/requester/finalized-swm-twin-reconciliation.js';
+import { DKGAgentBase } from '../dkg-agent-base.js';
+import type { DKGAgent } from '../dkg-agent.js';
+import { retireRfc64LegacySwmAfterFinalizedVmV1 } from '../rfc64/legacy-swm-boundary-v1.js';
+import { completeVerifiedVmMarkerRetirement, type VerifiedVmMarkerRetirementEvidence } from './finalized-swm-retirement-completion.js';
+import type { FinalizedSwmTwinReconciliationResult, FinalizedSwmTwinRetirement } from '../sync/requester/finalized-swm-twin-reconciliation.js';
 
 /** Agent-owned completion and recovery-marker retirement after verified VM convergence. */
 export class FinalizedSwmRetirementMethods extends DKGAgentBase {
@@ -25,16 +25,12 @@ export class FinalizedSwmRetirementMethods extends DKGAgentBase {
 
   async completeFinalizedSwmTwinRetirement(
     this: DKGAgent,
-    reconcile: () => Promise<FinalizedSwmTwinReconciliationResult>,
+    result: FinalizedSwmTwinReconciliationResult,
     ctx: OperationContext,
   ): Promise<FinalizedSwmTwinReconciliationResult> {
-    const result = await completeFinalizedSwmRetirement({
-      reconcile,
-      retireMarker: (evidence) => this.retireLegacySwmAfterVerifiedVmTwin(evidence),
-      warn: (message) => this.log.warn(ctx, message),
-      scheduleRetry: (key, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(key, work),
-    });
-    if ('retirement' in result) this.invalidateListContextGraphsCache();
+    if ('retirement' in result) {
+      await this.completeVerifiedVmMarkerRetirement(result.retirement, ctx);
+    }
     return result;
   }
 

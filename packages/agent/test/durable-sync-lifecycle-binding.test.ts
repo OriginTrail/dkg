@@ -205,6 +205,7 @@ async function captureGraphScopedStore(
     retireLegacySwmAfterVerifiedVmTwin: vi.fn(async () => {}),
     rfc64BackgroundWorkDispatcherV1: { scheduleKeyed: vi.fn(() => true) },
     completeFinalizedSwmTwinRetirement: LifecycleSyncMethods.prototype.completeFinalizedSwmTwinRetirement,
+    completeVerifiedVmMarkerRetirement: LifecycleSyncMethods.prototype.completeVerifiedVmMarkerRetirement,
   };
   agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.requireLocalCgMatchesOnChainSlot = (

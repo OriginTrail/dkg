@@ -1,4 +1,4 @@
-import { completeFinalizedSwmRetirement } from '../src/sync/requester/finalized-swm-retirement-completion.js';
+import { completeSettledSwmRetirement } from './_helpers/finalized-swm-retirement.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from '../src/sync/requester/private-swm-recovery-budget.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +17,7 @@ import {
   computeFlatKCRootV10,
   generateKnowledgeAssetShareMetadata,
   workspacePublicQuadsDigest,
+  swmKaWriteLockKey,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -91,8 +92,8 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin: async () => undefined,
-      completeFinalizedSwmTwinRetirement: (reconcile) => completeFinalizedSwmRetirement({
-        reconcile, retireMarker: async () => {}, warn: () => {}, scheduleRetry: () => false,
+      completeFinalizedSwmTwinRetirement: (result) => completeSettledSwmRetirement(result, {
+        retireMarker: async () => {}, warn: () => {}, scheduleRetry: () => false,
       }),
       logInfo: () => undefined,
       logWarn: () => undefined,
@@ -240,8 +241,8 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap,
       retireFinalizedSwmTwin: async () => undefined,
-      completeFinalizedSwmTwinRetirement: (reconcile) => completeFinalizedSwmRetirement({
-        reconcile, retireMarker: async () => {}, warn: () => {}, scheduleRetry: () => false,
+      completeFinalizedSwmTwinRetirement: (result) => completeSettledSwmRetirement(result, {
+        retireMarker: async () => {}, warn: () => {}, scheduleRetry: () => false,
       }),
       logInfo: () => undefined,
       logWarn: () => undefined,
@@ -357,9 +358,12 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       );
       return result.type === 'bindings' ? result.bindings : [];
     };
+    const writeLocks = new Map<string, Promise<void>>();
+    const retirementLock = swmKaWriteLockKey(contextGraphId, undefined, ual);
     const swmRowsWhenRetired: number[] = [];
     // Stand-in for the publisher's named-lifecycle cleanup: graph, then head and operation.
     const retireFinalizedSwmTwin = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      expect(writeLocks.has(retirementLock)).toBe(true);
       swmRowsWhenRetired.push(
         await store.countQuads(candidate.swmGraph),
         (await subjectRows(headSubject)).length,
@@ -371,6 +375,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     const invalidateListContextGraphsCache = vi.fn();
     let invalidationsBeforeMarkerRetirement = -1;
     const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async (_evidence: { contextGraphId: string; kaUal: string; assertionVersion: string; subGraphName?: string }) => {
+      expect(writeLocks.has(retirementLock)).toBe(false);
       invalidationsBeforeMarkerRetirement = invalidateListContextGraphsCache.mock.calls.length;
       throw new Error('legacy boundary store unavailable');
     });
@@ -382,7 +387,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     const scheduleRetry = vi.spyOn(dispatcher, 'scheduleKeyed');
     const executor = new SwmTargetExecutorV1({
       store,
-      writeLocks: new Map(),
+      writeLocks,
       listSubGraphs: async () => [],
       createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
       fetchSyncPages: async (
@@ -427,8 +432,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin,
-      completeFinalizedSwmTwinRetirement: (reconcile, ctx) => completeFinalizedSwmRetirement({
-        reconcile,
+      completeFinalizedSwmTwinRetirement: (result, ctx) => completeSettledSwmRetirement(result, {
         retireMarker: (evidence) => retireLegacySwmAfterVerifiedVmTwin({
           contextGraphId: evidence.contextGraphId, kaUal: evidence.kaUal,
           assertionVersion: String(evidence.assertionVersion), subGraphName: evidence.subGraphName,
