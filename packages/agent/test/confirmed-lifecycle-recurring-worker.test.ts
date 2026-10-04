@@ -39,6 +39,7 @@ describe('confirmed lifecycle recurring worker ownership', () => {
           merkleRoot: root, kav10Address: deployment, reservedKaId: packed, kaUal: input.publishedUal }),
         { graph: meta, subject: lifecycle, predicate: 'http://dkg.io/ontology/kaId', object: '"1"' },
         { graph: meta, subject: lifecycle, predicate: 'http://dkg.io/ontology/state', object: '"shared"' },
+        { graph: meta, subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"SWM"' },
       ]);
       vi.spyOn(agent.publisher, 'hasSwmShareComplete').mockResolvedValue(true);
       vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot').mockResolvedValue({ latestRoot: rootHex, rootCount: 1n });
@@ -53,8 +54,11 @@ describe('confirmed lifecycle recurring worker ownership', () => {
         }
         return mutate(sparql, options);
       });
-      const result = await agent.publishFromFinalizedAssertion(input.contextGraphId, input.name, { agentAddress: input.agentAddress });
-      expect(result).toMatchObject({ status: 'confirmed', ual: input.publishedUal, lifecycleRepairPending: true });
+      await expect(agent.publishFromFinalizedAssertion(input.contextGraphId, input.name, { agentAddress: input.agentAddress })).rejects.toMatchObject({
+        code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', repairAdmission: 'pending',
+        confirmedPublication: { status: 'confirmed', ual: input.publishedUal, merkleRoot: root },
+        lifecycleRecovery: { publishedUal: input.publishedUal, publicationRetrySafe: false },
+      });
       expect(publish).toHaveBeenCalledOnce();
       const owner = agent.getOrCreateNamedKaVmLifecycleRepair();
       const committed = () => agent.store.query(`ASK { GRAPH <${meta}> { <${lifecycle}>
