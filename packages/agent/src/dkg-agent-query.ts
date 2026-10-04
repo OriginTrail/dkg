@@ -1074,8 +1074,13 @@ export class QueryMethods extends DKGAgentBase {
             ...(opts.durableSubscriptionBinding === undefined
               ? {}
               : { durableSubscriptionBinding: opts.durableSubscriptionBinding }),
+            // A policy accepted from a join approval must not answer for
+            // the approval itself: without the allowance the registry runs
+            // the join proof on every read, so an expired delegation or a
+            // replaced request keeps failing closed.
             allowAcceptedRfc64FinalizedAbsence:
-              this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
+              this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true
+              && this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) !== true,
             allowApprovedPrivateReplicaFinalizedAbsence: true,
             authorityReadMode,
             // READ authorization, and therefore correctable by the next read.
@@ -1155,6 +1160,10 @@ export class QueryMethods extends DKGAgentBase {
         );
         if (current !== null) {
           if (current.policy.accessPolicy !== 1) return undefined;
+          // A join-derived roster never authorizes a read on its own.
+          if (this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) === true) {
+            return undefined;
+          }
           if (current.roster === null) return null;
           return Object.freeze(
             current.roster.members.map(({ agentAddress }) => agentAddress),
