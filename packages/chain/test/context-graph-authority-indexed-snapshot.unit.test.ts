@@ -1056,6 +1056,36 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     }
   });
 
+  it('rejects non-array revision targets before any authority observation', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+    for (const targets of [null, '9', { 0: '9', length: 1 }, new Set(['9'])]) {
+      await expect(reader.readContextGraphAuthorityIndexRevisions(targets as never))
+        .rejects.toThrow('revision target set is invalid');
+      await expect(reader.readContextGraphAuthorityIndexSnapshots!(targets as never))
+        .rejects.toThrow('revision target set is invalid');
+    }
+    expect(evidence.headReads).toEqual([]);
+    expect(evidence.blockReads).toEqual([]);
+    expect(evidence.networkReads).toEqual([]);
+    expect(evidence.indexRanges).toEqual([]);
+  });
+
+  it('rejects non-array name-hash targets before any authority observation', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+    for (const targets of [null, NAME_HASH, { 0: NAME_HASH, length: 1 }, new Set([NAME_HASH])]) {
+      await expect(reader.resolveFinalizedContextGraphIdsByNameHashes!(targets as never))
+        .rejects.toThrow('name-hash target set is invalid');
+      await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!(targets as never))
+        .rejects.toThrow('name-hash target set is invalid');
+    }
+    expect(evidence.headReads).toEqual([]);
+    expect(evidence.blockReads).toEqual([]);
+    expect(evidence.networkReads).toEqual([]);
+    expect(evidence.indexRanges).toEqual([]);
+  });
+
   it('rejects invalid indexed snapshot ids before deployment discovery or index ranges', async () => {
     for (const contextGraphId of [0n, ethers.MaxUint256 + 1n]) {
       const { adapter, evidence } = makeIndexedAuthorityAdapter();
