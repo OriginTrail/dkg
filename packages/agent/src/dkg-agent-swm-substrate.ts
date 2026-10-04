@@ -870,9 +870,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       );
       return;
     }
-    // Reconcile is the membership boundary; rebuild this CG's policy view
-    // before deciding whether to keep or drop the SWM subscription.
-    this.contextGraphMetaProjection.markDirty(contextGraphId);
+    // Reconcile is the membership boundary: decide on a rebuilt policy view.
+    // It writes no authority fact, so the authority revisions stay as they are.
+    this.contextGraphMetaProjection.requireFreshRead(contextGraphId);
     // OT-RFC-38 / LU-6 Phase B — subscribe on the wire-form (hash) topic.
     // Members compute the hash from their local cleartext id via
     // {@link gossipWireIdFor}; cores hosting CGs they never joined
