@@ -44,17 +44,15 @@ import {
   decodeContextGraphAuthorityIndexLog,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
-import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
 import { resolveEvmFinalityAnchorWithHeadV1 } from './evm-finality-anchor.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
-  withOwnedRpcRequestContext,
   withRpcRequestContext,
-  withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 
-import { retryCachedAuthorityIndexHeadV1 } from './context-graph-authority-index-admission.js';
+import { readEvmContextGraphAuthorityIndexRpcV1, readOwnedAuthorityIndexRpcV1, retryCachedAuthorityIndexHeadV1 } from './evm-context-graph-authority-index-rpc.js';
+export { readEvmContextGraphAuthorityIndexRpcV1 } from './evm-context-graph-authority-index-rpc.js';
 import { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
 export { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
 
@@ -65,22 +63,6 @@ export { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-author
  * range reader below.
  */
 const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
-
-/** Bound one physical authority-index RPC without capping the durable scan. */
-export function readEvmContextGraphAuthorityIndexRpcV1<T>(
-  operation: string,
-  read: () => Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  const bounded = () => withRpcRequestTimeout(
-    RPC_LOG_SCAN_TIMEOUT_MS,
-    operation,
-    read,
-  );
-  return signal === undefined
-    ? bounded()
-    : withRpcRequestContext({ signal }, bounded);
-}
 
 
 type ContextGraphAuthorityLogFoldAdmission =
@@ -99,21 +81,6 @@ function admitContextGraphAuthorityLogFold<T>(
   } catch (fault) {
     return Object.freeze({ kind: 'fault' as const, fault });
   }
-}
-
-/**
- * Shared page/hash work belongs to the authority-index lifecycle, not to the
- * first caller whose AsyncLocalStorage context starts the single flight.
- */
-function readOwnedAuthorityIndexRpcV1<T>(
-  lifecycleSignal: AbortSignal,
-  operation: string,
-  read: () => Promise<T>,
-): Promise<T> {
-  return withOwnedRpcRequestContext(
-    { signal: lifecycleSignal },
-    () => readEvmContextGraphAuthorityIndexRpcV1(operation, read),
-  );
 }
 
 function boundedAuthorityIndexPageSizeV1(pageSize: number): number {
