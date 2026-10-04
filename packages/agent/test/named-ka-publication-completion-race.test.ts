@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, assertionLifecycleUri, contextGraphMetaUri, createGraphKnowledgeAssetScope, generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { TypedEventBus, MemoryLayer, assertionLifecycleUri, contextGraphMetaUri, contextGraphLayerUri, createGraphKnowledgeAssetScope, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { GraphManager, OxigraphStore, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, TripleStoreAsyncLiftPublisher, computeFlatKCRootV10, resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { GossipSession } from '../src/gossip-session.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
+import { applyOwnedPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111', CG = 'completion-race', NAME = 'notes';
 const DKG = 'http://dkg.io/ontology/';
@@ -69,6 +70,153 @@ async function modelLegacyPublicationOwner(f: Awaited<ReturnType<typeof fixture>
 }
 
 describe('agent publication completion marker fencing', () => {
+  it.each(['before-commit', 'response-lost'].flatMap(fault => [false, true].map(replacement => ({ fault, replacement }))))(
+    'repairs an interrupted owned VM transition ($fault, replacement: $replacement)', async ({ fault, replacement }) => {
+      const f = await fixture(), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+      const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+      const scope = createGraphKnowledgeAssetScope(f.first.kaUal, 1);
+      const vmGraph = contextGraphLayerUri(CG, MemoryLayer.VerifiableMemory, AUTHOR, BigInt(scope.kaNumber));
+      await f.store.insert([{ graph, subject, predicate: 'urn:unrelated:metadata', object: '"keep"' }]);
+      const originalInsert = f.store.insert.bind(f.store), originalReplace = f.store.replaceSubject.bind(f.store);
+      const failure = new Error(`transient ${fault}`); let armed = true;
+      // Cover the old delete/insert boundary and the replacement commit boundary.
+      vi.spyOn(f.store, 'insert').mockImplementation(async (quads, options) => {
+        if (armed && quads.some(q => q.graph === graph && q.subject === subject && q.predicate === `${DKG}memoryLayer` && q.object === '"VM"')) {
+          armed = false; if (fault === 'response-lost') await originalInsert(quads, options); throw failure;
+        }
+        return originalInsert(quads, options);
+      });
+      vi.spyOn(f.store, 'replaceSubject').mockImplementation(async (targetGraph, targetSubject, quads) => {
+        if (armed && targetGraph === graph && targetSubject === subject) {
+          armed = false; if (fault === 'response-lost') await originalReplace(targetGraph, targetSubject, quads); throw failure;
+        }
+        return originalReplace(targetGraph, targetSubject, quads);
+      });
+      const stamp = () => f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
+      await expect(stamp()).rejects.toBe(failure);
+      expect(armed).toBe(false);
+      const interrupted = await f.agent.assertion.history(CG, NAME);
+      expect(interrupted).toMatchObject(fault === 'before-commit'
+        ? { memoryLayer: 'SWM', state: 'promoted' } : { memoryLayer: 'VM', state: 'published' });
+      expect(await f.store.query(`ASK { GRAPH <${graph}> { <${subject}> <urn:unrelated:metadata> "keep" } }`))
+        .toEqual({ type: 'boolean', value: true });
+      if (fault === 'response-lost') {
+        expect(interrupted.assertionGraph).toBe(vmGraph);
+        expect(await f.store.query(`ASK { GRAPH <${graph}> { <${subject}> <${DKG}assertionGraph> <${vmGraph}> } }`))
+          .toEqual({ type: 'boolean', value: true });
+      }
+      if (replacement) {
+        const replaced = await f.replace();
+        // Reopen creates its new draft metadata; the deferred prior publication
+        // must preserve that draft's unrelated rows as well as its owner fields.
+        await f.store.insert([{ graph, subject, predicate: 'urn:unrelated:metadata', object: '"keep"' }]);
+        const readDraft = async () => {
+          const result = await f.store.query(`CONSTRUCT { <${subject}> ?p ?o } WHERE { GRAPH <${graph}> { <${subject}> ?p ?o } }`);
+          if (result.type !== 'quads') throw new Error('Draft metadata unavailable');
+          // Confirmed-chain bookkeeping remains recordable for the prior publication.
+          return result.quads.filter(q => ![`${DKG}vmCurrentAssertion`, `${DKG}publishedUal`].includes(q.predicate));
+        };
+        const before = await readDraft();
+        await stamp();
+        expect(await readDraft()).toEqual(before);
+        expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'SWM', state: 'promoted', currentShareOperationId: replaced.shareOperationId });
+      } else {
+        expect(await f.agent._canStampRecoveredKnowledgeAssetVmLifecycle(request)).toBe(true);
+        await stamp();
+        expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'VM', state: 'published', assertionGraph: vmGraph });
+        expect(await f.store.query(`ASK { GRAPH <${graph}> { <${subject}> <${DKG}assertionGraph> <${vmGraph}> } }`))
+          .toEqual({ type: 'boolean', value: true });
+      }
+      expect(await f.store.query(`ASK { GRAPH <${graph}> { <${subject}> <urn:unrelated:metadata> "keep" } }`)).toEqual({ type: 'boolean', value: true });
+    });
+
+  it.each(['absent', 'refused'] as const)('keeps the layer retryable when certified replacement is %s, despite generic update support', async capability => {
+    const f = await fixture(), request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    const update = vi.spyOn(f.store, 'update');
+    if (capability === 'absent') Object.defineProperty(f.store, 'replaceSubject', { value: undefined });
+    else vi.spyOn(f.store, 'replaceSubject').mockRejectedValue(new UnsupportedTripleStoreCapabilityError('replaceSubject', 'test'));
+    await expect(f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId))
+      .rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
+    expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'SWM', state: 'promoted' });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it.each(['unavailable', 'over-budget'] as const)('rejects an %s metadata snapshot without deleting its layer', async shape => {
+    const f = await fixture(), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    const query = f.store.query.bind(f.store), replace = vi.spyOn(f.store, 'replaceSubject');
+    vi.spyOn(f.store, 'query').mockImplementation((sparql, options) => options?.source === 'agent.publish.namedKaVmTransition'
+      ? Promise.resolve(shape === 'unavailable' ? { type: 'bindings', bindings: [] } : { type: 'quads', quads: Array.from({ length: 129 }, (_, n) => ({ graph, subject, predicate: `urn:row:${n}`, object: '"value"' })) })
+      : query(sparql, options));
+    await expect(f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId))
+      .rejects.toThrow('complete metadata subject unavailable');
+    expect(replace).not.toHaveBeenCalled();
+    expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'SWM', state: 'promoted' });
+  });
+
+  it('keeps the real queue transaction carrier pending until the owned lifecycle repair succeeds', async () => {
+    const f = await fixture(), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    const txHash = f.result.onChainResult.txHash as `0x${string}`, packed = f.result.kaId.toString() as `${bigint}`;
+    const recovery = { inclusion: { txHash, blockNumber: 1, blockHash: `0x${'cd'.repeat(32)}` as `0x${string}` },
+      finalization: { mode: 'published' as const, txHash, ual: f.result.ual, batchId: packed, startKAId: packed, endKAId: packed, publisherAddress: AUTHOR },
+      publishProof: { merkleRoot: request.sealMerkleRoot, authorAddress: AUTHOR, txIndex: 0 } };
+    let executions = 0;
+    const queue = new TripleStoreAsyncLiftPublisher(f.store, {
+      knowledgeAssetVmPublishRecoveryResolver: async () => recovery,
+      knowledgeAssetVmPublishHandler: {
+        execute: async ({ publishOptions }) => {
+          executions++; await publishOptions.onBeforeBroadcast?.({ txHash, nonce: 0 });
+          throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'test.chain-response', { storeOperation: 'query' });
+        },
+        // Exercise the actual inherited recovery stamping phase after canonical
+        // chain evidence; the queue itself owns preservation/finalization of the carrier.
+        finalizeRecovered: () => f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId),
+      },
+    });
+    const jobId = await queue.enqueueKnowledgeAssetVmPublish(request);
+    expect(await queue.processNext('wallet')).toMatchObject({ status: 'broadcast' });
+    const replace = f.store.replaceSubject.bind(f.store); let armed = true;
+    vi.spyOn(f.store, 'replaceSubject').mockImplementation(async (targetGraph, targetSubject, quads) => {
+      if (armed && targetGraph === graph && targetSubject === subject) { armed = false; throw new Error('transient atomic repair'); }
+      return replace(targetGraph, targetSubject, quads);
+    });
+    expect(await queue.recover()).toBe(0);
+    expect(await queue.getStatus(jobId)).toMatchObject({ status: 'broadcast', broadcast: { txHash } });
+    expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'SWM', state: 'promoted' });
+    expect(await queue.recover()).toBe(1);
+    expect(await queue.getStatus(jobId)).toMatchObject({ status: 'finalized', jobId });
+    expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'VM', state: 'published' });
+    expect(executions).toBe(1);
+  });
+
+  it('serializes permanent VM bookkeeping with the complete draft subject replacement', async () => {
+    const f = await fixture(), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    const originalQuery = f.store.query.bind(f.store); let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; }), paused = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(f.store, 'query').mockImplementation(async (sparql, options) => {
+      const result = await originalQuery(sparql, options);
+      if (options?.source === 'agent.publish.namedKaVmTransition' && sparql.includes(`<${subject}>`)) { entered(); await gate; }
+      return result;
+    });
+    const first = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
+    // The old implementation has no complete subject read; fail rather than hang.
+    const reached = await Promise.race([paused.then(() => true), first.then(() => false)]);
+    expect(reached).toBe(true);
+    if (!reached) return;
+    const nextRoot = 'ee'.repeat(32), nextUal = 'urn:next:confirmed';
+    const next = applyOwnedPublishedNamedKaVmLifecycle(f.store, f.publisher, {
+      contextGraphId: CG, agentAddress: AUTHOR, name: NAME, publishedUal: nextUal, merkleRoot: nextRoot,
+    }, 'another-publication');
+    try {
+      expect(await Promise.race([next.then(() => 'finished'), new Promise<string>(resolve => setImmediate(() => resolve('waiting')))]))
+        .toBe('waiting');
+    } finally { release(); }
+    await Promise.all([first, next]);
+    expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'VM', state: 'published', vmCurrentAssertion: nextRoot, publishedUal: nextUal });
+  });
+
   it.each(['synchronous', 'queued'] as const)('materializes a %s update VM pointer once and converges its owned WM pointer', async lane => {
     const f = await fixture(false, true), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
     const insert = vi.spyOn(f.store, 'insert');

@@ -14,6 +14,7 @@ import {
 import type { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 import { stampLifecyclePointerIfDivergedFromVm } from './lifecycle-pointer-writer.js';
+import { replaceNamedKaVmDraftSubject, withNamedKaVmMetadataLock } from './named-ka-vm-metadata.js';
 
 const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
 const STATE_PRED = 'http://dkg.io/ontology/state';
@@ -55,41 +56,44 @@ async function recordPublishedNamedKaVm(store: TripleStore, input: PublishedName
     );
   }
 
-  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, graph: metaGraph });
-  await store.insert([{
-    subject: lifecycleUri,
-    predicate: VM_CURRENT_ASSERTION_PRED,
-    object: JSON.stringify(bareMerkleRoot),
-    graph: metaGraph,
-  }]);
+  return withNamedKaVmMetadataLock(store, metaGraph, lifecycleUri, async () => {
+    await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, graph: metaGraph });
+    await store.insert([{
+      subject: lifecycleUri,
+      predicate: VM_CURRENT_ASSERTION_PRED,
+      object: JSON.stringify(bareMerkleRoot),
+      graph: metaGraph,
+    }]);
 
-  // #1104: reconcile the KA's dual identity. `dkg:reservedUal`
-  // (chain/author/kaNumber, stamped at finalize) and the published
-  // UAL (chain/contract/tokenId, returned by vm/publish) are both
-  // permanent — record the published UAL on the lifecycle URN
-  // (drop-then-set, so updates re-point to the latest published UAL).
-  //
-  // Merge note (PR #1107 ← main): #1095's separate `published`
-  // prov:Activity EVENT minting was dropped here — main's RFC
-  // ka-metadata-trim deliberately removed `generateAssertionPublishedMetadata`,
-  // and main already stamps `dkg:state="published"` above (which
-  // `deriveStatus` maps to `vm-confirmed`), so the lifecycle STATE fix
-  // #1095 targeted is satisfied without the trimmed event entity.
-  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
-  await store.insert([{
-    subject: lifecycleUri,
-    predicate: PUBLISHED_UAL_PRED,
-    object: JSON.stringify(input.publishedUal),
-    graph: metaGraph,
-  }]);
+    // #1104: reconcile the KA's dual identity. `dkg:reservedUal`
+    // (chain/author/kaNumber, stamped at finalize) and the published
+    // UAL (chain/contract/tokenId, returned by vm/publish) are both
+    // permanent — record the published UAL on the lifecycle URN
+    // (drop-then-set, so updates re-point to the latest published UAL).
+    //
+    // Merge note (PR #1107 ← main): #1095's separate `published`
+    // prov:Activity EVENT minting was dropped here — main's RFC
+    // ka-metadata-trim deliberately removed `generateAssertionPublishedMetadata`,
+    // and main already stamps `dkg:state="published"` above (which
+    // `deriveStatus` maps to `vm-confirmed`), so the lifecycle STATE fix
+    // #1095 targeted is satisfied without the trimmed event entity.
+    await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
+    await store.insert([{
+      subject: lifecycleUri,
+      predicate: PUBLISHED_UAL_PRED,
+      object: JSON.stringify(input.publishedUal),
+      graph: metaGraph,
+    }]);
 
-  return { lifecycleUri, assertionUri, metaGraph };
+    return { lifecycleUri, assertionUri, metaGraph };
+  });
 }
 
 /** Idempotent materializer for callers already owning the draft lifecycle. */
 export async function applyPublishedNamedKaVmLifecycle(store: TripleStore, input: PublishedNamedKaVmLifecycleInput): Promise<void> {
   const { lifecycleUri, assertionUri, metaGraph } = await recordPublishedNamedKaVm(store, input);
-  await applyPublishedNamedKaDraftLifecycle(store, input, lifecycleUri, assertionUri, metaGraph);
+  await withNamedKaVmMetadataLock(store, metaGraph, lifecycleUri,
+    () => applyPublishedNamedKaDraftLifecycle(store, input, lifecycleUri, assertionUri, metaGraph));
 }
 
 /** Confirmed VM bookkeeping survives a replacement; only its captured draft may transition. */
@@ -99,7 +103,8 @@ export async function applyOwnedPublishedNamedKaVmLifecycle(
 ): Promise<void> {
   const { lifecycleUri, assertionUri, metaGraph } = await recordPublishedNamedKaVm(store, input);
   await publisher.withPublishedAssertionLifecycle(input.contextGraphId, input.name, input.agentAddress, expectedShareOperationId,
-    () => applyPublishedNamedKaDraftLifecycle(store, input, lifecycleUri, assertionUri, metaGraph), input.subGraphName);
+    () => withNamedKaVmMetadataLock(store, metaGraph, lifecycleUri,
+      () => applyPublishedNamedKaDraftLifecycle(store, input, lifecycleUri, assertionUri, metaGraph)), input.subGraphName);
 }
 
 // These current-draft markers require the captured publication owner.
@@ -160,23 +165,17 @@ async function applyPublishedNamedKaDraftLifecycle(
       store, lifecycleUri, WM_CURRENT_ASSERTION_PRED, input.merkleRoot.toLowerCase().replace(/^0x/, ''), metaGraph,
     );
   }
-  for (const subject of [lifecycleUri, assertionUri]) {
-    await deleteByPatternWithoutCount(store, { subject, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
-    await store.insert([{
-      subject,
-      predicate: MEMORY_LAYER_PRED,
-      object: `"${MemoryLayer.VerifiableMemory}"`,
-      graph: metaGraph,
+  const lifecycleReplacements = [
+    { subject: lifecycleUri, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
+    { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
+  ];
+  if (input.packedKaId === undefined) {
+    await replaceNamedKaVmDraftSubject(store, metaGraph, lifecycleUri, lifecycleReplacements);
+    await replaceNamedKaVmDraftSubject(store, metaGraph, assertionUri, [{
+      subject: assertionUri, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph,
     }]);
+    return;
   }
-  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
-  await store.insert([{
-    subject: lifecycleUri,
-    predicate: STATE_PRED,
-    object: '"published"',
-    graph: metaGraph,
-  }]);
-  if (input.packedKaId === undefined) return;
   const vmAuthor = `0x${(input.packedKaId >> 96n).toString(16).padStart(40, '0')}`;
   const vmNumber = input.packedKaId & ((1n << 96n) - 1n);
   const vmGraph = contextGraphLayerUri(
@@ -186,12 +185,10 @@ async function applyPublishedNamedKaDraftLifecycle(
     vmNumber,
     input.subGraphName,
   );
-  await deleteByPatternWithoutCount(store, { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
-  await store.insert([{
-    subject: lifecycleUri,
-    predicate: ASSERTION_GRAPH_PRED,
-    object: vmGraph,
-    graph: metaGraph,
+  lifecycleReplacements.push({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph });
+  await replaceNamedKaVmDraftSubject(store, metaGraph, lifecycleUri, lifecycleReplacements);
+  await replaceNamedKaVmDraftSubject(store, metaGraph, assertionUri, [{
+    subject: assertionUri, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph,
   }]);
 
   const wmGraph = contextGraphLayerUri(
@@ -201,11 +198,7 @@ async function applyPublishedNamedKaDraftLifecycle(
     vmNumber,
     input.subGraphName,
   );
-  await deleteByPatternWithoutCount(store, { subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
-  await store.insert([{
-    subject: wmGraph,
-    predicate: MEMORY_LAYER_PRED,
-    object: `"${MemoryLayer.VerifiableMemory}"`,
-    graph: metaGraph,
+  await replaceNamedKaVmDraftSubject(store, metaGraph, wmGraph, [{
+    subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph,
   }]);
 }

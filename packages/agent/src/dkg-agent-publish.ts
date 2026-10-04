@@ -304,6 +304,7 @@ import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type Ord
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyOwnedPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
 import { stampLifecyclePointer, stampLifecyclePointerIfDivergedFromVm } from './lifecycle-pointer-writer.js';
+import { withNamedKaVmMetadataLock } from './named-ka-vm-metadata.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -6481,7 +6482,8 @@ export class PublishMethods extends DKGAgentBase {
     merkleHex: string,
     metaGraph: string,
   ): Promise<void> {
-    await stampLifecyclePointer(this.store, lifecycleUri, pred, merkleHex, metaGraph);
+    await withNamedKaVmMetadataLock(this.store, metaGraph, lifecycleUri,
+      () => stampLifecyclePointer(this.store, lifecycleUri, pred, merkleHex, metaGraph));
   }
 
   async _stampPointerIfDivergedFromVm(
@@ -6491,7 +6493,8 @@ export class PublishMethods extends DKGAgentBase {
     merkleHex: string,
     metaGraph: string,
   ): Promise<void> {
-    await stampLifecyclePointerIfDivergedFromVm(this.store, lifecycleUri, pred, merkleHex, metaGraph);
+    await withNamedKaVmMetadataLock(this.store, metaGraph, lifecycleUri,
+      () => stampLifecyclePointerIfDivergedFromVm(this.store, lifecycleUri, pred, merkleHex, metaGraph));
   }
 
   /**
