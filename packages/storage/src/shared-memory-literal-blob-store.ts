@@ -1,7 +1,7 @@
-import { persistContentAddressedFile } from './durable-content-addressed-file.js';
+import { DurableDirectoryPreparation, persistContentAddressedFile } from './durable-content-addressed-file.js';
 import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   ConstructResult,
@@ -62,10 +62,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
-  /** Retain newly created directory ancestry across a failed sync and retry. */
-  private pendingCreatedDirectory?: string;
-  /** Different content hashes share initial directory creation and its ancestry evidence. */
-  private blobDirectoryCreation?: Promise<void>;
+  private readonly blobDirectory: DurableDirectoryPreparation;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -79,6 +76,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.commitment = composeTripleStoreCommitment(inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
+    this.blobDirectory = new DurableDirectoryPreparation(this.blobDir);
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
     });
@@ -402,10 +400,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   private async writeBlobFile(hash: string, term: string): Promise<void> {
-    this.blobDirectoryCreation ??= mkdir(this.blobDir, { recursive: true }).then(created => {
-      this.pendingCreatedDirectory = created;
-    }).catch(error => { this.blobDirectoryCreation = undefined; throw error; });
-    await this.blobDirectoryCreation;
+    await this.blobDirectory.prepare();
     const path = this.blobPath(hash);
 
     try {
@@ -415,8 +410,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
 
     await this.readBlob(hash);
-    await persistContentAddressedFile(path, this.pendingCreatedDirectory);
-    this.pendingCreatedDirectory = undefined;
+    await persistContentAddressedFile(path);
   }
 
   private async readBlob(hash: string): Promise<string> {
