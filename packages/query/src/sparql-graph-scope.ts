@@ -481,6 +481,13 @@ function hasTopLevelDefaultGraphPattern(scope: PreparedGraphScope): boolean {
   );
 }
 
+/** Exact partition reads never use a physical default graph or a GRAPH variable. */
+export function assertExactGraphRead(scope: PreparedGraphScope): void {
+  if (!scope.hasGraphClause || scope.graphVariables.length > 0 || hasTopLevelDefaultGraphPattern(scope)) {
+    throw new ScopedQueryViolationError('Exact partition reads require only concrete GRAPH patterns');
+  }
+}
+
 function nextGroupOpening(
   scope: PreparedGraphScope,
   start: number,

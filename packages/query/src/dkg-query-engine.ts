@@ -51,6 +51,7 @@ import {
 } from './sparql-guard.js';
 import {
   assertExplicitGraphIrisAllowed,
+  assertExactGraphRead,
   assertNoCallerDatasetClauses,
   constrainGraphVariablesToAllowedSet,
   prepareGraphScope,
@@ -380,6 +381,15 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     );
   }
 
+  /** Public partitions admitted by the existing broad count-scan policy. */
+  async listContextGraphQueryPartitions(contextGraphId: string, options?: QueryOptions): Promise<string[]> {
+    const root = contextGraphDataUri(contextGraphId);
+    return this.resolveScopedGraphVariableAllowList(contextGraphId,
+      [root, contextGraphMetaUri(contextGraphId), contextGraphSharedMemoryUri(contextGraphId),
+        contextGraphSharedMemoryMetaUri(contextGraphId)],
+      { isSwmOnlyRoute: false }, createQueryStoreReadContext(this.store, options));
+  }
+
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const prepared = prepareSparql(sparql);
     if (prepared.status === 'malformed-uchar') {
@@ -409,6 +419,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const v = validateSubGraphName(options.subGraphName);
       if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
     }
+
+    if (options?.exactContextGraphPartitions && (
+      !effectiveContextGraphId || options.view || options.includeContextGraphPartitions !== true
+      || initialGraphScope.graphVariables.length > 0
+    )) throw new Error('Exact context-graph reads require a scoped, concrete GRAPH query with partition access');
+    if (options?.exactContextGraphPartitions) assertExactGraphRead(initialGraphScope);
 
     if (effectiveContextGraphId && !options?.view) {
       const dataGraph = options?.subGraphName
@@ -510,7 +526,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
       const shouldExpandGraphVariables =
         options?.includeContextGraphPartitions === true
-        && initialGraphScope.graphVariables.length > 0;
+        && (initialGraphScope.graphVariables.length > 0 || options.exactContextGraphPartitions === true);
       const variableAllowedGraphs = shouldExpandGraphVariables
         ? await this.resolveScopedGraphVariableAllowList(
             effectiveContextGraphId,
@@ -523,7 +539,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // allow-list. GRAPH variables only gain known same-CG content
       // partitions for callers that explicitly opt into broad count scans;
       // legacy scoped routes keep their selected memory-layer contract.
-      assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
+      assertExplicitGraphIrisAllowed(initialGraphScope,
+        options?.exactContextGraphPartitions ? variableAllowedGraphs : explicitAllowedGraphs);
+      if (options?.exactContextGraphPartitions) {
+        return this.execAndNormalize(initialGraphScope, reads);
+      }
       routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
         initialGraphScope,
         variableAllowedGraphs,

@@ -413,6 +413,16 @@ interface ContextGraphReadAuthorityPlan {
 }
 
 export class QueryMethods extends DKGAgentBase {
+  /** Enumerate the same public count dataset used by scoped query execution. */
+  async listContextGraphQueryPartitions(this: DKGAgent, contextGraphId: string,
+    options: { callerAgentAddress?: string; signal?: AbortSignal; priority?: import('@origintrail-official/dkg-storage').StoreWorkPriority; source?: string } = {},
+  ): Promise<string[]> {
+    const authority = await this.resolveContextGraphReadAuthority(contextGraphId, options);
+    if (authority.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, authority);
+    if (authority.outcome !== 'allowed') return [];
+    return this.queryEngine.listContextGraphQueryPartitions(contextGraphId, options);
+  }
+
   async query(this: DKGAgent,
     sparql: string,
     options?: string | {
@@ -426,6 +436,8 @@ export class QueryMethods extends DKGAgentBase {
        * registered public content partitions in a scoped `GRAPH ?g` scan.
        */
       includeContextGraphPartitions?: boolean;
+      /** Bounded exact-graph reads over the registered public count dataset. */
+      exactContextGraphPartitions?: boolean;
       /**
        * Opt-in: allow the scoped query to reference the context graph's own
        * `_private` partition (excluded from the scope guard's allow-set by
@@ -689,6 +701,7 @@ export class QueryMethods extends DKGAgentBase {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
+      exactContextGraphPartitions: opts.exactContextGraphPartitions,
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
