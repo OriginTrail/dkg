@@ -50,4 +50,3 @@ export function authorityUnavailableResponse(res: ServerResponse): void {
     { 'Retry-After': '3' },
   );
 }
-
