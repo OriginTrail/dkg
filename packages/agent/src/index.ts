@@ -420,7 +420,6 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
-  type VmReconcileNegativeRecord,
   type VmReconcilePeerTopology,
   type VmReconcilePeerTopologyEvidence,
   type VmReconcilePeerTopologyPeer,

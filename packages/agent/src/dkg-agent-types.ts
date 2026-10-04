@@ -863,10 +863,6 @@ export interface ContextGraphSubscriptionStore {
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
-  loadVmReconcileNegative?(cacheKey: string): Promise<VmReconcileNegativeRecord | null>;
-  saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
-  deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
-  deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
 }
 
 /**
@@ -899,26 +895,6 @@ export interface SelectedVmReconcileCursorRecord {
   onChainContextGraphId: string;
   nameHash: string;
   watermark: number;
-}
-
-/** Restart-durable, generation-gated record of one authoritative no-match scan. */
-export interface VmReconcileNegativeRecord {
-  cacheKey: string;
-  localCgId: string;
-  failures: number;
-  nextRetryAt: number;
-  swmGen: string;
-  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-  /**
-   * Legacy serialized topology contract. Required during the v1-to-v2
-   * migration so existing custom stores can keep reading and persisting the
-   * field they were compiled against.
-   */
-  peerTopologyKey: string;
-  /** Typed topology used by v2-aware stores; absent when loading a legacy row. */
-  peerTopology?: VmReconcilePeerTopology;
-  /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
-  cleanMissPeerIds?: string[];
 }
 
 /** Fences for experimental transport reuse; never asset or absence authority. */

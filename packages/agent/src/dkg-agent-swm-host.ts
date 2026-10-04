@@ -99,7 +99,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, withDefaultStoreWorkPriority, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, withDefaultStoreWorkPriority, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -396,27 +396,13 @@ type JoinApprovalRetryEntry = {
   nextAttemptAt: number;
   lastError: string;
 };
-type VmReconcileSwmNamespace = { metaGraph: string; dataGraph: string };
-type VmReconcileSwmCandidateNamespaces = { namespaces: VmReconcileSwmNamespace[]; complete: boolean };
-type VmReconcileSwmCandidateState = {
-  swmGen: string | null;
-  candidateNamespaces: VmReconcileSwmNamespace[];
-  peerTopology: VmReconcilePeerTopology;
-  cleanMissPeerIds: string[];
-};
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
-  canReuseVmReconcilePeerTopology,
-  createVmReconcileCleanMissPeerIds,
   createVmReconcilePeerTopology,
-  encodeLegacyVmReconcilePeerTopologyKey,
-  isVmReconcilePeerTopology,
-  parseLegacyVmReconcilePeerTopologyKey,
-  parseVmReconcileCleanMissPeerIds,
   UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY,
 } from './vm-reconcile-peer-topology.js';
 import {
@@ -618,16 +604,10 @@ type VmReconcileExecution = {
 };
 
 type VmReconcileOrdinalOptions = {
-  /** Shared by every ordinal in one bounded pass. */
-  acquireActiveFetchPermit?: () => boolean;
-  /** Cap peer rotations for the one batch fetch; omitted preserves legacy behavior. */
-  maxPeerAttempts?: number;
   /** Re-check a captured local/on-chain binding around slow fetch work. */
   isTargetCurrent?: () => boolean;
   /** Re-prove operation-local selected bindings immediately before materialization. */
   revalidateTarget?: () => Promise<boolean>;
-  /** Collect the missing KA for one batch fetch instead of fetching inline. */
-  deferActiveFetch?: boolean;
   /**
    * Take the coherent version snapshot that lets a re-run of this ordinal at
    * the same finalized block skip its chain reads. A forward catch-up walk
@@ -4950,7 +4930,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock, {
           isTargetCurrent,
           revalidateTarget,
-          deferActiveFetch: true,
           rememberFinalizedEvidence: context === undefined
             || context.headOrdinal - ordinal <= DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
         }),
@@ -5478,62 +5457,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
   }
 
-  async collectVmReconcileSwmCandidateState(
-    this: DKGAgent,
-    localCgId: string,
-  ): Promise<VmReconcileSwmCandidateState> {
-    const candidateNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
-    return {
-      candidateNamespaces: candidateNamespaces.namespaces,
-      swmGen: await this.readVmReconcileSwmGen(candidateNamespaces.namespaces),
-      peerTopology: await this.vmReconcilePeerTopology(localCgId),
-      cleanMissPeerIds: [],
-    };
-  }
-
-  vmReconcileRootSwmCandidateNamespaces(this: DKGAgent, localCgId: string): VmReconcileSwmNamespace[] {
-    return [{
-      metaGraph: contextGraphWorkspaceMetaGraphUri(localCgId),
-      dataGraph: contextGraphWorkspaceGraphUri(localCgId),
-    }];
-  }
-
-  async collectVmReconcileSwmCandidateNamespaces(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmNamespace[]> {
-    const graphManager = new GraphManager(this.store);
-    // `listSubGraphs` finds sub-graphs by their data or `_meta` graphs; a
-    // hosted-only core holds only `<cg>/<sub>/_shared_memory*` copies, which
-    // its StorageACK ledger names.
-    const subGraphs = [...new Set([
-      ...await graphManager.listSubGraphs(localCgId),
-      ...await this.storageAckLedgerNamespaceSubGraphs(localCgId),
-    ])];
-    const subGraphNamespaces = subGraphs
-      .map((sg) => ({
-        metaGraph: graphManager.sharedMemoryMetaUri(localCgId, sg),
-        dataGraph: graphManager.sharedMemoryUri(localCgId, sg),
-      }))
-      .sort((a, b) => `${a.metaGraph}\0${a.dataGraph}`.localeCompare(`${b.metaGraph}\0${b.dataGraph}`));
-    return [
-      ...this.vmReconcileRootSwmCandidateNamespaces(localCgId),
-      ...subGraphNamespaces,
-    ];
-  }
-
-  async collectVmReconcileSwmCandidateNamespacesBestEffort(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmCandidateNamespaces> {
-    try {
-      return { namespaces: await this.collectVmReconcileSwmCandidateNamespaces(localCgId), complete: true };
-    } catch {
-      return { namespaces: this.vmReconcileRootSwmCandidateNamespaces(localCgId), complete: false };
-    }
-  }
-
-  vmReconcileSwmNamespaceKey(this: DKGAgent, candidateNamespaces: VmReconcileSwmNamespace[]): string {
-    return candidateNamespaces
-      .map((namespace) => `${namespace.metaGraph}\0${namespace.dataGraph}`)
-      .sort()
-      .join('\n');
-  }
-
   async vmReconcilePeerTopology(
     this: DKGAgent,
     localCgId: string,
@@ -5570,375 +5493,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     } catch {
       return UNREADABLE_VM_RECONCILE_PEER_TOPOLOGY;
     }
-  }
-
-  async readVmReconcileSwmGen(this: DKGAgent, candidateNamespaces: VmReconcileSwmNamespace[]): Promise<string | null> {
-    if (candidateNamespaces.length === 0) return 'empty:0';
-    try {
-      // The changelog cursor is a durable write generation: it survives daemon
-      // restart, advances at the store mutation choke point, and is O(1) after
-      // its one-time seed. It lets large (> fingerprint cap) stores reuse a
-      // proven negative without reconstructing or sampling their SWM content.
-      const changelog = asChangelogReader(this.store);
-      if (changelog) {
-        const head = await changelog.changelogHead({
-          priority: 'background',
-          source: 'agent.vmReconcile.negativeGeneration',
-        });
-        return `changelog:${head.era}:${head.seq}`;
-      }
-      const parts: string[] = [];
-      const digestRows = (rows: string[]) =>
-        createHash('sha256').update(rows.join('\n'), 'utf8').digest('hex');
-      const maxRows = DKGAgentBase.VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS;
-      const isTooLarge = (rows: unknown[]) => rows.length > maxRows;
-      for (const namespace of candidateNamespaces) {
-        const metaGraph = assertSafeIri(namespace.metaGraph);
-        const dataGraph = assertSafeIri(namespace.dataGraph);
-        const operationRows = await this.store.query(
-          `SELECT ?op ?root ?ts WHERE {
-            GRAPH <${metaGraph}> {
-              ?op <http://dkg.io/ontology/rootEntity> ?root .
-              OPTIONAL { ?op <http://dkg.io/ontology/publishedAt> ?ts . }
-            }
-          } ORDER BY ?op ?root ?ts LIMIT ${maxRows + 1}`,
-          { source: 'agent.vmReconcile.swmFingerprint.operations' },
-        );
-        if (operationRows.type !== 'bindings') return null;
-        if (isTooLarge(operationRows.bindings)) return null;
-        const operations = operationRows.bindings
-          .map((row) => [
-            String(row['op'] ?? ''),
-            String(row['root'] ?? ''),
-            String(row['ts'] ?? ''),
-          ].join('\0'))
-          .sort();
-
-        const dataRows = await this.store.query(
-          `SELECT ?s ?p ?o WHERE {
-            GRAPH <${dataGraph}> { ?s ?p ?o . }
-          } ORDER BY ?s ?p ?o LIMIT ${maxRows + 1}`,
-          { source: 'agent.vmReconcile.swmFingerprint.data' },
-        );
-        if (dataRows.type !== 'bindings') return null;
-        if (isTooLarge(dataRows.bindings)) return null;
-        const dataTriples = dataRows.bindings
-          .map((row) => [
-            String(row['s'] ?? ''),
-            String(row['p'] ?? ''),
-            String(row['o'] ?? ''),
-          ].join('\0'))
-          .sort();
-
-        const privateRootRows = await this.store.query(
-          `SELECT ?privateEntity ?privateRoot WHERE {
-            GRAPH <${metaGraph}> {
-              ?privateEntity <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot .
-            }
-          } ORDER BY ?privateEntity ?privateRoot LIMIT ${maxRows + 1}`,
-          { source: 'agent.vmReconcile.swmFingerprint.privateRoots' },
-        );
-        if (privateRootRows.type !== 'bindings') return null;
-        if (isTooLarge(privateRootRows.bindings)) return null;
-        const privateRoots = privateRootRows.bindings
-          .map((row) => [
-            String(row['privateEntity'] ?? ''),
-            String(row['privateRoot'] ?? ''),
-          ].join('\0'))
-          .sort();
-
-        parts.push([
-          `meta:${namespace.metaGraph}`,
-          `data:${namespace.dataGraph}`,
-          `ops:${operations.length}`,
-          `opHash:${digestRows(operations)}`,
-          `dataTriples:${dataTriples.length}`,
-          `dataHash:${digestRows(dataTriples)}`,
-          `privateRoots:${privateRoots.length}`,
-          `privateRootHash:${digestRows(privateRoots)}`,
-        ].join(';'));
-      }
-      // Catch writes into a newly-created/unregistered namespace that the
-      // current namespace enumeration cannot yet name. This process-local term
-      // complements (rather than replaces) the content fingerprint: after a
-      // restart the fingerprint remains the correctness gate while the counter
-      // restarts harmlessly.
-      const rootDataGraph = candidateNamespaces[0]?.dataGraph ?? '';
-      const swmSuffix = rootDataGraph.indexOf('/_shared_memory');
-      const graphPrefix = swmSuffix >= 0 ? `${rootDataGraph.slice(0, swmSuffix)}/` : rootDataGraph;
-      const writeRevision = asGraphWriteRevisionSource(this.store)?.getWriteRevision(graphPrefix);
-      // A remote mutation can still commit after this fingerprint's reads.
-      // Never turn such an in-flight/indeterminate observation into a stable
-      // negative-cache key.
-      if (writeRevision && !writeRevision.stable) return null;
-      if (writeRevision) parts.push(`writeGen:${writeRevision.generation}`);
-      return parts.join('|');
-    } catch {
-      // Probe failures are not a stable SWM generation. Callers must not cache
-      // or preserve a negative-cache gate from this result.
-    }
-    return null;
-  }
-
-  vmReconcileSwmGenHasOperations(this: DKGAgent, swmGen: string): boolean {
-    return swmGen.split('|').some((part) => {
-      const match = /(?:^|;)ops:(\d+)(?:;|$)/.exec(part);
-      return match ? Number(match[1]) > 0 : false;
-    });
-  }
-
-  vmReconcileSwmGenSupportsDurableNegative(this: DKGAgent, swmGen: string): boolean {
-    // A changelog cursor covers every descendant graph mutation. The fallback
-    // fingerprint covers only the bare SWM bucket, so an operation whose data
-    // later lands in a per-KA child graph must fail open after restart.
-    return swmGen.startsWith('changelog:') || !this.vmReconcileSwmGenHasOperations(swmGen);
-  }
-
-  vmReconcileSwmGenContainsSnapshot(this: DKGAgent, cachedSwmGen: string, currentSwmGen: string): boolean {
-    return cachedSwmGen === currentSwmGen || cachedSwmGen.split('|').includes(currentSwmGen);
-  }
-
-  vmReconcileWorkspaceOperationPattern(this: DKGAgent, candidateMetaGraphs: string[]): string {
-    const branches: string[] = [];
-    for (const graph of candidateMetaGraphs) {
-      try {
-        branches.push(`{ GRAPH <${assertSafeIri(graph)}> {
-          ?op <http://dkg.io/ontology/rootEntity> ?root .
-          OPTIONAL { ?op <http://dkg.io/ontology/publishedAt> ?ts . }
-        } }`);
-      } catch {
-        // Skip unsafe graph names instead of building a malformed query.
-      }
-    }
-    return branches.join(' UNION ');
-  }
-
-  deleteVmReconcileNegativeCacheEntry(this: DKGAgent, cacheKey: string): void {
-    const existing = this.vmReconcileNegativeCache.get(cacheKey);
-    this.markVmReconcileNegativeCacheHydrated(
-      cacheKey,
-      existing?.localCgId ?? cacheKey.slice(0, Math.max(0, cacheKey.indexOf('\0'))),
-    );
-    if (existing) {
-      this.vmReconcileNegativeCache.delete(cacheKey);
-      const keys = this.vmReconcileNegativeCacheKeysByCg.get(existing.localCgId);
-      if (keys) {
-        keys.delete(cacheKey);
-        if (keys.size === 0) this.vmReconcileNegativeCacheKeysByCg.delete(existing.localCgId);
-      }
-    }
-    void this.config.contextGraphSubscriptionStore?.deleteVmReconcileNegative?.(cacheKey).catch(() => {
-      // The in-memory invalidation remains authoritative for this process.
-    });
-  }
-
-  indexVmReconcileNegativeCacheEntry(this: DKGAgent, localCgId: string, cacheKey: string): void {
-    let keys = this.vmReconcileNegativeCacheKeysByCg.get(localCgId);
-    if (!keys) {
-      keys = new Set<string>();
-      this.vmReconcileNegativeCacheKeysByCg.set(localCgId, keys);
-    }
-    keys.add(cacheKey);
-  }
-
-  markVmReconcileNegativeCacheHydrated(this: DKGAgent, cacheKey: string, localCgId: string): void {
-    // Access order keeps actively reused keys resident while old one-shot
-    // misses fall out. Eviction is fail-open: it only permits another durable
-    // lookup if the same key is encountered later.
-    this.vmReconcileNegativeCacheHydrated.delete(cacheKey);
-    this.vmReconcileNegativeCacheHydrated.set(cacheKey, localCgId);
-    while (
-      this.vmReconcileNegativeCacheHydrated.size
-      > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES
-    ) {
-      const oldestKey = this.vmReconcileNegativeCacheHydrated.keys().next().value;
-      if (oldestKey === undefined) break;
-      this.vmReconcileNegativeCacheHydrated.delete(oldestKey);
-    }
-  }
-
-  async shouldDeferVmReconcileByNegativeCache(this: DKGAgent,
-    cacheKey: string,
-    localCgId: string,
-  ): Promise<boolean> {
-    let cached = this.vmReconcileNegativeCache.get(cacheKey);
-    const durableStateAlreadyConsulted = this.vmReconcileNegativeCacheHydrated.has(cacheKey);
-    this.markVmReconcileNegativeCacheHydrated(cacheKey, localCgId);
-    if (!cached && !durableStateAlreadyConsulted) {
-      try {
-        const durable = await this.config.contextGraphSubscriptionStore
-          ?.loadVmReconcileNegative?.(cacheKey);
-        const durablePeerTopology = durable
-          ? isVmReconcilePeerTopology(durable.peerTopology)
-            ? durable.peerTopology
-            : parseLegacyVmReconcilePeerTopologyKey(durable.peerTopologyKey)
-          : null;
-        const durableCleanMissPeerIds = durablePeerTopology
-          ? parseVmReconcileCleanMissPeerIds(
-            durable?.cleanMissPeerIds ?? [],
-            durablePeerTopology,
-          )
-          : null;
-        if (
-          durable &&
-          durable.cacheKey === cacheKey &&
-          durable.localCgId === localCgId &&
-          Number.isInteger(durable.failures) && durable.failures > 0 &&
-          Number.isFinite(durable.nextRetryAt) &&
-          typeof durable.swmGen === 'string' &&
-          Array.isArray(durable.candidateNamespaces) &&
-          durable.candidateNamespaces.every((item) =>
-            typeof item?.metaGraph === 'string' && typeof item?.dataGraph === 'string') &&
-          durablePeerTopology !== null &&
-          durableCleanMissPeerIds !== null
-        ) {
-          if (!this.vmReconcileSwmGenSupportsDurableNegative(durable.swmGen)) {
-            await this.config.contextGraphSubscriptionStore
-              ?.deleteVmReconcileNegative?.(cacheKey);
-          } else {
-            cached = {
-              localCgId: durable.localCgId,
-              failures: durable.failures,
-              nextRetryAt: durable.nextRetryAt,
-              swmGen: durable.swmGen,
-              candidateNamespaces: durable.candidateNamespaces,
-              peerTopology: durablePeerTopology,
-              cleanMissPeerIds: durableCleanMissPeerIds,
-            };
-            this.vmReconcileNegativeCache.set(cacheKey, cached);
-            this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
-          }
-        }
-      } catch {
-        // Persistence is an accelerator only. Fail open to an authoritative reconcile.
-      }
-    }
-    if (!cached) return false;
-    if (Date.now() >= cached.nextRetryAt) return false;
-
-    try {
-      try {
-        await this.primeCatchupConnections();
-      } catch {
-        // Best effort only; an unchanged connection view can still honor the
-        // cached miss until the backoff expires.
-      }
-      const currentPeerTopology = await this.vmReconcilePeerTopology(localCgId);
-      if (!canReuseVmReconcilePeerTopology({
-        topology: cached.peerTopology,
-        cleanMissPeerIds: cached.cleanMissPeerIds,
-      }, currentPeerTopology)) {
-        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        this.clearVmReconcileActiveFetchCooldown(localCgId);
-        return false;
-      }
-      const currentNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
-      const currentNamespaceKey = this.vmReconcileSwmNamespaceKey(currentNamespaces.namespaces);
-      const cachedNamespaceKey = this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces);
-      if (currentNamespaceKey !== cachedNamespaceKey) {
-        if (!currentNamespaces.complete) {
-          const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces.namespaces);
-          if (currentSwmGen === null) {
-            this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-            return false;
-          }
-          if (!this.vmReconcileSwmGenContainsSnapshot(cached.swmGen, currentSwmGen)) {
-            this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-            return false;
-          }
-          return true;
-        }
-        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return false;
-      }
-      const pattern = this.vmReconcileWorkspaceOperationPattern(currentNamespaces.namespaces.map((namespace) => namespace.metaGraph));
-      if (!pattern) return true;
-      const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces.namespaces);
-      if (currentSwmGen === null) {
-        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return false;
-      }
-      if (currentSwmGen !== cached.swmGen) {
-        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return false;
-      }
-    } catch {
-      // Unexpected validation failures leave the existing backoff in place;
-      // expected generation probe failures return null and clear the gate above.
-    }
-    return true;
-  }
-
-  recordVmReconcileNegativeCache(this: DKGAgent,
-    cacheKey: string,
-    localCgId: string,
-    state: VmReconcileSwmCandidateState,
-  ): void {
-    if (state.swmGen === null) {
-      this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-      return;
-    }
-    this.pruneVmReconcileState();
-    const previous = this.vmReconcileNegativeCache.get(cacheKey);
-    const failures = (previous?.failures ?? 0) + 1;
-    const exponentialBackoff = Math.min(
-      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1),
-    );
-    const jitterSample = createHash('sha256')
-      .update(`${this.node.peerId.toString()}\0${cacheKey}\0${failures}`)
-      .digest()
-      .readUInt32BE(0) / 0x1_0000_0000;
-    const backoff = Math.min(
-      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-      Math.max(1, Math.round(exponentialBackoff * (0.8 + jitterSample * 0.4))),
-    );
-    getMetrics().storeRetryAttemptsTotal.add(1, {
-      scope: 'vm_reconcile',
-      reason: 'no_swm',
-      attempt: Math.min(failures, 16),
-    });
-    if (previous) {
-      // Replace in place without racing an asynchronous durable DELETE against
-      // the SAVE below. The record key/local CG are unchanged here.
-      this.vmReconcileNegativeCache.delete(cacheKey);
-      const keys = this.vmReconcileNegativeCacheKeysByCg.get(previous.localCgId);
-      keys?.delete(cacheKey);
-      if (keys?.size === 0) this.vmReconcileNegativeCacheKeysByCg.delete(previous.localCgId);
-    }
-    const record = {
-      localCgId,
-      failures,
-      nextRetryAt: Date.now() + backoff,
-      swmGen: state.swmGen,
-      candidateNamespaces: state.candidateNamespaces,
-      peerTopology: state.peerTopology,
-      cleanMissPeerIds: state.cleanMissPeerIds,
-    };
-    this.vmReconcileNegativeCache.set(cacheKey, record);
-    this.markVmReconcileNegativeCacheHydrated(cacheKey, localCgId);
-    this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
-    const durableStore = this.config.contextGraphSubscriptionStore;
-    if (this.vmReconcileSwmGenSupportsDurableNegative(record.swmGen)) {
-      void durableStore?.saveVmReconcileNegative?.({
-        cacheKey,
-        localCgId: record.localCgId,
-        failures: record.failures,
-        nextRetryAt: record.nextRetryAt,
-        swmGen: record.swmGen,
-        candidateNamespaces: record.candidateNamespaces,
-        peerTopologyKey: encodeLegacyVmReconcilePeerTopologyKey(record.peerTopology),
-        peerTopology: record.peerTopology,
-        cleanMissPeerIds: record.cleanMissPeerIds,
-      }).catch(() => {
-        // Persistence is an accelerator only; the process-local gate still works.
-      });
-    } else {
-      void durableStore?.deleteVmReconcileNegative?.(cacheKey).catch(() => {
-        // Fail open after restart even if best-effort cleanup cannot complete.
-      });
-    }
-    this.pruneVmReconcileState();
   }
 
   initializeVmReconcilePublicCoreTransportPreferencePolicy(this: DKGAgent): void {
@@ -6627,28 +6181,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return true;
   }
 
-  vmReconcileActiveFetchHadUsableResponse(this: DKGAgent, result: {
-    peersSucceeded?: number;
-    sharedMemorySynced?: number;
-    diagnostics?: { sharedMemory?: Partial<SharedMemorySyncDiagnostics> };
-  }): boolean {
-    if ((result.peersSucceeded ?? 0) > 0) return true;
-    if ((result.sharedMemorySynced ?? 0) > 0) return true;
-    const shared = result.diagnostics?.sharedMemory;
-    if (!shared) return false;
-    return (shared.insertedDataTriples ?? 0) > 0
-      || (shared.insertedMetaTriples ?? 0) > 0
-      || (shared.checkpointAdvances ?? 0) > 0
-      || ((shared.completedPhases ?? 0) > 0 && (shared.resumedPhases ?? 0) > 0);
-  }
-
   pruneVmReconcileState(this: DKGAgent, now = Date.now()): void {
-    while (this.vmReconcileNegativeCache.size > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
-      const oldestKey = this.vmReconcileNegativeCache.keys().next().value;
-      if (oldestKey === undefined) break;
-      this.deleteVmReconcileNegativeCacheEntry(oldestKey);
-    }
-
     for (const [localCgId, cooldown] of this.vmReconcileFetchCooldowns) {
       if (now - cooldown.startedAt >= DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
         this.clearVmReconcileActiveFetchCooldown(localCgId);
@@ -6711,22 +6244,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     options: { includeSelectedCursor?: boolean } = {},
   ): void {
-    const negativeCacheKeys = this.vmReconcileNegativeCacheKeysByCg.get(localCgId);
-    if (negativeCacheKeys) {
-      for (const cacheKey of Array.from(negativeCacheKeys)) {
-        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-      }
-    }
-    for (const [cacheKey, hydratedLocalCgId] of this.vmReconcileNegativeCacheHydrated) {
-      if (hydratedLocalCgId === localCgId) {
-        this.vmReconcileNegativeCacheHydrated.delete(cacheKey);
-      }
-    }
-    void this.config.contextGraphSubscriptionStore
-      ?.deleteVmReconcileNegativesForContextGraph?.(localCgId)
-      .catch(() => {
-        // Best-effort durable cleanup; generation checks still reject stale rows.
-      });
     this.reconcileCursors.delete(localCgId);
     if (
       options.includeSelectedCursor !== false
@@ -6846,28 +6363,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   pruneVmReconcileCacheKeySiblings(this: DKGAgent, cacheKey: string): void {
     const prefix = this.vmReconcileCacheKeyPrefix(cacheKey);
-    for (const key of this.vmReconcileNegativeCache.keys()) {
-      if (key !== cacheKey && key.startsWith(prefix)) {
-        this.deleteVmReconcileNegativeCacheEntry(key);
-      }
-    }
     this.recentReconciledUals.deleteByPrefix(prefix, cacheKey);
-  }
-
-  vmReconcileConnectedPeerCount(this: DKGAgent): number {
-    try {
-      const libp2p = (this.node as any)?.libp2p;
-      const getConnections = libp2p?.getConnections;
-      if (typeof getConnections !== 'function') return 0;
-      const uniquePeers = new Set<string>(
-        (getConnections.call(libp2p) as Array<{ remotePeer?: { toString(): string } }>)
-          .map((connection) => connection.remotePeer?.toString())
-          .filter((peerId): peerId is string => typeof peerId === 'string' && peerId.length > 0),
-      );
-      return uniquePeers.size;
-    } catch {
-      return 0;
-    }
   }
 
   /**
@@ -7087,7 +6583,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         {
           isTargetCurrent: isRecoveryCurrent,
           revalidateTarget,
-          deferActiveFetch: true,
         },
       ));
       if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
@@ -8068,7 +7563,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * latest on-chain merkle root + publisher, build the UAL, and ask the
    * finalization handler to promote the matching local SWM snapshot to VM
    * (verifying the CG binding from chain). When no local SWM matches, run an
-   * active core-first catch-up fetch and retry once. A successful result is
+   * queue the exact target for bounded batch recovery. A successful result is
    * validated against one coherent pinned version snapshot before it earns a
    * same-finalized-block shortcut; a new block always reads again. `headBlock`
    * remains the independent cursor observation for the reorg-depth gate. See
@@ -8076,7 +7571,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
    *
    * Local first: before any root, publisher or version read, the handler
    * classifies what the store holds for the KA. A confirmed VM copy with
-   * nothing else to promote settles as `already`, and in the deferred mode an
+   * nothing else to promote settles as `already`, and an
    * asset held nowhere locally goes straight to the exact-recovery queue, both
    * without chain reads. Only local state whose outcome depends on the root
    * takes the chain-backed path below.
@@ -8155,11 +7650,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
       return { status: 'already', blockNumber: headBlock ?? 0 };
     }
-    if (localCandidate.kind === 'none' && options.deferActiveFetch) {
+    if (localCandidate.kind === 'none') {
       // Nothing local can match any root, so the chain-backed path could only
       // answer `no-swm`. Queue the same exact-recovery target it would; the
       // recovery batch keeps its rotation backoff, cooldown and peer gating.
-      // The inline mode keys its negative cache by the root and keeps reading it.
       if (!(await targetMayMaterialize())) return { status: 'skip' };
       this.emitReplication({
         contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
@@ -8231,19 +7725,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
       cacheKey = this.vmReconcileCacheKey(localCgId, ual, merkleRoot);
 
-      if (!options.deferActiveFetch && await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
-        this.emitReplication({
-          contextGraphId: localCgId,
-          onChainCgId: onChainCgId.toString(),
-          action: 'defer',
-          ordinal,
-          kaId: kaId.toString(),
-          ual,
-          detail: 'negative-cache',
-        });
-        return { status: 'pending' };
-      }
-
       publisherAddress = (this.chain.getLatestMerkleRootPublisher
         ? await this.chain.getLatestMerkleRootPublisher(kaId)
         : '') ?? '';
@@ -8293,126 +7774,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     };
 
-    let swmState: VmReconcileSwmCandidateState | undefined;
-    let activeFetchRan = false;
-    let activeFetchHadUsableResponse = false;
-    const cleanMissPeerIds = new Set<string>();
     if (!(await targetMayMaterialize())) return { status: 'skip' };
-    let outcome = await reconcileKnowledgeAsset();
+    const outcome = await reconcileKnowledgeAsset();
     if (outcome === undefined) return { status: 'pending' };
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
-      if (options.deferActiveFetch) {
-        this.emitReplication({
-          contextGraphId: localCgId,
+      this.emitReplication({
+        contextGraphId: localCgId,
+        onChainCgId: onChainCgId.toString(),
+        action: 'defer',
+        ordinal,
+        kaId: kaId.toString(),
+        ual,
+        detail: outcome,
+      });
+      return {
+        status: 'pending',
+        recovery: {
+          localCgId,
           onChainCgId: onChainCgId.toString(),
-          action: 'defer',
           ordinal,
-          kaId: kaId.toString(),
           ual,
-          detail: outcome,
-        });
-        return {
-          status: 'pending',
-          recovery: {
-            localCgId,
-            onChainCgId: onChainCgId.toString(),
-            ordinal,
-            ual,
-            merkleRoot: Array.from(
-              merkleRoot,
-              (byte) => byte.toString(16).padStart(2, '0'),
-            ).join(''),
-            kaId: kaId.toString(),
-            reason: outcome,
-          },
-        };
-      }
-      if (outcome === 'no-swm') {
-        swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
-      }
-      // Active fetch: pull the missing snapshot core-first (selectCatchupPeers
-      // already prioritises known cores + the preferred sync peer), then retry.
-      // Metadata-pending exact VM content needs the same recovery: a durable
-      // sync can supply the missing provenance-bearing assertion metadata even
-      // when no content triples need to move.
-      const batchAllowsFetch = options.acquireActiveFetchPermit?.() ?? true;
-      const cooldownAllowsFetch = batchAllowsFetch
-        && this.shouldRunVmReconcileActiveFetch(localCgId);
-      if (batchAllowsFetch && cooldownAllowsFetch) {
-        activeFetchRan = true;
-        this.emitReplication({
-          contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
-          action: 'fetch', ordinal, kaId: kaId.toString(), ual,
-        });
-        let maxAttempts = 1;
-        const fixedMaxAttempts = options.maxPeerAttempts === undefined
-          ? undefined
-          : Math.max(1, Math.floor(options.maxPeerAttempts));
-        if (fixedMaxAttempts !== undefined) maxAttempts = fixedMaxAttempts;
-        for (
-          let attempt = 0;
-          attempt < maxAttempts
-            && (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending');
-          attempt += 1
-        ) {
-          if (options.isTargetCurrent && !options.isTargetCurrent()) {
-            break;
-          }
-          try {
-            const recovery = await this.syncVmRecoveryFromConnectedPeers(localCgId, {
-              includeSharedMemory: true,
-              maxPeers: 1,
-              peerRotationKey: localCgId,
-              // This is recovery, not routine background catch-up. Without the
-              // override it would enter through the default-background path and
-              // be reported as `catchup-background`, merging repair traffic into
-              // the background lane. Attribution only — mode, priority, peer
-              // selection and the coalescing key are all unchanged.
-              sourceOverride: 'vm-recovery',
-            });
-            const fetchResult = recovery.catchup;
-            if (fixedMaxAttempts === undefined) {
-              maxAttempts = Math.max(
-                maxAttempts,
-                fetchResult.totalPeers ?? fetchResult.connectedPeers ?? 0,
-                this.vmReconcileConnectedPeerCount(),
-              );
-            }
-            if ((fetchResult.peersTried ?? 0) === 0 && (fetchResult.syncCapablePeers ?? 0) === 0) {
-              continue;
-            }
-            if (!this.vmReconcileActiveFetchHadUsableResponse(fetchResult)) {
-              continue;
-            }
-            activeFetchHadUsableResponse = true;
-            for (const peerId of recovery.cleanMissPeerIds) {
-              cleanMissPeerIds.add(peerId);
-            }
-          } catch (err) {
-            this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) failed: ${err instanceof Error ? err.message : String(err)}`);
-            if (fixedMaxAttempts === undefined) {
-              maxAttempts = Math.max(maxAttempts, this.vmReconcileConnectedPeerCount());
-            }
-            continue;
-          }
-          if (options.isTargetCurrent && !options.isTargetCurrent()) {
-            break;
-          }
-          if (!(await targetMayMaterialize())) return { status: 'skip' };
-          outcome = await reconcileKnowledgeAsset();
-          if (outcome === undefined) return { status: 'pending' };
-        }
-        if (outcome === 'no-swm') {
-          swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
-          swmState.cleanMissPeerIds = createVmReconcileCleanMissPeerIds(
-            swmState.peerTopology,
-            [...cleanMissPeerIds],
-          );
-        }
-      } else {
-        const reason = batchAllowsFetch ? 'per-CG cooldown' : 'per-batch fetch budget';
-        this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) skipped by ${reason}`);
-      }
+          merkleRoot: Array.from(
+            merkleRoot,
+            (byte) => byte.toString(16).padStart(2, '0'),
+          ).join(''),
+          kaId: kaId.toString(),
+          reason: outcome,
+        },
+      };
     }
 
     if (options.isTargetCurrent && !options.isTargetCurrent()) {
@@ -8430,7 +7819,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       case 'promoted':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
-        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.recentReconciledUals.add(cacheKey);
         await this.confirmAndRememberVmReconcileFinalizedSlot(
           localCgId,
@@ -8463,7 +7851,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
-        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return { status: 'already', blockNumber: completionBlock };
       case 'stale-target':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
@@ -8482,23 +7869,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
-        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return { status: 'already', blockNumber: completionBlock };
-      case 'no-swm':
-        if (activeFetchRan && !activeFetchHadUsableResponse) {
-          this.clearVmReconcileActiveFetchCooldown(localCgId);
-        } else {
-          this.recordVmReconcileNegativeCache(
-            cacheKey,
-            localCgId,
-            swmState ?? await this.collectVmReconcileSwmCandidateState(localCgId),
-          );
-        }
-        this.emitReplication({
-          contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
-          action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: activeFetchRan && !activeFetchHadUsableResponse ? 'network-unavailable' : outcome,
-        });
-        return { status: 'pending' };
       case 'receipt-revalidation-pending':
       case 'unverified':
       default:
