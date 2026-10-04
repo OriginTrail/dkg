@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from 'node:crypto';
-import { assertSafeIri, sparqlString, type TimestampMsV1 } from '@origintrail-official/dkg-core';
+import { assertSafeIri, canonicalizeObjectTermForHash, sparqlString, type TimestampMsV1 } from '@origintrail-official/dkg-core';
+import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { WorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceOperationAlias, KnowledgeAssetWorkspaceSnapshotLocator } from './workspace-resolution.js';
@@ -25,11 +26,13 @@ const EVIDENCE_DIGEST = 'urn:dkg:publisher:authenticatedOperationDigest';
 
 function evidenceDigest(rows: readonly Quad[]): string {
   const term = (row: Quad) => {
+    const canonical = canonicalizeObjectTermForHash(row.object);
     if (row.predicate === 'http://dkg.io/ontology/publishedAt') {
-      const date = /^"([^"]*)"/.exec(row.object)?.[1];
+      // Evidence has always folded valid timestamps to UTC, without the RDF suffix.
+      const date = parseRdfLiteralTerm(canonical, { combineSurrogatePairs: true })?.value;
       if (date && Number.isFinite(Date.parse(date))) return new Date(date).toISOString();
     }
-    return row.object.replace(/\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#string>$/, '');
+    return canonical;
   };
   const values = [...new Set(rows.filter(row => row.predicate !== RECOVERED_OPERATION_CHRONOLOGY)
     .map(row => JSON.stringify([row.subject, row.predicate, term(row)])))].sort();
@@ -56,8 +59,8 @@ export async function readAuthenticatedWorkspaceOperations(store: TripleStore, r
   for (const subject of subjects) {
     const operation = rows.filter(row => row.subject === subject);
     const digests = evidence.bindings.filter(row => row['s'] === subject).map(row => row['digest']);
-    if (digests.length === 1
-      && digests[0]?.replace(/^"|"(?:\^\^<[^>]+>)?$/g, '') === evidenceDigest(operation)) authenticated.add(subject);
+    const digest = digests.length === 1 ? parseRdfLiteralTerm(digests[0] ?? '') : null;
+    if (digest && digest.kind !== 'language' && digest.value === evidenceDigest(operation)) authenticated.add(subject);
   }
   return authenticated;
 }
