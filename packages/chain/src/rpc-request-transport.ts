@@ -24,6 +24,7 @@ import {
   withRpcUsageIssuerContext,
   type RpcUsageIssuerContext,
 } from './rpc-usage.js';
+import { rpcRequestAbortReason } from './rpc-request-abort.js';
 import { chainRpcFetch } from './rpc-http1-dispatcher.js';
 import { recordRpcAdmissionWait, recordRpcEndpointLatency } from './rpc-request-timing.js';
 
@@ -155,14 +156,6 @@ export function bindActiveRpcRequestScope<T>(fn: () => T): () => T {
 
 export function activeRpcRequestAbortSignal(): AbortSignal | undefined {
   return activeRpcRequestContext().signal;
-}
-
-/** The error an aborted RPC request settles with: the signal's own, or an AbortError. */
-export function rpcRequestAbortReason(signal: AbortSignal): Error {
-  if (signal.reason instanceof Error) return signal.reason;
-  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted');
-  error.name = 'AbortError';
-  return error;
 }
 
 /** Normalize caller/deadline cancellation consistently at every transport gate. */

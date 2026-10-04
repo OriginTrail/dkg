@@ -26,7 +26,7 @@
 
 import { AsyncResource } from 'node:async_hooks';
 
-import { rpcRequestAbortReason } from './rpc-request-transport.js';
+import { rpcRequestAbortReason } from './rpc-request-abort.js';
 
 export interface BatchedContractCall {
   readonly target: string;
