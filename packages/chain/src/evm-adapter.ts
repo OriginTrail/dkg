@@ -30,6 +30,7 @@ import { EventsMethods } from './evm-adapter-events.js';
 export {
   decodeEvmError,
   enrichEvmError,
+  getKaIdAlreadyMintedKaId,
   isTooLowAllowanceError,
   isInsufficientFundsError,
   InsufficientPublisherFundsError,

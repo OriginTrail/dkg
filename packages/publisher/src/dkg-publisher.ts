@@ -2,7 +2,7 @@ import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js'
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
-import { enrichEvmError } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, getKaIdAlreadyMintedKaId } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
@@ -4102,47 +4102,60 @@ export class DKGPublisher implements Publisher {
               merkleLeafCount: kcMerkleLeafCount,
             },
           });
-          onChainResult = await this.chain.createKnowledgeAssets!({
-            publishOperationId,
-            contextGraphId: v10CgId,
-            publisherAddress: publisherSigner.address,
-            reservedKaId,
-            merkleRoot: kcMerkleRoot,
-            knowledgeAssetsAmount: kaCount,
-            byteSize: publicationPricing.networkVisibleByteSize,
-            catalogRoot: useCuratedCatalog ? catalogCommitment?.root : undefined,
-            catalogLeafCount: useCuratedCatalog ? catalogCommitment?.leafCount : undefined,
-            // PCA strict-equality: must match the value committed to the
-            // ACK digest produced by the ACK collector
-            // (`packages/publisher/src/ack-collector.ts:159` invokes
-            // `computePublishACKDigest`) so the on-chain ECDSA recovery
-            // yields the same operator address each core signed with.
-            // Hard-coding `1` here re-introduces a digest mismatch on
-            // PCA-funded publishes and trips `SignerIsNotNodeOperator`
-            // even though the
-            // signatures were produced correctly.
-            epochs: publishEpochs,
-            tokenAmount,
-            merkleLeafCount: kcMerkleLeafCount,
-            isImmutable: false,
-            publisherNodeIdentityId: attributionIdentityId,
-            author: {
-              address: effectiveAuthorAddress,
-              signature: {
-                r: ethers.getBytes(authorSig.r),
-                vs: ethers.getBytes(authorSig.yParityAndS),
+          try {
+            onChainResult = await this.chain.createKnowledgeAssets!({
+              publishOperationId,
+              contextGraphId: v10CgId,
+              publisherAddress: publisherSigner.address,
+              reservedKaId,
+              merkleRoot: kcMerkleRoot,
+              knowledgeAssetsAmount: kaCount,
+              byteSize: publicationPricing.networkVisibleByteSize,
+              catalogRoot: useCuratedCatalog ? catalogCommitment?.root : undefined,
+              catalogLeafCount: useCuratedCatalog ? catalogCommitment?.leafCount : undefined,
+              // PCA strict-equality: must match the value committed to the
+              // ACK digest produced by the ACK collector
+              // (`packages/publisher/src/ack-collector.ts:159` invokes
+              // `computePublishACKDigest`) so the on-chain ECDSA recovery
+              // yields the same operator address each core signed with.
+              // Hard-coding `1` here re-introduces a digest mismatch on
+              // PCA-funded publishes and trips `SignerIsNotNodeOperator`
+              // even though the
+              // signatures were produced correctly.
+              epochs: publishEpochs,
+              tokenAmount,
+              merkleLeafCount: kcMerkleLeafCount,
+              isImmutable: false,
+              publisherNodeIdentityId: attributionIdentityId,
+              author: {
+                address: effectiveAuthorAddress,
+                signature: {
+                  r: ethers.getBytes(authorSig.r),
+                  vs: ethers.getBytes(authorSig.yParityAndS),
+                },
+                schemeVersion: effectiveSchemeVersion,
               },
-              schemeVersion: effectiveSchemeVersion,
-            },
-            ackSignatures: v10ACKs.map(ack => ({
-              identityId: ack.nodeIdentityId,
-              r: ack.signatureR,
-              vs: ack.signatureVS,
-            })),
-            onBroadcast: emitWriteAheadStart,
-            onBroadcastAccepted: (signal) =>
-              onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
-          });
+              ackSignatures: v10ACKs.map(ack => ({
+                identityId: ack.nodeIdentityId,
+                r: ack.signatureR,
+                vs: ack.signatureVS,
+              })),
+              onBroadcast: emitWriteAheadStart,
+              onBroadcastAccepted: (signal) =>
+                onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
+            });
+          } catch (mintErr) {
+            // Only the structured id and verified mint provenance can recover
+            // this sealed publish; keep the ordinary confirmed path below.
+            onChainResult = await this.adoptExistingMintOrRethrow({
+              mintErr,
+              reservedKaId,
+              kcMerkleRoot,
+              v10CgId,
+              hasSeal: graphPublish !== undefined && options.precomputedAttestation !== undefined,
+              ctx,
+            });
+          }
         } finally {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
         }
@@ -9561,6 +9574,55 @@ export class DKGPublisher implements Publisher {
       throw new Error('Cannot resolve KA UAL: DKGKnowledgeAssets address unavailable');
     }
     return `did:dkg:${this.chain.chainId}/${storageAddr.toLowerCase()}/${kaId.toString()}`;
+  }
+
+  /**
+   * Adopt-existing-mint: called from the createKnowledgeAssets catch. When the
+   * revert is KaIdAlreadyMinted for exactly our reserved kaId on a sealed
+   * graph publish, verify chain truth and recover the mint provenance via
+   * ChainAdapter.getMintedKnowledgeAssetProvenance; otherwise (or when the
+   * log is unrecoverable) rethrow the ORIGINAL error — never synthesize a
+   * txHash (finalization-handler.ts:1345 invariant).
+   */
+  private async adoptExistingMintOrRethrow(args: {
+    mintErr: unknown;
+    reservedKaId: bigint | undefined;
+    kcMerkleRoot: Uint8Array;
+    v10CgId: bigint;
+    hasSeal: boolean;
+    ctx: OperationContext;
+  }): Promise<OnChainPublishResult> {
+    const mintedKaId = getKaIdAlreadyMintedKaId(args.mintErr);
+    const provenanceFn = this.chain.getMintedKnowledgeAssetProvenance?.bind(this.chain);
+    if (
+      mintedKaId === undefined
+      || args.reservedKaId === undefined
+      || mintedKaId !== args.reservedKaId
+      || !args.hasSeal
+      || provenanceFn === undefined
+    ) {
+      throw args.mintErr;
+    }
+    this.log.warn(
+      args.ctx,
+      `[adopt-existing-mint] kaId ${args.reservedKaId} already minted on-chain; `
+        + 'verifying sealed root against chain and recovering mint provenance',
+    );
+    const synthesized = await provenanceFn(args.reservedKaId, args.kcMerkleRoot, args.v10CgId);
+    if (!synthesized) {
+      this.log.warn(
+        args.ctx,
+        `[adopt-existing-mint] mint provenance unrecoverable for kaId ${args.reservedKaId} `
+          + '(pruned/non-archive RPC?); rethrowing original mint error',
+      );
+      throw args.mintErr;
+    }
+    this.log.info(
+      args.ctx,
+      `[adopt-existing-mint] adopted kaId ${args.reservedKaId} `
+        + `tx=${synthesized.txHash} block=${synthesized.blockNumber}; continuing confirmed publish path`,
+    );
+    return synthesized;
   }
 
   /**
