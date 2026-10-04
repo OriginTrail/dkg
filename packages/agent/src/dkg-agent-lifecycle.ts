@@ -1,7 +1,5 @@
-
-
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
-import { sameStringArray, emptySwmRecoveryResult } from './internal/lifecycle-sync-result.js';
+import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -2018,6 +2016,10 @@ type StructuralCuratorPeerLookup =
       readonly overflowed?: never;
       readonly nextPageAfterPeerId?: never;
     };
+
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
 
 export class LifecycleSyncMethods extends DKGAgentBase {
   async retireLegacySwmAfterVerifiedVmTwin(
