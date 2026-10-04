@@ -3105,7 +3105,7 @@ export class DKGAgent extends DKGAgentBase {
       // The libp2p node, and every pubsub subscription with it, is gone; what
       // the agent recorded about the session's gossip wiring is now stale
       // (restart contract on DKGAgentBase). Subscription intent is untouched.
-      this.resetGossipSessionState();
+      this.retireGossipSession();
       this.finalizationRuntime.markStopped();
       // Node stop aborts active transport first; now drain the peer-serial
       // owners and release every retained selected-SWM prefix/checkpoint before

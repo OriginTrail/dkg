@@ -1,5 +1,9 @@
 /** Agent-owned admission and scheduling for chain-driven VM reconciliation. */
 
+import {
+  VmReconcileLocalAdmissionWait,
+  type LocalAdmissionWaitOptions,
+} from './internal/vm-reconcile-local-admission-wait.js';
 import type { VmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import { VmReconcileSweepPlanner } from './internal/vm-reconcile-sweep.js';
 import {
@@ -121,6 +125,19 @@ export class VmReconcileDispatcher<T> {
   triggerLive(key: string): void {
     if (this.states.get(key)?.hold === 'live-blocked') return;
     void this.dispatch(key, 'live').catch(() => undefined);
+  }
+
+  /**
+   * A live nudge with its completion handle. Undefined in the two cases
+   * `triggerLive` drops without a trace: the nudge is held after a failed
+   * pass, or the bounded queue has no room for it.
+   */
+  protected tryDispatchLive(key: string): Promise<T> | undefined {
+    if (this.states.get(key)?.hold === 'live-blocked') return undefined;
+    const outcome = this.admit(key, 'live');
+    if (!('completion' in outcome)) return undefined;
+    void outcome.completion.catch(() => undefined);
+    return outcome.completion;
   }
 
   /** A newly established binding is fresh evidence, so its first live nudge must not inherit an old discovery miss. */
@@ -503,7 +520,14 @@ class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
       retainCapacity: (signal: AbortSignal) => this.retainPeriodicCapacity(signal),
     }));
   }
+
+  /** The runtime's nudge for a graph that waited for sync admission. */
+  nudgeLive(key: string): Promise<T> | undefined {
+    return this.tryDispatchLive(key);
+  }
 }
+
+export type { LocalAdmissionWaitOptions };
 
 /**
  * Cohesive host-owned runtime for foreground nudges and periodic sweep work.
@@ -516,23 +540,31 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly dispatcher: VmReconcileRuntimeDispatcher<T>;
   private readonly planner: VmReconcileSweepPlanner;
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
-  private readonly localAdmissionRetries = new Map<string, () => void>();
-  private readonly maxLocalAdmissionRetries: number;
-  private closed = false;
+  private readonly localAdmissionWait: VmReconcileLocalAdmissionWait;
 
   constructor(
     run: (key: string, source: VmReconcileSource) => Promise<T>,
     onFailure: (key: string, error: unknown) => void,
     options: VmReconcileSchedulingOptions = {},
   ) {
-    this.maxLocalAdmissionRetries = options.maxPending ?? 256;
     let sweepAdmission!: VmReconcileSweepAdmission<T>;
     this.dispatcher = new VmReconcileRuntimeDispatcher(
-      run,
+      async (key, source) => {
+        const pass = this.localAdmissionWait.passStarted(key);
+        try {
+          return await run(key, source);
+        } finally {
+          this.localAdmissionWait.passEnded(pass);
+        }
+      },
       onFailure,
       options,
       (admission) => { sweepAdmission = admission; },
     );
+    this.localAdmissionWait = new VmReconcileLocalAdmissionWait({
+      nudge: (key) => this.dispatcher.nudgeLive(key),
+      maxWaiters: options.maxPending ?? 256,
+    });
     this.planner = new VmReconcileSweepPlanner({
       discoveryBatchSize: options.discoveryBatchSize ?? 8,
       periodicBoundBatchSize: options.periodicBoundBatchSize ?? 8,
@@ -542,33 +574,23 @@ export class VmReconcileSchedulingRuntime<T> {
 
   triggerLive(key: string): void { this.dispatcher.triggerLive(key); }
   /**
-   * Local sync pressure earns one bounded retry, rather than peer backoff.
-   * The timer owns no sync lease or VM worker; its nudge re-enters the ordinary
-   * bounded dispatcher, including foreground-burst and periodic fairness.
+   * Local sync pressure earns a bounded retry, rather than peer backoff: the
+   * graph waits in arrival order and is nudged once the node's sync admission
+   * can take its fetch (see `internal/vm-reconcile-local-admission-wait.ts`).
+   * The nudge re-enters the ordinary bounded dispatcher, including
+   * foreground-burst and periodic fairness.
    */
-  retryLocalAdmission(key: string, options: {
-    signal?: AbortSignal;
-    isCurrent: () => boolean;
-  }): void {
-    if (this.closed || options.signal?.aborted || !options.isCurrent()) return;
-    this.localAdmissionRetries.get(key)?.();
-    if (this.localAdmissionRetries.size >= this.maxLocalAdmissionRetries) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const cancel = () => {
-      if (timer !== undefined) clearTimeout(timer);
-      options.signal?.removeEventListener('abort', cancel);
-      if (this.localAdmissionRetries.get(key) === cancel) this.localAdmissionRetries.delete(key);
-    };
-    this.localAdmissionRetries.set(key, cancel);
-    options.signal?.addEventListener('abort', cancel, { once: true });
-    timer = setTimeout(() => {
-      cancel();
-      if (!this.closed && !options.signal?.aborted && options.isCurrent()) {
-        this.dispatcher.triggerLive(key);
-      }
-    }, 2_500);
-    timer.unref?.();
-    if (options.signal?.aborted) cancel();
+  retryLocalAdmission(key: string, options: LocalAdmissionWaitOptions): void {
+    this.localAdmissionWait.retry(key, options);
+  }
+
+  /**
+   * A graph that just used the node's sync admission and has more to fetch
+   * goes behind the graphs already waiting for it. Returns false, and parks
+   * nothing, when no other graph is waiting.
+   */
+  yieldLocalAdmissionTurn(key: string, options: LocalAdmissionWaitOptions): boolean {
+    return this.localAdmissionWait.yieldTurn(key, options);
   }
   releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
@@ -620,8 +642,7 @@ export class VmReconcileSchedulingRuntime<T> {
   resetSweep(): void { this.planner.reset(); }
 
   close(): Promise<void> {
-    this.closed = true;
-    for (const cancel of this.localAdmissionRetries.values()) cancel();
+    this.localAdmissionWait.close();
     this.planner.reset();
     return this.dispatcher.close();
   }
