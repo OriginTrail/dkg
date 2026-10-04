@@ -16,7 +16,7 @@ import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-
 import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish.js';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
-import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const CG = 'confirmed-lifecycle-repair', NAME = 'repair-asset', UAL = `did:dkg:mock:31337/${AUTHOR}/1`;
 const PACKED = (BigInt(AUTHOR) << 96n) | 1n, PUBLISHED = 'did:dkg:mock:31337/0x2222222222222222222222222222222222222222/1';
@@ -363,7 +363,8 @@ describe('review regression boundaries', () => {
       };
       return query(sparql, options);
     });
-    await applyPublishedNamedKaVmLifecycle(store, { ...input, ...(tentative ? { tentative: true, priorMerkleRoot: PRIOR } : {}) });
+    if (tentative) await applyTentativeNamedKaVmLifecycle(store, { ...input, tentative: true, priorMerkleRoot: PRIOR });
+    else await applyPublishedNamedKaVmLifecycle(store, input);
     const result = await query(`SELECT ?state ?layer ?wm WHERE { GRAPH <${META}> {
       <${LIFECYCLE}> <${DKG}state> ?state ; <${DKG}memoryLayer> ?layer .
       OPTIONAL { <${LIFECYCLE}> <${DKG}wmCurrentAssertion> ?wm }
