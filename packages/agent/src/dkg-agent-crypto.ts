@@ -869,7 +869,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
     if (recoveryAuthority.kind !== 'legacy-unregistered') return null;
 
-    const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+    const metadataRevision = this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
 
     // Metadata is another async boundary. Re-resolve the authoritative state
@@ -891,7 +892,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // A revocation or other authority-fact mutation during the metadata read
     // invalidates the captured roster even if registration remained absent.
     // Recovery is retryable, so fail closed instead of serving that snapshot.
-    return this.contextGraphMetaProjection.readAuthorityFactsRevision === metadataRevision
+    return this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
       ? metadataGate
       : null;
   }
@@ -914,7 +916,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     if (registered.kind === 'private') return [...registered.participantAgents];
     if (registered.kind !== 'unregistered') return null;
-    const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+    const metadataRevision = this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
     const currentRegistered = await this.resolveSwmRegisteredAuthority(
       contextGraphId,
@@ -924,7 +927,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return [...currentRegistered.participantAgents];
     }
     if (currentRegistered.kind !== 'unregistered') return null;
-    return this.contextGraphMetaProjection.readAuthorityFactsRevision === metadataRevision
+    return this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
       ? metadataGate
       : null;
   }

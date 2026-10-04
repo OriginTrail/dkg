@@ -562,6 +562,20 @@ export class QueryMethods extends DKGAgentBase {
         }),
       );
       if (scopedReadAuthority.outcome === 'unavailable') {
+        // An exact finalized name absence plus no local declaration or
+        // subscription means this node has no graph it could expose to the
+        // caller. Return an empty scoped result without touching the store's
+        // graph partitions. This gives a nonmember a settled privacy denial
+        // while keeping any replica that has local data or join intent on the
+        // retryable authority path until its proof is complete.
+        if (
+          scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
+          && !this.subscribedContextGraphs.has(scopedContextGraphId)
+          && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
+          && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
+        ) {
+          return emptyQueryResultForKind(sparql);
+        }
         throw new ContextGraphReadAuthorityUnavailableError(
           opts.contextGraphId,
           scopedReadAuthority,
@@ -900,6 +914,13 @@ export class QueryMethods extends DKGAgentBase {
             initial.outcome !== 'unavailable'
             || initial.reason !== 'finalized-name-absence-unaccepted'
           ) return initial;
+          // A private join carries a mutable requester generation. If its
+          // source-qualified proof failed this admission attempt, do not
+          // replace that answer with a later catalog refresh that could read
+          // a different generation. The next request rechecks the join, while
+          // the independent authority refresh loop may accept its stable
+          // catalog generation in the meantime.
+          if (this.localApprovedAgentByCG.has(contextGraphId)) return initial;
 
           // The finalized index proved exact absence, but a replica cannot
           // consume that fact until it authenticates the owner-signed policy

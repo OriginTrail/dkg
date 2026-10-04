@@ -67,6 +67,7 @@ import {
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { resolveApprovedPrivateReplicaAuthority } from './approved-private-replica.js';
 import {
   Rfc64CatalogReplayConnectionRuntimeV1,
   type Rfc64CatalogReplayConnectionReservationV1,
@@ -3351,6 +3352,32 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         && directAcceptedPrivateSnapshot.policy.accessPolicy === 1
         && directAcceptedPrivateSnapshot.roster !== null
         && directAcceptedPrivateSnapshot.policy.source.kind === 'owner-signed-unregistered';
+      // A join-approved private replica has a curator-bound decision and an
+      // exact, source-qualified member/delegation proof in its own _meta. That
+      // is sufficient local authority after finalized name absence; a remote
+      // private definition must not be promoted from RDF alone.
+      const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
+      const approvedPrivateMetaRevision = this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId);
+      const approvedPrivateReplica = (
+        boundOnChainId === undefined
+        && !localFirstUnregistered
+        && !directAcceptedPrivateAuthority
+        && authorityRequest.kind === 'finalized-absence'
+        && approvedAgent !== undefined
+      ) ? await resolveApprovedPrivateReplicaAuthority(
+        this,
+        contextGraphId,
+        approvedAgent,
+        () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+          === approvedAgent.toLowerCase(),
+        () => this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId)
+          === approvedPrivateMetaRevision,
+        signal,
+      ) : null;
+      const approvedPrivateReplicaAuthority = approvedPrivateReplica?.kind
+        === 'unregistered-private-replica' ? approvedPrivateReplica.authority : null;
       // Replica authority is admissible only after the shared finalized name
       // index proves that no on-chain graph owns this name. The embedded
       // policy is independently owner-signed and graph/network-bound; plain
@@ -3361,6 +3388,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         boundOnChainId === undefined
         && !localFirstUnregistered
         && !directAcceptedPrivateAuthority
+        && approvedPrivateReplicaAuthority === null
         && authorityRequest.kind === 'finalized-absence'
       )
         ? await loadRfc64UnregisteredReplicaAuthorityV1({
@@ -3416,6 +3444,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const registeredAuthorityRead = (
         localFirstUnregistered
         || directAcceptedPrivateAuthority
+        || approvedPrivateReplicaAuthority !== null
         || replicaUnregisteredAuthority !== null
         || (
           boundOnChainId === undefined
@@ -3457,7 +3486,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // the exact revision paired with every later metadata/version await and
       // refuse to accept a composed snapshot if owner, policy, revocation, or
       // membership facts changed in the meantime.
-      let metadataAuthorityRevision: number | null = null;
+      let metadataAuthorityRevision: string | null = null;
       if (registeredAuthorityRead !== null) {
         const { expectedNameHash, snapshot } = registeredAuthorityRead;
         if (signal?.aborted) throw signal.reason;
@@ -3470,7 +3499,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         let authoritativeSnapshot = snapshot;
         if (snapshot.accessPolicy === 1) {
           metadataAuthorityRevision = this.contextGraphMetaProjection
-            .readAuthorityFactsRevision;
+            .readContextGraphAuthorityFactsRevision(contextGraphId);
           const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
           if (localRoster === null) {
             // TRANSIENT, and typed so it is classified as such. `null` here
@@ -3519,6 +3548,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         if (
           !localFirstUnregistered
           && !directAcceptedPrivateAuthority
+          && approvedPrivateReplicaAuthority === null
           && replicaUnregisteredAuthority === null
         ) {
           throw new Rfc64CatalogAuthorityResolutionErrorV1(
@@ -3534,7 +3564,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // old owner with a new policy/roster generation and still pass the
           // acceptance-time fence.
           metadataAuthorityRevision = this.contextGraphMetaProjection
-            .readAuthorityFactsRevision;
+            .readContextGraphAuthorityFactsRevision(contextGraphId);
           const ownerDid = await this.getContextGraphOwner(contextGraphId);
           if (signal?.aborted) throw signal.reason;
           const normalizedOwnerDid = ownerDid
@@ -3579,6 +3609,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               'authenticated private RFC-64 authority owner does not match lifecycle metadata',
             );
           }
+          if (
+            approvedPrivateReplicaAuthority !== null
+            && (accessPolicy !== 'private'
+              || ownerAddress !== approvedPrivateReplicaAuthority.ownerAddress)
+          ) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'unregistered-owner-unresolved',
+              'approved private replica authority does not match lifecycle metadata',
+            );
+          }
           const stored = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
           const publishPolicy = stored.publishPolicy === 0 || stored.publishPolicy === 1
             ? stored.publishPolicy
@@ -3589,6 +3629,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           if (accessPolicy === 'private' && members === null) {
             throw new Error(
               'unregistered private RFC-64 Context Graph has no authenticated lifecycle roster',
+            );
+          }
+          if (
+            approvedPrivateReplicaAuthority !== null
+            && !members?.some((member) => member.toLowerCase()
+              === approvedPrivateReplicaAuthority.approvedAgentAddress)
+          ) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'unregistered-owner-unresolved',
+              'approved private replica member is absent from the authenticated roster',
             );
           }
           const rosterVersion = await this.readRfc64PrivateRosterVersionV1(contextGraphId);
@@ -3614,7 +3664,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       )) return null;
       if (
         metadataAuthorityRevision !== null
-        && this.contextGraphMetaProjection.readAuthorityFactsRevision
+        && this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId)
           !== metadataAuthorityRevision
       ) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
       // Finalized absence was exact when the refresh request was created, but

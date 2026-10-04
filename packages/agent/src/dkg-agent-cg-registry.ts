@@ -1246,7 +1246,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (options.allowApprovedPrivateReplicaFinalizedAbsence !== true) return null;
       const approved = this.localApprovedAgentByCG?.get(contextGraphId);
       if (approved === undefined) return null;
-      const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+      const metadataRevision = this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId);
       let privateResolution: ApprovedPrivateReplicaAuthorityResolution | null = null;
       try {
         privateResolution = await runBoundedOperation(
@@ -1256,8 +1257,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             approved,
             () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
               === approved.toLowerCase(),
-            () => this.contextGraphMetaProjection.readAuthorityFactsRevision
-              === metadataRevision,
+            () => this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision,
             signal,
           ),
           {

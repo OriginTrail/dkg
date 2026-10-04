@@ -139,6 +139,38 @@ describe('private read authorization uses the on-chain participant roster', () =
     agent = null;
   });
 
+  it('returns an empty query for a finalized-absent graph with no local declaration or subscription', async () => {
+    const contextGraphId = 'unregistered-nonmember-probe';
+    agent = await DKGAgent.create({
+      name: 'AbsentGraphNonmemberRead',
+      chainAdapter: new MockChainAdapter(),
+    });
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+      dependency: 'chain',
+      metadataBootstrap: 'forbidden',
+    });
+    const exists = vi.spyOn(agent, 'contextGraphExists').mockResolvedValue(false);
+    const execution = vi.spyOn(agent.queryEngine, 'query');
+    const sparql = 'SELECT ?s WHERE { ?s ?p ?o }';
+
+    await expect(agent.query(sparql, { contextGraphId }))
+      .resolves.toMatchObject({ bindings: [] });
+    expect(exists).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
+    expect(execution).not.toHaveBeenCalled();
+
+    Reflect.get(agent, 'subscribedContextGraphs').set(contextGraphId, {
+      subscribed: true,
+      pendingMeta: true,
+      syncMode: 'always-on',
+    });
+    await expect(agent.query(sparql, { contextGraphId })).rejects.toMatchObject({
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+    });
+  });
+
   it('serves a scoped public read from finalized authority without a live RPC', async () => {
     const contextGraphId = 'finalized-public';
     const chain = new MockChainAdapter();

@@ -1552,6 +1552,41 @@ describe('approved private bare-name replica authorization', () => {
       .toBeNull();
   });
 
+  it('retains an approved private proof when only another graph changes', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const proof = pauseApprovedPrivateProofOnce(fixture);
+    const admission = fixture.receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      {
+        callerAgentAddress: fixture.memberAddress,
+        allowSubscriptionFallback: false,
+      },
+    );
+    await proof.entered;
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty('unrelated-graph');
+    proof.release();
+
+    await expect(admission).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'rfc64-private',
+      registration: 'unregistered',
+    });
+  });
+
+  it('accepts catalog authority for a finalized-absent, join-approved private replica', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    )).resolves.toMatchObject({
+      source: 'owner-signed-unregistered',
+      policy: { accessPolicy: 1 },
+    });
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBe('private');
+  });
+
   it.each([
     ['curator', D.DKG_CURATOR, `did:dkg:agent:${OUTSIDER}`],
     ['creator', D.DKG_CREATOR, `did:dkg:agent:${CURATOR_PEER}-other`],
