@@ -1,4 +1,4 @@
-import { chatTurnSubjectPattern, scopedChatTurnUri } from './chat-turn-subject.js';
+import { chatTurnSubjectPattern, scopedChatTurnUri, decodeExistingChatTurn, type ExistingChatTurn } from './chat-turn-subject.js';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
@@ -737,11 +737,7 @@ export class ChatMemoryManager {
     return null;
   }
 
-  private async findExistingChatTurn(sessionId: string, turnId: string): Promise<{
-    uri: string;
-    turnId: string;
-    createdAt: string | null;
-  } | null> {
+  private async findExistingChatTurn(sessionId: string, turnId: string): Promise<ExistingChatTurn | null> {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
       `SELECT ?turn ?tid ?ts WHERE {
@@ -751,11 +747,7 @@ export class ChatMemoryManager {
       } ORDER BY ?turn LIMIT 1`,
       this.wmReadOpts(),
     );
-    const selected = result.bindings?.[0];
-    const found = String(selected?.turn ?? '').replace(/[<>]/g, '');
-    const existingTurnId = stripRdfLiteral(selected?.tid ?? '').trim();
-    if (!found || !isSafeIri(found) || !existingTurnId || existingTurnId !== turnId) return null;
-    return { uri: found, turnId: existingTurnId, createdAt: stripRdfLiteral(selected?.ts ?? '').trim() || null };
+    return decodeExistingChatTurn(result.bindings?.[0], turnId, stripRdfLiteral);
   }
 
   async recordChatTurnPersistenceTransition(

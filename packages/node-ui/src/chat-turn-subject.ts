@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+import { isSafeIri } from '@origintrail-official/dkg-core';
+
 /**
  * Select an attributable subject for a session/turn coordinate. Scoped subjects
  * take precedence over legacy subjects; URI order breaks ties within one class.
@@ -39,4 +42,22 @@ export function chatTurnSubjectPattern(session: string, turn: string, turnId: st
 /** A deterministic, unambiguous URI for a new session/turn coordinate. */
 export function scopedChatTurnUri(sessionId: string, turnId: string): string {
   return `urn:dkg:chat:session-turn:${encodeURIComponent(JSON.stringify([sessionId, turnId]))}`;
+}
+
+export interface ExistingChatTurn {
+  uri: string;
+  turnId: string;
+  createdAt: string | null;
+}
+
+/** Validate the identity selected by the ownership query without allocating a subject. */
+export function decodeExistingChatTurn(
+  selected: Record<string, string> | undefined,
+  expectedTurnId: string,
+  literalValue: (term: string) => string,
+): ExistingChatTurn | null {
+  const found = String(selected?.turn ?? '').replace(/[<>]/g, '');
+  const turnId = literalValue(selected?.tid ?? '').trim();
+  if (!found || !isSafeIri(found) || !turnId || turnId !== expectedTurnId) return null;
+  return { uri: found, turnId, createdAt: literalValue(selected?.ts ?? '').trim() || null };
 }
