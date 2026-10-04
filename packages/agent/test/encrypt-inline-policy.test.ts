@@ -936,7 +936,7 @@ function makeQueuedAgentHarness(options: {
     },
     publisher: {
       publish: publisherPublish,
-      clearSwmShareComplete: recorder(async () => undefined),
+      consumePublishedSwmShareComplete: recorder(async () => undefined),
     },
     createV10ACKProvider: recorder(() => undefined),
     _resolveEncryptInlinePayload: recorder(async () => options.encryptInlinePayload),

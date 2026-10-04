@@ -712,7 +712,7 @@ describe('published snapshot cleanup: bounded by the version a publication confi
       { publicQuadsDigest: workspacePublicQuadsDigest(firstPayload), privateTripleCount: 0 });
     expect(await f.store.countQuads(first.sharedGraphUri)).toBe(2);
     expect(await metaRows(f)).toEqual(before);
-    await f.publisher.clearSwmShareComplete(CG, NAME, AUTHOR, undefined, firstShare.shareOperationId);
+    await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, firstShare.shareOperationId);
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
     expect(secondShare.shareOperationId).not.toBe(firstShare.shareOperationId);
     f.advance();

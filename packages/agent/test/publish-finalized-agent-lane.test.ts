@@ -132,7 +132,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         markerCalls.push({ contextGraphId, name, agentAddress, subGraphName });
         return agentAddress === AGENT_B;
       },
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async (...args: any[]) => { remainingClearCalls.push(args); },
     };
     agent.publishFromSharedMemory = async (contextGraphId: string, selection: any, opts: any) => {
@@ -325,7 +325,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         cleanupCalls.push(args);
         await store.dropGraph(namedGraph);
       },
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
     };
     agent._buildPrecomputedUpdateAttestationForSeal = async () => ({
       expectedNewMerkleRoot: MERKLE,

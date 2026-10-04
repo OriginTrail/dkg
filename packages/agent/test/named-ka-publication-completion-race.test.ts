@@ -35,9 +35,9 @@ async function fixture(alias = false) {
   agent.createV10ACKProvider = () => undefined; agent._resolveEncryptInlinePayload = async () => undefined; agent._resolveEncryptInlineChunked = async () => undefined;
   agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined; agent.gossip = { publish: async () => undefined };
   agent.publishFromSharedMemory = publisher.publishFromSharedMemory.bind(publisher);
-  const replace = async () => {
+  const replace = async (sameContent = false) => {
     await publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm');
-    await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:replacement', predicate: 'urn:title', object: '"replacement"', graph: '' }]);
+    if (!sameContent) await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:replacement', predicate: 'urn:title', object: '"replacement"', graph: '' }]);
     await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, assertionVersion: 1 });
     return publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: 'publisher-peer', localOnly: true });
   };
@@ -47,7 +47,7 @@ async function fixture(alias = false) {
 
 describe('agent publication completion marker fencing', () => {
   it.each(['synchronous', 'queued'] as const)('clears the original lifecycle marker when %s publication selects an equivalent ACK alias', async (lane) => {
-    const f = await fixture(true), clear = vi.spyOn(f.publisher, 'clearSwmShareComplete');
+    const f = await fixture(true), clear = vi.spyOn(f.publisher, 'consumePublishedSwmShareComplete');
     vi.spyOn(f.publisher, 'publish').mockResolvedValueOnce(f.result);
     if (lane === 'synchronous') await f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
     else {
@@ -57,11 +57,11 @@ describe('agent publication completion marker fencing', () => {
       await queue.enqueueKnowledgeAssetVmPublish(request); const completed = await queue.processNext('wallet'); expect(completed).toMatchObject({ status: 'finalized' });
     }
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
-    expect(clear.mock.calls.at(-1)?.[4]).toBe(f.promoted.shareOperationId);
+    expect(clear.mock.calls.at(-1)?.[3]).toBe(f.promoted.shareOperationId);
   });
 
-  it.each(['synchronous', 'queued'] as const)('preserves a promoted replacement while %s confirmation is held', async (lane) => {
-    const f = await fixture(), clear = vi.spyOn(f.publisher, 'clearSwmShareComplete');
+  it.each([['synchronous', false], ['queued', false], ['synchronous', true], ['queued', true]] as const)('preserves a promoted replacement while %s confirmation is held (same content: %s)', async (lane, sameContent) => {
+    const f = await fixture(), clear = vi.spyOn(f.publisher, 'consumePublishedSwmShareComplete');
     let release!: () => void, entered!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
     vi.spyOn(f.publisher, 'publish').mockImplementationOnce(async () => { entered(); await held; return f.result; });
@@ -74,13 +74,13 @@ describe('agent publication completion marker fencing', () => {
     }
     await started;
     let replacement: Awaited<ReturnType<typeof f.replace>>;
-    try { replacement = await f.replace(); } finally { release(); }
+    try { replacement = await f.replace(sameContent); } finally { release(); }
     const completed = await publishing;
     if (lane === 'queued') expect(completed).toMatchObject({ status: 'finalized' });
     expect(replacement!.shareOperationId).not.toBe(f.promoted.shareOperationId);
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
-    expect(clear.mock.calls.at(-1)?.[4]).toBe(f.promoted.shareOperationId);
-    expect(await f.store.countQuads(f.first.sharedGraphUri)).toBe(2);
+    expect(clear.mock.calls.at(-1)?.[3]).toBe(f.promoted.shareOperationId);
+    expect(await f.store.countQuads(f.first.sharedGraphUri)).toBe(sameContent ? 1 : 2);
   });
 
   it.each([false, true])('fences a captured legacy marker without an operation ID (replacement: %s)', async (replacement) => {
@@ -88,8 +88,17 @@ describe('agent publication completion marker fencing', () => {
     const subject = assertionLifecycleUri(CG, AUTHOR, NAME), graph = contextGraphMetaUri(CG);
     await f.store.deleteByPattern({ subject, graph, predicate: `${DKG}shareOperationId` });
     if (replacement) await f.store.insert([{ subject, graph, predicate: `${DKG}shareOperationId`, object: '"replacement-share"' }]);
-    await f.publisher.clearSwmShareComplete(CG, NAME, AUTHOR, undefined, null);
+    await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, null);
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(replacement);
+  });
+
+  it('keeps unconditional invalidation separate from explicit publication consumption', async () => {
+    const f = await fixture();
+    // A legacy JS caller cannot accidentally omit the required publication fence.
+    await (f.publisher.consumePublishedSwmShareComplete as any)(CG, NAME, AUTHOR);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    await f.publisher.clearSwmShareComplete(CG, NAME, AUTHOR);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
   });
 
   it('rejects a lifecycle operation outside the selected head equivalence class before publication', async () => {

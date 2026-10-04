@@ -97,6 +97,7 @@ import {
   type StageKnowledgeAssetSharedWorkingMemoryInputV1,
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
+import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import type { DurableRootAtomicCompanionResolver } from
   './durable-root-atomic-companion.js';
@@ -2263,6 +2264,7 @@ export class DKGPublisher implements Publisher {
       reservedKaId?: bigint;
       /** Explicit graph-family boundary; named lifecycles exclude bucket and siblings. */
       sharedMemoryScope?: SharedMemoryGraphScope;
+      publicationShareOperationId?: string | null;
       contentScopeVersion?: PublishOptions['contentScopeVersion'];
       kaUal?: PublishOptions['kaUal'];
       assertionVersion?: PublishOptions['assertionVersion'];
@@ -2630,9 +2632,7 @@ export class DKGPublisher implements Publisher {
         });
     }
 
-    // SWM cleanup: ALWAYS remove published triples from SWM after chain confirmation.
-    // Published triples must not linger in SWM; they live in LTM now.
-    // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
+    // Confirmation consumes only the captured SWM share; an independent replacement survives.
     if (publishResult.status === 'confirmed') {
       if (graphPublish) {
         await this.clearPublishedKnowledgeAssetSwm(
@@ -2647,6 +2647,7 @@ export class DKGPublisher implements Publisher {
             privateTripleCount: privateQuads.length,
             ...(graphPublish.expectedPrivateMerkleRoot ? { privateMerkleRoot: ethers.hexlify(graphPublish.expectedPrivateMerkleRoot) } : {}),
           },
+          options?.publicationShareOperationId,
         );
       } else {
         const kaMap = skolemizeByEntity(quads);
@@ -6523,7 +6524,6 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-    // Idempotent: drop any prior marker first, then insert exactly one.
     await this.deleteStoreByPatternWithoutCount({
       graph: metaGraph,
       subject: lifecycleUri,
@@ -6537,32 +6537,27 @@ export class DKGPublisher implements Publisher {
     }]);
   }
 
-  /** Clear the marker under its lifecycle lock; an expected ID (or null for absence) fences completion. */
-  async clearSwmShareComplete(
-    contextGraphId: string,
-    name: string,
-    agentAddress: string,
-    subGraphName?: string,
-    expectedShareOperationId?: string | null,
+  /** Unconditional lifecycle invalidation, serialized with draft mutation. */
+  async clearSwmShareComplete(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<void> {
+    return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, subGraphName,
+      () => this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName));
+  }
+
+  /** Consume only the share captured by this publication; null explicitly means legacy absence. */
+  async consumePublishedSwmShareComplete(
+    contextGraphId: string, name: string, agentAddress: string,
+    expectedShareOperationId: string | null, subGraphName?: string,
   ): Promise<void> {
-    return this.withAssertionLifecycleWriteLock(
-      contextGraphId,
-      name,
-      agentAddress,
-      subGraphName,
-      async () => {
-        if (expectedShareOperationId !== undefined) {
-          const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-          const metaGraph = contextGraphMetaUri(contextGraphId);
-          const result = await this.store.query(`SELECT ?operation WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
-            <${assertSafeIri(lifecycle)}> <${SHARE_OPERATION_ID_PRED}> ?operation
-          } } LIMIT 2`);
-          if (result.type !== 'bindings' || result.bindings.length > 1
-            || (stripOptionalLiteral(result.bindings[0]?.['operation']) ?? null) !== expectedShareOperationId) return;
-        }
-        await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName);
-      },
-    );
+    return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, subGraphName, async () => {
+      const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+      const metaGraph = contextGraphMetaUri(contextGraphId);
+      const result = await this.store.query(`SELECT ?operation WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
+        <${assertSafeIri(lifecycle)}> <${SHARE_OPERATION_ID_PRED}> ?operation
+      } } LIMIT 2`);
+      if (result.type !== 'bindings' || result.bindings.length > 1
+        || (stripOptionalLiteral(result.bindings[0]?.['operation']) ?? null) !== expectedShareOperationId) return;
+      await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName);
+    });
   }
 
   private async clearSwmShareCompleteUnlocked(
@@ -7543,6 +7538,7 @@ export class DKGPublisher implements Publisher {
     kaUal: string,
     finalizedAssertionVersion?: string | number | bigint,
     finalizedContent?: { publicQuadsDigest: string; privateMerkleRoot?: string; privateTripleCount: number },
+    publicationShareOperationId?: string | null,
   ): Promise<void> {
     if (scope.kind !== 'named-lifecycle') {
       throw new Error('Graph-scoped KA SWM cleanup requires an exact named-lifecycle scope');
@@ -7571,8 +7567,12 @@ export class DKGPublisher implements Publisher {
           kaUal: kaScope.ual,
           subGraphName,
         });
-        // On corruption the head's version is unknown, so it cannot be shown
-        // to be at or below the finalized one: fail toward retention.
+        if (publicationShareOperationId !== undefined && (
+          headResolution.status === 'resolved'
+            ? publicationShareOperationId === null || !workspaceHeadIncludesShareOperationId(headResolution.head, publicationShareOperationId)
+            : publicationShareOperationId !== null
+        )) return;
+        // Unknown head versions retain their graph.
         if (headResolution.status === 'corrupt') {
           this.log.warn(
             ctx,

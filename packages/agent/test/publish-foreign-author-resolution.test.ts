@@ -197,7 +197,7 @@ describe('GH#1778 an explicit agentAddress is an authoritative author selector',
     agent.chain = {};
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async () => {},
     };
     await expect(agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: OTHER }))
@@ -671,7 +671,7 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
         markerCalls.push({ agentAddress });
         return agentAddress === MEMBER;
       },
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async () => {},
     };
     agent.publishFromSharedMemory = async (contextGraphId: string, selection: any, opts: any) => {
@@ -719,7 +719,7 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
     agent.publisher = {
       hasSwmShareComplete: async (_cg: string, _n: string, agentAddress: string) =>
         agentAddress === MEMBER,
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async () => {},
     };
     agent.publishFromSharedMemory = async (_cg: string, _sel: any, opts: any) => {

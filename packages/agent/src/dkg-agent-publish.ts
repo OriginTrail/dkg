@@ -5605,6 +5605,7 @@ export class PublishMethods extends DKGAgentBase {
             privateTripleCount: snapshotPrivateQuads.length,
             ...(snapshotPrivateRoot ? { privateMerkleRoot: ethers.hexlify(snapshotPrivateRoot) } : {}),
           },
+          request.shareOperationId,
         );
       } catch (err) {
         this.log.warn(
@@ -5898,7 +5899,7 @@ export class PublishMethods extends DKGAgentBase {
 
     if (result.status === 'confirmed') {
       try {
-        await publisher.clearSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.subGraphName, request.shareOperationId);
+        await publisher.consumePublishedSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.shareOperationId, request.subGraphName);
       } catch (err) {
         this.log.warn(
           ctx,
@@ -6226,6 +6227,7 @@ export class PublishMethods extends DKGAgentBase {
               privateTripleCount: canonicalPrivateQuads.length,
               ...(privateMerkleRoot ? { privateMerkleRoot: ethers.hexlify(privateMerkleRoot) } : {}),
             },
+            originalShareOperationId,
           );
         } catch (err) {
           this.log.warn(
@@ -6278,16 +6280,7 @@ export class PublishMethods extends DKGAgentBase {
       // lifecycle-URN kaId re-packed above. Both are undefined only for a
       // legacy seal that predates the §F2 binding AND was never stamped with a
       // lifecycle kaId.
-      // #1116 (round 5) — no-data preflight BEFORE the inner publisher's
-      // CG-not-registered guard. `publishFromSharedMemory` checks registration
-      // (throws CG_NOT_REGISTERED) BEFORE its own no-quads check, so an
-      // UNregistered CG + valid seal + EMPTY sealed SWM would surface
-      // CG_NOT_REGISTERED first — the /vm/publish route then auto-registers
-      // (burning mint gas) and only the retry hits the no-quads 409. The legacy
-      // memory.ts publish path had a SWM preflight to avoid exactly this; mirror
-      // it here so the no-data precondition fires for ALL callers regardless of
-      // registration. Match the publisher's wording so the route's existing 409
-      // mapping (/No quads in shared memory/) still applies.
+      // The sealed SWM preflight runs before registration, preserving the no-data 409.
       result = await this.publishFromSharedMemory(
         contextGraphId,
         'all',
@@ -6300,6 +6293,7 @@ export class PublishMethods extends DKGAgentBase {
           pricingPolicy: operationPlan.pricingPolicy,
           reservedKaId: recoveredReservedKaId,
           sharedMemoryScope,
+          publicationShareOperationId: originalShareOperationId,
           contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
           kaUal: graphScope.ual,
           assertionVersion: graphScope.assertionVersion,
@@ -6482,7 +6476,7 @@ export class PublishMethods extends DKGAgentBase {
     // Confirmation consumes only the original share marker; a replacement stays publishable.
     if (result.status === 'confirmed') {
       try {
-        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, originalShareOperationId);
+        await publisher.consumePublishedSwmShareComplete(contextGraphId, name, agentAddress, originalShareOperationId, opts?.subGraphName);
       } catch (err) {
         this.log.warn(
           opts?.operationCtx ?? createOperationContext('publishFromSWM'),
@@ -6770,6 +6764,7 @@ export class PublishMethods extends DKGAgentBase {
        */
       reservedKaId?: bigint;
       sharedMemoryScope?: SharedMemoryGraphScope;
+      publicationShareOperationId?: string | null;
       contentScopeVersion?: PublishOptions['contentScopeVersion'];
       kaUal?: PublishOptions['kaUal'];
       assertionVersion?: PublishOptions['assertionVersion'];
@@ -6957,6 +6952,7 @@ export class PublishMethods extends DKGAgentBase {
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
       sharedMemoryScope: options?.sharedMemoryScope,
+      publicationShareOperationId: options?.publicationShareOperationId,
       contentScopeVersion: options?.contentScopeVersion,
       kaUal: options?.kaUal,
       assertionVersion: options?.assertionVersion,
