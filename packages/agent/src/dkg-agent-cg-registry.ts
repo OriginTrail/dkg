@@ -10,7 +10,7 @@
  */
 
 
-import { contextGraphBindingAbortReason, raceContextGraphBindingAgainstAbort } from './context-graph-binding-abort.js';
+import { contextGraphBindingAbortReason, raceContextGraphBindingAgainstAbort } from './internal/context-graph-binding-abort.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   resolveApprovedPrivateReplicaAuthority,

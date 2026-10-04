@@ -12,7 +12,7 @@ import {
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
-import { cloneMetaRecord } from './context-graph-meta-record-copy.js';
+import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
 
 export interface ContextGraphSubGraphMeta {
   uri: string;
