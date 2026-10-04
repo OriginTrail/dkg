@@ -831,6 +831,7 @@ describe('RFC-64 operational status: provider failure reporting', () => {
 
   it.each(['current-sole-private-owner', 'older-owner-head', 'multi-member-private', 'public-curated'] as const)(
     'requires current sole-author production evidence despite failed replay: %s', async (scenario) => {
+    const accessPolicy = scenario === 'public-curated' ? 0 : 1;
     const contextGraphId = `${AUTHOR}/curated-owner-replay`;
     const edge = await startAgent({
       name: 'curated-owner-replay',
