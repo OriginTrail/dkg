@@ -53,10 +53,9 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
-import { resolveResponderPageFraming } from './page-framing-policy.js';
-import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
+import { resolveSyncResponderRequestProfile } from './page-framing-policy.js';
 import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
-import { encodeNegotiatedExactSyncResponse } from '../wire-compression.js';
+import { encodeResolvedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -636,16 +635,16 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const assetSelectionKey = assetUals === undefined
       ? 'full'
       : exactAssetFilterKey(assetUals);
-    const pageFraming = resolveResponderPageFraming({
+    const requestProfile = resolveSyncResponderRequestProfile({
       legacyLimit: limit,
       includeSharedMemory: isWorkspace,
       phase,
       pageMode: request.pageMode,
       pageRowsHint: request.pageRowsHint,
-      hasExactAssetFilter: assetUals !== undefined,
+      assetUals,
       responseEncoding: request.responseEncoding,
-      exactAssetCount: assetUals?.length,
     });
+    const pageFraming = requestProfile.framing;
     const usesByteBudgetPage = pageFraming.usesByteBudgetPage;
     const usesMetaByteBudget = phase === 'meta' && usesByteBudgetPage;
     const durableMetaLimit = pageFraming.limit;
@@ -905,11 +904,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         }
       } else {
-        const durableDataPolicy = resolveDurableDataRequestPolicy({
-          legacyLimit: limit, includeSharedMemory: false, phase, framing: pageFraming,
-          hasExactAssetFilter: assetUals !== undefined, exactAssetCount: assetUals?.length,
-          responseEncoding: request.responseEncoding,
-        });
+        const durableDataPolicy = requestProfile.durableData;
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
           'Durable data',
@@ -970,7 +965,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (totalDurationMs > 100) {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
-      const bytes = await encodeNegotiatedExactSyncResponse(new TextEncoder().encode(nquads.join('\n')), { request, signal });
+      const bytes = await encodeResolvedExactSyncResponse(new TextEncoder().encode(nquads.join('\n')), { profile: requestProfile.compression, signal });
       for (const lease of exactExportLeases) await lease.assertCurrent();
       throwIfAborted(signal);
       return bytes;

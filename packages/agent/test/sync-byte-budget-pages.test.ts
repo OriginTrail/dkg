@@ -26,14 +26,15 @@ import {
   serializeResponderRowsWithinByteBudget,
   type SyncRow,
 } from '../src/sync/responder/graph-plan.js';
-import { resolveDurableDataRequestPolicy } from '../src/sync/responder/durable-data-request-policy.js';
-import { resolveResponderPageFraming } from '../src/sync/responder/page-framing-policy.js';
+import { resolveSyncResponderRequestProfile } from '../src/sync/responder/page-framing-policy.js';
+import * as wireCompression from '../src/sync/wire-compression.js';
 import {
   linesFromNquads,
   registerTestSyncHandler,
 } from './_helpers/sync-responder.js';
 
 const CG_ID = 'byte-budget-cg';
+const POLICY_UAL = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
 const REMOTE_PEER_ID = '12D3KooWByteBudgetRemote';
 const LOCAL_PEER_ID = '12D3KooWByteBudgetLocal';
 
@@ -94,29 +95,60 @@ describe('byte-budget sync pagination', () => {
       computeSyncDigest: () => new Uint8Array(32), getIdentityId: async () => 0n,
     });
     expect(new TextDecoder().decode(encoded)).toContain(SYNC_BYTE_BUDGET_PAGE_MODE);
-    expect(resolveResponderPageFraming({ legacyLimit: 500, includeSharedMemory: true,
+    expect(resolveSyncResponderRequestProfile({ legacyLimit: 500, includeSharedMemory: true,
       phase, pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200,
-      hasExactAssetFilter: false })).toMatchObject({ usesByteBudgetPage: true, limit: 1200 });
+      assetUals: undefined }).framing).toMatchObject({ usesByteBudgetPage: true, limit: 1200 });
   });
 
   it('keeps exact compression and export policy behind the durable boundary', () => {
     const request = { legacyLimit: 128, includeSharedMemory: true, phase: 'data',
       pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200,
-      hasExactAssetFilter: true, exactAssetCount: 1, responseEncoding: 'gzip-nquads-v1' };
-    expect(resolveResponderPageFraming(request)).toMatchObject({
+      assetUals: [POLICY_UAL], responseEncoding: 'gzip-nquads-v1' };
+    expect(resolveSyncResponderRequestProfile(request).framing).toMatchObject({
       usesByteBudgetPage: true, limit: 1200, maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
     });
-    expect(resolveDurableDataRequestPolicy(request)).toMatchObject({
+    expect(resolveSyncResponderRequestProfile(request).durableData).toMatchObject({
       cacheMode: 'session-snapshot', exactGraphReadMode: 'snapshot-or-page',
       usesExactAssetExport: false, usesByteBudgetPage: false,
       maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
     });
-    expect(resolveResponderPageFraming({ ...request, includeSharedMemory: false })).toMatchObject({
+    expect(resolveSyncResponderRequestProfile({ ...request, includeSharedMemory: false }).framing).toMatchObject({
       usesByteBudgetPage: true, limit: 1200, maxPageBytes: 16 * 1024 * 1024,
     });
-    expect(resolveDurableDataRequestPolicy({ ...request, includeSharedMemory: false })).toMatchObject({
+    expect(resolveSyncResponderRequestProfile({ ...request, includeSharedMemory: false }).durableData).toMatchObject({
       cacheMode: 'page-only', exactGraphReadMode: 'page-only', usesExactAssetExport: true,
     });
+  });
+
+  it.each([
+    { selection: undefined, rows: 1200, cacheMode: 'session-snapshot' },
+    { selection: [], rows: SYNC_BYTE_BUDGET_EXACT_MAX_ROWS, cacheMode: 'page-only' },
+    { selection: [POLICY_UAL, `${POLICY_UAL.slice(0, -1)}8`], rows: SYNC_BYTE_BUDGET_EXACT_MAX_ROWS, cacheMode: 'page-only' },
+  ])('keeps non-singleton selection $selection on the conservative profile', ({ selection, rows, cacheMode }) => {
+    const profile = resolveSyncResponderRequestProfile({ legacyLimit: 128,
+      includeSharedMemory: false, phase: 'data', pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: 1200, assetUals: selection, responseEncoding: 'gzip-nquads-v1' });
+    expect(profile.compression).toBeUndefined();
+    expect(profile.framing).toMatchObject({ usesByteBudgetPage: true, limit: rows,
+      maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES });
+    expect(profile.durableData).toMatchObject({ cacheMode, usesExactAssetExport: false });
+  });
+
+  it('uses the actual selection to negotiate once and passes that profile through encoding', async () => {
+    const store = new OxigraphStore();
+    const negotiation = vi.spyOn(wireCompression, 'resolveExactSyncGzipProfile');
+    const encode = vi.spyOn(wireCompression, 'encodeResolvedExactSyncResponse');
+    try {
+      const cap = registerTestSyncHandler(store);
+      await cap.invoke({ contextGraphId: CG_ID, offset: 0, limit: 128,
+        includeSharedMemory: false, phase: 'meta', assetUals: [POLICY_UAL],
+        pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200,
+        responseEncoding: 'gzip-nquads-v1' });
+      expect(negotiation).toHaveBeenCalledOnce();
+      expect(negotiation.mock.calls[0]?.[0]).toMatchObject({ assetUals: [POLICY_UAL], phase: 'meta' });
+      expect(encode).toHaveBeenCalledOnce();
+      expect(encode.mock.calls[0]?.[1].profile).toBe(negotiation.mock.results[0]?.value);
+    } finally { negotiation.mockRestore(); encode.mockRestore(); await store.close(); }
   });
 
   it.each(['data', 'meta'] as const)('serves shared-memory %s row hints with byte-budget negotiation', async (phase) => {
@@ -245,14 +277,14 @@ describe('byte-budget sync pagination', () => {
       pageRowsHint: SYNC_REQUEST_SAFE_PAGE_SIZE,
       assetUals: [exactUal],
     });
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveSyncResponderRequestProfile({
       legacyLimit: request.limit,
       includeSharedMemory: false,
       phase: request.phase,
       pageMode: request.pageMode,
       pageRowsHint: request.pageRowsHint,
-      hasExactAssetFilter: true,
-    })).toEqual({
+      assetUals: [POLICY_UAL],
+    }).durableData).toEqual({
       usesByteBudgetPage: true,
       limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
       cacheMode: 'page-only',
@@ -722,14 +754,14 @@ describe('byte-budget sync pagination', () => {
   });
 
   it('derives exact-fetch resource policy without trusting signature fields', () => {
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveSyncResponderRequestProfile({
       legacyLimit: SYNC_PAGE_SIZE,
       includeSharedMemory: false,
       phase: 'data',
       pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
       pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
-      hasExactAssetFilter: true,
-    })).toEqual({
+      assetUals: [POLICY_UAL],
+    }).durableData).toEqual({
       usesByteBudgetPage: true,
       limit: SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
       cacheMode: 'page-only',
@@ -738,14 +770,14 @@ describe('byte-budget sync pagination', () => {
       usesExactAssetExport: false,
     });
 
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveSyncResponderRequestProfile({
       legacyLimit: SYNC_PAGE_SIZE,
       includeSharedMemory: false,
       phase: 'data',
       pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
       pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
-      hasExactAssetFilter: false,
-    })).toEqual({
+      assetUals: undefined,
+    }).durableData).toEqual({
       usesByteBudgetPage: true,
       limit: SYNC_REQUEST_PAGE_SIZE,
       cacheMode: 'session-snapshot',
