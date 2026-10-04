@@ -123,11 +123,11 @@ describe('createStoreRuntimeMonitor', () => {
     const { monitor, dockerCalls, logs, clock } = makeMonitor();
     for (let i = 0; i < 6; i++) await monitor.tick();
     expect(restartCalls(dockerCalls)).toHaveLength(1);
-    expect(monitor.stats.cooldownUntilMs).toBe(clock.t + 600_000);
+    expect(monitor.stats.cooldownUntilMs).toBe(clock.t + 1_800_000);
 
-    // Store stays dead through the whole 10-min cooldown: counter re-fills
+    // Store stays dead throughout the 30-minute cooldown: counter re-fills
     // and caps at the threshold, but no second restart fires.
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 59; i++) {
       clock.t += 30_000;
       await monitor.tick();
     }
@@ -135,8 +135,12 @@ describe('createStoreRuntimeMonitor', () => {
     expect(monitor.stats.consecutiveFailures).toBe(6);
     expect(logs.some((l) => l.includes('store.monitor.cooldown-wait'))).toBe(true);
 
-    // First tick past cooldown expiry restarts immediately (capped counter).
-    clock.t += 600_000;
+    // Check one millisecond before and after the documented minimum.
+    const expiry = monitor.stats.cooldownUntilMs!;
+    clock.t = expiry - 1;
+    await monitor.tick();
+    expect(restartCalls(dockerCalls)).toHaveLength(1);
+    clock.t = expiry + 1;
     await monitor.tick();
     expect(restartCalls(dockerCalls)).toHaveLength(2);
   });
@@ -230,7 +234,7 @@ describe('createStoreRuntimeMonitor', () => {
     expect(restartCalls(calls)).toHaveLength(1);
     expect(monitor.stats.restartsTotal).toBe(0); // failed restart is not a restart
     expect(monitor.stats.restartFailuresTotal).toBe(1);
-    expect(monitor.stats.cooldownUntilMs).toBe(clock.t + 600_000);
+    expect(monitor.stats.cooldownUntilMs).toBe(clock.t + 1_800_000);
   });
 
   it('catches a REJECTING docker runner (spawn error) — logs + counts, never escapes the tick', async () => {
@@ -248,7 +252,7 @@ describe('createStoreRuntimeMonitor', () => {
     expect(logs.some((l) => l.includes('store.monitor.restart-failed'))).toBe(true);
     expect(logs.some((l) => l.includes('spawn docker EMFILE'))).toBe(true);
     // Cooldown still starts so a broken engine is not hammered.
-    expect(monitor.stats.cooldownUntilMs).toBe(clock.t + 600_000);
+    expect(monitor.stats.cooldownUntilMs).toBe(clock.t + 1_800_000);
   });
 
   describe('harden-lock suspension (BLOCKER-1a)', () => {

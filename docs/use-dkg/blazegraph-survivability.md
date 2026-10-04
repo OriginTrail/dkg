@@ -20,8 +20,8 @@ an existing container does not rewrite those options.
 
 The daemon also probes external stores while running. After six consecutive
 failures it may restart a **DKG-managed Blazegraph** container, at most once
-per 30 minutes. Other external stores are monitored and logged, with no Docker
-restart. Boot recovery uses a persisted cooldown to prevent daemon restart
+per 30 minutes by default (`DKG_STORE_MONITOR_RESTART_COOLDOWN_MS=1800000`).
+Other external stores are monitored and logged, with no Docker restart. Boot recovery uses a persisted cooldown to prevent daemon restart
 loops from repeatedly restarting a cold store. `DKG_STORE_MONITOR_DISABLED=1`
 disables the runtime monitor. `/api/status` includes its counters.
 

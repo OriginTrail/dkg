@@ -218,7 +218,7 @@ export function createStoreRuntimeMonitor(
   const failureThreshold = opts.failureThreshold
     ?? parsePositiveIntegerEnv('DKG_STORE_MONITOR_FAILURE_THRESHOLD', 6);
   const restartCooldownMs = opts.restartCooldownMs
-    ?? parsePositiveIntegerEnv('DKG_STORE_MONITOR_RESTART_COOLDOWN_MS', 600_000);
+    ?? parsePositiveIntegerEnv('DKG_STORE_MONITOR_RESTART_COOLDOWN_MS', BOOT_RESTART_COOLDOWN_MS);
 
   const stats: StoreMonitorStats = {
     probesTotal: 0,

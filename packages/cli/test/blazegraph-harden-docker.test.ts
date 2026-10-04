@@ -7,7 +7,7 @@ import { provisionBlazegraphDocker, defaultDockerRunner, blazegraphVolumeName, b
 import { executeHardenMigration } from '../src/daemon/blazegraph-harden.js';
 
 // test-disable-allow: D1 #2974 -- owner=cli lane=bura-cli expires=2026-10-25 Real Docker journal roundtrip runs explicitly in CLI shard 1.
-it.skipIf(process.env.BLAZEGRAPH_HARDEN_INTEGRATION_TEST !== '1')('preserves ordinary RDF records in the replacement and original backup using the pinned image', async () => {
+it.skipIf(process.env.BLAZEGRAPH_HARDEN_INTEGRATION_TEST !== '1').each(['named-volume', 'writable-layer'] as const)('preserves ordinary RDF records in the replacement and original backup using the pinned image (%s)', async (journalSource) => {
 const name = `dkg-harden-test-${process.pid}-${Date.now()}`;
 const namespace = 'harden-roundtrip';
 const docker = defaultDockerRunner();
@@ -22,7 +22,8 @@ try {
   const legacyDocker = { run: async (args, options) => {
     if (args[0] === 'run' && args[1] === '-d') {
       const stripped = [];
-      const removed = new Set(['-e', '--health-cmd', '--health-interval', '--health-timeout', '--health-retries', '--health-start-period']);
+      const removed = new Set(['-e', '--health-cmd', '--health-interval', '--health-timeout', '--health-retries', '--health-start-period',
+        ...(journalSource === 'writable-layer' ? ['--mount'] : [])]);
       for (let i=0; i<args.length; i++) { if (removed.has(args[i])) { i++; continue; } stripped.push(args[i]); }
       args = stripped;
     }
@@ -35,7 +36,8 @@ try {
   const write = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `update=${encodeURIComponent(insert)}` });
   assert.equal(write.ok, true, await write.text());
   const before = JSON.parse((await docker.run(['inspect', name])).stdout)[0];
-  assert.ok(before.Mounts.some(m => m.Name === volumes[0]));
+  if (journalSource === 'writable-layer') assert.deepEqual(before.Mounts, []);
+  else assert.ok(before.Mounts.some(m => m.Name === volumes[0]));
   assert.equal(before.Config.Env.some(e => e.includes('ExitOnOutOfMemoryError')), false);
   const result = await executeHardenMigration({ containerName: name, namespace, migrationDir: `${temporary}/journal`,
     dkgHome: `${temporary}/config`, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, docker,
@@ -61,7 +63,8 @@ try {
   assert.equal(healthResult.exitCode, 0, healthResult.stderr);
   assert.match(healthResult.stdout, /(?:"boolean"\s*:\s*true|<boolean>\s*true\s*<\/boolean>)/);
   const backup = JSON.parse((await docker.run(['inspect', `${name}-backup`])).stdout)[0];
-  assert.ok(backup.Mounts.some(m => m.Name === volumes[0]));
+  if (journalSource === 'writable-layer') assert.deepEqual(backup.Mounts, []);
+  else assert.ok(backup.Mounts.some(m => m.Name === volumes[0]));
   const response = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' }, body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:smoke-2974> { <urn:test:subject> <urn:test:predicate> ?v } }')}` });
   const rows = await response.json();
   assert.equal(rows.results.bindings[0].v.value, 'preserve-me');
