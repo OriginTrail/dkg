@@ -1,3 +1,4 @@
+import { createContextGraphProjectionFenceFixture } from './_helpers/context-graph-projection-fence.js';
 /**
  * Regression coverage for the WM→SWM promote / publish gating bug on a
  * PUBLIC-on-chain context graph that carries a `DKG_ALLOWED_AGENT` list.
@@ -120,7 +121,7 @@ function makeAgentLike(opts: {
     log,
     chain,
     store: { query: storeQuery },
-    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, captureContextGraphAuthorityFactsFence: () => ({ assertCurrent: () => true }) },
+    contextGraphMetaProjection: createContextGraphProjectionFenceFixture(),
     swmSenderKeyStateLoaded: true,
     loadSwmSenderKeyState: vi.fn(async () => {}),
     subscribedContextGraphs,

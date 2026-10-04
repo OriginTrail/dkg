@@ -1,3 +1,4 @@
+import { createContextGraphProjectionFenceFixture } from './_helpers/context-graph-projection-fence.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE,
@@ -331,7 +332,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('keeps a fully revoked legacy gate authoritative and empty', async () => {
     const receiver = {
       ...noAcceptedPublicUnregisteredPolicy,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, captureContextGraphAuthorityFactsFence: () => ({ assertCurrent: () => true }) },
+      contextGraphMetaProjection: createContextGraphProjectionFenceFixture(),
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
@@ -353,7 +354,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('preserves legacy meta and subscription resolution for non-RFC-64 graphs', async () => {
     const receiver = {
       ...noAcceptedPublicUnregisteredPolicy,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, captureContextGraphAuthorityFactsFence: () => ({ assertCurrent: () => true }) },
+      contextGraphMetaProjection: createContextGraphProjectionFenceFixture(),
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),

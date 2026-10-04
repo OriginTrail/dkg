@@ -1,3 +1,4 @@
+import { createContextGraphProjectionFenceFixture } from './_helpers/context-graph-projection-fence.js';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   ContextGraphIdV1,
@@ -157,8 +158,7 @@ function runtimePrivateQueryAgent(options: {
     queryEngine,
     store,
     contextGraphMetaProjection: {
-      readAuthorityFactsRevision: 0,
-      captureContextGraphAuthorityFactsFence: () => ({ assertCurrent: () => true }),
+      ...createContextGraphProjectionFenceFixture(),
       prepareReadAuthorityFactsSnapshot: vi.fn(async () => ({
         assertCurrent: () => true,
         isAbsent: () => true,

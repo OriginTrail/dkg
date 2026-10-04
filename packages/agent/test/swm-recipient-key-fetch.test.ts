@@ -1,3 +1,4 @@
+import { createContextGraphProjectionFenceFixture } from './_helpers/context-graph-projection-fence.js';
 /**
  * #2849: a sender that lacks roster members' encryption keys fetches the
  * `agents` phonebook for all of them at once, then resolves their keys again.
@@ -85,7 +86,7 @@ describe('private share recipients with a missing member key (#2849)', () => {
     });
     Object.assign(host, {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, captureContextGraphAuthorityFactsFence: () => ({ assertCurrent: () => true }) },
+      contextGraphMetaProjection: createContextGraphProjectionFenceFixture(),
       resolveSwmTransportAuthority: vi.fn(async () => (transportKind === 'private-roster'
         ? { kind: 'private-roster' as const, participantAgents: members.map((member) => member.address) }
         : { kind: 'legacy-unregistered' as const })),

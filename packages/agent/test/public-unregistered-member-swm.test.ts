@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { createContextGraphProjectionFenceFixture } from './_helpers/context-graph-projection-fence.js';
 //
 // #2827: after a member joined a PUBLIC context graph that was never registered
 // on chain, every SWM share failed in both directions:
@@ -92,7 +93,7 @@ function joinedMember(options: {
   const isContextGraphPublicOnChain = vi.fn(async () => options.publicOnChain === true);
   const warn = vi.fn();
   const agent = {
-    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, captureContextGraphAuthorityFactsFence() { const revision = this.readAuthorityFactsRevision; return { assertCurrent: () => this.readAuthorityFactsRevision === revision }; } },
+    contextGraphMetaProjection: createContextGraphProjectionFenceFixture(),
     resolveContextGraphAgentGateAuthority:
       WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
     resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
