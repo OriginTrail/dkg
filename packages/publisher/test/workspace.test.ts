@@ -1469,7 +1469,27 @@ describe('SharedMemoryHandler', () => {
       assertionVersion: '2',
       timestampMs: secondPublishedAt,
     });
-    await handler.handle(msg2, peerId);
+    await expect(handler.handle(msg2, peerId)).resolves.toMatchObject({
+      applied: false,
+      retryable: true,
+      reason: expect.stringContaining('DRAFT_REPLACEMENT_PROOF_UNAVAILABLE'),
+    });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).resolves.toEqual(legacyHeadWithoutPublishedAt);
+
+    // Restore the publisher evidence removed for the legacy-read control.
+    // Forward versions must not bypass a head whose chronology is unavailable.
+    await store.insert([q(
+      `urn:dkg:share:${CONTEXT_GRAPH}:ws-own-1`,
+      'http://dkg.io/ontology/publishedAt',
+      `"${new Date(firstPublishedAt).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`,
+      gm.sharedMemoryMetaUri(CONTEXT_GRAPH),
+    )]);
+    await expect(handler.handle(msg2, peerId)).resolves.toMatchObject({ applied: true });
 
     const afterSecond = await resolveKnowledgeAssetWorkspaceHead({
       store,
