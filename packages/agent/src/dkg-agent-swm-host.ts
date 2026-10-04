@@ -552,6 +552,7 @@ import type {
 } from './context-graph-binding-state.js';
 import { resolveExactBatchStreamEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
 import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
+import { VM_RECOVERY_SYNC_PRIORITY } from './sync/catchup-policy.js';
 import { finalizedContextGraphSnapshotMismatchV1 } from
   './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
@@ -4413,13 +4414,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // The reconciler owns the continuation policy: productive slices, stale
       // bindings, and explicit provider rotations continue immediately, while
       // pending-only historical inventory yields to the periodic sweep.
+      const localAdmissionWait = {
+        signal: lifecycleSignal,
+        isCurrent: isTargetCurrent,
+        canAdmit: () => this.vmRecoverySyncAdmissionAvailable(localCgId),
+      };
       if (isTargetCurrent() && result.localAdmissionDeferred) {
-        this.vmReconcileScheduling?.retryLocalAdmission(localCgId, {
-          signal: lifecycleSignal,
-          isCurrent: isTargetCurrent,
-        });
+        this.vmReconcileScheduling?.retryLocalAdmission(localCgId, localAdmissionWait);
       } else if (isLifecycleCurrent() && result.shouldContinueImmediately) {
-        this.vmReconcileScheduling?.triggerLive(localCgId);
+        // A graph that just fetched from peers takes its next turn behind the
+        // graphs the node's sync admission refused while it did. Without that
+        // the freed capacity goes back to whichever pass asks first, which is
+        // this one, and the others repeat their passes to be refused again.
+        const yielded = result.recoveryAttempted === true
+          && !result.staleTarget
+          && isTargetCurrent()
+          && this.vmReconcileScheduling?.yieldLocalAdmissionTurn(localCgId, localAdmissionWait) === true;
+        if (!yielded) this.vmReconcileScheduling?.triggerLive(localCgId);
       } else if (isTargetCurrent()) {
         // RS heal is bounded, best-effort maintenance. Run it only after the
         // useful VM slice completed and only when that slice has no urgent
@@ -6978,7 +6989,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           undefined,
           {
             stopOnBackoffWorthyFailure: true,
-            priority: 1_000,
+            priority: VM_RECOVERY_SYNC_PRIORITY,
             source: 'vm-recovery',
             onWorkStarted,
             signal,

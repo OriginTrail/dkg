@@ -426,6 +426,7 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
+  VM_RECOVERY_SYNC_PRIORITY,
   catchupAdmissionSource,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
@@ -472,6 +473,7 @@ import {
   resolveExactBatchStreamEnabled,
   resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
+  syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
 import {
@@ -2243,6 +2245,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } finally {
       admissionBoundary.dispose();
     }
+  }
+
+  /**
+   * Whether this node's sync admission would take an exact VM recovery fetch
+   * for the graph right now. A read of the limiter: nothing is claimed or
+   * queued, and the fetch must still handle a refusal.
+   */
+  vmRecoverySyncAdmissionAvailable(this: DKGAgent, contextGraphId: string): boolean {
+    return !syncAdmissionWouldBeRefused(resolveAgentSyncGlobalBackpressure(this.config), {
+      contextGraphId,
+      lane: 'durable',
+      priority: VM_RECOVERY_SYNC_PRIORITY,
+      priorityClass: syncPriorityClass(VM_RECOVERY_SYNC_PRIORITY),
+      source: 'vm-recovery',
+    });
   }
 
   async start(this: DKGAgent): Promise<void> {
@@ -6097,7 +6114,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         registeredPublicEvidence: options.registeredPublicEvidence,
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
-        priority: 1_000,
+        priority: VM_RECOVERY_SYNC_PRIORITY,
         source: 'vm-recovery',
         onWorkStarted: options.onWorkStarted,
         signal: options.signal,
