@@ -3,6 +3,7 @@
 import { normalizeContextGraphAuthorityHash as normalizeHash } from
   './context-graph-authority-generation.js';
 import {
+  type ContextGraphAuthorityIndexAdmittedRepositoryRecord,
   type ContextGraphAuthorityIndexScopedRepository,
   type ContextGraphAuthorityIndexRepositoryRecord,
 } from './context-graph-authority-index-repository.js';
@@ -37,11 +38,6 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
   readonly lifecycleSignal: AbortSignal;
   /** Evict remotely servable observations as soon as a durable row is rejected. */
   readonly onRejectedCheckpoint?: (rejectedToken: number) => void;
-  /** Record the durable generation returned by that conditional invalidation. */
-  readonly onCheckpointRecovery?: (
-    rejectedToken: number,
-    recoveryToken: number | undefined,
-  ) => void;
   readonly readBlockHash: (
     blockNumber: number,
     lifecycleSignal: AbortSignal,
@@ -58,7 +54,7 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
  */
 export async function admitContextGraphAuthorityIndexCheckpoint(
   input: Readonly<ContextGraphAuthorityIndexAdmissionInput>,
-): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+): Promise<ContextGraphAuthorityIndexAdmittedRepositoryRecord> {
   let record = input.initial;
   let lostInvalidations = 0;
   // A checkpoint that wins the CAS against an invalidator may have been
@@ -111,12 +107,6 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
       );
     }
     const recovery = await input.repository.invalidateOrReloadWinner(record, input.lifecycleSignal);
-    // Only a tombstone is a proven lineage break. A checkpoint CAS winner may
-    // itself have been reduced from the rejected row by pre-rejection work; it
-    // becomes safe only if this rejecting scan re-admits it below.
-    if (recovery.record.kind === 'tombstone') {
-      input.onCheckpointRecovery?.(record.token, recovery.record.token);
-    }
     if (recovery.kind === 'invalidated') return recovery.record;
     lostInvalidations += 1;
     record = recovery.record;

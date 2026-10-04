@@ -11,8 +11,8 @@ import type { ContextGraphAuthorityIndexCheckpoint } from
 import { ContextGraphAuthorityIndexRetryableError } from
   './context-graph-authority-index-errors.js';
 import type {
+  ContextGraphAuthorityIndexAdmittedRepositoryRecord,
   ContextGraphAuthorityIndexKeyedScopedRepository,
-  ContextGraphAuthorityIndexRepositoryRecord,
 } from './context-graph-authority-index-repository.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS,
@@ -31,16 +31,13 @@ interface BootstrapSessionInput {
   readonly lifecycleSignal: AbortSignal;
   readonly readBlockHash: (blockNumber: number, signal: AbortSignal) => Promise<string | null>;
   readonly onRejectedCheckpoint: (repositoryKey: string, rejectedToken: number) => void;
-  readonly onCheckpointRecovery: (
-    repositoryKey: string,
-    rejectedToken: number,
-    recoveryToken: number | undefined,
-  ) => void;
 }
 
 export interface ContextGraphAuthorityIndexBootstrapSession {
-  needsSeed(durable: ContextGraphAuthorityIndexRepositoryRecord): boolean;
-  seed(durable: ContextGraphAuthorityIndexRepositoryRecord): Promise<ContextGraphAuthorityIndexRepositoryRecord>;
+  needsSeed(durable: ContextGraphAuthorityIndexAdmittedRepositoryRecord): boolean;
+  seed(
+    durable: ContextGraphAuthorityIndexAdmittedRepositoryRecord,
+  ): Promise<ContextGraphAuthorityIndexAdmittedRepositoryRecord>;
   close(): void;
 }
 
@@ -122,9 +119,9 @@ export class ContextGraphAuthorityIndexBootstrapCoordinator {
 
   async #importSeed(
     input: BootstrapSessionInput,
-    durable: ContextGraphAuthorityIndexRepositoryRecord,
+    durable: ContextGraphAuthorityIndexAdmittedRepositoryRecord,
     budgetSignal: AbortSignal,
-  ): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+  ): Promise<ContextGraphAuthorityIndexAdmittedRepositoryRecord> {
     const anchors = new Map<number, string | undefined>();
     const validate = async (value: unknown, attemptSignal = budgetSignal): Promise<ContextGraphAuthorityIndexCheckpoint> => {
       const validationSignal = attemptSignal === budgetSignal ? budgetSignal
@@ -176,13 +173,6 @@ export class ContextGraphAuthorityIndexBootstrapCoordinator {
           lifecycleSignal: budgetSignal,
           onRejectedCheckpoint: (rejectedToken) => {
             input.onRejectedCheckpoint(input.repository.key, rejectedToken);
-          },
-          onCheckpointRecovery: (rejectedToken, recoveryToken) => {
-            input.onCheckpointRecovery(
-              input.repository.key,
-              rejectedToken,
-              recoveryToken,
-            );
           },
         }));
   }

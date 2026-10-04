@@ -19,6 +19,17 @@ export type ContextGraphAuthorityIndexRepositoryRecord = (
     }>
 ) & Readonly<{ [authorityIndexObservation]: true }>;
 
+/** A repository observation that passed durable decoding/admission. */
+export type ContextGraphAuthorityIndexAdmittedRepositoryRecord = Exclude<
+  ContextGraphAuthorityIndexRepositoryRecord,
+  Readonly<{ kind: 'invalid'; token: number }>
+>;
+
+export type ContextGraphAuthorityIndexCommittedRepositoryRecord = Extract<
+  ContextGraphAuthorityIndexAdmittedRepositoryRecord,
+  Readonly<{ kind: 'checkpoint' }>
+>;
+
 type CacheableAuthorityIndexRecord = Exclude<
   ContextGraphAuthorityIndexRepositoryRecord,
   Readonly<{ kind: 'missing'; token: undefined }> | Readonly<{ kind: 'invalid'; token: number }>

@@ -16,6 +16,8 @@ import {
   isContextGraphAuthorityIndexRetryableError,
 } from
   './context-graph-authority-index-errors.js';
+import type { ContextGraphAuthorityIndexHorizonReader } from
+  './context-graph-authority-index-horizon.js';
 import { waitForSignal } from './wait-for-signal.js';
 
 /** Default `chain.indexTickMs`: how long one completed projection answers reads. */
@@ -391,72 +393,10 @@ export type ContextGraphAuthorityIndexIncompleteProjectionAdmission =
   | Readonly<{ admitted: false }>
   | Readonly<{ admitted: true; anchorValidated: boolean }>;
 
-type ContextGraphAuthorityIndexRefreshHorizon = Readonly<{
-  number: number;
-  hash: string;
-}>;
-
-type ContextGraphAuthorityRefreshHorizonConstraint = Readonly<{
-  number: number;
-  hashes: ReadonlySet<string>;
-  rejectAtNumber: boolean;
-}>;
-
-type ContextGraphAuthorityRecoveryBoundary = Readonly<{
-  repositoryKey: string;
-  token: number;
-  rejectionRevision: number;
-  marker: object;
-}>;
-
-export type ContextGraphAuthorityIndexRecoveryProof = object;
-
-/** Physical durable-scan ownership for one tentative publication horizon. */
-export interface ContextGraphAuthorityIndexRefreshHorizonLease {
-  /** Checkpoint recovery began; a successful scan may replace the old floor. */
-  markCheckpointRejected(repositoryKey: string, rejectedToken: number): void;
-  /** The store installed or exposed a tombstone after the rejected token. */
-  markCheckpointRecovery(
-    repositoryKey: string,
-    rejectedToken: number,
-    recoveryToken: number | undefined,
-  ): void;
-  /** Record one repository row only after this physical scan admitted it. */
-  admitDurableGeneration(
-    repositoryKey: string,
-    kind: 'missing' | 'tombstone' | 'checkpoint' | 'invalid',
-    token: number | undefined,
-  ): void;
-  /** Record a CAS commit descended from the generation admitted above. */
-  commitDurableGeneration(repositoryKey: string, token: number): void;
-  /** Opaque physical provenance consumed by every waiter for this flight. */
-  recoveryProof(): ContextGraphAuthorityIndexRecoveryProof | undefined;
-  /** Settle from the lifecycle-owned physical promise, never a caller wait. */
-  commit(outcome: Readonly<{
-    checkpointRejected: boolean;
-    recoveryProof: ContextGraphAuthorityIndexRecoveryProof | undefined;
-  }>): void;
-  rollback(): void;
-}
-
 /** Every mutable invariant for one physical deployment/contract scope. */
 interface ContextGraphAuthorityProjectionScopeState {
   generation: number;
   activeRefreshes: number;
-  /** Includes inactive `view()` leases so invalidation cannot orphan them. */
-  unsettledRefreshHorizonLeases: number;
-  /** Every rejection invalidates lineage evidence observed before it. */
-  rejectionRevision: number;
-  /** Last successful durable background scan (or successful fork rebuild). */
-  committedRefreshHorizon?: ContextGraphAuthorityIndexRefreshHorizon;
-  /** Physical scans that fence projections until they succeed or fail. */
-  activeRefreshHorizons?: Map<object, ContextGraphAuthorityIndexRefreshHorizon>;
-  /** Failed checkpoint recovery disproved every projection through this height. */
-  rejectedRefreshThrough?: number;
-  /** Greatest rejected generation per durable repository key. */
-  rejectedDurableThroughTokens?: Map<string, number>;
-  /** Safe tombstone/re-admitted generation per durable repository key. */
-  recoveryBoundaries?: Map<string, ContextGraphAuthorityRecoveryBoundary>;
   projection?: ContextGraphAuthorityIndexProjection;
   refreshing?: Promise<void>;
   failedAtMs?: number;
@@ -494,12 +434,14 @@ export class ContextGraphAuthorityIndexProjectionCache {
   readonly staleMs: number;
   readonly #headTimestampToleranceMs: number;
   readonly #now: () => number;
+  readonly #horizons: ContextGraphAuthorityIndexHorizonReader | undefined;
   /** One state cell per scope, including every refresh currently in flight. */
   readonly #scopes = new Map<string, ContextGraphAuthorityProjectionScopeState>();
-  /** Lifecycle epoch prevents a pre-clear lease from resurrecting a floor. */
-  #refreshHorizonEpoch = 0;
 
-  constructor(options: ContextGraphAuthorityIndexProjectionOptions = {}) {
+  constructor(
+    options: ContextGraphAuthorityIndexProjectionOptions = {},
+    horizons?: ContextGraphAuthorityIndexHorizonReader,
+  ) {
     this.tickMs = resolveContextGraphAuthorityIndexTickMs(options.tickMs);
     this.staleMs = resolveContextGraphAuthorityIndexStaleMs(this.tickMs);
     this.#headTimestampToleranceMs = options.headTimestampToleranceMs
@@ -509,6 +451,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
       throw new Error('Context Graph authority head timestamp tolerance must be a positive integer');
     }
     this.#now = options.now ?? (() => Date.now());
+    this.#horizons = horizons;
   }
 
   /** A checkpoint or cached-anchor proof invalidated this projection only. */
@@ -523,328 +466,32 @@ export class ContextGraphAuthorityIndexProjectionCache {
     this.#invalidateProjectionState(state);
     this.#deleteScopeIfIdle(scope, state);
   }
-
-  /**
-   * Tentatively fence projections at one physical durable-scan horizon.
-   * Settlement belongs to the physical promise: caller cancellation neither
-   * commits nor rolls this lease back.
-   */
-  beginRefreshHorizon(
-    scope: string,
-    finalized: Readonly<{ number: number; hash: string }>,
-    active: boolean,
-  ): ContextGraphAuthorityIndexRefreshHorizonLease {
-    const finalizedHash = normalizeHash(finalized.hash);
-    if (!Number.isSafeInteger(finalized.number)
-      || finalized.number < 0
-      || finalizedHash === undefined) {
-      throw new Error('Context Graph authority refresh horizon is invalid');
-    }
-    const state = this.#scopeState(scope);
-    state.unsettledRefreshHorizonLeases += 1;
-    const horizon = Object.freeze({
-      number: finalized.number,
-      hash: finalizedHash,
-    });
-    const token = Object.freeze({});
-    const epoch = this.#refreshHorizonEpoch;
-    const startsActive = active;
-    const rejectionRevisionAtStart = state.rejectionRevision;
-    let activated = false;
-    let checkpointRejected = false;
-    const rejectedTokens = new Map<string, number>();
-    let durableRepositoryKey: string | undefined;
-    let durableToken: number | undefined;
-    let rootRepositoryKey: string | undefined;
-    let rootRejectionRevision: number | undefined;
-    let recoveryBoundary: ContextGraphAuthorityRecoveryBoundary | undefined;
-    let settled = false;
-    const leaseIsCurrent = (): boolean => (
-      epoch === this.#refreshHorizonEpoch && this.#scopes.get(scope) === state
-    );
-    const releaseLease = (): void => {
-      if (this.#scopes.get(scope) !== state) return;
-      state.unsettledRefreshHorizonLeases -= 1;
-      this.#deleteScopeIfIdle(scope, state);
-    };
-    const assertRepositoryKey = (repositoryKey: string): void => {
-      if (repositoryKey.trim().length === 0) {
-        throw new Error('Context Graph authority durable repository key is empty');
-      }
-    };
-    const publishRecoveryBoundary = (
-      repositoryKey: string,
-      boundaryToken: number,
-    ): ContextGraphAuthorityRecoveryBoundary | undefined => {
-      if (!leaseIsCurrent() || state.rejectedRefreshThrough === undefined) return undefined;
-      const rejectedThrough = state.rejectedDurableThroughTokens?.get(repositoryKey) ?? -1;
-      if (boundaryToken <= rejectedThrough) return undefined;
-      const boundaries = state.recoveryBoundaries ?? new Map();
-      const existing = boundaries.get(repositoryKey);
-      if (existing !== undefined) return existing;
-      const boundary = Object.freeze({
-        repositoryKey,
-        token: boundaryToken,
-        rejectionRevision: state.rejectionRevision,
-        marker: Object.freeze({}),
-      });
-      boundaries.set(repositoryKey, boundary);
-      state.recoveryBoundaries = boundaries;
-      return boundary;
-    };
-    const activate = (): void => {
-      if (activated || settled || !leaseIsCurrent()) return;
-      const before = this.#effectiveRefreshHorizon(state);
-      const horizons = state.activeRefreshHorizons ?? new Map();
-      horizons.set(token, horizon);
-      state.activeRefreshHorizons = horizons;
-      activated = true;
-      const after = this.#effectiveRefreshHorizon(state);
-      // An identical/lower compatible tick must not discard a fresh answer.
-      // A higher or conflicting fence must also detach a cold active owner.
-      if (!this.#sameRefreshHorizonConstraint(before, after)) {
-        const projectionIsObsolete = state.projection !== undefined
-          && !this.#finalizedAtOrAboveRefreshHorizon(state.projection.finalized, after);
-        const refreshOwnerIsUnfenced = state.refreshing !== undefined;
-        if (projectionIsObsolete || refreshOwnerIsUnfenced) {
-          state.generation += 1;
-          if (projectionIsObsolete) delete state.projection;
-          delete state.failedAtMs;
-          if (refreshOwnerIsUnfenced) delete state.refreshing;
-        }
-      }
-    };
-    if (startsActive) activate();
-
-    return Object.freeze({
-      markCheckpointRejected: (repositoryKey: string, rejectedToken: number): void => {
-        if (settled) return;
-        assertRepositoryKey(repositoryKey);
-        if (!Number.isSafeInteger(rejectedToken) || rejectedToken < 1) {
-          throw new Error('Context Graph authority rejected durable token is invalid');
-        }
-        checkpointRejected = true;
-        if (!leaseIsCurrent()) return;
-        state.rejectionRevision += 1;
-        // A proof observed before this rejection—on this durable key or an
-        // alternate bootstrap/fallback key—cannot discharge the newer fence.
-        delete state.recoveryBoundaries;
-        rejectedTokens.set(repositoryKey, Math.max(
-          rejectedTokens.get(repositoryKey) ?? -1,
-          rejectedToken,
-        ));
-        const rejectedDurableThroughTokens = state.rejectedDurableThroughTokens ?? new Map();
-        const rejectedDurableThroughToken = Math.max(
-          rejectedDurableThroughTokens.get(repositoryKey) ?? -1,
-          rejectedToken,
-        );
-        rejectedDurableThroughTokens.set(repositoryKey, rejectedDurableThroughToken);
-        state.rejectedDurableThroughTokens = rejectedDurableThroughTokens;
-        if (rootRepositoryKey === repositoryKey) rootRepositoryKey = undefined;
-        if (rootRepositoryKey === undefined) rootRejectionRevision = undefined;
-        recoveryBoundary = undefined;
-        state.rejectedRefreshThrough = Math.max(
-          state.rejectedRefreshThrough ?? -1,
-          state.committedRefreshHorizon?.number ?? -1,
-          horizon.number,
-        );
-        activate();
-        // The old durable lineage was disproved now, not only if the rebuild
-        // later succeeds. Refuse it throughout recovery and after any failure.
-        this.#invalidateProjectionState(state);
-      },
-      markCheckpointRecovery: (
-        repositoryKey: string,
-        rejectedToken: number,
-        recoveryToken: number | undefined,
-      ): void => {
-        if (settled || !leaseIsCurrent() || recoveryToken === undefined) return;
-        assertRepositoryKey(repositoryKey);
-        if (!Number.isSafeInteger(rejectedToken) || rejectedToken < 1
-          || !Number.isSafeInteger(recoveryToken) || recoveryToken < 1) {
-          throw new Error('Context Graph authority recovery durable token is invalid');
-        }
-        if (recoveryToken <= rejectedToken) return;
-        publishRecoveryBoundary(repositoryKey, recoveryToken);
-      },
-      admitDurableGeneration: (
-        repositoryKey: string,
-        kind: 'missing' | 'tombstone' | 'checkpoint' | 'invalid',
-        admittedToken: number | undefined,
-      ): void => {
-        if (settled || !leaseIsCurrent()) return;
-        assertRepositoryKey(repositoryKey);
-        if (kind === 'missing') {
-          if (admittedToken !== undefined) {
-            throw new Error('Context Graph authority missing generation has a durable token');
-          }
-          durableRepositoryKey = repositoryKey;
-          durableToken = undefined;
-          rootRepositoryKey = repositoryKey;
-          rootRejectionRevision = state.rejectionRevision;
-          recoveryBoundary = undefined;
-          return;
-        }
-        if (admittedToken === undefined
-          || !Number.isSafeInteger(admittedToken)
-          || admittedToken < 1) {
-          throw new Error('Context Graph authority admitted durable token is invalid');
-        }
-        if (kind === 'invalid') {
-          throw new Error('Context Graph authority invalid durable generation was admitted');
-        }
-        durableRepositoryKey = repositoryKey;
-        durableToken = admittedToken;
-        const descendedFromRoot = rootRepositoryKey === repositoryKey;
-        const rootIsCurrent = descendedFromRoot
-          && rootRejectionRevision === state.rejectionRevision;
-        rootRepositoryKey = kind === 'tombstone' ? repositoryKey : undefined;
-        rootRejectionRevision = kind === 'tombstone'
-          ? state.rejectionRevision
-          : undefined;
-        recoveryBoundary = undefined;
-        if (kind === 'tombstone') {
-          recoveryBoundary = publishRecoveryBoundary(repositoryKey, admittedToken);
-          return;
-        }
-        const repositoryHasNoRejectedLineage =
-          !state.rejectedDurableThroughTokens?.has(repositoryKey);
-        const followsCompletedRecovery = rejectionRevisionAtStart === state.rejectionRevision
-          && [...(state.recoveryBoundaries?.values() ?? [])]
-            .some((boundary) => boundary.rejectionRevision === state.rejectionRevision);
-        const independentlyReadmitted = repositoryHasNoRejectedLineage && (
-          rejectedTokens.size > 0
-          || followsCompletedRecovery
-        );
-        const boundary = rootIsCurrent || independentlyReadmitted
-          ? publishRecoveryBoundary(repositoryKey, admittedToken)
-          : state.recoveryBoundaries?.get(repositoryKey);
-        if (boundary !== undefined && admittedToken >= boundary.token) {
-          recoveryBoundary = boundary;
-        }
-      },
-      commitDurableGeneration: (repositoryKey: string, committedToken: number): void => {
-        if (settled || !leaseIsCurrent()) return;
-        assertRepositoryKey(repositoryKey);
-        if (!Number.isSafeInteger(committedToken) || committedToken < 1) {
-          throw new Error('Context Graph authority committed durable token is invalid');
-        }
-        durableRepositoryKey = repositoryKey;
-        durableToken = committedToken;
-        if (rootRepositoryKey === repositoryKey
-          && rootRejectionRevision !== state.rejectionRevision) {
-          // This lineage was admitted before a newer rejection. Advancing its
-          // CAS token—once or across many pages—does not make it independent.
-          rootRepositoryKey = undefined;
-          rootRejectionRevision = undefined;
-          recoveryBoundary = undefined;
-        }
-        if (rootRepositoryKey === repositoryKey) {
-          recoveryBoundary = publishRecoveryBoundary(repositoryKey, committedToken);
-        } else if (recoveryBoundary?.repositoryKey !== repositoryKey
-          || committedToken < recoveryBoundary.token) {
-          recoveryBoundary = undefined;
-        }
-      },
-      recoveryProof: (): ContextGraphAuthorityIndexRecoveryProof | undefined => {
-        if (!leaseIsCurrent()
-          || recoveryBoundary === undefined
-          || durableRepositoryKey !== recoveryBoundary.repositoryKey
-          || durableToken === undefined
-          || durableToken < recoveryBoundary.token
-          || recoveryBoundary.rejectionRevision !== state.rejectionRevision
-          || state.recoveryBoundaries?.get(recoveryBoundary.repositoryKey) !== recoveryBoundary) {
-          return undefined;
-        }
-        return recoveryBoundary.marker;
-      },
-      commit: (outcome: Readonly<{
-        checkpointRejected: boolean;
-        recoveryProof: ContextGraphAuthorityIndexRecoveryProof | undefined;
-      }>): void => {
-        if (settled) return;
-        settled = true;
-        if (!leaseIsCurrent()) {
-          releaseLease();
-          return;
-        }
-        if (activated) state.activeRefreshHorizons?.delete(token);
-        const replacesCheckpoint = checkpointRejected || outcome.checkpointRejected;
-        const recoversRejectedGeneration = state.rejectedRefreshThrough !== undefined
-          && outcome.recoveryProof !== undefined
-          && [...(state.recoveryBoundaries?.values() ?? [])]
-            .some((boundary) => boundary.marker === outcome.recoveryProof);
-        if (recoversRejectedGeneration) {
-          // A successful rebuild proved the prior durable lineage wrong, so a
-          // lower or same-height replacement is intentional rather than lag.
-          // A later scan that admitted the resulting tombstone/partial row can
-          // carry the same repository-scoped proof and finish that recovery.
-          this.#invalidateProjectionState(state);
-          state.committedRefreshHorizon = horizon;
-          delete state.rejectedRefreshThrough;
-          delete state.rejectedDurableThroughTokens;
-          delete state.recoveryBoundaries;
-        } else if (startsActive && !replacesCheckpoint) {
-          const committed = state.committedRefreshHorizon;
-          if (committed === undefined
-            || horizon.number > committed.number
-            || (horizon.number === committed.number && horizon.hash !== committed.hash)) {
-            state.committedRefreshHorizon = horizon;
-          }
-        }
-        if (state.activeRefreshHorizons?.size === 0) delete state.activeRefreshHorizons;
-        releaseLease();
-      },
-      rollback: (): void => {
-        if (settled) return;
-        settled = true;
-        if (!leaseIsCurrent()) {
-          releaseLease();
-          return;
-        }
-        if (activated) state.activeRefreshHorizons?.delete(token);
-        if (state.activeRefreshHorizons?.size === 0) delete state.activeRefreshHorizons;
-        releaseLease();
-      },
-    });
-  }
-
-  /** Read-your-writes invalidation keeps durable refresh knowledge intact. */
+  /** Read-your-writes invalidation affects projection retention only. */
   dropAll(): void {
     for (const scope of this.#scopes.keys()) this.dropProjection(scope);
   }
 
-  /** Refuse an endpoint view older than the durable refresh already observed. */
-  assertAtOrAboveRefreshHorizon(
-    scope: string,
-    finalized: Readonly<{ number: number; hash: string }>,
-  ): void {
-    const refreshHorizon = this.#effectiveRefreshHorizon(this.#scopes.get(scope));
-    if (refreshHorizon === undefined) return;
-    if (this.#finalizedAtOrAboveRefreshHorizon(finalized, refreshHorizon)) return;
-    throw new ContextGraphAuthorityIndexRetryableError(
-      `Context Graph authority projection anchor ${finalized.number}:${finalized.hash} `
-      + `is behind durable refresh horizon ${refreshHorizon.number}:`
-      + `${refreshHorizon.rejectAtNumber
-        ? '<checkpoint-rejected>'
-        : [...refreshHorizon.hashes].join(',')}`,
-      'refresh-horizon-ahead',
-    );
+  /** Reconcile a newly active durable fence with retained/in-flight cache state. */
+  refreshHorizonChanged(scope: string): void {
+    const state = this.#scopes.get(scope);
+    if (state === undefined) return;
+    const projectionIsObsolete = state.projection !== undefined
+      && this.#horizons !== undefined
+      && !this.#horizons.admits(scope, state.projection.finalized);
+    const refreshOwnerIsUnfenced = state.refreshing !== undefined;
+    if (projectionIsObsolete || refreshOwnerIsUnfenced) {
+      state.generation += 1;
+      if (projectionIsObsolete) delete state.projection;
+      delete state.failedAtMs;
+      if (refreshOwnerIsUnfenced) delete state.refreshing;
+    }
+    this.#deleteScopeIfIdle(scope, state);
   }
 
-  /**
-   * Hub/contract rotation or adapter teardown: nothing scanned before it may
-   * answer, and no pre-clear horizon lease may resurrect state afterward.
-   */
+  /** Hub/contract rotation or adapter teardown drops every retained answer. */
   clear(): void {
-    this.#refreshHorizonEpoch += 1;
     for (const [scope, state] of this.#scopes) {
       state.generation += 1;
-      delete state.committedRefreshHorizon;
-      delete state.activeRefreshHorizons;
-      delete state.rejectedRefreshThrough;
-      delete state.rejectedDurableThroughTokens;
-      delete state.recoveryBoundaries;
       delete state.projection;
       delete state.failedAtMs;
       delete state.refreshing;
@@ -970,7 +617,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
           ),
         });
         try {
-          this.assertAtOrAboveRefreshHorizon(input.scope, projection.finalized);
+          this.#horizons?.assertAtOrAbove(input.scope, projection.finalized);
         } catch (error) {
           // A background durable refresh can advance after the provider
           // callback's own fence but before this cache publishes. Re-enter the
@@ -1047,12 +694,8 @@ export class ContextGraphAuthorityIndexProjectionCache {
     // boundary has already rejected a contract rotation, and this remains the
     // publication-side invariant protecting the state cell.
     if (this.#scopes.get(projection.scope) !== state) return;
-    const refreshHorizon = this.#effectiveRefreshHorizon(state);
-    if (refreshHorizon !== undefined
-      && !this.#finalizedAtOrAboveRefreshHorizon(
-        projection.finalized,
-        refreshHorizon,
-      )) return;
+    if (this.#horizons !== undefined
+      && !this.#horizons.admits(projection.scope, projection.finalized)) return;
     // No chain time, no cache: the S2 guard could never be evaluated.
     if (!Number.isSafeInteger(projection.head.timestampSeconds)
       || projection.head.timestampSeconds < 0) return;
@@ -1184,8 +827,6 @@ export class ContextGraphAuthorityIndexProjectionCache {
       state = {
         generation: 0,
         activeRefreshes: 0,
-        unsettledRefreshHorizonLeases: 0,
-        rejectionRevision: 0,
       };
       this.#scopes.set(scope, state);
     }
@@ -1198,72 +839,12 @@ export class ContextGraphAuthorityIndexProjectionCache {
     delete state.failedAtMs;
     delete state.refreshing;
   }
-
-  #effectiveRefreshHorizon(
-    state: ContextGraphAuthorityProjectionScopeState | undefined,
-  ): ContextGraphAuthorityRefreshHorizonConstraint | undefined {
-    if (state === undefined) return undefined;
-    let number = -1;
-    const hashes = new Set<string>();
-    const include = (horizon: ContextGraphAuthorityIndexRefreshHorizon | undefined): void => {
-      if (horizon === undefined || horizon.number < number) return;
-      if (horizon.number > number) {
-        number = horizon.number;
-        hashes.clear();
-      }
-      hashes.add(horizon.hash);
-    };
-    include(state.committedRefreshHorizon);
-    for (const horizon of state.activeRefreshHorizons?.values() ?? []) include(horizon);
-    const rejectedThrough = state.rejectedRefreshThrough ?? -1;
-    const rejectAtNumber = rejectedThrough >= number;
-    if (rejectedThrough > number) {
-      number = rejectedThrough;
-      hashes.clear();
-    }
-    return number < 0 ? undefined : Object.freeze({ number, hashes, rejectAtNumber });
-  }
-
-  #sameRefreshHorizonConstraint(
-    left: ContextGraphAuthorityRefreshHorizonConstraint | undefined,
-    right: ContextGraphAuthorityRefreshHorizonConstraint | undefined,
-  ): boolean {
-    if (left === undefined || right === undefined) return left === right;
-    if (left.number !== right.number
-      || left.rejectAtNumber !== right.rejectAtNumber
-      || left.hashes.size !== right.hashes.size) return false;
-    for (const hash of left.hashes) if (!right.hashes.has(hash)) return false;
-    return true;
-  }
-
-  #finalizedAtOrAboveRefreshHorizon(
-    finalized: Readonly<{ number: number; hash: string }>,
-    refreshHorizon: ContextGraphAuthorityRefreshHorizonConstraint | undefined,
-  ): boolean {
-    if (refreshHorizon === undefined) return true;
-    const finalizedHash = normalizeHash(finalized.hash);
-    if (!Number.isSafeInteger(finalized.number)
-      || finalized.number < 0
-      || finalizedHash === undefined) return false;
-    if (finalized.number > refreshHorizon.number) return true;
-    return finalized.number === refreshHorizon.number
-      && !refreshHorizon.rejectAtNumber
-      && refreshHorizon.hashes.size === 1
-      && refreshHorizon.hashes.has(finalizedHash);
-  }
-
   #deleteScopeIfIdle(
     scope: string,
     state: ContextGraphAuthorityProjectionScopeState,
   ): void {
     if (
       state.activeRefreshes === 0
-      && state.unsettledRefreshHorizonLeases === 0
-      && state.committedRefreshHorizon === undefined
-      && state.activeRefreshHorizons === undefined
-      && state.rejectedRefreshThrough === undefined
-      && state.rejectedDurableThroughTokens === undefined
-      && state.recoveryBoundaries === undefined
       && state.projection === undefined
       && state.refreshing === undefined
       && state.failedAtMs === undefined
