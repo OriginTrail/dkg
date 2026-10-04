@@ -208,6 +208,9 @@ describe('RFC-64 catalog replay recovery runtime', () => {
       rfc64BackgroundWorkDispatcherV1: dispatcher,
       promoteRfc64OwnerSignedSwmInventoriesV1: promote,
       requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      rfc64CatalogReplayRecoveryRuntimeV1: () => ({
+        status: () => ({ failed: false, unverified: false }),
+      }),
     }, 'public-cg', `0x${'11'.repeat(32)}`);
 
     await dispatcher.whenIdle();
@@ -215,6 +218,47 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     expect(replay).toHaveBeenCalledOnce();
     expect(onError).not.toHaveBeenCalled();
     await dispatcher.closeAndDrain();
+  });
+
+  it('retries an answered replay whose promised catalog rows are still missing', async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+      const replay = vi.fn()
+        .mockResolvedValueOnce(Object.freeze({ requested: 1, failed: 1 }))
+        .mockResolvedValueOnce(Object.freeze({ requested: 1, failed: 0 }));
+      const status = vi.fn()
+        .mockReturnValueOnce({ failed: true, unverified: false })
+        .mockReturnValueOnce({ failed: false, unverified: false });
+      const scheduleAcceptedRecovery = (
+        Rfc64CatalogMethods.prototype as unknown as {
+          scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+            contextGraphId: string,
+            policyDigest: string,
+          ): void;
+        }
+      ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+
+      scheduleAcceptedRecovery.call({
+        rfc64BackgroundWorkDispatcherV1: dispatcher,
+        promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
+        requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+        rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
+      }, 'private-cg', `0x${'33'.repeat(32)}`);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(replay).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(250);
+      await dispatcher.whenIdle();
+
+      expect(replay).toHaveBeenCalledTimes(2);
+      expect(status).toHaveBeenCalledTimes(2);
+      expect(onError).not.toHaveBeenCalled();
+      await dispatcher.closeAndDrain();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('retries a zero-provider replay after private membership settles', async () => {
@@ -226,6 +270,9 @@ describe('RFC-64 catalog replay recovery runtime', () => {
       const replay = vi.fn()
         .mockResolvedValueOnce(Object.freeze({ requested: 0, failed: 0 }))
         .mockResolvedValueOnce(Object.freeze({ requested: 1, failed: 0 }));
+      const status = vi.fn()
+        .mockReturnValueOnce(null)
+        .mockReturnValueOnce({ failed: false, unverified: false });
       const scheduleAcceptedRecovery = (
         Rfc64CatalogMethods.prototype as unknown as {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
@@ -239,6 +286,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         rfc64BackgroundWorkDispatcherV1: dispatcher,
         promoteRfc64OwnerSignedSwmInventoriesV1: promote,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+        rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
       }, 'private-cg', `0x${'44'.repeat(32)}`);
 
       await vi.advanceTimersByTimeAsync(0);
@@ -275,12 +323,13 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         rfc64BackgroundWorkDispatcherV1: dispatcher,
         promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+        rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status: () => null }),
       }, 'private-cg', `0x${'55'.repeat(32)}`);
 
-      await vi.advanceTimersByTimeAsync(120_000);
+      await vi.advanceTimersByTimeAsync(480_000);
       await dispatcher.whenIdle();
 
-      expect(replay).toHaveBeenCalledTimes(7);
+      expect(replay).toHaveBeenCalledTimes(9);
       expect(onError).not.toHaveBeenCalled();
       await dispatcher.closeAndDrain();
     } finally {
@@ -310,6 +359,9 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         rfc64BackgroundWorkDispatcherV1: dispatcher,
         promoteRfc64OwnerSignedSwmInventoriesV1: promote,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+        rfc64CatalogReplayRecoveryRuntimeV1: () => ({
+          status: () => ({ failed: false, unverified: false }),
+        }),
       }, 'public-cg', `0x${'22'.repeat(32)}`);
 
       await vi.advanceTimersByTimeAsync(0);
