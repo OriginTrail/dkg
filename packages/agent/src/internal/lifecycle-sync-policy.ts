@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { resolveBooleanSwitch, resolveSyncReconcilerEnabled } from './sync/backpressure.js';
-import { type DKGAgentConfig } from './dkg-agent-types.js';
+import { resolveBooleanSwitch, resolveSyncReconcilerEnabled } from '../sync/backpressure.js';
+import { type DKGAgentConfig } from '../dkg-agent-types.js';
 
 export function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
   return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
