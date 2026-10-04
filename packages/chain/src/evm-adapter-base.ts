@@ -55,7 +55,10 @@ import {
   createRpcRequestProvider,
   activeRpcRequestAbortSignal,
   activeRpcRequestContext,
+  waitForActiveRpcRequest,
+  withDetachedRpcRequestContext,
   withOwnedRpcRequestContext,
+  withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
@@ -804,6 +807,15 @@ export class EVMChainAdapterBase {
   protected contracts: ContractCache;
 
   protected initialized = false;
+
+  /**
+   * The initialization in flight. Every caller that finds the adapter
+   * uninitialized waits for this one instead of repeating its Hub reads.
+   */
+  private initFlight: Promise<void> | undefined;
+
+  /** Advances when a reset makes a running initialization stale. */
+  private initEpoch = 0;
 
   /** Monotonic fence for physical Hub binding generations, including ABA. */
   protected hubBindingGeneration = 0;
@@ -3195,8 +3207,38 @@ export class EVMChainAdapterBase {
 
   protected async init(): Promise<void> {
     if (this.initialized) return;
+    // The caller waits under its own cancellation and deadline. Neither
+    // reaches the initialization, which other callers are waiting for too.
+    await waitForActiveRpcRequest(this.initFlight ?? this.startInitFlight());
+  }
+
+  /**
+   * One initialization for every caller that needs it. It belongs to the
+   * adapter: no caller's cancellation, deadline, observer or usage attribution
+   * reaches it. It is admitted in the foreground class at authority priority,
+   * the most urgent a waiter can be, so no waiter is held behind work it would
+   * itself pass. The caller that starts it still decides what it always did:
+   * the request class of the long-running work initialization starts.
+   */
+  private startInitFlight(): Promise<void> {
+    const startsRequestClass = activeRpcRequestContext().requestClass;
+    const flight: Promise<void> = withDetachedRpcRequestContext('foreground', () => (
+      withRpcRequestContext(
+        { admissionPriority: 'authority' },
+        () => this.runInitFlight(startsRequestClass),
+      )
+    )).finally(() => {
+      if (this.initFlight === flight) this.initFlight = undefined;
+    });
+    // Its waiters may all have left by the time it fails.
+    flight.catch(() => undefined);
+    this.initFlight = flight;
+    return flight;
+  }
+
+  private async runInitFlight(startsRequestClass: RpcRequestClass): Promise<void> {
     try {
-      await this.initContracts();
+      await this.initContracts(startsRequestClass);
     } catch (err) {
       // `init()` sits on the critical path of every chain write
       // (`createOnChainContextGraph`, publish, verify, …). If the Hub lookups
@@ -3217,7 +3259,21 @@ export class EVMChainAdapterBase {
     }
   }
 
-  protected async initContracts(): Promise<void> {
+  /**
+   * Make the next caller initialize again. An initialization that is running
+   * resolved some of its bindings before this reset, so it is no longer joined
+   * and does not mark the adapter initialized when it ends.
+   */
+  private rearmInit(): void {
+    this.initialized = false;
+    this.initEpoch += 1;
+    this.initFlight = undefined;
+  }
+
+  protected async initContracts(
+    startsRequestClass: RpcRequestClass = activeRpcRequestContext().requestClass,
+  ): Promise<void> {
+    const epoch = this.initEpoch;
     this.contracts.identity = await this.resolveContract('Identity');
     this.contracts.profile = await this.resolveContract('Profile');
     this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
@@ -3320,8 +3376,10 @@ export class EVMChainAdapterBase {
     // delay a chain write. Only the adapter the composition root gave a store
     // does anything at all here.
     // Both starts spawn detached work. Its context must belong to the adapter,
-    // not to whichever transient caller happened to initialize it first.
-    await withOwnedRpcRequestContext({}, async () => {
+    // not to whichever transient caller happened to initialize it first: the
+    // work keeps that caller's request class, as it always has, and nothing
+    // else of it or of the initialization that runs here.
+    await withDetachedRpcRequestContext(startsRequestClass, async () => {
       this.startChainIndexRuntime();
       await this.startHubRotationListener();
     });
@@ -3344,7 +3402,9 @@ export class EVMChainAdapterBase {
       );
     }
 
-    this.initialized = true;
+    // A reset that landed while this ran re-armed initialization for bindings
+    // resolved before it.
+    if (this.initEpoch === epoch) this.initialized = true;
   }
 
   protected requireV9(): void {
@@ -5136,7 +5196,7 @@ export class EVMChainAdapterBase {
     // every binding. Do not clear boot-bound handles here: the callback can
     // fire between a public method's `await init()` and its first
     // `this.contracts.X` read.
-    this.initialized = false;
+    this.rearmInit();
   }
 
   /**
@@ -5171,7 +5231,7 @@ export class EVMChainAdapterBase {
     // the entire resolved-address memo along with every bound handle.
     this.resolvedContractAddressCache.invalidateAll();
     this.invalidateRandomSamplingPair();
-    this.initialized = false;
+    this.rearmInit();
   }
 
   protected requireContextGraphStorage(): Contract {
