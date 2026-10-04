@@ -36,6 +36,13 @@ const routes: { name: string; options: QueryOptions; expected: string[] }[] = [
     expected: [`${CODE}/_shared_memory`, `${CODE}/_shared_memory/author/1`, METADATA[3]] },
 ];
 
+routes.push(...routes.map(route => ({
+  name: `${route.name} without convenience shared-memory inclusion`,
+  options: { ...route.options, includeSharedMemory: false },
+  expected: route.options.graphSuffix === '_shared_memory' ? route.expected
+    : route.expected.filter(graph => graph !== `${route.options.subGraphName ? CODE : ROOT}/_shared_memory`),
+})));
+
 describe('scoped route policy equivalence', () => {
   it.each(routes)('ordinary, inventory and exact reads agree for $name', async ({ options, expected }) => {
     const store = new OxigraphStore();

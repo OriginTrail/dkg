@@ -56,60 +56,33 @@ export function isScopedRoutePartition(
   knownChildContextGraphs: Set<string>,
 ): boolean {
   if (policy.metadataGraphs.includes(graph)) return true;
-  if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return false;
-  if (graph !== policy.rootGraph && (
-    !graph.startsWith(`${policy.rootGraph}/`)
-    || isExcludedContentGraphTail(graph.slice(policy.rootGraph.length + 1))
-  )) return false;
+  const root = policy.rootGraph;
+  if (graph !== root && !graph.startsWith(`${root}/`)) return false;
+  const tail = graph === root ? '' : graph.slice(root.length + 1);
+  if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)
+    || isExcludedContentGraphTail(tail)) return false;
   if (policy.contentGraphs.includes(graph)) return true;
   if (policy.isSwmOnlyRoute) return graph.startsWith(`${policy.sharedMemoryGraph}/`);
-  return isScopedContentGraph(graph, policy.contextGraphId, registeredSubGraphs,
-    registeredAssertionGraphs, knownChildContextGraphs, policy.subGraphName);
-}
+  if (graph === root) return !policy.subGraphName;
 
-export function isScopedContentGraph(
-  graph: string,
-  contextGraphId: string,
-  registeredSubGraphs: Set<string>,
-  registeredAssertionGraphs: Set<string>,
-  knownChildContextGraphs: Set<string>,
-  subGraphName?: string,
-): boolean {
-  const root = contextGraphDataUri(contextGraphId);
-  if (graph === root) return !subGraphName;
-  if (!graph.startsWith(`${root}/`)) return false;
-  if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return false;
-
-  const tail = graph.slice(root.length + 1);
-  if (
-    !tail ||
-    isMetadataGraphTail(tail) ||
-    isPrivateGraphTail(tail) ||
-    isRulesGraphTail(tail) ||
-    isStagingGraphTail(tail)
-  ) {
-    return false;
+  // Root and registered-subgraph partitions share one content-family policy.
+  let contentTail = tail;
+  const rootFamily = ['_shared_memory/', '_verifiable_memory/', '_working_memory/']
+    .some(prefix => tail.startsWith(prefix));
+  if (rootFamily) {
+    if (policy.subGraphName) return false;
+  } else {
+    const slash = tail.indexOf('/');
+    const name = slash >= 0 ? tail.slice(0, slash) : tail;
+    if ((policy.subGraphName && name !== policy.subGraphName)
+      || !registeredSubGraphs.has(name) || !validateSubGraphName(name).valid) return false;
+    contentTail = slash >= 0 ? tail.slice(slash + 1) : '';
+    if (!contentTail) return true;
   }
-
-  if (!subGraphName) {
-    if (tail.startsWith('_shared_memory/')) return true;
-    if (tail.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(tail);
-    if (tail.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
-  }
-
-  const slash = tail.indexOf('/');
-  const firstSegment = slash >= 0 ? tail.slice(0, slash) : tail;
-  const remaining = slash >= 0 ? tail.slice(slash + 1) : '';
-  if (subGraphName && firstSegment !== subGraphName) return false;
-  if (!registeredSubGraphs.has(firstSegment) || !validateSubGraphName(firstSegment).valid) {
-    return false;
-  }
-
-  if (!remaining) return true;
-  if (remaining.startsWith('_shared_memory/')) return true;
-  if (remaining.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(remaining);
-  if (remaining.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
-  return false;
+  if (contentTail.startsWith('_shared_memory/')
+    || contentTail.startsWith('_verifiable_memory/')) return true;
+  return contentTail.startsWith('_working_memory/')
+    && isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
 }
 
 function isRegisteredAssertionGraphOrScopedChild(

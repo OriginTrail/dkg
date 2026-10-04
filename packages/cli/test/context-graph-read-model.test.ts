@@ -104,18 +104,22 @@ describe('context-graph read model', () => {
   it('preserves QueryCatalog opt-in through the admitted registered partition inventory', async () => {
     const store = new OxigraphStore();
     const catalogGraph = `${ROOT}/meta/_working_memory/0xabc/1`;
+    const unqualifiedGraph = `${ROOT}/meta/_working_memory/0xabc/2`;
     try {
       await store.insert([
         { subject: `${ROOT}/meta`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${ROOT}/_meta` },
         { subject: `${ROOT}/meta`, predicate: 'http://schema.org/name', object: '"meta"', graph: `${ROOT}/_meta` },
         { subject: 'urn:assertion:catalog', predicate: 'http://dkg.io/ontology/assertionGraph', object: catalogGraph, graph: `${ROOT}/_meta` },
+        { subject: 'urn:assertion:unqualified', predicate: 'http://dkg.io/ontology/assertionGraph', object: unqualifiedGraph, graph: `${ROOT}/_meta` },
+        { subject: 'urn:unqualified', predicate: 'http://schema.org/name', object: '"not a QueryCatalog"', graph: unqualifiedGraph },
         { subject: 'urn:catalog', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/profile/QueryCatalog', graph: catalogGraph },
         { subject: 'urn:catalog', predicate: 'http://schema.org/name', object: '"queries"', graph: catalogGraph },
       ]);
       const engine = new DKGQueryEngine(store);
       const reader: ContextGraphReader = {
         listGraphs: () => engine.listContextGraphQueryPartitions(CG),
-        query: async (sparql: string) => ({ type: 'bindings' as const, bindings: (await engine.query(sparql, {
+        query: async (sparql: string, _options, policy) => ({ type: 'bindings' as const, bindings: (await engine.query(sparql, {
+          includeSharedMemory: policy.includeSharedMemory,
           contextGraphId: CG, includeContextGraphPartitions: true, exactContextGraphPartitions: true,
         })).bindings }),
       };
@@ -124,21 +128,43 @@ describe('context-graph read model', () => {
       expect(included.layers.wm.ok).toBe(true);
       expect(included.layers.wm.bindings).toHaveLength(2);
       expect(included.layers.wm.bindings.every(row => row.s === 'urn:catalog')).toBe(true);
+      // Diagnostics retain their admitted raw-graph count contract.
+      const stats = await readContextGraphNamedGraphStats(reader, CG);
+      expect(stats.find(row => row.graph === catalogGraph)?.tripleCount).toBe(2);
+      expect(stats.find(row => row.graph === unqualifiedGraph)?.tripleCount).toBe(1);
     } finally { await store.close(); }
   });
 
   it('classifies the existing WM, SWM, and VM graph families without prefix collisions', () => {
-    expect(classifyMemoryGraph(`${ROOT}/notes/assertion/0xabc/a`, CG)).toBe('wm');
-    expect(classifyMemoryGraph(`${ROOT}/notes/_working_memory/a`, CG)).toBe('wm');
-    expect(classifyMemoryGraph(`${ROOT}/notes/_shared_memory`, CG)).toBe('swm');
-    expect(classifyMemoryGraph(`${ROOT}/notes/_shared_memory/ka-1`, CG)).toBe('swm');
-    expect(classifyMemoryGraph(ROOT, CG)).toBe('vm');
-    expect(classifyMemoryGraph(`${ROOT}/notes`, CG)).toBe('vm');
-    expect(classifyMemoryGraph(`${ROOT}/notes/_verifiable_memory/ka-1`, CG)).toBe('vm');
+    expect(classifyMemoryGraph(`${ROOT}/notes/assertion/0xabc/a`, CG)?.layer).toBe('wm');
+    expect(classifyMemoryGraph(`${ROOT}/notes/_working_memory/a`, CG)?.layer).toBe('wm');
+    expect(classifyMemoryGraph(`${ROOT}/notes/_shared_memory`, CG)?.layer).toBe('swm');
+    expect(classifyMemoryGraph(`${ROOT}/notes/_shared_memory/ka-1`, CG)?.layer).toBe('swm');
+    expect(classifyMemoryGraph(ROOT, CG)?.layer).toBe('vm');
+    expect(classifyMemoryGraph(`${ROOT}/notes`, CG)?.layer).toBe('vm');
+    expect(classifyMemoryGraph(`${ROOT}/notes/_verifiable_memory/ka-1`, CG)?.layer).toBe('vm');
 
-    expect(classifyMemoryGraph(`${ROOT}/meta/assertion/0xabc/profile`, CG)).toBeUndefined();
-    expect(classifyMemoryGraph(`${ROOT}/notes/_shared_memory/staging/ka-1`, CG)).toBeUndefined();
-    expect(classifyMemoryGraph(`${ROOT}-other/notes`, CG)).toBeUndefined();
+    expect(classifyMemoryGraph(`${ROOT}/meta/assertion/0xabc/profile`, CG)?.layer).toBeUndefined();
+    expect(classifyMemoryGraph(`${ROOT}/notes/_shared_memory/staging/ka-1`, CG)?.layer).toBeUndefined();
+    expect(classifyMemoryGraph(`${ROOT}-other/notes`, CG)?.layer).toBeUndefined();
+  });
+
+  it('plans catalog visibility, qualification and stats authority in one target', () => {
+    const wm = `${ROOT}/meta/_working_memory/0xabc/1`;
+    const swm = `${ROOT}/meta/_shared_memory/0xabc/1`;
+    expect(classifyMemoryGraph(wm, CG)).toBeUndefined();
+    expect(classifyMemoryGraph(wm, CG, { includeQueryCatalog: true })).toEqual({
+      graph: wm, layer: 'wm', catalogQualification: 'query-catalog',
+    });
+    expect(classifyMemoryGraph(swm, CG, { includeQueryCatalog: true })).toEqual({
+      graph: swm, layer: 'swm', catalogQualification: 'query-catalog',
+    });
+    expect(classifyMemoryGraph(swm, CG, { purpose: 'named-graph-stats' })).toEqual({
+      graph: swm, layer: 'swm', catalogQualification: 'unqualified',
+    });
+    expect(classifyMemoryGraph(`${ROOT}/_meta`, CG, { purpose: 'named-graph-stats' })).toEqual({
+      graph: `${ROOT}/_meta`, layer: undefined, catalogQualification: 'unqualified',
+    });
   });
 
   it('uses graph-index discovery and small exact-IRI batches instead of GRAPH variables or VALUES', async () => {

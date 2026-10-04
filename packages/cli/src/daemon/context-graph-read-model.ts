@@ -64,78 +64,86 @@ function isScopedGraph(graph: string, root: string): boolean {
   return graph === root || graph.startsWith(`${root}/`);
 }
 
-/**
- * Classify one concrete named graph using the same layer rules previously
- * embedded in useMemoryEntities' three GRAPH-variable SPARQL queries.
- */
+/** One admitted graph's complete read plan; builders never reclassify its URI. */
+export interface ContextGraphReadTarget {
+  graph: string;
+  layer: MemoryLayerKey | undefined;
+  catalogQualification: 'query-catalog' | 'unqualified';
+}
+
+interface GraphReadPlanningOptions {
+  purpose?: 'memory-layers' | 'named-graph-stats';
+  includeQueryCatalog?: boolean;
+}
+
+/** Catalog visibility and qualification are selected together with the layer. */
 export function classifyMemoryGraph(
   graph: string,
   contextGraphId: string,
-): MemoryLayerKey | undefined {
+  options: GraphReadPlanningOptions = {},
+): ContextGraphReadTarget | undefined {
   const root = `did:dkg:context-graph:${contextGraphId}`;
   if (!isScopedGraph(graph, root)) return undefined;
-
+  const stats = options.purpose === 'named-graph-stats';
   const isMeta = graph === `${root}/meta` || graph.includes('/meta/');
-  if (
-    graph.startsWith(`${root}/`)
+  const isSharedMemory = graph.endsWith('/_shared_memory') || graph.includes('/_shared_memory/');
+  const catalogTail = graph.startsWith(`${root}/meta/`) ? graph.slice(`${root}/meta/`.length) : '';
+  const catalogLayer = catalogTail.startsWith('assertion/') || catalogTail.startsWith('_working_memory/')
+    ? 'wm' : catalogTail.startsWith('_shared_memory/') && !catalogTail.includes('/staging/') ? 'swm' : undefined;
+  let layer: MemoryLayerKey | undefined;
+  let catalogQualification: ContextGraphReadTarget['catalogQualification'] = 'unqualified';
+  if (isMeta) {
+    if (stats) layer = isSharedMemory ? 'swm' : catalogLayer;
+    else if (options.includeQueryCatalog && catalogLayer) {
+      layer = catalogLayer;
+      catalogQualification = 'query-catalog';
+    }
+  } else if (graph.startsWith(`${root}/`)
     && (graph.includes('/assertion/') || graph.includes('/_working_memory/'))
-    && !isMeta
-    && !graph.endsWith('/_meta')
-  ) {
-    return 'wm';
+    && !graph.endsWith('/_meta')) {
+    layer = 'wm';
+  } else if (isSharedMemory && !graph.includes('/_shared_memory/staging/')) {
+    layer = 'swm';
+  } else if (!graph.includes('/assertion/') && !graph.includes('/_working_memory')
+    && !graph.includes('/_shared_memory') && !graph.includes('_verifiable_memory_meta')
+    && !graph.endsWith('/_meta') && !graph.includes('/_private') && !graph.includes('/_rules')) {
+    layer = 'vm';
   }
-
-  if (
-    (graph.endsWith('/_shared_memory') || graph.includes('/_shared_memory/'))
-    && graph !== `${root}/meta/_shared_memory`
-    && !isMeta
-    && !graph.includes('/_shared_memory/staging/')
-  ) {
-    return 'swm';
-  }
-
-  if (
-    !graph.includes('/assertion/')
-    && !graph.includes('/_working_memory')
-    && !graph.includes('/_shared_memory')
-    && !graph.includes('_verifiable_memory_meta')
-    && !graph.endsWith('/_meta')
-    && !isMeta
-    && !graph.includes('/_private')
-    && !graph.includes('/_rules')
-  ) {
-    return 'vm';
-  }
-
-  return undefined;
+  // Diagnostic counts include every admitted graph; even hidden catalog SWM
+  // counts retain the same shared-memory authority requirement as layer reads.
+  if (stats && isSharedMemory) layer = 'swm';
+  if (!stats && layer === undefined) return undefined;
+  return { graph: assertSafeIri(graph), layer, catalogQualification };
 }
 
-function exactGraphUnion(graphs: readonly string[]): string {
-  return graphs
-    .map((graph) =>
-      `{ GRAPH <${graph}> { ?s ?p ?o } BIND(<${graph}> AS ?g) }`)
-    .join('\nUNION\n');
+function planGraphReads(graphs: readonly string[], contextGraphId: string, options: GraphReadPlanningOptions): ContextGraphReadTarget[] {
+  return [...new Set(graphs)].sort().flatMap(graph => {
+    const target = classifyMemoryGraph(graph, contextGraphId, options);
+    return target ? [target] : [];
+  });
 }
 
-function buildLayerQuery(
-  graphs: readonly string[],
-  limit: number,
-  layer: MemoryLayerKey,
-  contextGraphId: string,
-): string {
+function exactGraphUnion(targets: readonly ContextGraphReadTarget[]): string {
+  return targets.map(({ graph, catalogQualification }) => {
+    const qualification = catalogQualification === 'query-catalog'
+      ? '?catalog a <http://dkg.io/ontology/profile/QueryCatalog> . ' : '';
+    return `{ GRAPH <${graph}> { ${qualification}?s ?p ?o } BIND(<${graph}> AS ?g) }`;
+  }).join('\nUNION\n');
+}
+
+function buildLayerQuery(targets: readonly ContextGraphReadTarget[], limit: number, layer: MemoryLayerKey): string {
   const predicateFilter = layer === 'swm'
-    ? '\nFILTER(?p != <http://dkg.io/ontology/workspaceOwner>)'
-    : '';
+    ? '\nFILTER(?p != <http://dkg.io/ontology/workspaceOwner>)' : '';
   return `SELECT ?s ?p ?o ?g WHERE {
-${graphs.map(graph => `{ GRAPH <${graph}> { ${graph.startsWith(`did:dkg:context-graph:${contextGraphId}/meta/`) ? '?catalog a <http://dkg.io/ontology/profile/QueryCatalog> . ' : ''}?s ?p ?o } BIND(<${graph}> AS ?g) }`).join('\nUNION\n')}${predicateFilter}
+${exactGraphUnion(targets)}${predicateFilter}
 }
 LIMIT ${limit}`;
 }
 
-function buildStatsQuery(graphs: readonly string[]): string {
+function buildStatsQuery(targets: readonly ContextGraphReadTarget[]): string {
   return `SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
 WHERE {
-${exactGraphUnion(graphs)}
+${exactGraphUnion(targets)}
 }
 GROUP BY ?g`;
 }
@@ -151,21 +159,20 @@ function parseCount(value: unknown): number {
 }
 
 async function readLayer(
-  graphs: readonly string[],
+  targets: readonly ContextGraphReadTarget[],
   limit: number,
   layer: MemoryLayerKey,
   options: QueryOptions,
-  contextGraphId: string,
   query: ContextGraphReader['query'],
 ): Promise<MemoryLayerReadResult> {
   const bindings: MemoryLayerBinding[] = [];
 
-  for (let offset = 0; offset < graphs.length; offset += EXACT_GRAPH_QUERY_BATCH_SIZE) {
+  for (let offset = 0; offset < targets.length; offset += EXACT_GRAPH_QUERY_BATCH_SIZE) {
     throwIfAborted(options.signal);
-    const batch = graphs.slice(offset, offset + EXACT_GRAPH_QUERY_BATCH_SIZE);
+    const batch = targets.slice(offset, offset + EXACT_GRAPH_QUERY_BATCH_SIZE);
     const remaining = limit - bindings.length;
     const result = await query(
-      buildLayerQuery(batch, remaining + 1, layer, contextGraphId),
+      buildLayerQuery(batch, remaining + 1, layer),
       options,
       { includeSharedMemory: layer === 'swm' },
     );
@@ -216,17 +223,9 @@ export async function readMemoryLayers(
     source: options.source ?? 'node-ui.memory-layers',
   };
   const discovered = await reader.listGraphs(queryOptions);
-  const graphs = [...new Set(discovered)].filter(graph => isScopedGraph(graph, `did:dkg:context-graph:${contextGraphId}`)).map(assertSafeIri).sort();
-  const byLayer: Record<MemoryLayerKey, string[]> = { wm: [], swm: [], vm: [] };
-  for (const graph of graphs) {
-    let layer = classifyMemoryGraph(graph, contextGraphId);
-    const metaRoot = `did:dkg:context-graph:${contextGraphId}/meta/`;
-    if (options.includeQueryCatalog && graph.startsWith(metaRoot)) {
-      if (graph.startsWith(`${metaRoot}assertion/`) || graph.startsWith(`${metaRoot}_working_memory/`)) layer = 'wm';
-      if (graph.startsWith(`${metaRoot}_shared_memory/`) && !graph.includes('/staging/')) layer = 'swm';
-    }
-    if (layer) byLayer[layer].push(graph);
-  }
+  const targets = planGraphReads(discovered, contextGraphId, { includeQueryCatalog: options.includeQueryCatalog });
+  const byLayer: Record<MemoryLayerKey, ContextGraphReadTarget[]> = { wm: [], swm: [], vm: [] };
+  for (const target of targets) if (target.layer) byLayer[target.layer].push(target);
 
   const layers = {} as Record<MemoryLayerKey, MemoryLayerReadResult>;
   for (const layer of LAYER_KEYS) {
@@ -236,7 +235,6 @@ export async function readMemoryLayers(
         MEMORY_LAYER_LIMITS[layer],
         layer,
         { ...queryOptions, source: `node-ui.memory-layers.${layer}` },
-        contextGraphId,
         reader.query.bind(reader),
       );
     } catch (error) {
@@ -264,13 +262,9 @@ export async function readContextGraphNamedGraphStats(
     source: options.source ?? 'node-ui.sub-graph-stats',
   };
   const discovered = await reader.listGraphs(queryOptions);
-  const graphs = [...new Set(discovered)].filter(graph => isScopedGraph(graph, `did:dkg:context-graph:${contextGraphId}`)).map(assertSafeIri).sort();
+  const targets = planGraphReads(discovered, contextGraphId, { purpose: 'named-graph-stats' });
   const stats: ContextGraphNamedGraphStats[] = [];
-
-  // Catalog graphs are hidden from the entity-layer classifier, but all SWM
-  // partitions still require shared-memory authority for their counts.
-  const isSharedMemory = (graph: string) => graph.endsWith('/_shared_memory') || graph.includes('/_shared_memory/');
-  const groups = [graphs.filter(graph => !isSharedMemory(graph)), graphs.filter(isSharedMemory)];
+  const groups = [targets.filter(target => target.layer !== 'swm'), targets.filter(target => target.layer === 'swm')];
   for (const [index, group] of groups.entries()) {
     for (let offset = 0; offset < group.length; offset += EXACT_GRAPH_QUERY_BATCH_SIZE) {
       throwIfAborted(queryOptions.signal);

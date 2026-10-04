@@ -32,7 +32,7 @@ export interface QueryOptions {
   includeContextGraphPartitions?: boolean;
   /** Execute concrete GRAPH IRIs from the same registered public partition set
    * as broad count scans, without GRAPH-variable expansion or route fan-out.
-   * Requires includeContextGraphPartitions and rejects GRAPH variables. */
+   * Requires includeContextGraphPartitions and rejects GRAPH variables and DESCRIBE. */
   exactContextGraphPartitions?: boolean;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context

@@ -49,6 +49,23 @@ describe('exact context-graph partition reads', () => {
     } finally { await store.close(); }
   });
 
+
+  it('rejects DESCRIBE through exact admission before private or foreign descriptions can execute', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([
+        { subject: 'urn:described', predicate: 'urn:public', object: '"visible"', graph: ROOT },
+        { subject: 'urn:described', predicate: 'urn:private', object: '"private sentinel"', graph: `${ROOT}/_private/1` },
+        { subject: 'urn:described', predicate: 'urn:foreign', object: '"foreign sentinel"', graph: 'did:dkg:context-graph:other' },
+      ]);
+      const spy = vi.spyOn(store, 'query');
+      await expect(new DKGQueryEngine(store).query(
+        `DESCRIBE <urn:described> WHERE { GRAPH <${ROOT}> { <urn:described> ?p ?o } }`, options,
+      )).rejects.toThrow(/Exact partition reads do not support DESCRIBE/);
+      expect(spy.mock.calls.some(([sparql]) => /^DESCRIBE\b/i.test(sparql))).toBe(false);
+    } finally { await store.close(); }
+  });
+
   it('authorizes each exact batch from bounded live metadata without enumerating the CG again', async () => {
     const inner = new OxigraphStore();
     const submitted: string[] = [];
