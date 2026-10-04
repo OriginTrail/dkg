@@ -142,13 +142,13 @@ describe('operation identity preservation (GH#2273)', () => {
       quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
     await store.insert(opRowsOf(remoteEquivalent));
     const { materializer } = materializerFor(store);
-    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+    expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent))))
       .toMatchObject({ winnerShareOperationId: 'op-v1' });
     // Solo-removal for the equivalence conjunct: same shape, but the stored
     // operation genuinely differs from what the descriptor offers => the
     // decision MUST fall back to descriptor-wins (null), or a real content
     // change could be silently masked by identity preservation.
-    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteChanged)))
+    expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteChanged))))
       .toBeNull();
   });
 
@@ -180,7 +180,7 @@ describe('operation identity preservation (GH#2273)', () => {
       const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: envelopeMeta });
       expect(descriptors).toHaveLength(1);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptors[0]!))).toBeNull();
     }
 
     // (b) descriptor carries a different author (prov:wasAttributedTo).
@@ -202,7 +202,7 @@ describe('operation identity preservation (GH#2273)', () => {
       const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: authorMeta });
       expect(descriptors).toHaveLength(1);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptors[0]!))).toBeNull();
     }
 
     // (d) stored winner carries a corrupt publishedAt — also outside the key
@@ -220,7 +220,7 @@ describe('operation identity preservation (GH#2273)', () => {
         quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
       await store.insert(opRowsOf(remoteEquivalent));
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
     }
 
     // (e) stored winner has NO publishedAt row at all — the plain resolver
@@ -238,7 +238,7 @@ describe('operation identity preservation (GH#2273)', () => {
         quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
       await store.insert(opRowsOf(remoteEquivalent));
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
     }
 
     // (f) private commitment differs: same PUBLIC digest and counts, but the
@@ -268,7 +268,7 @@ describe('operation identity preservation (GH#2273)', () => {
       const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: remotePrivateMeta });
       expect(descriptors).toHaveLength(1);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptors[0]!))).toBeNull();
     }
 
     // (c) stored winner is key-equal but missing publisherPeerId — the key
@@ -283,7 +283,7 @@ describe('operation identity preservation (GH#2273)', () => {
         quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
       await store.insert(opRowsOf(remoteEquivalent));
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
     }
   });
 
@@ -448,7 +448,7 @@ describe('operation identity preservation (GH#2273)', () => {
       quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
     await store.insert(opRowsOf(remoteEquivalent));
     const { materializer } = materializerFor(store);
-    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
   });
 
   it('string-valued identity rows compare across plain and xsd:string forms', async () => {
@@ -645,7 +645,7 @@ describe('operation identity preservation (GH#2273)', () => {
       quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
     await store.insert(opRowsOf(remoteEquivalent));
     const { materializer } = materializerFor(store);
-    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
   });
 
   it('refuses a stored winner whose snapshot-graph locator is stale, wrong or ambiguous', async () => {
@@ -674,7 +674,7 @@ describe('operation identity preservation (GH#2273)', () => {
       await store.insert(localWithLocator([]));
       await store.insert(remoteRows);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
     }
 
     // (b) same locator with the snapshot graph fully populated => preserve.
@@ -686,7 +686,7 @@ describe('operation identity preservation (GH#2273)', () => {
       await store.insert(localWithLocator([]));
       await store.insert(remoteRows);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent))))
         .toMatchObject({ winnerShareOperationId: 'op-v1' });
     }
 
@@ -704,7 +704,7 @@ describe('operation identity preservation (GH#2273)', () => {
       await store.insert(localWithLocator([]));
       await store.insert(remoteRows);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
     }
 
     // (c) BOTH locator forms on the stored winner => ambiguous => refuse.
@@ -718,7 +718,7 @@ describe('operation identity preservation (GH#2273)', () => {
       ]));
       await store.insert(remoteRows);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
     }
 
     // (c2) MALFORMED graph locator (a literal, not an IRI term — the shape a
@@ -739,7 +739,7 @@ describe('operation identity preservation (GH#2273)', () => {
           : quad));
       await store.insert(remoteRows);
       const { materializer } = materializerFor(store);
-      await expect(materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+      await expect(materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent))))
         .resolves.toBeNull();
     }
 
@@ -761,7 +761,7 @@ describe('operation identity preservation (GH#2273)', () => {
       ]);
       await store.insert(remoteRows);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
     }
 
     // (e) MULTI-VALUED ref rows (one canonical, one stale) => refuse: the
@@ -776,7 +776,7 @@ describe('operation identity preservation (GH#2273)', () => {
       ]);
       await store.insert(remoteRows);
       const { materializer } = materializerFor(store);
-      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+      expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
     }
   });
 
@@ -797,7 +797,7 @@ describe('operation identity preservation (GH#2273)', () => {
     await store.insert([...twinB.meta]);
     await store.insert([...twinA.meta]);
     const { materializer } = materializerFor(store);
-    const preserved = await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent));
+    const preserved = await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)));
     expect(preserved).toMatchObject({ winnerShareOperationId: 'op-aa' });
     await materializer.repairHeadPreservingIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)), 'op-aa');
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
@@ -860,7 +860,7 @@ describe('operation identity preservation (GH#2273)', () => {
       quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
     await store.insert(opRowsOf(remoteEquivalent));
     const { materializer } = materializerFor(store);
-    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
   });
 
   it('spares another KA\'s operation when repairing with a preserved winner (ownership guard)', async () => {
@@ -908,7 +908,7 @@ describe('operation identity preservation (GH#2273)', () => {
       quad.subject === remoteChanged.headSubject && quad.predicate === `${DKG}shareOperationId`));
     await store.insert(opRowsOf(remoteChanged));
     const { materializer } = materializerFor(store);
-    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)))).toBeNull();
   });
 
   it('a verified graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {

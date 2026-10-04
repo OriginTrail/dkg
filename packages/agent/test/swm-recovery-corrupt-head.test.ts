@@ -25,7 +25,7 @@ describe('real corrupt-head recovery admission', () => {
     const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: old.meta })[0]!;
     const materializer = createSharedMemorySnapshotMaterializer({ store, writeLocks: new Map(), invalidateListContextGraphsCache: () => {}, readConfirmedKnowledgeAssetVersion: async () => 0n });
     expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
-    expect(await materializer.readStoredHead(descriptor)).toMatchObject({ status: 'corrupt' });
+    expect((await materializer.prepareRecoveredDescriptor(descriptor)).storedHead).toMatchObject({ status: 'corrupt' });
     const before = await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }');
     expect(await applyVerifiedSwmRecoveryGraphAsset({ contextGraphId: CG, asset: { kind: 'preserve-equivalent', descriptor }, ports: { store, snapshotMaterializer: materializer, replaceMetaForGraphAssets: assets => materializer.replaceMetaForGraphAssets(assets) } })).toMatchObject({ insertedGraphQuads: 0, insertedMetaQuads: 0 });
     expect(await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }')).toEqual(before);

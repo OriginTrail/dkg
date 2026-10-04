@@ -9,7 +9,7 @@ import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
  *     materialized; a short graph reads as NOT materialized; and — the
  *     count-only trap — an equal-count graph holding an OLDER version's
  *     content reads as NOT materialized because the digest differs.
- *   - `readStoredHead` returns canonical corruption when append-style meta
+ *   - `prepareRecoveredDescriptor().storedHead` returns canonical corruption when append-style meta
  *     inserts left several version rows on one head subject, and requires
  *     complete immutable equivalence before healing that residue.
  *   - `replaceHeadMetadata` collapses the head to a clean subject: old head
@@ -408,11 +408,11 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     });
   });
 
-  describe('readStoredHead', () => {
+  describe('prepared stored head', () => {
     it('is null/clean when no head exists', async () => {
       const store = new OxigraphStore();
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({ status: 'missing' });
+      expect((await materializer.prepareRecoveredDescriptor(descriptorFor(v1))).storedHead).toMatchObject({ status: 'missing' });
     });
 
     it('reads a single-version head without flagging repair', async () => {
@@ -422,7 +422,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       // GH#2273 — the single unambiguous id is exposed so catch-up can compare
       // it against a descriptor's id before deciding whether the head may be
       // rewritten at all.
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({ status: 'resolved', head: { assertionVersion: '1', shareOperationId: 'op-v1' } });
+      expect((await materializer.prepareRecoveredDescriptor(descriptorFor(v1))).storedHead).toMatchObject({ status: 'resolved', head: { assertionVersion: '1', shareOperationId: 'op-v1' } });
     });
 
     it('returns canonical corruption for union-insert residue without an aggregate acquisition', async () => {
@@ -437,7 +437,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       // arbitrary pick (the exact failure the field exists to prevent), so
       // ambiguity reads as null and the decision routes through repair.
       const query = vi.spyOn(store, 'query');
-      expect(await materializer.readStoredHead(descriptorFor(v2))).toMatchObject({ status: 'corrupt', error: { code: 'KA_WORKSPACE_HEAD_CORRUPT' } });
+      expect((await materializer.prepareRecoveredDescriptor(descriptorFor(v2))).storedHead).toMatchObject({ status: 'corrupt', error: { code: 'KA_WORKSPACE_HEAD_CORRUPT' } });
       expect(query.mock.calls.some(([sparql]) => sparql.includes('MAX('))).toBe(false);
     });
   });
@@ -878,7 +878,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(h.atomicReplaceCalls()).toBe(0);
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toMatchObject({
+      expect((await materializer.prepareRecoveredDescriptor(descriptorFor(v1))).storedHead).toMatchObject({
         status: 'resolved', head: { assertionVersion: '2', shareOperationId: 'op-v2' },
       });
       await expect(store.query(
@@ -1486,7 +1486,7 @@ describe('T9b — the already-materialized exit repairs an absent or stale head'
 
     // The r26 residual, reproduced exactly: assertion graph written by an
     // earlier partial round, zero head rows. `needsRepair` is FALSE here
-    // (`readStoredHead` returns `{version: null, needsRepair: false}` when the
+    // (`prepareRecoveredDescriptor().storedHead` returns `{version: null, needsRepair: false}` when the
     // subject carries nothing), so a repair gated only on `needsRepair` never
     // fires and the KA stays stranded.
     await store.insert(inGraph(target.payload, target.assertionGraph));

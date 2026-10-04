@@ -15,6 +15,12 @@ const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const ACK_WINDOW_MS = 5 * 60_000;
 const BATCH_SIZE = 32;
+/** Complete TTL policy, shared by operation and alias retirement under one KA lock. */
+export interface DraftOperationRetirementPolicy {
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly cutoffMs: number;
+  readonly mayRetire: (operationSubject: string) => Promise<boolean>;
+}
 const cursors = new WeakMap<TripleStore, Map<string, { operation: string; privateGraph: string }>>();
 
 async function exists(store: TripleStore, query: string): Promise<boolean> {
@@ -127,7 +133,7 @@ async function collectUnqueuedDraftOperation(
   operationSubject: string,
   now: number,
   collect: () => Promise<void>,
-  ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: (operationSubject: string) => Promise<boolean> },
+  ownership: DraftOperationRetirementPolicy,
 ): Promise<void> {
   if (references.rawNamespaces.has(JSON.stringify([contextGraphId, subGraphName ?? '']))) return;
   const meta = `did:dkg:context-graph:${contextGraphId}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory_meta`;
@@ -140,40 +146,35 @@ async function collectUnqueuedDraftOperation(
   if (workspaceOperationSubject(contextGraphId, id) !== operationSubject) return;
   if (references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, id))) return;
   const retire = async () => {
-    if (ownership) {
-      const current = await store.query(`SELECT ?at WHERE { GRAPH <${meta}> { <${operationSubject}> <${DKG}publishedAt> ?at } }`, { source: 'agent.draftArtifacts.ttlCurrentExpiry', priority: 'background' });
-      if (current.type !== 'bindings' || current.bindings.length === 0
-        || current.bindings.some(row => !row['at'] || !Number.isFinite(Date.parse(literal(row['at']))) || Date.parse(literal(row['at'])) >= ownership.cutoffMs)) return;
-      if (ownership.mayRetire && !await ownership.mayRetire(operationSubject)) return;
-    }
+    const current = await store.query(`SELECT ?at WHERE { GRAPH <${meta}> { <${operationSubject}> <${DKG}publishedAt> ?at } }`, { source: 'agent.draftArtifacts.ttlCurrentExpiry', priority: 'background' });
+    if (current.type !== 'bindings' || current.bindings.length === 0
+      || current.bindings.some(row => !row['at'] || !Number.isFinite(Date.parse(literal(row['at']))) || Date.parse(literal(row['at'])) >= ownership.cutoffMs)) return;
+    if (!await ownership.mayRetire(operationSubject)) return;
     // Every pointer in the current alias class owns the same assertion.
     // A live, queued, ACK-owned, or unreadable alias keeps the entire class,
     // including the older publisher clock. This read and all TTL mutations
     // share the receiver's KA lock; the collection fence owns queue admission.
-    if (ownership) {
-      const aliases = await store.query(`SELECT DISTINCT ?alias ?at WHERE { GRAPH <${meta}> {
-        ?head <${DKG}shareOperationId> ${sparqlString(id)} ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ?alias .
-        FILTER(?alias != ${sparqlString(id)})
-        OPTIONAL { ?op <${DKG}shareOperationId> ?alias ; <${DKG}publishedAt> ?at }
-      } }`, { source: 'agent.draftArtifacts.ttlHeadAliases', priority: 'background' });
-      if (aliases.type !== 'bindings') return;
-      for (const row of aliases.bindings) {
-        if (!row['alias'] || !row['at']) return;
-        const alias = literal(row['alias']);
-        const at = Date.parse(literal(row['at']));
-        if (!Number.isFinite(at) || at >= ownership.cutoffMs
-          || references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, alias))) return;
-        const aliasSubject = workspaceOperationSubject(contextGraphId, alias);
-        if (ownership.mayRetire ? !await ownership.mayRetire(aliasSubject)
-          : await exists(store, `GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <${assertSafeIri(aliasSubject)}> ?p ?o }`)) return;
-      }
+    const aliases = await store.query(`SELECT DISTINCT ?alias ?at WHERE { GRAPH <${meta}> {
+      ?head <${DKG}shareOperationId> ${sparqlString(id)} ; <${DKG}assertionGraph> ?graph ; <${DKG}shareOperationId> ?alias .
+      FILTER(?alias != ${sparqlString(id)})
+      OPTIONAL { ?op <${DKG}shareOperationId> ?alias ; <${DKG}publishedAt> ?at }
+    } }`, { source: 'agent.draftArtifacts.ttlHeadAliases', priority: 'background' });
+    if (aliases.type !== 'bindings') return;
+    for (const row of aliases.bindings) {
+      if (!row['alias'] || !row['at']) return;
+      const alias = literal(row['alias']);
+      const at = Date.parse(literal(row['at']));
+      if (!Number.isFinite(at) || at >= ownership.cutoffMs
+        || references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, alias))) return;
+      const aliasSubject = workspaceOperationSubject(contextGraphId, alias);
+      if (!await ownership.mayRetire(aliasSubject)) return;
     }
     await markDraftOperationRetired(store, contextGraphId, subGraphName, id, now);
     await collect();
   };
   const ka = rows.bindings[0]?.['ka'];
-  if (ownership && ka) await withKeyedLocks(ownership.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, ka)], retire);
-  else await retire();
+  if (!ka) return; // Unknown KA ownership cannot certify retirement.
+  await withKeyedLocks(ownership.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, ka)], retire);
 }
 
 
@@ -181,7 +182,7 @@ export interface DraftOperationCollectionSession {
   withUnqueuedOperation: (
     contextGraphId: string, subGraphName: string | undefined, operationSubject: string,
     now: number, collect: () => Promise<void>,
-    ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: (operationSubject: string) => Promise<boolean> },
+    ownership: DraftOperationRetirementPolicy,
   ) => Promise<void>;
 }
 
@@ -201,11 +202,11 @@ export async function withDraftOperationCollectionBatches<T>(
   }
 }
 
-/** Compatibility entry for a single collector operation. */
+/** Single-operation entry using the same complete TTL ownership policy. */
 export async function withUnqueuedDraftOperation(
   store: TripleStore, contextGraphId: string, subGraphName: string | undefined,
   operationSubject: string, now: number, collect: () => Promise<void>,
-  ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: (operationSubject: string) => Promise<boolean> },
+  ownership: DraftOperationRetirementPolicy,
 ): Promise<void> {
   await withDraftOperationCollectionBatches(store, [operationSubject], async (subject, session) => {
     await session.withUnqueuedOperation(contextGraphId, subGraphName, subject, now, collect, ownership);

@@ -61,7 +61,8 @@ import {
   type SharedMemoryMetadataFetcher,
   type SharedMemorySnapshotWalkContinuation,
 } from '../src/sync/requester/shared-memory-sync.js';
-import type { SharedMemorySnapshotMaterializer, StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
+import type { PreparedSwmRecoveryDescriptor } from '../src/sync/requester/swm-recovered-provenance.js';
+import type { SharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import type { RecoveryExecutionGuard } from
   '../src/sync/requester/recovery-execution-guard.js';
 
@@ -222,16 +223,16 @@ function harness(overrides: HarnessOverrides = {}) {
       snapshotMaterializer: {
         prepareRecoveredDescriptor: async descriptor => {
           const state = overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
-          const storedHead: StoredWorkspaceHeadState = state.version === null ? { status: 'missing' } : state.needsRepair
-            ? { status: 'corrupt', error: new Error('fixture corruption') } as StoredWorkspaceHeadState
-            : { status: 'resolved', head: { assertionVersion: state.version, operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as StoredWorkspaceHeadState;
+          const storedHead: PreparedSwmRecoveryDescriptor['storedHead'] = state.version === null ? { status: 'missing' } : state.needsRepair
+            ? { status: 'corrupt', error: new Error('fixture corruption') } as PreparedSwmRecoveryDescriptor['storedHead']
+            : { status: 'resolved', head: { assertionVersion: state.version, operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as PreparedSwmRecoveryDescriptor['storedHead'];
           return { ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead };
         },
         filterBulkMetadata: async (rows, withheld = []) => { const keys = new Set(withheld.map(canonicalQuadKey)); return rows.filter(row => !keys.has(canonicalQuadKey(row))); },
         // Private-lane mutations are outside this public orchestration fixture.
         readExactMaterializedGraph: async () => { throw new Error('unexpected private recovery'); },
         replaceGraphWithAtomicCompanion: async () => { throw new Error('unexpected private recovery'); },
-        preserveStoredIdentityForSkippedAsset: async () => { throw new Error('unexpected private recovery'); },
+
         replaceMetaForGraphAssets: async () => { throw new Error('unexpected private recovery'); },
         withKaWriteLock: async (contextGraphId, subGraphName, kaUal, fn) => {
           events.push('lock-requested');
@@ -256,13 +257,7 @@ function harness(overrides: HarnessOverrides = {}) {
           if (version == null) return true;
           try { return BigInt(version) <= BigInt(descriptor.assertionVersion); } catch { return false; }
         },
-        readStoredHead: async () => {
-          events.push('version-read');
-          const state = overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
-          return state.version === null ? { status: 'missing' } : state.needsRepair
-            ? { status: 'corrupt', error: new Error('fixture corruption') } as StoredWorkspaceHeadState
-            : { status: 'resolved', head: { assertionVersion: state.version, operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as StoredWorkspaceHeadState;
-        },
+
         replaceGraph: async (graphUri, quads) => {
           events.push('replaced');
           if (overrides.replaceImpl) return overrides.replaceImpl(graphUri, quads);

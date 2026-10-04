@@ -90,6 +90,18 @@ describe('reference-safe abandoned draft maintenance', () => {
     expect(await f.has(META, workspaceOperationSubject(CG, id))).toBe(true);
     await f.store.close();
   });
+  it('retains an expired operation when its shared KA ownership cannot be proven', async () => {
+    const f = await fixture(); const id = 'missing-ka-owner'; await f.op(id);
+    await deleteByPatternWithoutCount(f.store, { graph: META, subject: workspaceOperationSubject(CG, id), predicate: `${DKG}kaUal` });
+    const collect = vi.fn(async () => {});
+    try {
+      await withUnqueuedDraftOperation(f.store, CG, undefined, workspaceOperationSubject(CG, id), NOW, collect, {
+        writeLocks: f.writeLocks, cutoffMs: NOW, mayRetire: async () => true,
+      });
+      expect(collect).not.toHaveBeenCalled();
+      expect(await f.has(META, workspaceOperationSubject(CG, id))).toBe(true);
+    } finally { await f.store.close(); }
+  });
   it('acquires queue references once per 32-operation chunk and admits a later queued operation between chunks', async () => {
     const f = await fixture();
     const ids = Array.from({ length: 65 }, (_, index) => `batch-${index}`);
@@ -100,7 +112,7 @@ describe('reference-safe abandoned draft maintenance', () => {
     const retired: string[] = [];
     let lateAdmission: Promise<unknown> | undefined;
     await withDraftOperationCollectionBatches(f.store, ids, async (id, session) => {
-      await session.withUnqueuedOperation(CG, undefined, workspaceOperationSubject(CG, id), NOW, async () => { retired.push(id); }, { writeLocks: f.writeLocks, cutoffMs: NOW });
+      await session.withUnqueuedOperation(CG, undefined, workspaceOperationSubject(CG, id), NOW, async () => { retired.push(id); }, { writeLocks: f.writeLocks, cutoffMs: NOW, mayRetire: async () => true });
       if (id === ids[31]) lateAdmission = queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: CG, shareOperationId: ids[64]!, name: 'late-other', assertionVersion: '1', kaUal: KA.replace('/7', '/8') }));
     });
     await lateAdmission;
@@ -133,7 +145,7 @@ describe('reference-safe abandoned draft maintenance', () => {
     await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: owner, shareOperationId: 'queued', assertionVersion: '3' }));
     expect(await collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW })).toEqual({ operations: 0, privateGraphs: 0 });
     let deleted = false;
-    await withUnqueuedDraftOperation(f.store, 'a', 'b', operation, NOW, async () => { deleted = true; });
+    await withUnqueuedDraftOperation(f.store, 'a', 'b', operation, NOW, async () => { deleted = true; }, { writeLocks: f.writeLocks, cutoffMs: NOW, mayRetire: async () => true });
     expect(deleted).toBe(false);
     for (const graph of [snapshot, archive]) expect(await f.has(graph)).toBe(true);
     expect(await f.has(meta, operation)).toBe(true);
@@ -224,7 +236,7 @@ describe('reference-safe abandoned draft maintenance', () => {
     const queue = new TripleStoreAsyncLiftPublisher(f.store);
     await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: CG, shareOperationId: 'queued', assertionVersion: '3' }));
     let deleted = false;
-    await withUnqueuedDraftOperation(f.store, CG, undefined, workspaceOperationSubject(CG, 'queued'), NOW, async () => { deleted = true; });
+    await withUnqueuedDraftOperation(f.store, CG, undefined, workspaceOperationSubject(CG, 'queued'), NOW, async () => { deleted = true; }, { writeLocks: f.writeLocks, cutoffMs: NOW, mayRetire: async () => true });
     expect(deleted).toBe(false);
   });
   it.each(['missing', 'conflicting'] as const)('refuses TTL collection with a %s operation ID', async (mode) => {
@@ -236,7 +248,7 @@ describe('reference-safe abandoned draft maintenance', () => {
       await f.store.insert([{ graph: META, subject: operation, predicate: `${DKG}shareOperationId`, object: '"other"' }]);
     }
     let deleted = false;
-    await withUnqueuedDraftOperation(f.store, CG, undefined, operation, NOW, async () => { deleted = true; });
+    await withUnqueuedDraftOperation(f.store, CG, undefined, operation, NOW, async () => { deleted = true; }, { writeLocks: f.writeLocks, cutoffMs: NOW, mayRetire: async () => true });
     expect(deleted).toBe(false);
     expect(await f.has(META, operation)).toBe(true);
   });

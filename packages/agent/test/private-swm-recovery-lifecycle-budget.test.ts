@@ -262,14 +262,9 @@ describe('private recovery job ownership and lifecycle outcome', () => {
           fn: () => Promise<unknown>,
         ) => { insideCommit = true; try { return await fn(); } finally { insideCommit = false; } },
         draftMayReplace: async () => true,
-        readStoredHead: async () => ({
-          version: null,
-          shareOperationId: null,
-          shareOperationIds: [],
-          needsRepair: false,
-        }),
+
         isGraphAssetMaterialized: () => insideCommit ? Promise.resolve(true) : isGraphAssetMaterialized(),
-        preserveStoredIdentityForSkippedAsset: async () => ({ outcome: 'replace' }),
+
       } as unknown as SharedMemorySnapshotMaterializer,
       snapshotWalkProgress: () => retained,
       store,

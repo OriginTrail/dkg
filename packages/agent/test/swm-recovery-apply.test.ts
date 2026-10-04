@@ -296,12 +296,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         isGraphAssetMaterialized: async () => false,
           withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
           draftMayReplace: async () => true,
-          readStoredHead: async () => ({
-            version: null,
-            shareOperationId: null,
-            shareOperationIds: [],
-            needsRepair: false,
-          }),
+
         } as never,
         ensureOwnedMap: (key) => {
           let map = owned.get(key);
@@ -368,12 +363,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         isGraphAssetMaterialized: async () => false,
         withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
         draftMayReplace: async () => true,
-        readStoredHead: async () => ({
-          version: null,
-          shareOperationId: null,
-          shareOperationIds: [],
-          needsRepair: false,
-        }),
+
       } as never,
       ensureOwnedMap: () => new Map(),
     };
@@ -444,10 +434,6 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       };
       const replaceGraph = vi.fn();
       const replaceGraphWithAtomicCompanion = vi.fn().mockResolvedValue(undefined);
-      const preserveStoredIdentityForSkippedAsset = vi.fn().mockResolvedValue({
-        outcome: 'preserved',
-        withholdRows: [],
-      });
       const replaceHeadMetadata = vi.fn().mockResolvedValue(undefined);
       const resolveRootAtomicCompanion = vi.fn(() => companion);
 
@@ -476,22 +462,9 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
               fn: () => Promise<unknown>,
             ) => fn(),
             draftMayReplace: async () => true,
-            readStoredHead: async () => kind === 'replace'
-              ? {
-                  version: null,
-                  shareOperationId: null,
-                  shareOperationIds: [],
-                  needsRepair: false,
-                }
-              : {
-                  version: descriptor.assertionVersion,
-                  shareOperationId: descriptor.shareOperationId,
-                  shareOperationIds: [descriptor.shareOperationId],
-                  needsRepair: false,
-                },
+
             readExactMaterializedGraph: async () => [...graphData],
             replaceGraphWithAtomicCompanion,
-            preserveStoredIdentityForSkippedAsset,
           } as never,
           resolveRootAtomicCompanion,
         },
@@ -578,12 +551,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
             return fn();
           },
           draftMayReplace: async () => BigInt(storedVersion) <= BigInt(descriptor.assertionVersion),
-          readStoredHead: async () => ({
-            version: storedVersion,
-            shareOperationId: 'live-v5',
-            shareOperationIds: ['live-v5'],
-            needsRepair: false,
-          }),
+
           replaceGraphWithAtomicCompanion,
         } as never,
         resolveRootAtomicCompanion,
@@ -657,10 +625,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           fn: () => Promise<unknown>,
         ) => fn(),
         draftMayReplace: async (_cg: string, _descriptor: unknown, equivalent: boolean) => equivalent,
-        readStoredHead: async () => ({
-          status: 'corrupt',
-          errorCode: 'WORKSPACE_HEAD_VERSION_INVALID',
-        }),
+
       } as never,
     };
 

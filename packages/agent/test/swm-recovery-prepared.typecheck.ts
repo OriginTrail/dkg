@@ -8,6 +8,9 @@ declare const prepared: PreparedSwmRecoveryDescriptor;
 declare const materializer: SharedMemorySnapshotMaterializer;
 
 materializer.draftMayReplace('cg', prepared);
+materializer.selectRepairIdentity('cg', prepared);
+// @ts-expect-error identity selection requires acquired local evidence
+materializer.selectRepairIdentity('cg', provider);
 // @ts-expect-error provider claims have not crossed local evidence acquisition
 materializer.draftMayReplace('cg', provider);
 // @ts-expect-error identity retention requires the prepared evidence boundary
@@ -39,3 +42,16 @@ if (prepared.authenticatedPublisherOperation) {
 // @ts-expect-error a timestamp-only projection cannot cross the prepared candidate boundary
 const incompleteCandidate: typeof candidate = { provenance: { shareOperationId: 'B', publishedAtMs: 1 } };
 void [decodedOwner, decodedClock, immutableIdentity, incompleteCandidate, authenticatedChronology, storedOutcome];
+
+import type { DraftOperationRetirementPolicy } from '../src/draft-artifact-gc.js';
+// @ts-expect-error retirement cannot omit the shared KA ownership map
+const unlocked: DraftOperationRetirementPolicy = { cutoffMs: 1, mayRetire: async () => true };
+// @ts-expect-error retirement always requires the complete ACK/alias policy
+const ungated: DraftOperationRetirementPolicy = { writeLocks: new Map(), cutoffMs: 1 };
+void [unlocked, ungated];
+
+import { withUnqueuedDraftOperation } from '../src/draft-artifact-gc.js';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
+declare const store: TripleStore;
+// @ts-expect-error collection cannot enter a queue-only optional mode
+void withUnqueuedDraftOperation(store, 'cg', undefined, 'urn:op', 1, async () => {});

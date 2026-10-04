@@ -121,7 +121,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const h = harness(store, incoming);
     const parse = (meta: Quad[]) => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: meta, registeredSubGraphNames: ['team'] })[0]!;
     const descriptor = parse(incoming.meta);
-    expect(await h.materializer.readStoredHead(descriptor)).toMatchObject({ status: 'resolved' });
+    expect((await h.materializer.prepareRecoveredDescriptor(descriptor)).storedHead).toMatchObject({ status: 'resolved' });
     expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
     expect(await h.materializer.readExactMaterializedGraph(descriptor)).toEqual([]);
     const differentVersion = incoming.meta.map(row => row.predicate === `${DKG}assertionVersion` ? { ...row, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' } : row);
@@ -130,7 +130,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     expect(await h.materializer.isGraphAssetMaterialized(parse(differentPrivateRoot))).toBe(false);
   });
 
-  it.each(['publicRun', 'privateRun', 'preserveSkipped'] as const)('%s extends healthy equivalent aliases without stranding a queued ACK snapshot', async lane => {
+  it.each(['publicRun', 'privateRun', 'canonicalCommit'] as const)('%s extends healthy equivalent aliases without stranding a queued ACK snapshot', async lane => {
     const store = new OxigraphStore(); stores.push(store);
     const make = (id: string, clock: number) => swmFixtures(CG).share({ version: 2, operationId: id, marker: 'same-queued-content', ual: UAL, timestamp: new Date(clock) });
     const original = make('a-publisher', 1000); const ack = make('storage-ack-B', 2000); const newer = make('publisher-C', 3000);
@@ -146,7 +146,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const before = await readSnapshot(); expect(before.quads).toHaveLength(ack.payload.length);
     const query = vi.spyOn(store, 'query');
     const h = harness(store, newer);
-    if (lane === 'preserveSkipped') expect(await h.materializer.preserveStoredIdentityForSkippedAsset(CG, parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: newer.meta })[0]!)).toMatchObject({ outcome: 'preserved' });
+    if (lane === 'canonicalCommit') expect(await commitRecoveredSwmAsset({ contextGraphId: CG, asset: { kind: 'preserve-equivalent', descriptor: parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: newer.meta })[0]! }, materializer: h.materializer, insertMetadata: rows => store.insert([...rows]) })).toMatchObject({ kind: 'committed' });
     else await h[lane]();
     expect(query.mock.calls.filter(([, options]) => options?.source === 'agent.swmRecovery.localPublisherEvidence')).toHaveLength(1);
     expect(query.mock.calls.some(([, options]) => ['agent.swmRecovery.storedHead', 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates', 'agent.sharedMemorySync.snapshotMaterializer.selectRepairIdentity'].includes(options?.source ?? ''))).toBe(false);
@@ -474,12 +474,12 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: recoveredMeta.quads.map(row => ({ ...row, graph: served.meta[0]!.graph })) })[0]!;
     expect(descriptor).toBeDefined();
     expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
-    expect(await h.materializer.readStoredHead(descriptor)).toMatchObject({ status: 'resolved' });
+    expect((await h.materializer.prepareRecoveredDescriptor(descriptor)).storedHead).toMatchObject({ status: 'resolved' });
     const repair = vi.spyOn(h.materializer, 'repairHeadPreservingIdentity');
     await h[lane]();
     expect(repair).not.toHaveBeenCalled();
     const restarted = harness(store, served).materializer;
-    expect(await restarted.readStoredHead(descriptor)).toMatchObject({ status: 'resolved' });
+    expect((await restarted.prepareRecoveredDescriptor(descriptor)).storedHead).toMatchObject({ status: 'resolved' });
     expect(await restarted.isGraphAssetMaterialized(descriptor)).toBe(true);
     await expectHead(store, { ...publisher, operationId: ack.operationId });
   });

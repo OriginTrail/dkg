@@ -144,14 +144,7 @@ export interface RecoverContextGraphSwmDeps {
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
   ) => Promise<void>;
-  /**
-   * GH#2273 — skipping an already-materialized KA and deciding whether its
-   * stored operation identity may be preserved are ONE capability, and the
-   * materializer OWNS both halves (`isGraphAssetMaterialized` +
-   * `preserveStoredIdentityForSkippedAsset`) over one store and one lock
-   * map — a config that could skip but not decide, or pair a predicate from
-   * one store with a materializer over another, is unrepresentable.
-   */
+  /** One store/lock owner consumed by the canonical recovered-asset commit protocol. */
   readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
   /** Durable boundary companion for every admitted root snapshot mutation. */
   readonly resolveRootAtomicCompanion?: DurableRootAtomicCompanionResolver;

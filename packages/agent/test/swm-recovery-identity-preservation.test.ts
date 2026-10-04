@@ -18,6 +18,7 @@ import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
+import { commitRecoveredSwmAsset } from '../src/sync/requester/swm-recovery-commit.js';
 
 const CG = 'ws00-recovery';
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
@@ -294,7 +295,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     })[0]!;
     const deps = identityDeps(store, [...curatorPrivateOnly.meta]);
 
-    expect(await deps.snapshotMaterializer.readStoredHead(descriptor)).toMatchObject({
+    expect((await deps.snapshotMaterializer.prepareRecoveredDescriptor(descriptor)).storedHead).toMatchObject({
       status: 'missing',
     });
     expect(await deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)).toBe(false);
@@ -321,10 +322,10 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
       metaQuads: curatorPrivateOnly.meta,
     })[0]!;
     const materializer = identityDeps(store, curatorPrivateOnly.meta).snapshotMaterializer;
-    expect(await materializer.readStoredHead(descriptor)).toMatchObject({
+    expect((await materializer.prepareRecoveredDescriptor(descriptor)).storedHead).toMatchObject({
       status: 'resolved', head: { assertionVersion: '1', shareOperationId: 'private-local' },
     });
-    expect(await materializer.selectRepairIdentity(CG, descriptor)).not.toBeNull();
+    expect(await materializer.selectRepairIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptor))).not.toBeNull();
     expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
 
     const result = await recoverContextGraphSwm(
@@ -565,7 +566,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     }
   });
 
-  it('serializes the preserve decision behind the KA write lock', async () => {
+  it('serializes the canonical commit behind the KA write lock', async () => {
     const store = new OxigraphStore();
     stores.push(store);
     await seedLocal(store);
@@ -608,8 +609,10 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
       CG, descriptor!.subGraphName, descriptor!.kaUal, () => gate,
     );
     let settled = false;
-    const decision = materializer
-      .preserveStoredIdentityForSkippedAsset(CG, descriptor!)
+    const decision = commitRecoveredSwmAsset({
+      contextGraphId: CG, asset: { kind: 'preserve-equivalent', descriptor: descriptor! },
+      materializer, insertMetadata: rows => store.insert([...rows]),
+    })
       .then((result) => { settled = true; return result; });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(settled).toBe(false);
@@ -619,7 +622,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     const result = await decision;
     expect(settled).toBe(true);
     expect(storeCalls).toBeGreaterThan(0);
-    expect(result.outcome).toBe('preserved');
+    expect(result.kind).toBe('committed');
     expect(await headIds(store)).toEqual(['"op-local"']);
   });
 });

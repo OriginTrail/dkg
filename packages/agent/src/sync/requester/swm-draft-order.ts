@@ -3,21 +3,11 @@ import { workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  tryResolveKnowledgeAssetWorkspaceHead,
   checkWorkspaceDraftReplacementOrder,
   headIsUnpromotedOwedAckCopy,
   type ConfirmedKnowledgeAssetVersionReader,
 } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
-import { type GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
-import { stripMetadataLiteral } from '../metadata-literal.js';
-import type { KnowledgeAssetWorkspaceHeadResolution } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { isAuthenticatedPublisherCandidate, type PreparedSwmRecoveryDescriptor } from './swm-recovered-provenance.js';
-
-/** Reuse the canonical missing/resolved/corrupt union; storage errors propagate. */
-export async function readStoredWorkspaceHead(store: TripleStore, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<KnowledgeAssetWorkspaceHeadResolution> {
-  const contextGraphId = stripMetadataLiteral(descriptor.metadataQuads.find(row => row.subject === descriptor.operationSubject && row.predicate === 'http://dkg.io/ontology/contextGraphId')?.object ?? '');
-  return tryResolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId, kaUal: descriptor.kaUal, subGraphName: descriptor.subGraphName, queryOptions: { priority: 'background', source: 'agent.swmRecovery.storedHead' } });
-}
 
 /** Called under the shared KA lock, again after any awaited snapshot/authority read. */
 export async function recoveredDraftMayReplace(input: {
