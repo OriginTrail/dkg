@@ -52,4 +52,3 @@ export function knowledgeAssetPrivateArtifactOwnerCandidates(graphUri: string): 
     return artifact ? [{ contextGraphId, subGraphName: artifact.subGraphName }] : [];
   });
 }
-
