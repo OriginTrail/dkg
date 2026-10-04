@@ -353,6 +353,8 @@ export interface SparqlHttpStoreOptions extends SparqlHttpPersistenceOptions {
    * present; incomplete runtime configurations are treated as unavailable.
    */
   managedRecovery?: SparqlHttpManagedRecoveryV1;
+  /** Runtime-only post-acknowledgement barrier for the daemon-owned local store. */
+  managedPersistence?: (options?: QueryOptions) => Promise<void>;
   /**
    * Certified endpoint guarantees. `atomic-update` means a whole
    * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
@@ -400,6 +402,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
 
   private readonly queryEndpoint: string;
   readonly writesDurableOnAcknowledgement: boolean;
+  readonly flush?: (options?: QueryOptions) => Promise<void>;
   private readonly updateEndpoint: string;
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
@@ -439,6 +442,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
       constructionAuthority,
     );
+    this.flush = this.managedOxigraph && typeof options.managedPersistence === 'function'
+      ? options.managedPersistence : undefined;
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;

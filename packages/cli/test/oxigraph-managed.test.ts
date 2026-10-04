@@ -862,6 +862,7 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
+            managedPersistence: expect.any(Function),
             managedRecovery: {
               readState: expect.any(Function),
               recover: expect.any(Function),

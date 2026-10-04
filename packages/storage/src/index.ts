@@ -54,6 +54,8 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+export { asTripleStorePersistenceCapability, type TripleStorePersistenceCapability } from './persistence.js';
+export { createManagedOxigraphPersistenceBarrierV1, type ManagedOxigraphPersistenceBarrier } from './managed-oxigraph-persistence.js';
 /**
  * Stable caller contract for one bounded RFC-64 author commit. Compilation,
  * receipt execution, normalization, and decorator mapping stay module-internal.

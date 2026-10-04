@@ -25,6 +25,7 @@
 import { join } from 'node:path';
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
+  createManagedOxigraphPersistenceBarrierV1,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
   type ManagedOxigraphRuntimeStoreConfigV1,
   type TripleStoreConfig,
@@ -429,6 +430,7 @@ export async function startManagedOxigraph(
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
+      managedPersistence: createManagedOxigraphPersistenceBarrierV1(plan.location, binary.version, opts.platform),
       managedRecovery: {
         readState: () => handle.getRecoveryState(),
         recover: (operation: string) => {
