@@ -506,6 +506,24 @@ function catchupAuthorityUnavailableResponse(
   return authorityUnavailableResponse(res);
 }
 
+const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
+  'finalized-name-absence-unaccepted',
+  'chain-name-binding-unavailable',
+  'registered-authority-error',
+  'authority-circuit-open',
+  'local-chain-binding-unavailable',
+  'local-existence-unavailable',
+  'chain-access-policy-unavailable',
+  'chain-access-policy-timeout',
+  'chain-access-policy-unknown',
+  'chain-participant-authority-unavailable',
+  'chain-participant-authority-unsupported',
+  'chain-participant-authority-invalid',
+  'remote-local-authority-unaccepted',
+  'rfc64-private-read-roster-unavailable',
+  'no-read-authority',
+]);
+
 /** The retryable 503 for an admission read that could not be completed. */
 function authorityUnavailableResponse(res: ServerResponse): void {
   return jsonResponse(
@@ -2002,6 +2020,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     if (readAuthority.outcome === 'unavailable') {
+      // The public response remains generic, but the operator needs the typed
+      // authority dependency to distinguish a missing seed from a chain read
+      // outage. Never log the graph name or caller identity here.
+      const reason = SUBSCRIBE_AUTHORITY_LOG_REASONS.has(readAuthority.reason)
+        ? readAuthority.reason : 'other';
+      console.warn(`[context-graph-subscribe] authority unavailable: reason=${reason}`
+        + ` dependency=${readAuthority.dependency}`);
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     // A private graph named by its on-chain id: one decision, with one answer

@@ -22,6 +22,7 @@ import {
 import {
   TripleStoreAsyncPromoteQueue,
   createPromotePostCommitFailure,
+  createPromoteRetryableFailure,
   type AsyncPromoteQueue,
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
@@ -293,6 +294,58 @@ describe('runPromoteJob', () => {
         errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
       }),
     ]);
+  });
+
+  it('logs only a typed, bounded authority reason behind a retryable promote prerequisite', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), {
+          code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+          reason: 'finalized-name-absence-unaccepted',
+          detail: 'private detail',
+        }));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    const diagnostic = promoteFailureDiagnostics(logs)[0];
+    expect(diagnostic).toMatchObject({
+      errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      authorityReason: 'finalized-name-absence-unaccepted',
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain('private detail');
+  });
+
+  it('identifies a metadata-revision retry without logging the context graph id', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromoteRetryableFailure(Object.assign(new Error('private graph id'), {
+          code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+          reason: 'local-existence-unavailable',
+          detail: 'Context graph "private graph id" metadata authority changed while resolving its agent gate',
+        }));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    const diagnostic = promoteFailureDiagnostics(logs)[0];
+    expect(diagnostic).toMatchObject({
+      authorityReason: 'local-existence-unavailable',
+      authorityOrigin: 'agent-gate-revision',
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain('private graph id');
   });
 
   it('uses publisher-owned diagnostics for a certified replay-safe failure', async () => {
