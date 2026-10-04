@@ -725,6 +725,10 @@ describe('published snapshot cleanup: bounded by the version a publication confi
 
   it('separates legacy publication consumption from unconditional marker invalidation', async () => {
     const f = await fixture(), name = 'legacy-completion';
+    // A completed legacy share has no operation ID, but promotion still owns
+    // its SWM lifecycle layer. A marker without that proof is not consumable.
+    await f.store.insert([{ subject: assertionLifecycleUri(CG, AUTHOR, name), graph: contextGraphMetaUri(CG),
+      predicate: `${DKG}memoryLayer`, object: '"SWM"' }]);
     await f.publisher.markSwmShareComplete(CG, name, AUTHOR);
     expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(true);
     await f.publisher.consumePublishedSwmShareComplete(CG, name, AUTHOR, null);

@@ -29,6 +29,23 @@ describe('publication lifecycle owner boundary', () => {
       expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
     });
 
+  it.each(['WM', 'SWM', 'VM'])('fences explicit legacy absence against the current %s layer', async layer => {
+    const f = await fixture();
+    await f.store.deleteByPattern({ graph: f.graph, subject: f.subject, predicate: `${DKG}memoryLayer` });
+    await f.store.insert([{ graph: f.graph, subject: f.subject, predicate: `${DKG}memoryLayer`, object: JSON.stringify(layer) }]);
+    await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, null);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(layer === 'WM');
+  });
+
+  it.each(['missing', 'conflicting'])('retains legacy completion with %s lifecycle layer evidence', async shape => {
+    const f = await fixture();
+    await f.store.deleteByPattern({ graph: f.graph, subject: f.subject, predicate: `${DKG}memoryLayer` });
+    if (shape === 'conflicting') await f.store.insert(['SWM', 'VM'].map(layer => ({ graph: f.graph, subject: f.subject,
+      predicate: `${DKG}memoryLayer`, object: JSON.stringify(layer) })));
+    await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, null);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+  });
+
   it('does not consume completion when its bounded ownership query is unavailable', async () => {
     const f = await fixture();
     vi.spyOn(f.store, 'query').mockResolvedValueOnce({ type: 'quads', quads: [] });

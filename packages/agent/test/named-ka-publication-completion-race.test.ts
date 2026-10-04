@@ -150,11 +150,15 @@ describe('agent publication completion marker fencing', () => {
       } else expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
     });
 
-  it('rechecks draft ownership after publication preflight queues behind a sanctioned reopen', async () => {
+  it.each([false, true])('rechecks draft ownership after publication preflight queues behind a sanctioned reopen (legacy: %s)', async legacy => {
     const f = await fixture();
+    if (legacy) {
+      await f.store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AUTHOR, NAME), predicate: `${DKG}shareOperationId` });
+      await f.store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AUTHOR, NAME), predicate: `${DKG}promoteOperationIntent` });
+    }
     let release!: () => void, entered!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
-    const holding = f.publisher.withPublishedAssertionLifecycle(CG, NAME, AUTHOR, f.promoted.shareOperationId!, async () => { entered(); await held; });
+    const holding = f.publisher.withPublishedAssertionLifecycle(CG, NAME, AUTHOR, legacy ? null : f.promoted.shareOperationId!, async () => { entered(); await held; });
     await started;
     const reopening = f.publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm');
     const query = f.store.query.bind(f.store);
@@ -162,10 +166,10 @@ describe('agent publication completion marker fencing', () => {
     const preflight = new Promise<void>(resolve => { preflightRead = resolve; });
     vi.spyOn(f.store, 'query').mockImplementation(async (sparql, options) => {
       const result = await query(sparql, options);
-      if (sparql.startsWith('SELECT ?operation')) preflightRead();
+      if (sparql.startsWith(legacy ? 'SELECT ?layer' : 'SELECT ?operation')) preflightRead();
       return result;
     });
-    const request = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, shareOperationId: f.promoted.shareOperationId,
+    const request = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, shareOperationId: legacy ? undefined : f.promoted.shareOperationId,
       sealMerkleRoot: Buffer.from(f.result.merkleRoot).toString('hex') };
     const completion = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
     await preflight;
@@ -189,6 +193,25 @@ describe('agent publication completion marker fencing', () => {
     expect(layer.type === 'bindings' ? layer.bindings : []).toEqual([{ layer: '"SWM"' }]);
     const vm = await f.store.query(`SELECT ?vm WHERE { GRAPH <${graph}> { <${subject}> <${DKG}vmCurrentAssertion> ?vm } }`);
     expect(vm.type === 'bindings' ? vm.bindings : []).toEqual([{ vm: JSON.stringify(Buffer.from(f.result.merkleRoot).toString('hex')) }]);
+  });
+
+  it('preserves a reopened unshared draft when the captured legacy publication has no operation ID', async () => {
+    const f = await fixture(), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}shareOperationId` });
+    await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}promoteOperationIntent` });
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(f.publisher, 'publish').mockImplementationOnce(async () => { entered(); await held; return f.result; });
+    const publishing = f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
+    await started;
+    await f.publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm');
+    await f.publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:unshared', predicate: 'urn:title', object: '"draft"', graph: '' }]);
+    release(); await publishing;
+    const layers = await f.store.query(`SELECT ?layer WHERE { GRAPH <${graph}> { <${subject}> <${DKG}memoryLayer> ?layer } }`);
+    expect(layers.type === 'bindings' ? layers.bindings : []).toEqual([{ layer: '"WM"' }]);
+    expect(await f.publisher.assertionQuery(CG, NAME, AUTHOR)).toHaveLength(2);
+    // Reopen intentionally retains the prior marker for seal recovery.
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
   });
 
   it.each([false, true])('fences a captured legacy marker without an operation ID (replacement: %s)', async (replacement) => {
