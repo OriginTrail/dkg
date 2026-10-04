@@ -12,6 +12,8 @@ let result = parseObservation({
 });
 if (operator !== undefined) result = assertObservation(result, operator, expected ?? '');
 if (result.outcome === 'PASS') {
-  console.log(mode === 'json' ? JSON.stringify({ result: { type: 'bindings', bindings: result.rows } }) : result.value);
+  if (mode === 'json') console.log(JSON.stringify({ result: { type: 'bindings', bindings: result.rows } }));
+  else if (mode === 'bindings') console.log(JSON.stringify(result.rows));
+  else console.log(result.value);
 } else console.error(JSON.stringify({ outcome: result.outcome, reason: result.reason }));
 process.exitCode = resultExit(result);

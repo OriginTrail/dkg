@@ -96,7 +96,7 @@ export function parseObservation({ transportExit, httpStatus, body, format = 'ap
     if (value === null) return invalid('INVALID_COUNT');
     return { outcome: 'PASS', reason: 'VALID_OBSERVATION', value };
   }
-  if (mode === 'rows' || mode === 'json') return {
+  if (mode === 'rows' || mode === 'json' || mode === 'bindings') return {
     outcome: 'PASS', reason: 'VALID_OBSERVATION', value: String(rows.length), rows,
   };
   return invalid('UNSUPPORTED_MODE');
@@ -107,5 +107,5 @@ export function assertObservation(observation, operator, expected) {
   if (!['eq', 'ge'].includes(operator) || !/^[0-9]+$/.test(expected)) return invalid('INVALID_ASSERTION');
   const actual = BigInt(observation.value), target = BigInt(expected);
   const passed = operator === 'eq' ? actual === target : actual >= target;
-  return { outcome: passed ? 'PASS' : 'FAIL', reason: passed ? 'ASSERTION_SATISFIED' : 'ASSERTION_FAILED', value: observation.value };
+  return { ...observation, outcome: passed ? 'PASS' : 'FAIL', reason: passed ? 'ASSERTION_SATISFIED' : 'ASSERTION_FAILED' };
 }

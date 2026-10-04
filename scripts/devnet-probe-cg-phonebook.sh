@@ -75,17 +75,12 @@ echo "--- 2. agents-CG has any triples ---"
 # don't pin a specific predicate name (those have churned across
 # rc.11/rc.12); we just confirm SOMETHING was written. The PR #700
 # code path includes `dkg:multiaddr` + agent-uri + lastSeen triples.
-MA_QUERY=$(devnet_capture -H "$AUTH_HEADER" -X POST -H "Content-Type: application/json" \
-  -d '{
-    "sparql": "SELECT (COUNT(*) as ?n) WHERE { ?s ?p ?o }",
-    "contextGraphId": "agents"
-  }' \
-  "http://127.0.0.1:$API_PORT_BASE/api/query") || devnet_observation_abort
-MA_COUNT=$(printf '%s' "$MA_QUERY" | devnet_observe count n api) || devnet_observation_abort
+MA_COUNT=$(devnet_query_api "http://127.0.0.1:$API_PORT_BASE" "$AUTH_TOKEN" \
+  'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }' n count '{"contextGraphId":"agents"}') || devnet_observation_abort
 if devnet_count_at_least "$MA_COUNT" 1; then
   ok "agents-CG contains $MA_COUNT triple(s) — phonebook is publishing"
 else
-  fail "agents-CG has 0 triples — phonebook publish may have failed (got: $MA_QUERY)"
+  fail "agents-CG has 0 triples — phonebook publish may have failed"
 fi
 
 # --- 3. agentProfileHeartbeatTimer wired (look for the log) ---
@@ -110,13 +105,8 @@ if [ -n "$NODE2_PEER" ]; then
   # heartbeat may take up to 5 min for the first repeat; the one-shot
   # startup publish should have fired by now (setTimeout 0 in
   # lifecycle.ts).
-  cross_query=$(devnet_capture -H "$AUTH_HEADER" -X POST -H "Content-Type: application/json" \
-    -d "{
-      \"sparql\": \"SELECT (COUNT(*) as ?n) WHERE { ?s ?p ?o FILTER (CONTAINS(STR(?o), \\\"$NODE2_PEER\\\")) }\",
-      \"contextGraphId\": \"agents\"
-    }" \
-    "http://127.0.0.1:$API_PORT_BASE/api/query") || devnet_observation_abort
-  X_COUNT=$(printf '%s' "$cross_query" | devnet_observe count n api) || devnet_observation_abort
+  X_COUNT=$(devnet_query_api "http://127.0.0.1:$API_PORT_BASE" "$AUTH_TOKEN" \
+    "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o FILTER (CONTAINS(STR(?o), \"$NODE2_PEER\")) }" n count '{"contextGraphId":"agents"}') || devnet_observation_abort
   if devnet_count_at_least "$X_COUNT" 1; then
     ok "node 1 sees $X_COUNT triple(s) referencing node 2's peerId in agents-CG"
   else

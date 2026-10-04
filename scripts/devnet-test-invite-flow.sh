@@ -708,9 +708,9 @@ for attempt in $(seq 1 30); do
 done
 [ "$outsider_refused" = yes ] || fail "N3 never returned an explicit authorization refusal: $sub3_resp"
 ok "N3's subscription was refused by the private graph's agent gate"
-outside_query=$(devnet_capture -X POST -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" --data "$query_body" "$N3/api/query") || devnet_observation_abort
-outside_count=$(printf '%s' "$outside_query" | devnet_observe rows '' api) || devnet_observation_abort
+outside_count=$(devnet_query_api "$N3" "$TOKEN" \
+  "SELECT ?o WHERE { <$SUBJECT> <http://schema.org/name> ?o }" o rows \
+  "{\"contextGraphId\":\"$CG_ID\",\"graphSuffix\":\"_shared_memory\"}") || devnet_observation_abort
 if [ "$outside_count" = 0 ]; then
   ok "N3's public query cannot read private SWM"
 else

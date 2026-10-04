@@ -28,18 +28,36 @@ devnet_count_at_least() {
   node -e 'const [a,b]=process.argv.slice(1); if (!/^[0-9]+$/.test(a) || !/^[0-9]+$/.test(b)) process.exit(2); process.exit(BigInt(a)>=BigInt(b)?0:1)' "$1" "$2"
 }
 
-# Authorized raw-store reads for physical assertions. Each read first proves
-# the observer can see seeded devnet triples, bypassing DKG API ACL filtering.
-# Embedded stores have no safe live read endpoint and are INCONCLUSIVE.
+# Explicit API observation: base URL, token, SPARQL, binding, mode, scope JSON.
+# Metrics are validated once; bindings mode emits an array for cell inspection.
+devnet_query_api() {
+  local api="$1" token="$2" sparql="$3" binding="$4" mode="$5" scope="${6:-}" body response
+  [ -n "$scope" ] || scope='{}'
+  body=$(node -e '
+    try {
+      const scope = JSON.parse(process.argv[2]);
+      if (!scope || typeof scope !== "object" || Array.isArray(scope)) throw Error();
+      console.log(JSON.stringify({ ...scope, sparql: process.argv[1] }));
+    } catch {
+      console.error("INCONCLUSIVE: invalid query scope"); process.exitCode = 2;
+    }
+  ' "$sparql" "$scope") || return 2
+  response=$(devnet_capture -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    --data "$body" "${api%/}/api/query") || return 2
+  printf '%s' "$response" | devnet_observe "$mode" "$binding" api "${@:7}"
+}
+
+# Authorized raw-store observation: devnet directory, API port, SPARQL,
+# binding, mode, optional assertion. The API port selects the configured store;
+# no synthetic API request or query-shape inference is involved.
+# Each read first proves the observer can see seeded triples. Embedded stores
+# have no safe live HTTP endpoint and remain INCONCLUSIVE.
 devnet_storage_query() {
-  local directory="$1" api="$2" body="$3" helper_dir endpoint sparql projection binding control response
+  local directory="$1" port="$2" sparql="$3" binding="$4" mode="$5" helper_dir endpoint control response
   helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  endpoint=$(node "$helper_dir/lib/qa/devnet-storage-endpoint.mjs" "$directory" "$api") || return 2
-  projection=$(printf '%s' "$body" | node -e 'let b="";process.stdin.on("data",c=>b+=c);process.stdin.on("end",()=>{try{const q=JSON.parse(b).sparql;const m=typeof q==="string" && /^SELECT\s+(?:DISTINCT\s+)?\?([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(q);if(!m)throw Error();console.log(m[1]);console.log(q)}catch{process.exitCode=2}})') || return 2
-  binding="${projection%%$'\n'*}"
-  sparql="${projection#*$'\n'}"
+  endpoint=$(node "$helper_dir/lib/qa/devnet-storage-endpoint.mjs" "$directory" "http://127.0.0.1:$port") || return 2
   control=$(devnet_capture -H 'Accept: application/sparql-results+json' --data-urlencode 'query=SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 1' "$endpoint") || return 2
   printf '%s' "$control" | devnet_observe rows s sparql ge 1 >/dev/null || return 2
   response=$(devnet_capture -H 'Accept: application/sparql-results+json' --data-urlencode "query=$sparql" "$endpoint") || return 2
-  printf '%s' "$response" | devnet_observe json "$binding" sparql
+  printf '%s' "$response" | devnet_observe "$mode" "$binding" sparql "${@:6}"
 }

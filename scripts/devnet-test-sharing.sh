@@ -17,20 +17,12 @@
 #
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$SCRIPT_DIR/../.devnet}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
 N1_PORT=$((API_PORT_BASE)); N2_PORT=$((API_PORT_BASE + 1))
 N3_PORT=$((API_PORT_BASE + 2)); N4_PORT=$((API_PORT_BASE + 3)); N5_PORT=$((API_PORT_BASE + 4))
 source "$SCRIPT_DIR/devnet-observation-helpers.sh"
-if [[ -n "${DKG_AUTH:-}" ]]; then
-  AUTH="$DKG_AUTH"
-elif [[ -f "$DEVNET_DIR/node1/auth.token" ]]; then
-  AUTH="$(grep -v '^#' "$DEVNET_DIR/node1/auth.token" 2>/dev/null | tr -d '[:space:]')"
-else
-  echo "ERROR: No auth token. Export DKG_AUTH or start a devnet." >&2
-  exit 1
-fi
 
 PASS=0; FAIL=0; WARN=0
 DEVNET_TMPDIR="${TMPDIR:-/tmp}"
@@ -80,38 +72,41 @@ check() {
   if [[ "$actual" == "$expected" ]]; then ok "$desc"; else fail "$desc (expected=$expected, got=$actual)"; fi
 }
 
-# Query acquisition validates curl/HTTP/API separately from assertions.
-query_api() {
-  local response
-  response=$(devnet_capture -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "$@") || return 2
-  printf '%s' "$response" | devnet_observe json '' api
+# Direct observation operations. The suite is also sourceable for fixture tests.
+sharing_api_observe() {
+  local port="$1"; shift
+  devnet_query_api "http://127.0.0.1:$port" "$AUTH" "$@"
 }
 
-storage_query() {
-  local url="" body=""
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -X) shift 2 ;;
-      -d) body="$2"; shift 2 ;;
-      *) url="$1"; shift ;;
-    esac
-  done
-  devnet_storage_query "$DEVNET_DIR" "$url" "$body"
+sharing_storage_observe() {
+  devnet_storage_query "$DEVNET_DIR" "$@"
 }
 
-storage_owner_control() {
-  local observed count
-  observed=$(storage_query -X POST "http://127.0.0.1:${N1_PORT}/api/query" -d "$1") || devnet_observation_abort
-  count=$(safe_bindings_count "$observed") || devnet_observation_abort
-  devnet_count_at_least "$count" 1 || { fail "Owner storage control did not expose the seeded WM fact"; exit 1; }
+# Legacy assertion adapter: invalid evidence aborts with suite exit 1.
+# The same feature query must expose seeded owner data before peer absence.
+sharing_storage_absence() {
+  local description="$1" owner="$2" peer="$3" sparql="$4" binding="$5" owner_count peer_count
+  owner_count=$(sharing_storage_observe "$owner" "$sparql" "$binding" rows) || devnet_observation_abort
+  devnet_count_at_least "$owner_count" 1 || { fail "Owner storage control did not expose the seeded WM fact"; exit 1; }
+  peer_count=$(sharing_storage_observe "$peer" "$sparql" "$binding" rows) || devnet_observation_abort
+  check "$description" "$peer_count" "0"
 }
 
-safe_bindings_count() {
-  printf '0\n200\n%s' "$1" | devnet_observe rows '' api
+sharing_wm_graphs_query() {
+  printf '%s\n' "SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \"$1\") && (CONTAINS(STR(?g), \"/assertion/\") || CONTAINS(STR(?g), \"/_working_memory/\"))) }"
 }
 
-count_integer() {
-  printf '0\n200\n%s' "$1" | devnet_observe count cnt api
+sharing_owner_wm_control() {
+  local port="$1" context="$2" query count
+  query=$(sharing_wm_graphs_query "$context")
+  count=$(sharing_storage_observe "$port" "$query" g rows) || devnet_observation_abort
+  devnet_count_at_least "$count" 1 || { fail "Owner storage positive control is empty"; exit 1; }
+}
+
+sharing_excluded_swm() {
+  local port="$1" context="$2" count
+  count=$(sharing_api_observe "$port" 'SELECT ?s WHERE { ?s ?p ?o }' s rows "{\"contextGraphId\":\"$context\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
+  check "Node 3 still has 0 SWM entities" "$count" "0"
 }
 
 q() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"$3\",\"graph\":\"\"}"; }
@@ -161,7 +156,20 @@ for a in d.get('agents',[]):
 " 2>/dev/null
 }
 
+# Sourcing exposes the real suite operations without running the devnet flow.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
+
+if [[ -n "${DKG_AUTH:-}" ]]; then
+  AUTH="$DKG_AUTH"
+elif [[ -f "$DEVNET_DIR/node1/auth.token" ]]; then
+  AUTH="$(grep -v '^#' "$DEVNET_DIR/node1/auth.token" 2>/dev/null | tr -d '[:space:]')"
+else
+  echo "ERROR: No auth token. Export DKG_AUTH or start a devnet." >&2
+  exit 1
+fi
+
 CG_ID="sharing-test-$(date +%s)"
+WM_GRAPHS_QUERY=$(sharing_wm_graphs_query "$CG_ID")
 
 echo "============================================================"
 echo "DKG V10 Private Project Sharing & WM Isolation Test"
@@ -237,14 +245,9 @@ sleep 1
 N1_ASSERT_CT=$(c "http://127.0.0.1:${N1_PORT}/api/knowledge-assets/draft-beta/wm/quads?contextGraphId=$CG_ID" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("quads",d.get("result",[]))))' 2>/dev/null)
 devnet_count_at_least "$N1_ASSERT_CT" 4 && ok "Node 1 has $N1_ASSERT_CT quads in WM" || fail "Node 1 WM assertion empty ($N1_ASSERT_CT)"
 
-N1_GRAPHS=$(storage_query -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?g (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\")) } GROUP BY ?g\"}") || devnet_observation_abort
-N1_GRAPH_CT=$(safe_bindings_count "$N1_GRAPHS") || devnet_observation_abort
+N1_GRAPH_CT=$(sharing_storage_observe "${N1_PORT}" "SELECT ?g (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \"$CG_ID\")) } GROUP BY ?g" g rows) || devnet_observation_abort
 echo "  Node 1 has $N1_GRAPH_CT graphs for this CG"
-OWNER_ASSERTIONS=$(storage_query -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && (CONTAINS(STR(?g), \\\"/assertion/\\\") || CONTAINS(STR(?g), \\\"/_working_memory/\\\"))) }\"}") || devnet_observation_abort
-OWNER_ASSERT_CT=$(safe_bindings_count "$OWNER_ASSERTIONS") || devnet_observation_abort
-devnet_count_at_least "$OWNER_ASSERT_CT" 1 || { fail "Owner storage positive control is empty"; exit 1; }
+sharing_owner_wm_control "$N1_PORT" "$CG_ID"
 
 
 #------------------------------------------------------------
@@ -264,9 +267,7 @@ CATCHUP_ST=$(poll_catchup ${N2_PORT} "$CG_ID" 10)
 # assertion-data graphs (same invariant asserted post-approval in §3a). A
 # `completed` outcome means the sync actually served data and is the leak this
 # check exists to catch, so it must fail regardless.
-N2_PREJOIN_ASSERT=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && (CONTAINS(STR(?g), \\\"/assertion/\\\") || CONTAINS(STR(?g), \\\"/_working_memory/\\\"))) }\"}") || devnet_observation_abort
-N2_PREJOIN_CT=$(safe_bindings_count "$N2_PREJOIN_ASSERT") || devnet_observation_abort
+N2_PREJOIN_CT=$(sharing_storage_observe "${N2_PORT}" "$WM_GRAPHS_QUERY" g rows) || devnet_observation_abort
 case "$CATCHUP_ST" in
   denied)
     [[ "$N2_PREJOIN_CT" == "0" ]] \
@@ -311,9 +312,7 @@ check "Join request approved" "$APPROVE_OK" "true"
 
 echo "--- 2e: Node 2 auto-subscribes after approval ---"
 sleep 8
-N2_GRAPHS=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\")) }\"}") || devnet_observation_abort
-N2_GRAPH_CT=$(safe_bindings_count "$N2_GRAPHS") || devnet_observation_abort
+N2_GRAPH_CT=$(sharing_storage_observe "${N2_PORT}" "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \"$CG_ID\")) }" g rows) || devnet_observation_abort
 devnet_count_at_least "$N2_GRAPH_CT" 1 && ok "Node 2 has $N2_GRAPH_CT graph(s) after approval" || fail "Node 2 has no graphs after approval"
 
 #------------------------------------------------------------
@@ -322,47 +321,30 @@ echo "=== SECTION 3: WM Isolation — Node 2 Must NOT See WM Data ==="
 echo ""
 
 echo "--- 3a: Node 2 has NO assertion data graphs ---"
-N2_ASSERT_GRAPHS=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && (CONTAINS(STR(?g), \\\"/assertion/\\\") || CONTAINS(STR(?g), \\\"/_working_memory/\\\"))) }\"}") || devnet_observation_abort
-N2_ASSERT_CT=$(safe_bindings_count "$N2_ASSERT_GRAPHS") || devnet_observation_abort
+N2_ASSERT_CT=$(sharing_storage_observe "${N2_PORT}" "$WM_GRAPHS_QUERY" g rows) || devnet_observation_abort
 check "Node 2 has 0 assertion data graphs" "$N2_ASSERT_CT" "0"
 
 echo "--- 3b: Node 2 has NO lifecycle entities (memoryLayer/state) ---"
 META_GRAPH="did:dkg:context-graph:${CG_ID}/_meta"
-storage_owner_control "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml } }\"}"
-N2_LIFECYCLE=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml } }\"}") || devnet_observation_abort
-N2_LC_CT=$(safe_bindings_count "$N2_LIFECYCLE") || devnet_observation_abort
-check "Node 2 has 0 lifecycle entities" "$N2_LC_CT" "0"
+sharing_storage_absence "Node 2 has 0 lifecycle entities" "${N1_PORT}" "${N2_PORT}" "SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml } }" s
 
 echo "--- 3c: Node 2 has NO event entities (prov:Activity) ---"
-storage_owner_control "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s a <http://www.w3.org/ns/prov#Activity> . ?s a ?dkgType . FILTER(STRSTARTS(STR(?dkgType), \\\"http://dkg.io/ontology/Assertion\\\")) } }\"}"
-N2_EVENTS=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s a <http://www.w3.org/ns/prov#Activity> . ?s a ?dkgType . FILTER(STRSTARTS(STR(?dkgType), \\\"http://dkg.io/ontology/Assertion\\\")) } }\"}") || devnet_observation_abort
-N2_EV_CT=$(safe_bindings_count "$N2_EVENTS") || devnet_observation_abort
-check "Node 2 has 0 assertion event entities" "$N2_EV_CT" "0"
+sharing_storage_absence "Node 2 has 0 assertion event entities" "${N1_PORT}" "${N2_PORT}" "SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s a <http://www.w3.org/ns/prov#Activity> . ?s a ?dkgType . FILTER(STRSTARTS(STR(?dkgType), \"http://dkg.io/ontology/Assertion\")) } }" s
 
 echo "--- 3d: Node 2 has NO import metadata (sourceFileHash, extractionMethod) ---"
-storage_owner_control "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/sourceFileHash> ?h } }\"}"
-N2_IMPORT_META=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/sourceFileHash> ?h } }\"}") || devnet_observation_abort
-N2_IM_CT=$(safe_bindings_count "$N2_IMPORT_META") || devnet_observation_abort
-check "Node 2 has 0 import metadata subjects" "$N2_IM_CT" "0"
+sharing_storage_absence "Node 2 has 0 import metadata subjects" "${N1_PORT}" "${N2_PORT}" "SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/sourceFileHash> ?h } }" s
 
 echo "--- 3e: Node 2 WM view shows 0 assertion facts ---"
-N2_WM_FACTS=$(query_api -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \\\"did:dkg:context-graph:$CG_ID/\\\") && !STRENDS(STR(?g), \\\"/_meta\\\") && !CONTAINS(STR(?g), \\\"/_private\\\") && !CONTAINS(STR(?g), \\\"/_shared_memory\\\")) }\",\"contextGraphId\":\"$CG_ID\"}") || devnet_observation_abort
-N2_WM_CT=$(safe_bindings_count "$N2_WM_FACTS") || devnet_observation_abort
+N2_WM_CT=$(sharing_api_observe "${N2_PORT}" "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:$CG_ID/\") && !STRENDS(STR(?g), \"/_meta\") && !CONTAINS(STR(?g), \"/_private\") && !CONTAINS(STR(?g), \"/_shared_memory\")) }" s rows "{\"contextGraphId\":\"$CG_ID\"}") || devnet_observation_abort
 check "Node 2 WM view has 0 assertion facts" "$N2_WM_CT" "0"
 
 echo "--- 3f: Node 2 _meta only has CG-level subjects ---"
-N2_META_SUBJECTS=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT DISTINCT ?s WHERE { GRAPH <$META_GRAPH> { ?s ?p ?o } } ORDER BY ?s\"}") || devnet_observation_abort
+N2_META_SUBJECTS=$(sharing_storage_observe "${N2_PORT}" "SELECT DISTINCT ?s WHERE { GRAPH <$META_GRAPH> { ?s ?p ?o } } ORDER BY ?s" s bindings) || devnet_observation_abort
 N2_SUBJ_LIST=$(echo "$N2_META_SUBJECTS" | python3 -c '
 import sys,json
 try:
-  d=json.load(sys.stdin)
-  subjects=[b["s"] if isinstance(b["s"],str) else b["s"]["value"] for b in d["result"]["bindings"]]
+  bindings=json.load(sys.stdin)
+  subjects=[b["s"] if isinstance(b["s"],str) else b["s"]["value"] for b in bindings]
   leaked=[s for s in subjects if "/assertion/" in s or "urn:dkg:assertion:" in s]
   print(f"total={len(subjects)},leaked={len(leaked)}")
 except: print("ERR")
@@ -383,17 +365,13 @@ PROMOTE1_CT=$(json_get "$PROMOTE1" promotedCount)
 
 echo "--- 4b: Verify SWM data on Node 1 ---"
 sleep 2
-N1_SWM=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-N1_SWM_CT=$(safe_bindings_count "$N1_SWM") || devnet_observation_abort
+N1_SWM_CT=$(sharing_api_observe "${N1_PORT}" "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
 devnet_count_at_least "$N1_SWM_CT" 1 && ok "Node 1 has promoted data in SWM" || fail "Node 1 SWM empty after promote"
 
 echo "--- 4c: Wait for gossip + verify SWM data on Node 2 ---"
 SWM_SYNCED=false
 for i in $(seq 1 15); do
-  N2_SWM=$(query_api -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  N2_SWM_CT=$(safe_bindings_count "$N2_SWM") || devnet_observation_abort
+  N2_SWM_CT=$(sharing_api_observe "${N2_PORT}" "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N2_SWM_CT" 1; then
     SWM_SYNCED=true
     ok "Node 2 received promoted SWM data (after ${i}s)"
@@ -405,20 +383,14 @@ $SWM_SYNCED || fail "Node 2 did not receive SWM data after 15s"
 
 echo "--- 4d: Verify both entities synced ---"
 if $SWM_SYNCED; then
-  N2_BETA2=$(query_api -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta2> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  N2_BETA2_CT=$(safe_bindings_count "$N2_BETA2") || devnet_observation_abort
+  N2_BETA2_CT=$(sharing_api_observe "${N2_PORT}" "SELECT ?name WHERE { <urn:sharing:beta2> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   devnet_count_at_least "$N2_BETA2_CT" 1 && ok "Node 2 has both promoted entities" || fail "Node 2 missing beta2 entity"
 fi
 
 echo "--- 4e: doc-alpha (still in WM) must NOT appear on Node 2 ---"
 # Current drafts use per-KA numeric _working_memory graphs; legacy drafts
 # can still use /assertion/. Neither family may be physically present here.
-storage_owner_control "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && (CONTAINS(STR(?g), \\\"/assertion/\\\") || CONTAINS(STR(?g), \\\"/_working_memory/\\\"))) }\"}"
-N2_ALPHA=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && (CONTAINS(STR(?g), \\\"/assertion/\\\") || CONTAINS(STR(?g), \\\"/_working_memory/\\\"))) }\"}") || devnet_observation_abort
-N2_ALPHA_CT=$(safe_bindings_count "$N2_ALPHA") || devnet_observation_abort
-check "doc-alpha (WM) not visible on Node 2" "$N2_ALPHA_CT" "0"
+sharing_storage_absence "doc-alpha (WM) not visible on Node 2" "${N1_PORT}" "${N2_PORT}" "$WM_GRAPHS_QUERY" g
 
 #------------------------------------------------------------
 echo ""
@@ -453,24 +425,16 @@ echo "--- 5d: Wait for Node 4 auto-subscribe + sync ---"
 sleep 10
 
 echo "--- 5e: Node 4 has NO WM assertion data ---"
-N4_ASSERT_GRAPHS=$(storage_query -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && (CONTAINS(STR(?g), \\\"/assertion/\\\") || CONTAINS(STR(?g), \\\"/_working_memory/\\\"))) }\"}") || devnet_observation_abort
-N4_AG_CT=$(safe_bindings_count "$N4_ASSERT_GRAPHS") || devnet_observation_abort
+N4_AG_CT=$(sharing_storage_observe "${N4_PORT}" "$WM_GRAPHS_QUERY" g rows) || devnet_observation_abort
 check "Node 4 (late joiner) has 0 assertion data graphs" "$N4_AG_CT" "0"
 
 echo "--- 5f: Node 4 has NO WM lifecycle/event metadata ---"
-storage_owner_control "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/state> \\\"created\\\" } }\"}"
-N4_LIFECYCLE=$(storage_query -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/state> \\\"created\\\" } }\"}") || devnet_observation_abort
-N4_LC_CT=$(safe_bindings_count "$N4_LIFECYCLE") || devnet_observation_abort
-check "Node 4 has 0 WM lifecycle entities" "$N4_LC_CT" "0"
+sharing_storage_absence "Node 4 has 0 WM lifecycle entities" "${N1_PORT}" "${N4_PORT}" "SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/state> \"created\" } }" s
 
 echo "--- 5g: Node 4 DOES have SWM data (promoted before join) ---"
 N4_SWM_SYNCED=false
 for i in $(seq 1 10); do
-  N4_SWM=$(query_api -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  N4_SWM_CT=$(safe_bindings_count "$N4_SWM") || devnet_observation_abort
+  N4_SWM_CT=$(sharing_api_observe "${N4_PORT}" "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N4_SWM_CT" 1; then
     N4_SWM_SYNCED=true
     ok "Node 4 (late joiner) received SWM data"
@@ -481,13 +445,12 @@ done
 $N4_SWM_SYNCED || fail "Node 4 did not receive SWM data (late joiner sync broken)"
 
 echo "--- 5h: Node 4 _meta has only CG-level + non-WM subjects ---"
-N4_META_SUBJ=$(storage_query -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT DISTINCT ?s WHERE { GRAPH <$META_GRAPH> { ?s ?p ?o } }\"}") || devnet_observation_abort
+N4_META_SUBJ=$(sharing_storage_observe "${N4_PORT}" "SELECT DISTINCT ?s WHERE { GRAPH <$META_GRAPH> { ?s ?p ?o } }" s bindings) || devnet_observation_abort
 N4_LEAKED=$(echo "$N4_META_SUBJ" | python3 -c '
 import sys,json
 try:
-  d=json.load(sys.stdin)
-  subjects=[b["s"] if isinstance(b["s"],str) else b["s"]["value"] for b in d["result"]["bindings"]]
+  bindings=json.load(sys.stdin)
+  subjects=[b["s"] if isinstance(b["s"],str) else b["s"]["value"] for b in bindings]
   wm_leaked=[s for s in subjects if "urn:dkg:assertion:" in s or ("/assertion/" in s and "sourceFileHash" not in s)]
   # Check if any urn:dkg:assertion: subjects have WM state
   print(len([s for s in subjects if "urn:dkg:assertion:" in s]))
@@ -495,11 +458,7 @@ except: print("ERR")
 ' 2>/dev/null)
 # The late joiner should see promoted assertion lifecycle (memoryLayer=SWM)
 # but NOT the WM-only doc-alpha lifecycle
-storage_owner_control "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\"}"
-N4_WM_LC=$(storage_query -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\"}") || devnet_observation_abort
-N4_WM_LC_CT=$(safe_bindings_count "$N4_WM_LC") || devnet_observation_abort
-check "Node 4 has 0 WM-layer lifecycle entities" "$N4_WM_LC_CT" "0"
+sharing_storage_absence "Node 4 has 0 WM-layer lifecycle entities" "${N1_PORT}" "${N4_PORT}" "SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> \"WM\" } }" s
 
 #------------------------------------------------------------
 echo ""
@@ -524,15 +483,11 @@ devnet_count_at_least "$N2_OWN_CT" 2 && ok "Node 2 sees its own WM data ($N2_OWN
 
 echo "--- 6c: Node 1 does NOT see Node 2's WM data ---"
 sleep 3
-N1_N2SECRET=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
-N1_N2S_CT=$(safe_bindings_count "$N1_N2SECRET") || devnet_observation_abort
+N1_N2S_CT=$(sharing_api_observe "${N1_PORT}" "SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
 check "Node 1 cannot see Node 2's WM data" "$N1_N2S_CT" "0"
 
 echo "--- 6d: Node 4 does NOT see Node 2's WM data ---"
-N4_N2SECRET=$(query_api -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
-N4_N2S_CT=$(safe_bindings_count "$N4_N2SECRET") || devnet_observation_abort
+N4_N2S_CT=$(sharing_api_observe "${N4_PORT}" "SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
 check "Node 4 cannot see Node 2's WM data" "$N4_N2S_CT" "0"
 
 echo "--- 6e: Node 2 promotes its assertion — should gossip to all ---"
@@ -547,9 +502,7 @@ for port_label in "${N1_PORT}:Node1" "${N4_PORT}:Node4"; do
   label="${port_label##*:}"
   FOUND_N2=false
   for i in $(seq 1 20); do
-    PEER_N2=$(query_api -X POST "http://127.0.0.1:$port/api/query" \
-      -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-    PEER_CT=$(safe_bindings_count "$PEER_N2") || devnet_observation_abort
+    PEER_CT=$(sharing_api_observe "$port" "SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
     if devnet_count_at_least "$PEER_CT" 1; then
       FOUND_N2=true
       ok "$label sees Node 2's promoted SWM data (after ${i}s)"
@@ -566,15 +519,11 @@ echo "=== SECTION 7: Non-Participant Exclusion ==="
 echo ""
 
 echo "--- 7a: Node 3 (not invited) should have no project data ---"
-N3_GRAPHS=$(storage_query -X POST "http://127.0.0.1:${N3_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\")) }\"}") || devnet_observation_abort
-N3_GRAPH_CT=$(safe_bindings_count "$N3_GRAPHS") || devnet_observation_abort
+N3_GRAPH_CT=$(sharing_storage_observe "${N3_PORT}" "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \"$CG_ID\")) }" g rows) || devnet_observation_abort
 check "Node 3 (not invited) has 0 project graphs" "$N3_GRAPH_CT" "0"
 
 echo "--- 7b: Node 3 cannot query project SWM ---"
-N3_SWM=$(query_api -X POST "http://127.0.0.1:${N3_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-N3_SWM_CT=$(safe_bindings_count "$N3_SWM") || devnet_observation_abort
+N3_SWM_CT=$(sharing_api_observe "${N3_PORT}" "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
 check "Node 3 has 0 SWM results" "$N3_SWM_CT" "0"
 
 #------------------------------------------------------------
@@ -591,9 +540,7 @@ if [[ "$PROMOTE_DOC_CT" != "__NONE__" && "$PROMOTE_DOC_CT" != "0" && "$PROMOTE_D
 else
   # import-file may auto-promote during extraction — check SWM directly
   sleep 2
-  DOC_IN_SWM=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  DOC_SWM_CT=$(count_integer "$DOC_IN_SWM") || devnet_observation_abort
+  DOC_SWM_CT=$(sharing_api_observe "${N1_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$DOC_SWM_CT" 3; then
     ok "doc-alpha already in SWM ($DOC_SWM_CT entities — auto-promoted by import pipeline)"
   else
@@ -604,9 +551,7 @@ fi
 echo "--- 8b: Verify doc-alpha now visible on Node 2 via SWM ---"
 DOC_SYNCED=false
 for i in $(seq 1 15); do
-  N2_DOC=$(query_api -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  N2_DOC_CT=$(count_integer "$N2_DOC") || devnet_observation_abort
+  N2_DOC_CT=$(sharing_api_observe "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N2_DOC_CT" 3; then
     DOC_SYNCED=true
     ok "Node 2 now sees promoted doc-alpha in SWM ($N2_DOC_CT entities)"
@@ -619,9 +564,7 @@ $DOC_SYNCED || fail "doc-alpha not synced to Node 2 after promotion"
 echo "--- 8c: Verify doc-alpha now visible on Node 4 (late joiner) ---"
 N4_DOC_SYNCED=false
 for i in $(seq 1 10); do
-  N4_DOC=$(query_api -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  N4_DOC_CT=$(count_integer "$N4_DOC") || devnet_observation_abort
+  N4_DOC_CT=$(sharing_api_observe "${N4_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N4_DOC_CT" 3; then
     N4_DOC_SYNCED=true
     ok "Node 4 (late joiner) sees doc-alpha in SWM ($N4_DOC_CT entities)"
@@ -632,10 +575,7 @@ done
 $N4_DOC_SYNCED || warn "doc-alpha not yet on Node 4 ($N4_DOC_CT entities)"
 
 echo "--- 8d: Node 3 (not invited) still sees nothing ---"
-N3_DOC=$(query_api -X POST "http://127.0.0.1:${N3_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-N3_DOC_CT=$(count_integer "$N3_DOC") || devnet_observation_abort
-check "Node 3 still has 0 SWM entities" "$N3_DOC_CT" "0"
+sharing_excluded_swm "$N3_PORT" "$CG_ID"
 
 #------------------------------------------------------------
 echo ""
@@ -643,12 +583,11 @@ echo "=== SECTION 9: Lifecycle Metadata Correctness ==="
 echo ""
 
 echo "--- 9a: Promoted assertion lifecycle shows SWM layer on Node 1 ---"
-N1_PROMOTED_LC=$(storage_query -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s ?ml WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml . ?s <http://dkg.io/ontology/assertionName> \\\"draft-beta\\\" } }\"}") || devnet_observation_abort
+N1_PROMOTED_LC=$(sharing_storage_observe "${N1_PORT}" "SELECT ?s ?ml WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml . ?s <http://dkg.io/ontology/assertionName> \"draft-beta\" } }" s bindings) || devnet_observation_abort
 N1_PLC_ML=$(echo "$N1_PROMOTED_LC" | python3 -c '
 import sys,json
 try:
-  b=json.load(sys.stdin)["result"]["bindings"]
+  b=json.load(sys.stdin)
   if b:
     ml=b[0]["ml"]
     print((ml if isinstance(ml,str) else ml["value"]).strip("\""))
@@ -660,9 +599,7 @@ check "draft-beta lifecycle shows SWM layer" "$N1_PLC_ML" "SWM"
 echo "--- 9b: Promoted assertion lifecycle synced to Node 2 ---"
 N2_PLC_FOUND=false
 for i in $(seq 1 10); do
-  N2_PLC=$(storage_query -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT ?ml WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml . ?s <http://dkg.io/ontology/assertionName> \\\"draft-beta\\\" } }\"}") || devnet_observation_abort
-  N2_PLC_CT=$(safe_bindings_count "$N2_PLC") || devnet_observation_abort
+  N2_PLC_CT=$(sharing_storage_observe "${N2_PORT}" "SELECT ?ml WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml . ?s <http://dkg.io/ontology/assertionName> \"draft-beta\" } }" ml rows) || devnet_observation_abort
   if devnet_count_at_least "$N2_PLC_CT" 1; then
     N2_PLC_FOUND=true
     ok "Node 2 has promoted lifecycle metadata"
@@ -674,9 +611,7 @@ $N2_PLC_FOUND || warn "Node 2 missing promoted lifecycle — may not sync lifecy
 
 echo "--- 9c: WM-only doc-alpha lifecycle NOT leaked before its promotion (check Node 4 snapshot) ---"
 # After section 8, doc-alpha is now SWM, so check specifically for WM-tagged entries
-N4_WM_ONLY=$(storage_query -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\"}") || devnet_observation_abort
-N4_WM_ONLY_CT=$(safe_bindings_count "$N4_WM_ONLY") || devnet_observation_abort
+N4_WM_ONLY_CT=$(sharing_storage_observe "${N4_PORT}" "SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> \"WM\" } }" s rows) || devnet_observation_abort
 check "Node 4 has 0 WM-tagged lifecycle entries" "$N4_WM_ONLY_CT" "0"
 
 #------------------------------------------------------------
@@ -699,9 +634,7 @@ sleep 5
 for port_label in "${N2_PORT}:Node2" "${N4_PORT}:Node4"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
-  PEER_PP=$(query_api -X POST "http://127.0.0.1:$port/api/query" \
-    -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:postpromo> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
-  PP_CT=$(safe_bindings_count "$PEER_PP") || devnet_observation_abort
+  PP_CT=$(sharing_api_observe "$port" "SELECT ?name WHERE { <urn:sharing:postpromo> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
   check "$label cannot see post-promotion WM data" "$PP_CT" "0"
 done
 
@@ -709,11 +642,8 @@ echo "--- 10c: No new assertion metadata leaked to peers ---"
 for port_label in "${N2_PORT}:Node2" "${N4_PORT}:Node4"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
-  storage_owner_control "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/assertionName> \\\"post-promo-draft\\\" } }\"}"
-  PEER_META=$(storage_query -X POST "http://127.0.0.1:$port/api/query" \
-    -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/assertionName> \\\"post-promo-draft\\\" } }\"}") || devnet_observation_abort
-  PM_CT=$(safe_bindings_count "$PEER_META") || devnet_observation_abort
-  check "$label has no post-promo-draft metadata" "$PM_CT" "0"
+  sharing_storage_absence "$label has no post-promo-draft metadata" "$N1_PORT" "$port" \
+    "SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/assertionName> \"post-promo-draft\" } }" s
 done
 
 #------------------------------------------------------------
@@ -725,9 +655,7 @@ echo "--- 11a: Final graph counts per node ---"
 for port_label in "${N1_PORT}:Node1(creator)" "${N2_PORT}:Node2(invited)" "${N4_PORT}:Node4(late)" "${N3_PORT}:Node3(excluded)"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
-  FINAL=$(storage_query -X POST "http://127.0.0.1:$port/api/query" \
-    -d "{\"sparql\":\"SELECT ?g (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\")) } GROUP BY ?g ORDER BY ?g\"}") || devnet_observation_abort
-  GCNT=$(safe_bindings_count "$FINAL") || devnet_observation_abort
+  GCNT=$(sharing_storage_observe "$port" "SELECT ?g (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \"$CG_ID\")) } GROUP BY ?g ORDER BY ?g" g rows) || devnet_observation_abort
   echo "  $label: $GCNT graph(s)"
   if [[ "$label" == *"excluded"* ]]; then
     check "$label has 0 graphs" "$GCNT" "0"
@@ -750,21 +678,15 @@ echo "=== SECTION 12: WM SPARQL Default Graph Isolation ==="
 echo ""
 
 echo "--- 12a: wmSparql default graph should not return system triples on participant ---"
-N2_DEFAULT=$(query_api -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \\\"did:dkg:context-graph:$CG_ID/\\\") && !STRENDS(STR(?g), \\\"/_meta\\\") && !CONTAINS(STR(?g), \\\"/_private\\\") && !CONTAINS(STR(?g), \\\"/_shared_memory\\\") && !CONTAINS(STR(?g), \\\"/_verifiable_memory\\\") && !CONTAINS(STR(?g), \\\"/_rules\\\")) }\",\"contextGraphId\":\"$CG_ID\"}") || devnet_observation_abort
-N2_DEF_CT=$(safe_bindings_count "$N2_DEFAULT") || devnet_observation_abort
+N2_DEF_CT=$(sharing_api_observe "${N2_PORT}" "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:$CG_ID/\") && !STRENDS(STR(?g), \"/_meta\") && !CONTAINS(STR(?g), \"/_private\") && !CONTAINS(STR(?g), \"/_shared_memory\") && !CONTAINS(STR(?g), \"/_verifiable_memory\") && !CONTAINS(STR(?g), \"/_rules\")) }" s rows "{\"contextGraphId\":\"$CG_ID\"}") || devnet_observation_abort
 check "Node 2 WM named-graph-only query returns 0 non-SWM triples" "$N2_DEF_CT" "0"
 
 echo "--- 12b: Non-participant wmSparql returns 0 triples (no system leak) ---"
-N3_DEFAULT=$(query_api -X POST "http://127.0.0.1:${N3_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \\\"did:dkg:context-graph:$CG_ID/\\\") && !STRENDS(STR(?g), \\\"/_meta\\\") && !CONTAINS(STR(?g), \\\"/_private\\\") && !CONTAINS(STR(?g), \\\"/_shared_memory\\\") && !CONTAINS(STR(?g), \\\"/_verifiable_memory\\\") && !CONTAINS(STR(?g), \\\"/_rules\\\")) }\",\"contextGraphId\":\"$CG_ID\"}") || devnet_observation_abort
-N3_DEF_CT=$(safe_bindings_count "$N3_DEFAULT") || devnet_observation_abort
+N3_DEF_CT=$(sharing_api_observe "${N3_PORT}" "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:$CG_ID/\") && !STRENDS(STR(?g), \"/_meta\") && !CONTAINS(STR(?g), \"/_private\") && !CONTAINS(STR(?g), \"/_shared_memory\") && !CONTAINS(STR(?g), \"/_verifiable_memory\") && !CONTAINS(STR(?g), \"/_rules\")) }" s rows "{\"contextGraphId\":\"$CG_ID\"}") || devnet_observation_abort
 check "Node 3 (excluded) WM named-graph-only query returns 0" "$N3_DEF_CT" "0"
 
 echo "--- 12c: System triples (did:dkg:network:*) excluded from WM entity count ---"
-N3_SYSTEM=$(query_api -X POST "http://127.0.0.1:${N3_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \\\"did:dkg:context-graph:$CG_ID/\\\")) }\",\"contextGraphId\":\"$CG_ID\"}") || devnet_observation_abort
-N3_SYS_CT=$(safe_bindings_count "$N3_SYSTEM") || devnet_observation_abort
+N3_SYS_CT=$(sharing_api_observe "${N3_PORT}" "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:$CG_ID/\")) }" s rows "{\"contextGraphId\":\"$CG_ID\"}") || devnet_observation_abort
 check "Node 3 has 0 named-graph triples scoped to this CG" "$N3_SYS_CT" "0"
 
 #------------------------------------------------------------
@@ -870,9 +792,7 @@ check "Node 4 join request approved" "$N4_APP_OK" "true"
 echo "--- 13i: Node 4 auto-subscribes and receives SWM data ---"
 N4_SWM_OK=false
 for i in $(seq 1 20); do
-  N4_SWM=$(query_api -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  N4_SWM_CT=$(safe_bindings_count "$N4_SWM") || devnet_observation_abort
+  N4_SWM_CT=$(sharing_api_observe "${N4_PORT}" "SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N4_SWM_CT" 1; then
     N4_SWM_OK=true
     ok "Node 4 received SWM data after approval (after ${i}s)"
@@ -883,20 +803,13 @@ done
 $N4_SWM_OK || fail "Node 4 did not receive SWM data after approval"
 
 echo "--- 13j: Node 4 has NO WM data (wm-secret stays private) ---"
-N4_SECRET=$(query_api -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
-N4_SEC_CT=$(safe_bindings_count "$N4_SECRET") || devnet_observation_abort
+N4_SEC_CT=$(sharing_api_observe "${N4_PORT}" "SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
 check "Node 4 cannot see WM secret data" "$N4_SEC_CT" "0"
 
 echo "--- 13k: Node 4 has NO WM lifecycle metadata ---"
 # Scoped: since v10.0.17 an unscoped query is refused on stores without
 # all-writer consistency coverage. The raw backend observer below verifies physical absence with an owner control.
-storage_owner_control "{\"sparql\":\"SELECT ?s WHERE { GRAPH <did:dkg:context-graph:$CG2_ID/_meta> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\",\"contextGraphId\":\"$CG2_ID\"}"
-N4_WM_META=$(storage_query -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <did:dkg:context-graph:$CG2_ID/_meta> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\",\"contextGraphId\":\"$CG2_ID\"}") || devnet_observation_abort
-N4_WMM_CT=$(safe_bindings_count "$N4_WM_META") || devnet_observation_abort
-[[ "$N4_WMM_CT" == "0" ]] || echo "  13k answer: $N4_WM_META"
-check "Node 4 has 0 WM-layer lifecycle entries" "$N4_WMM_CT" "0"
+sharing_storage_absence "Node 4 has 0 WM-layer lifecycle entries" "${N1_PORT}" "${N4_PORT}" "SELECT ?s WHERE { GRAPH <did:dkg:context-graph:$CG2_ID/_meta> { ?s <http://dkg.io/ontology/memoryLayer> \"WM\" } }" s
 
 echo "--- 13l: Node 5 sends join request + gets approved ---"
 c -X POST "http://127.0.0.1:${N5_PORT}/api/context-graph/subscribe" \
@@ -914,9 +827,7 @@ ok "Node 5 join approved"
 echo "--- 13m: Node 5 receives SWM but not WM ---"
 N5_SWM_OK=false
 for i in $(seq 1 25); do
-  N5_SWM=$(query_api -X POST "http://127.0.0.1:${N5_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-  N5_SWM_CT=$(safe_bindings_count "$N5_SWM") || devnet_observation_abort
+  N5_SWM_CT=$(sharing_api_observe "${N5_PORT}" "SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N5_SWM_CT" 1; then
     N5_SWM_OK=true
     ok "Node 5 received SWM data"
@@ -926,15 +837,11 @@ for i in $(seq 1 25); do
 done
 $N5_SWM_OK || warn "Node 5 (edge) did not receive SWM data after 25s — edge sync may be slower"
 
-N5_SECRET=$(query_api -X POST "http://127.0.0.1:${N5_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
-N5_SEC_CT=$(safe_bindings_count "$N5_SECRET") || devnet_observation_abort
+N5_SEC_CT=$(sharing_api_observe "${N5_PORT}" "SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
 check "Node 5 cannot see WM secret data" "$N5_SEC_CT" "0"
 
 echo "--- 13n: Node 3 (never requested) still excluded ---"
-N3_CG2=$(storage_query -X POST "http://127.0.0.1:${N3_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG2_ID\\\")) }\"}") || devnet_observation_abort
-N3_CG2_CT=$(safe_bindings_count "$N3_CG2") || devnet_observation_abort
+N3_CG2_CT=$(sharing_storage_observe "${N3_PORT}" "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \"$CG2_ID\")) }" g rows) || devnet_observation_abort
 check "Node 3 has 0 graphs for join-flow project" "$N3_CG2_CT" "0"
 
 # Cleanup
@@ -987,9 +894,7 @@ PROMO_CT=$(json_get "$PROMO_RESULT" promotedCount)
 
 echo "--- 14e: Verify promoted data exists in SWM ---"
 sleep 1
-N1_PROMO_SWM=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-PROMO_SWM_CT=$(count_integer "$N1_PROMO_SWM") || devnet_observation_abort
+PROMO_SWM_CT=$(sharing_api_observe "${N1_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
 devnet_count_at_least "$PROMO_SWM_CT" 1 && ok "Promoted data visible in SWM ($PROMO_SWM_CT entities)" || fail "SWM empty after promote ($PROMO_SWM_CT)"
 
 echo "--- 14f: Also create + write + promote an API assertion (same project) ---"
@@ -1065,15 +970,11 @@ fi
 
 echo "--- 15b: Verify VM data on Node 1 ---"
 sleep 3
-N1_VM=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
-N1_VM_CT=$(count_integer "$N1_VM") || devnet_observation_abort
+N1_VM_CT=$(sharing_api_observe "${N1_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
 devnet_count_at_least "$N1_VM_CT" 1 && ok "Node 1 has $N1_VM_CT entities in VM" || warn "Node 1 VM query is empty immediately after publish"
 
 echo "--- 15c: Verify specific entities in VM ---"
-N1_VM_API=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT ?name WHERE { <urn:promote-test:api1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
-N1_VM_API_CT=$(safe_bindings_count "$N1_VM_API") || devnet_observation_abort
+N1_VM_API_CT=$(sharing_api_observe "${N1_PORT}" "SELECT ?name WHERE { <urn:promote-test:api1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
 devnet_count_at_least "$N1_VM_API_CT" 1 && ok "API entity visible in VM" || warn "API entity not in VM ($N1_VM_API_CT) — may not have been in SWM"
 
 echo "--- 15d: VM data syncs to Node 2 ---"
@@ -1081,9 +982,7 @@ echo "--- 15d: VM data syncs to Node 2 ---"
 # (VM is published on-chain and available to all nodes)
 N2_VM_SYNCED=false
 for i in $(seq 1 20); do
-  N2_VM=$(query_api -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
-  N2_VM_CT=$(count_integer "$N2_VM") || devnet_observation_abort
+  N2_VM_CT=$(sharing_api_observe "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N2_VM_CT" 1; then
     N2_VM_SYNCED=true
     ok "Node 2 received VM data ($N2_VM_CT entities, after ${i}s)"
@@ -1096,9 +995,7 @@ $N2_VM_SYNCED || warn "Node 2 missing VM data after 20s — VM sync may need mor
 echo "--- 15e: Node 3 also has VM data (VM is public/on-chain) ---"
 N3_VM_SYNCED=false
 for i in $(seq 1 20); do
-  N3_VM=$(query_api -X POST "http://127.0.0.1:${N3_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
-  N3_VM_CT=$(count_integer "$N3_VM") || devnet_observation_abort
+  N3_VM_CT=$(sharing_api_observe "${N3_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N3_VM_CT" 1; then
     N3_VM_SYNCED=true
     ok "Node 3 received VM data ($N3_VM_CT entities, after ${i}s)"
@@ -1109,9 +1006,7 @@ done
 $N3_VM_SYNCED || warn "Node 3 missing VM data after 20s — VM sync may need more time"
 
 echo "--- 15f: SWM still has data (clearAfter=false) ---"
-N1_SWM_AFTER=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-SWM_AFTER_CT=$(count_integer "$N1_SWM_AFTER") || devnet_observation_abort
+SWM_AFTER_CT=$(sharing_api_observe "${N1_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
 devnet_count_at_least "$SWM_AFTER_CT" 1 && ok "SWM retained after publish ($SWM_AFTER_CT entities)" || warn "SWM cleared despite clearAfter=false"
 
 #------------------------------------------------------------
@@ -1152,9 +1047,7 @@ echo "--- 16b: Verify VM data on Node 1 for private CG ---"
 echo "--- 16b: Node 2 (participant) sees VM data ---"
 N2_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N2_CG1_VM=$(query_api -X POST "http://127.0.0.1:${N2_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
-  N2_CG1_VM_CT=$(count_integer "$N2_CG1_VM") || devnet_observation_abort
+  N2_CG1_VM_CT=$(sharing_api_observe "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N2_CG1_VM_CT" 1; then
     N2_CG1_VM_OK=true
     ok "Node 2 has VM data for CG1 ($N2_CG1_VM_CT entities, after ${i}s)"
@@ -1167,9 +1060,7 @@ $N2_CG1_VM_OK || warn "Node 2 missing VM data for CG1 after 20s"
 echo "--- 16c: Node 4 (late joiner) sees VM data ---"
 N4_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N4_CG1_VM=$(query_api -X POST "http://127.0.0.1:${N4_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
-  N4_CG1_VM_CT=$(count_integer "$N4_CG1_VM") || devnet_observation_abort
+  N4_CG1_VM_CT=$(sharing_api_observe "${N4_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N4_CG1_VM_CT" 1; then
     N4_CG1_VM_OK=true
     ok "Node 4 has VM data for CG1 ($N4_CG1_VM_CT entities, after ${i}s)"
@@ -1182,9 +1073,7 @@ $N4_CG1_VM_OK || warn "Node 4 missing VM data for CG1 after 20s"
 echo "--- 16d: Node 3 (excluded from private CG) still gets VM (on-chain is public) ---"
 N3_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N3_CG1_VM=$(query_api -X POST "http://127.0.0.1:${N3_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
-  N3_CG1_VM_CT=$(count_integer "$N3_CG1_VM") || devnet_observation_abort
+  N3_CG1_VM_CT=$(sharing_api_observe "${N3_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N3_CG1_VM_CT" 1; then
     N3_CG1_VM_OK=true
     ok "Node 3 sees VM for private CG1 ($N3_CG1_VM_CT entities — on-chain is public)"
@@ -1198,9 +1087,7 @@ echo "--- 16e: WM data still private after publish ---"
 for port_label in "${N2_PORT}:Node2" "${N4_PORT}:Node4" "${N3_PORT}:Node3"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
-  PEER_WM=$(storage_query -X POST "http://127.0.0.1:$port/api/query" \
-    -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && (CONTAINS(STR(?g), \\\"/assertion/\\\") || CONTAINS(STR(?g), \\\"/_working_memory/\\\"))) }\"}") || devnet_observation_abort
-  PEER_WM_CT=$(safe_bindings_count "$PEER_WM") || devnet_observation_abort
+  PEER_WM_CT=$(sharing_storage_observe "$port" "$WM_GRAPHS_QUERY" g rows) || devnet_observation_abort
   check "$label still has 0 WM assertion graphs after publish" "$PEER_WM_CT" "0"
 done
 
@@ -1214,9 +1101,7 @@ PUB_CLEAR=$(c -X POST "http://127.0.0.1:${N1_PORT}/api/knowledge-assets/$CLEAR_N
   -d "{\"contextGraphId\":\"$CG3_ID\",\"options\":{\"clearAfter\":true}}")
 PUB_CLEAR_STATUS=$(json_get "$PUB_CLEAR" status)
 sleep 2
-N1_SWM_CLEARED=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-  -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
-SWM_CLEARED_CT=$(count_integer "$N1_SWM_CLEARED") || devnet_observation_abort
+SWM_CLEARED_CT=$(sharing_api_observe "${N1_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
 if [[ "$SWM_CLEARED_CT" == "0" ]]; then
   ok "SWM cleared after publish with clearAfter=true"
 else
@@ -1226,9 +1111,7 @@ fi
 echo "--- 16g: VM still has data even after SWM cleared ---"
 VM_STILL_CT=0
 for _ in $(seq 1 30); do
-  N1_VM_STILL=$(query_api -X POST "http://127.0.0.1:${N1_PORT}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
-  VM_STILL_CT=$(count_integer "$N1_VM_STILL") || devnet_observation_abort
+  VM_STILL_CT=$(sharing_api_observe "${N1_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   devnet_count_at_least "$VM_STILL_CT" 1 && break
   sleep 1
 done

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -86,137 +87,248 @@ async function serve(t, handler) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-// Execute the actual sharing functions and their actual parent-shell assignments.
-// No reliance on set -e: it is intentionally absent, as in the shipping suite.
-const sharingSource = readFileSync(join(scripts, 'devnet-test-sharing.sh'), 'utf8');
-const sharingFunctions = sharingSource.slice(sharingSource.indexOf('query_api()'), sharingSource.indexOf('\nq() '));
+// Exercise sourceable operations used by the suite, without executing its flow
+// or depending on source formatting, variable names or assignment counts.
+const helper = join(scripts, 'devnet-observation-helpers.sh');
+const sharing = join(scripts, 'devnet-test-sharing.sh');
+const empty = '{"result":{"type":"bindings","bindings":[]}}';
+const select = 'SELECT ?s WHERE { ?s ?p ?o }';
+const count = 'SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }';
+
 for (const [name, response, http] of [
   ['API error', fixture('api-error'), 200], ['malformed', '{', 200],
   ['HTTP error', body('0'), 500], ['missing binding', body('0').replace('cnt', 'wrong'), 200],
-  ['ambiguous COUNT', '{"result":{"bindings":[]}}', 200],
+  ['ambiguous COUNT', empty, 200],
 ]) test(`parent sharing shell rejects ${name}`, async t => {
-  const url = await serve(t, (_req, res) => { res.writeHead(http); res.end(response); });
-  const captureAssignment = sharingSource.match(/^N1_VM=\$\(query_api[^\n]+\n[^\n]+/m)[0]
-    .replace(/http:\/\/127\.0\.0\.1:\$\{N1_PORT\}\/api\/query/, `${url}/api/query`);
-  const countAssignment = sharingSource.match(/^N1_VM_CT=\$\(count_integer[^\n]+/m)[0];
-  const result = await runShell(`source "$HELPER"; AUTH=fixture; CG3_ID=fixture; ${sharingFunctions}\n${captureAssignment}\n${countAssignment}\n[ "$N1_VM_CT" = 0 ] && echo FALSE_PASS`, { HELPER: join(scripts, 'devnet-observation-helpers.sh') });
+  const url = await serve(t, (req, res) => { req.resume(); res.writeHead(http); res.end(response); });
+  const result = await runShell(`source "$SHARING"; AUTH=fixture
+value=$(sharing_api_observe "$PORT" "$QUERY" cnt count '{"contextGraphId":"fixture"}') || devnet_observation_abort
+[ "$value" = 0 ] && echo FALSE_PASS`, { SHARING: sharing, PORT: new URL(url).port, QUERY: count });
   assert.equal(result.status, 1, `parent status=${result.status}, stdout=${result.stdout}, stderr=${result.stderr}`);
   assert.doesNotMatch(result.stdout, /FALSE_PASS/);
   assert.match(result.stderr, /INCONCLUSIVE/);
 });
 
-test('all sharing query and parser substitutions explicitly handle failure', () => {
-  const assignments = sharingSource.match(/^\s*\w+=\$\((?:query_api|storage_query|safe_bindings_count|count_integer)[^\n]*(?:\n[^\n]*)?/gm);
-  assert.ok(assignments.length > 90);
-  for (const assignment of assignments) {
-    const end = assignment.indexOf(')');
-    // Bodies can contain parentheses, so check the complete one/two-line call.
-    assert.ok(end > 0);
-    assert.match(assignment, /\|\| devnet_observation_abort/, assignment);
-  }
+for (const [name, response, http, expected] of [
+  ['valid denied empty SELECT', empty, 200, 0],
+  ['HTTP error', empty, 503, 1], ['malformed response', '{', 200, 1],
+  ['API error', fixture('api-error'), 200, 1],
+  ['visible leak', '{"result":{"bindings":[{"s":"<urn:leaked>"}]}}', 200, 1],
+]) test(`sharing excluded SWM check handles ${name}`, async t => {
+  let request;
+  const url = await serve(t, (req, res) => {
+    let input = ''; req.on('data', c => input += c);
+    req.on('end', () => { request = JSON.parse(input); res.writeHead(http); res.end(response); });
+  });
+  const result = await runShell('source "$SHARING"; AUTH=fixture; sharing_excluded_swm "$PORT" fixture; exit "$FAIL"', {
+    SHARING: sharing, PORT: new URL(url).port,
+  });
+  assert.equal(result.status, expected, result.stderr);
+  assert.equal(request.sparql, select);
+  assert.equal(request.contextGraphId, 'fixture'); assert.equal(request.view, 'shared-working-memory');
+  if (expected === 0) assert.match(result.stdout, /\[PASS\] Node 3 still has 0 SWM entities/);
+  else assert.doesNotMatch(result.stdout, /\[PASS\]/);
+});
+
+test('JSON-mode assertion preserves validated bindings and failures emit no payload', async () => {
+  const rows = [{ s: '<urn:fixture>' }];
+  const frame = `0\n200\n${JSON.stringify({ result: { type: 'bindings', bindings: rows } })}`;
+  const success = await runShell('source "$HELPER"; printf "%s" "$FRAME" | devnet_observe json s api ge 1', { HELPER: helper, FRAME: frame });
+  assert.equal(success.status, 0, success.stderr);
+  assert.deepEqual(JSON.parse(success.stdout).result.bindings, rows);
+  const failure = await runShell('source "$HELPER"; printf "%s" "$FRAME" | devnet_observe json s api eq 0', { HELPER: helper, FRAME: frame });
+  assert.equal(failure.status, 1); assert.equal(failure.stdout, ''); assert.match(failure.stderr, /ASSERTION_FAILED/);
+});
+
+test('direct API metrics preserve scope and large integers in one observation', async t => {
+  let request;
+  const url = await serve(t, (req, res) => {
+    let input = ''; req.on('data', c => input += c);
+    req.on('end', () => { request = JSON.parse(input); res.end(fixture('api-large')); });
+  });
+  const result = await runShell(`source "$HELPER"; devnet_query_api "$URL" fixture "$QUERY" cnt count '{"contextGraphId":"fixture","view":"shared-working-memory"}'`, {
+    HELPER: helper, URL: url, QUERY: count,
+  });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), '9007199254740993123456789');
+  assert.deepEqual(request, { contextGraphId: 'fixture', view: 'shared-working-memory', sparql: count });
 });
 
 test('real wrapper transport failure has empty stdout and exit 2 even in a pipeline', async () => {
-  const result = await runShell('source "$HELPER"; if value=$(devnet_capture http://127.0.0.1:1 | devnet_observe count cnt api); then echo FALSE_PASS; else exit $?; fi', { HELPER: join(scripts, 'devnet-observation-helpers.sh') });
+  const result = await runShell('source "$HELPER"; if value=$(devnet_capture http://127.0.0.1:1 | devnet_observe count cnt api); then echo FALSE_PASS; else exit $?; fi', { HELPER: helper });
   assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /TRANSPORT_FAILURE/);
 });
 
-test('ACL empty API view cannot prove physical absence; raw seeded backend catches the leak', async t => {
-  const url = await serve(t, (req, res) => {
-    req.resume();
-    if (req.url === '/api/query') res.end('{"result":{"type":"bindings","bindings":[]}}');
-    else res.end('{"head":{"vars":["s"]},"results":{"bindings":[{"s":{"type":"uri","value":"urn:seeded-private-assertion"}}]}}');
-  });
-  const dir = mkdtempSync(join(root, '.qa-observer-'));
+const raw = (binding, rows) => JSON.stringify({ head: { vars: [binding] }, results: { bindings: rows } });
+const seeded = [{ s: { type: 'uri', value: 'urn:seeded-private-assertion' } }];
+function config(port, endpoint) {
+  return { apiPort: port, chain: { chainId: 'evm:31337', rpcUrl: 'http://127.0.0.1:18547' }, store: { backend: 'sparql-http', options: { queryEndpoint: endpoint } } };
+}
+function directory(t, configs, parent = root) {
+  const dir = mkdtempSync(join(parent, '.qa-observer-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  mkdirSync(join(dir, 'node1'));
-  writeFileSync(join(dir, 'node1/config.json'), JSON.stringify({ apiPort: Number(new URL(url).port), chain: { chainId: 'evm:31337', rpcUrl: url }, store: { backend: 'sparql-http', options: { queryEndpoint: `${url}/query` } } }));
-  const result = await runShell(`source "$HELPER"
-api=$(devnet_capture "$URL/api/query") || exit 2
-visible=$(printf '%s' "$api" | devnet_observe rows s api) || exit 2
-[ "$visible" = 0 ] || exit 1
-physical=$(devnet_storage_query "$DIRECTORY" "$URL/api/query" '{"sparql":"SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }"}') || exit 2
-printf '0\\n200\\n%s' "$physical" | devnet_observe rows s api eq 0`, { HELPER: join(scripts, 'devnet-observation-helpers.sh'), URL: url, DIRECTORY: dir });
-  assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /ASSERTION_FAILED/);
+  configs.forEach((value, i) => {
+    mkdirSync(join(dir, `node${i + 1}`));
+    writeFileSync(join(dir, `node${i + 1}/config.json`), JSON.stringify(value));
+  });
+  return dir;
+}
+
+for (const [name, owner, peer, expected] of [
+  ['seeded owner and empty peer', seeded, [], 0],
+  ['empty owner', [], [], 1], ['seeded peer leak', seeded, seeded, 1],
+]) test(`paired physical absence handles ${name}`, async t => {
+  const requests = [];
+  const url = await serve(t, (req, res) => {
+    let input = ''; req.on('data', c => input += c);
+    req.on('end', () => {
+      const query = new URLSearchParams(input).get('query'); requests.push({ path: req.url, query });
+      res.end(raw('s', query.includes('LIMIT 1') ? seeded : req.url === '/owner' ? owner : peer));
+    });
+  });
+  const dir = directory(t, [config(19401, `${url}/owner`), config(19402, `${url}/peer`)]);
+  const result = await runShell(`source "$SHARING"; sharing_storage_absence 'Peer has no seeded fact' 19401 19402 "$QUERY" s; exit "$FAIL"`, {
+    SHARING: sharing, DEVNET_DIR: dir, QUERY: select,
+  });
+  assert.equal(result.status, expected, result.stderr);
+  assert.deepEqual(requests.filter(r => !r.query.includes('LIMIT 1')).map(r => r.query), owner.length ? [select, select] : [select]);
+  assert.deepEqual(requests.map(r => r.path), owner.length ? ['/owner', '/owner', '/peer', '/peer'] : ['/owner', '/owner']);
+  if (!owner.length) assert.match(result.stdout, /Owner storage control did not expose the seeded WM fact/);
 });
 
-test('storage absence refuses an empty positive control', async t => {
-  const url = await serve(t, (req, res) => { req.resume(); res.end('{"head":{"vars":["s"]},"results":{"bindings":[]}}'); });
-  const dir = mkdtempSync(join(root, '.qa-observer-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true })); mkdirSync(join(dir, 'node1'));
-  writeFileSync(join(dir, 'node1/config.json'), JSON.stringify({ apiPort: Number(new URL(url).port), chain: { chainId: 'evm:31337', rpcUrl: url }, store: { backend: 'sparql-http', options: { queryEndpoint: `${url}/query` } } }));
-  const result = await runShell('source "$HELPER"; devnet_storage_query "$DIRECTORY" "$URL/api/query" \'{"sparql":"SELECT ?s WHERE {?s ?p ?o}"}\'', { HELPER: join(scripts, 'devnet-observation-helpers.sh'), URL: url, DIRECTORY: dir });
+test('ACL empty API view cannot prove physical absence; raw seeded backend catches the leak', async t => {
+  const url = await serve(t, (req, res) => { req.resume(); res.end(req.url === '/api/query' ? empty : raw('s', seeded)); });
+  const dir = directory(t, [config(19401, `${url}/query`)]);
+  const result = await runShell(`source "$HELPER"
+visible=$(devnet_query_api "$URL" fixture "$QUERY" s rows) || exit 2
+[ "$visible" = 0 ] || exit 1
+devnet_storage_query "$DIRECTORY" 19401 "$QUERY" s rows eq 0`, { HELPER: helper, URL: url, DIRECTORY: dir, QUERY: select });
+  assert.equal(result.status, 1, result.stderr); assert.match(result.stderr, /ASSERTION_FAILED/);
+});
+
+test('storage absence refuses an empty positive control before acquiring the observation', async t => {
+  let calls = 0;
+  const url = await serve(t, (req, res) => { req.resume(); calls++; res.end(raw('s', [])); });
+  const dir = directory(t, [config(19401, `${url}/query`)]);
+  const result = await runShell('source "$HELPER"; devnet_storage_query "$DIRECTORY" 19401 "$QUERY" s rows', { HELPER: helper, DIRECTORY: dir, QUERY: select });
+  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.equal(calls, 1);
+});
+
+test('explicit raw COUNT binding supports expression projections without inferring SPARQL text', async t => {
+  const url = await serve(t, (req, res) => {
+    let input = ''; req.on('data', c => input += c);
+    req.on('end', () => res.end(new URLSearchParams(input).get('query').includes('LIMIT 1') ? raw('s', seeded)
+      : raw('cnt', [{ cnt: { type: 'literal', value: '9007199254740993123456789', datatype: `${xsd}integer` } }])));
+  });
+  const dir = directory(t, [config(19401, `${url}/query`)]);
+  const result = await runShell('source "$HELPER"; devnet_storage_query "$DIRECTORY" 19401 "$QUERY" cnt count', { HELPER: helper, DIRECTORY: dir, QUERY: count });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), '9007199254740993123456789');
+});
+
+async function rejectsBeforeAcquisition(dir) {
+  const endpoint = await runShell('node "$RESOLVER" "$DIRECTORY" http://127.0.0.1:19401', {
+    RESOLVER: join(scripts, 'lib/qa/devnet-storage-endpoint.mjs'), DIRECTORY: dir,
+  });
+  assert.equal(endpoint.status, 2); assert.equal(endpoint.stdout, '');
+  const observation = await runShell('source "$HELPER"; curl(){ echo ACQUIRED >&2; return 99; }; devnet_storage_query "$DIRECTORY" 19401 "$QUERY" s rows', {
+    HELPER: helper, DIRECTORY: dir, QUERY: select,
+  });
+  assert.equal(observation.status, 2); assert.equal(observation.stdout, ''); assert.doesNotMatch(observation.stderr, /ACQUIRED/);
+}
+
+for (const [name, change] of [
+  ['API port mismatch', c => { c.apiPort = 19402; }],
+  ['non-devnet chain', c => { c.chain.chainId = 'evm:8453'; }],
+  ['non-loopback RPC', c => { c.chain.rpcUrl = 'http://192.0.2.1:8545'; }],
+  ['non-loopback store', c => { c.store.options.queryEndpoint = 'http://192.0.2.1:9999/query'; }],
+  ['unsupported embedded store', c => { c.store = { backend: 'oxigraph', options: {} }; }],
+]) test(`raw store boundary rejects ${name} without query acquisition`, async t => {
+  const candidate = config(19401, 'http://127.0.0.1:17901/query'); change(candidate);
+  const dir = directory(t, [candidate]);
+  await rejectsBeforeAcquisition(dir);
+});
+
+for (const name of ['outside checkout', 'nested directory']) test(`raw store boundary rejects ${name} before acquisition`, async t => {
+  const parent = name === 'outside checkout' ? tmpdir() : mkdtempSync(join(root, '.qa-parent-'));
+  if (name === 'nested directory') t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const dir = directory(t, [config(19401, 'http://127.0.0.1:17901/query')], parent);
+  await rejectsBeforeAcquisition(dir);
+});
+
+test('endpoint resolver rejects a non-loopback API identity without emitting an endpoint', async t => {
+  const dir = directory(t, [config(19401, 'http://127.0.0.1:17901/query')]);
+  const result = await runShell('node "$RESOLVER" "$DIRECTORY" http://192.0.2.1:19401', { RESOLVER: join(scripts, 'lib/qa/devnet-storage-endpoint.mjs'), DIRECTORY: dir });
   assert.equal(result.status, 2); assert.equal(result.stdout, '');
 });
 
-const rcSource = readFileSync(join(scripts, 'v10-rc-validation.sh'), 'utf8');
-for (const [name, response, http] of [['API error', fixture('api-error'), 200], ['malformed', '{', 200], ['HTTP error', '{"result":{"bindings":[]}}', 500]]) {
-  test(`RC smoke parent rejects ${name} on an absence assertion`, async t => {
+for (const [name, response, http] of [['API error', fixture('api-error'), 200], ['malformed', '{', 200], ['HTTP error', empty, 500]]) {
+  test(`shared RC/invite privacy observation parent rejects ${name}`, async t => {
     const url = await serve(t, (req, res) => { req.resume(); res.writeHead(http); res.end(response); });
-    const queryPost = rcSource.slice(rcSource.indexOf('query_post()'), rcSource.indexOf('\nhttp_code()'));
-    const assignment = rcSource.match(/    BINDINGS=\$\(query_post[^\n]+\n(?:[^\n]*\n){2}[^\n]+/)[0];
-    const result = await runShell(`source "$HELPER"; H='Authorization: fixture'; PORT="$PORT"; CG=fixture; BOB_URI=urn:fixture; ${queryPost}\n${assignment}\n[ "$BINDINGS" = 0 ] && echo FALSE_PASS`, {
-      HELPER: join(scripts, 'devnet-observation-helpers.sh'), PORT: new URL(url).port,
-    });
+    const result = await runShell(`source "$HELPER"
+value=$(devnet_query_api "$URL" fixture "$QUERY" s rows '{"contextGraphId":"fixture","graphSuffix":"_shared_memory"}') || devnet_observation_abort
+[ "$value" = 0 ] && echo FALSE_PASS`, { HELPER: helper, URL: url, QUERY: select });
     assert.equal(result.status, 1, result.stderr); assert.doesNotMatch(result.stdout, /FALSE_PASS/);
   });
 }
 
-const phonebookSource = readFileSync(join(scripts, 'devnet-probe-cg-phonebook.sh'), 'utf8');
-for (const [name, response, expected] of [
-  ['valid positive', body('12').replace('cnt', 'n'), 0],
-  ['missing COUNT', '{"result":{"bindings":[]}}', 1],
-  ['digit-containing garbage', body('broken12count').replace('cnt', 'n'), 1],
-]) test(`phonebook parent handles ${name}`, async t => {
-  const url = await serve(t, (req, res) => { req.resume(); res.end(response); });
-  const segment = phonebookSource.slice(phonebookSource.indexOf('MA_QUERY='), phonebookSource.indexOf('# --- 3.'));
-  const result = await runShell(`source "$HELPER"; AUTH_HEADER='Authorization: fixture'; API_PORT_BASE="$PORT"; ok(){ echo PASS; }; fail(){ exit 1; }; ${segment}`, {
-    HELPER: join(scripts, 'devnet-observation-helpers.sh'), PORT: new URL(url).port,
+for (const [name, crossResponse, http, expected] of [
+  ['valid positive', body('12').replace('cnt', 'n'), 200, 0],
+  ['valid advisory zero', body('0').replace('cnt', 'n'), 200, 0],
+  ['missing COUNT', empty, 200, 1],
+  ['digit-containing garbage', body('broken12count').replace('cnt', 'n'), 200, 1],
+  ['HTTP error', body('0').replace('cnt', 'n'), 503, 1],
+]) test(`complete phonebook fixture script handles ${name}`, async t => {
+  const url = await serve(t, (req, res) => {
+    let input = ''; req.on('data', c => input += c);
+    req.on('end', () => {
+      if (req.url === '/api/query') {
+        const query = JSON.parse(input).sparql;
+        const cross = query.includes('FILTER');
+        res.writeHead(cross ? http : 200); res.end(cross ? crossResponse : body('12').replace('cnt', 'n'));
+      } else res.end(JSON.stringify(req.url === '/api/identity' ? { hasIdentity: true } : { peerId: 'fixture-peer' }));
+    });
   });
+  const dir = mkdtempSync(join(tmpdir(), 'dkg-phonebook-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (let n = 1; n <= 6; n++) {
+    mkdirSync(join(dir, `node${n}`)); writeFileSync(join(dir, `node${n}/daemon.log`), 'publishProfile succeeded\n');
+  }
+  writeFileSync(join(dir, 'node1/auth.token'), 'fixture-only');
+  const result = await runShell(`curl(){
+local args=() arg
+for arg in "$@"; do
+  if [[ "$arg" =~ ^http://127.0.0.1:[0-9]+(/.*)$ ]]; then arg="$URL\${BASH_REMATCH[1]}"; fi
+  args+=("$arg")
+done
+command curl "\${args[@]}"
+}
+export -f curl
+bash "$PROBE"`, { URL: url, DEVNET_DIR: dir, PROBE: join(scripts, 'devnet-probe-cg-phonebook.sh') });
   assert.equal(result.status, expected, result.stderr);
-  if (expected === 1) assert.doesNotMatch(result.stdout, /PASS/);
-});
-
-const inviteSource = readFileSync(join(scripts, 'devnet-test-invite-flow.sh'), 'utf8');
-test('invite-flow parent rejects API error on outsider absence check', async t => {
-  const url = await serve(t, (req, res) => { req.resume(); res.end(fixture('api-error')); });
-  const segment = inviteSource.slice(inviteSource.indexOf('outside_query='), inviteSource.indexOf('\ncurator_live_count='));
-  const result = await runShell(`source "$HELPER"; TOKEN=fixture; query_body='{}'; N3="$URL"; ok(){ echo FALSE_PASS; }; fail(){ exit 1; }; ${segment}`, {
-    HELPER: join(scripts, 'devnet-observation-helpers.sh'), URL: url,
-  });
-  assert.equal(result.status, 1, result.stderr); assert.doesNotMatch(result.stdout, /FALSE_PASS/);
+  if (expected === 0) assert.match(result.stdout, /Probe summary: PASS=\d+ FAIL=0/);
+  else { assert.match(result.stderr, /INCONCLUSIVE/); assert.doesNotMatch(result.stdout, /Probe summary/); }
 });
 
 test('Bash threshold helper compares large decimal values accurately', async () => {
-  const result = await runShell('source "$HELPER"; devnet_count_at_least 9007199254740993123456789 9007199254740993123456788', { HELPER: join(scripts, 'devnet-observation-helpers.sh') });
+  const result = await runShell('source "$HELPER"; devnet_count_at_least 9007199254740993123456789 9007199254740993123456788', { HELPER: helper });
   assert.equal(result.status, 0);
 });
 
 for (const cell of ['', { type: 'uri', value: '' }, { type: 'uri', value: 'invalid URI' }]) {
   test(`malformed raw SELECT cell cannot satisfy the positive control: ${JSON.stringify(cell)}`, () => {
-    const result = observe(JSON.stringify({ head: { vars: ['s'] }, results: { bindings: [{ s: cell }] } }), { format: 'sparql', mode: 'rows', binding: 's' });
-    assert.equal(result.outcome, 'INCONCLUSIVE');
-    assert.equal(resultExit(assertObservation(result, 'ge', '1')), 2);
+    const result = observe(raw('s', [{ s: cell }]), { format: 'sparql', mode: 'rows', binding: 's' });
+    assert.equal(result.outcome, 'INCONCLUSIVE'); assert.equal(resultExit(assertObservation(result, 'ge', '1')), 2);
   });
 }
 
-test('sharing owner control sees current numeric WM graphs as well as legacy assertion graphs', async t => {
+test('sourceable sharing owner control sees current numeric WM graphs', async t => {
   const url = await serve(t, (req, res) => {
     let input = ''; req.on('data', c => input += c);
     req.on('end', () => {
       const query = new URLSearchParams(input).get('query');
-      if (query.includes('LIMIT 1')) res.end('{"head":{"vars":["s"]},"results":{"bindings":[{"s":{"type":"uri","value":"urn:seeded"}}]}}');
-      else res.end(JSON.stringify({ head: { vars: ['g'] }, results: { bindings: query.includes('/_working_memory/')
-        ? [{ g: { type: 'uri', value: 'did:dkg:context-graph:fixture/_working_memory/0xabc/0' } }] : [] } }));
+      res.end(query.includes('LIMIT 1') ? raw('s', seeded) : raw('g', query.includes('/_working_memory/')
+        ? [{ g: { type: 'uri', value: 'did:dkg:context-graph:fixture/_working_memory/0xabc/0' } }] : []));
     });
   });
-  const dir = mkdtempSync(join(root, '.qa-observer-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true })); mkdirSync(join(dir, 'node1'));
-  writeFileSync(join(dir, 'node1/config.json'), JSON.stringify({ apiPort: Number(new URL(url).port), chain: { chainId: 'evm:31337', rpcUrl: url }, store: { backend: 'sparql-http', options: { queryEndpoint: `${url}/query` } } }));
-  const segment = sharingSource.slice(sharingSource.indexOf('OWNER_ASSERTIONS='), sharingSource.indexOf('\n\n\n#---', sharingSource.indexOf('OWNER_ASSERTIONS=')));
-  const result = await runShell(`source "$HELPER"; DEVNET_DIR="$DIRECTORY"; N1_PORT="$PORT"; CG_ID=fixture; fail(){ exit 1; }; ${sharingFunctions}\n${segment}`, {
-    HELPER: join(scripts, 'devnet-observation-helpers.sh'), DIRECTORY: dir, PORT: new URL(url).port,
-  });
+  const dir = directory(t, [config(19401, `${url}/query`)]);
+  const result = await runShell('source "$SHARING"; sharing_owner_wm_control 19401 fixture', { SHARING: sharing, DEVNET_DIR: dir });
   assert.equal(result.status, 0, result.stderr);
 });
