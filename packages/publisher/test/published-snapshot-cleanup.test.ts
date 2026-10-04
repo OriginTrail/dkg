@@ -6,6 +6,7 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, Logger, TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext,
   generateEd25519Keypair, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { computePrivateRootV10 } from '../src/index.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '../src/workspace-snapshot-store.js';
 import { snapshotReferenceCheck } from '../src/workspace-snapshot-lifecycle.js';
@@ -758,7 +759,7 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     expect((await metaRows(f)).get(`${first.kaUal}#dkg-swm-head`)).toEqual(expect.arrayContaining([`${DKG}shareOperationId "${promoted.shareOperationId}"`]));
   });
 
-  it('retains an equal-version head without evidence or with different private content', async () => {
+  it('retains an equal-version head without evidence or with a different private count', async () => {
     const f = await fixture();
     const v1 = await share(f, 1);
     const before = await metaRows(f);
@@ -773,6 +774,25 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     expect(await f.store.countQuads(SWM)).toBe(v1.quads.length);
     await confirm(f, 1);
     expect(await f.store.countQuads(SWM)).toBe(0);
+  });
+
+  it('compares private roots when version, public digest and private triple counts all match', async () => {
+    const f = await fixture();
+    const publicPayload = makeQuads(1, 'same-public');
+    const privateA = makeQuads(1, 'private-A'), privateB = makeQuads(1, 'private-B');
+    const rootA = computePrivateRootV10(privateA)!, rootB = computePrivateRootV10(privateB)!;
+    expect(rootA).not.toEqual(rootB);
+    await f.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({ contextGraphId: CG, kaUal: UAL, assertionVersion: 1,
+      shareOperationId: 'same-count-private-B', quads: publicPayload, privateMerkleRoot: rootB, privateTripleCount: 1, publisherPeerId: 'peer-publisher' });
+    const before = await metaRows(f), publicQuadsDigest = workspacePublicQuadsDigest(publicPayload);
+    const clear = (root: Uint8Array) => f.publisher.clearPublishedKnowledgeAssetSwm(CG,
+      { kind: 'named-lifecycle', identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) } },
+      undefined, createOperationContext('publish'), UAL, 1,
+      { publicQuadsDigest, privateTripleCount: 1, privateMerkleRoot: `0x${Buffer.from(root).toString('hex')}` });
+    await clear(rootA);
+    expect(await metaRows(f)).toEqual(before); expect(await f.store.countQuads(SWM)).toBe(publicPayload.length);
+    await clear(rootB);
+    expect((await metaRows(f)).has(HEAD)).toBe(false); expect(await f.store.countQuads(SWM)).toBe(0);
   });
 
   it('leaves version 3, its StorageACK copy and its snapshot in place when version 2 confirms after version 3 was shared', async () => {

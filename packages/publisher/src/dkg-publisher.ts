@@ -6499,21 +6499,7 @@ export class DKGPublisher implements Publisher {
     return roots;
   }
 
-  /**
-   * #1116 (review A1) — SWM-share-complete marker.
-   *
-   * A FULL share (entities:"all", all roots actually landed in SWM) stamps a
-   * single boolean marker on the lifecycle URN. `finalize(layer:"swm")` gates
-   * on it so a SUBSET share — which also stamps `dkg:rootEntity` member rows,
-   * the source `readPromotedRootEntities` reads — can NOT be sealed-in-SWM and
-   * published as a partial asset under the KA name. Subset shares are SWM-only,
-   * never publishable; only a complete full share sets this marker, and a later
-   * subset / reduced-scope share CLEARS it (`clearSwmShareComplete`), so the marker
-   * always reflects whether the CURRENT shared state is a complete full share.
-   * Modelled on `readPromotedRootEntities` /
-   * `_stampSwmPointer`: same meta graph (`contextGraphMetaUri(cg)`) and subject
-   * (`assertionLifecycleUri(...)`).
-   */
+  /** Complete full shares alone expose the lifecycle marker used by SWM finalize/publish. */
   async markSwmShareComplete(
     contextGraphId: string,
     name: string,
@@ -6551,25 +6537,13 @@ export class DKGPublisher implements Publisher {
     }]);
   }
 
-  /**
-   * #1116 (review A1, round 5) — CLEAR the SWM-share-complete marker.
-   *
-   * `markSwmShareComplete` only ever SET the marker (so a benign full-share
-   * recreate-retry never lost it), but that left two holes: a marked
-   * full-share that was later DISCARDED, or RE-shared as a strict SUBSET, kept
-   * a stale marker — letting `finalize(layer:"swm")` (and the seal-less
-   * pull-from source) publish a partial asset under the KA name. We now clear
-   * the marker at exactly the two moments scope is genuinely reduced: on
-   * `assertionDiscard`, and on a subset share (promote's non-full branch). It
-   * survives a full-share recreate-retry because A2_PRESERVE re-arms it and the
-   * full-share path re-stamps it — it is only cleared when scope actually drops.
-   */
+  /** Clear the marker under its lifecycle lock; an expected ID (or null for absence) fences completion. */
   async clearSwmShareComplete(
     contextGraphId: string,
     name: string,
     agentAddress: string,
     subGraphName?: string,
-    expectedShareOperationId?: string,
+    expectedShareOperationId?: string | null,
   ): Promise<void> {
     return this.withAssertionLifecycleWriteLock(
       contextGraphId,
@@ -6583,8 +6557,8 @@ export class DKGPublisher implements Publisher {
           const result = await this.store.query(`SELECT ?operation WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
             <${assertSafeIri(lifecycle)}> <${SHARE_OPERATION_ID_PRED}> ?operation
           } } LIMIT 2`);
-          if (result.type !== 'bindings' || result.bindings.length !== 1
-            || stripOptionalLiteral(result.bindings[0]?.['operation']) !== expectedShareOperationId) return;
+          if (result.type !== 'bindings' || result.bindings.length > 1
+            || (stripOptionalLiteral(result.bindings[0]?.['operation']) ?? null) !== expectedShareOperationId) return;
         }
         await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName);
       },
@@ -8496,14 +8470,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     opts?: PublisherAssertionPromoteOptions,
   ): Promise<AssertionPromoteResult> {
-    // #1464 (PR1, diagnostic) — every awaited op below runs BEFORE the
-    // `store.insert(swmQuads)` that actually lands the root in SWM. A masked
-    // rejection here (typically a sparql-http read hitting the 30s
-    // `AbortSignal.timeout` under load) is the leading hypothesis for the
-    // intermittent count-0. `tagPromoteStep` re-labels any such throw as
-    // "[promote:<step>] …" so CI/UI names the failing op — it does NOT retry,
-    // swallow, or change control flow, and the `store.insert` write itself is
-    // deliberately left untagged.
+    // Label preparation failures with the failing promote step without changing control flow.
     await tagPromoteStep('ensureSubGraphRegistered', () => this.ensureSubGraphRegistered(contextGraphId, opts?.subGraphName));
     await tagPromoteStep('assertGraphScopedLifecycleWritable', () =>
       this.assertGraphScopedLifecycleWritable(
@@ -8600,16 +8567,7 @@ export class DKGPublisher implements Publisher {
       opts?.subGraphName,
     );
 
-    // #1116 (round 10) — the swmShareComplete marker MUST be maintained on EVERY
-    // return path of assertionPromote, not just the success tail. A non-full share
-    // (subset/partial/foreign-skipped) that filters to ZERO promotable quads (the
-    // early returns below) would otherwise leave a STALE marker from a prior full
-    // share, letting finalize(layer:"swm")/publish pass their gate against the OLD
-    // SWM contents. `promotingAllEntities` is hoisted here so every exit can
-    // compute the correct scope; `maintainMarker(isFull)` is called before each
-    // return with `isFull = promotingAllEntities && promotedAllRoots` for that path.
-    // (Member-row REPLACE stays at the success path — it only matters when quads
-    // are actually promoted; the MARKER is the cross-cutting invariant.)
+    // Every promote exit must clear a stale marker or prove the complete share is durable.
     const promotingAllEntities = true;
     const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
     const maintainMarker = async (isFullCompletePromote: boolean): Promise<void> => {
@@ -8994,10 +8952,7 @@ export class DKGPublisher implements Publisher {
     const normalizedQuads = validatedPayload.normalizedPublicQuads;
     const normalizedPrivateQuads = validatedPayload.normalizedPrivateQuads;
     const promotedPrivateRoot = validatedPayload.privateMerkleRoot;
-    // A prior completed version may leave its marker intentionally preserved
-    // while a new WM draft is prepared. Once this exact new payload validates,
-    // retire that old proof before any encoding, confirmation, or other
-    // fallible work. Only the final commit tail may expose completion again.
+    // Retire prior completion before fallible preparation; only the durable commit tail re-arms it.
     await maintainMarker(false);
     if (!durablePromoteIntent && durableShareOperationId) {
       // Older partial commits persisted the ID but not the exact timestamp and
@@ -9034,9 +8989,7 @@ export class DKGPublisher implements Publisher {
         { code: 'KA_PROMOTE_CONFIRMATION_REQUIRED' },
       );
     }
-    // Pre-encode gossip message and enforce size limit BEFORE any destructive
-    // mutations, so oversized promotions are rejected cleanly while the
-    // assertion is still intact in WM.
+    // Encode and enforce gossip limits before any destructive WM mutations.
     let gossipPayload: EncodedWorkspaceGossipPayload | undefined;
     const operationPublisherPeerId = operationIntent.publisherPeerId;
     if (operationPublisherPeerId) {

@@ -6009,19 +6009,7 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    // #1116 (round 9, reviewer 🔴 #1/#2) — MARKER GATE. A valid seal is no longer
-    // SUFFICIENT to publish: it must be backed by a LIVE complete full share
-    // resident in SWM (the swmShareComplete marker). This closes the whole
-    // seal-staleness class at the consumer: a stale full seal that survived a
-    // subset re-share (subset never re-seals) or an already-consumed share
-    // (confirmed publish drains SWM + clears the marker, round 9 step 3) would
-    // otherwise be publishable via the merkle-still-matches path under the KA
-    // name. Placed AFTER the seal-read (so a genuinely-unfinalized asset still
-    // throws "is not finalized" — preserving that precondition) and BEFORE the
-    // create-vs-update routing + SWM gather, so it covers BOTH the MINT and UPDATE
-    // paths. A legitimate full-share publish has the marker (assertionPromote set
-    // it on the full share); an UPDATE re-publish re-sets it via the required
-    // re-promote (a confirmed publish drained SWM, so a re-publish MUST re-share).
+    // Publish only a complete full share; confirmation consumes its marker.
     if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(
         new Error(
@@ -6068,14 +6056,20 @@ export class PublishMethods extends DKGAgentBase {
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
     const xsdInt = 'http://www.w3.org/2001/XMLSchema#integer';
     const pointerRes = await this.store.query(
-      `SELECT ?vm ?kaNum WHERE { GRAPH <${metaGraph}> {
+      `SELECT ?vm ?kaNum ?operation WHERE { GRAPH <${metaGraph}> {
         OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
         OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
+        OPTIONAL { <${lifecycleUri}> <http://dkg.io/ontology/shareOperationId> ?operation }
       } } LIMIT 1`,
       { source: 'agent.vmPublish.lifecyclePointer' },
     );
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
+    const originalShareOperationId = stripLit(pointerRow?.['operation'])?.trim() || null;
+    if (originalShareOperationId && rfc64WorkspaceHead
+      && !workspaceHeadIncludesShareOperationId(rfc64WorkspaceHead, originalShareOperationId)) {
+      throw Object.assign(new Error('The named lifecycle share operation is outside the selected head alias class'), { code: 'PUBLISH_INTENT_STALE' });
+    }
     const vmCurrent = stripLit(pointerRow?.['vm']);
     const operationPlan = planKnowledgeAssetVmPublication({
       vmCurrentAssertion: vmCurrent,
@@ -6485,17 +6479,10 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    // #1116 (round 9, reviewer 🔴 #2) — a CONFIRMED publish CONSUMES the SWM full
-    // share: the mint path (publishFromSharedMemory) and the update path both
-    // DRAIN the published roots from SWM after on-chain confirmation. The
-    // swmShareComplete marker asserts "a complete full share is resident in SWM",
-    // which no longer holds once SWM is drained. Clear it (best-effort, after the
-    // chain commit) so a post-publish finalize(layer:"swm") can't pass the gate
-    // against an empty SWM, and the next publish requires a fresh full share (which
-    // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
+    // Confirmation consumes only the original share marker; a replacement stays publishable.
     if (result.status === 'confirmed') {
       try {
-        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, rfc64WorkspaceHead?.shareOperationId);
+        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, originalShareOperationId);
       } catch (err) {
         this.log.warn(
           opts?.operationCtx ?? createOperationContext('publishFromSWM'),
