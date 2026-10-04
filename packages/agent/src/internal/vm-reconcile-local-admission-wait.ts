@@ -12,7 +12,7 @@
  * bounded dispatcher, and the periodic sweep still visits a waiting graph.
  */
 
-/** A refused retry's delay, and how often a waiting queue re-reads capacity. */
+/** A refused nudge's hold, and how often the queue re-reads capacity. */
 const RETRY_MS = 2_500;
 /**
  * How long a nudged pass holds the next waiter back when it has not settled:
@@ -26,12 +26,10 @@ export interface LocalAdmissionWaitOptions {
   signal?: AbortSignal;
   isCurrent: () => boolean;
   /** Whether the node's sync admission would take this graph's fetch right now. */
-  canAdmit?: () => boolean;
+  canAdmit: () => boolean;
 }
 
 interface Waiter extends LocalAdmissionWaitOptions {
-  /** The earliest this waiter may be nudged. */
-  eligibleAt: number;
   onAbort: () => void;
 }
 
@@ -54,7 +52,6 @@ export interface VmReconcileLocalAdmissionWaitDeps {
 
 /** A capacity read that cannot answer falls back to the plain bounded retry. */
 function admissionAvailable(waiter: Waiter): boolean {
-  if (!waiter.canAdmit) return true;
   try {
     return waiter.canAdmit();
   } catch {
@@ -76,8 +73,7 @@ export class VmReconcileLocalAdmissionWait {
 
   /**
    * The node's sync admission refused this graph's fetch. `canAdmit` reads the
-   * admission the fetch will ask; a waiter without it is nudged once after the
-   * retry delay.
+   * admission the fetch will ask. Every waiter uses this readiness contract.
    */
   retry(key: string, options: LocalAdmissionWaitOptions): void {
     if (this.closed || options.signal?.aborted || !options.isCurrent()) return;
@@ -140,15 +136,10 @@ export class VmReconcileLocalAdmissionWait {
   ): boolean {
     const existing = this.waiters.get(key);
     if (!existing && this.waiters.size >= this.deps.maxWaiters) return false;
-    const now = Date.now();
-    const eligibleAt = position === 'keep' && existing
-      ? existing.eligibleAt
-      : options.canAdmit ? now : now + RETRY_MS;
     const waiter: Waiter = {
-      eligibleAt,
+      canAdmit: options.canAdmit,
       isCurrent: options.isCurrent,
       ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.canAdmit ? { canAdmit: options.canAdmit } : {}),
       onAbort: () => {
         if (this.waiters.get(key) !== waiter) return;
         this.remove(key);
@@ -194,7 +185,7 @@ export class VmReconcileLocalAdmissionWait {
           this.remove(key);
           continue;
         }
-        if (waiter.eligibleAt > now || !admissionAvailable(waiter)) continue;
+        if (!admissionAvailable(waiter)) continue;
         this.remove(key);
         const completion = this.deps.nudge(key);
         // Not admitted: the periodic sweep owns the graph.
@@ -221,10 +212,6 @@ export class VmReconcileLocalAdmissionWait {
     let delay = RETRY_MS;
     if (this.holdUntil > now) {
       delay = this.holdUntil - now;
-    } else {
-      for (const waiter of this.waiters.values()) {
-        if (waiter.eligibleAt > now) delay = Math.min(delay, waiter.eligibleAt - now);
-      }
     }
     this.timer = setTimeout(() => {
       this.timer = undefined;

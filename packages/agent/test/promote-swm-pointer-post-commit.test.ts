@@ -9,19 +9,16 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { DKGPublisher, getPromoteFailureDisposition } from '@origintrail-official/dkg-publisher';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { getPromoteFailureDisposition } from '@origintrail-official/dkg-publisher';
 import {
   ASSERTION_SEAL_PREDICATES,
-  TypedEventBus,
   assertionLifecycleUri,
   contextGraphAssertionUri,
   contextGraphMetaUri,
-  generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
-import { DKGAgent } from '../src/dkg-agent.js';
+import { createPromotionAgentForTest } from './_helpers/promotion-agent.js';
 import { SwmPointerFaultStore, SWM_POINTER_PRED } from './_helpers/swm-pointer-fault-store.js';
 
 const CG = 'swm-pointer-post-commit-cg';
@@ -48,32 +45,9 @@ const indeterminateTimeout = () => new StoreOperationTimeoutError({
   backend: 'managed-oxigraph', operation: 'insert', outcome: 'indeterminate',
 });
 
-/** A "process" over a durable store: fresh in-memory agent + publisher objects. */
-async function bootAgent(store: SwmPointerFaultStore) {
-  const publisher = new DKGPublisher({
-    store,
-    chain: new MockChainAdapter(),
-    eventBus: new TypedEventBus(),
-    keypair: await generateEd25519Keypair(),
-  });
-  const agent = Object.create(DKGAgent.prototype) as any;
-  agent.defaultAgentAddress = AGENT;
-  agent.node = { peerId: { toString: () => PEER } };
-  agent.store = store;
-  agent.publisher = publisher;
-  agent.log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
-  agent.prepareAtomicAssertionShare = async () => undefined;
-  agent.buildCuratorAckConfirmer = async () => undefined;
-  agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
-  agent.resolveWorkspaceRecipientsGated = async () => ({ requiresEncryption: false, recipients: [] });
-  agent.publishWorkspaceGossip = vi.fn(async () => undefined);
-  agent.scheduleRfc64SwmInventoryObserverV1 = vi.fn();
-  return { agent, publisher };
-}
-
 async function createFixture() {
   const store = new SwmPointerFaultStore();
-  const { agent, publisher } = await bootAgent(store);
+  const { agent, publisher } = await createPromotionAgentForTest(store, { agentAddress: AGENT, peerId: PEER });
   await publisher.assertionCreate(CG, NAME, AGENT);
   await publisher.assertionWrite(CG, NAME, AGENT, TRIPLES);
   const finalized = await finalizeRootlessAssertionForTest({
