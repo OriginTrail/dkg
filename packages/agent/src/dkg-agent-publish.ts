@@ -197,6 +197,7 @@ export interface ResolveAssertionAuthorOptions {
   selectedAuthorAgentAddress?: string;
 }
 import { RootlessUpdateError, isRootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
+import { ConfirmedNamedKaVmLifecycleRecoveryError, type ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -5040,18 +5041,14 @@ export class PublishMethods extends DKGAgentBase {
 
   async _repairConfirmedNamedKaVmLifecycle(
     this: DKGAgent, input: ConfirmedNamedKaVmLifecycleInput,
-    confirmedPublication: PublishResult & { assertionUri: string; seal: AssertionSeal },
+    confirmedPublication: ConfirmedNamedKaVmPublication,
   ): Promise<boolean> {
     try {
       const outcome = await this.getOrCreateNamedKaVmLifecycleRepair().submit(input);
       return outcome === 'pending' || outcome === 'rejected';
     } catch (error) {
       // Losing the durable admission is different from a scheduled graph-store retry.
-      throw Object.assign(new Error(`Confirmed publish requires lifecycle recovery: ${String(error)}`), {
-        code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: input.publishedUal,
-        merkleRoot: input.merkleRoot, assertionVersion: input.assertionVersion, cause: error,
-        confirmedPublication, lifecycleRecovery: { ...input, action: 'recover_confirmed_publication', publicationRetrySafe: false },
-      });
+      throw new ConfirmedNamedKaVmLifecycleRecoveryError(confirmedPublication, input, error);
     }
   }
 
@@ -5852,7 +5849,7 @@ export class PublishMethods extends DKGAgentBase {
           packedKaId: packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
           merkleRoot: ethers.hexlify(seal.merkleRoot), assertionVersion: graphScope.assertionVersion,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
-        }, { ...result, assertionUri, seal }) : false;
+        }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
 
     if (result.status === 'confirmed' && result.onChainResult) {
       const rootEntities: string[] = [];
@@ -6336,7 +6333,7 @@ export class PublishMethods extends DKGAgentBase {
           assertionVersion: graphScope.assertionVersion,
           packedKaId: packedKaId ?? result.onChainResult?.kaId ?? result.kaId,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
-        }, { ...result, assertionUri, seal }) : false;
+        }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
 
     // Preserve the standalone tentative publication projection. Confirmed work
     // above uses the durable repair owner; no VM data graph is claimed here.

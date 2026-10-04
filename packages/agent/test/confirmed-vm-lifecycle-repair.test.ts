@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
 import { assertionLifecycleUri, buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
-  createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+  createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, TypedEventBus, generateEd25519Keypair, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { ChangelogStore, GraphSetIndexStore, OxigraphStore, SparqlHttpStore, StoreOperationTimeoutError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, DKGPublisher, TripleStoreAsyncLiftPublisher,
@@ -586,7 +586,14 @@ describe('review regression boundaries', () => {
     const apply = vi.fn(async () => undefined), repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
     const persist = vi.spyOn(repair as unknown as { persist: () => Promise<void> }, 'persist').mockRejectedValueOnce(Object.assign(new Error('journal fsync failed'), { code: 'EIO' }));
     const store = await persistentStore(), agent = agentFor(store, dir, 1); agent.namedKaVmLifecycleRepair = repair;
-    await expect(agent._repairConfirmedNamedKaVmLifecycle(input)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1' });
+    const seal = parseAssertionSealQuads(buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META,
+      merkleRoot: ROOT, authorAddress: AUTHOR, authorAttestationR: new Uint8Array(32).fill(1),
+      authorAttestationVS: new Uint8Array(32).fill(2), authorSchemeVersion: 1, chainId: 31337n,
+      kav10Address: AUTHOR, reservedKaId: PACKED, finalizedAtIso: new Date().toISOString(),
+      contentScopeVersion: 2, kaUal: UAL, assertionVersion: 1, publicTripleCount: 1, privateTripleCount: 0 }), ASSERTION)!;
+    const confirmedPublication = { status: 'confirmed' as const, ual: PUBLISHED, kaId: PACKED, merkleRoot: ROOT,
+      kaManifest: [], assertionUri: ASSERTION, seal };
+    await expect(agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublication)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1' });
     expect(persist).toHaveBeenCalledOnce(); expect(apply).not.toHaveBeenCalled(); await repair.stop();
   });
   it('round-trips canonical version-2 journal entries and retry state', () => {

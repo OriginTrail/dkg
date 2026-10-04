@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { RequestContext } from './context.js';
+import { isConfirmedNamedKaVmLifecycleRecoveryError } from '@origintrail-official/dkg-agent';
 import { storageAckPeerIdsFromPublishResult } from './storage-ack-peers.js';
 const hex = (bytes: Uint8Array): string => '0x' + Buffer.from(bytes).toString('hex');
 
@@ -36,16 +37,13 @@ export function vmPublishResponseBody(pub: FinalizedPublishResult, reason?: stri
 
 /** Confirmation survives a failed write-ahead admission; publication must never be retried. */
 export function confirmedVmRecoveryRequiredResponse(error: unknown): Record<string, unknown> | undefined {
-  if (error === null || typeof error !== 'object') return undefined;
-  const failure = error as { code?: unknown; confirmedPublication?: FinalizedPublishResult;
-    lifecycleRecovery?: Readonly<Record<string, unknown>> };
-  if (failure.code !== 'KA_VM_LIFECYCLE_REPAIR_REQUIRED' || failure.confirmedPublication?.status !== 'confirmed') return undefined;
+  if (!isConfirmedNamedKaVmLifecycleRecoveryError(error)) return undefined;
   return {
-    ...vmPublishResponseBody(failure.confirmedPublication),
-    onChainResult: failure.confirmedPublication.onChainResult,
-    code: failure.code,
+    ...vmPublishResponseBody(error.confirmedPublication),
+    onChainResult: error.confirmedPublication.onChainResult,
+    code: error.code,
     error: 'Publication confirmed, but local lifecycle recovery was not admitted. Restore local persistence and recover the confirmed publication.',
     lifecycleRecoveryRequired: true, lifecycleRepairAdmitted: false, lifecycleRepairPending: false,
-    recovery: failure.lifecycleRecovery,
+    recovery: error.lifecycleRecovery,
   };
 }

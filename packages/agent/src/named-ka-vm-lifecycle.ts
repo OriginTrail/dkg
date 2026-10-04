@@ -3,7 +3,7 @@ import {
   ASSERTION_SEAL_PREDICATES, MemoryLayer, assertionLifecycleUri,
   contextGraphAssertionUri, contextGraphLayerUri, contextGraphMetaUri, formatSparqlTerm,
 } from '@origintrail-official/dkg-core';
-import { asTripleStorePersistenceCapability, asTripleStoreEphemeralCommitCapability, deleteByPatternWithoutCount, UnsupportedTripleStoreCapabilityError,
+import { deleteByPatternWithoutCount, UnsupportedTripleStoreCapabilityError,
   type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 
@@ -159,8 +159,8 @@ async function applyNamedKaVmLifecycle(
   // Validate inputs before I/O and use the shared RDF serializer at the query boundary.
   checkedRoot(input.merkleRoot);
   if (input.priorMerkleRoot !== undefined) checkedRoot(input.priorMerkleRoot);
-  const barrier = asTripleStorePersistenceCapability(store)?.persist
-    ?? (persistenceMode === 'process-local' ? asTripleStoreEphemeralCommitCapability(store)?.commitEphemeral : undefined);
+  const barrier = store.persist?.bind(store)
+    ?? (persistenceMode === 'process-local' ? store.commitEphemeral?.bind(store) : undefined);
   if (!tentative && barrier === undefined) {
     throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), {
       code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',

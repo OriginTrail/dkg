@@ -20,6 +20,7 @@ export default defineConfig({
           'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
+          'test/vm-publish-response-contract.test.ts',
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).

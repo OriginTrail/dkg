@@ -921,6 +921,7 @@ function makeQueuedAgentHarness(options: {
   }));
   const agentLike: any = {
     peerId: options.peerId,
+    writeLocks: new Map(),
     defaultAgentAddress: QUEUED_TEST_AUTHOR,
     chain: options.chain ?? {},
     store: {

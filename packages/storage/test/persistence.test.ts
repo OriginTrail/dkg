@@ -3,8 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TripleStore } from '../src/triple-store.js';
-import { ChangelogStore, GraphSetIndexStore, OxigraphStore, OxigraphWorkerStore, SharedMemoryLiteralBlobStore, SparqlHttpStore, asTripleStorePersistenceCapability,
-  asTripleStoreEphemeralCommitCapability, createManagedOxigraphRuntimeStoreConfigV1, createTripleStore } from '../src/index.js';
+import { ChangelogStore, GraphSetIndexStore, OxigraphStore, OxigraphWorkerStore, SharedMemoryLiteralBlobStore, SparqlHttpStore,
+  createManagedOxigraphRuntimeStoreConfigV1, createTripleStore } from '../src/index.js';
 
 const directories: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -20,21 +20,21 @@ describe('storage persistence boundary', () => {
     const options = { source: 'persistence-boundary-test' };
     try {
       await store.insert([{ graph: 'urn:persistence', subject: 'urn:asset', predicate: 'urn:value', object: '"durable"' }]);
-      await asTripleStorePersistenceCapability(store)!.persist(options);
+      await store.persist!(options);
       expect(outerPersist).toHaveBeenCalledWith(options); expect(innerFlush).toHaveBeenCalledWith(options);
     } finally { await store.close(); }
   });
   it('refuses a decorator-only no-op flush around an uncertified endpoint', async () => {
     const endpoint = new SparqlHttpStore({ queryEndpoint: 'http://untrusted.test/query', consistencyProfile: 'atomic-readback' });
     const store = new ChangelogStore(new GraphSetIndexStore(endpoint));
-    expect(typeof store.flush).toBe('function'); expect(asTripleStorePersistenceCapability(store)).toBeNull();
+    expect(typeof store.flush).toBe('function'); expect(store.persist).toBeUndefined();
     await store.close();
   });
   it('does not accept a persistence callback from generic managed-looking endpoint options', async () => {
     const flush = vi.fn(async () => {});
     const endpoint = new SparqlHttpStore({ queryEndpoint: 'http://localhost/query',
       managedByDkg: true, managedOxigraph: true, managedPersistence: flush });
-    expect(endpoint.flush).toBeUndefined(); expect(asTripleStorePersistenceCapability(endpoint)).toBeNull();
+    expect(endpoint.flush).toBeUndefined(); expect(endpoint.persist).toBeUndefined();
     expect(flush).not.toHaveBeenCalled(); await endpoint.close();
   });
   it('accepts the runtime-owned barrier and loses that authority when the runtime brand is omitted', async () => {
@@ -44,21 +44,21 @@ describe('storage persistence boundary', () => {
     } });
     const store = await createTripleStore(config), untrusted = await createTripleStore({ ...config });
     try {
-      expect(asTripleStorePersistenceCapability(untrusted)).toBeNull();
-      await asTripleStorePersistenceCapability(store)!.persist(options);
+      expect(untrusted.persist).toBeUndefined();
+      await store.persist!(options);
       expect(flush).toHaveBeenCalledExactlyOnceWith(options);
     } finally { await store.close(); await untrusted.close(); }
   });
   it('accepts a separately certified acknowledgement through decorators', async () => {
     const endpoint = new SparqlHttpStore({ queryEndpoint: 'http://durable.test/query', writesDurableOnAcknowledgement: true });
     const store = new ChangelogStore(new GraphSetIndexStore(endpoint)), outerPersist = vi.spyOn(store, 'persist');
-    await asTripleStorePersistenceCapability(store)!.persist();
+    await store.persist!();
     expect(outerPersist).toHaveBeenCalledOnce(); await store.close();
   });
   it('does not retire evidence after an outer persistence error', async () => {
     const backend = await persistentStore(), store = new GraphSetIndexStore(backend), failure = new Error('disk unavailable');
     vi.spyOn(backend, 'flush').mockRejectedValueOnce(failure);
-    await expect(asTripleStorePersistenceCapability(store)!.persist()).rejects.toBe(failure);
+    await expect(store.persist!()).rejects.toBe(failure);
     await store.close();
   });
 });
@@ -69,16 +69,16 @@ describe('explicit persistence certification', () => {
     const persist = vi.fn(async () => {});
     const store = { persist, get innerStore() { throw new Error('topology is not a persistence contract'); } } as unknown as TripleStore;
     const options = { source: 'explicit-capability' };
-    await asTripleStorePersistenceCapability(store)!.persist(options);
+    await store.persist!(options);
     expect(persist).toHaveBeenCalledExactlyOnceWith(options);
   });
   it('refuses an arbitrary flush-only leaf and an acknowledgement flag without a callable', () => {
-    expect(asTripleStorePersistenceCapability({ flush: vi.fn(async () => {}) } as unknown as TripleStore)).toBeNull();
-    expect(asTripleStorePersistenceCapability({ writesDurableOnAcknowledgement: true } as unknown as TripleStore)).toBeNull();
+    expect(({ flush: vi.fn(async () => {}) } as unknown as TripleStore).persist).toBeUndefined();
+    expect(({ writesDurableOnAcknowledgement: true } as unknown as TripleStore).persist).toBeUndefined();
   });
   it('does not certify an in-memory adapter whose optional flush cannot survive restart', async () => {
     const store = new OxigraphStore();
-    try { expect(asTripleStorePersistenceCapability(store)).toBeNull(); } finally { await store.close(); }
+    try { expect(store.persist).toBeUndefined(); } finally { await store.close(); }
   });
   it('drains a held outer mutation before the inner barrier, including changelog markers', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-composed-persistence-')), path = join(dir, 'store.nq');
@@ -93,7 +93,7 @@ describe('explicit persistence certification', () => {
     const mutation = store.insert([{ graph: 'urn:held-graph', subject: 'urn:held-asset', predicate: 'urn:value', object: '"held"' }]);
     try {
       await vi.waitFor(() => expect(entered).toBe(true));
-      const barrier = asTripleStorePersistenceCapability(store)!.persist().then(() => { persisted = true; });
+      const barrier = store.persist!().then(() => { persisted = true; });
       await new Promise(resolve => setTimeout(resolve, 20));
       expect(persisted).toBe(false); expect(flushed).not.toHaveBeenCalled();
       release(); await mutation; await barrier;
@@ -107,13 +107,28 @@ describe('explicit persistence certification', () => {
 
 
 describe('certified adapter and decorator composition', () => {
+  it('binds a receiver-dependent certified adapter method through all outer barriers and survives reopen', async () => {
+    const backend = await persistentStore(), path = join(directories.at(-1)!, 'store.nq');
+    backend.persist = async function (options) { await this.flush(options); };
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-bound-persistence-')); directories.push(dir);
+    const store = new ChangelogStore(new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(backend, { blobDir: dir, thresholdBytes: 1024 })));
+    const barrier = store.persist!;
+    try {
+      await store.insert([{ graph: 'urn:receiver', subject: 'urn:asset', predicate: 'urn:value', object: '"bound"' }]);
+      await barrier({ source: 'detached-outer-barrier' });
+      const reopened = new OxigraphStore(path);
+      try { expect(await reopened.query('ASK { GRAPH <urn:receiver> { <urn:asset> <urn:value> "bound" } }')).toMatchObject({ value: true }); }
+      finally { await reopened.close(); }
+    } finally { await store.close(); }
+  });
+
   it.each(['graph-index', 'literal-blob', 'changelog'] as const)('keeps an uncertified endpoint uncertified through %s', async decorator => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-persistence-wrapper-')); directories.push(dir);
     const endpoint = new SparqlHttpStore({ queryEndpoint: 'http://uncertified.test/query' });
     const store = decorator === 'graph-index' ? new GraphSetIndexStore(endpoint)
       : decorator === 'literal-blob' ? new SharedMemoryLiteralBlobStore(endpoint, { blobDir: dir, thresholdBytes: 10 })
         : new ChangelogStore(endpoint);
-    try { expect(asTripleStorePersistenceCapability(store)).toBeNull(); } finally { await store.close(); }
+    try { expect(store.persist).toBeUndefined(); } finally { await store.close(); }
   });
   it('forwards the certified barrier through literal, graph and changelog decorators in either order', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-persistence-permutation-')); directories.push(dir);
@@ -123,7 +138,7 @@ describe('certified adapter and decorator composition', () => {
         ? new SharedMemoryLiteralBlobStore(new GraphSetIndexStore(new ChangelogStore(backend)), { blobDir: join(dir, `${outside}-blobs`), thresholdBytes: 10 })
         : new ChangelogStore(new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(backend, { blobDir: join(dir, `${outside}-blobs`), thresholdBytes: 10 })));
       const flush = vi.spyOn(backend, 'flush'), options = { source: `composed-${outside}` };
-      try { await asTripleStorePersistenceCapability(store)!.persist(options); expect(flush).toHaveBeenCalledExactlyOnceWith(options); }
+      try { await store.persist!(options); expect(flush).toHaveBeenCalledExactlyOnceWith(options); }
       finally { await store.close(); }
     }
   });
@@ -131,9 +146,9 @@ describe('certified adapter and decorator composition', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-worker-persistence-')); directories.push(dir);
     const path = join(dir, 'worker.nq'), persistent = new OxigraphWorkerStore(path), memory = new OxigraphWorkerStore();
     try {
-      expect(asTripleStorePersistenceCapability(memory)).toBeNull();
+      expect(memory.persist).toBeUndefined();
       await persistent.insert([{ graph: 'urn:worker', subject: 'urn:asset', predicate: 'urn:value', object: '"persisted"' }]);
-      await asTripleStorePersistenceCapability(persistent)!.persist();
+      await persistent.persist!();
       const reopened = new OxigraphStore(path);
       try { expect(await reopened.query('ASK { GRAPH <urn:worker> { <urn:asset> <urn:value> "persisted" } }')).toMatchObject({ value: true }); }
       finally { await reopened.close(); }
@@ -144,12 +159,12 @@ describe('certified adapter and decorator composition', () => {
     const aborted = new AbortController(), reason = new Error('caller retired'); aborted.abort(reason);
     const flush = vi.spyOn(backend, 'flush');
     try {
-      await expect(asTripleStorePersistenceCapability(store)!.persist({ signal: aborted.signal })).rejects.toBe(reason);
+      await expect(store.persist!({ signal: aborted.signal })).rejects.toBe(reason);
       expect(flush).not.toHaveBeenCalled();
       const controller = new AbortController(); let entered = false, release!: () => void;
       const held = new Promise<void>(resolve => { release = resolve; });
       flush.mockImplementationOnce(async () => { entered = true; await held; });
-      const barrier = asTripleStorePersistenceCapability(store)!.persist({ signal: controller.signal });
+      const barrier = store.persist!({ signal: controller.signal });
       const rejected = expect(barrier).rejects.toBe(reason);
       await vi.waitFor(() => expect(entered).toBe(true)); controller.abort(reason); release(); await rejected;
     } finally { await store.close(); }
@@ -163,16 +178,16 @@ describe('explicit process-local commitment', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-ephemeral-wrapper-')); directories.push(dir);
     const store = new ChangelogStore(new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(backend, { blobDir: dir, thresholdBytes: 1024 })));
     try {
-      expect(asTripleStorePersistenceCapability(store)).toBeNull();
+      expect(store.persist).toBeUndefined();
       await store.insert([{ graph: 'urn:memory', subject: 'urn:asset', predicate: 'urn:value', object: '"committed"' }]);
-      await asTripleStoreEphemeralCommitCapability(store)!.commitEphemeral();
+      await store.commitEphemeral!();
       expect(await store.headSeq()).toBe(1);
       expect(await store.query('ASK { GRAPH <urn:memory> { <urn:asset> <urn:value> "committed" } }')).toMatchObject({ value: true });
     } finally { await store.close(); }
   });
   it('does not grant a remote endpoint process-local authority through composed decorators', async () => {
     const store = new ChangelogStore(new GraphSetIndexStore(new SparqlHttpStore({ queryEndpoint: 'http://untrusted.test/query' })));
-    try { expect(asTripleStoreEphemeralCommitCapability(store)).toBeNull(); } finally { await store.close(); }
+    try { expect(store.commitEphemeral).toBeUndefined(); } finally { await store.close(); }
   });
   it('waits for an outer queued mutation and propagates a process-local barrier failure', async () => {
     const backend = new OxigraphStore(), store = new ChangelogStore(new GraphSetIndexStore(backend));
@@ -183,7 +198,7 @@ describe('explicit process-local commitment', () => {
     const mutation = store.insert([{ graph: 'urn:memory', subject: 'urn:asset', predicate: 'urn:value', object: '"queued"' }]);
     try {
       await vi.waitFor(() => expect(entered).toBe(true));
-      const barrier = asTripleStoreEphemeralCommitCapability(store)!.commitEphemeral(), rejected = expect(barrier).rejects.toBe(failure);
+      const barrier = store.commitEphemeral!(), rejected = expect(barrier).rejects.toBe(failure);
       await new Promise(resolve => setImmediate(resolve)); expect(flush).not.toHaveBeenCalled();
       release(); await mutation; await rejected; expect(await store.headSeq()).toBe(1);
     } finally { release(); await mutation; await store.close(); }

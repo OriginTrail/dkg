@@ -3,7 +3,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { assertionLifecycleUri, contextGraphAssertionUri, contextGraphLayerUri, contextGraphMetaUri, MemoryLayer } from '@origintrail-official/dkg-core';
-import { asTripleStorePersistenceCapability, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { NamedKaVmLifecycleRepair } from '../../agent/src/named-ka-vm-lifecycle-repair.js';
 import { applyPublishedNamedKaVmLifecycle } from '../../agent/src/named-ka-vm-lifecycle.js';
 import { decodeLifecycleRepairJournal } from '../../agent/src/named-ka-vm-lifecycle-repair-journal.js';
@@ -39,11 +39,11 @@ it('completes confirmed lifecycle repair through actual managed configuration on
     config: { store: { backend: 'oxigraph-server', options: { location, cacheDir, port: await freePort() } } },
     dataDir: root, readyTimeoutMs: 120_000,
   });
-  expect(managed).not.toBeNull();
+  expect(managed).not.toBeUndefined();
   try {
     store = await createTripleStore(managed!.storeConfig);
     expect(store.writesDurableOnAcknowledgement).not.toBe(true);
-    expect(asTripleStorePersistenceCapability(store)).not.toBeNull();
+    expect(store.persist).toBeTypeOf('function');
     const cg = 'managed-lifecycle', author = `0x${'11'.repeat(20)}`, name = 'asset', hash = 'ab'.repeat(32);
     const packedKaId = (BigInt(author) << 96n) | 1n;
     const meta = contextGraphMetaUri(cg), lifecycle = assertionLifecycleUri(cg, author, name);

@@ -2,25 +2,6 @@
 import type { QueryOptions, TripleStore } from './triple-store.js';
 
 export type TripleStorePersistenceBarrier = (options?: QueryOptions) => Promise<void>;
-export interface TripleStoreEphemeralCommitCapability {
-  /** Completed mutations remain in this explicitly process-local store; no restart durability is promised. */
-  commitEphemeral: TripleStorePersistenceBarrier;
-}
-export interface TripleStorePersistenceCapability {
-  /** Persist completed mutations through the outer composition's certified barrier. */
-  persist: TripleStorePersistenceBarrier;
-}
-
-/** An adapter explicitly certifies its own barrier; neither flush nor wrapper topology grants it. */
-export function asTripleStorePersistenceCapability(store: TripleStore): TripleStorePersistenceCapability | null {
-  const persist = store.persist;
-  return typeof persist === 'function' ? Object.freeze({ persist: persist.bind(store) }) : null;
-}
-
-export function asTripleStoreEphemeralCommitCapability(store: TripleStore): TripleStoreEphemeralCommitCapability | null {
-  const commitEphemeral = store.commitEphemeral;
-  return typeof commitEphemeral === 'function' ? Object.freeze({ commitEphemeral: commitEphemeral.bind(store) }) : null;
-}
 
 /** Cancellation cannot turn a failed or unfinished persistence barrier into success. */
 export function certifiedTripleStorePersistenceBarrier(work: TripleStorePersistenceBarrier): TripleStorePersistenceBarrier {
@@ -35,12 +16,12 @@ export function certifiedTripleStorePersistenceBarrier(work: TripleStorePersiste
 export function composeTripleStorePersistence(
   inner: TripleStore, drain?: () => Promise<void>,
 ): TripleStorePersistenceBarrier | undefined {
-  return composeBarrier(asTripleStorePersistenceCapability(inner)?.persist, drain);
+  return composeBarrier(inner.persist?.bind(inner), drain);
 }
 export function composeTripleStoreEphemeralCommit(
   inner: TripleStore, drain?: () => Promise<void>,
 ): TripleStorePersistenceBarrier | undefined {
-  return composeBarrier(asTripleStoreEphemeralCommitCapability(inner)?.commitEphemeral, drain);
+  return composeBarrier(inner.commitEphemeral?.bind(inner), drain);
 }
 function composeBarrier(
   barrier: TripleStorePersistenceBarrier | undefined, drain?: () => Promise<void>,
