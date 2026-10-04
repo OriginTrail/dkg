@@ -5,6 +5,7 @@ import { TypedEventBus, assertionLifecycleUri, contextGraphMetaUri, createGraphK
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, TripleStoreAsyncLiftPublisher, computeFlatKCRootV10, resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111', CG = 'completion-race', NAME = 'notes';
@@ -29,6 +30,7 @@ async function fixture(alias = false, updating = false) {
     expect(await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CG, kaUal: first.kaUal })).toMatchObject({ shareOperationId: selectedAlias });
   }
   const agent = Object.create(DKGAgent.prototype) as any;
+  agent.gossipSession = new GossipSession();
   agent.store = store; agent.publisher = publisher; agent.chain = {}; agent.config = {}; agent.defaultAgentAddress = AUTHOR;
   agent.localAgents = new Map();
   agent.log = { warn() {}, info() {}, debug() {}, error() {} };
@@ -55,7 +57,36 @@ async function fixture(alias = false, updating = false) {
   return { store, publisher, agent, first, promoted, replace, result };
 }
 
+async function modelLegacyPublicationOwner(f: Awaited<ReturnType<typeof fixture>>) {
+  const graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+  const events = await f.store.query(`SELECT ?event WHERE { GRAPH <${graph}> {
+    ?event a <${DKG}AssertionPromoted> ; <http://www.w3.org/ns/prov#used> <${subject}>
+  } }`);
+  if (events.type !== 'bindings') throw new Error('Legacy fixture promotion events unavailable');
+  for (const row of events.bindings) await f.store.deleteByPattern({ graph, subject: row.event!, predicate: `${DKG}shareOperationId` });
+  await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}shareOperationId` });
+  await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}promoteOperationIntent` });
+}
+
 describe('agent publication completion marker fencing', () => {
+  it.each(['synchronous', 'queued'].flatMap(lane => [false, true].map(alias => ({ lane, alias }))))('completes $lane publication from a trimmed lifecycle and retained promotion event (ACK alias: $alias)', async ({ lane, alias }) => {
+    const f = await fixture(alias), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}shareOperationId` });
+    const before = await f.agent.assertion.history(CG, NAME);
+    expect(before?.currentShareOperationId).toBeUndefined();
+    expect(before?.events.find((event: { type: string }) => event.type === 'promoted')?.shareOperationId).toBe(f.promoted.shareOperationId);
+    vi.spyOn(f.publisher, 'publish').mockResolvedValueOnce(f.result);
+    if (lane === 'synchronous') await f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
+    else {
+      await f.publisher.clearPublishedSwmRoots(CG, [...request.roots], undefined, { operationId: 'trimmed-queued-share' } as any);
+      const queue = new TripleStoreAsyncLiftPublisher(f.store, { knowledgeAssetVmPublishHandler: { execute: ({ request, publishOptions }) => f.agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions) } });
+      await queue.enqueueKnowledgeAssetVmPublish(request); expect(await queue.processNext('wallet')).toMatchObject({ status: 'finalized' });
+    }
+    expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ state: 'published', memoryLayer: 'VM' });
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+  });
+
   it.each(['synchronous', 'queued'] as const)('clears the original lifecycle marker when %s publication selects an equivalent ACK alias', async (lane) => {
     const f = await fixture(true), clear = vi.spyOn(f.publisher, 'consumePublishedSwmShareComplete');
     vi.spyOn(f.publisher, 'publish').mockResolvedValueOnce(f.result);
@@ -153,8 +184,7 @@ describe('agent publication completion marker fencing', () => {
   it.each([false, true])('rechecks draft ownership after publication preflight queues behind a sanctioned reopen (legacy: %s)', async legacy => {
     const f = await fixture();
     if (legacy) {
-      await f.store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AUTHOR, NAME), predicate: `${DKG}shareOperationId` });
-      await f.store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AUTHOR, NAME), predicate: `${DKG}promoteOperationIntent` });
+      await modelLegacyPublicationOwner(f);
     }
     let release!: () => void, entered!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
@@ -197,8 +227,7 @@ describe('agent publication completion marker fencing', () => {
 
   it('preserves a reopened unshared draft when the captured legacy publication has no operation ID', async () => {
     const f = await fixture(), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
-    await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}shareOperationId` });
-    await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}promoteOperationIntent` });
+    await modelLegacyPublicationOwner(f);
     let release!: () => void, entered!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
     vi.spyOn(f.publisher, 'publish').mockImplementationOnce(async () => { entered(); await held; return f.result; });
@@ -217,7 +246,7 @@ describe('agent publication completion marker fencing', () => {
   it.each([false, true])('fences a captured legacy marker without an operation ID (replacement: %s)', async (replacement) => {
     const f = await fixture();
     const subject = assertionLifecycleUri(CG, AUTHOR, NAME), graph = contextGraphMetaUri(CG);
-    await f.store.deleteByPattern({ subject, graph, predicate: `${DKG}shareOperationId` });
+    await modelLegacyPublicationOwner(f);
     if (replacement) await f.store.insert([{ subject, graph, predicate: `${DKG}shareOperationId`, object: '"replacement-share"' }]);
     await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, null);
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(replacement);

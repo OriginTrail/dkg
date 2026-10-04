@@ -139,6 +139,7 @@ import {
   generatedPrivateCatalogTripleKeys,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  readPublishedAssertionOperation,
   workspaceHeadIncludesShareOperationId,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   workspacePublicQuadsDigest,
@@ -6058,16 +6059,16 @@ export class PublishMethods extends DKGAgentBase {
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
     const xsdInt = 'http://www.w3.org/2001/XMLSchema#integer';
     const pointerRes = await this.store.query(
-      `SELECT ?vm ?kaNum ?operation WHERE { GRAPH <${metaGraph}> {
+      `SELECT ?vm ?kaNum WHERE { GRAPH <${metaGraph}> {
         OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
         OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
-        OPTIONAL { <${lifecycleUri}> <http://dkg.io/ontology/shareOperationId> ?operation }
       } } LIMIT 1`,
       { source: 'agent.vmPublish.lifecyclePointer' },
     );
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
-    const originalShareOperationId = stripLit(pointerRow?.['operation'])?.trim() || null;
+    const originalShareOperationId = await readPublishedAssertionOperation(this.store, metaGraph, lifecycleUri);
+    if (originalShareOperationId === undefined) throw Object.assign(new Error('The named lifecycle publication owner is corrupt'), { code: 'PUBLISH_INTENT_STALE' });
     if (originalShareOperationId && rfc64WorkspaceHead
       && !workspaceHeadIncludesShareOperationId(rfc64WorkspaceHead, originalShareOperationId)) {
       throw Object.assign(new Error('The named lifecycle share operation is outside the selected head alias class'), { code: 'PUBLISH_INTENT_STALE' });

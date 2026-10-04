@@ -9,6 +9,7 @@ export default defineConfig({
       'test/graph-publish-envelope.test.ts',
       'test/confirmed-metadata-parser.test.ts',
       'test/workspace-metadata-subjects.test.ts',
+      'test/published-assertion-owner.test.ts',
       'test/entity-share-metadata.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
