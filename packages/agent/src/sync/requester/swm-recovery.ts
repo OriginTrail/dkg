@@ -54,7 +54,8 @@ import {
   sharedMemoryWorkOutcome,
   type SharedMemoryWorkOutcome,
 } from '../shared-memory-completion.js';
-import type { SharedMemoryPhaseFailureCause } from '../shared-memory-diagnostics.js';
+import type { RecoverContextGraphSwmResult } from '../shared-memory-completion.js';
+export type { RecoverContextGraphSwmResult } from '../shared-memory-completion.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -173,33 +174,6 @@ export interface RecoverContextGraphSwmDeps {
   /** Backstop against a misbehaving responder that never reports `completed`. */
   readonly maxPagesPerPhase?: number;
 }
-
-interface RecoverContextGraphSwmResultFields {
-  /** Attribution for the single incomplete recovery phase emitted by the lifecycle. */
-  readonly localYieldFailedPhases?: number;
-  readonly replacedRoots: number;
-  readonly replacedGraphs: number;
-  readonly insertedDataQuads: number;
-  readonly insertedMetaQuads: number;
-  readonly droppedDataTriples: number;
-  /** Verified immutable snapshot refs ready in the local cache after this round. */
-  readonly readySnapshots: number;
-  /** Manifest-bound progress across rounds; retry accounting, not permission to reuse a ref. */
-  readonly cumulativeResolvedSnapshots?: number;
-  /** Total immutable snapshot refs declared by the recovered SWM metadata. */
-  readonly totalSnapshots: number;
-}
-
-/** Recovery completion cannot simultaneously carry a local-yield outcome. */
-export type RecoverContextGraphSwmResult = RecoverContextGraphSwmResultFields & (
-  | { readonly completed: true; readonly localYield?: never; readonly phaseFailureCause?: never }
-  | {
-      readonly completed: false;
-      readonly localYield?: true;
-      /** Direct internal cause consumed by lifecycle aggregation. */
-      readonly phaseFailureCause: SharedMemoryPhaseFailureCause;
-    }
-);
 
 export interface SwmRecoveryProgress {
   readonly completedRound: number;
