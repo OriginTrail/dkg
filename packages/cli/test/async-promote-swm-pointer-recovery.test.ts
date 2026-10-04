@@ -13,16 +13,13 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
-  TypedEventBus,
   assertionLifecycleUri,
   contextGraphMetaUri,
-  generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
-import { DKGPublisher, TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
 import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
-import { DKGAgent } from '../../agent/src/dkg-agent.js';
+import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import {
   SWM_POINTER_PRED,
   SwmPointerFaultStore,
@@ -37,32 +34,6 @@ const NAME = 'pointer-asset';
 const AGENT = `0x${'11'.repeat(20)}`;
 const OPERATION_PRED = 'http://dkg.io/ontology/shareOperationId';
 const BACKOFF_MS = 60_000;
-
-/** A "process": fresh agent + publisher objects over a durable store. */
-async function bootAgent(store: SwmPointerFaultStore) {
-  const publisher = new DKGPublisher({
-    store,
-    chain: new MockChainAdapter(),
-    eventBus: new TypedEventBus(),
-    keypair: await generateEd25519Keypair(),
-  });
-  const agent = Object.create(DKGAgent.prototype) as any;
-  agent.defaultAgentAddress = AGENT;
-  agent.node = { peerId: { toString: () => '12D3KooWPointerRecovery' } };
-  agent.store = store;
-  agent.publisher = publisher;
-  agent.log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
-  agent.prepareAtomicAssertionShare = async () => undefined;
-  agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
-  agent.resolveWorkspaceRecipientsGated = async () => ({ requiresEncryption: false, recipients: [] });
-  agent.buildCuratorAckConfirmer = async () => undefined;
-  agent.getContextGraphOnChainPolicy = async () => ({ accessPolicy: 0 });
-  agent.publishWorkspaceGossip = vi.fn(async () => undefined);
-  // The real `afterDurableSwmPromotionV1` / `_stampSwmPointer` run; only the
-  // detached RFC-64 observer is out of scope here.
-  agent.scheduleRfc64SwmInventoryObserverV1 = vi.fn();
-  return { agent, publisher };
-}
 
 describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
   it.each([
@@ -87,7 +58,7 @@ describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
     async ({ fault, failure, path }) => {
       const store = new SwmPointerFaultStore();
       const { queue, clock, logs, makeRequest } = createAsyncPromoteWorkerFixture({ maxRetries: 5, store });
-      const { agent, publisher } = await bootAgent(store);
+      const { agent, publisher } = await createPromotionAgentForTest(store, { agentAddress: AGENT, peerId: '12D3KooWPointerRecovery' });
       await publisher.assertionCreate(CG, NAME, AGENT);
       await publisher.assertionWrite(CG, NAME, AGENT, [{
         subject: 'urn:test:pointer', predicate: 'http://schema.org/name', object: '"Pointer"',
@@ -143,7 +114,7 @@ describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
       const restartedQueue = new TripleStoreAsyncPromoteQueue(store, {
         now: clock.now, backoff: () => BACKOFF_MS, maxRetries: 5,
       });
-      const restarted = await bootAgent(store);
+      const restarted = await createPromotionAgentForTest(store, { agentAddress: AGENT, peerId: '12D3KooWPointerRecovery' });
 
       if (path === 'direct-retry') {
         // No `failed` flash: the queue's ordinary bounded retry owns it from the first write.
