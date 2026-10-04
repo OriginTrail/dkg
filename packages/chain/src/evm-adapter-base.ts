@@ -12,6 +12,7 @@
  */
 
 
+import { rpcReadDescriptor } from './rpc-read-descriptor.js';
 import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';

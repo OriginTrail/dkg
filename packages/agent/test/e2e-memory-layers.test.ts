@@ -2071,7 +2071,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
       const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
       const processed = await queue.processNext('wallet-1');
       if (processed?.status === 'failed') throw new Error(JSON.stringify(processed.failure));
-      expect(processed).toMatchObject({ jobId, status: 'finalized' });
+      expect(processed).toMatchObject({ jobId, status: 'broadcast', broadcast: { txHash: expect.any(String) } });
+      expect(await publisher.hasSwmShareComplete(CG_ID, name, author)).toBe(true);
       expect(submitted).toHaveBeenCalledTimes(1);
       const kaId = BigInt(intent.seal.reservedKaId!);
       const rootCount = await (firstAgent as any).chain.getMerkleRootCount(kaId);
@@ -2090,11 +2091,16 @@ describe('rootless graph-scoped KA lifecycle', () => {
       });
       const republish = vi.spyOn((restartedAgent as any).publisher, 'publish');
       let history = await restartedAgent.assertion.history(CG_ID, name);
+      let pendingRepairs = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries.length;
       const deadline = Date.now() + 20_000;
-      while (history?.state !== 'published' && Date.now() < deadline) {
+      // Visible metadata precedes certified persistence and marker consumption.
+      // Wait for the durable owner to retire, not just its intermediate VM rows.
+      while ((history?.state !== 'published' || pendingRepairs > 0) && Date.now() < deadline) {
         await sleep(100);
         history = await restartedAgent.assertion.history(CG_ID, name);
+        pendingRepairs = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries.length;
       }
+      expect(pendingRepairs).toBe(0);
       expect(history).toMatchObject({ vmCurrentAssertion: intent.sealMerkleRoot.slice(2),
         state: 'published', memoryLayer: MemoryLayer.VerifiableMemory });
       const published = await (restartedAgent as any).store.query(`SELECT ?ual WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> {
@@ -2103,6 +2109,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
       expect(published.bindings).toHaveLength(1);
       expect(await (restartedAgent as any).chain.getMerkleRootCount(kaId)).toBe(rootCount);
       expect(republish).not.toHaveBeenCalled();
+      expect(await (restartedAgent as any).publisher.hasSwmShareComplete(CG_ID, name, author)).toBe(false);
+      expect(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries).toHaveLength(0);
       expect(await new TripleStoreAsyncLiftPublisher((restartedAgent as any).store).processNext('wallet-1')).toBeNull();
     } finally {
       if (restartedAgent) { await restartedAgent.stop(); agents.splice(agents.indexOf(restartedAgent), 1); }

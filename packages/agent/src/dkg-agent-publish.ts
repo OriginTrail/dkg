@@ -333,7 +333,6 @@ import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle, con
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import { stampLifecyclePointer, stampLifecyclePointerIfDivergedFromVm } from './lifecycle-pointer-writer.js';
 import { requireNamedKaVmCompletionCapability, withNamedKaVmMetadataLock } from './named-ka-vm-metadata.js';
-import { isPublishedAssertionOwner } from '@origintrail-official/dkg-publisher';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -4957,15 +4956,17 @@ export class PublishMethods extends DKGAgentBase {
     confirmedPublication: ConfirmedNamedKaVmPublication,
   ): Promise<boolean> {
     const input = confirmedNamedKaVmLifecycleInput(confirmedPublication, coordinates);
+    let outcome;
     try {
-      const outcome = await submitOwnedNamedKaVmLifecycleRepair(this.store, this.writeLocks,
+      outcome = await submitOwnedNamedKaVmLifecycleRepair(this.store, this.writeLocks,
         this.getOrCreateNamedKaVmLifecycleRepair(), input);
-      if (outcome === 'pending' || outcome === 'rejected') throw new Error(`Confirmed lifecycle completion remains ${outcome}`);
-      return false;
     } catch (error) {
       // Losing the durable admission is different from a scheduled graph-store retry.
       throw new ConfirmedNamedKaVmLifecycleRecoveryError(confirmedPublication, input, error);
     }
+    if (outcome === 'pending' || outcome === 'rejected') throw new ConfirmedNamedKaVmLifecycleRecoveryError(
+      confirmedPublication, input, new Error(`Confirmed lifecycle completion remains ${outcome}`), outcome);
+    return false;
   }
 
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
@@ -4991,7 +4992,7 @@ export class PublishMethods extends DKGAgentBase {
         merkleRoot: ethers.getBytes(merkleRoot.startsWith('0x') ? merkleRoot : `0x${merkleRoot}`), kaManifest: [],
         assertionUri: contextGraphAssertionUri(request.contextGraphId, agentAddress, request.name, request.subGraphName),
         seal: assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request) };
-      throw new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, new Error(`Confirmed lifecycle completion remains ${outcome}`));
+      throw new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, new Error(`Confirmed lifecycle completion remains ${outcome}`), outcome);
     }
     return outcome === 'repaired';
   }

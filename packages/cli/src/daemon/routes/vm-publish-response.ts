@@ -35,15 +35,18 @@ export function vmPublishResponseBody(pub: FinalizedPublishResult, reason?: stri
   };
 }
 
-/** Confirmation survives a failed write-ahead admission; publication must never be retried. */
+/** Confirmation survives unfinished local completion; publication must never be retried. */
 export function confirmedVmRecoveryRequiredResponse(error: unknown): Record<string, unknown> | undefined {
   if (!isConfirmedNamedKaVmLifecycleRecoveryError(error)) return undefined;
   return {
     ...vmPublishResponseBody(error.confirmedPublication),
     onChainResult: error.confirmedPublication.onChainResult,
     code: error.code,
-    error: 'Publication confirmed, but local lifecycle recovery was not admitted. Restore local persistence and recover the confirmed publication.',
-    lifecycleRecoveryRequired: true, lifecycleRepairAdmitted: false, lifecycleRepairPending: false,
+    error: error.repairAdmission === 'unadmitted'
+      ? 'Publication confirmed, but local lifecycle recovery was not admitted. Restore local persistence and recover the confirmed publication.'
+      : 'Publication confirmed, but local lifecycle completion remains unfinished. Recover the confirmed publication.',
+    lifecycleRecoveryRequired: true, lifecycleRepairAdmitted: error.repairAdmission !== 'unadmitted',
+    lifecycleRepairPending: error.repairAdmission === 'pending',
     recovery: error.lifecycleRecovery,
   };
 }

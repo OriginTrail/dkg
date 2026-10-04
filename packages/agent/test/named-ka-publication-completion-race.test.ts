@@ -90,7 +90,7 @@ describe('agent publication completion marker fencing', () => {
       expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'SWM', state: 'promoted' });
     });
 
-  it('retains the actual inline queued confirmation until interrupted lifecycle completion is repaired', async () => {
+  it.each(['metadata', 'commitment'] as const)('retains inline queued confirmation until interrupted %s completion is repaired', async fault => {
     const f = await fixture(), request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
     const txHash = f.result.onChainResult.txHash as `0x${string}`, packed = f.result.kaId.toString() as `${bigint}`;
     const recovery = { inclusion: { txHash, blockNumber: 1, blockHash: `0x${'cd'.repeat(32)}` as `0x${string}` },
@@ -101,8 +101,13 @@ describe('agent publication completion marker fencing', () => {
     });
     const commit = f.store.atomicUpdate.bind(f.store); let failCompletion = true;
     vi.spyOn(f.store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
-      if (failCompletion && options?.source === 'agent.publish.confirmedLifecycleCommit') throw new Error('interrupted confirmed completion');
+      if (fault === 'metadata' && failCompletion && options?.source === 'agent.publish.confirmedLifecycleCommit') throw new Error('interrupted confirmed completion');
       return commit(sparql, options);
+    });
+    const commitment = f.store.commitment!.commit.bind(f.store.commitment);
+    vi.spyOn(f.store.commitment!, 'commit').mockImplementation(async options => {
+      if (fault === 'commitment' && failCompletion) throw new Error('interrupted certified commitment');
+      return commitment(options);
     });
     const queue = new TripleStoreAsyncLiftPublisher(f.store, {
       knowledgeAssetVmPublishRecoveryResolver: async () => recovery,
@@ -247,7 +252,7 @@ describe('agent publication completion marker fencing', () => {
   });
 
   it('keeps the real queue transaction carrier pending until the owned lifecycle repair succeeds', async () => {
-    const f = await fixture(), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const f = await fixture();
     const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
     const txHash = f.result.onChainResult.txHash as `0x${string}`, packed = f.result.kaId.toString() as `${bigint}`;
     const recovery = { inclusion: { txHash, blockNumber: 1, blockHash: `0x${'cd'.repeat(32)}` as `0x${string}` },
@@ -283,7 +288,7 @@ describe('agent publication completion marker fencing', () => {
   });
 
   it('serializes permanent VM bookkeeping with the owned predicate transition', async () => {
-    const f = await fixture(), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const f = await fixture();
     const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
     const commit = f.store.atomicUpdate.bind(f.store); let release!: () => void, entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; }), paused = new Promise<void>(resolve => { entered = resolve; });

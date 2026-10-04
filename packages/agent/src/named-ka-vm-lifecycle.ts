@@ -56,6 +56,7 @@ interface LifecycleMetadataPlan {
   readonly deletes: readonly Pick<Quad, 'subject' | 'predicate'>[];
   readonly inserts: readonly Omit<Quad, 'graph'>[];
   readonly metaGraph: string;
+  readonly completionMarkerSubject?: string;
 }
 interface WorkspaceLifecycleValues {
   readonly wm?: string;
@@ -109,9 +110,6 @@ function planPublishedNamedKaVmLifecycle(
   if (!preserveWorkspace) {
     for (const subject of [lifecycleUri, assertionUri]) replace(subject, MEMORY_LAYER_PRED, JSON.stringify(MemoryLayer.VerifiableMemory));
     replace(lifecycleUri, STATE_PRED, '"published"');
-    if (input.tentative !== true && input.publicationShareOperationId !== undefined) {
-      deletes.push({ subject: lifecycleUri, predicate: 'http://dkg.io/ontology/swmShareComplete' });
-    }
   }
   replace(lifecycleUri, PUBLISHED_UAL_PRED, JSON.stringify(input.publishedUal));
   if (input.tentative !== true && input.packedKaId !== undefined && !preserveWorkspace) {
@@ -120,7 +118,8 @@ function planPublishedNamedKaVmLifecycle(
     replace(lifecycleUri, ASSERTION_GRAPH_PRED, contextGraphLayerUri(input.contextGraphId, MemoryLayer.VerifiableMemory, author, number, input.subGraphName));
     replace(contextGraphLayerUri(input.contextGraphId, MemoryLayer.WorkingMemory, author, number, input.subGraphName), MEMORY_LAYER_PRED, JSON.stringify(MemoryLayer.VerifiableMemory));
   }
-  return { deletes, inserts, metaGraph };
+  return { deletes, inserts, metaGraph, ...(!preserveWorkspace && input.tentative !== true
+    && input.publicationShareOperationId !== undefined ? { completionMarkerSubject: lifecycleUri } : {}) };
 }
 
 /** One request on certified atomic backends; typed preflight refusal alone permits fallback. */
@@ -226,11 +225,21 @@ async function applyNamedKaVmLifecycle(
     // draft rows. Missing/corrupt layers still cannot admit a draft transition.
     const owns = ownsOperation && (!guarded || workspace.layer === MemoryLayer.SharedWorkingMemory
       || workspace.layer === MemoryLayer.VerifiableMemory);
-    await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(
-      owns ? input : { ...input, preserveWorkspace: true }, workspace), guarded);
+    const plan = planPublishedNamedKaVmLifecycle(owns ? input : { ...input, preserveWorkspace: true }, workspace);
+    await commitLifecycleMetadata(store, plan, guarded);
     // Visible writes do not certify persistence: retire evidence only after
     // the selected process-local or restart-durable commit barrier succeeds.
     if (barrier !== undefined) await barrier({ source: 'agent.publish.confirmedLifecycleFlush' });
     else await store.flush?.({ source: 'agent.publish.confirmedLifecycleFlush' });
+    if (plan.completionMarkerSubject !== undefined) {
+      // A partial compatibility commit or failed durability barrier cannot
+      // consume the share marker. This final mutation stays in the same owner
+      // and metadata fences; replay also certifies its persistence before retirement.
+      if (!await tryReplaceSubjectPredicatesAtomically(store, metaGraph, plan.completionMarkerSubject,
+        ['http://dkg.io/ontology/swmShareComplete'], [], { source: 'agent.publish.confirmedLifecycleMarkerCommit' })) {
+        throw new UnsupportedTripleStoreCapabilityError('replaceSubjectPredicates', 'Named KA VM completion');
+      }
+      await barrier!({ source: 'agent.publish.confirmedLifecycleFlush' });
+    }
   });
 }

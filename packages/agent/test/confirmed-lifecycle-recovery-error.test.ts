@@ -17,10 +17,18 @@ describe('confirmed lifecycle recovery package contract', () => {
     expect(error).toMatchObject({ name: 'ConfirmedNamedKaVmLifecycleRecoveryError', publishedUal: input.publishedUal,
       merkleRoot: input.merkleRoot, assertionVersion: input.assertionVersion });
   });
+  it.each(['pending', 'rejected'] as const)('preserves admitted %s completion without mislabeling journal loss', outcome => {
+    const { publication, input } = confirmedLifecycleRecoveryFixture();
+    const error = new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, new Error('unfinished'), outcome);
+    expect(isConfirmedNamedKaVmLifecycleRecoveryError(error)).toBe(true);
+    expect(error.repairAdmission).toBe(outcome);
+    expect(error.confirmedPublication).toBe(publication);
+  });
   it.each([null, undefined, {}, new Error('other')])('refuses non-contract errors %j', error => {
     expect(isConfirmedNamedKaVmLifecycleRecoveryError(error)).toBe(false);
   });
   it.each([
+    ['invalid admission', { repairAdmission: 'submitted_again' }],
     ['publication missing', { confirmedPublication: undefined }],
     ['recovery missing', { lifecycleRecovery: null }],
     ['publication tentative', { confirmedPublication: { ...failure().confirmedPublication, status: 'tentative' } }],

@@ -2726,9 +2726,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       }));
       await startWith({}, { publishFromFinalizedAssertion: fixture.agent.publishFromFinalizedAssertion.bind(fixture.agent) });
       const response = await post('vm/publish', { contextGraphId: CG_ID });
-      expect(response.status).toBe(200); expect(response.body.lifecycleRepairPending).toBe(true);
+      expect(response.status).toBe(207);
+      expect(response.body).toMatchObject({ status: 'confirmed', ual: fixture.result.ual,
+        lifecycleRecoveryRequired: true, lifecycleRepairAdmitted: true, lifecycleRepairPending: true,
+        recovery: { action: 'recover_confirmed_publication', publicationRetrySafe: false } });
       expect(commit).toHaveBeenCalledTimes(1);
-      expect(response.body.lifecycleRecoveryRequired).toBeUndefined(); expect(response.body.recovery).toBeUndefined();
+      expect(response.body.onChainResult.txHash).toBe(fixture.result.onChainResult.txHash);
       expect(fixture.publish).toHaveBeenCalledTimes(1);
     });
   });

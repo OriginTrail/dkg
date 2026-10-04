@@ -15,6 +15,16 @@ describe('confirmed recovery response contract', () => {
     expect(response.onChainResult).toBe(publication.onChainResult);
     expect(response.recovery).toBe(error.lifecycleRecovery);
   });
+  it.each(['pending', 'rejected'] as const)('preserves admitted %s evidence and never invites a new submission', outcome => {
+    const { publication, input } = confirmedLifecycleRecoveryFixture();
+    const error = new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, new Error('unfinished'), outcome);
+    const response = confirmedVmRecoveryRequiredResponse(error)!;
+    expect(response).toMatchObject({ status: 'confirmed', ual: publication.ual, lifecycleRecoveryRequired: true,
+      lifecycleRepairAdmitted: true, lifecycleRepairPending: outcome === 'pending',
+      recovery: { action: 'recover_confirmed_publication', publicationRetrySafe: false } });
+    expect(response.onChainResult).toBe(publication.onChainResult);
+    expect(response.error).not.toMatch(/not admitted/);
+  });
   it('does not claim actionable confirmed recovery from an error missing required recovery evidence', () => {
     const incomplete = Object.assign(new Error('incomplete recovery descriptor'), {
       code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', confirmedPublication: { status: 'confirmed', ual: 'did:dkg:mock/1' },

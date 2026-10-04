@@ -8,7 +8,7 @@ export interface ConfirmedNamedKaVmLifecycleRecovery extends ConfirmedNamedKaVmL
   readonly publicationRetrySafe: false;
 }
 
-/** Confirmation survived, but the local write-ahead repair could not be admitted. */
+/** Confirmation survived; required local completion remains unfinished. */
 export class ConfirmedNamedKaVmLifecycleRecoveryError extends Error {
   readonly code = 'KA_VM_LIFECYCLE_REPAIR_REQUIRED';
   readonly publishedUal: string;
@@ -20,6 +20,7 @@ export class ConfirmedNamedKaVmLifecycleRecoveryError extends Error {
     readonly confirmedPublication: ConfirmedNamedKaVmPublication,
     input: ConfirmedNamedKaVmLifecycleInput,
     cause: unknown,
+    readonly repairAdmission: 'unadmitted' | 'pending' | 'rejected' = 'unadmitted',
   ) {
     super(`Confirmed publish requires lifecycle recovery: ${String(cause)}`, { cause });
     this.name = 'ConfirmedNamedKaVmLifecycleRecoveryError';
@@ -35,7 +36,8 @@ export function isConfirmedNamedKaVmLifecycleRecoveryError(error: unknown): erro
   if (!(error instanceof Error) || Reflect.get(error, 'code') !== 'KA_VM_LIFECYCLE_REPAIR_REQUIRED') return false;
   const publication = Reflect.get(error, 'confirmedPublication'), recovery = Reflect.get(error, 'lifecycleRecovery');
   if (publication === null || typeof publication !== 'object' || recovery === null || typeof recovery !== 'object') return false;
-  return Reflect.get(publication, 'status') === 'confirmed'
+  return ['unadmitted', 'pending', 'rejected'].includes(Reflect.get(error, 'repairAdmission'))
+    && Reflect.get(publication, 'status') === 'confirmed'
     && typeof Reflect.get(publication, 'ual') === 'string'
     && typeof Reflect.get(publication, 'assertionUri') === 'string'
     && Reflect.get(publication, 'merkleRoot') instanceof Uint8Array

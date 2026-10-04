@@ -59,14 +59,23 @@ describe('one divergence-only lifecycle pointer policy', () => {
     expect(await f.read()).toEqual({ type: 'bindings', bindings: [{ root: JSON.stringify(STALE) }] });
   });
 
-  it('uses that same policy inside publication WM convergence', async () => {
+  it.each([ROOT, STALE])('atomically consumes only a WM pointer matching publication (%s)', async wm => {
     const f = await fixture(WM_CURRENT_ASSERTION_PRED, STALE);
+    await f.store.replaceSubjectPredicates(GRAPH, SUBJECT, [WM_CURRENT_ASSERTION_PRED], [
+      { graph: GRAPH, subject: SUBJECT, predicate: WM_CURRENT_ASSERTION_PRED, object: JSON.stringify(wm) },
+    ]);
+    const commit = vi.spyOn(f.store, 'atomicUpdate');
     const divergent = vi.spyOn(pointerWriter, 'stampLifecyclePointerIfDivergedFromVm');
     await applyPublishedNamedKaVmLifecycle(f.store, {
       contextGraphId: CG, agentAddress: AUTHOR, name: NAME, publishedUal: 'urn:published:asset',
-      merkleRoot: `0x${ROOT}`, convergeWorkingMemory: true,
-    });
-    expect(divergent).toHaveBeenCalledExactlyOnceWith(f.store, SUBJECT, WM_CURRENT_ASSERTION_PRED, ROOT, GRAPH);
-    expect(await f.read()).toEqual({ type: 'bindings', bindings: [] });
+      merkleRoot: `0x${ROOT}`,
+    }, { persistence: 'process-local' });
+    expect(commit).toHaveBeenCalledTimes(1);
+    // The confirmed command keeps convergence in its one atomic metadata plan.
+    // A later draft must survive, even when its old root happens to equal prior VM.
+    expect(divergent).not.toHaveBeenCalled();
+    expect(await f.read()).toEqual({ type: 'bindings', bindings: wm === ROOT ? [] : [{ root: JSON.stringify(STALE) }] });
+    expect(await f.store.query(`SELECT ?root WHERE { GRAPH <${GRAPH}> { <${SUBJECT}> <${VM_CURRENT_ASSERTION_PRED}> ?root } }`))
+      .toEqual({ type: 'bindings', bindings: [{ root: JSON.stringify(ROOT) }] });
   });
 });
