@@ -490,11 +490,13 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
   });
 }
 
-interface RecoveryOperationCandidate extends WorkspaceOperationModel<RecoveryWorkspaceOperationSemantics> {
+export interface RecoveryOperationCandidate extends WorkspaceOperationModel<RecoveryWorkspaceOperationSemantics> {
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
   readonly snapshotLocator: RecoverySnapshotLocator;
+  readonly identityKey: string | null;
+  readonly provenance: Readonly<{ shareOperationId: string; publishedAtMs: number; publisherChronologyAuthenticated?: boolean }>;
 }
 
 interface ResolvedHeadOperation {
@@ -559,6 +561,19 @@ function recoverySnapshotLocator(params: {
   };
 }
 
+/** Decode the same candidate model for provider parsing and prepared local evidence. */
+export function decodeRecoveryOperationCandidate(params: Parameters<typeof validateOperationRows>[0]): RecoveryOperationCandidate {
+  const semantics = validateOperationRows(params);
+  const publishedAtMs = Date.parse(stripLiteral(requireSingle(params.rows, PUBLISHED_AT, 'publishedAt')));
+  if (!Number.isFinite(publishedAtMs)) throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid publishedAt`);
+  return {
+    semantics, provenance: { shareOperationId: params.shareOperationId, publishedAtMs },
+    shareOperationId: params.shareOperationId, operationSubject: params.operationSubject,
+    operationRows: params.rows, identityKey: operationIdentityKey(params.rows),
+    snapshotLocator: recoverySnapshotLocator({ ...params, publicQuadsDigest: semantics.publicQuadsDigest }),
+  };
+}
+
 /** Resolve equivalent originator/ACK aliases; disagreements remain fail-closed. */
 function resolveEquivalentHeadOperation(params: {
   readonly headRows: readonly Quad[];
@@ -587,42 +602,9 @@ function resolveEquivalentHeadOperation(params: {
     const operationRows = params.byGraphAndSubject.get(
       `${params.metaGraph}\u0000${operationSubject}`,
     ) ?? [];
-    const semantics = validateOperationRows({
-      rows: operationRows,
-      contextGraphId: params.contextGraphId,
-      metaGraph: params.metaGraph,
-      operationSubject,
-      shareOperationId,
-      kaUal: params.kaUal,
-      assertionVersion: params.assertionVersion,
-      subGraphName: params.subGraphName,
-    });
-    const publishedAt = stripLiteral(requireSingle(operationRows, PUBLISHED_AT, 'publishedAt'));
-    const publishedAtMs = Date.parse(publishedAt);
-    if (!Number.isFinite(publishedAtMs)) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
-    }
-    const headShareOperationRow = params.headRows
-      .filter((row) => row.predicate === SHARE_OPERATION_ID)
-      .find((row) => stripLiteral(row.object).trim() === shareOperationId);
-    if (!headShareOperationRow) {
-      throw new Error(`Graph-scoped SWM head ${params.headSubject} is missing shareOperationId`);
-    }
-    return {
-      semantics,
-      provenance: { shareOperationId, publishedAtMs },
-      shareOperationId,
-      operationSubject,
-      operationRows,
-      snapshotLocator: recoverySnapshotLocator({
-        rows: operationRows,
-        contextGraphId: params.contextGraphId,
-        operationSubject,
-        shareOperationId,
-        ...(params.subGraphName === undefined ? {} : { subGraphName: params.subGraphName }),
-        publicQuadsDigest: semantics.publicQuadsDigest,
-      }),
-    };
+    return decodeRecoveryOperationCandidate({ rows: operationRows, contextGraphId: params.contextGraphId,
+      metaGraph: params.metaGraph, operationSubject, shareOperationId, kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion, subGraphName: params.subGraphName });
   });
 
   const orderedCandidates = selectEquivalentWorkspaceOperation(

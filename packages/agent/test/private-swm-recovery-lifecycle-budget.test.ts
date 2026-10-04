@@ -251,7 +251,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         putSnapshot: async () => { throw new Error('No snapshot write expected'); },
       },
       snapshotMaterializer: {
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [] }),
         filterBulkMetadata: async rows => rows,
         selectRepairIdentity: async () => null,
         withKaWriteLock: async (

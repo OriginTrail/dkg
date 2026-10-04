@@ -525,7 +525,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   };
 
   const repairHeadPreservingIdentity: SharedMemorySnapshotMaterializer['repairHeadPreservingIdentity'] = async (contextGraphId, descriptor, winnerShareOperationId) => {
-    const publisherAlias = await retainedPublisherAlias(deps.store, descriptor, winnerShareOperationId, [...(await loadStoredOperationCandidates(descriptor))?.values() ?? []].flat());
+    const publisherAlias = retainedPublisherAlias(descriptor, winnerShareOperationId);
     const loserSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
       seed: descriptor.shareOperationId !== winnerShareOperationId
         ? [descriptor.operationSubject]
@@ -552,7 +552,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         : { ...quad });
     if (publisherAlias) {
       headRows.push(publisherAlias.headRow);
-      await deps.store.insert(publisherAlias.operationRows);
+      await deps.store.insert([...publisherAlias.operationRows]);
     }
     await deleteByPatternWithoutCount(
       deps.store,

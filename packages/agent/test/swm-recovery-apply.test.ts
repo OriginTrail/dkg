@@ -299,7 +299,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         snapshotMaterializer: {
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [] }),
         isGraphAssetMaterialized: async () => false,
           withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
           draftMayReplace: async () => true,
@@ -364,7 +364,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       snapshotMaterializer: {
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [] }),
         isGraphAssetMaterialized: async () => false,
         withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
         draftMayReplace: async () => true,
@@ -465,7 +465,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           snapshotMaterializer: {
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [] }),
         isGraphAssetMaterialized: async () => kind === 'preserve-equivalent',
             withKaWriteLock: async (
               _cg: string,
@@ -562,7 +562,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         snapshotMaterializer: {
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [] }),
         isGraphAssetMaterialized: async () => false,
           withKaWriteLock: async (
             _cg: string,
@@ -645,7 +645,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       snapshotMaterializer: {
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [] }),
         isGraphAssetMaterialized: async () => true,
         withKaWriteLock: async (
           _cg: string,
@@ -669,7 +669,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
     expect(replaceMetaForGraphAssets).toHaveBeenCalledOnce();
     expect(replaceMetaForGraphAssets).toHaveBeenCalledWith([{
       ...descriptor,
-      preparation: 'local-evidence-acquired',
+      preparation: 'local-evidence-acquired', operationCandidates: [], storedOperationCandidates: [],
     }]);
     expect(replaceGraph).not.toHaveBeenCalled();
 

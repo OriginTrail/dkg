@@ -7,6 +7,7 @@ import {
   markDraftOperationRetired, readDraftArtifactReferences, swmKaWriteLockKey,
   withDraftArtifactCollection, withKeyedLocks, workspaceOperationSubject,
 } from '@origintrail-official/dkg-publisher';
+import { stripMetadataLiteral as literal } from './sync/metadata-literal.js';
 import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 
 type DraftArtifactReferences = NonNullable<Awaited<ReturnType<typeof readDraftArtifactReferences>>>;
@@ -16,10 +17,6 @@ const ACK_WINDOW_MS = 5 * 60_000;
 const BATCH_SIZE = 32;
 const cursors = new WeakMap<TripleStore, Map<string, { operation: string; privateGraph: string }>>();
 
-function literal(value: string): string {
-  const match = /^"((?:[^"\\]|\\.)*)"/.exec(value);
-  return match ? JSON.parse(`"${match[1]}"`) as string : value;
-}
 async function exists(store: TripleStore, query: string): Promise<boolean> {
   const result = await store.query(`ASK { ${query} }`, { source: 'agent.draftArtifacts.references', priority: 'background' });
   // A non-ASK response is unavailable reference coverage, never permission to delete.

@@ -220,7 +220,7 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [] }),
         filterBulkMetadata: async (rows, withheld = []) => { const keys = new Set(withheld.map(canonicalQuadKey)); return rows.filter(row => !keys.has(canonicalQuadKey(row))); },
         // Private-lane mutations are outside this public orchestration fixture.
         readExactMaterializedGraph: async () => { throw new Error('unexpected private recovery'); },

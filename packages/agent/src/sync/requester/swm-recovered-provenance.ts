@@ -1,56 +1,93 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertSafeIri } from '@origintrail-official/dkg-core';
-import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
-import { RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { workspacePublisherOperationTimestamp } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
+import { assertSafeIri } from '@origintrail-official/dkg-core';
+import { RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { operationIdentityKey, type GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
+import { decodeRecoveryOperationCandidate, type RecoveryOperationCandidate, type GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { stripMetadataLiteral } from '../metadata-literal.js';
+import { canonicalQuadKey } from './quad-key.js';
 
 const DKG = 'http://dkg.io/ontology/';
-/** The prepared boundary separates acquired local evidence from provider claims. */
+type AuthenticatedCandidate = RecoveryOperationCandidate & {
+  readonly provenance: RecoveryOperationCandidate['provenance'] & { readonly publisherChronologyAuthenticated: true };
+};
+/** Authentication and ACK exclusion follow the publisher's shared chronology policy. */
+export function isAuthenticatedPublisherCandidate(candidate: RecoveryOperationCandidate): candidate is AuthenticatedCandidate {
+  return candidate.provenance.publisherChronologyAuthenticated === true
+    && workspacePublisherOperationTimestamp([{ shareOperationId: candidate.shareOperationId,
+      publishedAt: candidate.provenance.publishedAtMs }]) !== undefined;
+}
+/** The prepared boundary separates decoded local evidence from provider claims. */
 export interface PreparedSwmRecoveryDescriptor extends GraphScopedSwmRecoveryDescriptor {
   readonly preparation: 'local-evidence-acquired';
-  readonly authenticatedPublisherOperation?: Readonly<{ id: string; timestampMs: number }>;
+  readonly operationCandidates: readonly RecoveryOperationCandidate[];
+  /** Null retains fail-closed handling of an undecodable current alias class. */
+  readonly storedOperationCandidates: readonly RecoveryOperationCandidate[] | null;
+  readonly authenticatedPublisherOperation?: AuthenticatedCandidate;
 }
 
-/**
- * A provider authenticates transport/content, not the publisher's RDF clock.
- * Only an immutable operation already established locally by a trusted writer
- * may contribute chronology. Never copy, clear, or reinterpret a peer's marker.
- */
+/** Decode at acquisition, so ordering and retention consume facts, not RDF lookups. */
+function decodeCandidate(rows: readonly Quad[], descriptor: GraphScopedSwmRecoveryDescriptor): RecoveryOperationCandidate {
+  const value = (predicate: string) => stripMetadataLiteral(rows.find(row => row.predicate === `${DKG}${predicate}`)?.object ?? '');
+  return decodeRecoveryOperationCandidate({ rows, contextGraphId: value('contextGraphId'),
+    metaGraph: descriptor.metaGraph, operationSubject: rows[0]!.subject, shareOperationId: value('shareOperationId'),
+    kaUal: descriptor.kaUal, assertionVersion: BigInt(value('assertionVersion')).toString(), subGraphName: descriptor.subGraphName });
+}
+
+/** Acquire one bounded provider/current alias class under the existing KA lock. */
 export async function prepareRecoveredDescriptor(store: TripleStore, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<PreparedSwmRecoveryDescriptor> {
   const subjects = [...new Set(descriptor.metadataQuads.filter(row => row.subject !== descriptor.headSubject).map(row => row.subject))];
-  // sparql-scan-allow: R4 -- VALUES binds the exact operation subjects in one validated KA alias class; this never walks the CG bucket.
-  const acquired = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> {
-    VALUES ?s { ${subjects.map(subject => `<${assertSafeIri(subject)}>`).join(' ')} } ?s ?p ?o
+  // sparql-scan-allow: R4 -- exact provider subjects and the exact KA head bind both branches; this never walks the CG bucket.
+  const acquired = await store.query(`SELECT ?s ?p ?o ?headId WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> {
+    { VALUES ?s { ${subjects.map(subject => `<${assertSafeIri(subject)}>`).join(' ')} } ?s ?p ?o }
+    UNION { <${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?headId . ?s <${DKG}shareOperationId> ?headId ; ?p ?o }
   } }`, { priority: 'background', source: 'agent.swmRecovery.localPublisherEvidence' });
   if (acquired.type !== 'bindings') throw new Error('Publisher provenance acquisition is unavailable');
-  const allLocal: Quad[] = acquired.bindings.map(row => ({ subject: row['s']!, predicate: row['p']!, object: row['o']!, graph: descriptor.metaGraph }));
+  const localBySubject = new Map<string, Map<string, Quad>>();
+  const ownedSubjects = new Set<string>();
+  for (const row of acquired.bindings) {
+    const subject = row['s']!;
+    if (subject === descriptor.headSubject) continue;
+    const quad = { subject, predicate: row['p']!, object: row['o']!, graph: descriptor.metaGraph };
+    const rows = localBySubject.get(subject) ?? new Map<string, Quad>();
+    rows.set(canonicalQuadKey(quad), quad); localBySubject.set(subject, rows);
+    if (row['headId'] !== undefined) ownedSubjects.add(subject);
+  }
+  const allLocal = [...localBySubject.values()].flatMap(rows => [...rows.values()]);
   const authenticated = await readAuthenticatedWorkspaceOperations(store, allLocal);
-  const clocks: { shareOperationId: string; publishedAt: number }[] = [];
+  const locals = new Map<string, RecoveryOperationCandidate>();
+  for (const [subject, rows] of localBySubject) {
+    try {
+      const candidate = decodeCandidate([...rows.values()], descriptor);
+      locals.set(subject, { ...candidate, provenance: { ...candidate.provenance,
+        publisherChronologyAuthenticated: authenticated.has(subject) } });
+    } catch { /* Incomplete local evidence cannot certify chronology or equivalence. */ }
+  }
+  const operationCandidates: RecoveryOperationCandidate[] = [];
   const metadataQuads = descriptor.metadataQuads.filter(row => row.subject === descriptor.headSubject);
   for (const subject of subjects) {
     const wire = descriptor.metadataQuads.filter(row => row.subject === subject && row.predicate !== RECOVERED_OPERATION_CHRONOLOGY);
-    const local: Quad[] = acquired.bindings.filter(row => row['s'] === subject).map(row => ({ subject, predicate: row['p']!, object: row['o']!, graph: descriptor.metaGraph }));
-    const value = (rows: readonly Quad[], predicate: string) => stripMetadataLiteral(rows.find(row => row.predicate === `${DKG}${predicate}`)?.object ?? '');
-    const id = value(wire, 'shareOperationId');
-    const locallyAuthenticated = authenticated.has(subject)
-      && isDecodableWorkspaceOperationRows(local, { kaUal: descriptor.kaUal, assertionVersion: value(local, 'assertionVersion'), shareOperationId: id, requirePublishedAt: true });
-    const sameOperation = value(local, 'publisherPeerId') === descriptor.publisherPeerId
-      && operationIdentityKey(local) !== null && operationIdentityKey(local) === operationIdentityKey(wire);
+    const incoming = decodeCandidate(wire, descriptor);
+    const local = locals.get(subject);
+    const locallyAuthenticated = local?.provenance.publisherChronologyAuthenticated === true
+      && local.shareOperationId === incoming.shareOperationId;
+    const sameOperation = local?.semantics.publisherIdentity === descriptor.publisherPeerId
+      && local.identityKey !== null && local.identityKey === incoming.identityKey;
     if (locallyAuthenticated && !sameOperation) throw Object.assign(new Error('Recovered operation conflicts with authenticated local evidence'), { code: 'RECOVERED_OPERATION_EVIDENCE_CONFLICT' });
-    const trusted = locallyAuthenticated && sameOperation;
-    if (trusted) {
-      metadataQuads.push(...local);
-      clocks.push({ shareOperationId: id, publishedAt: Date.parse(value(local, 'publishedAt')) });
+    if (locallyAuthenticated && sameOperation) {
+      metadataQuads.push(...local.operationRows); operationCandidates.push(local);
     } else {
-      metadataQuads.push(...wire, { subject, predicate: RECOVERED_OPERATION_CHRONOLOGY, object: '"true"', graph: descriptor.metaGraph });
+      const rows = [...wire, { subject, predicate: RECOVERED_OPERATION_CHRONOLOGY, object: '"true"', graph: descriptor.metaGraph }];
+      metadataQuads.push(...rows); operationCandidates.push({ ...incoming, operationRows: rows,
+        provenance: { ...incoming.provenance, publisherChronologyAuthenticated: false } });
     }
   }
-  const timestamp = workspacePublisherOperationTimestamp(clocks);
-  const publisherOperationId = clocks.find(clock => clock.publishedAt === timestamp)?.shareOperationId;
+  // Preserve descriptor order on ties, matching the prior publisher-clock policy.
+  const authenticatedPublisherOperation = operationCandidates
+    .filter(isAuthenticatedPublisherCandidate)
+    .sort((a, b) => b.provenance.publishedAtMs - a.provenance.publishedAtMs)[0];
+  const storedOperationCandidates = [...ownedSubjects].every(subject => locals.has(subject))
+    ? [...ownedSubjects].map(subject => locals.get(subject)!) : null;
   return { ...descriptor, metadataQuads, preparation: 'local-evidence-acquired',
-    authenticatedPublisherOperation: publisherOperationId === undefined || timestamp === undefined
-      ? undefined : { id: publisherOperationId, timestampMs: timestamp } };
+    operationCandidates, storedOperationCandidates, authenticatedPublisherOperation };
 }

@@ -1,3 +1,4 @@
+import { persistWorkspaceOperationEvidence } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
 import { ethers } from 'ethers';
 import { encodeRootlessWorkspaceRequest } from '../../publisher/test/_helpers/rootless-workspace.js';
@@ -10,6 +11,7 @@ import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
+import { commitRecoveredSwmAsset } from '../src/sync/requester/swm-recovery-commit.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 
@@ -72,6 +74,62 @@ const staleCases = (['publicRun', 'privateRun'] as const).flatMap(lane =>
     [undefined, 'team'].flatMap(subGraph => [false, true].map(graphLocator => ({ lane, oldVersion, currentVersion, subGraph, scope: subGraph ?? 'root', graphLocator })))));
 
 describe('legacy catch-up respects publisher draft chronology', () => {
+  it('does not pair a cached subject with another authenticated operation identity', async () => {
+    const store = new OxigraphStore(); stores.push(store);
+    const incoming = share(2, 'provider-identity', 3000);
+    const cached = incoming.meta.filter(row => row.subject === incoming.operationSubject)
+      .map(row => row.predicate === `${DKG}shareOperationId` ? { ...row, object: '"other-identity"' } : row);
+    await store.insert(cached); await persistWorkspaceOperationEvidence(store, cached);
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: incoming.meta })[0]!;
+    const prepared = await harness(store, incoming).materializer.prepareRecoveredDescriptor(descriptor);
+    expect(prepared.authenticatedPublisherOperation).toBeUndefined();
+    expect(prepared.operationCandidates[0]).toMatchObject({ shareOperationId: incoming.operationId,
+      provenance: { publisherChronologyAuthenticated: false } });
+  });
+  it.each([false, true])('retains decoded authenticated publisher ordering and excludes ACK clocks with tie=%s', async tie => {
+    const store = new OxigraphStore(); stores.push(store);
+    const make = (id: string, clock: number) => swmFixtures(CG).share({ version: 2, operationId: id, marker: 'same-payload', ual: UAL, timestamp: new Date(clock) });
+    const older = make('publisher-B', tie ? 2000 : 1000);
+    const newer = make('publisher-C', 2000);
+    const ack = make('storage-ack-latest-local-clock', 9000);
+    for (const fixture of [older, newer, ack]) await persistLocalSwmOperation(store, CG, fixture);
+    const rows = [...older.meta, ...[newer, ack].flatMap(fixture => fixture.meta.filter(row => row.subject === fixture.operationSubject || row.predicate === `${DKG}shareOperationId`))];
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: rows })[0]!;
+    const prepared = await harness(store, older).materializer.prepareRecoveredDescriptor(descriptor);
+    expect(prepared.operationCandidates).toHaveLength(3);
+    expect(prepared.authenticatedPublisherOperation).toMatchObject({ shareOperationId: newer.operationId,
+      provenance: { publishedAtMs: 2000, publisherChronologyAuthenticated: true } });
+  });
+  it.each(['02', '0002'])('keeps canonical integer version %s while preparing decoded store/wire candidates', async lexical => {
+    const store = new OxigraphStore(); stores.push(store);
+    const incoming = share(2, 'canonical-version-2', 3000);
+    await persistLocalSwmOperation(store, CG, incoming);
+    const wire = incoming.meta.map(row => row.predicate === `${DKG}assertionVersion`
+      ? { ...row, object: `"${lexical}"^^<http://www.w3.org/2001/XMLSchema#integer>` } : row);
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: wire })[0]!;
+    const prepared = await harness(store, incoming).materializer.prepareRecoveredDescriptor(descriptor);
+    expect(prepared.authenticatedPublisherOperation?.shareOperationId).toBe(incoming.operationId);
+    expect(prepared.operationCandidates[0]?.semantics.recoveryIdentity.assertionVersion).toBe('2');
+  });
+  it.each(['publicRun', 'privateRun'] as const)('%s keeps cached unsigned candidate rows separate from authenticated chronology', async lane => {
+    const store = new OxigraphStore(); stores.push(store);
+    const current = share(4, 'trusted-current-4', 2000);
+    const incoming = share(2, 'cached-provider-2', 3000);
+    await persistLocalSwmOperation(store, CG, current); await store.insert([...current.meta, ...inGraph(current)]);
+    await store.insert(incoming.meta.filter(row => row.subject === incoming.operationSubject));
+    const h = harness(store, incoming, async () => 1n);
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: incoming.meta })[0]!;
+    const prepared = await h.materializer.prepareRecoveredDescriptor(descriptor);
+    expect(prepared.authenticatedPublisherOperation).toBeUndefined();
+    expect(prepared.operationCandidates).toHaveLength(1);
+    expect(prepared.operationCandidates[0]).toMatchObject({ shareOperationId: incoming.operationId,
+      semantics: { publisherIdentity: 'peer-source', recoveryIdentity: { kaUal: UAL, assertionVersion: '2' } },
+      provenance: { shareOperationId: incoming.operationId, publishedAtMs: 3000, publisherChronologyAuthenticated: false } });
+    expect(prepared.operationCandidates[0]!.identityKey).not.toBeNull();
+    expect(prepared.operationCandidates[0]!.operationRows.some(row => row.predicate === `${DKG}recoveredOperationChronology`)).toBe(true);
+    expect(prepared.storedOperationCandidates?.map(candidate => candidate.shareOperationId)).toEqual([current.operationId]);
+    await h[lane](); await expectHead(store, current); expect(h.companion).not.toHaveBeenCalled();
+  });
   it.each((['publicRun', 'privateRun'] as const).flatMap(lane => ['cold', 'pre-upgrade'].map(mode => ({ lane, mode }))))('$lane authenticates an exact signed replay after $mode recovery without certifying a provider clock', async ({ lane, mode }) => {
     const store = new OxigraphStore(); stores.push(store);
     const wallet = ethers.Wallet.createRandom();
@@ -400,5 +458,47 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     await store.insert([...inGraph(current), ...current.meta]);
     await harness(store, incoming, async () => 1n)[lane]();
     await expectHead(store, current);
+  });
+});
+
+
+describe('prepared recovery rechecks unpublished evidence after snapshot loading', () => {
+  it.each(([false, true] as const).flatMap(advance => [undefined, 'team'].map(subGraph => ({ advance, subGraph, scope: subGraph ?? 'root' }))))('withholds every $scope effect when confirmation advances=$advance during the gated load', async ({ advance, subGraph }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const old = share(4, 'stored-draft-4', 2000, subGraph);
+    const incoming = share(2, 'authenticated-draft-2', 3000, subGraph);
+    await persistLocalSwmOperation(store, CG, old); await persistLocalSwmOperation(store, CG, incoming);
+    await store.insert([...old.meta, ...inGraph(old)]);
+    let confirmed = 1n;
+    const readConfirmed = vi.fn(async () => confirmed);
+    const h = harness(store, incoming, readConfirmed);
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: incoming.meta, registeredSubGraphNames: ['team'] })[0]!;
+    const initial = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${old.meta[0]!.graph}> { ?s ?p ?o } }`);
+    const replaceGraph = vi.spyOn(store, 'replaceGraph');
+    const insert = vi.spyOn(store, 'insert');
+    const deleteRows = vi.spyOn(store, 'deleteByPattern');
+    const prepareCompanion = vi.fn(() => ({ graphUri: 'urn:test:boundary', subject: 'urn:test:boundary:head', quads: [{ subject: 'urn:test:boundary:head', predicate: 'urn:test:operation', object: '"loaded"', graph: 'urn:test:boundary' }] }));
+    let release!: () => void; let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const loadVerifiedQuads = vi.fn(async () => { entered(); await gate; return inGraph(incoming); });
+    const running = commitRecoveredSwmAsset({ contextGraphId: CG, asset: { kind: 'replace', descriptor, loadVerifiedQuads },
+      materializer: h.materializer, insertMetadata: rows => store.insert([...rows]), resolveRootAtomicCompanion: prepareCompanion });
+    await ready;
+    expect(readConfirmed).toHaveBeenCalledTimes(1); expect(loadVerifiedQuads).toHaveBeenCalledOnce();
+    if (advance) confirmed = 2n;
+    release();
+    const result = await running;
+    if (advance) {
+      expect(result).toEqual({ kind: 'superseded', insertedGraphQuads: 0, insertedMetaQuads: 0, withholdRows: descriptor.metadataQuads });
+      expect(replaceGraph).not.toHaveBeenCalled(); expect(insert).not.toHaveBeenCalled(); expect(deleteRows).not.toHaveBeenCalled();
+      expect(prepareCompanion).not.toHaveBeenCalled();
+      await expectHead(store, old, subGraph);
+      expect(await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${old.meta[0]!.graph}> { ?s ?p ?o } }`)).toEqual(initial);
+    } else {
+      expect(result.kind).toBe('committed'); await expectHead(store, incoming, subGraph);
+      expect(prepareCompanion).toHaveBeenCalledTimes(subGraph === undefined ? 1 : 0);
+    }
+    expect(readConfirmed).toHaveBeenCalledTimes(2);
   });
 });

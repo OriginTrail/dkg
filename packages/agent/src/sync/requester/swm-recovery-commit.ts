@@ -72,7 +72,7 @@ export async function commitRecoveredSwmAsset(input: {
     const selected = await materializer.selectRepairIdentity(contextGraphId, descriptor);
     // Equivalent healthy aliases are a normal resolved state. Keep the whole
     // class, including queued ACK identities; no head/operation repair is owed.
-    if (selected && stored.status === 'resolved' && (!descriptor.authenticatedPublisherOperation?.id || stored.head.operationAliases.some(alias => alias.shareOperationId === descriptor.authenticatedPublisherOperation?.id))) {
+    if (selected && stored.status === 'resolved' && (!descriptor.authenticatedPublisherOperation?.shareOperationId || stored.head.operationAliases.some(alias => alias.shareOperationId === descriptor.authenticatedPublisherOperation?.shareOperationId))) {
       const ownedSubjects = new Set(stored.head.operationAliases.map(alias => workspaceOperationSubject(contextGraphId, alias.shareOperationId)));
       const history = descriptor.metadataQuads.filter(row => row.subject !== descriptor.headSubject && !ownedSubjects.has(row.subject));
       if (history.length > 0) await input.insertMetadata(history);

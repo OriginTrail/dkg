@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore, GraphManager } from '@origintrail-official/dkg-storage';
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import type { KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
@@ -81,7 +82,7 @@ export async function headIsUnpromotedOwedAckCopy(input: {
   const now = Date.now();
   const expired = owed.bindings.every(row => {
     const value = row['signedAt'] ?? '';
-    const lexical = value.startsWith('"') ? value.slice(1, value.indexOf('"', 1)) : value;
+    const lexical = parseRdfLiteralTerm(value)?.value ?? value;
     const signedAt = Date.parse(lexical);
     return Number.isFinite(signedAt) && now - signedAt > pendingAckTxWindowMs;
   });

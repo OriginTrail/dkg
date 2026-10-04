@@ -27,6 +27,23 @@ async function fixture(contextGraphId = CG) {
   return { store, chain, writeLocks, op, head, privateGraph, has, collect };
 }
 describe('reference-safe abandoned draft maintenance', () => {
+  it.each(['plain', 'rdf-unicode'] as const)('uses the shared literal decoder for %s collector bindings', async form => {
+    const f = await fixture(); const id = 'obsolete-🦉'; await f.op(id); await f.op('new', '2'); await f.head();
+    const original = f.store.query.bind(f.store);
+    const query = vi.spyOn(f.store, 'query').mockImplementation(async (sparql, options) => {
+      const result = await original(sparql, options);
+      if (result.type !== 'bindings') return result;
+      return { ...result, bindings: result.bindings.map(row => ({ ...row,
+        ...(row['id'] ? { id: form === 'plain' ? row['id'].replace(/^"|"$/g, '') : row['id'].replace('🦉', '\\U0001F989') } : {}),
+        ...(row['cursor'] && form === 'rdf-unicode' ? { cursor: row['cursor'].replace('🦉', '\\U0001F989') } : {}),
+      })) };
+    });
+    try {
+      expect(await f.collect()).toEqual({ operations: 1, privateGraphs: 0 });
+      expect(await f.has(META, workspaceOperationSubject(CG, id))).toBe(false);
+      expect(await f.has(META, workspaceOperationSubject(CG, 'new'))).toBe(true);
+    } finally { query.mockRestore(); await f.store.close(); }
+  });
   it.each(['clock', 'signed-ledger'] as const)('revalidates a selected expired operation after an in-lock %s refresh', async mode => {
     const f = await fixture(); const id = 'storage-ack-refreshed'; await f.op(id, '1'); await f.head(id, '1');
     const key = swmKaWriteLockKey(CG, undefined, KA);
