@@ -1,5 +1,9 @@
 import { collectAbandonedDraftArtifacts } from './draft-artifact-gc.js';
 import { expireSharedMemoryScope } from './swm-operation-expiry.js';
+
+
+import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './lifecycle-sync-policy.js';
+import { sameStringArray, emptySharedMemorySyncResult, mergeSharedMemorySyncResults, emptySwmRecoveryResult } from './lifecycle-sync-result.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -366,10 +370,9 @@ import {
 import {
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
-import {
+import  {
   emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
   mergeFleetSharedMemoryDiagnostics,
-  mergeSamePeerSharedMemoryDiagnostics,
   recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
@@ -460,13 +463,11 @@ import {
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
-import {
+import  {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
   resolveNonNegativeIntegerSwitch,
-  resolveBooleanSwitch,
   resolveExactBatchStreamEnabled,
-  resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
@@ -709,7 +710,7 @@ import {
 } from './sync/on-demand-agents-phonebook.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
-import {
+import  {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,
@@ -747,7 +748,6 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
-  type DKGAgentConfig,
   type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
@@ -1946,51 +1946,9 @@ async function authenticateDurableGraphScopedAsset(params: {
   }
 }
 
-function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
-}
-
-function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.syncOnConnectEnabled, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
-}
-
-function durableSyncEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
-}
-
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
  *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
 const CHANGELOG_MAX_SCAN_LIMIT = 2000;
-
-function emptySharedMemorySyncResult(): SharedMemorySyncResult {
-  return createEmptySharedMemorySyncResult();
-}
-
-function mergeSharedMemorySyncResults(
-  a: SharedMemorySyncResult,
-  b: SharedMemorySyncResult,
-): SharedMemorySyncResult {
-  return {
-    ...mergeSamePeerSharedMemoryDiagnostics(a, b),
-  };
-}
-
-function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
-  return {
-    replacedRoots: 0,
-    replacedGraphs: 0,
-    insertedDataQuads: 0,
-    insertedMetaQuads: 0,
-    droppedDataTriples: 0,
-    readySnapshots: 0,
-    totalSnapshots: 0,
-    completed: true,
-  };
-}
 
 type NonBoundedCuratorPeerIdsResolution =
   | {
