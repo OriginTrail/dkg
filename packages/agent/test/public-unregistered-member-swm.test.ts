@@ -92,7 +92,10 @@ function joinedMember(options: {
   const isContextGraphPublicOnChain = vi.fn(async () => options.publicOnChain === true);
   const warn = vi.fn();
   const agent = {
-    contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+    contextGraphMetaProjection: {
+      readAuthorityFactsRevision: 0,
+      readContextGraphAuthorityFactsRevision: () => '0:0',
+    },
     resolveContextGraphAgentGateAuthority:
       WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
     resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,

@@ -948,6 +948,9 @@ function makeQueuedAgentHarness(options: {
   Object.setPrototypeOf(agentLike, DKGAgent.prototype);
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
+  agentLike.retireLegacySwmAfterConfirmedLocalPublish =
+    (DKGAgent.prototype as any).retireLegacySwmAfterConfirmedLocalPublish;
+  agentLike.retireLegacySwmAfterVerifiedVmTwin = recorder(async () => undefined);
   agentLike.observeRfc64ConfirmedVmV1 =
     (DKGAgent.prototype as any).observeRfc64ConfirmedVmV1;
   agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => ({
@@ -1148,6 +1151,12 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     expect(cleanup.calls[0]?.[0]).toBe(request.contextGraphId);
     expect(cleanup.calls[0]?.[4]).toBe(request.kaUal);
     expect(cleanup.calls[0]?.[5]).toBe(request.assertionVersion);
+    expect(agentLike.retireLegacySwmAfterVerifiedVmTwin.calls).toEqual([[{
+      contextGraphId: request.contextGraphId,
+      kaUal: request.kaUal,
+      assertionVersion: request.assertionVersion,
+      subGraphName: request.subGraphName,
+    }]]);
   });
 
   it('keeps the V2 snapshot exact while passing a detached catalog capability', async () => {

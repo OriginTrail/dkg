@@ -162,6 +162,41 @@ describe('subscription bootstrap finalized-generation refresh', () => {
     expect(registeredAuthority).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ['declares the graph private', async () => ({ accessPolicy: 'private' }), false],
+    ['cannot be read', async () => { throw new Error('store unavailable'); }, false],
+    ['declares the graph public', async () => ({ accessPolicy: 'public' }), true],
+    ['holds no access policy yet', async () => ({}), true],
+  ] as const)(
+    'with a local join intent, reconciles the signed seed only unless own metadata %s',
+    async (_label, ownMetaFacts, reconciles) => {
+      const { agent, reconcile, registeredAuthority } = createBootstrapAgent({
+        refresh: async () => new Map(),
+      });
+      // Signing a join request records the intent for public and private graphs alike.
+      Reflect.set(agent, 'localApprovedAgentByCG', new Map([[CG_ID, `0x${'ab'.repeat(20)}`]]));
+      const getOwnCgMetaFacts = vi.fn(ownMetaFacts);
+      Reflect.set(agent, 'getOwnCgMetaFacts', getOwnCgMetaFacts);
+
+      const decision = await resolveBootstrap(agent);
+
+      expect(getOwnCgMetaFacts).toHaveBeenCalledExactlyOnceWith(
+        CG_ID,
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(decision.outcome).toBe('unavailable');
+      if (reconciles) {
+        expect(reconcile).toHaveBeenCalledOnce();
+        expect(reconcile.mock.calls[0]?.[2]).toEqual({ kind: 'finalized-absence' });
+      } else {
+        // The failed private join proof stands; no later refresh replaces it.
+        expect(decision).toMatchObject({ reason: 'finalized-name-absence-unaccepted' });
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(registeredAuthority).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it.each(['auto', 'finalized-absence'] as const)(
     'refuses admission when the finalized refresh downgrades to a %s request',
     async (kind) => {
