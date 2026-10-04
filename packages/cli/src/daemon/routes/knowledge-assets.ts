@@ -233,6 +233,20 @@ interface PromoteRecoveryContext {
   subGraphName?: string;
 }
 
+function promoteRecoveryResponseBody(e: any, context?: PromoteRecoveryContext) {
+  return {
+    code: e.code,
+    error: sanitizeRpcMessage(e.message ?? String(e)),
+    retryAction: 'resume_existing_knowledge_asset',
+    retryPhase: 'swm-share',
+    ...(context ? {
+      contextGraphId: context.contextGraphId,
+      retryKnowledgeAssetName: context.name,
+      ...(context.subGraphName ? { subGraphName: context.subGraphName } : {}),
+    } : {}),
+  };
+}
+
 function respondPromoteRecoveryError(
   res: RequestContext["res"],
   e: any,
@@ -244,17 +258,7 @@ function respondPromoteRecoveryError(
     code: e.code,
     ...context,
   })}\n`);
-  jsonResponse(res, 409, {
-    code: e.code,
-    error: sanitizeRpcMessage(e.message ?? String(e)),
-    retryAction: 'resume_existing_knowledge_asset',
-    retryPhase: 'swm-share',
-    ...(context ? {
-      contextGraphId: context.contextGraphId,
-      retryKnowledgeAssetName: context.name,
-      ...(context.subGraphName ? { subGraphName: context.subGraphName } : {}),
-    } : {}),
-  });
+  jsonResponse(res, 409, promoteRecoveryResponseBody(e, context));
   return true;
 }
 
@@ -265,18 +269,7 @@ function respondPromoteRecoveryError(
 export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   if (respondPromoteRecoveryError(res, e, context)) return;
   if (e?.code === 'PROMOTE_POST_COMMIT_FAILURE') {
-    jsonResponse(res, 503, {
-      code: e.code,
-      error: sanitizeRpcMessage(e.message ?? String(e)),
-      retryable: true,
-      retryAction: 'resume_existing_knowledge_asset',
-      retryPhase: 'swm-share',
-      ...(context ? {
-        contextGraphId: context.contextGraphId,
-        retryKnowledgeAssetName: context.name,
-        ...(context.subGraphName ? { subGraphName: context.subGraphName } : {}),
-      } : {}),
-    });
+    jsonResponse(res, 503, { ...promoteRecoveryResponseBody(e, context), retryable: true });
     return;
   }
   if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
