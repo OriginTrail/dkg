@@ -49,10 +49,10 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { logPromoteAttemptFailure } from './promote-attempt-diagnostics.js';
-import { safePromoteErrorIdentity } from './async-promote-error-classification.js';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
 import {
   classifyPromoteError,
+  safePromoteErrorIdentity,
   type ClassifiedPromoteError,
 } from './async-promote-error-classification.js';
 
