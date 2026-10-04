@@ -1,4 +1,4 @@
-import { chatTurnSubjectPattern } from './chat-turn-subject.js';
+import { chatTurnSubjectPattern, scopedChatTurnUri } from './chat-turn-subject.js';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
@@ -617,7 +617,7 @@ export class ChatMemoryManager {
     const failureReason = typeof opts?.failureReason === 'string'
       ? opts.failureReason.trim()
       : (opts?.failureReason === null ? null : undefined);
-    const turnUri = turnId ? `${CHAT_NS}turn:${turnId}` : undefined;
+    const turnUri = turnId ? (await this.selectChatTurn(sessionId, turnId)).uri : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
 
@@ -702,9 +702,7 @@ export class ChatMemoryManager {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
       `SELECT ?turn WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(trimmedTurnId))}
       } LIMIT 1`,
       this.wmReadOpts(),
     );
@@ -739,18 +737,29 @@ export class ChatMemoryManager {
     return null;
   }
 
-  private async resolveChatTurnUri(sessionId: string, turnId: string): Promise<string> {
+  private async selectChatTurn(sessionId: string, turnId: string): Promise<{
+    uri: string;
+    turnId: string | null;
+    createdAt: string | null;
+  }> {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
-      `SELECT ?turn WHERE {
+      `SELECT ?turn ?tid ?ts WHERE {
         ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(turnId))}
+        ?turn <${DKG_ONT}turnId> ?tid .
+        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
       } ORDER BY ?turn LIMIT 1`,
       this.wmReadOpts(),
     );
-    const found = String(result.bindings?.[0]?.turn ?? '').replace(/[<>]/g, '');
-    // Preserve the current writer's legacy fallback. The scoped writer in
-    // #2932 can supply its fallback without changing the selection contract.
-    return found && isSafeIri(found) ? found : `${CHAT_NS}turn:${turnId}`;
+    const selected = result.bindings?.[0];
+    const found = String(selected?.turn ?? '').replace(/[<>]/g, '');
+    return {
+      // Missing/invalid selection uses a fresh scoped coordinate, so recovery
+      // cannot append to a legacy subject rejected by the ownership filter.
+      uri: found && isSafeIri(found) ? found : scopedChatTurnUri(sessionId, turnId),
+      turnId: stripRdfLiteral(selected?.tid ?? '').trim() || null,
+      createdAt: stripRdfLiteral(selected?.ts ?? '').trim() || null,
+    };
   }
 
   async recordChatTurnPersistenceTransition(
@@ -768,7 +777,7 @@ export class ChatMemoryManager {
     const trimmedTurnId = turnId.trim();
     if (!trimmedTurnId) return;
     const transitionId = crypto.randomUUID().slice(0, 8);
-    const turnUri = await this.resolveChatTurnUri(sessionId, trimmedTurnId);
+    const turnUri = (await this.selectChatTurn(sessionId, trimmedTurnId)).uri;
     const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
     const now = new Date().toISOString();
     const failureReason = typeof opts?.failureReason === 'string'
@@ -1258,9 +1267,8 @@ export class ChatMemoryManager {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const baseTurnId = opts?.baseTurnId?.trim() || null;
     const countResult = await this.tools.query(
-      `SELECT (COUNT(*) AS ?c) WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+      `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
       }`,
       this.wmReadOpts(),
     );
@@ -1283,24 +1291,13 @@ export class ChatMemoryManager {
       };
     }
 
-    const currentTurnResult = await this.tools.query(
-      `SELECT ?turn ?tid ?ts WHERE {
-        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(turnId))}
-        ?turn <${DKG_ONT}turnId> ?tid .
-        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
-      } ORDER BY ?turn LIMIT 1`,
-      this.wmReadOpts(),
-    );
-    const currentTurn = (currentTurnResult.bindings ?? [])[0];
-    const foundTurnUri = String(currentTurn?.turn ?? '').replace(/[<>]/g, '');
-    const turnUri = foundTurnUri && isSafeIri(foundTurnUri) ? foundTurnUri : `${CHAT_NS}turn:${turnId}`;
-    const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
-    const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
+    const currentTurn = await this.selectChatTurn(sessionId, turnId);
+    const turnUri = currentTurn.uri;
+    const currentTurnId = currentTurn.turnId;
+    const currentTurnTs = currentTurn.createdAt;
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
-        ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?latestTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?latestTurn <${DKG_ONT}turnId> ?latestTurnId .
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?latestTurn', '?latestTurnId')}
         OPTIONAL { ?latestTurn <${SCHEMA}dateCreated> ?latestTs }
       } ORDER BY DESC(?latestTs) DESC(?latestTurnId) LIMIT 1`,
       this.wmReadOpts(),
@@ -1330,9 +1327,8 @@ export class ChatMemoryManager {
       : null;
     const previousTurnQuery = currentTsLiteral
       ? `SELECT ?previousTurnId WHERE {
-          ?previousTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-          ?previousTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-          ?previousTurn <${DKG_ONT}turnId> ?previousTurnId .
+          ${chatTurnSubjectPattern(`<${sessionUri}>`, '?previousTurn', '?previousTurnId')}
+          FILTER(?previousTurnId != ${currentTurnIdLiteral})
           ?previousTurn <${SCHEMA}dateCreated> ?previousTs .
           FILTER(
             ?previousTs < ${currentTsLiteral}
@@ -1340,9 +1336,8 @@ export class ChatMemoryManager {
           )
         } ORDER BY DESC(?previousTs) DESC(?previousTurnId) LIMIT 1`
       : `SELECT ?previousTurnId WHERE {
-          ?previousTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-          ?previousTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-          ?previousTurn <${DKG_ONT}turnId> ?previousTurnId .
+          ${chatTurnSubjectPattern(`<${sessionUri}>`, '?previousTurn', '?previousTurnId')}
+          FILTER(?previousTurnId != ${currentTurnIdLiteral})
           FILTER(?previousTurnId < ${currentTurnIdLiteral})
         } ORDER BY DESC(?previousTurnId) LIMIT 1`;
     const previousTurnResult = await this.tools.query(
@@ -1352,10 +1347,8 @@ export class ChatMemoryManager {
     const previousTurnId = stripRdfLiteral((previousTurnResult.bindings ?? [])[0]?.previousTurnId ?? '').trim() || null;
     const turnIndexResult = currentTsLiteral
       ? await this.tools.query(
-          `SELECT (COUNT(*) AS ?c) WHERE {
-            ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-            ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-            ?turn <${DKG_ONT}turnId> ?tid .
+          `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+            ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
             ?turn <${SCHEMA}dateCreated> ?ts .
             FILTER(
               ?ts < ${currentTsLiteral}
@@ -1364,7 +1357,13 @@ export class ChatMemoryManager {
           }`,
           this.wmReadOpts(),
         )
-      : { bindings: [{ c: String(previousTurnId ? 2 : 1) }] };
+      : await this.tools.query(
+          `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+            ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
+            FILTER(?tid <= ${currentTurnIdLiteral})
+          }`,
+          this.wmReadOpts(),
+        );
     const turnIndex = Math.max(0, sumBindingValues(turnIndexResult.bindings, 'c'));
 
     if (previousTurnId && !baseTurnId) {

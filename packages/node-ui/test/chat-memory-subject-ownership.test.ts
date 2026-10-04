@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ChatMemoryManager } from '../src/chat-memory.js';
+import { persistDurableChatTurn } from '../../cli/src/daemon/chat-turn-persistence.js';
 import { OxigraphStore } from '../../storage/src/adapters/oxigraph.js';
 
 const GRAPH = 'urn:test:chat-ownership';
@@ -21,24 +22,24 @@ async function fixture() {
     },
   }, { apiKey: '' });
   const insert = (...triples: Array<[string, string, string]>) => store.insert(triples.map(([subject, predicate, object]) => ({ subject, predicate, object, graph: GRAPH })));
-  const seed = async (session: string, turn: string, reply: string, state = 'pending') => {
+  const seed = async (session: string, turn: string, reply: string, state = 'pending', turnId = '1', timestamp = '2026-10-01T00:00:00Z') => {
     const sessionUri = `${CHAT}session:${session}`;
-    const messageUri = `${CHAT}message:${session}`;
+    const messageUri = `${CHAT}message:${session}:${encodeURIComponent(turn)}`;
     await insert(
       [sessionUri, RDF_TYPE, `${SCHEMA}Conversation`],
       [sessionUri, `${DKG}sessionId`, JSON.stringify(session)],
       [turn, RDF_TYPE, `${DKG}ChatTurn`],
       [turn, `${SCHEMA}isPartOf`, sessionUri],
-      [turn, `${DKG}turnId`, '"1"'],
+      [turn, `${DKG}turnId`, JSON.stringify(turnId)],
       [turn, `${DKG}persistenceState`, JSON.stringify(state)],
-      [turn, `${SCHEMA}dateCreated`, '"2026-10-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'],
+      [turn, `${SCHEMA}dateCreated`, `"${timestamp}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`],
       [turn, `${DKG}hasUserMessage`, messageUri],
       [turn, `${DKG}hasAssistantMessage`, messageUri],
       [messageUri, `${SCHEMA}isPartOf`, sessionUri],
       [messageUri, `${SCHEMA}author`, `${CHAT}agent`],
       [messageUri, `${SCHEMA}text`, JSON.stringify(reply)],
-      [messageUri, `${DKG}turnId`, '"1"'],
-      [messageUri, `${SCHEMA}dateCreated`, '"2026-10-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'],
+      [messageUri, `${DKG}turnId`, JSON.stringify(turnId)],
+      [messageUri, `${SCHEMA}dateCreated`, `"${timestamp}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`],
     );
   };
   return { store, manager, insert, seed };
@@ -95,4 +96,61 @@ describe('chat turn subject ownership and precedence', () => {
     await manager.recordChatTurnPersistenceTransition('a', '1', 'stored', { assistantReply: 'complete' });
     expect((await manager.getSession('a'))?.messages[0]).toMatchObject({ text: 'complete', persistStatus: 'stored' });
   });
+
+  it('recovers a shared legacy collision once through the real durable persistence state machine', async () => {
+    const { manager, seed, store } = await fixture();
+    await seed('a', `${CHAT}turn:1`, 'A original');
+    await seed('b', `${CHAT}turn:1`, 'B original');
+    let callbacks = 0;
+    const args = {
+      memoryManager: manager,
+      payload: { sessionId: 'a', turnId: '1', userMessage: 'retry user', assistantReply: 'A completed', persistenceState: 'stored' as const },
+      afterStored: async () => { callbacks += 1; },
+    };
+    expect((await persistDurableChatTurn(args)).kind).toBe('created');
+    expect((await persistDurableChatTurn(args)).kind).toBe('duplicate');
+    expect(callbacks).toBe(1);
+    expect(await manager.getChatTurnPersistenceState('a', '1')).toBe('stored');
+    expect(await manager.getChatTurnPersistenceState('b', '1')).toBeNull();
+    const messages = await store.query(`SELECT ?message WHERE { GRAPH <${GRAPH}> {
+      ?message <${SCHEMA}isPartOf> <${CHAT}session:a> ; <${SCHEMA}text> ?text .
+    } }`);
+    expect(messages.type === 'bindings' && messages.bindings).toHaveLength(3);
+    expect((await manager.getSession('b'))?.messages).toEqual([expect.objectContaining({ text: 'B original', persistStatus: undefined })]);
+  });
+
+  it('uses the same selected turn coordinates for delta predecessor, latest, count and index', async () => {
+    const { manager, seed } = await fixture();
+    await seed('a', `${CHAT}turn:1`, 'one', 'stored', '1', '2026-10-01T09:00:00Z');
+    await seed('a', `${CHAT}turn:2`, 'legacy two', 'stored', '2', '2026-10-01T10:00:00Z');
+    await seed('a', `${CHAT}session-turn:two`, 'scoped two', 'stored', '2', '2026-10-01T11:00:00Z');
+    await seed('a', `${CHAT}session-turn:two-z`, 'duplicate scoped two', 'stored', '2', '2026-10-01T23:00:00Z');
+    await seed('a', `${CHAT}turn:3`, 'legacy three', 'stored', '3', '2026-10-01T20:00:00Z');
+    await seed('a', `${CHAT}session-turn:three`, 'scoped three', 'stored', '3', '2026-10-01T12:00:00Z');
+    const delta = await manager.getSessionGraphDelta('a', '2', { baseTurnId: '1' });
+    expect(delta.mode).toBe('delta');
+    expect(delta.watermark).toMatchObject({ previousTurnId: '1', latestTurnId: '3', turnCount: 3, turnIndex: 2 });
+    expect(delta.triples.some((quad) => quad.subject === `${CHAT}session-turn:two`)).toBe(true);
+    expect(delta.triples.some((quad) => quad.subject === `${CHAT}turn:2`)).toBe(false);
+    const last = await manager.getSessionGraphDelta('a', '3', { baseTurnId: '2' });
+    expect(last.mode).toBe('delta');
+    expect(last.watermark).toMatchObject({ previousTurnId: '2', turnCount: 3, turnIndex: 3 });
+  });
+
+  it('keeps an owned legacy turn when a competing scoped candidate is shared', async () => {
+    const { manager, seed, store } = await fixture();
+    const legacy = `${CHAT}turn:1`;
+    const scoped = `${CHAT}session-turn:unattributable`;
+    await seed('a', legacy, 'owned legacy');
+    await seed('a', scoped, 'ambiguous a', 'stored');
+    await seed('b', scoped, 'ambiguous b', 'stored');
+    expect(await manager.getChatTurnPersistenceState('a', '1')).toBe('pending');
+    await manager.recordChatTurnPersistenceTransition('a', '1', 'stored', { assistantReply: 'legacy complete' });
+    const transition = await store.query(`SELECT ?turn WHERE { GRAPH <${GRAPH}> { ?transition <${DKG}updatesTurn> ?turn } }`);
+    expect(transition.type === 'bindings' && transition.bindings[0]?.turn).toBe(legacy);
+    expect(await manager.getChatTurnPersistenceState('a', '1')).toBe('stored');
+    expect((await manager.getSession('a'))?.messages.some((message) => message.text === 'legacy complete')).toBe(true);
+    expect(await manager.getChatTurnPersistenceState('b', '1')).toBeNull();
+  });
+
 });

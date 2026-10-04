@@ -28,5 +28,22 @@ export function chatTurnSubjectPattern(session: string, turn: string, turnId: st
         FILTER(?otherPreferredSession != ${session})
       }
     }
+    FILTER NOT EXISTS {
+      ?selectedTurn <${type}> <${ontology}ChatTurn> .
+      ?selectedTurn <${partOf}> ${session} .
+      ?selectedTurn <${ontology}turnId> ${turnId} .
+      FILTER(STR(?selectedTurn) < STR(${turn}))
+      FILTER(STRSTARTS(STR(?selectedTurn), "urn:dkg:chat:session-turn:")
+        = STRSTARTS(STR(${turn}), "urn:dkg:chat:session-turn:"))
+      FILTER NOT EXISTS {
+        ?selectedTurn <${partOf}> ?otherSelectedSession .
+        FILTER(?otherSelectedSession != ${session})
+      }
+    }
   `;
+}
+
+/** A deterministic, unambiguous URI for a new session/turn coordinate. */
+export function scopedChatTurnUri(sessionId: string, turnId: string): string {
+  return `urn:dkg:chat:session-turn:${encodeURIComponent(JSON.stringify([sessionId, turnId]))}`;
 }
