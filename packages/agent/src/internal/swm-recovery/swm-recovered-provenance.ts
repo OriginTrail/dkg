@@ -56,7 +56,7 @@ export async function prepareRecoveredDescriptor(store: TripleStore, descriptor:
     if (row['headId'] !== undefined) ownedSubjects.add(subject);
   }
   const allLocal = [...localBySubject.values()].flatMap(rows => [...rows.values()]);
-  const authenticated = await readAuthenticatedWorkspaceOperations(store, allLocal);
+  const authenticated = await readAuthenticatedWorkspaceOperations(store, descriptor.metaGraph, allLocal);
   let storedHead: KnowledgeAssetWorkspaceHeadResolution;
   const contextGraphId = stripMetadataLiteral(descriptor.metadataQuads.find(row => row.subject === descriptor.operationSubject && row.predicate === `${DKG}contextGraphId`)?.object ?? '');
   try {

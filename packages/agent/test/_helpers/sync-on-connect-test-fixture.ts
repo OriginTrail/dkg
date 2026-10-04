@@ -1,3 +1,4 @@
+import type { KeyedPersistScheduler } from '../../src/keyed-persist-scheduler.js';
 import { PeerSyncSession } from '../../src/sync/peer-sync-session.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { PeerSyncSessionTestDriver } from './peer-sync-session-driver.js';
@@ -20,6 +21,9 @@ type Rfc64CoordinatorTestPort = Pick<
 
 interface SyncOnConnectPrivateSeam {
   started: boolean;
+  contextGraphSubscriptionPersistence: Pick<KeyedPersistScheduler, 'closeAndDrain'>;
+  contextGraphMembershipPersistence: Pick<KeyedPersistScheduler, 'closeAndDrain'>;
+  closeRfc64PersistenceV1: () => Promise<void>;
   peerSyncSession: PeerSyncSession;
   config: DKGAgentConfig;
   node: {
@@ -200,4 +204,16 @@ export function emptyDetailedSync(overrides: Record<string, number | boolean> = 
     backoffWorthyFailures: 0,
     ...overrides,
   };
+}
+
+/** Release owned writes/storage for fixtures that never started the libp2p node. */
+export async function closeUnstartedSyncOnConnectAgentForTest(agent: SyncOnConnectTestAgent): Promise<void> {
+  agent.started = false;
+  agent.peerSyncSession.close();
+  await Promise.all([
+    agent.contextGraphSubscriptionPersistence.closeAndDrain(),
+    agent.contextGraphMembershipPersistence.closeAndDrain(),
+  ]);
+  await agent.closeRfc64PersistenceV1();
+  await agent.store.close();
 }

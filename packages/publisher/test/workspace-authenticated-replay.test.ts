@@ -24,7 +24,7 @@ async function recoveredHead() {
   await storeKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CG,
     kaUal: UAL, assertionVersion: 1, shareOperationId: operationId });
   // Model a pre-upgrade/cold provider operation, with no reserved local proof.
-  await store.deleteByPattern({ graph: 'urn:dkg:publisher:authenticated-operation-evidence', subject });
+  await store.deleteByPattern({ graph: 'urn:dkg:publisher:authenticated-operation-evidence', subject: `urn:dkg:publisher:operation-evidence:${encodeURIComponent(graph)}:${encodeURIComponent(subject)}` });
   await store.insert([{ subject, predicate: LEGACY_MARKER, object: '"true"', graph }]);
   const head = (await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CG, kaUal: UAL }))!;
   expect(head.operationAliases[0]?.publisherChronologyAuthenticated).toBe(false);
@@ -82,7 +82,7 @@ describe('authenticated exact replay evidence acquisition', () => {
     } });
     await authenticateWorkspaceOperationReplay({ ...input, store, timestamp: new Date(2000) });
     const final = await store.query(`CONSTRUCT { <${input.subject}> ?p ?o } WHERE { GRAPH <${input.graph}> { <${input.subject}> ?p ?o } }`);
-    expect(await readAuthenticatedWorkspaceOperations(store, final.type === 'quads' ? final.quads : [])).toEqual(new Set([input.subject]));
+    expect(await readAuthenticatedWorkspaceOperations(store, input.graph, final.type === 'quads' ? final.quads : [])).toEqual(new Set([input.subject]));
     expect(await store.query(`ASK { GRAPH <${input.graph}> { <${sibling}> <urn:test:identity> "sibling" } }`)).toEqual({ type: 'boolean', value: true });
     expect(refusal).toHaveBeenCalledTimes(mode === 'refused' ? 2 : 0);
     const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: input.graphManager, contextGraphId: CG, kaUal: UAL });
@@ -102,7 +102,7 @@ describe('authenticated exact replay evidence acquisition', () => {
     await expect(authenticateWorkspaceOperationReplay({ ...input, timestamp: new Date(2000) })).rejects.toThrow();
     expect(await input.store.query(query)).toEqual(before);
     expect(update).toHaveBeenCalledOnce(); expect(insert).not.toHaveBeenCalled();
-    expect(await readAuthenticatedWorkspaceOperations(input.store, before.type === 'quads' ? before.quads : [])).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(input.store, input.graph, before.type === 'quads' ? before.quads : [])).toEqual(new Set());
   });
 
   it('keeps a fully replaced subject untrusted if the subsequent authentication evidence fails, then retries successfully', async () => {

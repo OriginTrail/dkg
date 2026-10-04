@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { GRAPH_KA_CONTENT_SCOPE_VERSION, assertSafeIri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION, assertSafeIri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, contextGraphSharedMemoryUri, sparqlString } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { STORAGE_ACK_LEDGER_GRAPH, draftOperationReferenceKey, markDraftOperationRetired, readDraftArtifactReferences, swmKaWriteLockKey, swmEntityWriteLockKey, withDraftArtifactCollection, withKeyedLocks, workspaceOperationSubject, withWorkspaceOperationWriteLock } from '@origintrail-official/dkg-publisher';
 import { stripMetadataLiteral as literal } from '../../sync/metadata-literal.js';
@@ -19,7 +19,7 @@ export interface DraftOperationRetirementPolicy {
 async function readRetirementOwnership(
   store: TripleStore, contextGraphId: string, subGraphName: string | undefined, operationSubject: string,
 ): Promise<{ id: string; keys: string[] } | null> {
-  const meta = `did:dkg:context-graph:${contextGraphId}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory_meta`;
+  const meta = contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName);
   const rows = await store.query(`SELECT ?id ?ka ?scope WHERE { GRAPH <${assertSafeIri(meta)}> {
     <${assertSafeIri(operationSubject)}> <${DKG}shareOperationId> ?id
     OPTIONAL { <${operationSubject}> <${DKG}kaUal> ?ka }
@@ -52,7 +52,7 @@ async function collectUnqueuedDraftOperation(
   ownership: DraftOperationRetirementPolicy,
 ): Promise<void> {
   if (references.rawNamespaces.has(JSON.stringify([contextGraphId, subGraphName ?? '']))) return;
-  const meta = `did:dkg:context-graph:${contextGraphId}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory_meta`;
+  const meta = contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName);
   const selected = await readRetirementOwnership(store, contextGraphId, subGraphName, operationSubject);
   if (!selected) return;
   const { id, keys } = selected;
@@ -144,8 +144,8 @@ export async function expireSharedMemoryScope(input: SharedMemoryScopeExpiryInpu
   deletedTriples: number; expiredOperations: number; retiredEntities: string[];
 }> {
   const { store, contextGraphId, subGraphName, now } = input;
-  const meta = `did:dkg:context-graph:${contextGraphId}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory_meta`;
-  const bucket = meta.slice(0, -'_meta'.length);
+  const meta = contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName);
+  const bucket = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
   const cutoff = new Date(now - input.ttlMs).toISOString();
   const retentionFilters = (suffix: string) => storageAckNotRetainedFilters({
     rootMetaGraph: contextGraphMetaUri(contextGraphId), metaGraph: meta,

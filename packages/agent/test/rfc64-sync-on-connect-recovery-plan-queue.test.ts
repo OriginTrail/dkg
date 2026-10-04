@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,6 +17,7 @@ import {
   createSyncOnConnectPeerJobRunnerForTest,
   createRfc64CoordinatorStub,
   createUnstartedAgent,
+  closeUnstartedSyncOnConnectAgentForTest,
   emptyDetailedSync,
   flushTimers,
   installSyncOnConnectPeerJobStub,
@@ -32,14 +33,58 @@ import {
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const tempDirs: string[] = [];
+const ownedAgents: Awaited<ReturnType<typeof createUnstartedAgent>>[] = [];
 
-afterEach(async () => {
+async function closeOwnedFixtures(): Promise<void> {
+  // These fixtures explicitly set started=true and can enqueue durable policy
+  // writes. Physically drain their actual owner before closing its stores and removing its directory.
+  await Promise.all(ownedAgents.splice(0).map(closeUnstartedSyncOnConnectAgentForTest));
   await Promise.all(tempDirs.splice(0).map(
     (path) => rm(path, { recursive: true, force: true }),
   ));
-});
+}
+afterEach(closeOwnedFixtures);
 
 describe('RFC-64 recovery-plan queue authorization', () => {
+  it('drains a held durable subscription write before physically removing the owner directory', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-owner-composition-drain-'));
+    tempDirs.push(dataDir);
+    let releaseWrite!: () => void, enteredWrite!: () => void;
+    const held = new Promise<void>(resolve => { releaseWrite = resolve; });
+    const entered = new Promise<void>(resolve => { enteredWrite = resolve; });
+    let wrote = false;
+    const agent = await createUnstartedAgent('Rfc64OwnerPhysicalDrain', { dataDir,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [], delete: async () => undefined,
+        save: async record => {
+          enteredWrite(); await held;
+          await writeFile(join(dataDir, 'held-subscription.json'), JSON.stringify(record));
+          wrote = true;
+        },
+      },
+    });
+    agent.started = true; ownedAgents.push(agent);
+    agent.subscribedContextGraphs.set('held-cg', { subscribed: true, synced: false });
+    const write = agent.persistContextGraphSubscription('held-cg', { revision: 1 });
+    await entered;
+    const storeClose = vi.spyOn(agent.store, 'close');
+    let closed = false;
+    const teardown = closeOwnedFixtures().then(() => { closed = true; });
+    try {
+      await flushTimers();
+      expect(closed).toBe(false);
+      expect(storeClose).not.toHaveBeenCalled();
+      await expect(access(dataDir)).resolves.toBeUndefined();
+      releaseWrite();
+      await write; await teardown;
+      expect(wrote).toBe(true);
+      await expect(access(dataDir)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      releaseWrite(); await Promise.allSettled([write, teardown]);
+      await closeUnstartedSyncOnConnectAgentForTest(agent);
+    }
+  });
+
   it('uses one selection projection for current, previous, and next authority', () => {
     let selection = {
       selectedContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
@@ -379,6 +424,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     });
     allowAllNetworkAdmission(agent);
     agent.started = true;
+    if (agent.config.dataDir) ownedAgents.push(agent);
     agent.isRfc64CatalogBootstrapSwmRecoveryReadyV1 = () => true;
 
     expect(agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1(
@@ -422,6 +468,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     });
     allowAllNetworkAdmission(agent);
     agent.started = true;
+    if (agent.config.dataDir) ownedAgents.push(agent);
     const authorized = {
       kind: 'rfc64-authorized-swm-recovery-v1' as const,
       providerPeerId: PEER_A,
@@ -638,6 +685,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const agent = await createUnstartedAgent('Rfc64AuthorizedPlanDrainRevalidation');
     allowAllNetworkAdmission(agent);
     agent.started = true;
+    if (agent.config.dataDir) ownedAgents.push(agent);
     agent.getSyncReconcilerProbe = async () => ({
       connected: true,
       hasSyncProtocol: true,
@@ -685,6 +733,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const agent = await createUnstartedAgent('Rfc64MixedPlanSingleQueueOwner');
     allowAllNetworkAdmission(agent);
     agent.started = true;
+    if (agent.config.dataDir) ownedAgents.push(agent);
     agent.getSyncReconcilerProbe = async () => ({
       connected: true,
       hasSyncProtocol: true,

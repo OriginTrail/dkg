@@ -1890,21 +1890,26 @@ describe('listContextGraphs merge', () => {
 
       const originalQuery = store.query.bind(store);
       let sawAbort = false;
-      let scanSettled: Promise<void> | undefined;
+      let releaseScan!: () => void, completeScan!: () => void;
+      const heldScan = new Promise<void>(resolve => { releaseScan = resolve; });
+      const scanSettled = new Promise<void>(resolve => { completeScan = resolve; });
       (store as any).query = recorder(async (query: string, options?: any) => {
-        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
-          scanSettled = new Promise(resolve => setTimeout(resolve, 20));
-          await scanSettled;
-          sawAbort = options?.signal?.aborted === true;
+        if (options?.signal && query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+          await heldScan;
+          sawAbort = options.signal.aborted === true;
+          completeScan();
           return { type: 'bindings', bindings: [] } as any;
         }
         return originalQuery(query, options);
       });
 
-      await expect(agent.listContextGraphs({ callerAgentAddress: null }))
-        .rejects.toThrow('ontology/agents definition scan');
-      await scanSettled;
-      expect(sawAbort).toBe(true);
+      try {
+        await expect(agent.listContextGraphs({ callerAgentAddress: null }))
+          .rejects.toThrow('ontology/agents definition scan');
+        releaseScan();
+        await scanSettled;
+        expect(sawAbort).toBe(true);
+      } finally { releaseScan(); }
     } finally {
       Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
         value: originalRowBudget,
@@ -1935,18 +1940,28 @@ describe('listContextGraphs merge', () => {
       await agent.start();
 
       let sawAbort = false;
-      let scanSettled: Promise<void> | undefined;
+      let releaseScan!: () => void, completeScan!: () => void;
+      const heldScan = new Promise<void>(resolve => { releaseScan = resolve; });
+      const scanSettled = new Promise<void>(resolve => { completeScan = resolve; });
+      const originalListGraphs = store.listGraphs.bind(store);
       (store as any).listGraphs = recorder(async (options?: any) => {
-        scanSettled = new Promise(resolve => setTimeout(resolve, 20));
-        await scanSettled;
-        sawAbort = options?.signal?.aborted === true;
+        // Background inventory has its own lifetime; it cannot overwrite the
+        // completion/abort evidence of this budgeted foreground scan.
+        if (!options?.signal) return originalListGraphs(options);
+        await heldScan;
+        sawAbort = options.signal.aborted === true;
+        completeScan();
         return [];
       });
 
-      await expect(agent.listContextGraphs({ callerAgentAddress: null }))
-        .rejects.toThrow('storage context graph scan');
-      await scanSettled;
-      expect(sawAbort).toBe(true);
+      try {
+        await expect(agent.listContextGraphs({ callerAgentAddress: null }))
+          .rejects.toThrow('storage context graph scan');
+        // Complete real scan work only after its unchanged 1ms budget rejects.
+        releaseScan();
+        await scanSettled;
+        expect(sawAbort).toBe(true);
+      } finally { releaseScan(); }
     } finally {
       Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
         value: originalRowBudget,

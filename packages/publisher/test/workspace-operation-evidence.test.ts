@@ -1,9 +1,11 @@
-import { workspacePublisherOperationTimestamp } from '../src/workspace-draft-replacement.js';
+import { checkWorkspaceDraftReplacementOrder, workspacePublisherOperationTimestamp } from '../src/workspace-draft-replacement.js';
 import { normalizeWorkspaceOperationProvenance } from '../src/workspace-operation-equivalence.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphStore, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
+import { resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
+import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { persistWorkspaceOperationEvidence, readAuthenticatedWorkspaceOperations, workspaceOperationAlias } from '../src/workspace-operation-alias.js';
 
 const SUBJECT = 'urn:test:operation', GRAPH = 'urn:test:operation-meta', DKG = 'http://dkg.io/ontology/';
@@ -26,6 +28,45 @@ async function fixture(input = rows()) {
 }
 
 describe('canonical operation evidence round trips', () => {
+  it.each([2n, 3n])('keeps colliding operation URIs independently authenticated for version %s replacement', async incomingVersion => {
+    const store = new OxigraphStore(); stores.push(store);
+    const graphManager = new GraphManager(store);
+    const a = { contextGraphId: 'a:b', shareOperationId: 'c', kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7' };
+    const b = { contextGraphId: 'a', shareOperationId: 'b:c', kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/8' };
+    expect(workspaceOperationSubject(a.contextGraphId, a.shareOperationId)).toBe(workspaceOperationSubject(b.contextGraphId, b.shareOperationId));
+    const write = async (identity: typeof a, assertionVersion: bigint, value: string, at: string) => {
+      await storeKnowledgeAssetOperationPublicQuads({ store, graphManager, ...identity, assertionVersion,
+        publisherPeerId: 'publisher', timestamp: new Date(at),
+        quads: [{ subject: 'urn:test:content', predicate: 'urn:test:value', object: JSON.stringify(value), graph: '' }] });
+      await storeKnowledgeAssetWorkspaceHead({ store, graphManager, ...identity, assertionVersion });
+    };
+    await write(a, 3n, 'draft-a', '2026-10-04T10:00:00Z');
+    await write(b, 3n, 'draft-b', '2026-10-04T11:00:00Z');
+    const headA = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, ...a });
+    const headB = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, ...b });
+    expect(headA!.operationAliases[0].publisherChronologyAuthenticated).toBe(true);
+    expect(headB!.operationAliases[0].publisherChronologyAuthenticated).toBe(true);
+    expect(await checkWorkspaceDraftReplacementOrder({ head: headA!, incomingVersion, publisherPeerId: 'publisher',
+      timestamp: new Date('2026-10-04T12:00:00Z'), readConfirmedVersion: async () => 1n })).toBeUndefined();
+    await write(a, incomingVersion, 'replacement-a', '2026-10-04T12:00:00Z');
+    expect((await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, ...a }))!.operationAliases[0].publisherChronologyAuthenticated).toBe(true);
+    expect((await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, ...b }))!.operationAliases[0].publisherChronologyAuthenticated).toBe(true);
+  });
+
+  it("does not reuse another metadata graph's authentication for identical operation rows", async () => {
+    const f = await fixture();
+    expect(await readAuthenticatedWorkspaceOperations(f.store, `${GRAPH}:other`, f.loaded)).toEqual(new Set());
+  });
+  it.each(['empty', 'mixed-subject', 'mixed-graph'] as const)('rejects %s immutable evidence rows before any write', async shape => {
+    const store = new OxigraphStore(); stores.push(store);
+    const input = shape === 'empty' ? [] : rows().map((row, index) => index === 0
+      ? shape === 'mixed-graph' ? { ...row, graph: `${GRAPH}:other` } : { ...row, subject: `${SUBJECT}:other` }
+      : row);
+    const insert = vi.spyOn(store, 'insert'), replace = vi.spyOn(store, 'replaceSubject');
+    await expect(persistWorkspaceOperationEvidence(store, input)).rejects.toThrow('Invalid immutable operation evidence');
+    expect(insert).not.toHaveBeenCalled(); expect(replace).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])('keeps decoded and projected chronology authentication explicitly %s', authenticated => {
     const alias = workspaceOperationAlias({ provenance: { shareOperationId: 'publisher-alias', publishedAtMs: 2000, publisherChronologyAuthenticated: authenticated }, snapshotLocator: { kind: 'store', ref: 'sha256:content' } });
     expect(alias.publisherChronologyAuthenticated).toBe(authenticated);
@@ -39,9 +80,9 @@ describe('canonical operation evidence round trips', () => {
   });
   it('preserves the existing digest of canonical rows across timestamp formatting, ordering and duplicates', async () => {
     const f = await fixture([...rows().reverse(), ...rows()]);
-    const result = await f.store.query(`SELECT ?digest WHERE { GRAPH <${EVIDENCE_GRAPH}> { <${SUBJECT}> ?p ?digest } }`);
+    const result = await f.store.query(`SELECT ?digest WHERE { GRAPH <${EVIDENCE_GRAPH}> { ?e ?p ?digest } }`);
     expect(result.type === 'bindings' ? result.bindings : []).toEqual([{ digest: JSON.stringify(CANONICAL_DIGEST) }]);
-    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, f.loaded)).toEqual(new Set([SUBJECT]));
   });
 
   it('refreshes evidence in one native subject transaction without exposing an empty subject or touching siblings', async () => {
@@ -53,9 +94,9 @@ describe('canonical operation evidence round trips', () => {
     const remove = vi.spyOn(f.store, 'deleteByPatternWithoutCount');
     const insert = vi.spyOn(f.store, 'insert');
     await persistWorkspaceOperationEvidence(f.store, changed);
-    expect(await readAuthenticatedWorkspaceOperations(f.store, changed)).toEqual(new Set([SUBJECT]));
-    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set());
-    expect(await readAuthenticatedWorkspaceOperations(f.store, sibling)).toEqual(new Set([`${SUBJECT}:sibling`]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, changed)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, f.loaded)).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, sibling)).toEqual(new Set([`${SUBJECT}:sibling`]));
     expect(update).toHaveBeenCalledOnce();
     expect(update.mock.calls[0][0]).toContain('DELETE WHERE');
     expect(update.mock.calls[0][0]).toContain('INSERT DATA');
@@ -73,8 +114,8 @@ describe('canonical operation evidence round trips', () => {
     const update = vi.spyOn(embedded, 'update').mockImplementationOnce(sparql => nativeUpdate(`${sparql}; LOAD <urn:test:unavailable-operation-evidence>`));
     const insert = vi.spyOn(f.store, 'insert').mockRejectedValueOnce(new Error('Evidence insertion unavailable'));
     await expect(persistWorkspaceOperationEvidence(f.store, changed)).rejects.toThrow();
-    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set([SUBJECT]));
-    expect(await readAuthenticatedWorkspaceOperations(f.store, changed)).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, f.loaded)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, changed)).toEqual(new Set());
     expect(update).toHaveBeenCalledOnce();
     expect(insert).not.toHaveBeenCalled();
   });
@@ -91,11 +132,11 @@ describe('canonical operation evidence round trips', () => {
     } });
     const remove = vi.spyOn(f.store, 'deleteByPatternWithoutCount');
     await persistWorkspaceOperationEvidence(store, changed);
-    expect(await readAuthenticatedWorkspaceOperations(f.store, changed)).toEqual(new Set([SUBJECT]));
-    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set());
-    expect(await readAuthenticatedWorkspaceOperations(f.store, sibling)).toEqual(new Set([`${SUBJECT}:sibling`]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, changed)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, f.loaded)).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, sibling)).toEqual(new Set([`${SUBJECT}:sibling`]));
     expect(remove).toHaveBeenCalledOnce();
-    expect(remove.mock.calls[0][0]).toEqual({ graph: EVIDENCE_GRAPH, subject: SUBJECT });
+    expect(remove.mock.calls[0][0]).toEqual({ graph: EVIDENCE_GRAPH, subject: `urn:dkg:publisher:operation-evidence:${encodeURIComponent(GRAPH)}:${encodeURIComponent(SUBJECT)}` });
     expect(refuse).toHaveBeenCalledTimes(mode === 'refused' ? 1 : 0);
   });
 
@@ -108,9 +149,9 @@ describe('canonical operation evidence round trips', () => {
     ['escaped timestamp', `${DKG}publishedAt`, String.raw`"2026-10-04T10:00:\u0030\u0030.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>`],
   ])('retains authenticated chronology after %s passes through the actual store', async (_label, predicate, object) => {
     const f = await fixture(rows().map(row => row.predicate === predicate ? { ...row, object } : row));
-    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, f.loaded)).toEqual(new Set([SUBJECT]));
     const altered = [...f.loaded, { subject: SUBJECT, predicate: `${DKG}recoveredOperationChronology`, object: '"true"', graph: GRAPH }];
-    expect(await readAuthenticatedWorkspaceOperations(f.store, altered)).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, altered)).toEqual(new Set());
   });
 
   it('uses the canonical parser for an adapter-escaped persisted digest literal', async () => {
@@ -121,7 +162,7 @@ describe('canonical operation evidence round trips', () => {
       const escaped = `"\\u${CANONICAL_DIGEST.charCodeAt(0).toString(16).padStart(4, '0')}${CANONICAL_DIGEST.slice(1)}"`;
       return { ...result, bindings: result.bindings.map(row => ({ ...row, digest: escaped })) };
     });
-    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set([SUBJECT]));
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, f.loaded)).toEqual(new Set([SUBJECT]));
   });
 
   it.each(['malformed', 'language', 'ambiguous'])('withholds authentication for %s persisted evidence', async mode => {
@@ -133,7 +174,7 @@ describe('canonical operation evidence round trips', () => {
         : result.bindings.map(row => ({ ...row, digest: mode === 'language' ? `${row.digest}@en` : CANONICAL_DIGEST }));
       return { ...result, bindings };
     });
-    expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, f.loaded)).toEqual(new Set());
   });
 
   it.each(['subject', 'predicate', 'peer case', 'clock'])('withholds authentication when %s changes', async field => {
@@ -142,6 +183,6 @@ describe('canonical operation evidence round trips', () => {
       : field === 'predicate' && row.predicate === `${DKG}assertionVersion` ? { ...row, predicate: 'urn:test:other-predicate' }
       : field === 'peer case' && row.predicate === `${DKG}publisherPeerId` ? { ...row, object: '"Peer"' }
       : field === 'clock' && row.predicate === `${DKG}publishedAt` ? { ...row, object: '"2026-10-04T10:00:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' } : row);
-    expect(await readAuthenticatedWorkspaceOperations(f.store, changed)).toEqual(new Set());
+    expect(await readAuthenticatedWorkspaceOperations(f.store, GRAPH, changed)).toEqual(new Set());
   });
 });

@@ -22,6 +22,10 @@ export function workspaceOperationAlias(candidate: {
 const LOCAL_EVIDENCE_GRAPH = 'urn:dkg:publisher:authenticated-operation-evidence';
 const EVIDENCE_DIGEST = 'urn:dkg:publisher:authenticatedOperationDigest';
 
+function evidenceSubject(metadataGraph: string, operationSubject: string): string {
+  return `urn:dkg:publisher:operation-evidence:${encodeURIComponent(assertSafeIri(metadataGraph))}:${encodeURIComponent(assertSafeIri(operationSubject))}`;
+}
+
 function evidenceDigest(rows: readonly Quad[]): string {
   const term = (row: Quad) => {
     const canonical = canonicalizeObjectTermForHash(row.object);
@@ -38,25 +42,27 @@ function evidenceDigest(rows: readonly Quad[]): string {
 
 /** Only local publisher/verified-live writers may create this positive evidence. */
 export async function persistWorkspaceOperationEvidence(store: TripleStore, rows: readonly Quad[]): Promise<void> {
-  const subject = rows[0]?.subject;
-  if (!subject || rows.some(row => row.subject !== subject)) throw new Error('Invalid immutable operation evidence');
+  const operationSubject = rows[0]?.subject, metadataGraph = rows[0]?.graph;
+  if (!operationSubject || !metadataGraph || rows.some(row => row.subject !== operationSubject || row.graph !== metadataGraph)) throw new Error('Invalid immutable operation evidence');
+  const subject = evidenceSubject(metadataGraph, operationSubject);
   await replaceSubjectAtomicallyOrFallback(store, LOCAL_EVIDENCE_GRAPH, subject,
     [{ subject, predicate: EVIDENCE_DIGEST, object: sparqlString(evidenceDigest(rows)), graph: LOCAL_EVIDENCE_GRAPH }],
     'publisher.workspace.authenticatedOperationEvidence');
 }
 
 /** Reserved local graph evidence cannot arrive through provider metadata unions. */
-export async function readAuthenticatedWorkspaceOperations(store: TripleStore, rows: readonly Quad[]): Promise<ReadonlySet<string>> {
+export async function readAuthenticatedWorkspaceOperations(store: TripleStore, metadataGraph: string, rows: readonly Quad[]): Promise<ReadonlySet<string>> {
   const subjects = [...new Set(rows.map(row => row.subject))];
   if (subjects.length === 0) return new Set();
+  const keys = new Map(subjects.map(subject => [subject, evidenceSubject(metadataGraph, subject)]));
   const evidence = await store.query(`SELECT ?s ?digest WHERE { GRAPH <${LOCAL_EVIDENCE_GRAPH}> {
-    VALUES ?s { ${subjects.map(subject => `<${assertSafeIri(subject)}>`).join(' ')} } ?s <${EVIDENCE_DIGEST}> ?digest
+    VALUES ?s { ${[...keys.values()].map(subject => `<${subject}>`).join(' ')} } ?s <${EVIDENCE_DIGEST}> ?digest
   } }`, { priority: 'background', source: 'publisher.workspace.authenticatedOperationEvidence' });
   if (evidence.type !== 'bindings') throw new Error('Authenticated operation evidence is unavailable');
   const authenticated = new Set<string>();
   for (const subject of subjects) {
     const operation = rows.filter(row => row.subject === subject);
-    const digests = evidence.bindings.filter(row => row['s'] === subject).map(row => row['digest']);
+    const digests = evidence.bindings.filter(row => row['s'] === keys.get(subject)).map(row => row['digest']);
     const digest = digests.length === 1 ? parseRdfLiteralTerm(digests[0] ?? '') : null;
     if (digest && digest.kind !== 'language' && digest.value === evidenceDigest(operation)) authenticated.add(subject);
   }

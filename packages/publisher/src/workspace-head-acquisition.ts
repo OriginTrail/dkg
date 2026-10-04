@@ -23,6 +23,6 @@ export async function acquireKnowledgeAssetWorkspaceHead(params: ResolveKnowledg
   );
   if (acquisition.type !== 'bindings') throw new Error(`Unexpected graph-scoped SWM head query result for ${scope.ual}: ${acquisition.type}`);
   const rows: Quad[] = acquisition.bindings.map(row => ({ subject: row['s'] ?? '', predicate: row['p'] ?? '', object: row['o'] ?? '', graph: metaGraph }));
-  const authenticatedOperations = await readAuthenticatedWorkspaceOperations(params.store, rows.filter(row => row.subject !== subject));
+  const authenticatedOperations = await readAuthenticatedWorkspaceOperations(params.store, metaGraph, rows.filter(row => row.subject !== subject));
   return { rows, authenticatedOperations };
 }
