@@ -69,6 +69,26 @@ async function modelLegacyPublicationOwner(f: Awaited<ReturnType<typeof fixture>
 }
 
 describe('agent publication completion marker fencing', () => {
+  it.each(['synchronous', 'queued'] as const)('materializes a %s update VM pointer once and converges its owned WM pointer', async lane => {
+    const f = await fixture(false, true), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+    const insert = vi.spyOn(f.store, 'insert');
+    vi.spyOn(f.agent, 'update').mockResolvedValueOnce(f.result);
+    if (lane === 'synchronous') await f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR });
+    else {
+      const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+      const queue = new TripleStoreAsyncLiftPublisher(f.store, { knowledgeAssetVmPublishHandler: { execute: ({ request, publishOptions }) => f.agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions) } });
+      await queue.enqueueKnowledgeAssetVmPublish(request); expect(await queue.processNext('wallet')).toMatchObject({ status: 'finalized' });
+    }
+    const vmWrites = insert.mock.calls.flatMap(([quads]) => quads).filter(quad =>
+      quad.subject === subject && quad.graph === graph && quad.predicate === `${DKG}vmCurrentAssertion`);
+    expect(vmWrites).toHaveLength(1);
+    expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ state: 'published', memoryLayer: 'VM',
+      wmCurrentAssertion: Buffer.from(f.result.merkleRoot).toString('hex'), vmCurrentAssertion: Buffer.from(f.result.merkleRoot).toString('hex') });
+    expect(await f.store.query(`ASK { GRAPH <${graph}> { <${subject}> <${DKG}wmCurrentAssertion> ?wm } }`))
+      .toEqual({ type: 'boolean', value: false });
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+  });
+
   it.each(['synchronous', 'queued'].flatMap(lane => [false, true].map(alias => ({ lane, alias }))))('completes $lane publication from a trimmed lifecycle and retained promotion event (ACK alias: $alias)', async ({ lane, alias }) => {
     const f = await fixture(alias), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
     const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });

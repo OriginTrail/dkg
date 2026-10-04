@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, onTestFinished } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair, assertionLifecycleUri, contextGraphMetaUri,
   createGraphKnowledgeAssetScope, createOperationContext, decodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
@@ -20,6 +20,7 @@ const quads = makeQuads(2, 'published');
 /** Real store/publisher orchestration, independent of snapshot-file GC settings. */
 async function fixture() {
   const store = new OxigraphStore();
+  onTestFinished(() => store.close());
   const publisher = new DKGPublisher({ store, chain: new NoChainAdapter(),
     eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
   return { store, publisher };
@@ -34,6 +35,30 @@ async function metaRows(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe('assertion promote confirmation and recovery', () => {
+  it.each([
+    ['conflicting IDs', 'KA_SHARE_OPERATION_ID_CONFLICT'],
+    ['malformed ID', 'KA_SHARE_OPERATION_ID_CORRUPT'],
+    ['malformed intent', 'KA_PROMOTE_OPERATION_INTENT_CORRUPT'],
+  ])('withdraws empty-WM recovery completion before reporting %s', async (corruption, code) => {
+    const f = await fixture(), name = `corrupt-recovery-${corruption.replaceAll(' ', '-')}`;
+    await f.publisher.assertionCreate(CG, name, AUTHOR);
+    await f.publisher.assertionWrite(CG, name, AUTHOR, quads);
+    const sealed = await finalizeRootlessAssertionForTest({ publisher: f.publisher, store: f.store, contextGraphId: CG, name, agentAddress: AUTHOR });
+    await f.publisher.assertionPromote(CG, name, AUTHOR, { publisherPeerId: 'peer-publisher' });
+    const graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, name);
+    await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}promoteOperationIntent` });
+    if (corruption === 'malformed ID') await f.store.deleteByPattern({ graph, subject, predicate: `${DKG}shareOperationId` });
+    await f.store.insert([{ graph, subject,
+      predicate: `${DKG}${corruption === 'malformed intent' ? 'promoteOperationIntent' : 'shareOperationId'}`,
+      object: corruption === 'malformed ID' ? 'urn:invalid:operation' : JSON.stringify('different-or-malformed-claim') }]);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(true);
+    expect(await f.store.countQuads(sealed.graphUri)).toBe(0);
+    await expect(f.publisher.assertionPromote(CG, name, AUTHOR, { publisherPeerId: 'peer-publisher' }))
+      .rejects.toMatchObject({ code });
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(false);
+    expect(await f.store.countQuads(sealed.sharedGraphUri)).toBe(sealed.publicQuads.length);
+  });
+
   it('clears an inherited completion marker before rejecting malformed durable share identity', async () => {
     const f = await fixture(), name = 'malformed-promote-identity';
     await f.publisher.assertionCreate(CG, name, AUTHOR);

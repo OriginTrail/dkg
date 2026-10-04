@@ -3,12 +3,12 @@
 import { assertSafeIri, isTrustLevelQuad, MemoryLayer, type GraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type { GraphManager, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { PROMOTE_OPERATION_INTENT_PRED } from './metadata.js';
-import { parsePromoteOperationIntent, type PromoteOperationIntent } from './promote-operation-intent.js';
+import type { PromoteOperationIntent } from './promote-operation-intent.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import { isReservedSubject } from './reserved-subjects.js';
 import { tryResolveKnowledgeAssetWorkspaceHead, type KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { publisherWorkspaceOperationSemanticsKey, workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
-import { readDurablePromoteClaim, decodeDurablePromoteClaim, durablePromoteClaimMatches, parsePromoteLifecycleLiteral } from './durable-promote-claim.js';
+import { readDurablePromoteClaim, durablePromoteClaimMatches, parsePromoteLifecycleLiteral } from './durable-promote-claim.js';
 import { isInterruptedOwnPromoteHead } from './assertion-promote-head-recovery.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 
@@ -168,27 +168,12 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
   // sort of recovery path that should not double as an accidental OOM test.
   const claim = await readDurablePromoteClaim(host.store, promoteMetaGraph, lifecycleSubject);
   if (preserveLegacyCompletionMarker) {
-    if (
-      claim.readable && claim.operationIds.length === 1 && claim.intents.length === 0
-    ) {
-      let legacyOperationId: string | undefined;
-      try {
-        legacyOperationId = parsePlainLiteral(
-          claim.operationIds[0],
-          'KA_SHARE_OPERATION_ID_CORRUPT',
-        );
-      } catch (error) {
-        await maintainMarker(false);
-        throw error;
-      }
-      if (
-        legacyOperationId
-        && await host.hasDurableTail(legacyOperationId)
-      ) {
+    if (claim.kind === 'legacy') {
+      if (await host.hasDurableTail(claim.operationId)) {
         return { kind: 'complete' as const, result: {
           promotedCount: 0,
           promotedAllRoots: false,
-          shareOperationId: legacyOperationId,
+          shareOperationId: claim.operationId,
         } };
       }
     }
@@ -196,41 +181,9 @@ export async function readAssertionPromoteSource(host: AssertionPromoteSourceHos
     // before the normal conflict/corruption path reports the exact reason.
     await maintainMarker(false);
   }
-  if (!claim.readable) {
-    throw Object.assign(
-      new Error(`Graph-scoped assertion lifecycle <${lifecycleSubject}> could not be read safely`),
-      { code: 'KA_LIFECYCLE_STATE_CORRUPT' },
-    );
-  }
-  if (claim.operationIds.length > 1) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped assertion lifecycle <${lifecycleSubject}> has conflicting durable share operation IDs`,
-      ),
-      { code: 'KA_SHARE_OPERATION_ID_CONFLICT' },
-    );
-  }
-  if (claim.intents.length > 1) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped assertion lifecycle <${lifecycleSubject}> has conflicting durable promote intent`,
-      ),
-      { code: 'KA_PROMOTE_OPERATION_INTENT_CONFLICT' },
-    );
-  }
-  const { operationId: durableShareOperationId, serializedIntent: durablePromoteIntentValue } =
-    decodeDurablePromoteClaim(claim, lifecycleSubject);
-  if (!durableShareOperationId && durablePromoteIntentValue) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped assertion lifecycle <${lifecycleSubject}> has promote intent without an operation ID`,
-      ),
-      { code: 'KA_PROMOTE_OPERATION_INTENT_CONFLICT' },
-    );
-  }
-  const durablePromoteIntent = durablePromoteIntentValue && durableShareOperationId
-    ? parsePromoteOperationIntent(durablePromoteIntentValue, durableShareOperationId)
-    : undefined;
+  if (claim.kind === 'corrupt') throw claim.error;
+  const durableShareOperationId = claim.kind === 'absent' ? undefined : claim.operationId;
+  const durablePromoteIntent = claim.kind === 'modern' ? claim.intent : undefined;
   if (assertionQuads.length > 0 && durableShareOperationId) {
     // The exact SWM graph may have committed before a later snapshot/head
     // write failed, while WM is intentionally retained for retry. Recognize
@@ -311,7 +264,7 @@ export async function revalidateAssertionPromoteSource(
   const [claim, layer] = await Promise.all([
     readDurablePromoteClaim(host.store, context.promoteMetaGraph, context.lifecycleSubject), readLifecycleLayer(host, context),
   ]);
-  if (!durablePromoteClaimMatches(claim, context.lifecycleSubject, intent)) {
+  if (!durablePromoteClaimMatches(claim, intent)) {
     throw Object.assign(new Error('Durable promote claim changed during confirmation'), { code: 'KA_PROMOTE_OPERATION_INTENT_CONFLICT' });
   }
   if (layer.type !== 'bindings' || layer.bindings.length > 1

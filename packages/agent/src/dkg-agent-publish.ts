@@ -5019,6 +5019,7 @@ export class PublishMethods extends DKGAgentBase {
     publishedUal: string,
     packedKaId?: bigint,
     merkleRoot: string = request.sealMerkleRoot,
+    convergeWorkingMemory = false,
   ): Promise<void> {
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     await applyOwnedPublishedNamedKaVmLifecycle(this.store, this.publisher, {
@@ -5029,6 +5030,7 @@ export class PublishMethods extends DKGAgentBase {
       publishedUal,
       merkleRoot,
       packedKaId,
+      convergeWorkingMemory,
     }, request.shareOperationId ?? null);
   }
 
@@ -5662,10 +5664,6 @@ export class PublishMethods extends DKGAgentBase {
             ? operationPlan.vmCurrentAssertion.slice(2)
             : operationPlan.vmCurrentAssertion;
           const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await publisher.withPublishedAssertionLifecycle(
-            request.contextGraphId, request.name, agentAddress, request.shareOperationId ?? null,
-            () => this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph), request.subGraphName);
           await this.store.insert([
             { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
             { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
@@ -5831,6 +5829,8 @@ export class PublishMethods extends DKGAgentBase {
           request,
           result.ual,
           packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
+          newMerkleHexBare,
+          operationPlan.kind === 'update',
         );
       } catch (err) {
         this.log.warn(
@@ -6222,22 +6222,14 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
 
-      // Stamp UPDATE provenance + re-stamp VM/WM pointers to the new merkle.
+      // Revision provenance is permanent chain history. The canonical
+      // materializer below owns VM and the guarded draft pointer transition.
       if (result.status === 'confirmed' || result.status === 'tentative') {
         try {
           const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
             ? operationPlan.vmCurrentAssertion.slice(2)
             : operationPlan.vmCurrentAssertion;
           const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          // Re-point VM to the new merkle (drop-then-set), then record the
-          // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
-          // Phase 2: WM converges back to VM after the update mint, so the
-          // divergence-only stamp DELETES any stale WM row instead of
-          // duplicating the new merkle (readers COALESCE missing wm → vm).
-          await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await publisher.withPublishedAssertionLifecycle(
-            contextGraphId, name, agentAddress, originalShareOperationId,
-            () => this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph), opts?.subGraphName);
           await this.store.insert([
             { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
             { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
@@ -6336,15 +6328,14 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // OT-RFC-43 A2 (decision 2) — stamp the VM pointer on the lifecycle URN
-    // whenever the publish/update is confirmed. (For the mint path this is the
-    // first VM pointer; for the update path the DELETE/INSERT above already set
-    // it, and this idempotent re-stamp is a no-op.)
+    // OT-RFC-43 A2 (decision 2) — record VM once for mint and update, then
+    // transition the WM pointer and other draft markers under one owner guard.
     if (result.status === 'confirmed' || result.status === 'tentative') {
       try {
         await applyOwnedPublishedNamedKaVmLifecycle(this.store, publisher, {
           contextGraphId, agentAddress, name, subGraphName: opts?.subGraphName,
           publishedUal: result.ual, merkleRoot: newMerkleHexBare,
+          convergeWorkingMemory: operationPlan.kind === 'update',
           // Tentative publication has no confirmed VM graph to point at.
           packedKaId: result.status === 'confirmed' && result.onChainResult
             ? packedKaId ?? result.onChainResult.kaId ?? result.kaId : undefined,

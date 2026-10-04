@@ -72,6 +72,7 @@ export default defineConfig({
       'test/promote-replay-safety.test.ts',
       'test/promote-post-commit-recovery.test.ts',
       'test/promote-operation-intent.test.ts',
+      'test/durable-promote-claim.test.ts',
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',
       'test/ka-graph-workspace-receiver.test.ts',

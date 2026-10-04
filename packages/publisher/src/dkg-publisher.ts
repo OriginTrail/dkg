@@ -8838,7 +8838,7 @@ export class DKGPublisher implements Publisher {
       // is a conservative compare-after-insert: a collision may make both
       // callers withdraw, but it can never let both escape externally.
       const claim = await readDurablePromoteClaim(this.store, promoteMetaGraph, lifecycleSubject);
-      if (!durablePromoteClaimMatches(claim, lifecycleSubject, operationIntent)) {
+      if (!durablePromoteClaimMatches(claim, operationIntent)) {
         await this.store.delete([operationIdQuad, operationIntentQuad]);
         throw Object.assign(
           new Error(`A different promote operation already claimed assertion "${name}"`),
