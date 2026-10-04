@@ -9,6 +9,7 @@
  * composed class.
  */
 
+import { captureContextGraphAuthorityFactsFence } from './internal/context-graph-authority/context-graph-authority-facts-fence.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -869,8 +870,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
     if (recoveryAuthority.kind !== 'legacy-unregistered') return null;
 
-    const metadataRevision = this.contextGraphMetaProjection
-      .readContextGraphAuthorityFactsRevision(contextGraphId);
+    const metadataFence = captureContextGraphAuthorityFactsFence(this.contextGraphMetaProjection, contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
 
     // Metadata is another async boundary. Re-resolve the authoritative state
@@ -892,10 +892,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // A revocation or other authority-fact mutation during the metadata read
     // invalidates the captured roster even if registration remained absent.
     // Recovery is retryable, so fail closed instead of serving that snapshot.
-    return this.contextGraphMetaProjection
-      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
-      ? metadataGate
-      : null;
+    return metadataFence.assertCurrent() ? metadataGate : null;
   }
 
   /**
@@ -916,8 +913,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     if (registered.kind === 'private') return [...registered.participantAgents];
     if (registered.kind !== 'unregistered') return null;
-    const metadataRevision = this.contextGraphMetaProjection
-      .readContextGraphAuthorityFactsRevision(contextGraphId);
+    const metadataFence = captureContextGraphAuthorityFactsFence(this.contextGraphMetaProjection, contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
     const currentRegistered = await this.resolveSwmRegisteredAuthority(
       contextGraphId,
@@ -927,10 +923,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return [...currentRegistered.participantAgents];
     }
     if (currentRegistered.kind !== 'unregistered') return null;
-    return this.contextGraphMetaProjection
-      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
-      ? metadataGate
-      : null;
+    return metadataFence.assertCurrent() ? metadataGate : null;
   }
 
   /**

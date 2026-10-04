@@ -9,6 +9,7 @@
  * class.
  */
 
+import { captureContextGraphAuthorityFactsFence } from './internal/context-graph-authority/context-graph-authority-facts-fence.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   resolveApprovedPrivateReplicaAuthority,
@@ -1246,8 +1247,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (options.allowApprovedPrivateReplicaFinalizedAbsence !== true) return null;
       const approved = this.localApprovedAgentByCG?.get(contextGraphId);
       if (approved === undefined) return null;
-      const metadataRevision = this.contextGraphMetaProjection
-        .readContextGraphAuthorityFactsRevision(contextGraphId);
+      const metadataFence = captureContextGraphAuthorityFactsFence(this.contextGraphMetaProjection, contextGraphId);
       let privateResolution: ApprovedPrivateReplicaAuthorityResolution | null = null;
       try {
         privateResolution = await runBoundedOperation(
@@ -1257,8 +1257,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             approved,
             () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
               === approved.toLowerCase(),
-            () => this.contextGraphMetaProjection
-              .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision,
+            metadataFence.assertCurrent,
             signal,
           ),
           {

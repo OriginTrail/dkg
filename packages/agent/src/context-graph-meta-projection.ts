@@ -12,6 +12,7 @@ import {
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { prepareReadAuthorityFactsSnapshot } from './internal/context-graph-authority/context-graph-authority-facts-fence.js';
 
 export interface ContextGraphSubGraphMeta {
   uri: string;
@@ -266,24 +267,11 @@ export class ContextGraphMetaProjection {
     return present;
   }
 
-  /**
-   * Capture an owned request-local absence snapshot. Consumers never compare
-   * revision counters themselves; they ask this projection whether its proof
-   * is still current at the exact point where absence would be used.
-   */
   async prepareReadAuthorityFactsSnapshot(
     contextGraphIds: readonly string[],
     options: QueryOptions = {},
   ): Promise<ContextGraphReadAuthorityFactsSnapshot> {
-    const revision = this.authorityFactsRevision;
-    const present = new Set(
-      await this.findContextGraphIdsWithReadAuthorityFacts(contextGraphIds, options),
-    );
-    options.signal?.throwIfAborted();
-    return Object.freeze({
-      assertCurrent: () => this.authorityFactsRevision === revision,
-      isAbsent: (contextGraphId: string) => !present.has(contextGraphId),
-    });
+    return prepareReadAuthorityFactsSnapshot(this, contextGraphIds, options);
   }
 
   async get(contextGraphId: string, options: QueryOptions = {}): Promise<ContextGraphMetaRecord> {
