@@ -56,6 +56,10 @@ import {
 } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 
+import { retryCachedAuthorityIndexHeadV1 } from './context-graph-authority-index-admission.js';
+import { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
+export { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
+
 /**
  * Keep authority-index eth_getLogs requests inside the strictest production
  * provider limit currently supported. The configured registry page size can
@@ -63,26 +67,6 @@ import { withRpcUsageConsumer } from './rpc-usage.js';
  * range reader below.
  */
 const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
-
-/** Refresh an ethers-cached tip once before classifying cursor skew as endpoint failure. */
-async function retryCachedAuthorityIndexHeadV1<T>(
-  read: () => Promise<T>,
-  lifecycleSignal: AbortSignal,
-  callerSignal?: AbortSignal,
-): Promise<T> {
-  try {
-    return await read();
-  } catch (error) {
-    if (!isContextGraphAuthorityIndexRetryableError(error)
-      || error.reason !== 'cursor-ahead') throw error;
-    // Rapid writes can advance the durable cursor while `getBlock('latest')`
-    // still returns a recently cached block from this very endpoint. A
-    // persistent lag remains retryable and takes the usual endpoint failover.
-    await sleep(300, undefined, { signal: lifecycleSignal });
-    callerSignal?.throwIfAborted();
-    return read();
-  }
-}
 
 /** Bound one physical authority-index RPC without capping the durable scan. */
 export function readEvmContextGraphAuthorityIndexRpcV1<T>(
@@ -100,30 +84,6 @@ export function readEvmContextGraphAuthorityIndexRpcV1<T>(
     : withRpcRequestContext({ signal }, bounded);
 }
 
-/**
- * The single fail-closed error both authority-anchor resolvers raise.
- *
- * The message is preserved verbatim as a prefix: it is the contract callers
- * (and operators reading logs) already recognize. The detail only says which
- * step of the anchor resolution failed.
- *
- * RETRYABLE by type, not by message. Every condition it reports — a head an
- * endpoint could not answer, an anchor below the configured depth, a block that
- * came back at the wrong height — is one that a different endpoint or a later
- * attempt can satisfy, so it must fail over rather than abort the authority
- * read that gates catalog admission. Typing it also keeps it away from
- * `classifyRpcRetryDisposition`'s message regex, which alternates bare
- * `429|503|502|500` with no word boundaries: the details here interpolate block
- * numbers, so a head of 31500123 would classify as `failover` and 31499123 as
- * `fail` purely on its digits.
- */
-export function contextGraphAuthorityAnchorUnavailableV1(
-  detail: string,
-): ContextGraphAuthorityIndexRetryableError {
-  return new ContextGraphAuthorityIndexRetryableError(
-    `finalized Context Graph authority block is unavailable: ${detail}`,
-  );
-}
 
 type ContextGraphAuthorityLogFoldAdmission =
   | Readonly<{ kind: 'served' }>
