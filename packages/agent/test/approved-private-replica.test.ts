@@ -1605,6 +1605,26 @@ describe('approved private bare-name replica authorization', () => {
       .toBe('private');
   });
 
+  it('retries an approved private catalog proof when its metadata revision moves', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const proof = pauseSuccessfulApprovedPrivateProofOnce(fixture);
+    const reconciliation = fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    await proof.returned;
+    Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+    proof.release();
+
+    await expect(reconciliation).resolves.toMatchObject({
+      source: 'owner-signed-unregistered',
+      policy: { accessPolicy: 1 },
+    });
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBe('private');
+  });
+
   it('authorizes an approved private catalog peer from the live join proof without a circular recovery read', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(

@@ -3553,6 +3553,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           === approvedPrivateMetaRevision,
         signal,
       ) : null;
+      // A join or catalog write can invalidate this graph's metadata while
+      // the source-qualified proof is reading it. The proof correctly returns
+      // null for that mixed generation, but null alone is not evidence that
+      // the approved owner vanished. Recompose against the new revision before
+      // falling through to owner-unresolved and deactivating a valid receiver.
+      if (
+        approvedPrivateReplica === null
+        && approvedAgent !== undefined
+        && boundOnChainId === undefined
+        && !localFirstUnregistered
+        && !directAcceptedPrivateAuthority
+        && authorityRequest.kind === 'finalized-absence'
+        && this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId)
+          !== approvedPrivateMetaRevision
+      ) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
       const approvedPrivateReplicaAuthority = approvedPrivateReplica?.kind
         === 'unregistered-private-replica' ? approvedPrivateReplica.authority : null;
       // Replica authority is admissible only after the shared finalized name
