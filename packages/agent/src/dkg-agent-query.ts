@@ -926,7 +926,7 @@ export class QueryMethods extends DKGAgentBase {
           // a different generation. The next request rechecks the join, while
           // the independent authority refresh loop may accept its stable
           // catalog generation in the meantime.
-          if (this.localApprovedAgentByCG.has(contextGraphId)) return initial;
+          if (this.localApprovedAgentByCG?.has(contextGraphId)) return initial;
 
           // The finalized index proved exact absence, but a replica cannot
           // consume that fact until it authenticates the owner-signed policy
