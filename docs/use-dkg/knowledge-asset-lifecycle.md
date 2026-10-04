@@ -70,6 +70,21 @@ If a finalized update carries a different number (it was sealed by an older node
 
 A core that already ACK-signed the abandoned draft declines its replacement transiently for a few minutes (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default); retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Working Memory until the update is published. Finalizing a replacement draft also replaces the private payload sealed under the same number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Working Memory once its replacement is finalized.
 
+## Synchronous share failures
+
+`dkg ka share` (`POST /api/knowledge-assets/<name>/swm/share`) can answer `503` in two cases. Both are retryable. In both the answer carries `retryable: true`, `retryAction: resume_existing_knowledge_asset`, `retryPhase: swm-share`, the `contextGraphId` and `retryKnowledgeAssetName`: send the same share for the same name again, and do not create a replacement asset.
+
+| `code` | What happened | What to do |
+|---|---|---|
+| `PROMOTE_RETRYABLE_FAILURE` | Something the share depends on was temporarily unavailable, so the share did not complete. | Wait for `Retry-After` (1 second), then share again. |
+| `PROMOTE_POST_COMMIT_FAILURE` | Shared Working Memory was written, but a step after it failed. | Share again; the node repairs the same share operation. |
+
+`PROMOTE_RETRYABLE_FAILURE` usually means the node could not confirm, at that moment, who may read the Context Graph. A share into a private Context Graph is encrypted to the graph's current members, and the node accepts a member list only if it could read it from the chain and from its own metadata without either changing during the read. This is most likely straight after a Context Graph is registered, while the node is still settling the new graph's subscriptions, and while chain RPC is slow or unreachable. The node repeats the read on its own for a short time (about two seconds at most) before it answers, so a brief gap is not visible to the caller.
+
+After this answer nothing is lost and the content is unchanged, but the request was not a no-op. The share seals the draft before it shares, so the asset is now at least `wm-sealed` (see `dkg ka history`), and whatever the share had already recorded is reused by the next attempt. Do not write to the asset or recreate it: share it again. Publish only after the share has succeeded.
+
+The daemon log names what was unavailable: the event `knowledge_asset_share_prerequisite_unavailable` carries the share `step` and, when known, a `causeCode` and `causeReason`. An async share (`dkg ka share-async`) that meets the same failure is retried by the queue as `failed_retrying`. A one-shot create with `--share` keeps what it created: when only its share step fails this way, it answers `207` with the sealed asset and the share error under `errors`; finish with `dkg ka share <name>`.
+
 ## Async share recovery
 
 Use `dkg ka share-job <job-id>` to observe an accepted async share. A `failed_retrying` job follows the queue's existing backoff and attempt limit; do not submit another share to restart it.
