@@ -345,19 +345,63 @@ describe('ContractReadBatcher', () => {
       const third = batcher.read(read('0x03'));
       await vi.advanceTimersByTimeAsync(5_000);
       expect(requests).toEqual([['0x01'], ['0x02'], ['0x03']]);
-      const fourth = batcher.read(read('0x04'));
-      await vi.advanceTimersByTimeAsync(60_000);
+
+      // A read behind the limit waits for the newest request's own bound...
+      const fourthRead = read('0x04');
+      const fourth = batcher.read(fourthRead);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(fourthRead.direct).not.toHaveBeenCalled();
+      expect(batcher.accepting).toBe(true);
+      // ...and then leaves directly: every request allowed out has stalled.
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(fourth).resolves.toBe('direct:0x04');
+      expect(batcher.accepting).toBe(false);
+      // One that arrives now does not wait at all.
+      await expect(batcher.read(read('0x05'))).resolves.toBe('direct:0x05');
       expect(requests).toHaveLength(3);
 
-      // Any request coming back lets what is waiting leave.
+      // Any request coming back makes room: reads leave in a batch again.
       gates[1]!.resolve();
       await expect(behind).resolves.toBe('batched:0x02');
+      expect(batcher.accepting).toBe(true);
+      const sixth = batcher.read(read('0x06'));
       await vi.advanceTimersByTimeAsync(0);
-      expect(requests).toEqual([['0x01'], ['0x02'], ['0x03'], ['0x04']]);
+      expect(requests).toEqual([['0x01'], ['0x02'], ['0x03'], ['0x06']]);
       for (const gate of gates) gate.resolve();
       await vi.advanceTimersByTimeAsync(0);
-      await expect(Promise.all([stuck, third, fourth]))
-        .resolves.toEqual(['batched:0x01', 'batched:0x03', 'batched:0x04']);
+      await expect(Promise.all([stuck, third, sixth]))
+        .resolves.toEqual(['batched:0x01', 'batched:0x03', 'batched:0x06']);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not hold a later read behind stalled requests whose callers have all gone', async () => {
+      vi.useFakeTimers();
+      const requests: string[][] = [];
+      const batcher = new ContractReadBatcher({
+        // An endpoint that takes the request and never answers.
+        aggregate: (calls) => {
+          requests.push(calls.map(({ callData }) => callData));
+          return new Promise(() => {});
+        },
+        stallMs: 5_000,
+      });
+      const abandoned: Array<{ controller: AbortController; waiting: Promise<string> }> = [];
+      for (const callData of ['0x01', '0x02', '0x03', '0x04']) {
+        const controller = new AbortController();
+        const waiting = batcher.read(read(callData, { signals: [controller.signal] }));
+        waiting.catch(() => undefined);
+        abandoned.push({ controller, waiting });
+        await vi.advanceTimersByTimeAsync(5_000);
+      }
+      expect(requests).toEqual([['0x01'], ['0x02'], ['0x03'], ['0x04']]);
+      for (const { controller } of abandoned) controller.abort(new Error('caller deadline'));
+      for (const { waiting } of abandoned) await expect(waiting).rejects.toThrow('caller deadline');
+
+      // All four requests are still out, with nobody waiting for them.
+      const later = read('0x05');
+      await expect(batcher.read(later)).resolves.toBe('direct:0x05');
+      expect(later.direct).toHaveBeenCalledTimes(1);
+      expect(requests).toHaveLength(4);
     });
 
     it('sends nothing extra when no read is waiting behind it', async () => {

@@ -172,6 +172,7 @@ export interface BackgroundContractReadBatchingDeps {
     descriptor: RpcReadDescriptor,
     contract: Contract,
     fn: (contract: Contract) => Promise<T>,
+    opts?: ReadOpts,
   ) => Promise<T>;
   /** The adapter's failover provider read. */
   readonly readProvider: <T>(
@@ -192,6 +193,9 @@ export interface BackgroundContractRead<T> {
   /** The read as the adapter issues it without batching. */
   readonly direct: () => Promise<T>;
 }
+
+/** Capped on every node: see the aggregate request. */
+const MULTICALL3_AGGREGATE_READ_OPTS: ReadOpts = Object.freeze({ policy: 'watchdogPointRead' });
 
 type Multicall3State = 'unchecked' | 'checking' | 'present';
 
@@ -291,12 +295,16 @@ export class BackgroundContractReadBatching {
   ): Promise<readonly BatchedContractCallResult[]> {
     // The request belongs to the adapter. No caller's cancellation, priority
     // or attribution may follow it: its callers wait on their own signals.
+    // So nothing but its own policy bounds how long it stays out, and it has
+    // somewhere to fall back to (the reads themselves) even on a node with one
+    // endpoint, where a plain point read is left uncapped.
     const results = await withDetachedRpcRequestContext('background', () => this.#deps.readContract(
       this.#descriptor,
       this.#multicall3,
       (multicall3) => multicall3.aggregate3.staticCall(
         calls.map(({ target, callData }) => ({ target, allowFailure: true, callData })),
       ) as Promise<ReadonlyArray<{ success: unknown; returnData: unknown }>>,
+      MULTICALL3_AGGREGATE_READ_OPTS,
     ));
     return results.map(({ success, returnData }) => ({
       success: success === true,

@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MULTICALL3_ADDRESS } from '../src/evm-background-read-batching.js';
-import type { RpcReadDescriptor } from '../src/rpc-failover-client.js';
+import type { ReadOpts, RpcReadDescriptor } from '../src/rpc-failover-client.js';
 import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import { MULTICALL3_RUNTIME_CODE } from './fixtures/multicall3-runtime-code.js';
 
@@ -54,6 +54,8 @@ function makeAdapter() {
   } as EVMAdapterConfig);
   /** The label of every physical request, in order. */
   const requests: string[] = [];
+  /** The read policy each contract read was issued with, by label. */
+  const policies = new Map<string, ReadOpts['policy']>();
   const internals = adapter as unknown as {
     init(): Promise<void>;
     contracts: { knowledgeAssetStorage?: Contract; contextGraphStorage?: Contract };
@@ -63,6 +65,7 @@ function makeAdapter() {
         descriptor: RpcReadDescriptor,
         contract: Contract,
         fn: (contract: unknown) => Promise<unknown>,
+        opts?: ReadOpts,
       ): Promise<unknown>;
     };
   };
@@ -73,8 +76,9 @@ function makeAdapter() {
     requests.push(label);
     return fn({ getCode: async () => MULTICALL3_RUNTIME_CODE });
   };
-  internals.rpcFailover.readContract = async (descriptor, contract, fn) => {
+  internals.rpcFailover.readContract = async (descriptor, contract, fn, opts) => {
     requests.push(descriptor.label);
+    policies.set(descriptor.label, opts?.policy);
     if (contract.target === MULTICALL3_ADDRESS) {
       return fn({
         aggregate3: {
@@ -95,7 +99,7 @@ function makeAdapter() {
       },
     }));
   };
-  return { adapter, requests };
+  return { adapter, requests, policies };
 }
 
 /** An adapter whose Multicall3 bytecode check has passed. */
@@ -132,6 +136,16 @@ describe('adapter views in the background request class', () => {
     expect(rootCount).toBe(3n);
     expect(contextGraphId).toBe(42n);
     expect(requests).toEqual(['multicall3.aggregate3']);
+  });
+
+  it('caps the aggregate request on every node, and leaves a direct view as it was', async () => {
+    const { adapter, policies } = await checkedAdapter();
+
+    await background(() => adapter.getLatestMerkleRoot(7n));
+    await adapter.getLatestMerkleRoot(7n);
+
+    expect(policies.get('multicall3.aggregate3')).toBe('watchdogPointRead');
+    expect(policies.get('kas.getLatestMerkleRoot')).toBeUndefined();
   });
 
   it('answers a pass worth of positions and sizing reads from one request', async () => {

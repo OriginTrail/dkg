@@ -1488,7 +1488,7 @@ export class EVMChainAdapterBase {
       },
     );
     this.backgroundReadBatching = new BackgroundContractReadBatching({
-      readContract: (descriptor, contract, fn) => this.rpcFailover.readContract(descriptor, contract, fn),
+      readContract: (descriptor, contract, fn, opts) => this.rpcFailover.readContract(descriptor, contract, fn, opts),
       readProvider: (label, fn) => this.readProvider(label, fn),
       // Resolved here at the config boundary, live per read, like the stickiness switch.
       isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',

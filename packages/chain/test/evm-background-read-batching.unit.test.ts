@@ -76,6 +76,7 @@ interface Harness {
   /** Each aggregate request: its descriptor, inner calls and the request context it ran under. */
   aggregates: Array<{
     descriptor: RpcReadDescriptor;
+    opts: ReadOpts | undefined;
     calls: Array<{ target: string; allowFailure: boolean; callData: string }>;
     context: RpcRequestContext;
     usage: ReturnType<typeof captureRpcUsageIssuerContext>;
@@ -95,13 +96,15 @@ function harness(initialCode: string | Error = MULTICALL3_RUNTIME_CODE): Harness
   const aggregates: Harness['aggregates'] = [];
   const codeReads: string[] = [];
   const batching = new BackgroundContractReadBatching({
-    readContract: async <T>(descriptor: RpcReadDescriptor, contract: Contract, fn: (c: Contract) => Promise<T>) => {
+    readContract: async <T>(
+      descriptor: RpcReadDescriptor, contract: Contract, fn: (c: Contract) => Promise<T>, opts?: ReadOpts,
+    ) => {
       expect(contract.target).toBe(MULTICALL3_ADDRESS);
       return fn({
         aggregate3: {
           staticCall: async (calls: Array<{ target: string; allowFailure: boolean; callData: string }>) => {
             aggregates.push({
-              descriptor, calls, context: activeRpcRequestContext(), usage: captureRpcUsageIssuerContext(),
+              descriptor, opts, calls, context: activeRpcRequestContext(), usage: captureRpcUsageIssuerContext(),
             });
             if (aggregateFailure !== undefined) throw aggregateFailure;
             return calls.map(({ target, callData }) => answer(target, callData));
@@ -422,6 +425,9 @@ describe('whose request each physical request is', () => {
     expect(h.aggregates).toHaveLength(1);
     expect(h.aggregates[0]!.context).toEqual({ requestClass: 'background' });
     expect(h.aggregates[0]!.usage).toEqual({});
+    // No caller's signal reaches it, so its own policy bounds it: the one that
+    // is capped on a node with a single endpoint as well.
+    expect(h.aggregates[0]!.opts).toEqual({ policy: 'watchdogPointRead' });
   });
 
   it('runs a fallback under its caller\'s request policy and attribution', async () => {

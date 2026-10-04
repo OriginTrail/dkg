@@ -21,7 +21,8 @@
  * batch grows exactly when requests are scarce. A request that has been out
  * for longer than the stall bound no longer holds the others back: one stuck
  * connection must not stop every read behind it, as it would not have without
- * batching.
+ * batching. Once every request allowed out has stalled, the reads that are
+ * waiting, and the ones that arrive, go out directly until one comes back.
  */
 
 import { AsyncResource } from 'node:async_hooks';
@@ -140,9 +141,18 @@ export class ContractReadBatcher {
     }
   }
 
-  /** False while batching is paused after repeated request failures. */
+  /**
+   * False while a batch would only hold a read back: batching is paused after
+   * repeated request failures, or every request allowed out has stalled.
+   */
   get accepting(): boolean {
-    return this.#now() >= this.#pausedUntil;
+    return this.#now() >= this.#pausedUntil && !this.#saturated();
+  }
+
+  /** Every request allowed out is out, and the newest has been out for the stall bound. */
+  #saturated(): boolean {
+    return this.#inFlight >= this.#maxInFlight
+      && this.#now() - this.#newestRequestAt >= this.#stallMs;
   }
 
   read<T>(read: BatchableContractRead<T>): Promise<T> {
@@ -195,8 +205,13 @@ export class ContractReadBatcher {
   #pump(): void {
     for (;;) {
       if (this.#inFlight > 0) {
-        const newestStalled = this.#now() - this.#newestRequestAt >= this.#stallMs;
-        if (this.#inFlight >= this.#maxInFlight || !newestStalled) {
+        if (this.#saturated()) {
+          // Nothing more may leave and nothing out is coming back in time:
+          // what is waiting goes out the way it does without batching.
+          for (const pending of this.#pending.splice(0)) this.#answerDirectly(pending);
+          return;
+        }
+        if (this.#now() - this.#newestRequestAt < this.#stallMs) {
           if (this.#pending.some((pending) => !pending.settled)) this.#armStallTimer();
           return;
         }
@@ -218,7 +233,7 @@ export class ContractReadBatcher {
 
   /** Look again when the newest request has been out for the stall bound. */
   #armStallTimer(): void {
-    if (this.#stallTimer !== undefined || this.#inFlight >= this.#maxInFlight) return;
+    if (this.#stallTimer !== undefined) return;
     const wait = Math.max(0, this.#newestRequestAt + this.#stallMs - this.#now());
     this.#stallTimer = setTimeout(() => this.#scope.runInAsyncScope(() => {
       this.#stallTimer = undefined;
