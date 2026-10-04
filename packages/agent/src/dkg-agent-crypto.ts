@@ -869,7 +869,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
     if (recoveryAuthority.kind !== 'legacy-unregistered') return null;
 
-    const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+    const metadataRevision = this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
 
     // Metadata is another async boundary. Re-resolve the authoritative state
@@ -891,7 +892,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // A revocation or other authority-fact mutation during the metadata read
     // invalidates the captured roster even if registration remained absent.
     // Recovery is retryable, so fail closed instead of serving that snapshot.
-    return this.contextGraphMetaProjection.readAuthorityFactsRevision === metadataRevision
+    return this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
       ? metadataGate
       : null;
   }
@@ -914,7 +916,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     if (registered.kind === 'private') return [...registered.participantAgents];
     if (registered.kind !== 'unregistered') return null;
-    const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+    const metadataRevision = this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
     const currentRegistered = await this.resolveSwmRegisteredAuthority(
       contextGraphId,
@@ -924,7 +927,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return [...currentRegistered.participantAgents];
     }
     if (currentRegistered.kind !== 'unregistered') return null;
-    return this.contextGraphMetaProjection.readAuthorityFactsRevision === metadataRevision
+    return this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
       ? metadataGate
       : null;
   }
@@ -2915,6 +2919,34 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // A connection can teach us routes for another peer. Persist that legacy
       // migration even when this peer had no exact authorized row to drain.
       await this.saveSwmSenderKeyState();
+    }
+    return drained;
+  }
+
+  /**
+   * A delivered Sender Key setup can receive a retryable authority denial.
+   * That leaves a durable pending row but does not create a Messenger outbox
+   * retry, and an already-connected recipient may never produce another
+   * connection:open event. Retry only peer-bound rows on the ordinary outbox
+   * cadence. The drain below re-resolves current graph authority and the exact
+   * recipient key/peer route before sending any package.
+   */
+  public async drainPendingSenderKeysForConnectedPeers(this: DKGAgent): Promise<number> {
+    await this.loadSwmSenderKeyState();
+    if (this.pendingSenderKeyByAgent.size === 0 || !this.node.isStarted) return 0;
+
+    const pendingPeers = new Set(
+      [...this.pendingSenderKeyByAgent.values()]
+        .flatMap((queue) => queue.flatMap((entry) =>
+          entry.recipientPeerId === undefined ? [] : [entry.recipientPeerId])),
+    );
+    if (pendingPeers.size === 0) return 0;
+
+    let drained = 0;
+    for (const peer of this.node.libp2p.getPeers()) {
+      const peerId = peer.toString();
+      if (!pendingPeers.has(peerId)) continue;
+      drained += await this.drainPendingSenderKeyForPeer(peerId);
     }
     return drained;
   }

@@ -8,8 +8,12 @@ import {
   assertCanonicalDecimalU64,
   assertContextGraphIdV1,
   assertSwmAuthorInventoryShareOperationIdV1,
+  contextGraphSharedMemoryMetaUri,
   contextGraphWorkspaceMetaGraphUri,
   contextGraphWorkspaceGraphUri,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
   type AuthorCatalogScopeV1,
   type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
@@ -547,6 +551,63 @@ export async function markRfc64LegacySwmRepublishedV1(
       canonicalContextGraphId,
       preparationScope,
     );
+  }
+}
+
+/**
+ * A verified, finalized VM twin can supersede an exact legacy SWM root even
+ * when that root never entered the author catalog. The caller must first
+ * prove byte-identical VM/SWM content and finish SWM cleanup. Recheck the
+ * physical graph and head under the legacy preparation fence before retiring
+ * its marker: a concurrent new share must either finish first and remain
+ * visible here, or retry after this retirement with a new marker.
+ */
+export async function retireRfc64LegacySwmAfterFinalizedVmV1(
+  owner: object,
+  contextGraphId: string,
+  kaUalInput: string,
+  assertionVersionInput: string,
+  subGraphName?: string,
+): Promise<boolean> {
+  if (subGraphName !== undefined) return false;
+  const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
+  if (state === undefined) return false;
+  assertContextGraphIdV1(contextGraphId, 'RFC-64 finalized VM legacy boundary contextGraphId');
+  const kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
+  const assertionVersion = assertPositiveDecimalU64V1(assertionVersionInput);
+  const preparationScope = beginRfc64LegacySwmBoundaryRetirementV1(state, contextGraphId);
+  try {
+    return await mutateRfc64LegacySwmBoundaryV1(state, async () => {
+      await preparationScope.preparationsDrained;
+      if (state.entriesByContextGraph.get(contextGraphId)?.has(kaUal) !== true) return false;
+      const scope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
+      const swmGraph = knowledgeAssetLayerGraphUri(
+        contextGraphId,
+        MemoryLayer.SharedWorkingMemory,
+        scope,
+      );
+      const metaGraph = contextGraphSharedMemoryMetaUri(contextGraphId);
+      const graph = await state.store.query(
+        `SELECT ?s WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } } LIMIT 1`,
+        { source: 'agent.rfc64.legacySwmBoundary.finalizedVmGraph', priority: 'background' },
+      );
+      const head = await state.store.query(
+        `SELECT ?p WHERE { GRAPH <${metaGraph}> { <${kaUal}#dkg-swm-head> ?p ?o } } LIMIT 1`,
+        { source: 'agent.rfc64.legacySwmBoundary.finalizedVmHead', priority: 'background' },
+      );
+      if (graph.type !== 'bindings' || head.type !== 'bindings') {
+        throw new Error('RFC-64 finalized VM legacy boundary absence query was not bindings');
+      }
+      if (graph.bindings.length > 0 || head.bindings.length > 0) return false;
+      await retireCanonicalRfc64LegacySwmAssetsV1(
+        state,
+        contextGraphId,
+        new Map([[kaUal, assertionVersion]]),
+      );
+      return true;
+    });
+  } finally {
+    endRfc64LegacySwmBoundaryRetirementV1(state, contextGraphId, preparationScope);
   }
 }
 

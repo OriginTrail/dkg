@@ -259,7 +259,7 @@ async function coldRecoveryFixture(name: string, localCgId: string) {
   const asset = { contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1n, assertionGraph,
     metaGraph: `did:dkg:context-graph:${localCgId}/_meta`,
     dataQuads: publicQuads.map((quad) => ({ ...quad, graph: assertionGraph })), metadataQuads };
-  const targetOptions = { isTargetCurrent: () => true, revalidateTarget: async () => true, deferActiveFetch: true };
+  const targetOptions = { isTargetCurrent: () => true, revalidateTarget: async () => true };
   /** The exact fetch the batch runs: a verified, authenticated, atomically committed materialization. */
   const installVerifiedFetch = () => {
     internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => {

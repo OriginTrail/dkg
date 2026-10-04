@@ -397,8 +397,6 @@ import {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
-  type VmReconcileNegativeRecord,
-  type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
@@ -541,7 +539,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(undefined, pattern.graph),
         'deleteByPattern',
       );
     },
@@ -549,7 +547,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => deleteByPatternWithoutCount(innerStore, pattern, options),
         () => true,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(undefined, pattern.graph),
         'deleteByPattern',
       );
     },
@@ -571,7 +569,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.dropGraph(graphUri, options),
         () => true,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(undefined, graphUri),
         'dropGraph',
       );
     },
@@ -579,7 +577,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       ? (graphUri, quads, options) => invalidateAfterMutation(
           () => innerStore.replaceGraph!(graphUri, quads, options),
           () => true,
-          () => markProjectionDirty?.(),
+          () => markProjectionDirty?.(undefined, graphUri),
           'replaceGraph',
         )
       : undefined,
@@ -599,9 +597,12 @@ export function createListContextGraphsCacheInvalidatingStore(
               options,
             ),
             () => true,
-            // A complete replacement can delete recipient facts not present in
-            // the replacement payload. Treat it as opaque authority mutation.
-            () => markProjectionDirty?.(),
+            // Both deletion targets are named. A graph-scoped invalidation
+            // covers inserted and removed facts without scanning the payload.
+            () => {
+              markProjectionDirty?.(undefined, graphUri);
+              markProjectionDirty?.(undefined, metaGraphUri);
+            },
             'replaceGraphAndSubject',
           )
       : undefined,
@@ -630,7 +631,38 @@ export function createListContextGraphsCacheInvalidatingStore(
       ? (input, options) => invalidateAfterMutation(
           () => innerStore.rfc64AuthorCommitCasV1!(input, options),
           result => result === 'committed',
-          () => markProjectionDirty?.(),
+          () => {
+            // The CAS names every graph it replaces. A graph-wide dirty mark
+            // here invalidates an unrelated private CG's own metadata proof
+            // after every authored row, even though the CAS only changed this
+            // exact projection and its control subjects. Fence each named
+            // target, including deleted facts, without losing the conservative
+            // all-graph fallback used by genuinely opaque store mutations.
+            if (markProjectionDirty === undefined) return;
+            markProjectionDirty(undefined, input.sharedProjectionGraph);
+            markProjectionDirty(undefined, input.authorSealGraph);
+            if ('currentHead' in input) {
+              for (const transition of [
+                input.currentHead,
+                input.subgraphMutationGeneration,
+                input.contextGraphMutationGeneration,
+                input.appliedSet,
+              ]) {
+                markProjectionDirty(undefined, transition.graphUri);
+              }
+            } else {
+              markProjectionDirty(undefined, input.currentHeadGraph);
+              for (const transition of [
+                input.kaStateDigest,
+                input.subgraphMutationGeneration,
+                input.contextGraphMutationGeneration,
+                input.appliedSet,
+                ...input.sealInvalidations,
+              ]) {
+                markProjectionDirty(undefined, transition.graphUri);
+              }
+            }
+          },
           'rfc64AuthorCommitCasV1',
         )
       : undefined,
@@ -1125,8 +1157,6 @@ export class DKGAgentBase {
     'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
     1_000,
   );
-  static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
     'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
     1_000,
@@ -1380,20 +1410,6 @@ export class DKGAgentBase {
   }
   /** StorageACK declines per minute bucket and code, for the last hour. */
   protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
-  /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
-  protected readonly vmReconcileNegativeCache = new Map<
-    string,
-    Omit<
-      VmReconcileNegativeRecord,
-      'cacheKey' | 'peerTopologyKey' | 'peerTopology' | 'cleanMissPeerIds'
-    > & {
-      peerTopology: VmReconcilePeerTopology;
-      cleanMissPeerIds: string[];
-    }
-  >();
-  /** Bounded access-ordered keys already consulted in the durable store. */
-  protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
-  protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
   protected readonly vmReconcileTransportBudgetPolicy = new VmRecoveryTransportBudgetPolicy();
