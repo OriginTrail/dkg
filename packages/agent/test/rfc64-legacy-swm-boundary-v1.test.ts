@@ -114,6 +114,39 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
   });
 
+  it('leaves a root marker in place when the retired twin belongs to a named subgraph', async () => {
+    const root = await secureTempRoot(roots);
+    const store = new OxigraphStore();
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+    // A root share left its marker; its root graph and head are not stored.
+    const marker = prepareRfc64LateLegacySwmBoundaryV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, 'root-share', '1',
+    );
+    await store.insert([...marker.quads]);
+    marker.settle(true);
+    const markerRows = async () => {
+      const result = await store.query(
+        `SELECT ?p WHERE { GRAPH <${marker.graphUri}> { <${marker.subject}> ?p ?o } }`,
+      );
+      return result.type === 'bindings' ? result.bindings.length : -1;
+    };
+
+    // A verified twin in a named subgraph says nothing about the root share.
+    expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, '1', 'private-lane',
+    )).toBe(false);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+    expect(await markerRows()).toBe(1);
+
+    // The same call for the root namespace is what retires it.
+    expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
+    )).toBe(true);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
+    expect(await markerRows()).toBe(0);
+  });
+
   it.each([
     { share: 'a newer version', inFlightVersion: '2' },
     { share: 'the same version', inFlightVersion: '1' },

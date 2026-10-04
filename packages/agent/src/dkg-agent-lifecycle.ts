@@ -6481,17 +6481,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             this.invalidateListContextGraphsCache();
             this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
+              let retiredTwin: FinalizedSwmTwinRetirement | undefined;
               const retirement = await reconcileFinalizedSwmTwin({
                 store: this.store,
                 writeLocks: this.writeLocks,
                 asset: authentication.asset,
-                retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+                retire: async (candidate) => {
+                  await this.retireFinalizedSwmTwinCandidate(candidate, ctx);
+                  retiredTwin = candidate;
+                },
               });
               if (retirement === 'retired') {
                 await this.retireLegacySwmAfterVerifiedVmTwin({
                   contextGraphId: asset.contextGraphId,
                   kaUal: asset.ual,
                   assertionVersion: asset.assertionVersion,
+                  // The marker of the namespace whose twin was verified and
+                  // retired. Without it a twin in a named subgraph would
+                  // retire the root marker of the same asset.
+                  subGraphName: retiredTwin?.subGraphName,
                 });
                 this.invalidateListContextGraphsCache();
                 this.log.info(

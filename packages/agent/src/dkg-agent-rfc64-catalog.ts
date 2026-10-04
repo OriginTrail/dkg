@@ -3679,6 +3679,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               members = confirmed
                 ? await this.getLocalMetadataMemberRecoveryGate(contextGraphId, { signal })
                 : null;
+              if (members !== null) {
+                // The join proof authenticates one member against the graph's
+                // own `_meta`. The roster above comes from the merged
+                // projection, where the shared agents and ontology graphs can
+                // name allowed agents no curator approved. Keep only addresses
+                // the graph's own `_meta` names; a revocation from any source
+                // has already been applied.
+                const ownMeta = await this.getOwnCgMetaFacts(contextGraphId, { signal });
+                if (signal?.aborted) throw signal.reason;
+                const namedByOwnMeta = new Set(
+                  [...ownMeta.allowedAgents, ...ownMeta.participantAgents]
+                    .map((address) => address.toLowerCase()),
+                );
+                members = members.filter((member) => namedByOwnMeta.has(member.toLowerCase()));
+              }
             } else {
               members = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
             }
