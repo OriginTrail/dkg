@@ -1709,6 +1709,27 @@ describe('approved private bare-name replica authorization', () => {
       .toBe('private');
   });
 
+  it('asks for the catalog as a replica whose providers may not be authorized yet', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const schedule = vi.spyOn(
+      fixture.receiver as unknown as Record<string, (...args: unknown[]) => void>,
+      'scheduleRfc64AuthorityAcceptedCatalogRecoveryV1',
+    ).mockImplementation(() => undefined);
+
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+
+    // Only a join-derived acceptance keeps the zero-provider demand alive.
+    expect(schedule).toHaveBeenCalledWith(
+      CONTEXT_GRAPH_ID,
+      expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      { awaitsProviderAuthorization: true },
+    );
+  });
+
   it('refreshes an approved private catalog without depending on its own active recovery gate', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     const recoveryGate = vi.spyOn(fixture.receiver, 'getMemberRecoveryRosterSource')
