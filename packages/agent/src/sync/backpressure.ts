@@ -423,15 +423,19 @@ export function getSyncBackpressureBusyError(
   return undefined;
 }
 
-interface SyncAdmissionRequest {
-  label: string;
+/** Options shared by both the admission and its read-only refusal probe. */
+export interface SyncAdmissionOptions {
   contextGraphId?: string;
-  lane: SyncSchedulerLane;
-  priority: number;
-  priorityClass: SyncPriorityClass;
-  source: SyncAdmissionSource;
-  selectedSwmPriority: boolean;
-  agingThresholdMs: number;
+  lane?: SyncSchedulerLane;
+  priority?: number;
+  priorityClass?: SyncPriorityClass;
+  source?: SyncAdmissionSource;
+  selectedSwmPriority?: boolean;
+  agingThresholdMs?: number;
+}
+
+interface SyncAdmissionRequest extends SyncAdmissionOptions {
+  label: string;
 }
 
 /**
@@ -444,25 +448,26 @@ function syncAdmissionTerms(
   options: SyncAdmissionRequest,
 ) {
   const { limit, queueLimit } = policy;
+  const lane = options.lane ?? 'durable';
   const normalizedSource = normalizeSyncAdmissionSource(options.source);
   const selectedRecoveryScope = options.contextGraphId !== undefined
     && (selectedRecoveryScopeIds.get(policy)?.has(options.contextGraphId) ?? false);
   const capacityClaim = capacityTracker.classify({
     contextGraphId: options.contextGraphId,
     source: normalizedSource,
-    selectedSwmPriority: options.selectedSwmPriority,
+    selectedSwmPriority: options.selectedSwmPriority === true,
     selectedRecoveryScope,
   });
   const admissionClass = isPartitionedPolicy(policy)
     ? syncAdmissionClass(
-      options.lane,
+      lane,
       normalizedSource,
       capacityClaim.kind === 'selected-recovery',
     )
     : 'slow_background';
   const schedulerLane: SyncSchedulerLane = isPartitionedPolicy(policy)
     ? admissionClass === 'fast' ? 'fast' : 'slow'
-    : options.lane;
+    : lane;
   const ownerKey = !isPartitionedPolicy(policy)
     ? 'global'
     : admissionClass;
@@ -492,9 +497,9 @@ function syncAdmissionTerms(
       ownerKey,
       ownerQueueLimit,
       lane: schedulerLane,
-      priority: options.priority,
-      priorityClass: options.priorityClass,
-      agingThresholdMs: options.agingThresholdMs,
+      priority: options.priority ?? 0,
+      priorityClass: options.priorityClass ?? 'default',
+      agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
       queueLimit,
     },
   };
@@ -839,50 +844,18 @@ export function getSyncBackpressureSnapshot(
  */
 export function syncAdmissionWouldBeRefused(
   policy: SyncGlobalBackpressurePolicy,
-  options: {
-    contextGraphId?: string;
-    lane?: SyncSchedulerLane;
-    priority?: number;
-    priorityClass?: SyncPriorityClass;
-    source?: SyncAdmissionSource;
-    selectedSwmPriority?: boolean;
-    agingThresholdMs?: number;
-  } = {},
+  options: SyncAdmissionOptions = {},
 ): boolean {
   if (policy.limit === undefined) return false;
-  return queue.wouldRefuse(syncAdmissionTerms(policy, {
-    label: 'probe',
-    contextGraphId: options.contextGraphId,
-    lane: options.lane ?? 'durable',
-    priority: options.priority ?? 0,
-    priorityClass: options.priorityClass ?? 'default',
-    source: normalizeSyncAdmissionSource(options.source),
-    selectedSwmPriority: options.selectedSwmPriority === true,
-    agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
-  }).queued);
+  return queue.wouldRefuse(syncAdmissionTerms(policy, { ...options, label: 'probe' }).queued);
 }
 
 export async function withGlobalSyncBackpressure<T>(
-  options: {
+  options: SyncAdmissionOptions & {
     policy: SyncGlobalBackpressurePolicy;
     ctx: OperationContext;
     label: string;
-    contextGraphId?: string;
-    lane?: SyncSchedulerLane;
-    priority?: number;
-    priorityClass?: SyncPriorityClass;
-    /**
-     * Which trigger enqueued this admission. Callers normalize at the boundary
-     * where the value enters (`runContextGraphSyncWithBackpressure`); the clamp
-     * below is defence in depth for anything that reaches the scheduler by
-     * another route, so a bad cast can still only widen the label space to
-     * `unspecified`.
-     */
-    source?: SyncAdmissionSource;
-    /** The selected graph-complete RFC-64 SWM transfer may use the reserved slot. */
-    selectedSwmPriority?: boolean;
     signal?: AbortSignal;
-    agingThresholdMs?: number;
     logInfo?: (ctx: OperationContext, message: string) => void;
   },
   work: () => Promise<T>,
@@ -899,21 +872,8 @@ export async function withGlobalSyncBackpressure<T>(
     return work();
   }
   let admission: PriorityAdmission<GlobalQueuePayload>;
-  const lane = options.lane ?? 'durable';
-  const priority = options.priority ?? 0;
-  const priorityClass = options.priorityClass ?? 'default';
   try {
-    admission = acquire(options.policy, {
-      label: options.label,
-      contextGraphId: options.contextGraphId,
-      lane,
-      priority,
-      priorityClass,
-      source: normalizeSyncAdmissionSource(options.source),
-      selectedSwmPriority: options.selectedSwmPriority === true,
-      signal: options.signal,
-      agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
-    });
+    admission = acquire(options.policy, options);
   } catch (error) {
     if (error instanceof SyncBackpressureBusyError) {
       options.logInfo?.(options.ctx, error.message);

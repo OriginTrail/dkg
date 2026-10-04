@@ -467,44 +467,20 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     return subscription;
   }
 
-  /**
-   * Same-instance restart: `start()` has just built a `GossipSubManager` with
-   * no subscriptions (restart contract on {@link DKGAgentBase}), yet
-   * `subscribedContextGraphs` still says which graphs were live. Durable rows
-   * are replayed by `rehydrateContextGraphsFromDurableState()` behind its
-   * authority gate; this re-arms the remaining live ones, the process-local
-   * subscriptions (on-demand, or no subscription store) that no durable row
-   * can bring back. Returns the number of graphs re-armed.
-   *
-   * Never revives what rehydration decided about: a row it accounts for, or
-   * left dormant (authority denied or unavailable, activation cap, the
-   * rehydration kill-switch). The restricted `pendingMeta` bootstrap is skipped
-   * for the same reason: it holds no live gossip until its authority resolves.
-   * What rehydration accounts for is fixed when its pass ends. A save still in
-   * flight when the previous session stopped can be accounted after the pass
-   * read the store; no durable row brought that graph back, so it is re-armed.
-   * Subscriptions and sync scope are only re-wired, never re-persisted.
-   */
-  restoreLiveContextGraphGossipSubscriptions(this: DKGAgent): number {
+  /** Apply the process-local remainder of the startup subscription plan. */
+  applyStartupContextGraphGossipPlan(this: DKGAgent): number {
+    const session = this.gossipSession;
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     let restored = 0;
-    // A snapshot: re-arming can retire or replace rows while it runs.
-    const candidateIds = Array.from(this.subscribedContextGraphs.keys());
-    for (const contextGraphId of candidateIds) {
+    for (const [contextGraphId, intent] of session.startupLiveIntents) {
       const subscription = this.subscribedContextGraphs.get(contextGraphId);
-      if (
-        subscription?.subscribed !== true
-        || subscription.pendingMeta === true
-        || systemContextGraphs.has(contextGraphId)
-        || this.gossipRegistered.has(contextGraphId)
-        || this.contextGraphSubscriptionRehydrationPassAccountedIds.has(contextGraphId)
-        || this.contextGraphSubscriptionDormancyById.has(contextGraphId)
-      ) continue;
+      if (!session.active || subscription?.subscribed !== true || subscription.pendingMeta
+        || systemContextGraphs.has(contextGraphId) || session.gossipRegistered.has(contextGraphId)) continue;
       try {
         this.subscribeToContextGraph(contextGraphId, {
           trackSyncScope: false,
           persist: false,
-          syncMode: subscription.syncMode,
+          syncMode: intent.syncMode,
         });
         restored += 1;
       } catch (err) {
@@ -514,12 +490,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         );
       }
     }
-    if (restored > 0) {
-      this.log.info(
-        createOperationContext('system'),
-        `Re-armed gossip for ${restored} process-local context-graph subscription(s) after restart`,
-      );
-    }
+    session.startupLiveIntents.clear();
     return restored;
   }
 
@@ -916,6 +887,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
+    const session = this.gossipSession;
+    const live = session.live();
+    if (live === null) return;
     // Retired name-hash id: skip. It shares the wire topic and host-mode key
     // with the cleartext row, and a topic-wide unsubscribe here would drop
     // that row's handler (see supersedingContextGraphIdFor).
@@ -938,7 +912,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // identity for them.
     const wireCgId = this.gossipWireIdFor(contextGraphId);
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
-    const isRegistered = this.sharedMemoryGossipRegistered.has(contextGraphId);
+    const isRegistered = session.sharedMemoryGossipRegistered.has(contextGraphId);
     const ctx = createOperationContext('system');
     if (!this.rfc64LegacySwmMemberTransportAllowedForContextGraph(contextGraphId)) {
       // This is the member-mode transport boundary. An unsubscribed selected
@@ -948,12 +922,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // GossipSubManager.unsubscribe() is topic-wide, so clear both member
         // and host bookkeeping before returning. A future live subscription
         // may explicitly restore the scope-filtered member handler.
-        this.gossip.unsubscribe(swmTopic);
-        this.sharedMemoryGossipRegistered.delete(contextGraphId);
+        live.manager.unsubscribe(swmTopic);
+        session.sharedMemoryGossipRegistered.delete(contextGraphId);
         const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-        this.swmHostModeSubscribed.delete(hostKey);
-        this.swmHostModeCurated.delete(hostKey);
-        this.swmHostModeHandlers.delete(hostKey);
+        session.swmHostModeSubscribed.delete(hostKey);
+        session.swmHostModeCurated.delete(hostKey);
+        session.swmHostModeHandlers.delete(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
       } else {
         // Remove a host-only handler surgically when no member handler owns the
@@ -962,7 +936,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       }
       return;
     }
-    if (!(await this.canUseSharedMemoryForContextGraph(contextGraphId))) {
+    const canUseSharedMemory = await this.canUseSharedMemoryForContextGraph(contextGraphId);
+    if (!session.active || this.gossipSession !== session) return;
+    if (!canUseSharedMemory) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
         // not just the member-mode one. If this core was already
@@ -994,17 +970,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // final on-disk state always matches the final in-memory
         // intent — no possible interleave where the "false" lands
         // after a later "true" and re-subscribes on next boot.
-        this.gossip.unsubscribe(swmTopic);
-        this.sharedMemoryGossipRegistered.delete(contextGraphId);
+        live.manager.unsubscribe(swmTopic);
+        session.sharedMemoryGossipRegistered.delete(contextGraphId);
         // Host-mode maps are canonical-keyed (wire-form hash); delete
         // by canonical id so this cleanup hits the entry regardless
         // of which discovery path wired it. Without this, the
         // immediate `reconcileSwmHostModeSubscription()` call below
         // would see a stale entry and early-return.
         const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-        this.swmHostModeSubscribed.delete(hostKey);
-        this.swmHostModeCurated.delete(hostKey);
-        this.swmHostModeHandlers.delete(hostKey);
+        session.swmHostModeSubscribed.delete(hostKey);
+        session.swmHostModeCurated.delete(hostKey);
+        session.swmHostModeHandlers.delete(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
         this.log.warn(ctx, `SWM gossip unsubscribed for "${contextGraphId}": local node is no longer authorized`);
       } else {
@@ -1029,9 +1005,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // process every envelope (apply + opaque append).
     this.unwireSwmHostModeHandler(contextGraphId);
 
-    this.sharedMemoryGossipRegistered.add(contextGraphId);
-    this.gossip.subscribe(swmTopic);
-    this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
+    session.sharedMemoryGossipRegistered.add(contextGraphId);
+    live.manager.subscribe(swmTopic);
+    live.manager.onMessage(swmTopic, async (_topic, data, from) => {
+      if (!session.active) return;
       const wh = this.getOrCreateSharedMemoryHandler();
       const outcome = await wh.handle(data, from);
       // Emit SwmShareAck on gossip-applied shares so the
