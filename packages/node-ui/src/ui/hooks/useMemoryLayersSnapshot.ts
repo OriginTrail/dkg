@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { fetchMemoryLayersDeduped, type MemoryLayersApiResponse } from '../api.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
+import { useCoalescingRecurringTask } from './useCoalescingRecurringTask.js';
 
 interface ReadScope {
   contextGraphId: string;
@@ -24,13 +25,12 @@ export function useMemoryLayersSnapshot(contextGraphId: string, includeQueryCata
   const [state, setState] = useState<ReadState>({
     scope, phase: 'loading', snapshot: null, failure: null,
   });
-  const coordinator = useRef({ scope, active: false, epoch: 0, running: false, pending: false });
-  coordinator.current.scope = scope;
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
 
-  const readOnce = useCallback(async () => {
-    const owner = coordinator.current;
-    const requestedScope = owner.scope;
-    const requestedEpoch = owner.epoch;
+  const readOnce = useCallback(async (signal: AbortSignal) => {
+    const requestedScope = currentScope.current;
+    if (!requestedScope.contextGraphId || signal.aborted) return 'idle' as const;
     setState(previous => ({
       scope: requestedScope,
       phase: 'loading',
@@ -51,42 +51,17 @@ export function useMemoryLayersSnapshot(contextGraphId: string, includeQueryCata
       };
     }
 
-    // Every success or failure passes the same ownership fence. Scope changes,
-    // unmounts and StrictMode effect remounts all invalidate the captured epoch.
-    if (owner.active && owner.epoch === requestedEpoch && sameScope(owner.scope, requestedScope)) {
+    // The canonical task owns pass lifetime; scope also fences results between
+    // render and effect cleanup, before the previous pass has been aborted.
+    if (!signal.aborted && sameScope(currentScope.current, requestedScope)) {
       setState(completed);
     }
+    return 'idle' as const;
   }, []);
 
-  const refresh = useCallback(async () => {
-    const owner = coordinator.current;
-    if (!owner.active || !owner.scope.contextGraphId) return;
-    if (owner.running) {
-      owner.pending = true;
-      return;
-    }
-    owner.running = true;
-    try {
-      do {
-        owner.pending = false;
-        await readOnce();
-      } while (owner.active && owner.pending);
-    } finally {
-      owner.running = false;
-    }
-  }, [readOnce]);
+  const refresh = useCoalescingRecurringTask(JSON.stringify([contextGraphId, includeQueryCatalog]), readOnce);
 
   useMemoryGraphEvents(contextGraphId, refresh);
-  useEffect(() => {
-    const owner = coordinator.current;
-    owner.active = true;
-    void refresh();
-    return () => {
-      owner.active = false;
-      owner.pending = false;
-      owner.epoch++;
-    };
-  }, [contextGraphId, includeQueryCatalog, refresh]);
 
   const visibleState: ReadState = sameScope(state.scope, scope) ? state : {
     scope, phase: 'loading', snapshot: null, failure: null,

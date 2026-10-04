@@ -6,7 +6,8 @@ import { canAdministerNode } from '../../auth.js';
 import { readMemoryLayers, type ContextGraphReader } from '../context-graph-read-model.js';
 import { admitContextGraphFollow } from '../context-graph-subscription-admission.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
-import { readBody, safeParseJson, jsonResponse, validateRequiredContextGraphId, SMALL_BODY_BYTES } from '../http-utils.js';
+import { readBody, safeParseJson, jsonResponse, validateRequiredContextGraphId,
+  respondIfContextGraphReadAuthorityUnavailable, SMALL_BODY_BYTES } from '../http-utils.js';
 import { actorFromRequestContext, type RequestContext } from './context.js';
 
 export function contextGraphReader(agent: DKGAgent, contextGraphId: string, callerAgentAddress?: string): ContextGraphReader {
@@ -60,6 +61,7 @@ export async function handleContextGraphMemoryLayerRoute(ctx: RequestContext): P
     return;
   } catch (err: any) {
     if (lifecycle.signal.aborted || res.destroyed) return;
+    if (respondIfContextGraphReadAuthorityUnavailable(res, err)) return;
     return jsonResponse(res, 500, {
       error: err?.message ?? 'Failed to read context-graph memory layers',
     });

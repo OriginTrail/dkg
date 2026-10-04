@@ -314,4 +314,37 @@ describe('useMemoryEntities live updates', () => {
     expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
   });
+
+  it.each(['graph', 'catalog'] as const)('rejects a retired response after returning to the same %s scope', async change => {
+    const requests: Array<{ contextGraphId: string; includeQueryCatalog: boolean; resolve: (response: Response) => void }> = [];
+    vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => {
+      const scope = JSON.parse(String(init?.body)) as { contextGraphId: string; includeQueryCatalog: boolean };
+      return new Promise<Response>(resolve => requests.push({ ...scope, resolve }));
+    }));
+    const original = { contextGraphId: `aba-${change}`, includeQueryCatalog: true };
+    const intermediate = { contextGraphId: change === 'graph' ? `${original.contextGraphId}-other` : original.contextGraphId,
+      includeQueryCatalog: change === 'catalog' ? false : true };
+    const respond = (request: typeof requests[number], subject: string) => request.resolve({
+      ok: true,
+      json: async () => ({ contextGraphId: request.contextGraphId, layers: {
+        wm: { ok: true, truncated: false, bindings: [tripleBinding(subject, `did:dkg:context-graph:${request.contextGraphId}/notes/assertion/agent/a`)] },
+        swm: { ok: true, truncated: false, bindings: [] }, vm: { ok: true, truncated: false, bindings: [] },
+      } }),
+    } as Response);
+    await act(async () => root.render(React.createElement(Probe, original)));
+    await act(async () => root.render(React.createElement(Probe, intermediate)));
+    await act(async () => root.render(React.createElement(Probe, original)));
+    // React retired both preceding owners; the canonical task must physically
+    // drain the first request before the latest owner can read the same scope.
+    expect(requests).toHaveLength(1);
+    await act(async () => respond(requests[0], 'urn:retired-same-scope'));
+    await flush();
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject(original);
+    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('');
+    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('true');
+    await act(async () => respond(requests[1], 'urn:latest-same-scope'));
+    await flush();
+    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('urn:latest-same-scope');
+  });
 });

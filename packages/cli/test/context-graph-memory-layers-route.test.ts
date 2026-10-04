@@ -98,4 +98,31 @@ describe('memory-layer route', () => {
     expect(req.listenerCount('aborted')).toBe(0);
     expect(res.listenerCount('close')).toBe(0);
   });
+
+  it.each([false, true])('returns a public retryable 503 when inventory authority fails (operator=%s)', async operator => {
+    const store = new OxigraphStore();
+    try {
+      const agent = Object.assign(Object.create(DKGAgent.prototype), { store,
+        queryEngine: new DKGQueryEngine(store), node: { peerId: 'test-node' }, log: { info() {} },
+        resolveContextGraphSubscriptionBootstrapAuthority: vi.fn(async () => ({ outcome: 'allowed' })),
+        resolveContextGraphReadAuthority: vi.fn(async () => ({ outcome: 'unavailable', source: 'registered-chain',
+          reason: 'internal-chain-roster-failure', dependency: 'private-roster' })),
+      }) as DKGAgent;
+      const query = vi.spyOn(agent, 'query');
+      const list = vi.spyOn(agent, 'listContextGraphQueryPartitions');
+      const { ctx, res } = fixture(agent, undefined, operator);
+      await handleContextGraphRoutes(ctx);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(query).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['Retry-After']).toBe('3');
+      expect(JSON.parse(res.body)).toEqual({
+        code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true,
+        error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      });
+      expect(res.body).not.toContain(CG);
+      expect(res.body).not.toContain('registered-chain');
+      expect(res.body).not.toContain('internal-chain-roster-failure');
+    } finally { await store.close(); }
+  });
 });

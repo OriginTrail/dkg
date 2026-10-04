@@ -45,6 +45,11 @@
       "import": "./dist/memory-layer-result.js",
       "default": "./dist/memory-layer-result.js"
     },
+    "./coalescing-recurring-task": {
+      "types": "./dist/coalescing-recurring-task.d.ts",
+      "import": "./dist/coalescing-recurring-task.js",
+      "default": "./dist/coalescing-recurring-task.js"
+    },
     "./sparql-safe": {
       "types": "./dist/sparql-safe.d.ts",
       "import": "./dist/sparql-safe.js",
