@@ -450,19 +450,45 @@ function pauseReceiverMethodOnce(
   return { entered, release: releaseCall };
 }
 
-/** The member asks again: the approved generation is replaced by a pending one. */
-async function replaceApprovedJoinRequestWithPending(
+/**
+ * Ways the approved join request stops holding while nothing in the context
+ * graph's own metadata changes: the member asks again (the approved generation
+ * is replaced by a pending one), on a store with and without SPARQL UPDATE, or
+ * the requester state is cleared.
+ */
+const REQUESTER_STATE_CHANGES = [
+  'replaced',
+  'replaced on a store without update support',
+  'cleared',
+] as const;
+
+async function changeApprovedJoinRequest(
   fixture: Awaited<ReturnType<typeof approvedBareNameReplicaFixture>>,
+  change: (typeof REQUESTER_STATE_CHANGES)[number],
 ) {
-  await fixture.receiver.writeRequesterJoinRequestState(
-    CONTEXT_GRAPH_ID,
-    fixture.approvedAddress,
-    {
-      status: 'pending',
-      requestGeneration: `0x${'34'.repeat(32)}`,
-      curatorPeerId: CURATOR_PEER,
-    },
-  );
+  if (change === 'cleared') {
+    await fixture.receiver.clearRequesterJoinRequestState(
+      CONTEXT_GRAPH_ID,
+      fixture.approvedAddress,
+    );
+    return;
+  }
+  const store = fixture.receiver.store as { update?: unknown };
+  const update = store.update;
+  if (change === 'replaced on a store without update support') store.update = undefined;
+  try {
+    await fixture.receiver.writeRequesterJoinRequestState(
+      CONTEXT_GRAPH_ID,
+      fixture.approvedAddress,
+      {
+        status: 'pending',
+        requestGeneration: `0x${'34'.repeat(32)}`,
+        curatorPeerId: CURATOR_PEER,
+      },
+    );
+  } finally {
+    store.update = update;
+  }
 }
 
 describe('approved private replica delegation deadline', () => {
@@ -1726,11 +1752,11 @@ describe('approved private bare-name replica authorization', () => {
       .toBeNull();
   });
 
-  it.each([
-    { read: 'getContextGraphOwner' },
-    { read: 'getStoredContextGraphRegistrationOptions' },
-    { read: 'readRfc64PrivateRosterVersionV1' },
-  ])('accepts no catalog authority when the join request is replaced during $read', async ({ read }) => {
+  it.each(REQUESTER_STATE_CHANGES.flatMap((change) => [
+    { change, read: 'getContextGraphOwner' },
+    { change, read: 'getStoredContextGraphRegistrationOptions' },
+    { change, read: 'readRfc64PrivateRosterVersionV1' },
+  ]))('accepts no catalog authority when the join request is $change during $read', async ({ change, read }) => {
     const fixture = await approvedBareNameReplicaFixture();
     const proofReturned = pauseSuccessfulApprovedPrivateProofOnce(fixture);
     const paused = pauseReceiverMethodOnce(fixture, read);
@@ -1743,7 +1769,7 @@ describe('approved private bare-name replica authorization', () => {
     await proofReturned.returned;
     proofReturned.release();
     await paused.entered;
-    await replaceApprovedJoinRequestWithPending(fixture);
+    await changeApprovedJoinRequest(fixture, change);
     paused.release();
 
     await expect(reconciliation).rejects.toThrow('no authenticated owner authority');
@@ -1903,10 +1929,10 @@ describe('approved private bare-name replica authorization', () => {
       .resolves.toBeNull();
   });
 
-  it.each([
-    { read: 'readRfc64RegisteredAuthoritySnapshotV1' },
-    { read: 'getLocalMetadataMemberRecoveryGate' },
-  ])('returns no catalog peer roster when the join request is replaced during $read', async ({ read }) => {
+  it.each(REQUESTER_STATE_CHANGES.flatMap((change) => [
+    { change, read: 'readRfc64RegisteredAuthoritySnapshotV1' },
+    { change, read: 'getLocalMetadataMemberRecoveryGate' },
+  ]))('returns no catalog peer roster when the join request is $change during $read', async ({ change, read }) => {
     const fixture = await approvedBareNameReplicaFixture();
     await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
       CONTEXT_GRAPH_ID,
@@ -1916,7 +1942,7 @@ describe('approved private bare-name replica authorization', () => {
     await expect(fixture.receiver.resolveRfc64VerifiedPrivateRosterV1(CONTEXT_GRAPH_ID))
       .resolves.toEqual([OWNER, fixture.memberAddress].sort());
 
-    // Rewriting the requester state invalidates every graph's facts revision,
+    // A change of the requester state moves this graph's facts revision,
     // which is what lets the lookup discard a proof that was valid when it
     // started. The roster reads below run after that proof has returned.
     const proofReturned = pauseSuccessfulApprovedPrivateProofOnce(fixture);
@@ -1925,7 +1951,7 @@ describe('approved private bare-name replica authorization', () => {
     await proofReturned.returned;
     proofReturned.release();
     await paused.entered;
-    await replaceApprovedJoinRequestWithPending(fixture);
+    await changeApprovedJoinRequest(fixture, change);
     paused.release();
 
     await expect(roster).resolves.toBeNull();

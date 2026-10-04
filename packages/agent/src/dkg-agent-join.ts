@@ -1452,8 +1452,22 @@ export class JoinRequestMethods extends DKGAgentBase {
       } catch (error) {
         cache.delete(key);
         throw error;
+      } finally {
+        this.fenceRequesterJoinStateChange(contextGraphId);
       }
     });
+  }
+
+  /**
+   * The join proof behind an approved replica's reads, catalog roster and
+   * catalog authority is bound to the requester state. That state lives in
+   * its own graph, so store-level invalidation does not reach the context
+   * graph's facts revision, which is what those paths compare after the reads
+   * that follow the proof. Move it here for every attempted change, including
+   * one that failed part-way, so an in-flight result is discarded.
+   */
+  private fenceRequesterJoinStateChange(this: DKGAgent, contextGraphId: string): void {
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
   }
 
   async clearRequesterJoinRequestState(
@@ -1468,13 +1482,15 @@ export class JoinRequestMethods extends DKGAgentBase {
         await deleteByPatternWithoutCount(this.store, {
           graph: REQUESTER_JOIN_STATE_GRAPH,
           subject: requesterJoinStateSubject(contextGraphId, agentAddress),
-      });
-      await this.store.flush?.();
-      cache.delete(key);
-    } catch (error) {
-      cache.delete(key);
-      throw error;
-    }
+        });
+        await this.store.flush?.();
+        cache.delete(key);
+      } catch (error) {
+        cache.delete(key);
+        throw error;
+      } finally {
+        this.fenceRequesterJoinStateChange(contextGraphId);
+      }
     });
   }
 
