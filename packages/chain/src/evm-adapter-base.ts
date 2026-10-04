@@ -70,6 +70,7 @@ import {
 import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
+  rpcReadDescriptor,
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
