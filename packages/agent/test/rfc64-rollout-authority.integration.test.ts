@@ -6384,7 +6384,7 @@ describe('RFC-64 rollout authority integration', () => {
 
     const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
     await versionRead;
-    f.projection.markDirty(f.contextGraphId);
+    move(f);
     releaseVersion();
 
     const authority = await refresh;
