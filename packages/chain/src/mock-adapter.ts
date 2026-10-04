@@ -56,7 +56,8 @@ import {
 import { ethers } from 'ethers';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import type { AdoptedMintPublishResult } from './existing-mint-provenance.js';
-import { getMockMintedKnowledgeAssetProvenance, resolveMockPublishByTxHash, fromHex, toHex } from './mock-publish-provenance.js';
+import { getMockMintedKnowledgeAssetProvenance, resolveMockPublishByTxHash } from './mock-publish-provenance.js';
+import { fromHex, toHex } from './byte-codec.js';
 import {
   isNonexistentContextGraphStorageRevert,
   readContextGraphStorageRangeV1,
