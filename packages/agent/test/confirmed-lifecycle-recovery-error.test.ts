@@ -44,3 +44,33 @@ describe('confirmed lifecycle recovery package contract', () => {
     expect(isConfirmedNamedKaVmLifecycleRecoveryError(Object.assign(failure(), fields))).toBe(false);
   });
 });
+
+
+describe('structural recovery boundary evidence', () => {
+  function foreignError(publicationChanges: Record<string, unknown> = {}) {
+    const source = failure();
+    return Object.assign(new Error('another package copy'), { code: source.code, repairAdmission: source.repairAdmission,
+      confirmedPublication: { ...source.confirmedPublication, ...publicationChanges }, lifecycleRecovery: source.lifecycleRecovery });
+  }
+  it('recognizes a valid foreign producer without claiming its concrete class aliases', () => {
+    const error = foreignError();
+    expect(error).not.toBeInstanceOf(ConfirmedNamedKaVmLifecycleRecoveryError);
+    expect(isConfirmedNamedKaVmLifecycleRecoveryError(error)).toBe(true);
+    expect('publishedUal' in error).toBe(false);
+  });
+  it.each([
+    ['KA identity', { kaId: '1' }], ['author seal', { seal: {} }],
+    ['transaction receipt', { onChainResult: { txHash: 1, blockNumber: 12 } }],
+    ['receipt block', { onChainResult: { txHash: '0x1234', blockNumber: '12' } }],
+    ['ACK container', { v10ACKs: {} }], ['ACK peer', { v10ACKs: [{ peerId: 3 }] }],
+    ['pending flag', { lifecycleRepairPending: 'pending' }], ['graph error', { contextGraphError: 3 }],
+    ['legacy author', { authorAddress: 3 }], ['legacy assets', { kas: {} }],
+  ])('refuses malformed exposed %s fields', (_name, changes) => {
+    expect(isConfirmedNamedKaVmLifecycleRecoveryError(foreignError(changes))).toBe(false);
+  });
+  it('refuses inaccessible structural fields without throwing from the guard', () => {
+    const error = foreignError();
+    Object.defineProperty(error.confirmedPublication, 'seal', { get() { throw new Error('hostile getter'); } });
+    expect(isConfirmedNamedKaVmLifecycleRecoveryError(error)).toBe(false);
+  });
+});

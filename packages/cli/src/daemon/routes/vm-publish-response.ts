@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { RequestContext } from './context.js';
-import { isConfirmedNamedKaVmLifecycleRecoveryError } from '@origintrail-official/dkg-agent';
+import { isConfirmedNamedKaVmLifecycleRecoveryError, type ConfirmedNamedKaVmPublicationView } from '@origintrail-official/dkg-agent';
 import { storageAckPeerIdsFromPublishResult } from './storage-ack-peers.js';
 const hex = (bytes: Uint8Array): string => '0x' + Buffer.from(bytes).toString('hex');
 
@@ -13,7 +13,7 @@ export type FinalizedPublishResult = Awaited<
 };
 
 /** The same sealed-to-minted projection is used after normal completion and failed local admission. */
-export function vmPublishResponseBody(pub: FinalizedPublishResult, reason?: string): Record<string, unknown> {
+export function vmPublishResponseBody(pub: FinalizedPublishResult | ConfirmedNamedKaVmPublicationView, reason?: string): Record<string, unknown> {
   const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
   return {
     kaId: pub?.kaId,

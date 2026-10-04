@@ -1,9 +1,12 @@
 import { ConfirmedNamedKaVmLifecycleRecoveryError, isConfirmedNamedKaVmLifecycleRecoveryError,
-  type ConfirmedNamedKaVmPublication, type ConfirmedNamedKaVmLifecycleRecovery } from '../src/index.js';
+  type ConfirmedNamedKaVmPublication, type ConfirmedNamedKaVmLifecycleRecovery,
+  type ConfirmedNamedKaVmPublicationView, type ConfirmedNamedKaVmLifecycleRecoveryView } from '../src/index.js';
 import type { ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 declare const publication: ConfirmedNamedKaVmPublication;
 declare const input: ConfirmedNamedKaVmLifecycleInput;
 new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, new Error('journal unavailable'));
+const completeProducerRecovery: ConfirmedNamedKaVmLifecycleRecovery = new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, undefined).lifecycleRecovery;
+void completeProducerRecovery;
 // @ts-expect-error A tentative publication is not confirmed recovery evidence.
 new ConfirmedNamedKaVmLifecycleRecoveryError({ ...publication, status: 'tentative' }, input, undefined);
 const { assertionUri, ...unsealedPublication } = publication;
@@ -14,8 +17,16 @@ const { assertionVersion, ...incompleteRecovery } = input;
 new ConfirmedNamedKaVmLifecycleRecoveryError(publication, incompleteRecovery, undefined);
 declare const failure: unknown;
 if (isConfirmedNamedKaVmLifecycleRecoveryError(failure)) {
-  const recovery: ConfirmedNamedKaVmLifecycleRecovery = failure.lifecycleRecovery;
-  const receipt: ConfirmedNamedKaVmPublication = failure.confirmedPublication;
+  const recovery: ConfirmedNamedKaVmLifecycleRecoveryView = failure.lifecycleRecovery;
+  const receipt: ConfirmedNamedKaVmPublicationView = failure.confirmedPublication;
+  // @ts-expect-error Structural recognition does not certify concrete producer class aliases.
+  void failure.publishedUal;
+  // @ts-expect-error A structural author view does not certify the complete attestation seal.
+  void receipt.seal.authorAttestationR;
+  // @ts-expect-error Opaque receipt extras are not certified by the HTTP projection contract.
+  void receipt.onChainResult?.batchId;
+  // @ts-expect-error Structural recovery does not certify optional internal deployment evidence.
+  void recovery.publicationDeployment;
   // @ts-expect-error Confirmed recovery never authorizes publication retry.
   const resend: true = recovery.publicationRetrySafe;
   void receipt; void resend;

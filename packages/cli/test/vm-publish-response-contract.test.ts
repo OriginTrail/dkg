@@ -32,3 +32,25 @@ describe('confirmed recovery response contract', () => {
     expect(confirmedVmRecoveryRequiredResponse(incomplete)).toBeUndefined();
   });
 });
+
+
+describe('foreign recovery HTTP boundary', () => {
+  function foreignError(changes: Record<string, unknown> = {}) {
+    const { publication, input } = confirmedLifecycleRecoveryFixture();
+    const source = new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, 'another producer');
+    return Object.assign(new Error('foreign copy'), { code: source.code, repairAdmission: source.repairAdmission,
+      confirmedPublication: { ...publication, ...changes }, lifecycleRecovery: source.lifecycleRecovery });
+  }
+  it('preserves the full opaque receipt and projected ACK identities from a foreign producer', () => {
+    const error = foreignError({ v10ACKs: [{ peerId: ' peer-a ', extraReceiptField: 'kept internally' }, { peerId: 'peer-a' }] });
+    const response = confirmedVmRecoveryRequiredResponse(error)!;
+    expect(response).toMatchObject({ status: 'confirmed', storageAckPeerIds: ['peer-a'],
+      lifecycleRepairAdmitted: false, lifecycleRepairPending: false, recovery: { publicationRetrySafe: false } });
+    expect(response.onChainResult).toBe(error.confirmedPublication.onChainResult);
+    expect(response.recovery).toBe(error.lifecycleRecovery);
+  });
+  it.each([{ seal: {} }, { v10ACKs: {} }, { onChainResult: { txHash: [], blockNumber: 'bad' } }])(
+    'refuses malformed consumer fields instead of projecting unsafe assumptions: %j', changes => {
+      expect(confirmedVmRecoveryRequiredResponse(foreignError(changes))).toBeUndefined();
+    });
+});
