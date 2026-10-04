@@ -1,5 +1,4 @@
 import { snapshotCatalogScope, assertOpenPolicyMatchesCatalogScope, assertAcceptedPolicyMatchesCatalogScope } from './catalog-policy-scope-v1.js';
-import { rfc64CatalogTargetScopeKeyV1 } from './catalog-operational-applied-heads-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**

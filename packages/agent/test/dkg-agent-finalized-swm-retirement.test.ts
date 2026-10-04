@@ -69,15 +69,16 @@ describe('agent-owned finalized SWM retirement', () => {
     type Registration = { configureSwmTargetExecutorSessionsV1(ports: SwmTargetExecutorPortsV1): void };
     const prototype = DKGAgent.prototype as unknown as Registration;
     const configure = prototype.configureSwmTargetExecutorSessionsV1;
-    let captured!: SwmTargetExecutorPortsV1;
-    let capturedOwner!: DKGAgent;
+    const registrations: Array<{ owner: DKGAgent; ports: SwmTargetExecutorPortsV1 }> = [];
     const registration = vi.spyOn(prototype, 'configureSwmTargetExecutorSessionsV1')
       .mockImplementation(function (this: DKGAgent, ports) {
-        captured = ports; capturedOwner = this; configure.call(this, ports);
+        registrations.push({ owner: this, ports }); configure.call(this, ports);
       });
     try {
       const { agent, store, marker } = await fixture();
-      expect(capturedOwner).toBe(agent);
+      expect(registrations).toHaveLength(1);
+      const { owner, ports: captured } = registrations[0]!;
+      expect(owner).toBe(agent);
       expect(captured.store).toBe(agent.store);
       const markerRows = await marker();
       const swmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.SharedWorkingMemory,
