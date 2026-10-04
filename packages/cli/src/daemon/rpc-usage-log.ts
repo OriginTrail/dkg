@@ -26,6 +26,8 @@
 
 import {
   normalizeRpcEndpointSlotLabel,
+  mergeRpcUsageWindows,
+  drainRpcReadBatchingWindow,
   normalizeRpcUsageWindow,
   rpcUsageWindowTotal,
   type RpcUsageDrainable,
@@ -162,6 +164,18 @@ export interface RpcTelemetrySource extends RpcUsageSource {
   drainRpcRequestGovernor?: () => RpcRequestGovernorWindow;
   /** Process-wide like the governor: one drain owner for every adapter. */
   drainRpcReadBatching?: () => RpcReadBatchingWindow;
+}
+
+/** Keep live adapter deltas and the process-owned drains in one telemetry source. */
+export function createDaemonRpcTelemetrySource(
+  usageSources: readonly (() => RpcUsageWindow | undefined)[],
+  governor?: { drainWindow(): RpcRequestGovernorWindow },
+): RpcTelemetrySource {
+  return {
+    drainRpcUsage: () => mergeRpcUsageWindows(...usageSources.map(read => read())),
+    ...(governor === undefined ? {} : { drainRpcRequestGovernor: () => governor.drainWindow() }),
+    drainRpcReadBatching: drainRpcReadBatchingWindow,
+  };
 }
 
 /**
