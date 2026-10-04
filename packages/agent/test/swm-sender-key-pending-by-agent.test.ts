@@ -9,8 +9,8 @@
 // PR-2 turns the no-peerId branch into a soft success: we durably
 // remember the package bytes in `pendingSenderKeyByAgent` (keyed by
 // lowercased recipientAgentAddress) and return success up the loop.
-// A subsequent `connection:open` event or later publish retry drives
-// queued-package drain and replays each queued package via
+// A subsequent `connection:open` event, later publish, or connected-peer
+// retry tick drives queued-package drain and replays each queued package via
 // `messenger.sendReliable` once current CG authority binds its exact key to a
 // peer route.
 //
@@ -1012,6 +1012,9 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
       ctx: { operationId: 'test-op', operationName: 'share' },
     });
 
+    // Setup fans out to all recipients concurrently, so the sends to A and B
+    // may reach the messenger in either order.
+    expect([...sendPeers].sort()).toEqual([peerA, peerB].sort());
     const queued = internals.pendingSenderKeyByAgent.get(recipient.agentAddress.toLowerCase());
     expect(queued).toHaveLength(1);
     expect(queued?.[0].recipientPeerId).toBe(peerB);
@@ -1028,7 +1031,69 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     );
 
     expect(drained).toBe(1);
-    expect(sendPeers).toEqual([peerA, peerB, peerB]);
+    // The drain sends only the retry owed to B; A already accepted.
+    expect(sendPeers.slice(2)).toEqual([peerB]);
+    expect(internals.pendingSenderKeyByAgent.size).toBe(0);
+  });
+
+  it('retries a transiently denied setup while the recipient remains connected', async () => {
+    const boot = await bootAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    const peerId = '12D3KooWAlreadyConnectedSenderKeyRecipient';
+    const recipient = makeFakeRecipient({ peerId });
+    const sender = agentFromPrivateKey(
+      ethers.Wallet.createRandom().privateKey,
+      'sender',
+    ) as AgentKeyRecord & { privateKey: string };
+    const sendPeers: string[] = [];
+
+    installStubMessenger(internals, async (target): Promise<ReliableSendResult> => {
+      sendPeers.push(target);
+      return {
+        delivered: true,
+        response: senderKeyAck(
+          sendPeers.length > 1,
+          sendPeers.length === 1 ? 'authority is still converging' : undefined,
+          sendPeers.length === 1 ? 'agent-gate-pending' : undefined,
+        ),
+        attempts: 1,
+        messageId: `sender-key-attempt-${sendPeers.length}`,
+      };
+    });
+    await internals.createAndDistributeSwmSenderKeyEpoch({
+      contextGraphId: 'test-cg/connected-retry',
+      sender,
+      recipients: [recipient],
+      membershipHash: 'sha256:connected-retry',
+      ctx: { operationId: 'test-op', operationName: 'share' },
+    });
+    expect(internals.pendingSenderKeyByAgent.get(recipient.agentAddress.toLowerCase()))
+      .toHaveLength(1);
+    installCurrentRecipientAuthority(internals, [recipient]);
+
+    const node = internals.node as unknown as object;
+    const beforeStarted = Object.getOwnPropertyDescriptor(node, 'isStarted');
+    const beforeLibp2p = Object.getOwnPropertyDescriptor(node, 'libp2p');
+    Object.defineProperties(node, {
+      isStarted: { configurable: true, value: true },
+      libp2p: {
+        configurable: true,
+        value: { getPeers: () => [{ toString: () => peerId }] },
+      },
+    });
+    try {
+      const retry = internals as unknown as {
+        drainPendingSenderKeysForConnectedPeers(): Promise<number>;
+      };
+      expect(await retry.drainPendingSenderKeysForConnectedPeers()).toBe(1);
+    } finally {
+      if (beforeStarted) Object.defineProperty(node, 'isStarted', beforeStarted);
+      else Reflect.deleteProperty(node, 'isStarted');
+      if (beforeLibp2p) Object.defineProperty(node, 'libp2p', beforeLibp2p);
+      else Reflect.deleteProperty(node, 'libp2p');
+    }
+    expect(sendPeers).toEqual([peerId, peerId]);
     expect(internals.pendingSenderKeyByAgent.size).toBe(0);
   });
 

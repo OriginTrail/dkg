@@ -196,7 +196,7 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     expect(markProjectionDirty).toHaveBeenCalledTimes(1);
   });
 
-  it('treats replaceGraphAndSubject as opaque when replacement payloads are empty', async () => {
+  it('fences both known replacement graphs even when their payloads are empty', async () => {
     const inner = new OxigraphStore();
     Object.defineProperty(inner, 'replaceGraphAndSubject', {
       value: vi.fn(async () => undefined),
@@ -214,6 +214,7 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       },
     );
     const before = projection.readAuthorityFactsRevision;
+    const unrelatedBefore = projection.captureContextGraphAuthorityFactsFence('unrelated-private-cg');
 
     await wrapped.replaceGraphAndSubject!(
       'urn:dkg:recipient-cache',
@@ -223,6 +224,34 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       [],
     );
 
-    expect(projection.readAuthorityFactsRevision).toBe(before + 1);
+    expect(projection.readAuthorityFactsRevision).toBe(before + 2);
+    expect(unrelatedBefore.assertCurrent()).toBe(true);
+  });
+
+  it('keeps unrelated private proof revisions stable across graph-scoped mutations', async () => {
+    const inner = new OxigraphStore();
+    const projection = new ContextGraphMetaProjection(inner);
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      () => undefined,
+      (quads, targetGraph) => {
+        if (targetGraph !== undefined) projection.markDirtyForGraph(targetGraph);
+        if (quads !== undefined) projection.markDirtyFromQuads(quads);
+        else if (targetGraph === undefined) projection.markAllDirty();
+      },
+    );
+    const contextGraphId = 'unrelated-private-cg';
+    const before = projection.captureContextGraphAuthorityFactsFence(contextGraphId);
+    const row = quad(JOB, 'urn:dkg:publisher:status', '"ready"');
+
+    await wrapped.insert([row]);
+    await wrapped.deleteByPattern({ graph: GRAPH });
+    await wrapped.replaceGraph!(GRAPH, [row]);
+    await wrapped.dropGraph(GRAPH);
+    expect(before.assertCurrent()).toBe(true);
+
+    await wrapped.replaceGraph!(contextGraphMetaGraphUri(contextGraphId), []);
+    expect(before.assertCurrent()).toBe(false);
+    await wrapped.close();
   });
 });

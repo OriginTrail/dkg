@@ -854,6 +854,7 @@ import { reconcileRfc64CatalogAuthorityPlanV1 } from
 import {
   initializeRfc64LegacySwmBoundaryV1,
   prepareRfc64LateLegacySwmBoundaryV1,
+  retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
 
@@ -2060,6 +2061,24 @@ type StructuralCuratorPeerLookup =
     };
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  async retireLegacySwmAfterVerifiedVmTwin(
+    this: DKGAgent,
+    input: Readonly<{
+      contextGraphId: string;
+      kaUal: string;
+      assertionVersion: string | bigint;
+      subGraphName?: string;
+    }>,
+  ): Promise<void> {
+    await retireRfc64LegacySwmAfterFinalizedVmV1(
+      this,
+      input.contextGraphId,
+      input.kaUal,
+      String(input.assertionVersion),
+      input.subGraphName,
+    );
+  }
+
   async retireFinalizedSwmTwinCandidate(
     candidate: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
@@ -2633,18 +2652,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.messenger.setOutboxResponseHandler(PROTOCOL_JOIN_REQUEST, async (result) => {
       await this.handleJoinRequestOutboxResponse(result);
     });
-    // Restart contract (see DKGAgentBase): the manager built here starts with
-    // no subscriptions and no handlers, so the registries that mirror the
-    // previous manager must not outlive it. A detached subscribe from the
-    // previous session can repopulate them after stop() returned, hence the
-    // reset lives at the manager swap and not only in stop().
-    this.resetGossipSessionState();
+    // Snapshot live intent before any durable read or detached persistence
+    // completion. Durable rows claim their part of this startup plan below.
+    const liveIntents = [...this.subscribedContextGraphs].filter(
+      ([, subscription]) => subscription.subscribed && !subscription.pendingMeta,
+    );
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
       chainId: this.config.networkIdentity?.chainId,
       isPeerAccepted: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
     });
-    const isRestart = ++this.gossipSessionCount > 1;
+    for (const [id, subscription] of liveIntents) {
+      this.gossipSession.startupLiveIntents.set(id, { syncMode: subscription.syncMode });
+    }
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphsFromDurableState();
@@ -3834,9 +3854,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const systemContextGraph of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
       this.subscribeToContextGraph(systemContextGraph, { syncMode: 'always-on' });
     }
-    // Same-instance restart: durable rows were replayed by rehydration above;
-    // give the live process-local subscriptions the wiring the new manager lacks.
-    if (isRestart) this.restoreLiveContextGraphGossipSubscriptions();
+    this.applyStartupContextGraphGossipPlan();
 
     // Connect to bootstrap peers
     if (this.config.bootstrapPeers) {
@@ -4061,6 +4079,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // this is now the only outbox tick — chat (PR-3) and every
     // future migrated protocol drain on the same cadence so
     // operators see a single "outbox tick" beat.
+    let senderKeyRetryInFlight = false;
     this.messengerOutboxTimer = setInterval(() => {
       const now = Date.now();
       this.messenger.processOutboxTick(now)
@@ -4079,6 +4098,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           }
         });
+      // A retryable ACK is a delivered Messenger response, so it has no
+      // outbox obligation. The sender-key queue owns that retry and must
+      // progress even if both peers stay connected and no further share is
+      // published. Keep one pass in flight and reuse its current-authority
+      // recipient check before every resend.
+      if (!senderKeyRetryInFlight && this.pendingSenderKeyByAgent.size > 0) {
+        senderKeyRetryInFlight = true;
+        void this.drainPendingSenderKeysForConnectedPeers()
+          .then((drained) => {
+            if (drained > 0) {
+              this.log.info(ctx, `Sender-key retry delivered ${drained} pending package(s)`);
+            }
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log.warn(ctx, `Sender-key retry tick failed: ${message}`);
+          })
+          .finally(() => { senderKeyRetryInFlight = false; });
+      }
     }, MESSAGE_OUTBOX_TICK_MS);
     if (this.messengerOutboxTimer.unref) this.messengerOutboxTimer.unref();
 
@@ -6479,13 +6517,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             this.invalidateListContextGraphsCache();
             this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
+              let retiredTwin: FinalizedSwmTwinRetirement | undefined;
               const retirement = await reconcileFinalizedSwmTwin({
                 store: this.store,
                 writeLocks: this.writeLocks,
                 asset: authentication.asset,
-                retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+                retire: async (candidate) => {
+                  await this.retireFinalizedSwmTwinCandidate(candidate, ctx);
+                  retiredTwin = candidate;
+                },
               });
               if (retirement === 'retired') {
+                await this.retireLegacySwmAfterVerifiedVmTwin({
+                  contextGraphId: asset.contextGraphId,
+                  kaUal: asset.ual,
+                  assertionVersion: asset.assertionVersion,
+                  // The marker of the namespace whose twin was verified and
+                  // retired. Without it a twin in a named subgraph would
+                  // retire the root marker of the same asset.
+                  subGraphName: retiredTwin?.subGraphName,
+                });
                 this.invalidateListContextGraphsCache();
                 this.log.info(
                   ctx,
@@ -8115,21 +8166,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** Focused VM-recovery operation that returns clean per-peer miss evidence. */
-  async syncVmRecoveryFromConnectedPeers(
-    this: DKGAgent,
-    contextGraphId: string,
-    options?: ContextGraphCatchupOptions,
-  ): Promise<{ catchup: ContextGraphCatchupResult; cleanMissPeerIds: string[] }> {
-    const catchup = await this.syncContextGraphFromConnectedPeers(contextGraphId, options);
-    return {
-      catchup,
-      // Embedders may still override the catch-up method with the pre-evidence
-      // result shape. Treat that legacy shape as no proof; production results
-      // always carry the immutable field below.
-      cleanMissPeerIds: [...(catchup.cleanSharedMemoryPeerIds ?? [])],
-    };
-  }
-
   selectCatchupPeerWindow(this: DKGAgent,
     peers: Array<{ toString(): string }>,
     options?: { maxPeers?: number; peerRotationKey?: string; peerPriorityRanks?: ReadonlyMap<string, number> },
@@ -10724,10 +10760,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const store = this.config.contextGraphSubscriptionStore;
     this.contextGraphSubscriptionRehydrationSlotIds.clear();
     this.contextGraphSubscriptionRehydrationPendingIds.clear();
-    this.contextGraphSubscriptionRehydrationPassAccountedIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
+    const startupPlan = this.gossipSession.beginDurableStartupPlan(
+      this.contextGraphSubscriptionRehydrationAccountedIds,
+    );
     try {
       // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
       // by start(); their persisted rows must NOT be rehydrated here too. Re-
@@ -10736,6 +10774,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // dormant. Exclude them from the rehydration set entirely.
       const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
       const persistedRows = await store.loadAll();
+      startupPlan.claimDurableRows(persistedRows);
       // A name-hash placeholder whose verified cleartext row is also durable
       // was adopted earlier; the crash window between the two writes can
       // leave both. Never reactivate the placeholder. Record the adoption as
@@ -11149,12 +11188,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       authorityBudget?.dispose();
-      // Freeze the accounting as this pass leaves it: rebuilt from the rows it
-      // read, or inherited when it failed. No await separates the rebuild from
-      // this copy, so a persistence completion cannot land in between.
-      for (const id of this.contextGraphSubscriptionRehydrationAccountedIds) {
-        this.contextGraphSubscriptionRehydrationPassAccountedIds.add(id);
-      }
+      startupPlan.finish();
     }
   }
 

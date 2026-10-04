@@ -1,10 +1,11 @@
 /** The pass-local registered-authority observation: one typed state drives retry, wire choice and the log label. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   VM_RECOVERY_REGISTERED_PUBLIC_MAX_AGE_MS,
   VmRecoveryPassAuthority,
   type VmRecoveryPassAuthorityOwner,
 } from '../src/vm-recovery-pass-authority.js';
+import type { VmRecoveryAuthorityRetryPolicy } from '../src/vm-recovery-experiment-policy.js';
 import type { RegisteredContextGraphAuthority } from '../src/registered-context-graph-authority.js';
 
 const publicAnswer: RegisteredContextGraphAuthority = { kind: 'public', onChainId: 1n };
@@ -13,9 +14,9 @@ const unavailableAnswer: RegisteredContextGraphAuthority = {
   kind: 'unavailable', onChainId: 1n, reason: 'chain-access-policy-unavailable',
 };
 
-function authorityWithClock() {
+function authorityWithClock(retryPolicy: VmRecoveryAuthorityRetryPolicy = { kind: 'disabled' }) {
   let now = 1_000;
-  return { authority: new VmRecoveryPassAuthority(() => now), advance: (ms: number) => { now += ms; } };
+  return { authority: new VmRecoveryPassAuthority(() => now, undefined, retryPolicy), advance: (ms: number) => { now += ms; } };
 }
 
 describe('VmRecoveryPassAuthority', () => {
@@ -24,7 +25,7 @@ describe('VmRecoveryPassAuthority', () => {
     expect(authority.observation).toEqual({ kind: 'not-read' });
     expect(authority.isPublic).toBe(false);
     expect(authority.missed).toBe(false);
-    expect(authority.retryDue(0)).toBe(false);
+    expect(authority.retryDue()).toBe(false);
     expect(authority.label).toBe('not-read');
   });
 
@@ -43,7 +44,7 @@ describe('VmRecoveryPassAuthority', () => {
       advance(60_000);
       expect(authority.isPublic).toBe(false);
       expect(authority.missed).toBe(false);
-      expect(authority.retryDue(0)).toBe(false);
+      expect(authority.retryDue()).toBe(false);
       expect(authority.label).toBe(label);
     }
   });
@@ -64,28 +65,64 @@ describe('VmRecoveryPassAuthority', () => {
     expect(authority.label).toBe('error');
   });
 
-  it('spaces retries from the start of the most recent read', async () => {
+  it('keeps default disabled retries ineligible after either kind of miss, with no wait', async () => {
     const { authority, advance } = authorityWithClock();
+    for (const read of [async () => unavailableAnswer, async () => { throw new Error('unavailable'); }]) {
+      await authority.read(read);
+      advance(60_000);
+      expect(authority.missed).toBe(true);
+      expect(authority.retryDue()).toBe(false);
+      await expect(authority.waitForMissRetry()).resolves.toBe(false);
+    }
+  });
+
+  it('uses the constructor spacing for its cancellable entry wait', async () => {
+    vi.useFakeTimers();
+    try {
+      const authority = new VmRecoveryPassAuthority(() => Date.now(), undefined,
+        { kind: 'spaced', minIntervalMs: 5_000 });
+      await authority.read(async () => unavailableAnswer);
+      let settled = false;
+      const wait = authority.waitForMissRetry().then(value => { settled = true; return value; });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      expect(authority.retryDue()).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(wait).resolves.toBe(true);
+      expect(authority.retryDue()).toBe(true);
+
+      await authority.read(async () => unavailableAnswer);
+      const controller = new AbortController();
+      const cancelled = authority.waitForMissRetry(controller.signal);
+      controller.abort();
+      await expect(cancelled).resolves.toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(authority.retryDue()).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('spaces retries from the start of the most recent read', async () => {
+    const { authority, advance } = authorityWithClock({ kind: 'spaced', minIntervalMs: 5_000 });
     await authority.read(async () => unavailableAnswer);
-    expect(authority.retryDue(5_000)).toBe(false);
+    expect(authority.retryDue()).toBe(false);
     advance(4_999);
-    expect(authority.retryDue(5_000)).toBe(false);
+    expect(authority.retryDue()).toBe(false);
     advance(1);
-    expect(authority.retryDue(5_000)).toBe(true);
+    expect(authority.retryDue()).toBe(true);
     // A new read restarts the spacing.
     await authority.read(async () => unavailableAnswer);
-    expect(authority.retryDue(5_000)).toBe(false);
+    expect(authority.retryDue()).toBe(false);
   });
 
   it('lets a later answer supersede an earlier miss and stop the retries', async () => {
-    const { authority, advance } = authorityWithClock();
+    const { authority, advance } = authorityWithClock({ kind: 'spaced', minIntervalMs: 5_000 });
     await authority.read(async () => unavailableAnswer);
     advance(10_000);
-    expect(authority.retryDue(5_000)).toBe(true);
+    expect(authority.retryDue()).toBe(true);
     await authority.read(async () => publicAnswer);
     advance(10_000);
     expect(authority.isPublic).toBe(true);
-    expect(authority.retryDue(5_000)).toBe(false);
+    expect(authority.retryDue()).toBe(false);
     // And an answer that regresses to a miss is a miss again.
     await authority.read(async () => unavailableAnswer);
     expect(authority.isPublic).toBe(false);

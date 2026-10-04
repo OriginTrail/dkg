@@ -1837,6 +1837,7 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(requeued.state).toBe('failed_retrying');
     expect(requeued.attempt).toMatchObject({ count: 1, maxRetries: 5, nextRetryAt: now + 1_000 });
     expect(requeued.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+    expect(requeued.attempt.lastError?.retryable).toBe(true);
     expect(requeued.reason).toBeUndefined();
     expect(requeued.lease).toBeUndefined();
 

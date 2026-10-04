@@ -837,11 +837,13 @@ export interface DurableContextGraphSubscriptionBinding {
   onChainHash?: string;
 }
 
+/** @deprecated Compatibility shape for retired negative-cache store adapters. */
 export interface VmReconcilePeerTopologyPeer {
   peerId: string;
   core: boolean;
 }
 
+/** @deprecated Compatibility shape; VM recovery no longer reads a miss cache. */
 export type VmReconcilePeerTopology =
   | { kind: 'unreadable' }
   | {
@@ -852,7 +854,7 @@ export type VmReconcilePeerTopology =
     peers: VmReconcilePeerTopologyPeer[];
   };
 
-/** Historical proof attached to a cached miss, separate from live topology. */
+/** @deprecated Historical shape for retired negative-cache store adapters. */
 export interface VmReconcilePeerTopologyEvidence {
   topology: VmReconcilePeerTopology;
   cleanMissPeerIds: string[];
@@ -863,10 +865,27 @@ export interface ContextGraphSubscriptionStore {
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   loadVmReconcileNegative?(cacheKey: string): Promise<VmReconcileNegativeRecord | null>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
+}
+
+/** @deprecated Retained for custom subscription stores; the runtime no longer consumes these records. */
+export interface VmReconcileNegativeRecord {
+  cacheKey: string;
+  localCgId: string;
+  failures: number;
+  nextRetryAt: number;
+  swmGen: string;
+  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  peerTopologyKey: string;
+  peerTopology?: VmReconcilePeerTopology;
+  cleanMissPeerIds?: string[];
 }
 
 /**
@@ -899,26 +918,6 @@ export interface SelectedVmReconcileCursorRecord {
   onChainContextGraphId: string;
   nameHash: string;
   watermark: number;
-}
-
-/** Restart-durable, generation-gated record of one authoritative no-match scan. */
-export interface VmReconcileNegativeRecord {
-  cacheKey: string;
-  localCgId: string;
-  failures: number;
-  nextRetryAt: number;
-  swmGen: string;
-  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-  /**
-   * Legacy serialized topology contract. Required during the v1-to-v2
-   * migration so existing custom stores can keep reading and persisting the
-   * field they were compiled against.
-   */
-  peerTopologyKey: string;
-  /** Typed topology used by v2-aware stores; absent when loading a legacy row. */
-  peerTopology?: VmReconcilePeerTopology;
-  /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
-  cleanMissPeerIds?: string[];
 }
 
 /** Fences for experimental transport reuse; never asset or absence authority. */

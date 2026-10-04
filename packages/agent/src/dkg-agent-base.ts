@@ -44,6 +44,7 @@ import type { Rfc64CatalogShadowObservabilityRuntimeV1 } from
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphSubscriptionPersistScheduler } from './context-graph-subscription-persist-scheduler.js';
+import { GossipSession } from './gossip-session.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SlotFactsIndex } from './context-graph-claim-proof.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
@@ -140,7 +141,6 @@ import {
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
-  type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   isSparqlUpdateOperation,
@@ -397,8 +397,6 @@ import {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
-  type VmReconcileNegativeRecord,
-  type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
@@ -541,7 +539,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(undefined, pattern.graph),
         'deleteByPattern',
       );
     },
@@ -549,7 +547,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => deleteByPatternWithoutCount(innerStore, pattern, options),
         () => true,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(undefined, pattern.graph),
         'deleteByPattern',
       );
     },
@@ -571,7 +569,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.dropGraph(graphUri, options),
         () => true,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(undefined, graphUri),
         'dropGraph',
       );
     },
@@ -579,7 +577,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       ? (graphUri, quads, options) => invalidateAfterMutation(
           () => innerStore.replaceGraph!(graphUri, quads, options),
           () => true,
-          () => markProjectionDirty?.(),
+          () => markProjectionDirty?.(undefined, graphUri),
           'replaceGraph',
         )
       : undefined,
@@ -599,9 +597,12 @@ export function createListContextGraphsCacheInvalidatingStore(
               options,
             ),
             () => true,
-            // A complete replacement can delete recipient facts not present in
-            // the replacement payload. Treat it as opaque authority mutation.
-            () => markProjectionDirty?.(),
+            // Both deletion targets are named. A graph-scoped invalidation
+            // covers inserted and removed facts without scanning the payload.
+            () => {
+              markProjectionDirty?.(undefined, graphUri);
+              markProjectionDirty?.(undefined, metaGraphUri);
+            },
             'replaceGraphAndSubject',
           )
       : undefined,
@@ -630,7 +631,38 @@ export function createListContextGraphsCacheInvalidatingStore(
       ? (input, options) => invalidateAfterMutation(
           () => innerStore.rfc64AuthorCommitCasV1!(input, options),
           result => result === 'committed',
-          () => markProjectionDirty?.(),
+          () => {
+            // The CAS names every graph it replaces. A graph-wide dirty mark
+            // here invalidates an unrelated private CG's own metadata proof
+            // after every authored row, even though the CAS only changed this
+            // exact projection and its control subjects. Fence each named
+            // target, including deleted facts, without losing the conservative
+            // all-graph fallback used by genuinely opaque store mutations.
+            if (markProjectionDirty === undefined) return;
+            markProjectionDirty(undefined, input.sharedProjectionGraph);
+            markProjectionDirty(undefined, input.authorSealGraph);
+            if ('currentHead' in input) {
+              for (const transition of [
+                input.currentHead,
+                input.subgraphMutationGeneration,
+                input.contextGraphMutationGeneration,
+                input.appliedSet,
+              ]) {
+                markProjectionDirty(undefined, transition.graphUri);
+              }
+            } else {
+              markProjectionDirty(undefined, input.currentHeadGraph);
+              for (const transition of [
+                input.kaStateDigest,
+                input.subgraphMutationGeneration,
+                input.contextGraphMutationGeneration,
+                input.appliedSet,
+                ...input.sealInvalidations,
+              ]) {
+                markProjectionDirty(undefined, transition.graphUri);
+              }
+            }
+          },
           'rfc64AuthorCommitCasV1',
         )
       : undefined,
@@ -695,9 +727,8 @@ export function createListContextGraphsCacheInvalidatingStore(
  *    The subscribe helpers short-circuit on these records, so a stale copy
  *    makes a restarted node silently deaf: `gossipRegistered`,
  *    `sharedMemoryGossipRegistered`, `swmHostModeSubscribed`,
- *    `swmHostModeCurated` and `swmHostModeHandlers`. They are reset by
- *    {@link resetGossipSessionState} (end of `stop()` and again right before
- *    `start()` builds the replacement manager).
+ *    `swmHostModeCurated` and `swmHostModeHandlers`. They live with that
+ *    manager in one {@link GossipSession}, retired as a unit by `stop()`.
  * 2. Session-scoped, owned by a lifecycle runtime that `stop()` closes and
  *    `start()` re-opens or rebuilds: the router, messenger, peer resolver and
  *    network admission, the peer-sync session, the chain and VM-reconcile
@@ -715,9 +746,9 @@ export function createListContextGraphsCacheInvalidatingStore(
  * `start()` re-derives kind 1 from kind 3, so that a restart ends in the state
  * a fresh process would reach from the same durable stores, plus the
  * process-local (on-demand, or store-less) subscriptions that were live:
- * `rehydrateContextGraphsFromDurableState()` replays the durable rows behind
- * their authority gate, and `restoreLiveContextGraphGossipSubscriptions()`
- * re-arms the live process-local ones.
+ * `start()` snapshots live intents, then the durable startup read removes its
+ * rows from that plan and replays them behind the authority gate. The same
+ * subscription wiring applies the remaining process-local intents.
  */
 export class DKGAgentBase {
   readonly wallet: AgentWallet;
@@ -747,7 +778,12 @@ export class DKGAgentBase {
    * these overrides folded into the defaults.
    */
   protected _promoteQueueConfig?: Partial<AsyncPromoteQueueConfig>;
-  gossip!: GossipSubManager;
+  protected gossipSession = new GossipSession();
+  get gossip(): GossipSubManager { return this.gossipSession.requireManager(); }
+  set gossip(manager: GossipSubManager) {
+    this.gossipSession.retire();
+    this.gossipSession = new GossipSession(manager);
+  }
   router!: ProtocolRouter;
   messenger!: Messenger;
   networkAdmission: NetworkAdmissionService = new NetworkAdmissionService();
@@ -827,17 +863,17 @@ export class DKGAgentBase {
    *
    * Session-scoped, together with {@link swmHostModeCurated} and
    * {@link swmHostModeHandlers}: they describe handlers installed on the
-   * current `GossipSubManager` and are reset by {@link resetGossipSessionState}
+   * current `GossipSubManager` and are owned by its {@link GossipSession}
    * (restart contract on {@link DKGAgentBase}). The persisted host-mode
    * markers in `swmHostModeStore` are the durable side.
    */
-  protected readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
+  protected get swmHostModeSubscribed() { return this.gossipSession.swmHostModeSubscribed; }
   /**
    * Cached curation classification for each host-mode handler. The handler
    * reads this map before dispatch so the strip can cover both legacy and
    * chunked envelopes without a store-backed policy lookup per message.
    */
-  protected readonly swmHostModeCurated = new Map<string, boolean>();
+  protected get swmHostModeCurated() { return this.gossipSession.swmHostModeCurated; }
   /**
    * Per-CG reference to the host-mode gossip handler closure. Kept
    * so we can call `gossip.offMessage(topic, handler)` to remove
@@ -851,7 +887,7 @@ export class DKGAgentBase {
    * Keyed by the canonical wire-form id (same invariant as
    * `swmHostModeSubscribed`); see {@link canonicalSwmHostModeKey}.
    */
-  protected readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
+  protected get swmHostModeHandlers() { return this.gossipSession.swmHostModeHandlers; }
   /** Async lock for the host-mode reconciler so simultaneous calls don't double-subscribe. */
   protected hostModeReconcileInflight?: Promise<void>;
   /** Rotating cursor for bounded host-mode reconcile sweeps over known context graphs. */
@@ -1121,8 +1157,6 @@ export class DKGAgentBase {
     'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
     1_000,
   );
-  static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
     'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
     1_000,
@@ -1376,20 +1410,6 @@ export class DKGAgentBase {
   }
   /** StorageACK declines per minute bucket and code, for the last hour. */
   protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
-  /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
-  protected readonly vmReconcileNegativeCache = new Map<
-    string,
-    Omit<
-      VmReconcileNegativeRecord,
-      'cacheKey' | 'peerTopologyKey' | 'peerTopology' | 'cleanMissPeerIds'
-    > & {
-      peerTopology: VmReconcilePeerTopology;
-      cleanMissPeerIds: string[];
-    }
-  >();
-  /** Bounded access-ordered keys already consulted in the durable store. */
-  protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
-  protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
   protected readonly vmReconcileTransportBudgetPolicy = new VmRecoveryTransportBudgetPolicy();
@@ -1575,16 +1595,6 @@ export class DKGAgentBase {
   /** Non-hosted rows waiting behind the rolling rehydration cap. */
   protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
-  /**
-   * {@link contextGraphSubscriptionRehydrationAccountedIds} as the latest
-   * rehydration pass left it: the non-system rows that pass read, or the
-   * accounting it inherited when it failed. Only the pass writes it, and
-   * `start()` runs one pass per session, so the restart re-arm
-   * (`restoreLiveContextGraphGossipSubscriptions()`) decides on a fixed set.
-   * The live accounting keeps following persistence completions, including
-   * one from a retired session.
-   */
-  protected readonly contextGraphSubscriptionRehydrationPassAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
@@ -1651,37 +1661,13 @@ export class DKGAgentBase {
       this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
     }
   }
-  /**
-   * Session-scoped (see the restart contract on {@link DKGAgentBase}): the
-   * context graphs whose publish/app/update/finalization topics are subscribed
-   * on the CURRENT `GossipSubManager`. Cleared by
-   * {@link resetGossipSessionState} whenever that manager is retired.
-   */
-  protected readonly gossipRegistered = new Set<string>();
-  /** Session-scoped, like {@link gossipRegistered}: member-mode SWM topics on the current manager. */
-  protected readonly sharedMemoryGossipRegistered = new Set<string>();
-  /**
-   * How many `GossipSubManager`s `start()` has built for this instance. Above
-   * one, the running `start()` is a same-instance restart.
-   */
-  protected gossipSessionCount = 0;
-  /**
-   * Forget everything recorded about the retired `GossipSubManager`'s
-   * subscriptions and handlers: the five session-scoped registries of the
-   * restart contract on {@link DKGAgentBase}. This is a plain in-memory
-   * `clear()`. It must never go through `unsubscribeFromContextGraph` or
-   * `unwireSwmHostModeHandler`, which also change durable state (persisted
-   * subscription rows, host-mode markers, sync scope): a restart drops the
-   * wiring, not the intent behind it.
-   */
-  protected resetGossipSessionState(): void {
-    // Optional chaining, like the other registries `stop()` touches: partial
-    // hosts built on the prototype never ran these field initializers.
-    this.gossipRegistered?.clear();
-    this.sharedMemoryGossipRegistered?.clear();
-    this.swmHostModeSubscribed?.clear();
-    this.swmHostModeCurated?.clear();
-    this.swmHostModeHandlers?.clear();
+  protected get gossipRegistered() { return this.gossipSession.gossipRegistered; }
+  protected get sharedMemoryGossipRegistered() { return this.gossipSession.sharedMemoryGossipRegistered; }
+
+  /** Retire the owner without touching durable subscription or host-mode intent. */
+  protected retireGossipSession(): void {
+    this.gossipSession.retire();
+    this.gossipSession = new GossipSession();
   }
   protected readonly seenOnChainIds = new Set<string>();
   /**
