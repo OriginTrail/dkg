@@ -101,20 +101,53 @@ test('fail-fast preserves failure and unexecuted registered work', async t => {
   assert.ok(receipt.suites.slice(1).every(s => s.result === 'NOT_RUN'));
 });
 
-test('interruption records CANCELLED and NOT_RUN and exits nonzero', async t => {
-  const dir = setup(t, { first: 'echo ready; exec sleep 30' });
-  const run = launch(dir);
-  const deadline = Date.now() + 5000;
-  let ready = false;
+const alive = pid => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
+};
+async function until(predicate, timeout = 5000) {
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    try { ready = report(dir).suites[0]?.result === 'RUNNING'; } catch { /* awaiting report */ }
-    if (ready) break;
+    if (predicate()) return true;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  assert.ok(ready, 'suite reached RUNNING');
+  return false;
+}
+
+test('interruption terminates the ready suite and descendant and records unfinished work', async t => {
+  const dir = setup(t, { first: `
+echo $$ > "$SUITE_PID_FILE"
+bash -c 'echo $$ > "$DESCENDANT_PID_FILE"; exec sleep 300' &
+descendant=$!
+trap 'wait "$descendant" 2>/dev/null || true; exit 0' TERM
+wait "$descendant"
+` });
+  const suiteFile = join(dir, 'suite.pid'), descendantFile = join(dir, 'descendant.pid');
+  const run = launch(dir, { SUITE_PID_FILE: suiteFile, DESCENDANT_PID_FILE: descendantFile });
+  let suitePid, descendantPid;
+  t.after(async () => {
+    // Always stop our fixture processes, including when a lifetime assertion fails.
+    for (const pid of [descendantPid, suitePid, run.child.pid]) if (alive(pid)) process.kill(pid, 'SIGTERM');
+    await until(() => !alive(suitePid) && !alive(descendantPid), 1000);
+    for (const pid of [descendantPid, suitePid, run.child.pid]) if (alive(pid)) process.kill(pid, 'SIGKILL');
+    await run.done;
+  });
+  const ready = await until(() => {
+    try {
+      suitePid = Number(readFileSync(suiteFile, 'utf8').trim());
+      descendantPid = Number(readFileSync(descendantFile, 'utf8').trim());
+      return alive(suitePid) && alive(descendantPid) && report(dir).suites[0]?.result === 'RUNNING';
+    } catch { return false; }
+  });
+  assert.ok(ready, 'suite and descendant are alive and the runner records RUNNING');
   run.child.kill('SIGTERM');
   const result = await run.done;
   assert.equal(result.status, 143, result.stderr);
+  assert.ok(await until(() => !alive(suitePid)), `suite PID ${suitePid} terminated`);
+  assert.ok(await until(() => !alive(descendantPid)), `descendant PID ${descendantPid} terminated`);
   const receipt = report(dir);
   assert.equal(receipt.outcome, 'INCONCLUSIVE'); assert.equal(receipt.interrupted, true);
   assert.equal(receipt.suites[0].result, 'CANCELLED');

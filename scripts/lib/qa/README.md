@@ -13,14 +13,15 @@ PR #1571 changes nightly sweep tooling, which this delivery does not edit.
 
 `parseObservation({transportExit, httpStatus, body, format, mode, binding})`
 is pure. `format` is `api` (default) or `sparql`; `mode` is `count`, `rows`, or
-`json`. COUNT defaults to binding `cnt`; callers select the actual alias, never
+`json` or `bindings`. COUNT defaults to binding `cnt`; callers select the actual alias, never
 fall back to a different column. Successful values are normalized decimal
 **strings**, including values larger than either JS safe integers or Bash
 machine integers. JSON numeric cells are not a supported COUNT wire form.
 
-Results carry `outcome`, a stable `reason`, and a `value` only on PASS. Row
-observations also carry `rows`. `assertObservation(observation, 'eq'|'ge',
-expectedDecimalString)` separates valid observation from assertion evaluation.
+Valid parsed observations carry `outcome`, a stable `reason`, and a `value`;
+invalid observations carry no value. Row observations also carry `rows`. `assertObservation(observation, 'eq'|'ge',
+expectedDecimalString)` separates valid observation from assertion evaluation
+and preserves the validated value and row payload when adding its outcome.
 `resultExit` maps PASS/FAIL/INCONCLUSIVE to 0/1/2. Diagnostics contain no response
 body, token, URL, config, or subject values.
 
@@ -38,25 +39,38 @@ body, token, URL, config, or subject values.
 
 `devnet_capture <curl arguments>` emits `curlExit LF httpStatus LF body`. Capture
 always carries the real curl exit; it does not turn an HTTP failure into a JSON
-success. `devnet_observe count|rows|json <binding> api|sparql [eq|ge expected]`
+success. `devnet_observe count|rows|json|bindings <binding> api|sparql [eq|ge expected]`
 consumes that frame. It emits a value only on PASS and uses 0/1/2. The `json`
-mode adapts validated rows to the DKG `{result:{type:'bindings',bindings}}` shape.
+mode remains a compatibility adapter to the DKG
+`{result:{type:'bindings',bindings}}` shape, including after a successful optional
+assertion. `bindings` emits the validated row array for cell inspection.
 
-Call sites explicitly branch on status, including both acquisition and parsing:
+The direct acquisition interfaces accept query metadata explicitly:
 
 ```bash
-response=$(devnet_capture -X POST -H 'Content-Type: application/json' \
-  --data "$query_body" "$api/api/query") || devnet_observation_abort
-count=$(printf '%s' "$response" | devnet_observe count cnt api) \
+# base URL, bearer token, SPARQL, expected binding, mode, scope JSON
+count=$(devnet_query_api "$api" "$token" "$sparql" cnt count \
+  '{"contextGraphId":"fixture","view":"shared-working-memory"}') \
+  || devnet_observation_abort
+
+# this checkout's devnet directory, API port selecting its store, SPARQL,
+# expected binding, mode, optional assertion
+count=$(devnet_storage_query "$DEVNET_DIR" 9202 "$sparql" s rows) \
   || devnet_observation_abort
 ```
 
+These operations return the requested metric after one validation of the
+observation. Raw reads also validate their separate seeded control. They do not
+parse curl-like arguments, infer projections from SPARQL, translate metrics into
+an API envelope, or reparse invented HTTP frames. Cell readers request
+`bindings`; legacy CLI JSON callers can continue to request `json`.
+
 `devnet_observation_abort` is an explicit legacy adapter: it identifies invalid
-evidence as INCONCLUSIVE, then exits **1**, preserving the existing public suite
-semantics. The sharing script's body-only helpers are adapters over responses
-whose transport/envelope were already validated by `query_api` or
-`storage_query`. Threshold comparisons use BigInt, avoiding Bash overflow.
-Node 22 is sufficient; the parser/wrapper do not require a product build.
+evidence as INCONCLUSIVE, then exits **1**, preserving existing suite semantics.
+Sharing's paired absence operation similarly adapts observations to the legacy
+PASS/FAIL counters and abort behavior. Threshold comparisons use BigInt,
+avoiding Bash overflow. Node 22 is sufficient; the parser/wrapper do not require
+a product build.
 
 ## Supported wire forms and sources
 
@@ -101,14 +115,16 @@ graphs; graph isolation queries now cover that family and the supported legacy
 `doc-alpha` cannot identify numeric graphs, so that check observes physical WM
 absence in both families for the same CG, with an owner control after promotion.
 Lifecycle/event/import metadata and post-promotion WM metadata checks have
-matching owner controls before asserting peer absence. Raw result headers
-must declare the first projected variable. A failed or empty control blocks
+a paired `sharing_storage_absence(description, ownerPort, peerPort, sparql,
+binding)` operation: one feature query must expose owner rows before the peer
+can satisfy absence. The WM graph query is defined once in the sourceable sharing
+suite. Raw result headers must declare the explicit expected binding. A failed or empty control blocks
 absence acceptance. The local fixture test deliberately returns an ACL-filtered
 empty API view while the raw store contains a seeded private assertion; the
 physical zero assertion correctly fails.
 
-Scoped API queries remain observations of WM/SWM/VM **visibility**. Four API WM
-view checks use SELECT cardinality instead of COUNT, because an ACL-filtered
+Scoped API queries remain observations of WM/SWM/VM **visibility**. The four WM
+view checks and section 8d's excluded SWM check use SELECT cardinality, because an ACL-filtered
 empty SELECT is a valid visibility observation while zero COUNT rows are invalid.
 Physical graph/meta claims were not changed to visibility claims.
 `API_PORT_BASE` and `DEVNET_DIR` let sharing run on an isolated layout.
@@ -232,12 +248,18 @@ pnpm test:inventory
 ```
 
 The focused lane exercises the real Bash wrapper, a local HTTP fixture, actual
-sharing/RC/phonebook/invite parent-shell statements, authorization/physical
-controls, and the real comprehensive script with disposable fixture suites.
+sourceable sharing operations and the shared RC/invite API boundary, the full
+phonebook script with controlled dependencies, authorization/physical controls,
+and the real comprehensive script with disposable fixture suites. No shell
+source slicing, fixed-line regex extraction or assignment-count check is used.
+The cancellation fixture records actual suite/descendant PIDs, waits for live
+readiness and verifies both stop; cleanup runs even on failure. Raw boundary
+fixtures check resolver exit 2/empty stdout and no query acquisition for directory
+confinement, API port matching, chain identity, loopback and embedded-store rules.
 The missing-only, empty, fail-fast, mixed FAIL/MISSING, cancelled and complete
 cases are behavioral tests, not only reducer tests.
 
-### Observed results on this branch
+### Initial delivery results (`97308b2a1`)
 
 - Focused parser/wrapper/parent-shell and comprehensive tests: **72 passed,
   0 failed** (63 observation tests and 9 runner tests).
@@ -266,9 +288,9 @@ stopped; generated deployment changes were restored. No existing node data or
 public network was used. Comprehensive behavior is validated with disposable
 fixture suites, not claimed as a real complete release devnet run.
 
-### Defect-restoration demonstrations
+### Initial defect-restoration demonstrations (`97308b2a1`)
 
-After restoring only the exact `count_integer` function from the base revision,
+At the initial-delivery revision, after restoring only the exact `count_integer` function from the base revision,
 this regression exited 1:
 
 ```bash
@@ -292,3 +314,38 @@ All **15** registered suites were MISSING, with PASS=0 and FAIL=0, yet the teste
 original runner exited **0** (`expected: 1`, `actual: 0`). Restoring the fixed
 runner makes it pass. Both demonstrations restored the fixed source before the
 final focused/tooling validation; neither defective variant is committed.
+
+### PR review follow-up validation
+
+All seven initial review comments are addressed by the direct interfaces,
+paired controls and callable-boundary tests described above. The runner's
+production behavior did not need a further change; its new lifetime regression
+verifies the existing recursive cancellation operation.
+
+- Focused lane: **91 passed, 0 failed** (82 observation tests and 9 runner tests).
+- Existing `pnpm test:scripts`: **493 passed, 0 failed, 0 skipped**.
+- Lint, inventory (2,108 files), six shell syntax checks and diff checks: exit 0.
+- Complete phonebook fixture executions preserve both positive success and
+  advisory-zero success. A denied empty SELECT passes sharing's section 8d
+  operation; HTTP/API errors, malformed replies and real leaked rows do not.
+- Matched owner/peer fixtures verify owner-positive/peer-empty success,
+  empty-owner refusal before querying the peer, and a seeded-peer leak failure.
+- Resolver rejection fixtures verify exit 2, empty stdout and zero query
+  acquisition. The cancellation fixture verifies both recorded PIDs disappear.
+
+Four temporary defect-restoration checks each exited 1 for its intended reason,
+then restored the fixed source before the final passing lanes:
+
+| Temporary defect | Selected regression | Observed failure |
+| --- | --- | --- |
+| Restore pre-review `assertObservation` | `JSON-mode assertion preserves validated bindings` | successful CLI output has undefined bindings instead of the validated array |
+| Restore COUNT behavior for excluded SWM | `sharing excluded SWM check handles valid denied empty SELECT` | parent exits 1 instead of expected 0 |
+| Remove `terminate_tree` from cancellation | `interruption terminates the ready suite and descendant` | suite PID is still alive after reported cancellation; cleanup stops both fixtures |
+| Remove the devnet chain restriction | `raw store boundary rejects non-devnet chain without query acquisition` | resolver exits 0 instead of expected 2 |
+
+Use `node --test --test-name-pattern='<selected regression>'` with the
+observation or comprehensive test file to reproduce the corresponding check.
+These review fixtures use only newly created temporary stores/processes. No
+product daemon was restarted for the follow-up; the initial sharing smoke's
+HTTP 503 limitation remains, and no complete live sharing or mixed-backend
+success is claimed.
