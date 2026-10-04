@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { NamedKaVmLifecycleIntegrityError, isNamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { readFile } from 'node:fs/promises';
 import { replaceDurableFile } from './durable-file-replace.js';
@@ -81,7 +82,7 @@ export class NamedKaVmLifecycleRepair {
       const previous = this.entries.get(key);
       if (previous && BigInt(previous.input.assertionVersion) > BigInt(stored.assertionVersion)) return { outcome: 'superseded' as const };
       if (previous && previous.input.assertionVersion === stored.assertionVersion && previous.input.merkleRoot !== stored.merkleRoot) {
-        throw Object.assign(new Error('Conflicting confirmed roots at the same assertion version'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
+        throw new NamedKaVmLifecycleIntegrityError('Conflicting confirmed roots at the same assertion version');
       }
       const entry = previous?.input.assertionVersion === stored.assertionVersion
         ? previous : { input: stored, attempts: 0, nextAttemptAt: this.now() };
@@ -131,7 +132,7 @@ export class NamedKaVmLifecycleRepair {
       });
     } catch (error) {
       failure = error;
-      outcome = (error as { code?: string })?.code === 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' ? 'rejected' : 'pending';
+      outcome = isNamedKaVmLifecycleIntegrityError(error) ? 'rejected' : 'pending';
     }
     return this.serial(async () => {
       if (this.entries.get(key) !== entry) return 'superseded';

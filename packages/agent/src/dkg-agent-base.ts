@@ -146,7 +146,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
+import { composeTripleStoreCommitment, GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -516,7 +516,6 @@ export function createListContextGraphsCacheInvalidatingStore(
     & Partial<SortedGraphSetSource>
     & { readonly innerStore: TripleStore } = {
     innerStore,
-    get writesDurableOnAcknowledgement() { return innerStore.writesDurableOnAcknowledgement; },
     get queryCancellation() {
       return innerStore.queryCancellation;
     },
@@ -669,8 +668,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         'update',
       )
       : undefined,
-    persist: innerStore.persist?.bind(innerStore),
-    commitEphemeral: innerStore.commitEphemeral?.bind(innerStore),
+    commitment: composeTripleStoreCommitment(innerStore),
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
     close() {
       return innerStore.close();

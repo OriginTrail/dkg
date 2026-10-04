@@ -46,6 +46,7 @@ export default defineConfig({
       "test/confirmed-lifecycle-deployment-replay.test.ts",
       "test/confirmed-lifecycle-read-deadline.test.ts",
       "test/confirmed-lifecycle-evidence.test.ts",
+      "test/confirmed-lifecycle-integrity-error.test.ts",
       "test/confirmed-lifecycle-recurring-worker.test.ts",
       "test/confirmed-lifecycle-command-contract.test.ts",
       "test/confirmed-vm-lifecycle-lock-fence.test.ts",

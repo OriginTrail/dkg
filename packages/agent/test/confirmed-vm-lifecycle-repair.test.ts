@@ -1,3 +1,4 @@
+import { NamedKaVmLifecycleIntegrityError } from '../src/named-ka-vm-lifecycle-integrity-error.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -215,7 +216,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
     now = 6_000; await repair.runDue(); expect(apply).toHaveBeenCalledTimes(2);
     now = 15_999; await repair.runDue(); expect(apply).toHaveBeenCalledTimes(2);
     now = 16_000; await repair.runDue(); expect(apply).toHaveBeenCalledTimes(3);
-    apply.mockImplementation(async () => { throw Object.assign(new Error('Invalid exact evidence'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' }); });
+    apply.mockImplementation(async () => { throw new NamedKaVmLifecycleIntegrityError('Invalid exact evidence'); });
     now = 36_000; await repair.runDue(); expect(apply).toHaveBeenCalledTimes(4);
     now = 999_999; await repair.runDue(); expect(apply).toHaveBeenCalledTimes(4);
     await repair.stop(); repair = create(); await repair.runDue(); expect(apply).toHaveBeenCalledTimes(4);
@@ -335,7 +336,7 @@ describe('review regression boundaries', () => {
   it.each(['raw', 'agent-facade', 'decorated'] as const)('retains the journal when the %s backend cannot certify durable completion', async facade => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-uncertified-stamp-')); dirs.push(dir);
     const store = await persistentStore(), agent = agentFor(store, dir, 1);
-    Object.defineProperty(store, 'persist', { value: undefined, configurable: true });
+    Object.defineProperty(store, 'commitment', { value: undefined, configurable: true });
     const wrapped = facade === 'decorated' ? new ChangelogStore(new GraphSetIndexStore(store)) : store;
     agent.store = facade === 'raw' ? wrapped : createListContextGraphsCacheInvalidatingStore(wrapped, vi.fn(), vi.fn());
     const commit = vi.spyOn(store, 'atomicUpdate');
@@ -441,7 +442,7 @@ describe('review regression boundaries', () => {
     const remote = new SparqlHttpStore({ queryEndpoint: 'http://durable-remote.test/sparql', consistencyProfile: 'atomic-update', writesDurableOnAcknowledgement: true });
     agent.store = facade === 'raw' ? remote : createListContextGraphsCacheInvalidatingStore(remote, vi.fn(), vi.fn());
     try {
-      expect(agent.store.writesDurableOnAcknowledgement).toBe(true); expect(agent.store.flush).toBeUndefined();
+      expect(agent.store.commitment?.durability).toBe('restart-durable'); expect(agent.store.flush).toBeUndefined();
       expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input))).toBe(false); expect(fetch).toHaveBeenCalledTimes(2);
       expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
       const reopened = new OxigraphStore(path); stores.push(reopened);
@@ -455,7 +456,7 @@ describe('review regression boundaries', () => {
     const remote = new SparqlHttpStore({ queryEndpoint: 'http://uncertified-remote.test/sparql', consistencyProfile: 'atomic-readback' });
     agent.store = createListContextGraphsCacheInvalidatingStore(remote, vi.fn(), vi.fn());
     try {
-      expect(agent.store.writesDurableOnAcknowledgement).toBe(false);
+      expect(agent.store.commitment).toBeUndefined();
       expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input))).toBe(true); expect(fetch).not.toHaveBeenCalled();
       expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(1);
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await remote.close(); }

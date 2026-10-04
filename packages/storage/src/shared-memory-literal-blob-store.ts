@@ -1,5 +1,5 @@
 import { persistContentAddressedFile } from './durable-content-addressed-file.js';
-import { composeTripleStorePersistence, composeTripleStoreEphemeralCommit, type TripleStorePersistenceBarrier } from './persistence.js';
+import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -57,8 +57,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   readonly innerStore: TripleStore;
-  readonly persist?: TripleStorePersistenceBarrier;
-  readonly commitEphemeral?: TripleStorePersistenceBarrier;
+  readonly commitment?: TripleStoreCommitCapability;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -77,8 +76,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     this.inner = inner;
     this.innerStore = inner;
-    this.persist = composeTripleStorePersistence(inner);
-    this.commitEphemeral = composeTripleStoreEphemeralCommit(inner);
+    this.commitment = composeTripleStoreCommitment(inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
     this.blobWrites = new ContentAddressedBlobSingleFlight({

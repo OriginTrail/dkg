@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { activeRpcRequestAbortSignal, withRpcRequestContext, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { runBoundedOperation } from './bounded-operation.js';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
@@ -48,9 +49,7 @@ export async function isConfirmedNamedKaVmLifecycleCurrent(
     }
     if (snapshot.rootCount > BigInt(input.assertionVersion)) return false;
     if (snapshot.latestRoot.toLowerCase().replace(/^0x/, '') !== input.merkleRoot.toLowerCase().replace(/^0x/, '')) {
-      throw Object.assign(new Error('Confirmed named KA lifecycle repair root differs from the chain'), {
-        code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
-      });
+      throw new NamedKaVmLifecycleIntegrityError('Confirmed named KA lifecycle repair root differs from the chain');
     }
     return true;
   }), { timeoutMs: requestTimeoutMs, label: 'Confirmed named KA lifecycle chain read', signal: activeRpcRequestAbortSignal() });

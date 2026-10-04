@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { createHash } from 'node:crypto';
 import { assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
@@ -11,7 +12,7 @@ export interface LifecycleRepairEntry {
   rejected?: boolean;
 }
 function invalid(): never {
-  throw Object.assign(new Error('Invalid confirmed named KA lifecycle repair evidence'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
+  throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named KA lifecycle repair evidence');
 }
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return invalid();

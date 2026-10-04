@@ -1,4 +1,4 @@
-import { certifiedTripleStorePersistenceBarrier, type TripleStorePersistenceBarrier } from '../persistence.js';
+import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
@@ -61,8 +61,7 @@ type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
-  readonly persist?: TripleStorePersistenceBarrier;
-  readonly commitEphemeral?: TripleStorePersistenceBarrier;
+  readonly commitment: TripleStoreCommitCapability;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -84,9 +83,9 @@ export class OxigraphStore implements TripleStore {
   constructor(persistPath?: string) {
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
-    const barrier = certifiedTripleStorePersistenceBarrier(options => this.flush(options));
-    this.persist = persistPath ? barrier : undefined;
-    this.commitEphemeral = persistPath ? undefined : barrier;
+    this.commitment = certifiedTripleStoreCommitment(
+      persistPath ? 'restart-durable' : 'process-local', options => this.flush(options),
+    );
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
@@ -224,7 +223,7 @@ export class OxigraphStore implements TripleStore {
 
       // 4: fsync the directory so the rename itself survives a power loss.
       // A visible rename is not proof of durability. In particular, certified
-      // persist() callers may erase recovery evidence only after this sync
+      // commitment callers may erase recovery evidence only after this sync
       // succeeds. Unsupported directory sync and I/O failures both propagate;
       // a retry can re-dump the already visible in-memory state safely.
       const dirFh = await open(dir, 'r');

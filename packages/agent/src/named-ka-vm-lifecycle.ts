@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import {
   ASSERTION_SEAL_PREDICATES, MemoryLayer, assertionLifecycleUri,
   contextGraphAssertionUri, contextGraphLayerUri, contextGraphMetaUri, formatSparqlTerm,
@@ -66,7 +67,7 @@ function decodeWorkspaceLifecycleValues(bindings: Record<string, string> | undef
 }
 function checkedRoot(value: string): string {
   const root = value.toLowerCase().replace(/^0x/, '');
-  if (!/^[0-9a-f]{64}$/.test(root)) throw Object.assign(new Error('Invalid confirmed lifecycle root'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
+  if (!/^[0-9a-f]{64}$/.test(root)) throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed lifecycle root');
   return root;
 }
 
@@ -140,15 +141,11 @@ export async function applyPublishedNamedKaVmLifecycle(
   store: TripleStore, input: PublishedNamedKaVmLifecycleInput,
   options: NamedKaVmLifecycleApplyOptions = { persistence: 'restart-durable' },
 ): Promise<void> {
-  if ('tentative' in input) throw Object.assign(new Error('Confirmed lifecycle commands cannot carry tentative mode'), {
-    code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
-  });
+  if ('tentative' in input) throw new NamedKaVmLifecycleIntegrityError('Confirmed lifecycle commands cannot carry tentative mode');
   await applyNamedKaVmLifecycle(store, input, options.persistence);
 }
 export async function applyTentativeNamedKaVmLifecycle(store: TripleStore, input: TentativeNamedKaVmLifecycleInput): Promise<void> {
-  if (input.tentative !== true || 'packedKaId' in input) throw Object.assign(new Error('Tentative lifecycle commands require tentative mode without confirmed graph coordinates'), {
-    code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
-  });
+  if (input.tentative !== true || 'packedKaId' in input) throw new NamedKaVmLifecycleIntegrityError('Tentative lifecycle commands require tentative mode without confirmed graph coordinates');
   await applyNamedKaVmLifecycle(store, input, 'process-local');
 }
 async function applyNamedKaVmLifecycle(
@@ -162,8 +159,10 @@ async function applyNamedKaVmLifecycle(
   // Validate inputs before I/O and use the shared RDF serializer at the query boundary.
   checkedRoot(input.merkleRoot);
   if (input.priorMerkleRoot !== undefined) checkedRoot(input.priorMerkleRoot);
-  const barrier = store.persist?.bind(store)
-    ?? (persistenceMode === 'process-local' ? store.commitEphemeral?.bind(store) : undefined);
+  const capability = store.commitment;
+  const barrier = capability !== undefined
+    && (capability.durability === 'restart-durable' || persistenceMode === 'process-local')
+    ? capability.commit.bind(capability) : undefined;
   if (!tentative && barrier === undefined) {
     throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), {
       code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE',
@@ -178,7 +177,7 @@ async function applyNamedKaVmLifecycle(
     OPTIONAL { ${iri(assertionUri)} <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?activeSeal }
   } } LIMIT 2`, { source: 'agent.publish.confirmedLifecycleWorkspaceGuard' });
   if (rows.type !== 'bindings' || rows.bindings.length > 1) {
-    throw Object.assign(new Error('Invalid workspace pointers during confirmed lifecycle repair'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
+    throw new NamedKaVmLifecycleIntegrityError('Invalid workspace pointers during confirmed lifecycle repair');
   }
   await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(input, decodeWorkspaceLifecycleValues(rows.bindings[0])));
   // Graph writes can be visible before the debounced snapshot is on disk. The

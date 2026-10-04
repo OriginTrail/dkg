@@ -1,4 +1,4 @@
-import { composeTripleStorePersistence, composeTripleStoreEphemeralCommit, type TripleStorePersistenceBarrier } from './persistence.js';
+import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
 import type { ChangelogStoreOptions } from './changelog-store-options.js';
 export type { ChangelogStoreOptions } from './changelog-store-options.js';
 import { randomUUID } from 'node:crypto';
@@ -217,8 +217,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
-  readonly persist?: TripleStorePersistenceBarrier;
-  readonly commitEphemeral?: TripleStorePersistenceBarrier;
+  readonly commitment?: TripleStoreCommitCapability;
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
@@ -245,8 +244,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
-    this.persist = composeTripleStorePersistence(inner, () => this.drain());
-    this.commitEphemeral = composeTripleStoreEphemeralCommit(inner, () => this.drain());
+    this.commitment = composeTripleStoreCommitment(inner, () => this.drain());
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);

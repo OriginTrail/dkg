@@ -18,7 +18,7 @@ describe('confirmed lifecycle recurring worker ownership', () => {
     const apply = vi.fn(async (current: typeof input) => {
       if (current.name === input.name) { entered(); await held; }
       await store.insert([{ graph: 'urn:worker', subject: `urn:${current.name}`, predicate: 'urn:value', object: '"committed"' }]);
-      await store.persist!();
+      await store.commitment!.commit();
     });
     const owner = new NamedKaVmLifecycleRepair({ dataDir: dir, writeLocks: new Map(), warn: vi.fn(), apply, isCurrent: async () => true }); owners.push(owner);
     owner.start(); const submission = owner.submit(input); await started;

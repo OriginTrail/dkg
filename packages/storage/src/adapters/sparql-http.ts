@@ -1,4 +1,4 @@
-import { certifiedTripleStorePersistenceBarrier, type TripleStorePersistenceBarrier } from '../persistence.js';
+import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -402,8 +402,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   readonly rfc64SemanticReadCertifiedV1: true | false;
 
   private readonly queryEndpoint: string;
-  readonly writesDurableOnAcknowledgement: boolean;
-  readonly persist?: TripleStorePersistenceBarrier;
+  readonly commitment?: TripleStoreCommitCapability;
   readonly flush?: (options?: QueryOptions) => Promise<void>;
   private readonly updateEndpoint: string;
   private readonly timeout: number;
@@ -437,7 +436,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       throw new Error('sparql-http adapter requires options.queryEndpoint');
     }
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
-    this.writesDurableOnAcknowledgement = certifiedWriteAcknowledgement(options);
+    const writesDurableOnAcknowledgement = certifiedWriteAcknowledgement(options);
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
@@ -446,8 +445,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     );
     this.flush = this.managedOxigraph && typeof options.managedPersistence === 'function'
       ? options.managedPersistence : undefined;
-    this.persist = this.flush || this.writesDurableOnAcknowledgement
-      ? certifiedTripleStorePersistenceBarrier(options => this.flush?.(options) ?? Promise.resolve()) : undefined;
+    this.commitment = this.flush || writesDurableOnAcknowledgement
+      ? certifiedTripleStoreCommitment('restart-durable', options => this.flush?.(options) ?? Promise.resolve()) : undefined;
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;

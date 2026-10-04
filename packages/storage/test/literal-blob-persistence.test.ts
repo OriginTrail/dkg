@@ -43,7 +43,7 @@ describe('external literal persistence certification', () => {
     const f = await fixture(), insert = vi.spyOn(f.backend, 'insert'); syncControl.creationFail = true;
     await expect(f.store.insert([f.quad])).rejects.toMatchObject({ code: 'EACCES' });
     expect(insert).not.toHaveBeenCalled(); expect(syncControl.writes).toEqual([]);
-    syncControl.creationFail = false; await f.store.insert([f.quad]); await (f.store).persist!();
+    syncControl.creationFail = false; await f.store.insert([f.quad]); await (f.store).commitment!.commit();
     expect(await f.store.query('SELECT ?value WHERE { GRAPH <urn:dkg:cg/_shared_memory> { <urn:asset> <urn:value> ?value } }'))
       .toMatchObject({ bindings: [{ value: f.quad.object }] });
   });
@@ -55,7 +55,7 @@ describe('external literal persistence certification', () => {
     const second = f.store.insert([{ ...f.quad, subject: 'urn:second', object: '"another large content hash"' }]);
     try { await new Promise(resolve => setImmediate(resolve)); expect(syncControl.writes).toEqual([]); expect(insert).not.toHaveBeenCalled(); }
     finally { release(); await Promise.all([first, second]); }
-    await (f.store).persist!();
+    await (f.store).commitment!.commit();
     expect(insert).toHaveBeenCalledTimes(2);
   });
   it('waits for file and directory persistence before referencing the blob, then reopens hydrated content', async () => {
@@ -66,7 +66,7 @@ describe('external literal persistence certification', () => {
       await vi.waitFor(() => expect(syncControl.entered).toBe(true));
       expect(insert).not.toHaveBeenCalled();
     } finally { release(); }
-    await mutation; await (f.store).persist!();
+    await mutation; await (f.store).commitment!.commit();
     expect(syncControl.calls).toContain(f.blobDir); expect(syncControl.calls).toContain(join(f.blobDir, '..')); expect(syncControl.calls.some(path => /[a-f0-9]{64}$/.test(path))).toBe(true);
     const reopened = new SharedMemoryLiteralBlobStore(new OxigraphStore(f.path), { blobDir: f.blobDir, thresholdBytes: 10 }); stores.push(reopened);
     expect(await reopened.query('SELECT ?value WHERE { GRAPH <urn:dkg:cg/_shared_memory> { <urn:asset> <urn:value> ?value } }'))
@@ -75,7 +75,7 @@ describe('external literal persistence certification', () => {
   it.each(['file', 'directory'] as const)('propagates a %s sync error, never inserts a dangling reference, and retries existing bytes durably', async failure => {
     const f = await fixture(), insert = vi.spyOn(f.backend, 'insert'); syncControl.fail = failure;
     await expect(f.store.insert([f.quad])).rejects.toMatchObject({ code: 'EIO' }); expect(insert).not.toHaveBeenCalled();
-    syncControl.fail = undefined; await f.store.insert([f.quad]); await (f.store).persist!();
+    syncControl.fail = undefined; await f.store.insert([f.quad]); await (f.store).commitment!.commit();
     expect(insert).toHaveBeenCalledOnce(); expect(syncControl.calls.filter(path => /[a-f0-9]{64}$/.test(path))).toHaveLength(2);
   });
 });

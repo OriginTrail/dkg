@@ -34,9 +34,9 @@ it('propagates a real worker directory-sync EIO through certified persistence an
       let failure;
       try {
         await store.insert([{subject:'urn:worker:s',predicate:'urn:worker:p',object:'"value"',graph:'urn:worker:g'}]);
-        try { await store.persist(); } catch (error) { failure = { code:error.code, message:error.message }; }
+        try { await store.commitment.commit(); } catch (error) { failure = { code:error.code, message:error.message }; }
         await unlink(${JSON.stringify(flag)});
-        await store.persist();
+        await store.commitment.commit();
       } finally { await store.close(); }
       const reopened = new OxigraphWorkerStore(path);
       try { console.log(JSON.stringify({ failure, reopened:await reopened.countQuads() })); }

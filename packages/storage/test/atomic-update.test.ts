@@ -40,7 +40,7 @@ describe('explicit whole-request atomic UPDATE capability', () => {
   it('preserves explicit acknowledgement durability in direct and factory construction', async () => {
     const direct = new SparqlHttpStore({ queryEndpoint: 'http://example.test/sparql', writesDurableOnAcknowledgement: true }); stores.push(direct);
     const factory = await createTripleStore({ backend: 'sparql-http', options: { queryEndpoint: 'http://example.test/sparql', writesDurableOnAcknowledgement: true } }); stores.push(factory);
-    expect(direct.writesDurableOnAcknowledgement).toBe(true); expect(factory.writesDurableOnAcknowledgement).toBe(true);
+    expect(direct.commitment?.durability).toBe('restart-durable'); expect(factory.commitment?.durability).toBe('restart-durable');
     expect(() => new SparqlHttpStore({ queryEndpoint: 'http://example.test/sparql', writesDurableOnAcknowledgement: 'true' as unknown as boolean })).toThrow('must be boolean');
     expect(() => new SparqlHttpStore({ queryEndpoint: 'http://example.test/sparql', consistencyProfile: 'unsupported' as never })).toThrow('consistencyProfile must be');
   });

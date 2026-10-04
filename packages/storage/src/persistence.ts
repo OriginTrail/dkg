@@ -1,35 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { QueryOptions, TripleStore } from './triple-store.js';
 
+export type TripleStoreCommitDurability = 'process-local' | 'restart-durable';
 export type TripleStorePersistenceBarrier = (options?: QueryOptions) => Promise<void>;
+/** One commit boundary with an explicit guarantee; atomicity alone grants neither level. */
+export interface TripleStoreCommitCapability {
+  readonly durability: TripleStoreCommitDurability;
+  readonly commit: TripleStorePersistenceBarrier;
+}
 
-/** Cancellation cannot turn a failed or unfinished persistence barrier into success. */
-export function certifiedTripleStorePersistenceBarrier(work: TripleStorePersistenceBarrier): TripleStorePersistenceBarrier {
-  return async (options) => {
+/** Cancellation cannot turn a failed or unfinished commit into success. */
+export function certifiedTripleStoreCommitment(
+  durability: TripleStoreCommitDurability, work: TripleStorePersistenceBarrier,
+): TripleStoreCommitCapability {
+  return { durability, commit: async (options?: QueryOptions) => {
     options?.signal?.throwIfAborted();
     await work(options);
     options?.signal?.throwIfAborted();
-  };
+  } };
 }
 
-/** Decorators certify only an explicitly certified inner endpoint, after their own mutation queue drains. */
-export function composeTripleStorePersistence(
+/** Decorators preserve the inner guarantee after their own mutation queue drains. */
+export function composeTripleStoreCommitment(
   inner: TripleStore, drain?: () => Promise<void>,
-): TripleStorePersistenceBarrier | undefined {
-  return composeBarrier(inner.persist?.bind(inner), drain);
-}
-export function composeTripleStoreEphemeralCommit(
-  inner: TripleStore, drain?: () => Promise<void>,
-): TripleStorePersistenceBarrier | undefined {
-  return composeBarrier(inner.commitEphemeral?.bind(inner), drain);
-}
-function composeBarrier(
-  barrier: TripleStorePersistenceBarrier | undefined, drain?: () => Promise<void>,
-): TripleStorePersistenceBarrier | undefined {
-  if (barrier === undefined) return undefined;
-  return certifiedTripleStorePersistenceBarrier(async (options) => {
+): TripleStoreCommitCapability | undefined {
+  const capability = inner.commitment;
+  if (capability === undefined) return undefined;
+  return certifiedTripleStoreCommitment(capability.durability, async (options) => {
     await drain?.();
     options?.signal?.throwIfAborted();
-    await barrier(options);
+    await capability.commit(options);
   });
 }

@@ -355,8 +355,11 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect(writeAhead).toHaveBeenCalledOnce();
       expect(confirmations).toHaveBeenCalledOnce();
       expect(settlement).toHaveBeenCalledOnce();
-      expect(settlement.mock.calls[0]?.[0]).toMatchObject({ contextGraphId: fixture.cg, name: fixture.name,
-        merkleRoot: fixture.intent.sealMerkleRoot, assertionVersion: fixture.intent.assertionVersion });
+      const [coordinates, publication] = settlement.mock.calls[0]!;
+      expect(coordinates).toMatchObject({ contextGraphId: fixture.cg, name: fixture.name });
+      expect(coordinates).not.toHaveProperty('merkleRoot'); expect(coordinates).not.toHaveProperty('assertionVersion');
+      expect(publication).toMatchObject({ status: 'confirmed', seal: { assertionVersion: fixture.intent.assertionVersion } });
+      expect(ethers.hexlify(publication.seal.merkleRoot)).toBe(fixture.intent.sealMerkleRoot);
       expect(await settlement.mock.results[0]?.value).toBe(false);
       expect(writeAhead.mock.calls[0]?.[0].txHash).toBe(finalized?.broadcast?.txHash);
       expect(confirmations.mock.calls[0]?.[0].txHash).toBe(finalized?.broadcast?.txHash);

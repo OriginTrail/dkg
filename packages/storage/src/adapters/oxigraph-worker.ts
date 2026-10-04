@@ -1,4 +1,4 @@
-import { certifiedTripleStorePersistenceBarrier, type TripleStorePersistenceBarrier } from '../persistence.js';
+import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
 import { sleep, normalizeNonNegativeInt } from './oxigraph-worker-timing.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
@@ -167,8 +167,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
-  readonly persist?: TripleStorePersistenceBarrier;
-  readonly commitEphemeral?: TripleStorePersistenceBarrier;
+  readonly commitment: TripleStoreCommitCapability;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -311,9 +310,9 @@ export class OxigraphWorkerStore implements TripleStore {
     }
     this.workerPath = workerPath;
     this.persistPath = persistPath;
-    const barrier = certifiedTripleStorePersistenceBarrier(options => this.flush(options));
-    this.persist = persistPath ? barrier : undefined;
-    this.commitEphemeral = persistPath ? undefined : barrier;
+    this.commitment = certifiedTripleStoreCommitment(
+      persistPath ? 'restart-durable' : 'process-local', options => this.flush(options),
+    );
     this.spawnWorker();
   }
 

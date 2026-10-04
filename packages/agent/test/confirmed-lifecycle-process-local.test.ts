@@ -63,7 +63,7 @@ describe('confirmed lifecycle persistence policy', () => {
   it('prefers a real durable barrier in process-local host mode and propagates its failure', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-standalone-durable-')); dirs.push(dir);
     const store = new OxigraphStore(join(dir, 'store.nq')); stores.push(store);
-    const failure = new Error('durable storage unavailable'); const persist = vi.spyOn(store, 'persist').mockRejectedValueOnce(failure);
+    const failure = new Error('durable storage unavailable'); const persist = vi.spyOn(store.commitment!, 'commit').mockRejectedValueOnce(failure);
     await expect(applyPublishedNamedKaVmLifecycle(store, input, { persistence: 'process-local' })).rejects.toBe(failure);
     expect(persist).toHaveBeenCalledOnce();
   });

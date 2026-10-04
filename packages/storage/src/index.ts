@@ -54,7 +54,8 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
-export type { TripleStorePersistenceBarrier } from './persistence.js';
+export type { TripleStorePersistenceBarrier, TripleStoreCommitDurability, TripleStoreCommitCapability } from './persistence.js';
+export { composeTripleStoreCommitment } from './persistence.js';
 /**
  * Stable caller contract for one bounded RFC-64 author commit. Compilation,
  * receipt execution, normalization, and decorator mapping stay module-internal.

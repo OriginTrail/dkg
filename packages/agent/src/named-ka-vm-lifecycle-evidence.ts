@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import { hexlify } from 'ethers';
 import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
@@ -21,9 +22,7 @@ export function confirmedNamedKaVmLifecycleInput(
 ): ConfirmedNamedKaVmLifecycleInput {
   const { seal } = publication;
   if (publication.status !== 'confirmed' || seal.kaUal === undefined || seal.assertionVersion === undefined) {
-    throw Object.assign(new Error('Confirmed named KA repair requires a validated graph-scoped publication'), {
-      code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY',
-    });
+    throw new NamedKaVmLifecycleIntegrityError('Confirmed named KA repair requires a validated graph-scoped publication');
   }
   const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
   const packedKaId = coordinates.packedKaId ?? publication.onChainResult?.kaId ?? publication.kaId;
