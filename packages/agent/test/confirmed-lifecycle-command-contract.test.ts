@@ -19,8 +19,8 @@ describe('confirmed lifecycle command contract', () => {
       .toThrowError(expect.objectContaining({ code: 'KA_VM_LIFECYCLE_REPAIR_LOCKS_REQUIRED' }));
   });
   it.each([true, false])('refuses a supplied tentative flag rather than stripping it, flag=%s', tentative => {
-    expect(() => normalizeLifecycleRepairInput({ ...fields, tentative }, true)).toThrowError(expect.objectContaining({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' }));
-    const valid = normalizeLifecycleRepairInput(fields, true);
+    expect(() => normalizeLifecycleRepairInput({ ...fields, tentative })).toThrowError(expect.objectContaining({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' }));
+    const valid = normalizeLifecycleRepairInput(fields);
     expect(() => decodeLifecycleRepairJournal({ version: 2, entries: [[lifecycleRepairKey(valid), {
       input: { ...valid, tentative }, attempts: 0, nextAttemptAt: 0,
     }]] })).toThrowError(expect.objectContaining({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' }));

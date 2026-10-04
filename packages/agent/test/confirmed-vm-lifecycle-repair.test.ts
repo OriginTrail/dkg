@@ -17,8 +17,14 @@ import { GossipSession } from '../src/gossip-session.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish.js';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
-import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
+function serializedRepairInput(input: ConfirmedNamedKaVmLifecycleInput) {
+  return encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(input),
+    { input, attempts: 0, nextAttemptAt: 0 },
+  ]])).entries[0]![1].input;
+}
+
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const CG = 'confirmed-lifecycle-repair', NAME = 'repair-asset', UAL = `did:dkg:mock:31337/${AUTHOR}/1`;
 const PACKED = (BigInt(AUTHOR) << 96n) | 1n, PUBLISHED = 'did:dkg:mock:31337/0x2222222222222222222222222222222222222222/1';
@@ -675,9 +681,23 @@ describe('review regression boundaries', () => {
     await expect(agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublication)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1' });
     expect(persist).toHaveBeenCalledOnce(); expect(apply).not.toHaveBeenCalled(); await repair.stop();
   });
+  it.each([0n, (1n << 256n) - 1n])('keeps packed coordinate %s typed through the explicit file codec', packedKaId => {
+    const normalized = normalizeLifecycleRepairInput({ ...input, packedKaId }), key = lifecycleRepairKey(normalized);
+    expect(normalized.packedKaId).toBe(packedKaId);
+    const entries = new Map([[key, { input: normalized, attempts: 3, nextAttemptAt: 42_000, rejected: true, lastError: 'retained' }]]);
+    const wire = encodeLifecycleRepairJournal(entries);
+    expect(wire.entries[0]![1].input.packedKaId).toBe(packedKaId.toString());
+    expect(decodeLifecycleRepairJournal(JSON.parse(JSON.stringify(wire)))).toEqual(entries);
+    wire.entries[0]![1].input.packedKaId = `000${packedKaId}`;
+    expect(decodeLifecycleRepairJournal(wire)).toEqual(entries);
+    expect(entries.get(key)!.input.packedKaId).toBe(packedKaId);
+  });
+  it.each([-1n, 1n << 256n, '1', 1])('refuses a non-confirmed packed coordinate %s before scheduling', packedKaId => {
+    expect(() => normalizeLifecycleRepairInput({ ...input, packedKaId })).toThrow(NamedKaVmLifecycleIntegrityError);
+  });
   it('round-trips canonical version-2 journal entries and retry state', () => {
-    const normalized = normalizeLifecycleRepairInput({ ...input, merkleRoot: HEX.toUpperCase().replace('0X', '0x'), priorMerkleRoot: `0x${PRIOR.toUpperCase()}` }, true), key = lifecycleRepairKey(normalized);
-    const decoded = decodeLifecycleRepairJournal({ version: 2, entries: [[key, { input: normalized, attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' }]] });
+    const normalized = normalizeLifecycleRepairInput({ ...input, merkleRoot: HEX.toUpperCase().replace('0X', '0x'), priorMerkleRoot: `0x${PRIOR.toUpperCase()}` }), key = lifecycleRepairKey(normalized);
+    const decoded = decodeLifecycleRepairJournal({ version: 2, entries: [[key, { input: serializedRepairInput(normalized), attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' }]] });
     expect(decoded.get(key)).toEqual({ input: { ...normalized, merkleRoot: HEX.slice(2), priorMerkleRoot: PRIOR }, attempts: 2, nextAttemptAt: 6_000, rejected: false, lastError: 'timeout' });
   });
   it('keeps peer case identities independent through durable retry and restart', async () => {
@@ -705,9 +725,9 @@ describe('review regression boundaries', () => {
     const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
     expect([...journal.values()]).toMatchObject([{ input: { agentAddress: lower, assertionVersion: '2' } }]);
     await repair.stop();
-    const normalized = normalizeLifecycleRepairInput({ ...input, agentAddress: mixed }, true);
+    const normalized = normalizeLifecycleRepairInput({ ...input, agentAddress: mixed });
     const historical = createHash('sha256').update(JSON.stringify([CG, lower, NAME, ''])).digest('hex');
-    await writeFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), JSON.stringify({ version: 1, entries: [[historical, { input: normalized, attempts: 2, nextAttemptAt: 6_000 }]] }));
+    await writeFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), JSON.stringify({ version: 1, entries: [[historical, { input: serializedRepairInput(normalized), attempts: 2, nextAttemptAt: 6_000 }]] }));
     const migrated = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
     expect(migrated.get(lifecycleRepairKey(normalized))).toMatchObject({ input: normalized, attempts: 2, nextAttemptAt: 6_000 });
     const freshApply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => { throw new Error('retry remains pending'); });
@@ -718,26 +738,26 @@ describe('review regression boundaries', () => {
     await fresh.stop();
   });
   it.each([1, 2])('rejects mismatched and duplicate version-%s journal identities before migration', version => {
-    const normalized = normalizeLifecycleRepairInput(input, true);
+    const normalized = normalizeLifecycleRepairInput(input);
     const historical = createHash('sha256').update(JSON.stringify([CG, AUTHOR, NAME, ''])).digest('hex');
     const key = version === 1 ? historical : lifecycleRepairKey(normalized);
-    const entry = { input: normalized, attempts: 0, nextAttemptAt: 0 };
+    const entry = { input: serializedRepairInput(normalized), attempts: 0, nextAttemptAt: 0 };
     expect(() => decodeLifecycleRepairJournal({ version, entries: [['bad-key', entry]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
     expect(() => decodeLifecycleRepairJournal({ version, entries: [[key, entry], [key, entry]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
   });
   it('migrates a historical peer key while preserving its case-sensitive identity', () => {
-    const normalized = normalizeLifecycleRepairInput({ ...input, agentAddress: 'PeerABC' }, true);
+    const normalized = normalizeLifecycleRepairInput({ ...input, agentAddress: 'PeerABC' });
     const historical = createHash('sha256').update(JSON.stringify([CG, 'peerabc', NAME, ''])).digest('hex');
-    const entry = { input: normalized, attempts: 2, nextAttemptAt: 6_000 };
+    const entry = { input: serializedRepairInput(normalized), attempts: 2, nextAttemptAt: 6_000 };
     const journal = decodeLifecycleRepairJournal({ version: 1, entries: [[historical, entry]] });
-    expect(journal.get(lifecycleRepairKey(normalized))).toEqual(entry);
+    expect(journal.get(lifecycleRepairKey(normalized))).toEqual({ ...entry, input: normalized });
     expect(journal.has(lifecycleRepairKey({ ...normalized, agentAddress: 'peerabc' }))).toBe(false);
     // Historical key collisions are corruption, not permission to merge two principals.
-    expect(() => decodeLifecycleRepairJournal({ version: 1, entries: [[historical, entry], [historical, { ...entry, input: { ...normalized, agentAddress: 'peerabc' } }]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
+    expect(() => decodeLifecycleRepairJournal({ version: 1, entries: [[historical, entry], [historical, { ...entry, input: { ...serializedRepairInput(normalized), agentAddress: 'peerabc' } }]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
   });
   it.each(['contextGraphId', 'agentAddress', 'name', 'publishedUal', 'merkleRoot', 'assertionVersion', 'packedKaId', 'subGraphName', 'priorMerkleRoot'])('rejects non-string journal field %s', (field) => {
-    const normalized = normalizeLifecycleRepairInput(input, true), key = lifecycleRepairKey(normalized);
-    expect(() => decodeLifecycleRepairJournal({ version: 2, entries: [[key, { input: { ...normalized, [field]: 123 }, attempts: 0, nextAttemptAt: 0 }]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
+    const normalized = normalizeLifecycleRepairInput(input), key = lifecycleRepairKey(normalized);
+    expect(() => decodeLifecycleRepairJournal({ version: 2, entries: [[key, { input: { ...serializedRepairInput(normalized), [field]: 123 }, attempts: 0, nextAttemptAt: 0 }]] })).toThrow('Invalid confirmed named KA lifecycle repair evidence');
   });
 });
 

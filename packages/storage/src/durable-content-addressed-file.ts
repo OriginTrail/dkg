@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { persistDirectoryRange, persistFileAndParent } from './file-durability.js';
+import { persistDirectoryRange } from './file-durability.js';
 
 /** One preparation task owns creation and its full ancestry barrier for every blob. */
 export class DurableDirectoryPreparation {
@@ -29,11 +29,4 @@ export class DurableDirectoryPreparation {
       ? this.directory : dirname(resolve(this.creation.firstCreated));
     await persistDirectoryRange(this.directory, last, this.platform);
   }
-}
-
-/** Sync verified immutable bytes and their containing directory before acknowledging their RDF reference. */
-export async function persistContentAddressedFile(
-  path: string, platform: NodeJS.Platform = process.platform,
-): Promise<void> {
-  await persistFileAndParent(path, platform);
 }

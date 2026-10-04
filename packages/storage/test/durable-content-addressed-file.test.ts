@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DurableDirectoryPreparation, persistContentAddressedFile } from '../src/durable-content-addressed-file.js';
+import { DurableDirectoryPreparation } from '../src/durable-content-addressed-file.js';
+import { persistFileAndParent } from '../src/file-durability.js';
 const observed = vi.hoisted(() => ({ paths: [] as string[] }));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -20,7 +21,7 @@ describe('content addressed file persistence', () => {
     await Promise.all([preparation.prepare(), preparation.prepare()]);
     expect(observed.paths).toEqual([directory, join(dir, 'new'), dir]);
     const file = join(directory, 'bytes'); await writeFile(file, 'verified bytes');
-    observed.paths = []; await persistContentAddressedFile(file, 'linux');
+    observed.paths = []; await persistFileAndParent(file, 'linux');
     expect(observed.paths).toEqual([file, directory]);
     observed.paths = []; await preparation.prepare();
     expect(observed.paths).toEqual([]);
@@ -33,7 +34,7 @@ describe('content addressed file persistence', () => {
     await new DurableDirectoryPreparation(directory, 'win32').prepare();
     expect(observed.paths).toEqual([]);
     const file = join(directory, 'bytes'); await writeFile(file, 'verified bytes');
-    await persistContentAddressedFile(file, 'win32');
+    await persistFileAndParent(file, 'win32');
     expect(observed.paths).toEqual([file]);
   });
 });
