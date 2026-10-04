@@ -613,8 +613,9 @@ function captureProvenanceClaim(
 /**
  * Request the receipt that authenticates a first publish. Started before the
  * views have answered, so a check that fails first leaves this read unawaited:
- * it is observed here, and its own failure is still reported where it is
- * awaited. Nothing is started for any other asset.
+ * it is observed here, it carries the caller's signal like the views do, and
+ * its own failure is still reported where it is awaited. Nothing is started
+ * for any other asset.
  */
 function startPublishReceiptRead(
   chain: ChainAdapter,
