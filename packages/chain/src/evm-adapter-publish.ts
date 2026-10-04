@@ -15,7 +15,6 @@ import { ethers, Wallet, Contract, type JsonRpcProvider } from 'ethers';
 import type {
   BatchMintParams,
   BatchMintResult,
-  CanonicalFinalizationReceipt,
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
@@ -653,7 +652,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       }
       if (receipt.status !== 1) return { status: 'reverted' };
       if (!publish) return { status: 'unrecognized' };
-      const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, publish);
+      const canonicalReceipt = projectCanonicalFinalizationReceipt(receipt, publish);
       return {
         status: 'confirmed',
         publish,
@@ -811,10 +810,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       ?? (this.contracts.knowledgeAssetsStorage
         ? this.decodeV9PublishReceipt(receipt) : null);
     return { receipt, publish: facts ? await this.enrichPublishReceipt(receipt, facts, options) : null };
-  }
-
-  private projectCanonicalFinalizationReceipt(receipt: ethers.TransactionReceipt, parsedPublish: OnChainPublishResult): CanonicalFinalizationReceipt | null {
-    return projectCanonicalFinalizationReceipt(receipt, parsedPublish);
   }
 
   async getMintedKnowledgeAssetProvenance(

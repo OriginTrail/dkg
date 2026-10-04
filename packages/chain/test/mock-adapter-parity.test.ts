@@ -78,10 +78,6 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // RPC capabilities. MockChainAdapter mirrors those public methods directly;
   // it has no provider pool or failover plumbing to dispatch through.
   'requestBrowserWalletRpc',
-  // Pure receipt projection behind the public canonical-finalization reader.
-  // The mock implements that public reader directly from its in-memory event
-  // state and has no ethers TransactionReceipt to project.
-  'projectCanonicalFinalizationReceipt',
   // Private EVM evidence readers share the decoded receipt between canonical
   // recovery and adoption. The mock's public capabilities read its event array.
   'readExistingMintObservation',
