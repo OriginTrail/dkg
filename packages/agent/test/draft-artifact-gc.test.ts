@@ -4,11 +4,11 @@ import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-pu
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
-import { GraphManager, OxigraphStore, deleteByPatternWithoutCount, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, deleteByPatternWithoutCount, type Quad, UnsupportedTripleStoreCapabilityError } from '@origintrail-official/dkg-storage';
 import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, swmKaWriteLockKey, withKeyedLocks, workspaceOperationSubject, storageAckLedgerEntryQuads } from '@origintrail-official/dkg-publisher';
 import { storageAckNotRetainedFilters } from '../src/storage-ack-retention.js';
 import { expiredSwmOperationMayRetire } from '../src/internal/swm-expiry/swm-expiry-batch.js';
-import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
+import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { collectAbandonedDraftArtifacts } from '../src/internal/draft/draft-artifact-gc.js';
 import { withUnqueuedDraftOperation, withDraftOperationCollectionBatches } from '../src/internal/swm-expiry/swm-operation-expiry.js';
 const CG = 'draft-gc';
@@ -19,8 +19,8 @@ const NOW = Date.parse('2026-10-04T06:00:00Z');
 const META = `did:dkg:context-graph:${CG}/_shared_memory_meta`;
 const ROOT_META = `did:dkg:context-graph:${CG}/_meta`;
 const publicQuads: Quad[] = [{ subject: 'urn:item', predicate: 'urn:title', object: '"sealed"', graph: '' }];
-async function fixture(contextGraphId = CG) {
-  const store = new OxigraphStore(); const graphManager = new GraphManager(store);
+async function fixture(contextGraphId = CG, store = new OxigraphStore()) {
+  const graphManager = new GraphManager(store);
   const chain: ChainAdapter = Object.assign(new NoChainAdapter(), { chainId: '31337', readKnowledgeAssetVersionSnapshot: async (knowledgeAssetId: bigint) => ({ knowledgeAssetId, rootCount: 1n, latestAuthor: AUTHOR, latestRoot: `0x${'11'.repeat(32)}` }) });
   const writeLocks = new Map<string, Promise<void>>();
   const op = async (id: string, version = '3', kaUal = KA) => storeKnowledgeAssetOperationPublicQuads({ store, graphManager, contextGraphId, shareOperationId: id, kaUal, assertionVersion: version, quads: publicQuads, timestamp: new Date(NOW - 10 * 60_000) });
@@ -31,6 +31,60 @@ async function fixture(contextGraphId = CG) {
   return { store, chain, writeLocks, op, head, privateGraph, has, collect };
 }
 describe('reference-safe abandoned draft maintenance', () => {
+  it.each(['absent', 'refused'] as const)('retains queued operation and snapshot during a real %s atomic-capability fallback transition', async mode => {
+    const inner = new OxigraphStore();
+    const gate = () => { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; };
+    const orphanRead = gate(); const returnOrphans = gate(); const transitionRead = gate();
+    const deleted = gate(); const insertJob = gate();
+    let armed = false; let jobRef = ''; let collectorReachedReferences = false;
+    const store = new Proxy(inner, { get(target, prop) {
+      if (prop === 'replaceSubject') return mode === 'absent' ? undefined : async () => {
+        throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'non-atomic test backend');
+      };
+      if (prop === 'query') return async (...args: Parameters<OxigraphStore['query']>) => {
+        const result = await target.query(...args);
+        if (armed && args[1]?.source === 'publisher.asyncLift.getStatus') transitionRead.release();
+        if (armed && args[1]?.source === 'publisher.draftArtifacts.orphanRequests') {
+          expect(result).toEqual({ type: 'boolean', value: false });
+          orphanRead.release(); await returnOrphans.promise;
+        }
+        if (armed && args[1]?.source === 'publisher.draftArtifacts.queueReferences') collectorReachedReferences = true;
+        return result;
+      };
+      if (prop === 'deleteByPatternWithoutCount') return async (...args: Parameters<OxigraphStore['deleteByPatternWithoutCount']>) => {
+        await target.deleteByPatternWithoutCount(...args);
+        if (armed && args[0].subject === jobRef) { deleted.release(); await insertJob.promise; }
+      };
+      const value = Reflect.get(target, prop, target); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const f = await fixture(CG, store); await f.op('queued'); await f.op('new', '2'); await f.head();
+    const operation = workspaceOperationSubject(CG, 'queued');
+    const locator = await store.query(`SELECT ?g WHERE { GRAPH <${META}> { <${operation}> <${DKG}publicSnapshotGraph> ?g } }`);
+    if (locator.type !== 'bindings' || !locator.bindings[0]?.['g']) throw new Error('Missing native operation snapshot');
+    const snapshot = locator.bindings[0]['g'];
+    const queue = new TripleStoreAsyncLiftPublisher(store);
+    const jobId = await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: CG, shareOperationId: 'queued', kaUal: KA, assertionVersion: '3' }));
+    await queue.claimNext('wallet'); jobRef = `urn:dkg:publisher:lift-job:${jobId}`;
+    let transition: Promise<void> | undefined; let collecting: ReturnType<typeof f.collect> | undefined;
+    try {
+      armed = true; collecting = f.collect(); await orphanRead.promise;
+      transition = queue.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+      await transitionRead.promise; await new Promise<void>(resolve => setImmediate(resolve));
+      returnOrphans.release(); const counts = await collecting;
+      await deleted.promise; // the supported fallback has really deleted the native job subject
+      expect(collectorReachedReferences).toBe(true);
+      expect(await queue.getStatus(jobId)).toBeNull();
+      expect({ ...counts, operationRetained: await f.has(META, operation), snapshotRetained: await f.has(snapshot) })
+        .toEqual({ operations: 0, privateGraphs: 0, operationRetained: true, snapshotRetained: true });
+      insertJob.release(); await transition;
+      expect((await queue.getStatus(jobId))?.status).toBe('validated');
+      expect(await f.has(META, operation)).toBe(true); expect(await f.has(snapshot)).toBe(true);
+    } finally {
+      returnOrphans.release(); insertJob.release();
+      await Promise.allSettled([transition, collecting]); await inner.close();
+    }
+  });
+
   it.each([true, false])('retains the complete expired alias class when registered ACK ownership=%s', async retained => {
     const f = await fixture(); const clock = new Date(NOW - 2 * 60 * 60_000);
     const make = (operationId: string) => swmFixtures(CG).share({ version: 2, operationId, marker: 'same-expired-content', ual: KA, timestamp: clock });

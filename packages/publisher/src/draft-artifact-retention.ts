@@ -5,6 +5,7 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { CONTROL_HAS_REQUEST, CONTROL_JOB_TYPE, CONTROL_PAYLOAD, CONTROL_REQUEST_TYPE, RDF_TYPE_PREDICATE } from './async-lift-control-plane.js';
 import { decodeLiftJobPayload } from './lift-job-payload-codec.js';
 import type { KnowledgeAssetVmPublishRequest } from './lift-job.js';
+import { withKeyedLocks } from './keyed-lock.js';
 interface DraftArtifactFence {
   operations: number;
   collecting: boolean;
@@ -12,6 +13,15 @@ interface DraftArtifactFence {
   collectorWaiters: Array<() => void>;
 }
 const fences = new WeakMap<TripleStore, DraftArtifactFence>();
+const queueFences = new WeakMap<TripleStore, Map<string, Promise<void>>>();
+
+/** Coherent queue-record I/O only; released before collection takes KA ownership. */
+export function withDraftArtifactQueueState<T>(store: TripleStore, fn: () => Promise<T>): Promise<T> {
+  let locks = queueFences.get(store);
+  if (!locks) { locks = new Map(); queueFences.set(store, locks); }
+  return withKeyedLocks(locks, ['queue-records'], fn);
+}
+
 const RETIREMENTS = 'urn:dkg:publisher:draft-artifact-retirements';
 const RETIRED_AT = 'urn:dkg:publisher:draftArtifactRetiredAt';
 const JOB_LIMIT = 256;
@@ -75,37 +85,39 @@ export interface DraftArtifactReferences {
 
 /** Unknown, damaged, orphaned, or over-budget queue state disables collection. */
 export async function readDraftArtifactReferences(store: TripleStore): Promise<DraftArtifactReferences | null> {
-  const orphans = await store.query(`ASK { GRAPH ?g {
-    ?request <${RDF_TYPE_PREDICATE}> <${CONTROL_REQUEST_TYPE}> .
-    FILTER NOT EXISTS { ?job <${CONTROL_HAS_REQUEST}> ?request }
-  } }`, { source: 'publisher.draftArtifacts.orphanRequests', priority: 'background' });
-  if (orphans.type !== 'boolean' || orphans.value) return null;
-  const rows = await store.query(`SELECT DISTINCT ?job ?payload WHERE { GRAPH ?g {
-    { ?job <${RDF_TYPE_PREDICATE}> <${CONTROL_JOB_TYPE}> }
-    UNION { ?job <${CONTROL_HAS_REQUEST}> ?request }
-    OPTIONAL { ?job <${CONTROL_PAYLOAD}> ?payload }
-  } } LIMIT ${JOB_LIMIT + 1}`, { source: 'publisher.draftArtifacts.queueReferences', priority: 'background' });
-  if (rows.type !== 'bindings' || rows.bindings.length > JOB_LIMIT) return null;
-  const operations = new Set<string>();
-  const privateVersions = new Set<string>();
-  const rawNamespaces = new Set<string>();
-  for (const row of rows.bindings) {
-    const decoded = decodeLiftJobPayload(row['payload']);
-    if (decoded.kind !== 'canonical' && decoded.kind !== 'compatibility') return null;
-    const request = decoded.job.request;
-    if (request.jobType === 'lift') {
-      const raw = request.lift;
-      rawNamespaces.add(JSON.stringify([raw.contextGraphId, raw.subGraphName ?? '']));
-      operations.add(draftOperationReferenceKey(raw.contextGraphId, raw.subGraphName, raw.shareOperationId));
-    } else {
-      const publish = request.knowledgeAssetVmPublish;
-      if (!publish.kaUal || !publish.assertionVersion) return null;
-      const scope = createGraphKnowledgeAssetScope(publish.kaUal, publish.assertionVersion);
-      operations.add(draftOperationReferenceKey(publish.contextGraphId, publish.subGraphName, publish.shareOperationId));
-      privateVersions.add(draftPrivateReferenceKey(publish.contextGraphId, publish.subGraphName, scope.agentAddress, scope.kaNumber, scope.assertionVersion));
+  return withDraftArtifactQueueState(store, async () => {
+    const orphans = await store.query(`ASK { GRAPH ?g {
+      ?request <${RDF_TYPE_PREDICATE}> <${CONTROL_REQUEST_TYPE}> .
+      FILTER NOT EXISTS { ?job <${CONTROL_HAS_REQUEST}> ?request }
+    } }`, { source: 'publisher.draftArtifacts.orphanRequests', priority: 'background' });
+    if (orphans.type !== 'boolean' || orphans.value) return null;
+    const rows = await store.query(`SELECT DISTINCT ?job ?payload WHERE { GRAPH ?g {
+      { ?job <${RDF_TYPE_PREDICATE}> <${CONTROL_JOB_TYPE}> }
+      UNION { ?job <${CONTROL_HAS_REQUEST}> ?request }
+      OPTIONAL { ?job <${CONTROL_PAYLOAD}> ?payload }
+    } } LIMIT ${JOB_LIMIT + 1}`, { source: 'publisher.draftArtifacts.queueReferences', priority: 'background' });
+    if (rows.type !== 'bindings' || rows.bindings.length > JOB_LIMIT) return null;
+    const operations = new Set<string>();
+    const privateVersions = new Set<string>();
+    const rawNamespaces = new Set<string>();
+    for (const row of rows.bindings) {
+      const decoded = decodeLiftJobPayload(row['payload']);
+      if (decoded.kind !== 'canonical' && decoded.kind !== 'compatibility') return null;
+      const request = decoded.job.request;
+      if (request.jobType === 'lift') {
+        const raw = request.lift;
+        rawNamespaces.add(JSON.stringify([raw.contextGraphId, raw.subGraphName ?? '']));
+        operations.add(draftOperationReferenceKey(raw.contextGraphId, raw.subGraphName, raw.shareOperationId));
+      } else {
+        const publish = request.knowledgeAssetVmPublish;
+        if (!publish.kaUal || !publish.assertionVersion) return null;
+        const scope = createGraphKnowledgeAssetScope(publish.kaUal, publish.assertionVersion);
+        operations.add(draftOperationReferenceKey(publish.contextGraphId, publish.subGraphName, publish.shareOperationId));
+        privateVersions.add(draftPrivateReferenceKey(publish.contextGraphId, publish.subGraphName, scope.agentAddress, scope.kaNumber, scope.assertionVersion));
+      }
     }
-  }
-  return { operations, privateVersions, rawNamespaces };
+    return { operations, privateVersions, rawNamespaces };
+  });
 }
 
 function retirementSubject(contextGraphId: string, subGraphName: string | undefined, operationId: string): string {
