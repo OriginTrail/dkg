@@ -1968,6 +1968,28 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
     expect(harness.evidence.headReads).toEqual([30, 30, 30]);
   });
 
+  it('does not reuse cached name absence after configured finality advances', async () => {
+    const { adapter, evidence, provider, advanceAuthorityHead } = makeTimedAdapter({
+      lateContextGraphNameHash: LATE_NAME_HASH,
+      finalityConfirmations: 4,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    advanceAuthorityHead();
+    provider.getLogs = async () => {
+      throw new RpcEndpointsExhaustedError('new finalized page unavailable');
+    };
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .rejects.toThrow('new finalized page unavailable');
+    // An outage cannot reuse absence proven at block 27 once the configured
+    // finality horizon has advanced to block 32.
+    expect(evidence.blockReads).toContain(32);
+    expect(evidence.blockReads).not.toContain('finalized');
+  });
+
   it('rejects an invalid chain.indexTickMs at construction', () => {
     for (const indexTickMs of [0, 1.5, -6_000]) {
       expect(() => new EVMChainAdapter({
