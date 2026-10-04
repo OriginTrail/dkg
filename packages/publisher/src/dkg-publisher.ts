@@ -1,6 +1,5 @@
-import { materializeConfirmedGraphPublish } from './confirmed-graph-publish-materialization.js';
+import { materializeConfirmedGraphKnowledgeAsset, materializeTentativeGraphKnowledgeAsset } from './confirmed-graph-publish-materialization.js';
 import { replaceExactKnowledgeAssetGraph } from './knowledge-asset-graph-write.js';
-import { convergeKnowledgeAssetMetadataRows, prepareKnowledgeAssetMaterializationMetadata } from './knowledge-asset-metadata-write.js';
 import { createKnowledgeAssetsWithMintAdoption } from './adopt-existing-mint.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
@@ -4287,11 +4286,11 @@ export class DKGPublisher implements Publisher {
           : contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, options.subGraphName);
         const vmQuads = normalizedQuads.map((q) => ({ ...q, graph: vmGraph }));
         this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
-        const applied = graphPublish ? await materializeConfirmedGraphPublish({
+        const applied = graphPublish ? await materializeConfirmedGraphKnowledgeAsset({
           store: this.store, privateStore: this.privateStore, scope: graphPublish.scope,
           contextGraphId, subGraphName: options.subGraphName,
           metaGraph: options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId),
-          vmGraph, vmQuads, privateQuads: canonicalPrivateQuads, confirmedQuads,
+          vmGraph, prepare: async () => ({ vmQuads, privateQuads: canonicalPrivateQuads, metadataQuads: confirmedQuads }),
           version: { blockNumber: onChainResult.blockNumber ?? 0, txIndex: onChainResult.txIndex ?? 0 },
           persistCatalogEntry,
         }) : true;
@@ -4921,9 +4920,6 @@ export class DKGPublisher implements Publisher {
     let canonicalPrivateQuads: Quad[] = [];
     let allSkolemizedQuads: Quad[];
     let updatePrivateRoots: Uint8Array[];
-    let graphUpdateAccess:
-      | { accessPolicy: 'public' | 'ownerOnly' | 'allowList'; publisherPeerId: string; allowedPeers: string[] }
-      | undefined;
     if (graphUpdate) {
       assertNoKnowledgeAssetPayloadNamedGraphs(quads, privateQuads);
       const canonicalParts = await skolemizeKnowledgeAssetParts(quads, privateQuads, {
@@ -4956,7 +4952,7 @@ export class DKGPublisher implements Publisher {
         }
       }
       updatePrivateRoots = privateRoot ? [privateRoot] : [];
-      graphUpdateAccess = await this.resolveGraphScopedUpdateAccessMeta(
+      await this.resolveGraphScopedUpdateAccessMeta(
         options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId),
         graphUpdate.scope.ual,
         options,
@@ -5044,25 +5040,7 @@ export class DKGPublisher implements Publisher {
         // v2 could overwrite a materialised v3's data graph and delete v3's
         // metadata rows via the converge, leaving the node permanently serving
         // the superseded assertion with no self-heal (cross-node divergence).
-        await withMaterializationLock(labelMeta, graphUpdate.scope.ual, async () => {
-          // Gate only on a confirmed run (one that carries a chain version); the
-          // tentative local write has none and is the current-version write.
-          if (
-            version
-            && !(await shouldApplyMaterialization(
-              this.store,
-              labelMeta,
-              graphUpdate.scope.ual,
-              version,
-              BigInt(graphUpdate.scope.assertionVersion),
-            ))
-          ) {
-            this.log.info(
-              ctx,
-              `Graph-scoped update: skipped ${graphUpdate.scope.ual} — a newer materialisation is present`,
-            );
-            return;
-          }
+        const prepare = async () => {
           const inherited = await this.readGraphKnowledgeAssetIdentity(
             labelMeta,
             graphUpdate.scope.ual,
@@ -5073,6 +5051,9 @@ export class DKGPublisher implements Publisher {
                 `${inherited.subGraphName ?? '(root)'} to ${options.subGraphName ?? '(root)'}`,
             );
           }
+          const graphUpdateAccess = await this.resolveGraphScopedUpdateAccessMeta(
+            labelMeta, graphUpdate.scope.ual, options, graphUpdate.privateTripleCount > 0,
+          );
           // 🔴 PR #1712 review (3586192289): the converge below replaces the
           // KA's entire access row set, so passing raw update options here let
           // an update that omitted `accessPolicy` rewrite a private KA to the
@@ -5085,10 +5066,10 @@ export class DKGPublisher implements Publisher {
               ual: graphUpdate.scope.ual,
               contextGraphId,
               merkleRoot: kcMerkleRoot,
-              publisherPeerId: graphUpdateAccess!.publisherPeerId,
-              accessPolicy: graphUpdateAccess!.accessPolicy,
-              allowedPeers: graphUpdateAccess!.allowedPeers.length > 0
-                ? graphUpdateAccess!.allowedPeers
+              publisherPeerId: graphUpdateAccess.publisherPeerId,
+              accessPolicy: graphUpdateAccess.accessPolicy,
+              allowedPeers: graphUpdateAccess.allowedPeers.length > 0
+                ? graphUpdateAccess.allowedPeers
                 : undefined,
               timestamp: new Date(),
               subGraphName: inherited.subGraphName,
@@ -5108,41 +5089,21 @@ export class DKGPublisher implements Publisher {
                 }
               : { status: 'tentative' },
           );
-          const preparedMetadata = await prepareKnowledgeAssetMaterializationMetadata(
-            this.store, labelMeta, graphUpdate.scope.ual, metadata,
-          );
-          await this.replaceExactKnowledgeAssetGraph(
-            dataGraph,
-            allSkolemizedQuads,
-            'Graph-scoped KA update',
-          );
-          await this.privateStore.replaceKnowledgeAssetPrivateTriples(
-            contextGraphId,
-            graphUpdate.scope,
-            canonicalPrivateQuads,
-            options.subGraphName,
-          );
-          await replaceLocallyTrustedKnowledgeAssetControls(
-            this.store,
-            graphUpdate.scope.ual,
-            metadata,
-          );
-          await convergeKnowledgeAssetMetadataRows(
-            this.store,
-            labelMeta,
-            graphUpdate.scope.ual,
-            preparedMetadata,
-          );
-          if (version) {
-            await persistUpdateCatalogEntry();
-            await writeMaterializedVersion(
-              this.store,
-              labelMeta,
-              graphUpdate.scope.ual,
-              version,
-            );
+          return { vmQuads: allSkolemizedQuads, privateQuads: canonicalPrivateQuads, metadataQuads: metadata };
+        };
+        const target = { store: this.store, privateStore: this.privateStore,
+          scope: graphUpdate.scope, contextGraphId, subGraphName: options.subGraphName,
+          metaGraph: labelMeta, vmGraph: dataGraph, prepare };
+        // Gate only on a confirmed run (one that carries a chain version); the
+        // tentative local write has none and is the current-version write.
+        if (version) {
+          if (!await materializeConfirmedGraphKnowledgeAsset({ ...target, version,
+            persistCatalogEntry: persistUpdateCatalogEntry })) {
+            this.log.info(ctx, `Graph-scoped update: skipped ${graphUpdate.scope.ual} — a newer materialisation is present`);
           }
-        });
+        } else {
+          await materializeTentativeGraphKnowledgeAsset(target);
+        }
         onPhase?.('store', 'end');
         return;
       }

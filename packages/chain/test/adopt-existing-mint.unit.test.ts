@@ -28,8 +28,13 @@ function fixture(finalityConfirmations = 1) {
     merkleRoot: ethers.getBytes(ROOT), publisherAddress: ADDRESS,
     authorAddress: '0x2222222222222222222222222222222222222222', knowledgeAssetsContract: ADDRESS, tokenAmount: 100n };
   const rawReceipt = { hash: HASH, status: 1, blockNumber: 10, blockHash: BLOCK_HASH, index: 2 };
-  const readContract = vi.fn(async (_contract, _label, method) =>
-    method === 'getMerkleRoots' ? roots : CG_ID);
+  const graphStorage = { target: '0x3333333333333333333333333333333333333333' };
+  const bindings = new Map([[KA_ID, CG_ID], [KA_ID + 1n, CG_ID + 1n]]);
+  const readContract = vi.fn(async (contract: unknown, label: string, method: string, id: bigint) => {
+    if (contract === storage && label === 'kas.getMerkleRoots' && method === 'getMerkleRoots' && id === KA_ID) return roots;
+    if (contract === graphStorage && label === 'cgStorage.kaToContextGraph' && method === 'kaToContextGraph' && bindings.has(id)) return bindings.get(id)!;
+    throw new Error(`Unexpected contract read: ${label}/${method}/${id}`);
+  });
   const queryEventLogsPage = vi.fn(async (..._args: unknown[]) => ({ logs: [log] }));
   const readPublishReceipt = vi.fn(async () => ({ receipt: rawReceipt, publish: receipt }));
   const provider = { getBlockNumber: vi.fn(async () => 10),
@@ -37,7 +42,7 @@ function fixture(finalityConfirmations = 1) {
   const finalityProviderRead = vi.fn(async (_label, read) => read(provider));
   const chain = Object.assign(Object.create(PublishMethods.prototype), {
     init: vi.fn(async () => undefined),
-    contracts: { knowledgeAssetStorage: storage, contextGraphStorage: {} },
+    contracts: { knowledgeAssetStorage: storage, contextGraphStorage: graphStorage },
     knowledgeAssetStorageBindingGeneration: 1, hubBindingGeneration: 1,
     readContract, queryEventLogsPage, readPublishReceipt,
     readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({ knowledgeAssetId: KA_ID, latestRoot: ROOT, rootCount: BigInt(roots.length), latestAuthor: receipt.authorAddress, latestPublisher: ADDRESS, blockNumber: receipt.blockNumber, blockHash: BLOCK_HASH, knowledgeAssetStorageAddress: ADDRESS, knowledgeAssetStorageGeneration: 1 })),
@@ -47,7 +52,7 @@ function fixture(finalityConfirmations = 1) {
     resolveKaStorageDeployBlock: vi.fn(async () => ({ fromBlock: 1, head: 10, scanProviders: [] })),
     getBlockTimestamp: vi.fn(async (_block: number) => 100),
   }) as PublishMethods;
-  return { chain, roots, log, receipt, rawReceipt, queryEventLogsPage, readPublishReceipt,
+  return { chain, roots, log, receipt, rawReceipt, queryEventLogsPage, readPublishReceipt, readContract, graphStorage, bindings,
     provider, finalityProviderRead };
 }
 
@@ -95,6 +100,20 @@ describe('existing mint provenance', () => {
       expectedBlockNumber: 10, expectedBlockHash: BLOCK_HASH,
     }, 'canonical finalization receipt');
     expect(f.provider.getBlock).toHaveBeenCalledWith(10);
+    expect(f.readContract).toHaveBeenCalledWith(f.graphStorage, 'cgStorage.kaToContextGraph', 'kaToContextGraph', KA_ID);
+  });
+
+  it('refuses the requested asset bound to another graph even when the adjacent asset matches', async () => {
+    const f = fixture();
+    f.bindings.set(KA_ID, CG_ID + 1n);
+    f.bindings.set(KA_ID + 1n, CG_ID);
+    const adoption = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID);
+    await expect(adoption).rejects.toMatchObject({ code: 'KA_CG_MISMATCH' });
+    expect(f.readContract).toHaveBeenCalledWith(f.graphStorage, 'cgStorage.kaToContextGraph', 'kaToContextGraph', KA_ID);
+    expect(f.readContract.mock.calls.filter(([, , method]) => method === 'kaToContextGraph').map(([, , , id]) => id))
+      .toEqual([KA_ID]);
+    expect(f.queryEventLogsPage).not.toHaveBeenCalled();
+    expect(f.readPublishReceipt).not.toHaveBeenCalled();
   });
 
   it('projects definite canonical identity and ordering while retaining parsed costs and storage provenance', async () => {
@@ -242,8 +261,9 @@ describe('existing mint provenance', () => {
       lease.mockResolvedValue(true); // B's own lease is valid, so it cannot fence A's receipt.
       // The first graph check belongs to A; rotate only after receipt recovery.
       const initialGraph = contracts.contextGraphStorage;
-      Reflect.get(f.chain, 'readContract').mockImplementation(async (contract, _label, method) =>
-        method === 'getMerkleRoots' ? f.roots : contract === initialGraph ? CG_ID : CG_ID + 1n);
+      expect(initialGraph).toBe(f.graphStorage); // The strict fixture owns the initial binding.
+      // Replacement handles are deliberately absent from the fixture, so an
+      // observation on a different contract cannot borrow A's graph response.
       Reflect.get(f.chain, 'readKnowledgeAssetVersionSnapshot').mockImplementation(async () => {
         expect(f.readPublishReceipt).toHaveBeenCalledTimes(1);
         if (rotation !== 'graph binding only') {

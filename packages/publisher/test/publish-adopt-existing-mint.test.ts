@@ -39,7 +39,7 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetsWithMintAdoption } from '../src/adopt-existing-mint.js';
 import { setImmediate } from 'node:timers/promises';
 import { generatedPrivateCatalogTripleKeys, generatedPrivateCatalogFloorQuads } from '../src/catalog-trust.js';
-import { readMaterializedVersion } from '../src/metadata.js';
+import { readMaterializedVersion, withMaterializationLock } from '../src/metadata.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
 import type { UpdateOptions } from '../src/publisher.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
@@ -205,6 +205,53 @@ async function sealedUpdateFixture() {
 }
 
 describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
+  it.each(['identity moved', 'revoked access'] as const)(
+    'prepares fresh %s metadata only after the shared confirmed KA lock is acquired', async change => {
+      const s = await sealedUpdateFixture();
+      let release!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const holder = withMaterializationLock(s.meta, s.ual, async () => { entered(); await gate; });
+      await ready;
+      const identity = vi.spyOn(s.publisher as unknown as {
+        readGraphKnowledgeAssetIdentity: (meta: string, ual: string) => Promise<unknown>;
+      }, 'readGraphKnowledgeAssetIdentity');
+      const compound = vi.spyOn(s.store, 'replaceGraphAndSubject');
+      const update = s.publisher.update(s.reservedKaId, s.options);
+      // Install a rejection observer before releasing the held writer.
+      const outcome = update.then(result => ({ result }), error => ({ error }));
+      try {
+        await vi.waitFor(() => expect(s.chain.updateKnowledgeCollectionV10).toHaveBeenCalledOnce());
+        await setImmediate();
+        expect(identity).not.toHaveBeenCalled();
+        expect(compound).not.toHaveBeenCalled();
+        if (change === 'identity moved') {
+          await s.store.insert([{ subject: s.ual, predicate: 'http://dkg.io/ontology/subGraphName',
+            object: '"moved"', graph: s.meta }]);
+        } else {
+          await s.store.deleteByPattern({ subject: s.ual, graph: s.meta, predicate: 'http://dkg.io/ontology/accessPolicy' });
+          await s.store.insert([{ subject: s.ual, predicate: 'http://dkg.io/ontology/accessPolicy',
+            object: '"ownerOnly"', graph: s.meta }]);
+        }
+        release(); await holder;
+        const settled = await outcome;
+        expect(identity).toHaveBeenCalledOnce();
+        if (change === 'identity moved') {
+          expect(settled).toMatchObject({ error: expect.objectContaining({ message: expect.stringContaining('cannot move') }) });
+          expect(compound).not.toHaveBeenCalled();
+          expect(await readMaterializedVersion(s.store, s.meta, s.ual)).toEqual(s.prior);
+          expect(await s.store.countQuads(`did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_catalog`)).toBe(0);
+        } else {
+          expect(settled).toMatchObject({ result: { status: 'confirmed' } });
+          expect(compound).toHaveBeenCalledOnce();
+          expect(await s.store.query(`SELECT ?policy WHERE { GRAPH <${s.meta}> {
+            <${s.ual}> <http://dkg.io/ontology/accessPolicy> ?policy } }`))
+            .toMatchObject({ bindings: [{ policy: '"ownerOnly"' }] });
+        }
+      } finally { release(); await Promise.allSettled([holder, outcome]); await s.store.close(); }
+    });
+
   it.each(['private', 'metadata', 'catalog'] as const)(
     'retains the previous update fence after a committed %s failure and repairs the equal-version retry', async slice => {
       const s = await sealedUpdateFixture();
@@ -218,15 +265,18 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
               await replace(...args);
               throw new Error('committed slice failed');
             });
+        } else if (slice === 'metadata') {
+          const original = s.store.replaceGraphAndSubject.bind(s.store);
+          vi.spyOn(s.store, 'replaceGraphAndSubject').mockImplementationOnce(async (...args) => {
+            await original(...args);
+            throw new Error('committed slice failed');
+          });
         } else {
-          const method = slice === 'metadata' ? 'delete' : 'insert';
-          const original = s.store[method].bind(s.store);
+          const original = s.store.insert.bind(s.store);
           let fail = true;
-          vi.spyOn(s.store, method).mockImplementation(async rows => {
+          vi.spyOn(s.store, 'insert').mockImplementation(async rows => {
             await original(rows);
-            if (fail && rows.some(row => slice === 'metadata'
-              ? row.graph === s.meta && row.subject === s.ual
-              : row.graph === catalog)) {
+            if (fail && rows.some(row => row.graph === catalog)) {
               fail = false;
               throw new Error('committed slice failed');
             }

@@ -3,10 +3,17 @@ import { setImmediate } from 'node:timers/promises';
 import { describe, expect, it, vi } from 'vitest';
 import { createGraphKnowledgeAssetScope, MemoryLayer, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, PrivateContentStore, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
-import { materializeConfirmedGraphPublish } from '../src/confirmed-graph-publish-materialization.js';
+import { materializeConfirmedGraphKnowledgeAsset, type GraphMaterializationRows } from '../src/confirmed-graph-publish-materialization.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
 import { replaceCatalogQuads } from '../src/catalog-persistence.js';
 import { generateGraphKnowledgeAssetMetadata, materializedVersionQuad, readMaterializedVersion, withMaterializationLock, writeMaterializedVersion } from '../src/metadata.js';
+
+type FixtureRows = Omit<GraphMaterializationRows, 'metadataQuads'> & { confirmedQuads: readonly Quad[] };
+function materialize(input: Omit<Parameters<typeof materializeConfirmedGraphKnowledgeAsset>[0], 'prepare'> & FixtureRows) {
+  return materializeConfirmedGraphKnowledgeAsset({ ...input, prepare: async () => ({
+    vmQuads: input.vmQuads, privateQuads: input.privateQuads, metadataQuads: input.confirmedQuads,
+  }) });
+}
 
 function fixture() {
   const store = new OxigraphStore();
@@ -25,6 +32,49 @@ function fixture() {
 }
 
 describe('confirmed graph publish materialization', () => {
+  it('does not prepare or mutate while another KA writer owns the lock, and prepares once after release', async () => {
+    const input = fixture();
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const holder = withMaterializationLock(input.metaGraph, input.scope.ual, async () => { entered(); await gate; });
+    await ready;
+    const prepare = vi.fn(async () => ({ vmQuads: input.vmQuads,
+      privateQuads: input.privateQuads, metadataQuads: input.confirmedQuads }));
+    const query = vi.spyOn(input.store, 'query');
+    const compound = vi.spyOn(input.store, 'replaceGraphAndSubject');
+    const commit = materializeConfirmedGraphKnowledgeAsset({ ...input, prepare });
+    try {
+      await setImmediate();
+      expect(prepare).not.toHaveBeenCalled();
+      expect(query).not.toHaveBeenCalled();
+      expect(compound).not.toHaveBeenCalled();
+      release(); await holder;
+      expect(await commit).toBe(true);
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(compound).toHaveBeenCalledOnce();
+    } finally { release(); await Promise.allSettled([holder, commit]); await input.store.close(); }
+  });
+
+  it('refuses stale confirmation before invoking preparation and propagates preparation failure before any slice write', async () => {
+    const input = fixture();
+    const prepare = vi.fn(async () => { throw new Error('identity preflight refused'); });
+    const compound = vi.spyOn(input.store, 'replaceGraphAndSubject');
+    try {
+      await materialize(input);
+      compound.mockClear();
+      expect(await materializeConfirmedGraphKnowledgeAsset({ ...input,
+        version: { blockNumber: 9, txIndex: 0 }, prepare })).toBe(false);
+      expect(prepare).not.toHaveBeenCalled();
+      await expect(materializeConfirmedGraphKnowledgeAsset({ ...input, prepare }))
+        .rejects.toThrow('identity preflight refused');
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(compound).not.toHaveBeenCalled();
+      expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
+    } finally { await input.store.close(); }
+  });
+
   it('replaces the public graph and its metadata subject through one compound commit', async () => {
     const input = fixture();
     const compound = vi.spyOn(input.store, 'replaceGraphAndSubject');
@@ -33,7 +83,7 @@ describe('confirmed graph publish materialization', () => {
     try {
       await input.store.insert([other, ...input.vmQuads.map(q => ({ ...q, object: '"superseded"' })),
         { subject: input.scope.ual, predicate: 'urn:obsolete', object: '"remove"', graph: input.metaGraph }]);
-      expect(await materializeConfirmedGraphPublish(input)).toBe(true);
+      expect(await materialize(input)).toBe(true);
       expect(compound).toHaveBeenCalledOnce();
       expect(compound.mock.calls[0]?.slice(0, 5)).toEqual([
         input.vmGraph, input.vmQuads, input.metaGraph, input.scope.ual, input.confirmedQuads,
@@ -49,7 +99,7 @@ describe('confirmed graph publish materialization', () => {
   it.each(['private', 'catalog'] as const)('retains the previous fence in the compound payload after a later %s failure', async failingSlice => {
     const input = fixture();
     try {
-      await materializeConfirmedGraphPublish(input);
+      await materialize(input);
       const compound = vi.spyOn(input.store, 'replaceGraphAndSubject');
       const nextVersion = { blockNumber: 11, txIndex: 1 };
       const next = { ...input, version: nextVersion,
@@ -61,14 +111,14 @@ describe('confirmed graph publish materialization', () => {
       } else {
         input.persistCatalogEntry.mockRejectedValueOnce(new Error('later slice failed'));
       }
-      await expect(materializeConfirmedGraphPublish(next)).rejects.toThrow('later slice failed');
+      await expect(materialize(next)).rejects.toThrow('later slice failed');
       expect(compound).toHaveBeenCalledOnce();
       expect(compound.mock.calls[0]?.[4].filter(q => q.predicate.endsWith('materializedVersion')))
         .toEqual([materializedVersionQuad(input.metaGraph, input.scope.ual, input.version)]);
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
       expect(await input.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.vmGraph}> { ?s ?p ?o } }`))
         .toMatchObject({ quads: [expect.objectContaining({ object: '"replacement"' })] });
-      expect(await materializeConfirmedGraphPublish(next)).toBe(true);
+      expect(await materialize(next)).toBe(true);
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(nextVersion);
     } finally { await input.store.close(); }
   });
@@ -79,12 +129,12 @@ describe('confirmed graph publish materialization', () => {
       const graphOnly = vi.spyOn(input.store, 'replaceGraph');
       if (capability === 'missing') Reflect.set(input.store, 'replaceGraphAndSubject', undefined);
       else vi.spyOn(input.store, 'replaceGraphAndSubject').mockRejectedValue(new UnsupportedTripleStoreCapabilityError('replaceGraphAndSubject', 'test compatibility store'));
-      expect(await materializeConfirmedGraphPublish(input)).toBe(true);
+      expect(await materialize(input)).toBe(true);
       expect(graphOnly.mock.calls.filter(([graph]) => graph === input.vmGraph)).toHaveLength(1);
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
       const nextVersion = { blockNumber: 11, txIndex: 0 };
       input.persistCatalogEntry.mockRejectedValueOnce(new Error('fallback catalog failed'));
-      await expect(materializeConfirmedGraphPublish({ ...input, version: nextVersion,
+      await expect(materialize({ ...input, version: nextVersion,
         confirmedQuads: [...input.confirmedQuads, materializedVersionQuad(input.metaGraph, input.scope.ual, nextVersion)],
       })).rejects.toThrow('fallback catalog failed');
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
@@ -95,11 +145,11 @@ describe('confirmed graph publish materialization', () => {
     const input = fixture();
     try {
       input.persistCatalogEntry.mockRejectedValueOnce(new Error('first catalog failed'));
-      await expect(materializeConfirmedGraphPublish({ ...input,
+      await expect(materialize({ ...input,
         confirmedQuads: [...input.confirmedQuads, materializedVersionQuad(input.metaGraph, input.scope.ual, input.version)],
       })).rejects.toThrow('first catalog failed');
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toBeNull();
-      expect(await materializeConfirmedGraphPublish(input)).toBe(true);
+      expect(await materialize(input)).toBe(true);
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
     } finally { await input.store.close(); }
   });
@@ -109,7 +159,7 @@ describe('confirmed graph publish materialization', () => {
     try {
       const graphOnly = vi.spyOn(input.store, 'replaceGraph');
       vi.spyOn(input.store, 'replaceGraphAndSubject').mockRejectedValue(new Error('compound response lost'));
-      await expect(materializeConfirmedGraphPublish(input)).rejects.toThrow('compound response lost');
+      await expect(materialize(input)).rejects.toThrow('compound response lost');
       expect(graphOnly).not.toHaveBeenCalled();
       expect(input.persistCatalogEntry).not.toHaveBeenCalled();
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toBeNull();
@@ -129,7 +179,7 @@ describe('confirmed graph publish materialization', () => {
     const persistCatalogEntry = vi.fn(async () => replaceCatalogQuads(input.store, catalogGraph, catalogRows));
     const successful = { ...input, privateQuads, confirmedQuads, persistCatalogEntry };
     try {
-      expect(await materializeConfirmedGraphPublish(successful)).toBe(true);
+      expect(await materialize(successful)).toBe(true);
       const data = () => input.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.vmGraph}> { ?s ?p ?o } }`);
       expect(await data()).toMatchObject({ quads: [expect.objectContaining({ object: '"old"' })] });
       const freshPrivateReader = new PrivateContentStore(input.store, new GraphManager(input.store));
@@ -141,7 +191,7 @@ describe('confirmed graph publish materialization', () => {
         .toMatchObject({ value: true });
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
       for (const version of [{ blockNumber: 9, txIndex: 9 }, { blockNumber: 10, txIndex: 1 }]) {
-        expect(await materializeConfirmedGraphPublish({ ...successful, version,
+        expect(await materialize({ ...successful, version,
           vmQuads: input.vmQuads.map(q => ({ ...q, object: '"stale public"' })),
           privateQuads: privateQuads.map(q => ({ ...q, object: '"stale private"' })),
           confirmedQuads: confirmedQuads.map(q => q.predicate.endsWith('accessPolicy') ? { ...q, object: '"public"' } : q),
@@ -157,14 +207,14 @@ describe('confirmed graph publish materialization', () => {
   it('keeps the committed ordering fence after an interrupted equal-version metadata retry', async () => {
     const input = fixture();
     try {
-      expect(await materializeConfirmedGraphPublish(input)).toBe(true);
+      expect(await materialize(input)).toBe(true);
       vi.spyOn(input.privateStore, 'replaceKnowledgeAssetPrivateTriples').mockRejectedValueOnce(new Error('private retry failed'));
-      await expect(materializeConfirmedGraphPublish({ ...input,
+      await expect(materialize({ ...input,
         confirmedQuads: input.confirmedQuads.map(q => q.predicate.endsWith('accessPolicy')
           ? { ...q, object: '"ownerOnly"' } : q),
       })).rejects.toThrow('private retry failed');
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
-      expect(await materializeConfirmedGraphPublish({ ...input, version: { blockNumber: 9, txIndex: 9 },
+      expect(await materialize({ ...input, version: { blockNumber: 9, txIndex: 9 },
         vmQuads: input.vmQuads.map(q => ({ ...q, object: '"stale after interrupted retry"' })),
       })).toBe(false);
       expect(await input.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.vmGraph}> { ?s ?p ?o } }`))
@@ -180,7 +230,7 @@ describe('confirmed graph publish materialization', () => {
         const replacement = input.vmQuads.map(q => ({ ...q, object: '"new"' }));
         await input.store.insert(replacement);
         await writeMaterializedVersion(input.store, input.metaGraph, input.scope.ual, newer);
-        expect(await materializeConfirmedGraphPublish(input)).toBe(false);
+        expect(await materialize(input)).toBe(false);
         expect(await input.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.vmGraph}> { ?s ?p ?o } }`))
           .toMatchObject({ type: 'quads', quads: [expect.objectContaining({ object: '"new"' })] });
         expect(input.persistCatalogEntry).not.toHaveBeenCalled();
@@ -201,7 +251,7 @@ describe('confirmed graph publish materialization', () => {
     });
     await active;
     let settled = false;
-    const publish = materializeConfirmedGraphPublish(input).finally(() => { settled = true; });
+    const publish = materialize(input).finally(() => { settled = true; });
     try {
       await setImmediate();
       expect(settled).toBe(false);
@@ -221,7 +271,7 @@ describe('confirmed graph publish materialization', () => {
       await input.store.insert(input.vmQuads);
       Reflect.set(input.store, 'replaceGraphAndSubject', undefined);
       Reflect.set(input.store, 'replaceGraph', undefined);
-      await expect(materializeConfirmedGraphPublish(input))
+      await expect(materialize(input))
         .rejects.toMatchObject({ code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED', graphUri: input.vmGraph });
       expect(await input.store.countQuads(input.vmGraph)).toBe(1);
       expect(input.persistCatalogEntry).not.toHaveBeenCalled();
@@ -232,7 +282,7 @@ describe('confirmed graph publish materialization', () => {
     const input = fixture();
     try {
       vi.spyOn(input.store, 'replaceGraphAndSubject').mockRejectedValue(new Error('swap failed'));
-      await expect(materializeConfirmedGraphPublish(input)).rejects.toThrow('swap failed');
+      await expect(materialize(input)).rejects.toThrow('swap failed');
       expect(input.persistCatalogEntry).not.toHaveBeenCalled();
       await expect(input.store.query(`ASK { GRAPH <${input.metaGraph}> {
         <${input.scope.ual}> <http://dkg.io/ontology/materializedVersion> ?v } }`))

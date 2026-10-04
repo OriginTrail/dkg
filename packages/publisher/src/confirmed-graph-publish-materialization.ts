@@ -11,41 +11,63 @@ import {
   type MaterializedVersion,
 } from './metadata.js';
 
-/** Publish and update serialize every materialized slice under the same KA lock. */
-export async function materializeConfirmedGraphPublish(input: Readonly<{
-  store: TripleStore;
-  privateStore: PrivateContentStore;
-  scope: GraphKnowledgeAssetScope;
-  contextGraphId: string;
-  subGraphName?: string;
-  metaGraph: string;
-  vmGraph: string;
-  vmQuads: readonly Quad[];
-  privateQuads: readonly Quad[];
-  confirmedQuads: Quad[];
+export interface GraphMaterializationRows {
+  readonly vmQuads: readonly Quad[];
+  readonly privateQuads: readonly Quad[];
+  readonly metadataQuads: readonly Quad[];
+}
+interface GraphMaterializationTarget {
+  readonly store: TripleStore;
+  readonly privateStore: PrivateContentStore;
+  readonly scope: GraphKnowledgeAssetScope;
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  readonly metaGraph: string;
+  readonly vmGraph: string;
+  /** Identity/access reads and metadata construction happen under this KA's lock. */
+  readonly prepare: () => Promise<GraphMaterializationRows>;
+}
+
+/** One confirmed publish/update owner for admission, every slice, and the final fence. */
+export async function materializeConfirmedGraphKnowledgeAsset(input: GraphMaterializationTarget & Readonly<{
   version: MaterializedVersion;
   persistCatalogEntry: () => Promise<void>;
 }>): Promise<boolean> {
   return withMaterializationLock(input.metaGraph, input.scope.ual, async () => {
     if (!await shouldApplyMaterialization(input.store, input.metaGraph, input.scope.ual,
       input.version, BigInt(input.scope.assertionVersion))) return false;
-    await replaceLocallyTrustedKnowledgeAssetControls(input.store, input.scope.ual, input.confirmedQuads);
+    const rows = await input.prepare();
     const publicMetadata = await prepareKnowledgeAssetMaterializationMetadata(
-      input.store, input.metaGraph, input.scope.ual, input.confirmedQuads);
+      input.store, input.metaGraph, input.scope.ual, rows.metadataQuads);
+    await replaceLocallyTrustedKnowledgeAssetControls(input.store, input.scope.ual, rows.metadataQuads);
     if (!await tryReplaceGraphAndSubjectAtomically(input.store, input.vmGraph,
-      input.vmQuads.map(quad => ({ ...quad, graph: input.vmGraph })),
+      rows.vmQuads.map(quad => ({ ...quad, graph: input.vmGraph })),
       input.metaGraph, input.scope.ual, publicMetadata)) {
       await replacePublicSliceWithoutCompoundCapability(input.store, input.vmGraph,
-        input.vmQuads, input.metaGraph, input.scope.ual, publicMetadata);
+        rows.vmQuads, input.metaGraph, input.scope.ual, publicMetadata);
     }
     // GH #1078 — supersede/persist private slices only now that the chain
     // has confirmed (before returning 'confirmed', so no read sees the KA
     // confirmed without its private data).
     await input.privateStore.replaceKnowledgeAssetPrivateTriples(input.contextGraphId,
-      input.scope, input.privateQuads, input.subGraphName);
+      input.scope, rows.privateQuads, input.subGraphName);
     await input.persistCatalogEntry();
     await writeMaterializedVersion(input.store, input.metaGraph, input.scope.ual, input.version);
     return true;
+  });
+}
+
+/** Tentative local updates have no chain admission, catalog commit, or new fence. */
+export async function materializeTentativeGraphKnowledgeAsset(input: GraphMaterializationTarget): Promise<void> {
+  await withMaterializationLock(input.metaGraph, input.scope.ual, async () => {
+    const rows = await input.prepare();
+    const metadata = await prepareKnowledgeAssetMaterializationMetadata(
+      input.store, input.metaGraph, input.scope.ual, rows.metadataQuads);
+    await replaceExactKnowledgeAssetGraph(input.store, input.vmGraph, rows.vmQuads, 'Graph-scoped tentative update');
+    await input.privateStore.replaceKnowledgeAssetPrivateTriples(input.contextGraphId,
+      input.scope, rows.privateQuads, input.subGraphName);
+    await replaceLocallyTrustedKnowledgeAssetControls(input.store, input.scope.ual, rows.metadataQuads);
+    await convergeKnowledgeAssetMetadataRows(input.store, input.metaGraph, input.scope.ual, metadata);
   });
 }
 
@@ -58,6 +80,6 @@ async function replacePublicSliceWithoutCompoundCapability(
   ual: string,
   metadataQuads: readonly Quad[],
 ): Promise<void> {
-  await replaceExactKnowledgeAssetGraph(store, vmGraph, vmQuads, 'Graph-scoped confirmed publish');
+  await replaceExactKnowledgeAssetGraph(store, vmGraph, vmQuads, 'Graph-scoped confirmed materialization');
   await convergeKnowledgeAssetMetadataRows(store, metaGraph, ual, metadataQuads);
 }
