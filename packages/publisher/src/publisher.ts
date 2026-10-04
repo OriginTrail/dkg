@@ -497,6 +497,8 @@ export interface PublishResult {
   merkleRoot: Uint8Array;
   kaManifest: KAManifestEntry[];
   status: 'tentative' | 'confirmed' | 'failed';
+  /** Chain confirmation succeeded; durable local lifecycle repair is still scheduled. */
+  lifecycleRepairPending?: boolean;
   onChainResult?: OnChainPublishResult;
   /**
    * GH #1013 — when a publish lands `tentative` (local-only), WHY it skipped

@@ -1222,6 +1222,15 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     if (reason) expect(res.body.error).toContain(reason);
   });
 
+  it('reports a confirmed transaction with pending local lifecycle repair', async () => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status: 'confirmed', ual: 'did:dkg:confirmed/1', lifecycleRepairPending: true }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'confirmed', ual: 'did:dkg:confirmed/1', lifecycleRepairPending: true });
+  });
+
   // GH#1786 — the resident-author selector. The load-bearing property is that it can
   // never be silently dropped: a dropped selector publishes the WRONG author with a
   // success status and real TRAC/gas spent.

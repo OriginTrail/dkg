@@ -29,7 +29,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreOperationTimeoutError, GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
 import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
@@ -1995,6 +1995,86 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await expect(
       agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name),
     ).rejects.toMatchObject({ code: 'PUBLISH_NOT_FULL_SHARE' });
+  }, 60_000);
+
+  it('repairs a confirmed queued lifecycle stamp automatically after a real agent restart', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-lifecycle-e2e-'));
+    const storePath = join(dir, 'store.nq');
+    const store = new OxigraphStore(storePath);
+    let firstAgent: DKGAgent | undefined;
+    let restartedAgent: DKGAgent | undefined;
+    try {
+      firstAgent = await createAgent('ConfirmedLifecycleRepairBeforeRestart', {
+        dataDir: dir, store, sharedMemoryPublicSnapshotStorage: { enabled: false },
+        syncReconcilerEnabled: false, vmReconcilerEnabled: false,
+      });
+      await firstAgent.createContextGraph({ id: CG_ID, name: 'Confirmed Lifecycle Repair E2E' });
+      await firstAgent.registerContextGraph(CG_ID);
+      const name = 'confirmed-stamp-restart';
+      await firstAgent.assertion.create(CG_ID, name);
+      await firstAgent.assertion.write(CG_ID, name, [
+        { subject: 'urn:confirmed-stamp-restart', predicate: 'http://schema.org/name', object: '"Repair after restart"' },
+      ]);
+      await firstAgent.assertion.promote(CG_ID, name);
+      const intent = await firstAgent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+      const publisher = (firstAgent as any).publisher;
+      const publish = publisher.publish.bind(publisher);
+      let armed = false;
+      const author = firstAgent.defaultAgentAddress ?? firstAgent.peerId;
+      const lifecycle = assertionLifecycleUri(CG_ID, author, name);
+      const insert = store.insert.bind(store);
+      const fault = vi.spyOn(store, 'insert').mockImplementation(async quads => {
+        if (armed && quads.some(q => q.subject === lifecycle && q.predicate === 'http://dkg.io/ontology/state')) {
+          throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'insert', outcome: 'not_started' });
+        }
+        await insert(quads);
+      });
+      const submitted = vi.spyOn(publisher, 'publish').mockImplementation(async (...args: any[]) => {
+        const result = await publish(...args);
+        armed = result.status === 'confirmed';
+        return result;
+      });
+      const queue = new TripleStoreAsyncLiftPublisher(store, { publicSnapshotStore: (firstAgent as any).publicSnapshotStore, knowledgeAssetVmPublishHandler: {
+        execute: ({ request, publishOptions }) => firstAgent!.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      } });
+      const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
+      const processed = await queue.processNext('wallet-1');
+      if (processed?.status === 'failed') throw new Error(JSON.stringify(processed.failure));
+      expect(processed).toMatchObject({ jobId, status: 'finalized' });
+      expect(submitted).toHaveBeenCalledTimes(1);
+      const kaId = BigInt(intent.seal.reservedKaId!);
+      const rootCount = await (firstAgent as any).chain.getMerkleRootCount(kaId);
+      expect(rootCount).toBe(1n);
+      const before = await firstAgent.assertion.history(CG_ID, name);
+      expect(before?.state).not.toBe('published');
+      await firstAgent.stop();
+      agents.splice(agents.indexOf(firstAgent), 1);
+      fault.mockRestore();
+      restartedAgent = await createAgent('ConfirmedLifecycleRepairAfterRestart', {
+        dataDir: dir, store: new OxigraphStore(storePath), sharedMemoryPublicSnapshotStorage: { enabled: false },
+        syncReconcilerEnabled: false, vmReconcilerEnabled: false,
+      });
+      const republish = vi.spyOn((restartedAgent as any).publisher, 'publish');
+      let history = await restartedAgent.assertion.history(CG_ID, name);
+      const deadline = Date.now() + 20_000;
+      while (history?.state !== 'published' && Date.now() < deadline) {
+        await sleep(100);
+        history = await restartedAgent.assertion.history(CG_ID, name);
+      }
+      expect(history).toMatchObject({ vmCurrentAssertion: intent.sealMerkleRoot.slice(2),
+        state: 'published', memoryLayer: MemoryLayer.VerifiableMemory });
+      const published = await (restartedAgent as any).store.query(`SELECT ?ual WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> {
+        <${lifecycle}> <http://dkg.io/ontology/publishedUal> ?ual
+      } }`);
+      expect(published.bindings).toHaveLength(1);
+      expect(await (restartedAgent as any).chain.getMerkleRootCount(kaId)).toBe(rootCount);
+      expect(republish).not.toHaveBeenCalled();
+      expect(await new TripleStoreAsyncLiftPublisher((restartedAgent as any).store).processNext('wallet-1')).toBeNull();
+    } finally {
+      if (restartedAgent) { await restartedAgent.stop(); agents.splice(agents.indexOf(restartedAgent), 1); }
+      if (firstAgent && agents.includes(firstAgent)) { await firstAgent.stop(); agents.splice(agents.indexOf(firstAgent), 1); }
+      await rm(dir, { recursive: true, force: true });
+    }
   }, 60_000);
 
   it('async VM publish with clearAfter false clears published roots but leaves unrelated SWM content', async () => {

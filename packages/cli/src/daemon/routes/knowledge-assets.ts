@@ -1233,6 +1233,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           });
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
+          if (pub?.lifecycleRepairPending) result.lifecycleRepairPending = true;
           result.txHash = pub?.onChainResult?.txHash;
           const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
           if (storageAckPeerIds.length > 0) {
@@ -1891,6 +1892,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         return jsonResponse(res, httpStatus, {
           kaId: pub?.kaId,
           status: pub?.status,
+          ...(pub?.lifecycleRepairPending ? { lifecycleRepairPending: true } : {}),
           ual: pub?.ual,
           txHash: pub?.onChainResult?.txHash,
           ...(pub?.assertionUri !== undefined ? { assertionUri: pub.assertionUri } : {}),

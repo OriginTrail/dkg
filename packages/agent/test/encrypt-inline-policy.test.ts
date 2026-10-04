@@ -944,6 +944,7 @@ function makeQueuedAgentHarness(options: {
     _stampPointer: recorder(async () => undefined),
     resolveRfc64CatalogAuthoringLaneV1: () => null,
   };
+  Object.setPrototypeOf(agentLike, DKGAgent.prototype);
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   agentLike.observeRfc64ConfirmedVmV1 =

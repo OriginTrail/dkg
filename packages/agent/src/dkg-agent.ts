@@ -2773,6 +2773,8 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    const namedLifecycleRepairDrain = this.namedKaVmLifecycleRepair?.stop();
+    void namedLifecycleRepairDrain?.catch(() => {});
     // Fence ACK routes, retries, and self sends before shutdown awaits.
     const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
     void storageACKDrain.catch(() => {});
@@ -3072,6 +3074,8 @@ export class DKGAgent extends DKGAgentBase {
     // Stop admission and await the active finalization recovery batch while
     // chain and graph-store dependencies are still alive. No new retry may
     // begin after this boundary.
+    await namedLifecycleRepairDrain;
+    this.namedKaVmLifecycleRepair = undefined;
     await this.finalizationHandler?.stopRecoveryWorker();
     // OT-RFC-64 Gate 1: unregister the public catalog protocols and drain the
     // receiver scheduler (awaiting in-flight durable stage writes) while the

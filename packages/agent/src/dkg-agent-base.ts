@@ -29,6 +29,7 @@ import {
 } from './finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
+import type { NamedKaVmLifecycleRepair } from './named-ka-vm-lifecycle-repair.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from
   './rfc64/background-work-dispatcher-v1.js';
@@ -1490,6 +1491,7 @@ export class DKGAgentBase {
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
+  protected namedKaVmLifecycleRepair?: NamedKaVmLifecycleRepair;
   /**
    * Lazily resolved so partial test hosts built on the prototype (and any
    * configuration that predates the resolved field) still receive the

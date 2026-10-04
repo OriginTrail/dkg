@@ -305,7 +305,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     };
     await store.insert([
       ...buildGraphSeal(assertionUri),
-      { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, object: '"prior"', graph: metaGraph },
+      { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, object: JSON.stringify('ab'.repeat(32)), graph: metaGraph },
       { subject: lifecycleUri, predicate: KA_ID_PRED, object: '"1"', graph: metaGraph },
       { ...PUBLIC_QUAD, graph: namedGraph },
       unrelatedLegacyQuad,

@@ -19,7 +19,7 @@ import {
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
-import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
+import { swmKaWriteLockKey, withKeyedLocks, assertionLifecycleWriteLockKey } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
@@ -1782,23 +1782,6 @@ export class DKGPublisher implements Publisher {
     return withKeyedLocks(this.writeLocks, keys, fn);
   }
 
-  private assertionLifecycleWriteLockKey(
-    contextGraphId: string,
-    name: string,
-    agentAddress: string,
-    subGraphName?: string,
-  ): string {
-    const normalizedAgentAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
-      ? agentAddress.toLowerCase()
-      : agentAddress;
-    return `assertion-lifecycle:${JSON.stringify([
-      contextGraphId,
-      subGraphName ?? '',
-      normalizedAgentAddress,
-      name,
-    ])}`;
-  }
-
   private withAssertionLifecycleWriteLock<T>(
     contextGraphId: string,
     name: string,
@@ -1807,7 +1790,7 @@ export class DKGPublisher implements Publisher {
     fn: () => Promise<T>,
   ): Promise<T> {
     return this.withWriteLocks([
-      this.assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName),
+      assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName),
     ], fn);
   }
 
