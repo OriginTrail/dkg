@@ -5,18 +5,58 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { CONTROL_HAS_REQUEST, CONTROL_JOB_TYPE, CONTROL_PAYLOAD, CONTROL_REQUEST_TYPE, RDF_TYPE_PREDICATE } from './async-lift-control-plane.js';
 import { decodeLiftJobPayload } from './lift-job-payload-codec.js';
 import type { KnowledgeAssetVmPublishRequest } from './lift-job.js';
-import { withKeyedLocks } from './keyed-lock.js';
-
-const locks = new WeakMap<TripleStore, Map<string, Promise<void>>>();
+interface DraftArtifactFence {
+  operations: number;
+  collecting: boolean;
+  operationWaiters: Array<() => void>;
+  collectorWaiters: Array<() => void>;
+}
+const fences = new WeakMap<TripleStore, DraftArtifactFence>();
 const RETIREMENTS = 'urn:dkg:publisher:draft-artifact-retirements';
 const RETIRED_AT = 'urn:dkg:publisher:draftArtifactRetiredAt';
 const JOB_LIMIT = 256;
 
-/** Admission and artifact collection share one store-local reference boundary. */
-export function withDraftArtifactReferences<T>(store: TripleStore, fn: () => Promise<T>): Promise<T> {
-  let map = locks.get(store);
-  if (!map) { map = new Map(); locks.set(store, map); }
-  return withKeyedLocks(map, ['draft-artifact-references'], fn);
+function fenceFor(store: TripleStore): DraftArtifactFence {
+  let fence = fences.get(store);
+  if (!fence) {
+    fence = { operations: 0, collecting: false, operationWaiters: [], collectorWaiters: [] };
+    fences.set(store, fence);
+  }
+  return fence;
+}
+
+function startWaitingCollector(fence: DraftArtifactFence): void {
+  if (fence.collecting || fence.operations !== 0) return;
+  const resume = fence.collectorWaiters.shift();
+  if (resume) { fence.collecting = true; resume(); }
+}
+
+/** Shared operation/admission lease; per-KA and claim locks retain write ownership. */
+export async function withDraftArtifactReferences<T>(store: TripleStore, fn: () => Promise<T>): Promise<T> {
+  const fence = fenceFor(store);
+  if (fence.collecting) await new Promise<void>(resolve => fence.operationWaiters.push(resolve));
+  else fence.operations += 1;
+  // A waiting collector must not couple independent operations to a paused
+  // signer. New operations can join an active lease; the last release starts
+  // collection synchronously, before another operation can enter.
+  try { return await fn(); }
+  finally { fence.operations -= 1; startWaitingCollector(fence); }
+}
+
+/** Exclusive reference snapshot and retirement; excludes every operation lease. */
+export async function withDraftArtifactCollection<T>(store: TripleStore, fn: () => Promise<T>): Promise<T> {
+  const fence = fenceFor(store);
+  if (fence.collecting || fence.operations !== 0) {
+    await new Promise<void>(resolve => fence.collectorWaiters.push(resolve));
+  } else fence.collecting = true;
+  try { return await fn(); }
+  finally {
+    fence.collecting = false;
+    const operations = fence.operationWaiters.splice(0);
+    fence.operations += operations.length;
+    for (const resume of operations) resume();
+    startWaitingCollector(fence);
+  }
 }
 
 export function draftOperationReferenceKey(contextGraphId: string, subGraphName: string | undefined, operationId: string): string {

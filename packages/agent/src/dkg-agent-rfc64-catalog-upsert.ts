@@ -119,6 +119,12 @@ interface Rfc64CatalogMutationStateV1 {
   readonly expectedCurrentCatalogHeadDigest: Digest32V1 | null;
 }
 
+interface Rfc64CatalogTargetMutationResultV1 {
+  readonly state: Rfc64CatalogMutationStateV1;
+  readonly successorsApplied: number;
+  readonly sourceCurrent: boolean;
+}
+
 export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
   /** Package-internal positive proof used by crash-safe confirmed-row retirement. */
   async rfc64CatalogCoversConfirmedSwmRowV1(
@@ -225,27 +231,12 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       if (existingIndex >= 0) targetAssets[existingIndex] = params.asset;
       else targetAssets.push(params.asset);
       targetAssets.sort(compareRfc64CatalogAssetsByKaIdV1);
-      // The strict successor protocol represents a new seal at the same or a
-      // lower assertion number by removing the abandoned row, then inserting
-      // the independently verified replacement. Both heads remain in history.
-      while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
-        const step = planRfc64CatalogMutationStepV1(state.assets, targetAssets);
-        const nextAssets = step.assets;
-        const committed = await this.applyRfc64CatalogSuccessorV1(
-          persistence,
-          state,
-          params,
-          nextAssets,
-          peers,
-          authority.reconciliationLane === 'shadow-stage',
-          undefined,
-          undefined,
-          step.intermediateAssets,
-        );
-        state = catalogStateAfterSuccessorV1(state, committed, nextAssets);
-      }
-      if (state.current === null) throw new Error('RFC-64 catalog upsert did not apply its asset');
-      return state.current;
+      const mutation = await this.mutateRfc64CatalogTargetV1(
+        persistence, state, params, targetAssets, peers,
+        authority.reconciliationLane === 'shadow-stage',
+      );
+      if (mutation.state.current === null) throw new Error('RFC-64 catalog upsert did not apply its asset');
+      return mutation.state.current;
     });
   }
 
@@ -339,65 +330,55 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         options.targetPolicy,
       );
       await assertRfc64CatalogReplacementOrderV1(this.chain, state.assets, targetAssets, params.signal);
-      if (sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
-        return Object.freeze({
-          status: state.current === null ? 'empty' as const : 'existing' as const,
-          appliedHead: state.current,
-          successorsApplied: 0,
-          targetAssetCount: targetAssets.length,
-          sourceCurrent: true,
-        });
-      }
-
-      let successorsApplied = 0;
-      const hardLimit = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
-      while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
-        throwIfAbortedV1(params.signal);
-        if (successorsApplied >= hardLimit) {
-          throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
-        }
-        const step = planRfc64CatalogMutationStepV1(state.assets, targetAssets);
-        const nextAssets = step.assets;
-        const committed = await this.applyRfc64CatalogSuccessorV1(
-          persistence,
-          state,
-          params,
-          nextAssets,
-          peers,
-          authority.reconciliationLane === 'shadow-stage',
-          params.signal,
-          options.commitAppliedHead,
-          step.intermediateAssets,
-        );
-        successorsApplied += step.successors;
-        state = Object.freeze({
-          current: committed.applied,
-          previousHead: Object.freeze({
-            objectDigest: committed.successor.headObjectDigest,
-            signatureVariantDigest: committed.successor.signatureVariantDigest,
-          }),
-          catalogIssuerAuthorization: state.catalogIssuerAuthorization,
-          assets: nextAssets,
-          expectedCurrentCatalogHeadDigest: committed.applied.currentCatalogHeadDigest,
-        });
-        if (!committed.sourceCurrent) {
-          return Object.freeze({
-            status: 'advanced' as const,
-            appliedHead: state.current,
-            successorsApplied,
-            targetAssetCount: targetAssets.length,
-            sourceCurrent: false,
-          });
-        }
-      }
+      const mutation = await this.mutateRfc64CatalogTargetV1(
+        persistence, state, params, targetAssets, peers,
+        authority.reconciliationLane === 'shadow-stage', options.commitAppliedHead,
+      );
       return Object.freeze({
-        status: 'advanced' as const,
-        appliedHead: state.current,
-        successorsApplied,
+        status: mutation.successorsApplied > 0 ? 'advanced' as const
+          : state.current === null ? 'empty' as const : 'existing' as const,
+        appliedHead: mutation.state.current,
+        successorsApplied: mutation.successorsApplied,
         targetAssetCount: targetAssets.length,
-        sourceCurrent: true,
+        sourceCurrent: mutation.sourceCurrent,
       });
     }, params.signal);
+  }
+
+  /** Drive one prepared target while the existing scope coordinator owns mutation. */
+  private async mutateRfc64CatalogTargetV1(
+    this: DKGAgent,
+    persistence: Rfc64PersistenceV1,
+    initialState: Rfc64CatalogMutationStateV1,
+    params: Readonly<Pick<ReconcileRfc64PublicRootCatalogExactSetParamsV1,
+      'scope' | 'author' | 'deployment' | 'signal'>>,
+    targetAssets: readonly Rfc64CatalogSuccessorAssetInputV1[],
+    peers: readonly string[],
+    stageOnly: boolean,
+    commitAppliedHead?: Rfc64CatalogProjectionMutationOptionsV1['commitAppliedHead'],
+  ): Promise<Rfc64CatalogTargetMutationResultV1> {
+    let state = initialState;
+    let successorsApplied = 0;
+    let sourceCurrent = true;
+    const hardLimit = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
+    while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
+      throwIfAbortedV1(params.signal);
+      const step = planRfc64CatalogMutationStepV1(state.assets, targetAssets);
+      if (successorsApplied + step.successors > hardLimit) {
+        throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
+      }
+      const committed = await this.applyRfc64CatalogSuccessorV1(
+        persistence, state, params, step.assets, peers, stageOnly,
+        params.signal, commitAppliedHead, step.intermediateAssets,
+      );
+      successorsApplied += step.successors;
+      state = catalogStateAfterSuccessorV1(state, committed, step.assets);
+      sourceCurrent = committed.sourceCurrent;
+      // A signed successor still commits when its inventory becomes stale,
+      // but only a fresh projection pass may construct the next successor.
+      if (!sourceCurrent) break;
+    }
+    return Object.freeze({ state, successorsApplied, sourceCurrent });
   }
 
   private assertRfc64CatalogAuthoringModeV1(

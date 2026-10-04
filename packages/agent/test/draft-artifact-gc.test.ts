@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
 import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, deleteByPatternWithoutCount, type Quad } from '@origintrail-official/dkg-storage';
 import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { collectAbandonedDraftArtifacts, withUnqueuedDraftOperation } from '../src/draft-artifact-gc.js';
@@ -37,12 +37,29 @@ describe('reference-safe abandoned draft maintenance', () => {
     for (const graph of [old, archive]) expect(await f.has(graph)).toBe(false);
     for (const graph of [previous, next, sibling]) expect(await f.has(graph)).toBe(true);
   });
-  it('preserves ACK copies, current aliases, lifecycle operations and sealed private archives', async () => {
+  it('preserves ACK copies, current aliases and sealed private archives', async () => {
     const f = await fixture(); await f.op('current'); await f.head('current', '3');
-    await f.op('storage-ack-held'); await f.op('signed-held'); await f.op('lifecycle-held');
-    await f.store.insert([{ subject: workspaceOperationSubject(CG, 'signed-held'), predicate: `${DKG}storageAckSignedAt`, object: '"2026-10-04"', graph: STORAGE_ACK_LEDGER_GRAPH }, { subject: 'urn:lifecycle', predicate: `${DKG}currentShareOperationId`, object: '"lifecycle-held"', graph: ROOT_META }, { subject: 'urn:seal', predicate: `${DKG}kaUal`, object: KA, graph: ROOT_META }, { subject: 'urn:seal', predicate: `${DKG}assertionVersion`, object: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: ROOT_META }]);
+    await f.op('storage-ack-held'); await f.op('signed-held');
+    await f.store.insert([{ subject: workspaceOperationSubject(CG, 'signed-held'), predicate: `${DKG}storageAckSignedAt`, object: '"2026-10-04"', graph: STORAGE_ACK_LEDGER_GRAPH }, { subject: 'urn:seal', predicate: `${DKG}kaUal`, object: KA, graph: ROOT_META }, { subject: 'urn:seal', predicate: `${DKG}assertionVersion`, object: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: ROOT_META }]);
     const graph = await f.privateGraph(3, `/commitments/${'cd'.repeat(32)}`);
     expect(await f.collect()).toEqual({ operations: 0, privateGraphs: 0 }); expect(await f.has(graph)).toBe(true);
+  });
+  it('retains an otherwise collectible lifecycle operation and snapshot only until its reference is removed', async () => {
+    const f = await fixture(); await f.op('lifecycle-only', '4'); await f.op('new', '2'); await f.head();
+    const operation = workspaceOperationSubject(CG, 'lifecycle-only');
+    const result = await f.store.query(`SELECT ?snapshot WHERE { GRAPH <${META}> {
+      <${operation}> <${DKG}publicSnapshotGraph> ?snapshot
+    } }`);
+    if (result.type !== 'bindings' || result.bindings.length !== 1) throw new Error('expected one immutable snapshot');
+    const snapshot = result.bindings[0]!['snapshot']!;
+    await f.store.insert([{ subject: 'urn:lifecycle-only', predicate: `${DKG}currentShareOperationId`, object: '"lifecycle-only"', graph: ROOT_META }]);
+    expect(await f.collect()).toEqual({ operations: 0, privateGraphs: 0 });
+    expect(await f.has(META, operation)).toBe(true);
+    expect(await f.has(snapshot)).toBe(true);
+    await deleteByPatternWithoutCount(f.store, { graph: ROOT_META, subject: 'urn:lifecycle-only', predicate: `${DKG}currentShareOperationId` });
+    expect(await f.collect()).toEqual({ operations: 1, privateGraphs: 0 });
+    expect(await f.has(META, operation)).toBe(false);
+    expect(await f.has(snapshot)).toBe(false);
   });
   it('retains queued immutable snapshots and commitments until explicitly cleared', async () => {
     const f = await fixture(); await f.op('queued'); await f.op('new', '2'); await f.head(); const graph = await f.privateGraph(3, `/commitments/${'ab'.repeat(32)}`);

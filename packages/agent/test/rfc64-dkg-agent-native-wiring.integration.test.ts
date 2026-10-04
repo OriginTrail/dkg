@@ -98,6 +98,7 @@ import {
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import { createAppliedCatalogHeadsSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
+import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
 import { readRfc64LegacySwmBoundaryCountV1 } from
@@ -5084,6 +5085,43 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
   );
 
   it.each(['upsert', 'exact-set'] as const)(
+    'marks a %s target mutation as staged in shadow mode',
+    async (mode) => {
+      const author = await startNativeAgentWithOptions({
+        name: `shadow-target-mutation-${mode}`,
+        catalogActivation: {
+          deploymentProfile: NATIVE_DEPLOYMENT,
+          rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' } },
+          bootstrap: {
+            acceptedPolicies: [{
+              policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(buildOpenOwnerContextGraphPolicyV1({
+                networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+              })),
+              targets: [],
+            }],
+          },
+        },
+      });
+      author.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+      });
+      const common = draftCatalogMutationParams();
+      const asset = await draftCatalogAsset('2', '2026-07-19T12:34:56.789Z', 'B');
+      const result = mode === 'upsert'
+        ? await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({ ...common, asset })
+        : await author.reconcileRfc64PublicRootCatalogExactSetV1({ ...common, assets: [asset] });
+      const staged = 'currentCatalogHeadDigest' in result ? result : result.appliedHead;
+      expect(staged).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+      const inventory = (author as unknown as { rfc64PersistenceV1: Rfc64PersistenceV1 })
+        .rfc64PersistenceV1.inventory;
+      expect(inventory.isStagedCatalogHeadV1(
+        catalogScopeDigest(), AUTHOR, staged!.currentCatalogHeadDigest,
+      )).toBe(true);
+    },
+    60_000,
+  );
+
+  it.each(['upsert', 'exact-set'] as const)(
     'replaces an abandoned same-number catalog seal through %s and rejects old replay',
     async (mode) => {
       const author = await startNativeAgent(`draft-replacement-${mode}`);
@@ -5450,6 +5488,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       projectionBytes: PROJECTION,
       seal: await authorSeal(73n),
     });
+    const followUpAsset = Object.freeze({
+      assertionCoordinate: 'r1-3-commit-freshness-follow-up' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(74n),
+    });
     const originalPublish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
     let markSuccessorStaged!: () => void;
     let releaseSuccessor!: () => void;
@@ -5483,7 +5526,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         bucketCount: '1',
       },
       author: AUTHOR_WALLET,
-      assets: [asset],
+      assets: [asset, followUpAsset],
       deployment: NATIVE_DEPLOYMENT,
       peers: [],
       catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
@@ -5503,7 +5546,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await expect(reconciliation).resolves.toMatchObject({
       status: 'advanced',
       sourceCurrent: false,
-      appliedHead: { currentCatalogHeadDigest: staleHeadDigest },
+      successorsApplied: 1,
+      targetAssetCount: 2,
+      appliedHead: { currentCatalogHeadDigest: staleHeadDigest, inventoryRowCount: '1' },
     });
     expect(staleHeadDigest).not.toBeNull();
     expect(author.readRfc64AppliedCatalogHeadV1({

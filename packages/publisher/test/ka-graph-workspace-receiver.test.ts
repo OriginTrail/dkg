@@ -23,6 +23,7 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storageAckLedgerEntryQuads,
+  storageAckOperationId,
   workspacePublicQuadsDigest,
 } from '../src/index.js';
 import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
@@ -65,6 +66,47 @@ async function graphCount(store: OxigraphStore, graph: string): Promise<number> 
 }
 
 describe('SharedMemoryHandler graph-scoped KA receiver', () => {
+  it.each([['mint', '1', '1', 0n], ['burned update', '4', '2', 1n]])(
+    'does not let a delayed ACK clock permanently block an unpublished %s replacement', async (_case, oldVersion, newVersion, confirmed) => {
+      const store = new OxigraphStore();
+      try {
+        const graphManager = new GraphManager(store);
+        const options = { readConfirmedKnowledgeAssetVersion: async () => confirmed, pendingAckTxWindowMs: 300_000 };
+        const handler = new SharedMemoryHandler(store, new TypedEventBus(), options);
+        const issuedAt = Date.now() - 1000;
+        const oldShare = v2Request({ assertionVersion: oldVersion, timestampMs: issuedAt });
+        expect((await handler.handle(oldShare, PEER_ID)).applied).toBe(true);
+        const quads = [{ subject: 'urn:entity:1', predicate: 'urn:predicate:value', object: '"one"', graph: '' }];
+        const ackId = storageAckOperationId(UAL, oldVersion, computeFlatKCRootV10(quads, []));
+        await storeKnowledgeAssetOperationPublicQuads({
+          store, graphManager, contextGraphId: CONTEXT_GRAPH, shareOperationId: ackId,
+          kaUal: UAL, assertionVersion: oldVersion, quads,
+          privateTripleCount: 0, publisherPeerId: PEER_ID, accessPolicy: 'public',
+          timestamp: new Date(issuedAt + 5000),
+        });
+        const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+        await store.insert([{ subject: `${UAL}#dkg-swm-head`, predicate: 'http://dkg.io/ontology/shareOperationId', object: JSON.stringify(ackId), graph: metaGraph }]);
+        const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL });
+        expect(head?.shareOperationId).toBe(ackId);
+        expect(head?.operationAliases).toHaveLength(2);
+        const ledger = { operationSubject: workspaceOperationSubject(CONTEXT_GRAPH, ackId), namespace: CONTEXT_GRAPH,
+          metaGraph, contextGraphId: '42', kaUal: UAL, assertionVersion: oldVersion, operation: 'publish' as const };
+        await store.insert(storageAckLedgerEntryQuads({ ...ledger, signedAt: new Date() }));
+        const replacement = v2Request({ assertionVersion: newVersion, timestampMs: issuedAt + 3000,
+          shareOperationId: 'later-publisher-draft', nquads: new TextEncoder().encode(nquad('urn:entity:replacement', 'new')) });
+        const held = await handler.handle(replacement, PEER_ID);
+        expect(held).toMatchObject({ applied: false, retryable: true });
+        if (!held.applied) expect(held.reason).toContain('OWED_STORAGE_ACK_COPY');
+        await store.dropGraph('urn:dkg:node:storage-ack-ledger');
+        await store.insert(storageAckLedgerEntryQuads({ ...ledger, signedAt: new Date(Date.now() - 300_001) }));
+        const restarted = new SharedMemoryHandler(store, new TypedEventBus(), options);
+        expect((await restarted.handle(replacement, PEER_ID)).applied).toBe(true);
+        expect((await restarted.handle(oldShare, PEER_ID)).applied).toBe(false);
+        expect((await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL }))?.shareOperationId).toBe('later-publisher-draft');
+      } finally { await store.close(); }
+    },
+  );
+
   it.each([['mint replacement', '1', '1', 0n], ['burned update replacement', '4', '2', 1n]])(
     'accepts a later authorized unpublished %s and fences older replay after restart', async (_case, oldVersion, newVersion, confirmed) => {
       const store = new OxigraphStore();

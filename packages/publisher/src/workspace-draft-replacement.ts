@@ -2,7 +2,7 @@
 import type { TripleStore, GraphManager } from '@origintrail-official/dkg-storage';
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import type { KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
-import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
+import { storageAckOwedCopiesByScopeQuery, STORAGE_ACK_OPERATION_ID_PREFIX } from './storage-ack-ledger.js';
 
 export type ConfirmedKnowledgeAssetVersionReader = (kaUal: string) => Promise<bigint | null>;
 export type DraftReplacementRejection = { phase: 'validation' | 'corrupt-head'; reason: string };
@@ -20,7 +20,10 @@ export async function checkWorkspaceDraftReplacementOrder(input: {
   if (head.publisherPeerId !== publisherPeerId) return {
     phase: 'validation', reason: `KA_PUBLISHER_MISMATCH: ${head.kaUal} is owned in SWM by ${head.publisherPeerId}, not ${publisherPeerId}`,
   };
-  const timestamps = head.operationAliases.map(alias => Number(alias.publishedAt ?? NaN)).filter(Number.isFinite);
+  // ACK copies stamp the receiver's clock; only publisher-issued aliases order drafts.
+  const timestamps = head.operationAliases
+    .filter(alias => !alias.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX))
+    .map(alias => Number(alias.publishedAt ?? NaN)).filter(Number.isFinite);
   const currentTimestamp = Math.max(...timestamps);
   if (Number.isFinite(currentTimestamp) && timestamp.getTime() < currentTimestamp) return {
     phase: 'validation', reason: 'STALE_KA_SHARE_OPERATION: authenticated publisher operation precedes the current head',

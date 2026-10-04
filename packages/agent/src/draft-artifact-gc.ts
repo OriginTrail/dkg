@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { assertSafeIri, contextGraphMetaUri, resolveWithinAbort, sparqlString } from '@origintrail-official/dkg-core';
-import { deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, readKnowledgeAssetPrivateArtifactsPage, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   STORAGE_ACK_LEDGER_GRAPH, draftOperationReferenceKey, draftPrivateReferenceKey,
   markDraftOperationRetired, readDraftArtifactReferences, swmKaWriteLockKey,
-  withDraftArtifactReferences, withKeyedLocks,
+  withDraftArtifactCollection, withKeyedLocks,
 } from '@origintrail-official/dkg-publisher';
 import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 
@@ -33,7 +33,7 @@ export async function collectAbandonedDraftArtifacts(input: {
   contextGraphId: string;
   now: number;
 }): Promise<{ operations: number; privateGraphs: number }> {
-  return withDraftArtifactReferences(input.store, async () => {
+  return withDraftArtifactCollection(input.store, async () => {
     const { store, chain, contextGraphId, now } = input;
     const references = await readDraftArtifactReferences(store);
     const counts = { operations: 0, privateGraphs: 0 };
@@ -89,23 +89,12 @@ export async function collectAbandonedDraftArtifacts(input: {
     }
     // Old counter bugs left /assertions/N above the confirmed next version. Only
     // those unreachable versions are collected; historical and next drafts remain.
-    // Enumerate the graph index once per graph; the probe excludes registered
-    // empty graphs without materializing every private quad before paging.
-    const graphs = await store.query(`SELECT ?graph WHERE {
-      GRAPH ?graph {}
-      FILTER(STRSTARTS(STR(?graph), ${sparqlString(prefix)}) && CONTAINS(STR(?graph), "/_private/"))
-      FILTER(STR(?graph) > ${sparqlString(cursor.privateGraph)})
-      FILTER EXISTS { GRAPH ?graph { ?s ?p ?o } }
-    } ORDER BY ?graph LIMIT ${BATCH_SIZE}`, { source: 'agent.draftArtifacts.privateGraphs', priority: 'background' });
-    if (graphs.type !== 'bindings') return counts;
-    cursor.privateGraph = graphs.bindings.length === BATCH_SIZE ? graphs.bindings.at(-1)?.['graph'] ?? '' : '';
+    const page = await readKnowledgeAssetPrivateArtifactsPage(store, contextGraphId, { cursor: cursor.privateGraph, limit: BATCH_SIZE });
+    if (!page) return counts;
+    cursor.privateGraph = page.nextCursor;
     const chainDeadline = AbortSignal.timeout(2_000);
-    for (const row of graphs.bindings) {
-      const graph = row['graph']; if (!graph) continue;
-      const relative = graph.slice(prefix.length);
-      const parsed = /^(?:(?<sub>[^/]+)\/)?_private\/(?<author>0x[0-9a-fA-F]{40})\/(?<number>[1-9][0-9]*)\/assertions\/(?<version>[1-9][0-9]*)(?:\/commitments\/[0-9a-fA-F]{64})?$/.exec(relative);
-      const parts = parsed?.groups; if (!parts) continue;
-      const sub = parts['sub']; const author = parts['author']!; const number = parts['number']!; const version = parts['version']!;
+    for (const artifact of page.artifacts) {
+      const { graphUri: graph, subGraphName: sub, agentAddress: author, kaNumber: number, assertionVersion: version } = artifact;
       if (references.rawNamespaces.has(JSON.stringify([contextGraphId, sub ?? '']))
         || references.privateVersions.has(draftPrivateReferenceKey(contextGraphId, sub, author, number, version))) continue;
       await withKeyedLocks(input.writeLocks, [swmKaWriteLockKey(contextGraphId, sub, `did:dkg:${chain.chainId}/${author}/${number}`)], async () => {
@@ -135,7 +124,7 @@ export async function withUnqueuedDraftOperation(
   now: number,
   collect: () => Promise<void>,
 ): Promise<void> {
-  return withDraftArtifactReferences(store, async () => {
+  return withDraftArtifactCollection(store, async () => {
     const references = await readDraftArtifactReferences(store);
     if (!references || references.rawNamespaces.has(JSON.stringify([contextGraphId, subGraphName ?? '']))) return;
     const meta = `did:dkg:context-graph:${contextGraphId}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory_meta`;

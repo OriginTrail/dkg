@@ -25,12 +25,14 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, SharedMemoryHandler, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import { DKGPublisher, SharedMemoryHandler, TripleStoreAsyncLiftPublisher, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { stubAgent } from './_helpers/foreign-author-resolution-fixtures.js';
+import { collectAbandonedDraftArtifacts } from '../src/draft-artifact-gc.js';
+import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 const CG = 'finalize-version-gap';
 const NAME = 'abandoned-update';
@@ -604,6 +606,31 @@ describe('GH#2964 finalize proof and lifecycle serialization', () => {
     await expect(writing).rejects.toMatchObject({ code: 'KA_ASSERTION_ALREADY_FINALIZED' });
     expect(seal.merkleRoot).toEqual(computeFlatKCRootV10(content('A'), []));
     expect(await agent.publisher.assertionQuery(CG, NAME, AUTHOR)).toHaveLength(1);
+  });
+  it('allows unrelated finalization and admission during a paused signer while collection remains excluded', async () => {
+    const store = new OxigraphStore(); const agent = await makeAgent(store);
+    const otherCg = 'unrelated-finalization'; const otherName = 'independent-B';
+    await agent.assertion.create(CG, NAME); await draft(agent, 'A');
+    await agent.assertion.create(otherCg, otherName);
+    await agent.assertion.write(otherCg, otherName, content('B'));
+    let release!: () => void; let entered!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const signing = new Promise<void>(resolve => { entered = resolve; });
+    const finalizingA = finalize(agent, undefined, { authorSignTypedData: async (typedData: any) => { entered(); await blocked; return signTypedData(typedData); } });
+    await signing;
+    let collected = false; let finalizedB = false; let admittedB = false;
+    const collecting = collectAbandonedDraftArtifacts({ store, chain: agent.chain, writeLocks: agent.publisher.writeLocks, contextGraphId: CG, now: Date.now() }).then(() => { collected = true; });
+    const finalizingB = agent.assertion.finalize(otherCg, otherName, { authorAgentAddress: AUTHOR, authorSignTypedData: signTypedData }).then(() => { finalizedB = true; });
+    const queue = new TripleStoreAsyncLiftPublisher(store);
+    const admittingB = queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: otherCg, name: otherName })).then(() => { admittedB = true; });
+    let progressed = false; let collectedBeforeRelease = false;
+    try {
+      progressed = await vi.waitFor(() => expect(finalizedB && admittedB).toBe(true), { timeout: 1_000, interval: 10 }).then(() => true, () => false);
+      collectedBeforeRelease = collected;
+    } finally { release(); await Promise.all([finalizingA, finalizingB, admittingB, collecting]); await store.close(); }
+    expect(progressed).toBe(true);
+    expect(collectedBeforeRelease).toBe(false);
+    expect(collected).toBe(true);
   });
 });
 

@@ -521,4 +521,4 @@ export { withKeyedLocks, swmKaWriteLockKey, assertionLifecycleWriteLockKey } fro
 
 export { withSnapshotScope, snapshotOperation, WorkspaceSnapshotScope, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
 
-export { withDraftArtifactReferences, readDraftArtifactReferences, draftOperationReferenceKey, draftPrivateReferenceKey, markDraftOperationRetired } from './draft-artifact-retention.js';
+export { withDraftArtifactReferences, withDraftArtifactCollection, readDraftArtifactReferences, draftOperationReferenceKey, draftPrivateReferenceKey, markDraftOperationRetired } from './draft-artifact-retention.js';

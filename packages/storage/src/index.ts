@@ -285,6 +285,9 @@ export {
 } from './graph-manager.js';
 export {
   PrivateContentStore,
+  decodeKnowledgeAssetPrivateArtifact,
+  readKnowledgeAssetPrivateArtifactsPage,
+  type KnowledgeAssetPrivateArtifact,
   type KnowledgeAssetPrivateReadOptions,
 } from './private-store.js';
 export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';

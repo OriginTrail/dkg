@@ -6618,8 +6618,10 @@ export class DKGPublisher implements Publisher {
       agentAddress,
       subGraphName,
     );
-    for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
-      await this.deleteStoreByPatternWithoutCount({ graph: recoveryGraph, subject: recoverySubject, predicate });
+    for (const subject of [recoverySubject, `${recoverySubject}/wm`]) {
+      for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
+        await this.deleteStoreByPatternWithoutCount({ graph: recoveryGraph, subject, predicate });
+      }
     }
   }
 
@@ -6637,13 +6639,14 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
+    recoveryLayer?: 'wm',
   ): string {
     return `${contextGraphAssertionUri(
       contextGraphId,
       agentAddress,
       name,
       subGraphName,
-    )}/_recovery_seal`;
+    )}/_recovery_seal${recoveryLayer === 'wm' ? '/wm' : ''}`;
   }
 
   private async activeAssertionSealSubjects(
@@ -6729,7 +6732,7 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
-  ): Promise<Array<{ seal: AssertionSeal; subject: string; quads: Quad[] }>> {
+  ): Promise<Array<{ seal: AssertionSeal; subject: string; quads: Quad[]; active: boolean }>> {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
     const recoverySubject = this.assertionRecoverySealSubject(
@@ -6738,14 +6741,15 @@ export class DKGPublisher implements Publisher {
       agentAddress,
       subGraphName,
     );
-    const candidates: Array<{ subject: string; graph: string }> = [
+    const candidates: Array<{ subject: string; graph: string; active: boolean }> = [
       ...(await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName))
-        .map((subject) => ({ subject, graph: metaGraph })),
-      { subject: recoverySubject, graph: recoveryGraph },
+        .map((subject) => ({ subject, graph: metaGraph, active: true })),
+      { subject: recoverySubject, graph: recoveryGraph, active: false },
+      { subject: `${recoverySubject}/wm`, graph: recoveryGraph, active: false },
     ];
-    const loaded: Array<{ seal: AssertionSeal; subject: string; quads: Quad[] }> = [];
+    const loaded: Array<{ seal: AssertionSeal; subject: string; quads: Quad[]; active: boolean }> = [];
     const seen = new Set<string>();
-    for (const { subject, graph } of candidates) {
+    for (const { subject, graph, active } of candidates) {
       const key = `${graph}\0${subject}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -6757,7 +6761,7 @@ export class DKGPublisher implements Publisher {
       const quads = result.type === 'quads' ? result.quads : [];
       try {
         const seal = parseAssertionSealQuads(quads, subject);
-        if (seal) loaded.push({ seal, subject, quads });
+        if (seal) loaded.push({ seal, subject, quads, active });
       } catch {
         // A complete recovery archive may coexist with a torn active-seal
         // deletion after a crash. Ignore only the unusable candidate; the
@@ -6774,6 +6778,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     loaded: { seal: AssertionSeal; subject: string; quads: Quad[] },
     subGraphName?: string,
+    recoveryLayer?: 'wm',
   ): Promise<Quad[]> {
     const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
     const recoverySubject = this.assertionRecoverySealSubject(
@@ -6781,6 +6786,7 @@ export class DKGPublisher implements Publisher {
       name,
       agentAddress,
       subGraphName,
+      recoveryLayer,
     );
     const sealPredicates = new Set<string>(Object.values(ASSERTION_SEAL_PREDICATES));
     const recoveryQuads = loaded.quads
@@ -8334,7 +8340,8 @@ export class DKGPublisher implements Publisher {
       subGraphName,
     );
     const hasDraft = publicDraftExists || privateDraft.length > 0;
-    if (sourceLayer !== 'wm' && hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
+    const reopeningSealedWm = sourceLayer === 'wm' && selectedSeal.active;
+    if (!reopeningSealedWm && hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
       throw Object.assign(
         new Error(`A WM draft already exists for "${name}" in context graph "${contextGraphId}"; pass onConflict:"replace" to overwrite it.`),
         { code: 'WM_DRAFT_CONFLICT' },
@@ -8360,6 +8367,7 @@ export class DKGPublisher implements Publisher {
       agentAddress,
       selectedSeal,
       subGraphName,
+      sourceLayer === 'wm' ? 'wm' : undefined,
     );
     await this.clearActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
 

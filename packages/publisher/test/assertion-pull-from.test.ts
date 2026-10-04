@@ -158,6 +158,42 @@ describe('rootless assertionPullFrom', () => {
     expect(await publisher.assertionQuery(CG, 'sibling', AGENT)).toEqual([expect.objectContaining({ object: '"sibling"' })]);
   });
 
+  it('rejects repeated WM recovery after private edits without changing either partition', async () => {
+    const { publisher, store } = await makePublisher();
+    try {
+      await publisher.assertionCreate(CG, NAME, AGENT);
+      await publisher.assertionWrite(CG, NAME, AGENT, [q(ENTITY_1, SCHEMA, '"sealed public"')]);
+      await publisher.assertionWritePrivate(CG, NAME, AGENT, [q(ENTITY_1, 'urn:secret', '"sealed private"')]);
+      await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AGENT });
+      await publisher.assertionPullFrom(CG, NAME, AGENT, 'wm');
+      await publisher.assertionWritePrivate(CG, NAME, AGENT, [q(ENTITY_3, 'urn:secret', '"new private edit"')]);
+      const publicBefore = await publisher.assertionQuery(CG, NAME, AGENT);
+      const privateBefore = await publisher.assertionQueryPrivate(CG, NAME, AGENT);
+      expect(privateBefore).toHaveLength(2);
+      await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'wm')).rejects.toMatchObject({ code: 'WM_DRAFT_CONFLICT' });
+      expect(await publisher.assertionQuery(CG, NAME, AGENT)).toEqual(publicBefore);
+      expect(await publisher.assertionQueryPrivate(CG, NAME, AGENT)).toEqual(privateBefore);
+    } finally { await store.close(); }
+  });
+
+  it('retains shared B recovery after reopening an unshared finalized replacement C from WM', async () => {
+    const { publisher, store } = await makePublisher();
+    try {
+      const b = await seedShared(publisher, store, { privateQuads: [q(ENTITY_1, 'urn:secret', '"B private"')] });
+      await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
+      await publisher.assertionWrite(CG, NAME, AGENT, [q(ENTITY_3, SCHEMA, '"C addition"')]);
+      await publisher.assertionWritePrivate(CG, NAME, AGENT, [q(ENTITY_3, 'urn:secret', '"C private addition"')]);
+      const c = await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AGENT });
+      expect(c.assertionVersion).toBe(b.assertionVersion);
+      await publisher.assertionPullFrom(CG, NAME, AGENT, 'wm');
+      expect(await publisher.assertionQueryPrivate(CG, NAME, AGENT)).toHaveLength(2);
+      const restored = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { onConflict: 'replace' });
+      expect(restored).toMatchObject({ fromLayer: 'swm', seededPublic: b.publicQuads.length, seededPrivate: 1 });
+      expect(new Set((await publisher.assertionQuery(CG, NAME, AGENT)).map(key))).toEqual(new Set(b.publicQuads.map(key)));
+      expect(new Set((await publisher.assertionQueryPrivate(CG, NAME, AGENT)).map(key))).toEqual(new Set(b.privateQuads.map(key)));
+    } finally { await store.close(); }
+  });
+
   it('leaves a damaged sealed WM source intact instead of reopening unverified content', async () => {
     const { publisher, store } = await makePublisher();
     await publisher.assertionCreate(CG, NAME, AGENT);

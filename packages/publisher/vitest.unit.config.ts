@@ -14,6 +14,7 @@ export default defineConfig({
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',
       'test/dkg-publisher-compat.test.ts',
+      'test/draft-artifact-retention.test.ts',
       'test/shared-memory-publish-boundary.test.ts',
       'test/swm-public-gated-plaintext-accept.test.ts',
       'test/storage-ack-roster-and-verify-mofn-extra.test.ts',
