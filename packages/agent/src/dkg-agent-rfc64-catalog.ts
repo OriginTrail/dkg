@@ -2382,62 +2382,61 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
   /**
    * Resolve a catalog peer from authenticated, Context-Graph-scoped state.
-   * Public agent profiles remain the first choice, but private admission must
-   * not depend on best-effort profile gossip. Curators already hold the
-   * member's signed delegatee binding, while approved receivers persist the
-   * authenticated curator peer together with its exact owner generation.
+   * A peer may advertise a generic agent profile after a private transfer has
+   * already begun. That profile need not be the agent approved for this graph.
+   * Prefer the verified delegatee or curator binding, so late profile gossip
+   * cannot change the identity used for catalog authorization mid-transfer.
    */
   async resolveRfc64CatalogRemoteAgentAddressV1(
     this: DKGAgent,
     remotePeerId: string,
     contextGraphId: ContextGraphIdV1,
   ): Promise<EvmAddressV1 | null> {
+    if (await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+      const delegatedAgents = new Set<EvmAddressV1>();
+      const delegateePeers = await this.getContextGraphAllowedDelegateePeers(contextGraphId)
+        .catch(() => new Map<string, string[]>());
+      for (const [agentAddress, peerIds] of delegateePeers) {
+        const normalized = agentAddress.toLowerCase();
+        if (
+          peerIds.includes(remotePeerId)
+          && /^0x[0-9a-f]{40}$/u.test(normalized)
+        ) {
+          delegatedAgents.add(normalized as EvmAddressV1);
+        }
+      }
+      if (delegatedAgents.size === 1) return [...delegatedAgents][0]!;
+      if (delegatedAgents.size > 1) return null;
+
+      const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
+      if (approvedAgent !== undefined) {
+        const requesterState = await this.readRequesterJoinRequestState(
+          contextGraphId,
+          approvedAgent,
+        ).catch(() => null);
+        if (
+          requesterState?.status === 'approved'
+          && requesterState.curatorPeerId === remotePeerId
+          && requesterState.curatorAgentAddress !== undefined
+          && requesterState.curatorAuthorityEra !== undefined
+        ) {
+          const current = await this.readRfc64CurrentCuratorAuthorityBindingV1(
+            contextGraphId,
+          ).catch(() => null);
+          if (
+            current?.agentAddress === requesterState.curatorAgentAddress
+            && current.authorityEra === requesterState.curatorAuthorityEra
+          ) return current.agentAddress;
+        }
+      }
+    }
+
     const discovered = (await this.findAgentByPeerId(remotePeerId))
       ?.agentAddress
       ?.toLowerCase();
-    if (discovered !== undefined && /^0x[0-9a-f]{40}$/u.test(discovered)) {
-      return discovered as EvmAddressV1;
-    }
-    if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
-      return null;
-    }
-
-    const delegatedAgents = new Set<EvmAddressV1>();
-    const delegateePeers = await this.getContextGraphAllowedDelegateePeers(contextGraphId)
-      .catch(() => new Map<string, string[]>());
-    for (const [agentAddress, peerIds] of delegateePeers) {
-      const normalized = agentAddress.toLowerCase();
-      if (
-        peerIds.includes(remotePeerId)
-        && /^0x[0-9a-f]{40}$/u.test(normalized)
-      ) {
-        delegatedAgents.add(normalized as EvmAddressV1);
-      }
-    }
-    if (delegatedAgents.size === 1) return [...delegatedAgents][0]!;
-    if (delegatedAgents.size > 1) return null;
-
-    const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
-    if (approvedAgent === undefined) return null;
-    const requesterState = await this.readRequesterJoinRequestState(
-      contextGraphId,
-      approvedAgent,
-    ).catch(() => null);
-    if (
-      requesterState?.status !== 'approved'
-      || requesterState.curatorPeerId !== remotePeerId
-      || requesterState.curatorAgentAddress === undefined
-      || requesterState.curatorAuthorityEra === undefined
-    ) return null;
-    const current = await this.readRfc64CurrentCuratorAuthorityBindingV1(
-      contextGraphId,
-    ).catch(() => null);
-    if (
-      current === null
-      || current.agentAddress !== requesterState.curatorAgentAddress
-      || current.authorityEra !== requesterState.curatorAuthorityEra
-    ) return null;
-    return current.agentAddress;
+    return discovered !== undefined && /^0x[0-9a-f]{40}$/u.test(discovered)
+      ? discovered as EvmAddressV1
+      : null;
   }
 
   /** Read the curator-authored local roster generation from authenticated metadata. */

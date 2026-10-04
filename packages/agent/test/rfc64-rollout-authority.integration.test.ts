@@ -5908,7 +5908,7 @@ describe('RFC-64 rollout authority integration', () => {
     const curatorPeerId = '12D3KooWVerifiedPrivateCurator';
     const memberPeerId = '12D3KooWVerifiedPrivateMember';
     const edge = await startAgent({ name: 'private-peer-binding' });
-    vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
+    const profile = vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
     const delegateePeers = vi.spyOn(edge, 'getContextGraphAllowedDelegateePeers')
       .mockResolvedValue(new Map([[MEMBER, [memberPeerId]]]));
@@ -5917,6 +5917,15 @@ describe('RFC-64 rollout authority integration', () => {
       memberPeerId,
       contextGraphId,
     )).resolves.toBe(MEMBER);
+
+    // A generic profile can arrive after the private delegatee binding and
+    // name another local agent. It must not replace the graph-scoped identity.
+    profile.mockResolvedValue({ agentAddress: AUTHOR } as never);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      memberPeerId,
+      contextGraphId,
+    )).resolves.toBe(MEMBER);
+    profile.mockResolvedValue(null);
 
     delegateePeers.mockResolvedValue(new Map());
     (edge as any).localApprovedAgentByCG.set(contextGraphId, MEMBER);
@@ -5936,6 +5945,12 @@ describe('RFC-64 rollout authority integration', () => {
       curatorPeerId,
       contextGraphId,
     )).resolves.toBe(AUTHOR);
+    profile.mockResolvedValue({ agentAddress: MEMBER } as never);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBe(AUTHOR);
+    profile.mockResolvedValue(null);
 
     currentCuratorBinding.mockResolvedValue({ agentAddress: MEMBER, authorityEra: '1' });
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
@@ -5967,6 +5982,7 @@ describe('RFC-64 rollout authority integration', () => {
       [MEMBER, [memberPeerId]],
       [AUTHOR, [memberPeerId]],
     ]));
+    profile.mockResolvedValue({ agentAddress: MEMBER } as never);
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
       memberPeerId,
       contextGraphId,
