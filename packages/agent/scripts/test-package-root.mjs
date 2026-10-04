@@ -10,6 +10,9 @@ if ('createRandomSamplingRuntime' in root.DKGAgent.prototype) {
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const legacyAgentBase = await import('@origintrail-official/dkg-agent/dist/dkg-agent-base.js');
 const legacyAgentPublish = await import('@origintrail-official/dkg-agent/dist/dkg-agent-publish.js');
+const legacySwmRecoveryApply = await import(
+  '@origintrail-official/dkg-agent/dist/sync/requester/swm-recovery-apply.js'
+);
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
 );
@@ -52,6 +55,9 @@ if (
   || typeof legacyAgent.DKGAgent !== 'function'
   || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
   || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
+  || typeof legacySwmRecoveryApply.applySwmRecovery !== 'function'
+  || typeof legacySwmRecoveryApply.createSwmRecoveryMutationRuntimeV1 !== 'function'
+  || typeof legacySharedMemorySync.runSharedMemorySync !== 'function'
   || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
   || typeof root.computeRfc64AppliedInventoryDigestV1 !== 'function'
   || typeof root.classifyRfc64PolicyCellV1 !== 'function'
@@ -434,6 +440,15 @@ const privateImplementationModules = [
   'local-private-member',
   'storage-ack-owned-request',
   'workspace-projected-delegatees',
+  'confirmed-draft-version',
+  'draft-artifact-gc',
+  'finalize-draft-version',
+  'swm-expiry-batch',
+  'swm-operation-expiry',
+  'sync/requester/swm-draft-order',
+  'sync/requester/swm-recovered-provenance',
+  'sync/requester/swm-recovery-bulk-metadata',
+  'sync/requester/swm-recovery-commit',
 ];
 for (const module of privateImplementationModules) {
   for (const extension of ['', '.js', '.d.ts', '.js.map', '.d.ts.map']) {
