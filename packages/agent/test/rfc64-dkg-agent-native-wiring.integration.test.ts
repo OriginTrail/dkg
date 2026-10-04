@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -248,13 +248,27 @@ function rfc64M0RecoveryTitle(scenario: Rfc64M0RecoveryScenario): string {
   return metadata.title;
 }
 
+async function retireNativeFixtureResources(owned: {
+  readonly agents: readonly Pick<DKGAgent, 'stop'>[];
+  readonly tempDirs: readonly string[];
+  readonly stopRpc: () => Promise<void>;
+}): Promise<void> {
+  // Fence all live peers together, and wait for every physical stop even when
+  // one rejects. Closing a later case's servers is never a cleanup fallback.
+  await Promise.allSettled(owned.agents.map(async (agent) => { await agent.stop(); }));
+  try { await owned.stopRpc(); }
+  finally { await Promise.all(owned.tempDirs.map((path) => rm(path, { recursive: true, force: true }))); }
+}
+
 afterEach(async () => {
-  for (const agent of agents.splice(0)) {
-    try { await agent.stop(); } catch { /* best-effort */ }
-  }
-  await Promise.all(tempDirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
-  await rpcHarness.stopAll();
-});
+  await retireNativeFixtureResources({
+    agents: agents.splice(0),
+    tempDirs: tempDirs.splice(0),
+    stopRpc: rpcHarness.captureStopAll(),
+  });
+  // Production cancellation and physical retirement can exceed the unit hook's
+  // default 10 seconds. This budget bounds the concurrent drain of live peers.
+}, 60_000);
 
 async function startNativeAgent(
   name: string,
@@ -8480,6 +8494,52 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       row: staleWorkspaceRow,
     })).rejects.toThrow('durable RFC-64 workspace head differs');
   }, 90_000);
+
+  it('captures native teardown ownership while a failed peer stop is held', async () => {
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const ownedDir = await mkdtemp(join(tmpdir(), 'dkg-native-retiring-'));
+    const nextDir = await mkdtemp(join(tmpdir(), 'dkg-native-next-'));
+    const handler = (call: Parameters<typeof sendJsonRpcResult>[1], response: Parameters<typeof sendJsonRpcResult>[0]) =>
+      sendJsonRpcResult(response, call, '0x1');
+    const old = await rpc.start(handler);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    let secondStarted = false;
+    let failedStopEnded = false;
+    let cleanupSettled = false;
+    const cleanup = retireNativeFixtureResources({
+      agents: [
+        { stop: async () => { await gate; failedStopEnded = true; throw new Error('one peer stop refused'); } },
+        { stop: async () => { secondStarted = true; await secondGate; } },
+      ],
+      tempDirs: [ownedDir],
+      stopRpc: rpc.captureStopAll(),
+    });
+    const settlement = cleanup.then(() => { cleanupSettled = true; }, () => { cleanupSettled = true; });
+    const next = await rpc.start(handler);
+    const request = (url: string) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) });
+    try {
+      expect(secondStarted).toBe(true);
+      expect((await request(old.url)).status).toBe(200);
+      release();
+      await vi.waitFor(() => expect(failedStopEnded).toBe(true));
+      expect(cleanupSettled).toBe(false);
+      expect((await request(old.url)).status).toBe(200);
+      await expect(access(ownedDir)).resolves.toBeUndefined();
+      releaseSecond(); await cleanup;
+      await expect(request(old.url)).rejects.toThrow();
+      expect((await request(next.url)).status).toBe(200);
+      await expect(access(ownedDir)).rejects.toThrow();
+      await expect(access(nextDir)).resolves.toBeUndefined();
+    } finally {
+      release(); releaseSecond(); await settlement;
+      await rpc.stopAll();
+      await Promise.all([ownedDir, nextDir].map((path) => rm(path, { recursive: true, force: true })));
+    }
+  });
 
   it('awaits production private retirement and reports a real finalized missing-placement path', async () => {
     const providerAgentAddress = `0x${'91'.repeat(20)}` as EvmAddressV1;
