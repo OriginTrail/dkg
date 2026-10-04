@@ -20,14 +20,16 @@ import {
   tryReplaceGraphWithDurableRootCompanionAtomically,
   withKeyedLocks,
   workspacePublicQuadsDigest,
+  publisherWorkspaceOperationSemanticsKey,
   type DurableRootAtomicCompanion,
 } from '@origintrail-official/dkg-publisher';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore, QueryOptions } from '@origintrail-official/dkg-storage';
 import {
   deleteByPatternWithoutCount,
   invalidateSwmMaterializationWitness,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
+  tryReplaceGraphAtomically,
 } from '@origintrail-official/dkg-storage';
 import { recoveredDraftMayReplace, readStoredWorkspaceHead, retainedPublisherAlias, healthyRecoveredAliasRows } from './swm-draft-order.js';
 import { prepareRecoveredDescriptor, type PreparedSwmRecoveryDescriptor } from './swm-recovered-provenance.js';
@@ -100,6 +102,16 @@ export interface SharedMemorySnapshotMaterializer {
    * written) as materialized; a count-only predicate cannot tell two versions
    * of equal size apart and would skip a verified newer snapshot.
    */
+  /**
+   * The private curator-recovery lane's skip predicate. A head marker alone
+   * cannot prove materialization: the assertion graph can be cleared while
+   * its durable metadata survives. Reuse the same exact count+digest guard as
+   * ordinary catch-up so a marker-only, partial, or equal-count stale graph is
+   * repaired rather than reported as recovered. Living here (rather than as a
+   * caller-supplied closure) keeps skip and preserve as one capability over
+   * one store and lock map.
+   */
+
   isGraphAssetMaterialized(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
   /**
    * Read and re-verify the exact stored graph bytes for a same-byte compound
@@ -114,25 +126,27 @@ export interface SharedMemorySnapshotMaterializer {
    * all-or-nothing and digest-verified; union-insert risks partial or
    * duplicated state across retries.
    */
-  replaceGraph(graphUri: string, quads: Quad[]): Promise<void>;
+  replaceGraph(graphUri: string, quads: Quad[], attribution?: Readonly<Pick<QueryOptions, 'source'>>): Promise<void>;
   /** Atomic exact-graph replace plus one durable root-boundary subject. */
   replaceGraphWithAtomicCompanion(
     graphUri: string,
     quads: Quad[],
     companion: Readonly<DurableRootAtomicCompanion>,
+    attribution?: Readonly<Pick<QueryOptions, 'source'>>,
   ): Promise<void>;
   /**
    * Delete the KA's head rows and every share-operation subject its head
    * references (including the descriptor's own, which the caller re-inserts
    * from fresh verified metadata). This is the catch-up lane's counterpart of
    * gossip's delete-then-insert (`storeKnowledgeAssetWorkspaceHead`) and the
-   * private recovery lane's `replaceMetaForGraphAssets`: without it the
+   * private recovery lane: without the canonical replacement the
    * append-style meta insert stacks old and new head rows on one subject and
    * the durable current head becomes ambiguous.
    */
   replaceHeadMetadata(
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
+    attribution?: Readonly<Pick<QueryOptions, 'source'>>,
   ): Promise<void>;
   /**
    * GH#2273 — decide whether a head repair may PRESERVE a locally stored
@@ -199,21 +213,7 @@ export interface SharedMemorySnapshotMaterializer {
     | { outcome: 'preserved'; withholdRows: readonly Quad[] }
     | { outcome: 'replace' }
   >;
-  /**
-   * The private curator-recovery lane's skip predicate. A head marker alone
-   * cannot prove materialization: the assertion graph can be cleared while
-   * its durable metadata survives. Reuse the same exact count+digest guard as
-   * ordinary catch-up so a marker-only, partial, or equal-count stale graph is
-   * repaired rather than reported as recovered. Living here (rather than as a
-   * caller-supplied closure) keeps skip and preserve as one capability over
-   * one store and lock map.
-   */
-  /**
-   * Canonical graph-asset meta replacement (delete head + kaUal-owned linked
-   * operation subjects) over THIS materializer's store — the one cleanup
-   * implementation shared by the lifecycle wiring and the recovery suites.
-   */
-  replaceMetaForGraphAssets(assets: readonly GraphScopedSwmRecoveryDescriptor[]): Promise<void>;
+
 }
 
 /**
@@ -261,6 +261,15 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   })();
 
   const materializationMemo = createSwmMaterializationMemo(deps.store);
+
+  /** Canonical replacement effects are shared by plain and compound graph writes. */
+  const invalidateReplacementEffects = async (graphUri: string, source: string): Promise<void> => {
+    await invalidateSwmMaterializationWitness(deps.store, graphUri, {
+      priority: 'background', source: `${source}.witnessInvalidate`,
+    }).catch(() => {});
+    materializationMemo.invalidate(graphUri);
+    deps.invalidateListContextGraphsCache();
+  };
 
   /**
    * The ONE discovery of which operation subjects a head references AND this
@@ -320,7 +329,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    * subjects linked through the head's CURRENT shareOperationId rows (a
    * head-join, so non-convention subjects are found too), optionally sparing
    * one id's subject (the preserving repair's winner) and seeding extras.
-   * Both `repairHeadPreservingIdentity` and `replaceMetaForGraphAssets`
+   * Both `repairHeadPreservingIdentity` and `replaceHeadMetadata`
    * consume this — the ownership guard cannot drift between them.
    */
   const collectOwnedHeadOperationSubjects = async (
@@ -383,21 +392,16 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   const hasHealthyEmptyProjectionControlPlane = async (
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<boolean> => {
-    const stored = await readStoredHead(descriptor);
-    if (stored.status !== 'resolved') return false;
-    const head = stored.head;
-    const operation = descriptor.metadataQuads.filter(row => row.subject === descriptor.operationSubject);
-    const accessPolicy = literalValue(operation.find(row => row.predicate === `${DKG}accessPolicy`)?.object)
-      ?? (descriptor.privateTripleCount > 0 ? 'ownerOnly' : 'public');
-    const allowedPeers = operation.filter(row => row.predicate === `${DKG}allowedPeer`).map(row => literalValue(row.object) ?? row.object).sort();
-    return head.assertionVersion === descriptor.assertionVersion
-      && head.publicQuadsDigest === descriptor.publicQuadsDigest
-      && head.publicTripleCount === descriptor.publicQuadsCount
-      && head.privateTripleCount === descriptor.privateTripleCount
-      && head.privateMerkleRoot === descriptor.privateMerkleRoot
-      && head.publisherPeerId === descriptor.publisherPeerId
-      && head.accessPolicy === accessPolicy
-      && JSON.stringify([...head.allowedPeers].sort()) === JSON.stringify(allowedPeers);
+    const prepared = 'preparation' in descriptor
+      ? descriptor as PreparedSwmRecoveryDescriptor : await prepareRecoveredDescriptor(deps.store, descriptor);
+    const stored = prepared.storedHead;
+    const incoming = prepared.operationCandidates.find(candidate => candidate.operationSubject === descriptor.operationSubject);
+    const candidates = prepared.storedOperationCandidates;
+    if (stored.status !== 'resolved' || stored.head.assertionVersion !== descriptor.assertionVersion
+      || !incoming || candidates === null || candidates.length === 0) return false;
+    const semanticKey = publisherWorkspaceOperationSemanticsKey(incoming.semantics);
+    return candidates.every(candidate => candidate.semantics.recoveryIdentity.assertionVersion === descriptor.assertionVersion
+      && publisherWorkspaceOperationSemanticsKey(candidate.semantics) === semanticKey);
   };
 
   const repairHeadPreservingIdentity: SharedMemorySnapshotMaterializer['repairHeadPreservingIdentity'] = async (contextGraphId, descriptor, winnerShareOperationId) => {
@@ -576,17 +580,15 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       return neutral.map((quad) => ({ ...quad, graph: descriptor.assertionGraph }));
     },
 
-    replaceGraph: async (graphUri, quads) => {
+    replaceGraph: async (graphUri, quads, attribution) => {
       // Deliberately NOT routed through the sync lane's guarded union insert:
       // a KA graph is all-or-nothing and digest-verified, so it must land via
       // the atomic replace or not at all.
-      if (typeof deps.store.replaceGraph !== 'function') {
-        throw new Error('triple store does not support atomic graph replace');
+      const source = attribution?.source ?? 'agent.sharedMemorySync.materializeSnapshot';
+      if (!await tryReplaceGraphAtomically(deps.store, graphUri, quads, { priority: 'background', source })) {
+        throw Object.assign(new Error('Graph-scoped SWM recovery requires atomic graph replace support'),
+          { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' });
       }
-      await deps.store.replaceGraph(graphUri, quads, {
-        priority: 'background',
-        source: 'agent.sharedMemorySync.materializeSnapshot',
-      });
       // #2079: the content just changed, so any witness for it now describes
       // bytes that are gone. Defence in depth, NOT the thing that makes an
       // equal-count replace safe — be precise about this, because the
@@ -612,15 +614,11 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       // next successful verify otherwise. Ordering is after the replace because
       // invalidating first would drop a still-valid memo on a replace that then
       // throws; neither order removes the window.
-      await invalidateSwmMaterializationWitness(deps.store, graphUri, {
-        priority: 'background',
-        source: 'agent.sharedMemorySync.materializeSnapshot.witnessInvalidate',
-      }).catch(() => {});
-      materializationMemo.invalidate(graphUri);
-      deps.invalidateListContextGraphsCache();
+      await invalidateReplacementEffects(graphUri, source);
     },
 
-    replaceGraphWithAtomicCompanion: async (graphUri, quads, companion) => {
+    replaceGraphWithAtomicCompanion: async (graphUri, quads, companion, attribution) => {
+      const source = attribution?.source ?? 'agent.sharedMemorySync.materializeSnapshot.atomicRootCompanion';
       const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
         deps.store,
         graphUri,
@@ -628,7 +626,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         companion,
         {
           priority: 'background',
-          source: 'agent.sharedMemorySync.materializeSnapshot.atomicRootCompanion',
+          source,
         },
       );
       if (!replaced) {
@@ -637,52 +635,25 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { code: 'SWM_ATOMIC_GRAPH_AND_SUBJECT_REPLACE_UNSUPPORTED' },
         );
       }
-      await invalidateSwmMaterializationWitness(deps.store, graphUri, {
-        priority: 'background',
-        source: 'agent.sharedMemorySync.materializeSnapshot.atomicRootCompanion.witnessInvalidate',
-      }).catch(() => {});
-      deps.invalidateListContextGraphsCache();
+      await invalidateReplacementEffects(graphUri, source);
     },
 
-    replaceHeadMetadata: async (contextGraphId, descriptor) => {
+    replaceHeadMetadata: async (contextGraphId, descriptor, attribution) => {
+      const source = attribution?.source ?? 'agent.sharedMemorySync.snapshotMaterializer';
       const operationSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
         seed: [descriptor.operationSubject],
       });
       await deleteByPatternWithoutCount(
         deps.store,
         { graph: descriptor.metaGraph, subject: descriptor.headSubject },
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
+        { priority: 'background', source: `${source}.deleteHead` },
       );
       for (const operationSubject of operationSubjects) {
         await deleteByPatternWithoutCount(
           deps.store,
           { graph: descriptor.metaGraph, subject: operationSubject },
-          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
+          { priority: 'background', source: `${source}.deleteOperation` },
         );
-      }
-    },
-
-    replaceMetaForGraphAssets: async (assets) => {
-      for (const asset of assets) {
-        // ONE deletion-set rule with the preserving repair: the kaUal-owned
-        // operation subjects linked through the head's current id rows (no
-        // exclusion — full replacement), seeded with the descriptor's own.
-        const operationSubjects = await collectOwnedHeadOperationSubjects(
-          asset,
-          { seed: [asset.operationSubject] },
-        );
-        await deleteByPatternWithoutCount(
-          deps.store,
-          { graph: asset.metaGraph, subject: asset.headSubject },
-          { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead' },
-        );
-        for (const operationSubject of operationSubjects) {
-          await deleteByPatternWithoutCount(
-            deps.store,
-            { graph: asset.metaGraph, subject: operationSubject },
-            { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation' },
-          );
-        }
       }
     },
 

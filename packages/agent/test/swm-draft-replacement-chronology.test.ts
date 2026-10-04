@@ -5,7 +5,7 @@ import { ethers } from 'ethers';
 import { encodeRootlessWorkspaceRequest } from '../../publisher/test/_helpers/rootless-workspace.js';
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, readSwmMaterializationWitness, type Quad } from '@origintrail-official/dkg-storage';
 import { workspaceKnowledgeAssetOperationSnapshotGraph, TypedEventBus, computeGossipSigningPayload, encodeGossipEnvelope, GOSSIP_ENVELOPE_VERSION, GOSSIP_TYPE_WORKSPACE_PUBLISH, type OperationContext } from '@origintrail-official/dkg-core';
 import { resolveKnowledgeAssetWorkspaceHead, SharedMemoryHandler, TripleStoreAsyncLiftPublisher, resolveKnowledgeAssetOperationPublicQuads, withKeyedLocks, swmKaWriteLockKey, storageAckLedgerEntryQuads, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
@@ -46,7 +46,8 @@ const page = (quads: readonly Quad[]): SyncPageResult => ({ quads: [...quads], b
 
 function harness(store: OxigraphStore, served: Share, readConfirmed = async (): Promise<bigint | null> => 0n) {
   const writeLocks = new Map<string, Promise<void>>();
-  const materializer = createSharedMemorySnapshotMaterializer({ store, writeLocks, invalidateListContextGraphsCache: () => {}, readConfirmedKnowledgeAssetVersion: readConfirmed });
+  const invalidateListContextGraphsCache = vi.fn();
+  const materializer = createSharedMemorySnapshotMaterializer({ store, writeLocks, invalidateListContextGraphsCache, readConfirmedKnowledgeAssetVersion: readConfirmed });
   const snapshots = new Map([[served.digest, served.payload]]);
   const publicSnapshotStore = {
     putSnapshot: async (input: { digest: string; quads: readonly Quad[] }) => { snapshots.set(input.digest, [...input.quads]); return { ref: input.digest, byteLength: 0 }; },
@@ -57,8 +58,8 @@ function harness(store: OxigraphStore, served: Share, readConfirmed = async (): 
   const companion = vi.fn(() => ({ graphUri: 'urn:test:boundary', subject: 'urn:test:boundary:head', quads: [{ subject: 'urn:test:boundary:head', predicate: 'urn:test:operation', object: JSON.stringify(served.operationId), graph: 'urn:test:boundary' }] }));
   const common = { ctx, remotePeerId: 'peer-source', fetchSyncPages, processSharedMemoryBatch, ensureContextGraph: async () => {}, publicSnapshotStore, snapshotMaterializer: materializer, setCheckpoint: () => {}, deleteCheckpoint: () => {}, ensureOwnedMap: () => new Map<string, string>(), getRegisteredSubGraphNames: async () => ['team'], logInfo: () => {}, logWarn: () => {}, logDebug: () => {} };
   const publicRun = () => runSharedMemorySync({ ...common, mode: { kind: 'ordinary' }, contextGraphIds: [CG], createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER, storeInsert: quads => store.insert(quads), resolveRootSnapshotAtomicCompanion: companion });
-  const privateRun = () => recoverContextGraphSwm({ ...common, contextGraphId: CG, deadline: Number.MAX_SAFE_INTEGER, store, writeLocks, replaceMetaForRoots: async () => {}, replaceMetaForGraphAssets: assets => materializer.replaceMetaForGraphAssets(assets), resolveRootAtomicCompanion: companion });
-  return { publicRun, privateRun, companion, materializer, writeLocks };
+  const privateRun = () => recoverContextGraphSwm({ ...common, contextGraphId: CG, deadline: Number.MAX_SAFE_INTEGER, store, writeLocks, replaceMetaForRoots: async () => {}, resolveRootAtomicCompanion: companion });
+  return { publicRun, privateRun, companion, materializer, writeLocks, invalidateListContextGraphsCache };
 }
 
 async function expectHead(store: OxigraphStore, expected: Share, subGraph?: string) {
@@ -75,6 +76,60 @@ const staleCases = (['publicRun', 'privateRun'] as const).flatMap(lane =>
     [undefined, 'team'].flatMap(subGraph => [false, true].map(graphLocator => ({ lane, oldVersion, currentVersion, subGraph, scope: subGraph ?? 'root', graphLocator })))));
 
 describe('legacy catch-up respects publisher draft chronology', () => {
+  it.each(['publicRun', 'privateRun'] as const)('%s delegates replacement effects to the canonical materializer', async lane => {
+    const store = new OxigraphStore(); stores.push(store);
+    const current = share(1, 'older-effects', 1000, 'team');
+    const incoming = share(1, 'newer-effects', 2000, 'team');
+    for (const f of [current, incoming]) await persistLocalSwmOperation(store, CG, f);
+    await store.insert([...current.meta.filter(row => row.subject === current.headSubject), ...inGraph(current)]);
+    const h = harness(store, incoming);
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: current.meta, registeredSubGraphNames: ['team'] })[0]!;
+    expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect(await readSwmMaterializationWitness(store, current.assertionGraph, current.digest)).toBe(true);
+    const replaceGraph = vi.spyOn(h.materializer, 'replaceGraph');
+    const replaceMetadata = vi.spyOn(h.materializer, 'replaceHeadMetadata');
+
+    await h[lane]();
+
+    expect(replaceGraph).toHaveBeenCalledOnce();
+    expect(replaceMetadata).toHaveBeenCalledOnce();
+    expect(h.invalidateListContextGraphsCache).toHaveBeenCalled();
+    expect(await readSwmMaterializationWitness(store, current.assertionGraph, current.digest)).toBe(false);
+    expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(false);
+    await expectHead(store, incoming, 'team');
+  });
+
+  it.each([undefined, 'team'].flatMap(subGraph => ['allowList-lexical', 'legacy-default'].map(mode => ({ subGraph, mode }))))('recognizes decoded $mode empty alias semantics in $subGraph', async ({ subGraph, mode }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const make = (id: string, provider = false) => {
+      const f = share(1, id, 1000, subGraph, false, true);
+      const meta = f.meta.filter(row => row.predicate !== `${DKG}accessPolicy`);
+      if (mode === 'allowList-lexical') {
+        meta.push({ subject: f.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: meta[0]!.graph });
+        for (const peer of provider ? ['"peer-b"', '"peer-a"', '"peer-\\u0061"'] : ['"peer-a"', '"peer-b"']) {
+          meta.push({ subject: f.operationSubject, predicate: `${DKG}allowedPeer`, object: peer, graph: meta[0]!.graph });
+        }
+      } else if (!provider) {
+        meta.push({ subject: f.operationSubject, predicate: `${DKG}accessPolicy`, object: '"ownerOnly"', graph: meta[0]!.graph });
+      }
+      return { ...f, meta };
+    };
+    const first = make('empty-first'); const alias = make('storage-ack-empty'); const incoming = make('empty-provider', true);
+    for (const f of [first, alias]) await persistLocalSwmOperation(store, CG, f);
+    const head = first.meta.filter(row => row.subject === first.headSubject);
+    await store.insert([...head, { ...head.find(row => row.predicate === `${DKG}shareOperationId`)!, object: JSON.stringify(alias.operationId) }]);
+    const h = harness(store, incoming);
+    const parse = (meta: Quad[]) => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: meta, registeredSubGraphNames: ['team'] })[0]!;
+    const descriptor = parse(incoming.meta);
+    expect(await h.materializer.readStoredHead(descriptor)).toMatchObject({ status: 'resolved' });
+    expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect(await h.materializer.readExactMaterializedGraph(descriptor)).toEqual([]);
+    const differentVersion = incoming.meta.map(row => row.predicate === `${DKG}assertionVersion` ? { ...row, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' } : row);
+    expect(await h.materializer.isGraphAssetMaterialized(parse(differentVersion))).toBe(false);
+    const differentPrivateRoot = incoming.meta.map(row => row.predicate === `${DKG}privateMerkleRoot` ? { ...row, object: JSON.stringify(`0x${'cd'.repeat(32)}`) } : row);
+    expect(await h.materializer.isGraphAssetMaterialized(parse(differentPrivateRoot))).toBe(false);
+  });
+
   it.each(['publicRun', 'privateRun', 'preserveSkipped'] as const)('%s extends healthy equivalent aliases without stranding a queued ACK snapshot', async lane => {
     const store = new OxigraphStore(); stores.push(store);
     const make = (id: string, clock: number) => swmFixtures(CG).share({ version: 2, operationId: id, marker: 'same-queued-content', ual: UAL, timestamp: new Date(clock) });

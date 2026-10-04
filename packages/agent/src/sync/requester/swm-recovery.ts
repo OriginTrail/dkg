@@ -144,10 +144,6 @@ export interface RecoverContextGraphSwmDeps {
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
   ) => Promise<void>;
-  /** Replace the active head/operation rows for each exact graph asset. */
-  readonly replaceMetaForGraphAssets: (
-    assets: readonly GraphScopedSwmRecoveryDescriptor[],
-  ) => Promise<void>;
   /**
    * GH#2273 — skipping an already-materialized KA and deciding whether its
    * stored operation identity may be preserved are ONE capability, and the
@@ -511,7 +507,6 @@ async function recoverContextGraphSwmUnlocked(
               asset: { kind: 'preserve-equivalent', descriptor },
               ports: {
                 store: deps.store,
-                replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
                 snapshotMaterializer: deps.snapshotMaterializer,
                 resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion!,
               },
@@ -547,7 +542,6 @@ async function recoverContextGraphSwmUnlocked(
           },
           ports: {
             store: deps.store,
-            replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
             snapshotMaterializer: deps.snapshotMaterializer,
             ...(deps.resolveRootAtomicCompanion === undefined
               ? {}
@@ -769,7 +763,6 @@ async function recoverContextGraphSwmUnlocked(
       store: deps.store,
       ensureContextGraph: deps.ensureContextGraph,
       replaceMetaForRoots: deps.replaceMetaForRoots,
-      replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
       snapshotMaterializer: deps.snapshotMaterializer,
       ...(deps.resolveRootAtomicCompanion === undefined
         ? {}

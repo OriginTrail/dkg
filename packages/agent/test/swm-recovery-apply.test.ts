@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   applySwmRecovery,
   applyVerifiedSwmRecoveryGraphAsset,
@@ -8,6 +8,7 @@ import {
   type SwmRecoveryStore,
   type VerifiedSwmRecoveryApplyPorts,
 } from '../src/sync/requester/swm-recovery-apply.js';
+import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { createRecoveryExecutionAdmission } from
   '../src/sync/requester/recovery-execution-guard.js';
 
@@ -111,7 +112,6 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         operations.push('insert');
         rows.push(...quads);
       },
-      replaceGraph: async () => undefined,
       deleteByPattern: async (pattern) => {
         operations.push('delete-root');
         rows = rows.filter((quad) => !(
@@ -162,7 +162,6 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
     const operations: string[] = [];
     const store: SwmRecoveryStore = {
       insert: async () => { operations.push('insert'); },
-      replaceGraph: async () => undefined,
       deleteByPattern: async () => { operations.push('delete-root'); },
       deleteBySubjectPrefix: async () => {
         operations.push('delete-children');
@@ -261,10 +260,6 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           }
           failAfter(point);
         },
-        replaceGraph: async (_graph, quads) => {
-          graphRows = [...quads];
-          failAfter('replace-graph');
-        },
         deleteByPattern: async (pattern) => {
           if (pattern.graph === G && pattern.subject === SUBJ) {
             rows = rows.filter((quad) => !(
@@ -292,11 +287,9 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           appliedRootMetaGraphs = [...metaGraphs];
           failAfter('replace-root-meta');
         },
-        replaceMetaForGraphAssets: async () => {
-          graphMetaCurrent = true;
-          failAfter('replace-graph-meta');
-        },
         snapshotMaterializer: {
+          replaceGraph: async (_graph, quads) => { graphRows = [...quads]; failAfter('replace-graph'); },
+          replaceHeadMetadata: async () => { graphMetaCurrent = true; failAfter('replace-graph-meta'); },
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
         prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
@@ -350,18 +343,25 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
     const graphData: Quad[] = [{
       subject: 'urn:asset', predicate: STATUS, object: '"current"', graph: assertionGraph,
     }];
-    let graphRows: Quad[] = [];
+    const inner = new OxigraphStore(); stores.push(inner);
+    const invalidateWitness = vi.fn(async () => { throw new Error('witness backend unavailable'); });
+    const decorated = new Proxy(inner, { get(target, key) {
+      if (key === 'deleteByPatternWithoutCount') return invalidateWitness;
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }) as TripleStore;
+    const canonical = createSharedMemorySnapshotMaterializer({ store: decorated, writeLocks: new Map(), invalidateListContextGraphsCache: () => {} });
     const ports: VerifiedSwmRecoveryApplyPorts = {
       store: {
         insert: async () => undefined,
-        replaceGraph: async (_graph, quads) => { graphRows = [...quads]; },
-        deleteByPattern: async () => { throw new Error('witness backend unavailable'); },
+        deleteByPattern: async () => undefined,
         deleteBySubjectPrefix: async () => 0,
       },
       ensureContextGraph: async () => undefined,
       replaceMetaForRoots: async () => undefined,
-      replaceMetaForGraphAssets: async () => undefined,
       snapshotMaterializer: {
+        replaceGraph: canonical.replaceGraph,
+        replaceHeadMetadata: async () => undefined,
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
         prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
@@ -403,7 +403,9 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       ports,
       executionBoundary: createRecoveryExecutionAdmission(),
     })).resolves.toMatchObject({ replacedGraphs: 1, insertedGraphQuads: 1 });
-    expect(graphRows).toEqual(graphData);
+    const graph = await inner.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertionGraph}> { ?s ?p ?o } }`);
+    expect(graph.type === 'quads' ? graph.quads : []).toEqual(graphData.map(quad => ({ ...quad, graph: '' })));
+    expect(invalidateWitness).toHaveBeenCalledOnce();
   });
 
   it.each(['replace', 'preserve-equivalent'] as const)(
@@ -446,7 +448,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         outcome: 'preserved',
         withholdRows: [],
       });
-      const replaceMetaForGraphAssets = vi.fn().mockResolvedValue(undefined);
+      const replaceHeadMetadata = vi.fn().mockResolvedValue(undefined);
       const resolveRootAtomicCompanion = vi.fn(() => companion);
 
       await expect(applyVerifiedSwmRecoveryGraphAsset({
@@ -457,12 +459,12 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         ports: {
           store: {
             insert: async () => undefined,
-            replaceGraph,
             deleteByPattern: async () => undefined,
             deleteBySubjectPrefix: async () => 0,
           },
-          replaceMetaForGraphAssets,
           snapshotMaterializer: {
+            replaceGraph,
+            replaceHeadMetadata,
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
         prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
@@ -506,6 +508,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         assertionGraph,
         graphData,
         companion,
+        { source: 'agent.swmRecovery.graphScopedReplace' },
       );
     },
   );
@@ -554,12 +557,12 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       ports: {
         store: {
           insert: async () => undefined,
-          replaceGraph,
           deleteByPattern: async () => undefined,
           deleteBySubjectPrefix: async () => 0,
         },
-        replaceMetaForGraphAssets: vi.fn(),
         snapshotMaterializer: {
+          replaceGraph,
+          replaceHeadMetadata: vi.fn(),
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
         prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
@@ -633,16 +636,16 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       graph: assertionGraph,
     }];
     const replaceGraph = vi.fn();
-    const replaceMetaForGraphAssets = vi.fn().mockResolvedValue(undefined);
+    const replaceHeadMetadata = vi.fn().mockResolvedValue(undefined);
     const ports = {
       store: {
         insert: async () => undefined,
-        replaceGraph,
         deleteByPattern: async () => undefined,
         deleteBySubjectPrefix: async () => 0,
       },
-      replaceMetaForGraphAssets,
       snapshotMaterializer: {
+        replaceGraph,
+        replaceHeadMetadata,
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
         prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
@@ -666,14 +669,14 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       asset: { kind: 'preserve-equivalent', descriptor },
       ports,
     })).resolves.toMatchObject({ insertedGraphQuads: 1 });
-    expect(replaceMetaForGraphAssets).toHaveBeenCalledOnce();
-    expect(replaceMetaForGraphAssets).toHaveBeenCalledWith([{
+    expect(replaceHeadMetadata).toHaveBeenCalledOnce();
+    expect(replaceHeadMetadata).toHaveBeenCalledWith('private-recovery-cg', {
       ...descriptor,
       preparation: 'local-evidence-acquired', operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const },
-    }]);
+    }, { source: 'agent.swmRecovery.replaceMetaForGraphAssets' });
     expect(replaceGraph).not.toHaveBeenCalled();
 
-    replaceMetaForGraphAssets.mockClear();
+    replaceHeadMetadata.mockClear();
     ports.snapshotMaterializer.isGraphAssetMaterialized = async () => false;
     await expect(applyVerifiedSwmRecoveryGraphAsset({
       contextGraphId: 'private-recovery-cg',
@@ -684,7 +687,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       insertedMetaQuads: 0,
       withholdRows: descriptor.metadataQuads,
     });
-    expect(replaceMetaForGraphAssets).not.toHaveBeenCalled();
+    expect(replaceHeadMetadata).not.toHaveBeenCalled();
     expect(replaceGraph).not.toHaveBeenCalled();
   });
 });

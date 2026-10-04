@@ -425,6 +425,7 @@ interface SeedSignedSwmWorkspaceParamsV1 {
   readonly allowedPeers?: readonly string[];
   readonly publicQuads?: readonly Quad[];
   readonly assertionVersion?: CanonicalGraphScopedAuthorSealV1['assertionVersion'];
+  readonly assertionFinalizedAt?: string;
   readonly networkId?: NetworkIdV1;
   readonly publisherPeerId?: string;
 }
@@ -439,12 +440,11 @@ async function seedSignedSwmWorkspaceV1(
 }>> {
   const publicQuads = params.publicQuads ?? PROJECTION_QUADS;
   const baseSeal = await authorSeal(params.kaNumber, publicQuads, params.networkId);
-  const canonicalSeal = params.assertionVersion === undefined
-    ? baseSeal
-    : Object.freeze({
-      ...baseSeal,
-      assertionVersion: params.assertionVersion,
-    }) as CanonicalGraphScopedAuthorSealV1;
+  const canonicalSeal = Object.freeze({
+    ...baseSeal,
+    ...(params.assertionVersion === undefined ? {} : { assertionVersion: params.assertionVersion }),
+    ...(params.assertionFinalizedAt === undefined ? {} : { assertionFinalizedAt: params.assertionFinalizedAt }),
+  }) as CanonicalGraphScopedAuthorSealV1;
   assertCanonicalGraphScopedAuthorSealV1(canonicalSeal);
   const seal = assertionSealFromCanonical(canonicalSeal);
   const assertionUri = contextGraphAssertionUri(
@@ -5481,6 +5481,105 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   }, 60_000);
 
+  it.each([
+    ['equal', '2', true], ['lower', '3', true],
+    ['equal', '2', false], ['lower', '3', false],
+  ] as const)(
+    'rechecks a %s draft under real inventory-exclusive commit ownership (previous %s, confirmation advances %s)',
+    async (_order, previousVersion, confirmationAdvances) => {
+      const author = await startNativeAgentWithOptions({
+        name: 'catalog-commit-confirmation-fence',
+        autoPublish: { peers: [], catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1 },
+      });
+      vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+      author.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+      const seed = {
+        contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: 'commit-fenced-draft',
+        kaNumber: 75n, accessPolicy: 'public' as const,
+      };
+      await seedSignedSwmWorkspaceV1(author, {
+        ...seed, shareOperationId: 'commit-fence-B', assertionVersion: previousVersion,
+        assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
+      });
+      await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+        contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seed.assertionCoordinate,
+        lifecycleAgentAddress: AUTHOR, shareOperationId: 'commit-fence-B',
+      })).resolves.toMatchObject({ status: 'applied' });
+      const reconcileParams = { contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR };
+      const original = (await author.reconcileRfc64PublicCatalogFromSwmInventoryV1(reconcileParams))!.appliedHead;
+      expect(original).not.toBeNull();
+      const replacement = await seedSignedSwmWorkspaceV1(author, {
+        ...seed, shareOperationId: 'commit-fence-C', assertionVersion: '2',
+        assertionFinalizedAt: '2026-07-19T12:34:56.790Z',
+        publicQuads: PROJECTION_QUADS.map(quad => ({ ...quad, object: quad.predicate === 'https://schema.org/name' ? '"C"' : quad.object })),
+      });
+      await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+        contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seed.assertionCoordinate,
+        lifecycleAgentAddress: AUTHOR, shareOperationId: 'commit-fence-C',
+      })).resolves.toMatchObject({ status: 'applied' });
+      const chain = (author as unknown as { chain: ChainAdapter }).chain;
+      let published = false;
+      const read = vi.fn(async () => ({
+        knowledgeAssetId: BigInt(replacement.canonicalSeal.reservedKaId), rootCount: published ? 2n : 1n,
+        latestRoot: replacement.canonicalSeal.assertionMerkleRoot,
+        latestAuthor: AUTHOR, latestPublisher: AUTHOR, blockNumber: 100,
+        blockHash: `0x${'ab'.repeat(32)}`, knowledgeAssetStorageAddress: KAV10,
+        knowledgeAssetStorageGeneration: 1,
+      }));
+      chain.readKnowledgeAssetVersionSnapshot = read;
+      chain.knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
+      const runtime = rfc64SwmInventoryShadowRuntimeV1(author);
+      const { bucketCount: _bucketCount, ...inventoryScope } = draftCatalogMutationParams().scope;
+      const inventoryScopeKey = `${computeSwmAuthorInventoryScopeDigestV1(inventoryScope)}\n${AUTHOR}`;
+      let releaseOwner!: () => void;
+      let markQueued!: () => void;
+      const ownerGate = new Promise<void>(resolve => { releaseOwner = resolve; });
+      const queued = new Promise<void>(resolve => { markQueued = resolve; });
+      const runExclusive = runtime.runScopeExclusive.bind(runtime);
+      let held = false;
+      vi.spyOn(runtime, 'runScopeExclusive').mockImplementation((key, operation, signal) => {
+        if (held) { expect(key).toBe(inventoryScopeKey); markQueued(); }
+        return runExclusive(key, operation, signal);
+      });
+      const publish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
+      let owner: Promise<void> | undefined;
+      vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1').mockImplementation(async params => {
+        const successor = await publish(params);
+        if (params.assets.some(asset => asset.seal.assertionMerkleRoot === replacement.canonicalSeal.assertionMerkleRoot)) {
+          let markHeld!: () => void;
+          const ownerHeld = new Promise<void>(resolve => { markHeld = resolve; });
+          owner = runExclusive(inventoryScopeKey, async () => { held = true; markHeld(); await ownerGate; });
+          await ownerHeld;
+        }
+        return successor;
+      });
+      const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+      const outcome = author.reconcileRfc64PublicCatalogFromSwmInventoryV1(reconcileParams)
+        .then(value => ({ value, error: null }), error => ({ value: null, error }));
+      try {
+        await Promise.race([queued, outcome.then(result => { throw result.error ?? new Error('catalog finished before commit ownership was gated'); })]);
+        const readsBeforeOwnership = read.mock.calls.length;
+        expect(readsBeforeOwnership).toBeGreaterThan(0);
+        published = confirmationAdvances;
+        releaseOwner();
+        const result = await outcome;
+        await owner;
+        if (confirmationAdvances) {
+          expect(result.error).toBeInstanceOf(Error);
+          expect(read.mock.calls.length).toBeGreaterThan(readsBeforeOwnership);
+          expect(result.error.message).toMatch(/published|proof/u);
+          expect(author.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR })).toEqual(original);
+          expect(announce).not.toHaveBeenCalled();
+        } else {
+          expect(result.error).toBeNull();
+          expect(result.value).toMatchObject({ status: 'advanced', targetAssetCount: 1 });
+          expect(result.value?.appliedHead?.currentCatalogHeadDigest).not.toBe(original?.currentCatalogHeadDigest);
+          expect(announce).toHaveBeenCalledOnce();
+        }
+      } finally { releaseOwner(); await outcome; await owner; }
+    }, 60_000,
+  );
+
   it('commits an already-signed SWM successor when its source becomes stale', async () => {
     const author = await startNativeAgent('r1-3-commit-freshness-author');
     author.acceptOpenContextGraphPolicyV1({
@@ -5538,7 +5637,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       targetPolicy: 'exact-replacement',
       commitAppliedHeadIfInventoryCurrent: async (commit) => {
-        const appliedHead = commit();
+        const appliedHead = await commit();
         return Object.freeze({
           appliedHead,
           sourceCurrent: currentInventoryHead === expectedInventoryHead,

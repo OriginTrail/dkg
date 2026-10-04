@@ -361,20 +361,21 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           commitAppliedHeadIfInventoryCurrent: (commit) => (
             rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
               inventoryScopeKey,
-              () => {
+              async () => {
+                const appliedHead = await commit();
                 const current = persistence.swmAuthorInventory
                   .readSwmAuthorInventorySnapshotV1(
                     inventoryScopeDigest,
                     params.authorAddress,
                   );
-                return Promise.resolve(Object.freeze({
-                  // Never abandon an already-signed branch. Commit it as the
+                return Object.freeze({
+                  // Never abandon an eligible signed branch. Commit it as the
                   // unique next version, then let the projection loop advance
                   // from that durable head when its source snapshot is stale.
-                  appliedHead: commit(),
+                  appliedHead,
                   sourceCurrent:
                     current?.head.objectDigest === prepared.inventoryHeadObjectDigest,
-                }));
+                });
               },
               params.signal,
             )

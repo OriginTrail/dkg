@@ -108,7 +108,6 @@ type FinalizedTwinReconciler = (
 
 class GraphScopedSnapshotCommitCoordinator {
   readonly #verifiedKeys: ReadonlySet<string>;
-  readonly #writtenKeys = new Set<string>();
   readonly #suppressedKeys = new Set<string>();
   readonly #reconcileFinalizedTwin: FinalizedTwinReconciler | undefined;
 
@@ -120,23 +119,10 @@ class GraphScopedSnapshotCommitCoordinator {
     this.#reconcileFinalizedTwin = reconcileFinalizedTwin;
   }
 
-  unwrittenVerifiedRows(descriptor: GraphScopedSwmRecoveryDescriptor): Quad[] {
-    return descriptor.metadataQuads.filter((quad) => {
-      const key = canonicalQuadKey(quad);
-      return this.#verifiedKeys.has(key)
-        && !this.#writtenKeys.has(key)
-        && !this.#suppressedKeys.has(key);
-    });
-  }
-
-  recordWritten(rows: readonly Quad[]): void {
-    for (const quad of rows) this.#writtenKeys.add(canonicalQuadKey(quad));
-  }
-
   /**
    * GH#2273 — ROW-level suppression for identity-preserving decisions. Only
    * the specific rows named here are withheld from this round's remaining
-   * writes (`insertVerifiedDescriptorMeta` and the bulk append both honour the
+   * writes (per-asset commits and the bulk append both honour the
    * same ledger). Deliberately NOT descriptor-level: after a head repair the
    * head subject holds only what the repair re-inserted, and suppressing a
    * descriptor's WHOLE metadata there would withhold the four required head
@@ -190,7 +176,7 @@ class GraphScopedSnapshotCommitCoordinator {
   bulkRows(rows: readonly Quad[]): Quad[] {
     return rows.filter(quad => {
       const key = canonicalQuadKey(quad);
-      return !this.#suppressedKeys.has(key) && !this.#writtenKeys.has(key);
+      return !this.#suppressedKeys.has(key);
     });
   }
 

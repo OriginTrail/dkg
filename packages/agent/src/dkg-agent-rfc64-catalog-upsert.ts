@@ -74,11 +74,11 @@ interface ReconcileRfc64SwmInventoryCatalogParamsV1
   readonly targetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
   /**
    * Projection-owned atomic boundary: verify the expected inventory head while
-   * holding its scope lock, then execute the synchronous applied-head CAS
-   * before releasing that lock.
+   * holding its scope lock, then revalidate unpublished evidence and execute
+   * the synchronous applied-head CAS before releasing that lock.
    */
   readonly commitAppliedHeadIfInventoryCurrent: (
-    commit: () => AppliedCatalogHeadSnapshotV1,
+    commit: () => Promise<AppliedCatalogHeadSnapshotV1>,
   ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
 }
 
@@ -89,7 +89,7 @@ export type Rfc64CatalogProjectionTargetPolicyV1 =
 interface Rfc64CatalogProjectionMutationOptionsV1 {
   readonly targetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
   readonly commitAppliedHead?: (
-    commit: () => AppliedCatalogHeadSnapshotV1,
+    commit: () => Promise<AppliedCatalogHeadSnapshotV1>,
   ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
 }
 
@@ -493,9 +493,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     peers: readonly string[],
     stageOnly: boolean,
     signal?: AbortSignal,
-    commitAppliedHead?: (
-      commit: () => AppliedCatalogHeadSnapshotV1,
-    ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>,
+    commitAppliedHead?: Rfc64CatalogProjectionMutationOptionsV1['commitAppliedHead'],
   ) {
     throwIfAbortedV1(signal);
     let previousHead = state.previousHead;
@@ -519,15 +517,16 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       });
     }
     const assets = mutation.at(-1)!;
-    // A reused or lower burned draft is admissible only while its chain proof
-    // remains unpublished. Signing and durable staging may cross a block.
-    await assertRfc64CatalogReplacementOrderV1(this.chain, state.assets, assets, signal);
     const appliedInventoryDigest = computeRfc64AppliedInventoryDigestV1({
       catalogScopeDigest: successor.catalogScopeDigest,
       rows: successor.assets,
     });
-    const commit = (): AppliedCatalogHeadSnapshotV1 => (
-      persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+    const commit = async (): Promise<AppliedCatalogHeadSnapshotV1> => {
+      // A reused or lower burned draft is admissible only while its chain proof
+      // remains unpublished. Signing, staging and commit ownership may cross a block.
+      await assertRfc64CatalogReplacementOrderV1(this.chain, state.assets, assets, signal);
+      throwIfAbortedV1(signal);
+      return persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
         catalogScopeDigest: successor.catalogScopeDigest,
         authorAddress: params.scope.authorAddress,
         currentCatalogHeadDigest: successor.headObjectDigest,
@@ -536,10 +535,10 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         inventoryRowCount: successor.signedBucketRowCount,
         expectedCurrentCatalogHeadDigest: state.expectedCurrentCatalogHeadDigest,
         stageOnly,
-      }).snapshot
-    );
+      }).snapshot;
+    };
     const committed = commitAppliedHead === undefined
-      ? Object.freeze({ appliedHead: commit(), sourceCurrent: true })
+      ? Object.freeze({ appliedHead: await commit(), sourceCurrent: true })
       : await commitAppliedHead(commit);
     if (!signal?.aborted) {
       this.warnRfc64CatalogAnnounceFailuresV1(await this.announceRfc64PublicCatalogHeadV1({

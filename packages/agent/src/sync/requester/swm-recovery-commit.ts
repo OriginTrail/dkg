@@ -33,8 +33,7 @@ export async function commitRecoveredSwmAsset(input: {
   materializer: SharedMemorySnapshotMaterializer;
   insertMetadata: (rows: readonly Quad[]) => Promise<unknown>;
   ensureContextGraph?: () => Promise<void>;
-  replaceGraph?: (graph: string, quads: readonly Quad[]) => Promise<unknown>;
-  replaceMetadata?: (descriptor: GraphScopedSwmRecoveryDescriptor) => Promise<void>;
+  mutationAttribution?: Readonly<{ graphSource: string; metadataSource: string }>;
   resolveRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
   assertCurrent?: () => void;
   allowed?: () => boolean;
@@ -66,8 +65,8 @@ export async function commitRecoveredSwmAsset(input: {
     if (!authorityAllows()) return result('deferred');
     const companion = descriptor.subGraphName === undefined ? input.resolveRootAtomicCompanion?.(Object.freeze({ contextGraphId, kaUal: descriptor.kaUal, assertionVersion: descriptor.assertionVersion, shareOperationId: descriptor.shareOperationId })) : undefined;
     if (quads !== null) {
-      if (companion) await materializer.replaceGraphWithAtomicCompanion(descriptor.assertionGraph, [...quads], companion);
-      else if (!equivalent) await (input.replaceGraph?.(descriptor.assertionGraph, quads) ?? materializer.replaceGraph(descriptor.assertionGraph, [...quads]));
+      if (companion) await materializer.replaceGraphWithAtomicCompanion(descriptor.assertionGraph, [...quads], companion, input.mutationAttribution ? { source: input.mutationAttribution.graphSource } : undefined);
+      else if (!equivalent) await materializer.replaceGraph(descriptor.assertionGraph, [...quads], input.mutationAttribution ? { source: input.mutationAttribution.graphSource } : undefined);
     }
     const stored = descriptor.storedHead;
     const selected = await materializer.selectRepairIdentity(contextGraphId, descriptor);
@@ -84,7 +83,7 @@ export async function commitRecoveredSwmAsset(input: {
       await materializer.repairHeadPreservingIdentity(contextGraphId, descriptor, selected.winnerShareOperationId);
       withheld = selected.withholdRows;
     } else {
-      await (input.replaceMetadata?.(descriptor) ?? materializer.replaceHeadMetadata(contextGraphId, descriptor));
+      await materializer.replaceHeadMetadata(contextGraphId, descriptor, input.mutationAttribution ? { source: input.mutationAttribution.metadataSource } : undefined);
     }
     const keys = new Set(withheld.map(canonicalQuadKey));
     const rows = descriptor.metadataQuads.filter(row => !keys.has(canonicalQuadKey(row)));

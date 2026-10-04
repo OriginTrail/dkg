@@ -17,7 +17,6 @@ import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
-import type { GraphScopedSwmRecoveryDescriptor } from '../src/sync/graph-scoped-swm-recovery.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
 const CG = 'ws00-recovery';
@@ -159,8 +158,6 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     return {
       ...makeIdentityBaseDeps(store, curatorMeta, writeLocks),
       replaceMetaForRoots: async () => undefined,
-      replaceMetaForGraphAssets: (assets: readonly GraphScopedSwmRecoveryDescriptor[]) =>
-        snapshotMaterializer.replaceMetaForGraphAssets(assets),
       snapshotMaterializer,
       ensureOwnedMap: (key: string) => {
         let owned = ownership.get(key);

@@ -7,9 +7,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
-  invalidateSwmMaterializationWitness,
   deleteByPatternWithoutCount,
-  tryReplaceGraphAtomically,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -52,8 +50,6 @@ import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializ
 /** The subset of the triple store this apply needs. */
 export interface SwmRecoveryStore {
   insert(quads: Quad[]): Promise<unknown>;
-  /** Atomic complete-graph replacement required by graph-scoped recovery. */
-  replaceGraph(graph: string, quads: Quad[]): Promise<unknown>;
   deleteByPattern(pattern: { graph: string; subject: string }): Promise<unknown>;
   deleteBySubjectPrefix(graph: string, prefix: string): Promise<unknown>;
 }
@@ -108,24 +104,6 @@ export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
         params.invalidateListContextGraphsCache();
         params.markMetaProjectionDirty(inserted);
       }
-    },
-    replaceGraph: async (graph, quads) => {
-      const replaced = await tryReplaceGraphAtomically(
-        params.store,
-        graph,
-        quads,
-        {
-          priority: 'background',
-          source: 'agent.swmRecovery.graphScopedReplace',
-        },
-      );
-      if (!replaced) {
-        throw Object.assign(
-          new Error('Graph-scoped SWM recovery requires atomic TripleStore.replaceGraph() support'),
-          { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
-        );
-      }
-      params.invalidateListContextGraphsCache();
     },
     deleteByPattern: (pattern) => params.store.deleteByPattern(pattern, {
       priority: 'background',
@@ -290,9 +268,6 @@ export interface VerifiedSwmRecoveryApplyPorts {
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
   ) => Promise<void>;
-  readonly replaceMetaForGraphAssets: (
-    assets: readonly GraphScopedSwmRecoveryDescriptor[],
-  ) => Promise<void>;
   readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
   /** Durable negative-completeness boundary for recovered root SWM assets. */
   readonly resolveRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
@@ -364,7 +339,6 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
   ports: Pick<
     VerifiedSwmRecoveryApplyPorts,
     | 'store'
-    | 'replaceMetaForGraphAssets'
     | 'snapshotMaterializer'
     | 'resolveRootAtomicCompanion'
   >;
@@ -376,11 +350,7 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
       loadVerifiedQuads: async () => asset.replacementQuads } : asset,
     materializer: ports.snapshotMaterializer,
     insertMetadata: rows => ports.store.insert([...rows]),
-    replaceGraph: async (graph, quads) => {
-      await ports.store.replaceGraph(graph, [...quads]);
-      await invalidateSwmMaterializationWitness(ports.store, graph, { source: 'agent.swmRecovery.witnessInvalidate' }).catch(() => {});
-    },
-    replaceMetadata: descriptor => ports.replaceMetaForGraphAssets([descriptor]),
+    mutationAttribution: { graphSource: 'agent.swmRecovery.graphScopedReplace', metadataSource: 'agent.swmRecovery.replaceMetaForGraphAssets' },
     resolveRootAtomicCompanion: ports.resolveRootAtomicCompanion,
   });
   return { insertedGraphQuads: asset.kind === 'preserve-equivalent' && committed.kind === 'committed' ? asset.descriptor.publicQuadsCount : committed.insertedGraphQuads, insertedMetaQuads: committed.insertedMetaQuads, withholdRows: committed.withholdRows };

@@ -191,9 +191,6 @@ export class SwmTargetExecutorV1 {
           roots,
           metaGraphs,
         ),
-      replaceMetaForGraphAssets: (assets) => (
-        this.#snapshotMaterializer.replaceMetaForGraphAssets(assets)
-      ),
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
       setCheckpoint: this.#ports.setCheckpoint,
       deleteCheckpoint: this.#ports.deleteCheckpoint,

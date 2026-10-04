@@ -254,6 +254,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
         filterBulkMetadata: async rows => rows,
         selectRepairIdentity: async () => null,
+        replaceHeadMetadata: async () => undefined,
         withKaWriteLock: async (
           _contextGraphId: string,
           _subGraphName: string | undefined,
@@ -273,7 +274,6 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       snapshotWalkProgress: () => retained,
       store,
       replaceMetaForRoots: async () => undefined,
-      replaceMetaForGraphAssets: async () => undefined,
       ensureContextGraph: async () => undefined,
       setCheckpoint: () => undefined,
       deleteCheckpoint: () => undefined,
