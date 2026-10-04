@@ -1,3 +1,5 @@
+
+import { verifiedDelegationKeyIds, verifyJoinEncryptionKeyBundle } from './internal/join-encryption-key-bundle.js';
 import type { PeerSyncConnection } from './p2p/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,6 +12,7 @@ import type { PeerSyncConnection } from './p2p/peer-connection.js';
  */
 
 import { createHash } from 'node:crypto';
+import { withRequesterAuthorityMutation } from './approved-private-replica.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -454,19 +457,12 @@ const JOIN_ENCRYPTION_KEY_CACHE_ISSUED_AT =
 const JOIN_ENCRYPTION_KEY_CACHE_KEY_SET_DIGEST =
   'urn:dkg:local:join-encryption-key-cache:key-set-digest';
 const JOIN_ENCRYPTION_KEY_CACHE_DIGEST_RE = /^0x[0-9a-f]{64}$/i;
-const JOIN_ENCRYPTION_KEY_LIMIT = 8;
 
 const requesterJoinStateCache = new WeakMap<DKGAgent, Map<string, RequesterJoinRequestState>>();
 const requesterJoinStateTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const requesterJoinForwardTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const curatorJoinRequestStoreTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const joinEncryptionKeyCacheTails = new WeakMap<TripleStore, Map<string, Promise<void>>>();
-
-interface VerifiedJoinEncryptionKeyBundle {
-  readonly issuedAtMs: number;
-  readonly keySetDigest: string;
-  readonly keys: NonNullable<SignedAgentDelegation['workspaceEncryptionKeys']>;
-}
 
 interface StorePendingJoinRequestOptions {
   emitNotification?: boolean;
@@ -479,16 +475,6 @@ function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): b
     if (!right.has(value)) return false;
   }
   return true;
-}
-
-function verifiedDelegationKeyIds(
-  agentAddress: string,
-  keys: VerifiedJoinEncryptionKeyBundle['keys'],
-): Set<string> {
-  return new Set(keys.map((key) => workspaceAgentEncryptionKeyId(
-    agentAddress,
-    decodeWorkspaceEncryptionKey(key.publicEncryptionKey),
-  ).toLowerCase()));
 }
 
 function requesterJoinStateKey(contextGraphId: string, agentAddress: string): string {
@@ -592,81 +578,6 @@ async function withJoinEncryptionKeyCacheLock<T>(
   } finally {
     if (tails.get(agentSubject) === tail) tails.delete(agentSubject);
   }
-}
-
-function verifyJoinEncryptionKeyBundle(
-  delegation: SignedAgentDelegation,
-  carrierPeerId: string,
-): VerifiedJoinEncryptionKeyBundle | null {
-  const keys = delegation.workspaceEncryptionKeys;
-  if (keys === undefined) return null;
-  if (!Array.isArray(keys) || keys.length === 0 || keys.length > JOIN_ENCRYPTION_KEY_LIMIT) {
-    throw new Error(
-      `Join request must carry between 1 and ${JOIN_ENCRYPTION_KEY_LIMIT} workspace encryption keys.`,
-    );
-  }
-  // Preserve the existing admission contract for a signed carrier mismatch:
-  // policy evaluation reports a bounded pending decision. Do not accept the
-  // bundle because the carrier has not proven it is the signed delegatee.
-  if (delegation.delegateePeerId !== carrierPeerId) return null;
-
-  // issuedAtMs becomes the durable cross-CG cache high-water, so authenticate
-  // the base delegation here as well as at the admission boundary.
-  verifyAgentDelegation(delegation);
-  if (!Number.isSafeInteger(delegation.issuedAtMs) || delegation.issuedAtMs < 0) {
-    throw new Error('Join request carries an invalid encryption-key freshness timestamp.');
-  }
-  const verified = keys.map((key) => {
-    if (
-      key === null
-      || typeof key !== 'object'
-      || key.encryptionKeyAlgorithm !== WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519
-      || typeof key.publicEncryptionKey !== 'string'
-      || typeof key.encryptionKeyProof !== 'string'
-    ) {
-      throw new Error('Join request carries a malformed workspace encryption key.');
-    }
-    let valid = false;
-    try {
-      valid = verifyWorkspaceEncryptionKeyBinding(
-        delegation.agentAddress,
-        key.encryptionKeyAlgorithm,
-        key.publicEncryptionKey,
-        key.encryptionKeyProof,
-      );
-    } catch {
-      valid = false;
-    }
-    if (!valid) {
-      throw new Error('Join request carries an invalid workspace encryption key proof.');
-    }
-    return key;
-  });
-  if (typeof delegation.workspaceEncryptionKeysSignature !== 'string') {
-    throw new Error('Join request is missing its workspace encryption-key attestation.');
-  }
-  let attestationSigner = '';
-  try {
-    attestationSigner = ethers.verifyMessage(
-      computeWorkspaceEncryptionKeysAttestationDigest(delegation),
-      delegation.workspaceEncryptionKeysSignature,
-    );
-  } catch {
-    attestationSigner = '';
-  }
-  if (attestationSigner.toLowerCase() !== delegation.agentAddress.toLowerCase()) {
-    throw new Error('Join request carries an invalid workspace encryption-key attestation.');
-  }
-
-  const canonicalKeySet = [...new Set(verified.map((key) => JSON.stringify({
-    encryptionKeyAlgorithm: key.encryptionKeyAlgorithm,
-    publicEncryptionKey: key.publicEncryptionKey,
-  })))].sort();
-  return {
-    issuedAtMs: delegation.issuedAtMs,
-    keySetDigest: `0x${createHash('sha256').update(JSON.stringify(canonicalKeySet)).digest('hex')}`,
-    keys: verified,
-  };
 }
 
 export class JoinRequestMethods extends DKGAgentBase {
@@ -1336,124 +1247,126 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     state: RequesterJoinRequestState,
   ): Promise<void> {
-    const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    const cache = this.requesterJoinStateCache();
-    const previous = cache.get(key);
-    const subject = requesterJoinStateSubject(contextGraphId, agentAddress);
-    const curatorPeerId = state.curatorPeerId?.trim();
-    if (state.curatorPeerId !== undefined && !curatorPeerId) {
-      throw new Error('Invalid requester join-state curator peer id');
-    }
-    const curatorAgentAddress = state.curatorAgentAddress?.trim().toLowerCase();
-    const curatorAuthorityEra = state.curatorAuthorityEra?.trim();
-    if (
-      (curatorAgentAddress === undefined) !== (curatorAuthorityEra === undefined)
-      || (curatorAgentAddress !== undefined && !/^0x[0-9a-f]{40}$/u.test(curatorAgentAddress))
-      || (curatorAuthorityEra !== undefined && !/^(0|[1-9][0-9]*)$/u.test(curatorAuthorityEra))
-    ) {
-      throw new Error('Invalid requester join-state curator authority binding');
-    }
-    const quads: Quad[] = [{
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_STATUS,
-      object: `"${state.status}"`,
-    }, {
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_GENERATION,
-      object: `"${state.requestGeneration}"`,
-    }, ...(curatorPeerId ? [{
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_CURATOR,
-      object: `"${escapeSparqlLiteral(curatorPeerId)}"`,
-    }] : []), ...(curatorAgentAddress && curatorAuthorityEra ? [{
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
-      object: `"${curatorAgentAddress}"`,
-    }, {
-      graph: REQUESTER_JOIN_STATE_GRAPH,
-      subject,
-      predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
-      object: `"${curatorAuthorityEra}"`,
-    }] : [])];
-    const curatorInsert = curatorPeerId
-      ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR}> "${escapeSparqlLiteral(curatorPeerId)}"`
-      : '';
-    const curatorAuthorityInsert = curatorAgentAddress && curatorAuthorityEra
-      ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_AGENT}> "${curatorAgentAddress}"`
-        + ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_ERA}> "${curatorAuthorityEra}"`
-      : '';
-    try {
-      const updatedAtomically = await tryUpdateWithTouchedGraphs(
-        this.store,
-        `DELETE {
-          GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . }
-        }
-        INSERT {
-          GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> {
-            <${subject}> <${REQUESTER_JOIN_STATE_STATUS}> "${state.status}" ;
-                        <${REQUESTER_JOIN_STATE_GENERATION}> "${state.requestGeneration}"${curatorInsert}${curatorAuthorityInsert} .
+    await withRequesterAuthorityMutation(this, contextGraphId, async () => {
+      const key = requesterJoinStateKey(contextGraphId, agentAddress);
+      const cache = this.requesterJoinStateCache();
+      const previous = cache.get(key);
+      const subject = requesterJoinStateSubject(contextGraphId, agentAddress);
+      const curatorPeerId = state.curatorPeerId?.trim();
+      if (state.curatorPeerId !== undefined && !curatorPeerId) {
+        throw new Error('Invalid requester join-state curator peer id');
+      }
+      const curatorAgentAddress = state.curatorAgentAddress?.trim().toLowerCase();
+      const curatorAuthorityEra = state.curatorAuthorityEra?.trim();
+      if (
+        (curatorAgentAddress === undefined) !== (curatorAuthorityEra === undefined)
+        || (curatorAgentAddress !== undefined && !/^0x[0-9a-f]{40}$/u.test(curatorAgentAddress))
+        || (curatorAuthorityEra !== undefined && !/^(0|[1-9][0-9]*)$/u.test(curatorAuthorityEra))
+      ) {
+        throw new Error('Invalid requester join-state curator authority binding');
+      }
+      const quads: Quad[] = [{
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_STATUS,
+        object: `"${state.status}"`,
+      }, {
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_GENERATION,
+        object: `"${state.requestGeneration}"`,
+      }, ...(curatorPeerId ? [{
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_CURATOR,
+        object: `"${escapeSparqlLiteral(curatorPeerId)}"`,
+      }] : []), ...(curatorAgentAddress && curatorAuthorityEra ? [{
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
+        object: `"${curatorAgentAddress}"`,
+      }, {
+        graph: REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
+        object: `"${curatorAuthorityEra}"`,
+      }] : [])];
+      const curatorInsert = curatorPeerId
+        ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR}> "${escapeSparqlLiteral(curatorPeerId)}"`
+        : '';
+      const curatorAuthorityInsert = curatorAgentAddress && curatorAuthorityEra
+        ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_AGENT}> "${curatorAgentAddress}"`
+          + ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR_ERA}> "${curatorAuthorityEra}"`
+        : '';
+      try {
+        const updatedAtomically = await tryUpdateWithTouchedGraphs(
+          this.store,
+          `DELETE {
+            GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . }
           }
-        }
-        WHERE {
-          OPTIONAL { GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . } }
-        }`,
-        [REQUESTER_JOIN_STATE_GRAPH],
-      );
-      if (!updatedAtomically) {
-        // Compatibility fallback for custom stores without SPARQL UPDATE.
-        // Restore the prior row best-effort if the replacement insert fails.
-        await deleteByPatternWithoutCount(this.store, { graph: REQUESTER_JOIN_STATE_GRAPH, subject });
-        try {
-          await this.store.insert(quads);
-        } catch (error) {
-          if (previous) {
-            try {
-              await this.store.insert([{
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_STATUS,
-                object: `"${previous.status}"`,
-              }, {
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_GENERATION,
-                object: `"${previous.requestGeneration}"`,
-              }, ...(previous.curatorPeerId ? [{
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_CURATOR,
-                object: `"${escapeSparqlLiteral(previous.curatorPeerId)}"`,
-              }] : []), ...(previous.curatorAgentAddress && previous.curatorAuthorityEra ? [{
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
-                object: `"${previous.curatorAgentAddress}"`,
-              }, {
-                graph: REQUESTER_JOIN_STATE_GRAPH,
-                subject,
-                predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
-                object: `"${previous.curatorAuthorityEra}"`,
-              }] : [])]);
-            } catch {
-              // Preserve the original mutation failure; the cache is evicted
-              // below so a later read observes the backend's actual state.
+          INSERT {
+            GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> {
+              <${subject}> <${REQUESTER_JOIN_STATE_STATUS}> "${state.status}" ;
+                          <${REQUESTER_JOIN_STATE_GENERATION}> "${state.requestGeneration}"${curatorInsert}${curatorAuthorityInsert} .
             }
           }
-          throw error;
+          WHERE {
+            OPTIONAL { GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . } }
+          }`,
+          [REQUESTER_JOIN_STATE_GRAPH],
+        );
+        if (!updatedAtomically) {
+          // Compatibility fallback for custom stores without SPARQL UPDATE.
+          // Restore the prior row best-effort if the replacement insert fails.
+          await deleteByPatternWithoutCount(this.store, { graph: REQUESTER_JOIN_STATE_GRAPH, subject });
+          try {
+            await this.store.insert(quads);
+          } catch (error) {
+            if (previous) {
+              try {
+                await this.store.insert([{
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_STATUS,
+                  object: `"${previous.status}"`,
+                }, {
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_GENERATION,
+                  object: `"${previous.requestGeneration}"`,
+                }, ...(previous.curatorPeerId ? [{
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_CURATOR,
+                  object: `"${escapeSparqlLiteral(previous.curatorPeerId)}"`,
+                }] : []), ...(previous.curatorAgentAddress && previous.curatorAuthorityEra ? [{
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_CURATOR_AGENT,
+                  object: `"${previous.curatorAgentAddress}"`,
+                }, {
+                  graph: REQUESTER_JOIN_STATE_GRAPH,
+                  subject,
+                  predicate: REQUESTER_JOIN_STATE_CURATOR_ERA,
+                  object: `"${previous.curatorAuthorityEra}"`,
+                }] : [])]);
+              } catch {
+                // Preserve the original mutation failure; the cache is evicted
+                // below so a later read observes the backend's actual state.
+              }
+            }
+            throw error;
+          }
         }
+        await this.store.flush?.();
+        cache.set(key, state);
+      } catch (error) {
+        cache.delete(key);
+        throw error;
+      } finally {
+        this.fenceRequesterJoinStateChange(contextGraphId);
       }
-      await this.store.flush?.();
-      cache.set(key, state);
-    } catch (error) {
-      cache.delete(key);
-      throw error;
-    } finally {
-      this.fenceRequesterJoinStateChange(contextGraphId);
-    }
+    });
   }
 
   /**
@@ -1473,21 +1386,23 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     agentAddress: string,
   ): Promise<void> {
-    const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    const cache = this.requesterJoinStateCache();
-    try {
-      await deleteByPatternWithoutCount(this.store, {
-        graph: REQUESTER_JOIN_STATE_GRAPH,
-        subject: requesterJoinStateSubject(contextGraphId, agentAddress),
-      });
-      await this.store.flush?.();
-      cache.delete(key);
-    } catch (error) {
-      cache.delete(key);
-      throw error;
-    } finally {
-      this.fenceRequesterJoinStateChange(contextGraphId);
-    }
+    await withRequesterAuthorityMutation(this, contextGraphId, async () => {
+      const key = requesterJoinStateKey(contextGraphId, agentAddress);
+      const cache = this.requesterJoinStateCache();
+      try {
+        await deleteByPatternWithoutCount(this.store, {
+          graph: REQUESTER_JOIN_STATE_GRAPH,
+          subject: requesterJoinStateSubject(contextGraphId, agentAddress),
+        });
+        await this.store.flush?.();
+        cache.delete(key);
+      } catch (error) {
+        cache.delete(key);
+        throw error;
+      } finally {
+        this.fenceRequesterJoinStateChange(contextGraphId);
+      }
+    });
   }
 
   /** Start a fresh requester-side generation and reset its local status. */
@@ -2643,27 +2558,7 @@ export class JoinRequestMethods extends DKGAgentBase {
         && result.peerId !== this.peerId
         && this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).track2Enabled
       ) {
-        for (const delayMs of [0, 250, 1_000]) {
-          if (delayMs > 0) {
-            await new Promise<void>((resolve) => { setTimeout(resolve, delayMs); });
-          }
-          try {
-            await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
-            if (await this.reannounceRfc64CatalogAfterJoinApprovalV1(
-              contextGraphId,
-              agentAddress,
-              result.peerId,
-            )) return;
-          } catch {
-            // The approval remains durable. The next bounded attempt can
-            // observe the current authority generation.
-          }
-        }
-        this.log.warn(
-          createOperationContext('system'),
-          `RFC-64 catalog replay remains pending after join approval for "${contextGraphId}"`,
-        );
-        this.scheduleRfc64CatalogAfterJoinApprovalRetryV1(
+        await this.runRfc64CatalogAfterJoinApprovalV1(
           contextGraphId,
           agentAddress,
           result.peerId,

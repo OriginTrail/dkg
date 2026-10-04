@@ -12,6 +12,7 @@
 // See `packages/cli/scripts/split-handle-request.mjs` for the
 // extraction driver.
 
+import { catchupShuttingDownResponse, catchupAuthorityUnavailableResponse, authorityUnavailableResponse } from './context-graph-catchup-responses.js';
 import {
   createServer,
   type IncomingMessage,
@@ -468,72 +469,6 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
   return jsonResponse(res, 500, { error: message });
 }
 
-/**
- * Refuse to mint a new catch-up job because the daemon is shutting down.
- *
- * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
- * — because that is what this is: the request is fine, the node just cannot
- * take on new work it will never drain. Returned from BOTH mint sites, which
- * is why I7's `result` vocabulary needed a distinct value; a 503 that clamped
- * to `unspecified` would hide the one route outcome shutdown introduces.
- */
-function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: boolean): void {
-  recordCatchupRequest('shutting_down', includeSharedMemory);
-  return jsonResponse(
-    res,
-    503,
-    {
-      error:
-        'Node is shutting down and is no longer accepting catch-up jobs; retry once it is back up.',
-      code: 'CATCHUP_SHUTTING_DOWN',
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '5' },
-  );
-}
-
-/** Fail closed without misreporting a transient authority outage as a denial. */
-function catchupAuthorityUnavailableResponse(
-  res: ServerResponse,
-  includeSharedMemory: boolean,
-): void {
-  recordCatchupRequest('authority_unavailable', includeSharedMemory);
-  return authorityUnavailableResponse(res);
-}
-
-const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
-  'finalized-name-absence-unaccepted',
-  'chain-name-binding-unavailable',
-  'registered-authority-error',
-  'authority-circuit-open',
-  'local-chain-binding-unavailable',
-  'local-existence-unavailable',
-  'chain-access-policy-unavailable',
-  'chain-access-policy-timeout',
-  'chain-access-policy-unknown',
-  'chain-participant-authority-unavailable',
-  'chain-participant-authority-unsupported',
-  'chain-participant-authority-invalid',
-  'remote-local-authority-unaccepted',
-  'rfc64-private-read-roster-unavailable',
-  'no-read-authority',
-]);
-
-/** The retryable 503 for an admission read that could not be completed. */
-function authorityUnavailableResponse(res: ServerResponse): void {
-  return jsonResponse(
-    res,
-    503,
-    {
-      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '3' },
-  );
-}
 
 /** How the subscribe route answers an on-chain id that names nothing subscribable. */
 const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
@@ -2025,14 +1960,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     if (readAuthority.outcome === 'unavailable') {
-      // The public response remains generic, but the operator needs the typed
-      // authority dependency to distinguish a missing seed from a chain read
-      // outage. Never log the graph name or caller identity here.
-      const reason = SUBSCRIBE_AUTHORITY_LOG_REASONS.has(readAuthority.reason)
-        ? readAuthority.reason : 'other';
-      console.warn(`[context-graph-subscribe] authority unavailable: reason=${reason}`
-        + ` dependency=${readAuthority.dependency}`);
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, readAuthority);
     }
     // A private graph named by its on-chain id: one decision, with one answer
     // whether or not this node holds its cleartext id.

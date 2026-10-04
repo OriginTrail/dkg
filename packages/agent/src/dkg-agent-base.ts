@@ -1,3 +1,5 @@
+
+export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
 import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
@@ -61,16 +63,44 @@ import type {
   './rfc64/swm-recovery-coordinator-v1.js';
 import type { Rfc64SwmRecoveryRuntimeV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
-import {
-  DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
-  LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
-  PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
-  contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
-  contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+import  {
+  DKGNode,
+  ProtocolRouter,
+  GossipSubManager,
+  TypedEventBus,
+  DKGEvent,
+  LibP2PNetwork,
+  PeerResolver,
+  StubNetworkStateRegistry,
+  PROTOCOL_ACCESS,
+  PROTOCOL_PUBLISH,
+  PROTOCOL_SYNC,
+  PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_GET_CIPHERTEXT_CHUNK,
+  PROTOCOL_VERIFY_PROPOSAL,
+  PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_SWM_SENDER_KEY,
+  PROTOCOL_SWM_UPDATE,
+  PROTOCOL_SWM_SHARE_ACK,
+  PROTOCOL_SWM_HOST_CATCHUP,
+  PROTOCOL_MESSAGE,
+  contextGraphPublishTopic,
+  contextGraphWorkspaceTopic,
+  contextGraphAppTopic,
+  contextGraphUpdateTopic,
+  contextGraphFinalizationTopic,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphWorkspaceGraphUri,
+  contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
-  contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
-  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphVerifiableMemoryUri,
+  contextGraphVerifiableMemoryMetaUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  assertionLifecycleUri,
+  contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -80,19 +110,35 @@ import {
   computeGossipSigningPayload,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
-  encodeFinalizationMessage, type FinalizationMessageMsg,
-  decodeGossipEnvelope, type GossipEnvelopeMsg,
-  decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
-  decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  encodeFinalizationMessage,
+  type FinalizationMessageMsg,
+  decodeGossipEnvelope,
+  type GossipEnvelopeMsg,
+  decodeEncryptedWorkspacePayload,
+  ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
+  decodeSwmSenderKeyMessage,
+  SWM_SENDER_KEY_MESSAGE_TYPE,
+  getGenesisQuads,
+  computeNetworkId,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  Logger,
+  createOperationContext,
+  sparqlString,
+  escapeSparqlLiteral,
+  isSafeIri,
+  assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
-  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
-  buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
-  parseAssertionSealQuads, type AssertionSeal,
+  buildAuthorAttestationTypedData,
+  AUTHOR_SCHEME_VERSION_V1,
+  type AuthorAttestationTypedData,
+  buildAssertionSealQuads,
+  buildAssertionPublishReceiptQuads,
+  parseAssertionSealQuads,
+  type AssertionSeal,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
   computeWorkspaceAgentEncryptionKeyProofPayload,
@@ -123,7 +169,12 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig,
+  type OperationContext,
+  type GetView,
+  type AssertionDescriptor,
+  type AssertionEvent,
+  type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -143,9 +194,8 @@ import {
   CIPHERTEXT_CHUNK_PREDICATE,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
-  isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -468,248 +518,6 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
 function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-export function createListContextGraphsCacheInvalidatingStore(
-  innerStore: TripleStore,
-  invalidate: () => void,
-  // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
-  // dirty the projection by graph rather than by inserted quads (covers deletes).
-  markProjectionDirty?: (
-    quads?: readonly Quad[],
-    targetGraph?: string,
-    targetSubject?: string,
-  ) => void,
-): TripleStore & Partial<SortedGraphSetSource> {
-  const invalidateAfterMutation = async <T>(
-    work: () => Promise<T>,
-    changed: (result: T) => boolean,
-    markDirty?: () => void,
-    operation?: StoreOperation,
-  ): Promise<T> => {
-    try {
-      const result = await work();
-      if (changed(result)) {
-        invalidate();
-        markDirty?.();
-      }
-      return result;
-    } catch (error) {
-      // A mutation may have committed before its response was lost. Only an
-      // outcome-tagged pre-dispatch refusal proves cache/authority state did
-      // not change; every indeterminate outcome must invalidate fail-closed.
-      if (operation !== undefined && !isStoreOperationNotStarted(error, operation)) {
-        invalidate();
-        markDirty?.();
-      }
-      throw error;
-    }
-  };
-  const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
-    === 'function'
-    ? innerStore as TripleStore & SortedGraphSetSource
-    : null;
-  const wrapper: TripleStore
-    & Partial<SortedGraphSetSource>
-    & { readonly innerStore: TripleStore } = {
-    innerStore,
-    get queryCancellation() {
-      return innerStore.queryCancellation;
-    },
-    getPressureSnapshot() {
-      return innerStore.getPressureSnapshot?.();
-    },
-    insert(quads, options) {
-      return invalidateAfterMutation(
-        () => innerStore.insert(quads, options),
-        () => quads.length > 0,
-        () => markProjectionDirty?.(quads),
-        'insert',
-      );
-    },
-    delete(quads, options) {
-      return invalidateAfterMutation(
-        () => innerStore.delete(quads, options),
-        () => quads.length > 0,
-        () => markProjectionDirty?.(quads),
-        'delete',
-      );
-    },
-    deleteByPattern(pattern, options) {
-      return invalidateAfterMutation(
-        () => innerStore.deleteByPattern(pattern, options),
-        removed => removed > 0,
-        () => markProjectionDirty?.(undefined, pattern.graph),
-        'deleteByPattern',
-      );
-    },
-    deleteByPatternWithoutCount(pattern, options) {
-      return invalidateAfterMutation(
-        () => deleteByPatternWithoutCount(innerStore, pattern, options),
-        () => true,
-        () => markProjectionDirty?.(undefined, pattern.graph),
-        'deleteByPattern',
-      );
-    },
-    query(sparql, options) {
-      return invalidateAfterMutation(
-        () => innerStore.query(sparql, options),
-        () => isSparqlUpdateOperation(sparql),
-        () => markProjectionDirty?.(),
-        isSparqlUpdateOperation(sparql) ? 'query' : undefined,
-      );
-    },
-    hasGraph(graphUri, options) {
-      return innerStore.hasGraph(graphUri, options);
-    },
-    createGraph(graphUri) {
-      return innerStore.createGraph(graphUri);
-    },
-    dropGraph(graphUri, options) {
-      return invalidateAfterMutation(
-        () => innerStore.dropGraph(graphUri, options),
-        () => true,
-        () => markProjectionDirty?.(undefined, graphUri),
-        'dropGraph',
-      );
-    },
-    replaceGraph: innerStore.replaceGraph
-      ? (graphUri, quads, options) => invalidateAfterMutation(
-          () => innerStore.replaceGraph!(graphUri, quads, options),
-          () => true,
-          () => markProjectionDirty?.(undefined, graphUri),
-          'replaceGraph',
-        )
-      : undefined,
-    // Rootless KA materialization replaces the assertion graph and its UAL
-    // metadata subject in one backend transaction. Preserve that optional
-    // capability through the agent decorator just like replaceGraph/update;
-    // omitting it makes every capable production backend appear unsupported.
-    replaceGraphAndSubject: innerStore.replaceGraphAndSubject
-      ? (graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, options) =>
-          invalidateAfterMutation(
-            () => innerStore.replaceGraphAndSubject!(
-              graphUri,
-              graphQuads,
-              metaGraphUri,
-              metadataSubject,
-              metadataQuads,
-              options,
-            ),
-            () => true,
-            // Both deletion targets are named. A graph-scoped invalidation
-            // covers inserted and removed facts without scanning the payload.
-            () => {
-              markProjectionDirty?.(undefined, graphUri);
-              markProjectionDirty?.(undefined, metaGraphUri);
-            },
-            'replaceGraphAndSubject',
-          )
-      : undefined,
-    // #1863 — the async-lift publisher persists a job transition via this atomic
-    // single-subject replace. Preserve the optional capability through the agent
-    // decorator just like replaceGraph/replaceGraphAndSubject/update; omitting it
-    // makes every capable production backend appear unsupported, so the publisher
-    // silently falls back to non-atomic delete-then-insert and the fix is a no-op.
-    replaceSubject: innerStore.replaceSubject
-      ? (graphUri, subject, quads, options) =>
-          invalidateAfterMutation(
-            () => innerStore.replaceSubject!(graphUri, subject, quads, options),
-            () => true,
-            // The target graph covers deleted facts; the replacement quads
-            // cover inserted recipient facts. The subject lets downstream
-            // invalidation distinguish exact atomic replacement paths.
-            () => markProjectionDirty?.(quads, graphUri, subject),
-            'replaceSubject',
-          )
-      : undefined,
-    // RFC-64 author publication moves a complete public-SWM projection and
-    // its bounded semantic control state through one backend CAS. Preserve the
-    // capability through this cache-invalidation decorator and invalidate only
-    // after a proven commit; a clean guard conflict changes nothing.
-    rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
-      ? (input, options) => invalidateAfterMutation(
-          () => innerStore.rfc64AuthorCommitCasV1!(input, options),
-          result => result === 'committed',
-          () => {
-            // The CAS names every graph it replaces. A graph-wide dirty mark
-            // here invalidates an unrelated private CG's own metadata proof
-            // after every authored row, even though the CAS only changed this
-            // exact projection and its control subjects. Fence each named
-            // target, including deleted facts, without losing the conservative
-            // all-graph fallback used by genuinely opaque store mutations.
-            if (markProjectionDirty === undefined) return;
-            markProjectionDirty(undefined, input.sharedProjectionGraph);
-            markProjectionDirty(undefined, input.authorSealGraph);
-            if ('currentHead' in input) {
-              for (const transition of [
-                input.currentHead,
-                input.subgraphMutationGeneration,
-                input.contextGraphMutationGeneration,
-                input.appliedSet,
-              ]) {
-                markProjectionDirty(undefined, transition.graphUri);
-              }
-            } else {
-              markProjectionDirty(undefined, input.currentHeadGraph);
-              for (const transition of [
-                input.kaStateDigest,
-                input.subgraphMutationGeneration,
-                input.contextGraphMutationGeneration,
-                input.appliedSet,
-                ...input.sealInvalidations,
-              ]) {
-                markProjectionDirty(undefined, transition.graphUri);
-              }
-            }
-          },
-          'rfc64AuthorCommitCasV1',
-        )
-      : undefined,
-    listGraphs(options) {
-      return innerStore.listGraphs(options);
-    },
-    // This wrapper changes mutation-side cache state but not graph visibility,
-    // so forwarding the direct inner capability preserves the same public
-    // boundary while keeping the responder's identity-stable catalog path live.
-    listGraphsSorted: sortedSource
-      ? (options) => sortedSource.listGraphsSorted(options)
-      : undefined,
-    listGraphsByPrefix(prefix, options) {
-      return innerStore.listGraphsByPrefix
-        ? innerStore.listGraphsByPrefix(prefix, options)
-        : innerStore.listGraphs(options).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix)));
-    },
-    deleteBySubjectPrefix(graphUri, prefix, options) {
-      return invalidateAfterMutation(
-        () => innerStore.deleteBySubjectPrefix(graphUri, prefix, options),
-        removed => removed > 0,
-        () => markProjectionDirty?.(),
-        'deleteBySubjectPrefix',
-      );
-    },
-    countQuads(graphUri, options) {
-      return innerStore.countQuads(graphUri, options);
-    },
-    // Defined iff the inner store supports it, so the capability propagates
-    // truthfully up the decorator chain (callers gate on `typeof store.update
-    // === 'function'`). A server-side UPDATE can create/drop named graphs and
-    // mutate projected content, so it invalidates the listGraphs cache and
-    // marks the projection dirty just like insert/delete.
-    update: innerStore.update
-      ? (sparql, options) => invalidateAfterMutation(
-        () => innerStore.update!(sparql, options),
-        () => true,
-        () => markProjectionDirty?.(),
-        'update',
-      )
-      : undefined,
-    flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
-    close() {
-      return innerStore.close();
-    },
-  };
-  return wrapper;
 }
 
 /**

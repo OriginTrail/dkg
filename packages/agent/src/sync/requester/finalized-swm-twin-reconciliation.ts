@@ -1,3 +1,5 @@
+import type { FinalizedSwmTwinRetirement } from '../shared-memory-completion.js';
+import { readExactGraph, parseInteger, parseSafeCount, literalValue, normalizeHex32, optionalHex32 } from '../../internal/finalized-swm-twin-storage.js';
 import {
   MemoryLayer,
   assertSafeIri,
@@ -41,14 +43,11 @@ export type FinalizedSwmTwinReconciliationOutcome =
   | 'vm-changed'
   | 'content-mismatch';
 
-export interface FinalizedSwmTwinRetirement {
-  readonly contextGraphId: string;
-  readonly subGraphName?: string;
-  readonly kaUal: string;
-  readonly swmGraph: string;
-  readonly agentAddress: string;
-  readonly kaNumber: bigint;
-}
+export type FinalizedSwmTwinReconciliationResult =
+  | Readonly<{ outcome: 'retired' | 'already-retired-finalized'; retirement: FinalizedSwmTwinRetirement & { readonly assertionVersion: bigint } }>
+  | Readonly<{ outcome: Exclude<FinalizedSwmTwinReconciliationOutcome, 'retired' | 'already-retired-finalized'> }>;
+
+export type { FinalizedSwmTwinRetirement } from '../shared-memory-completion.js';
 
 export interface FinalizedSwmTwinCatalogProjectionEvidence {
   readonly contextGraphId: string;
@@ -83,13 +82,21 @@ export type RetireConfirmedGraphScopedSwmTwinIfOrphaned = (
  * The owner captures publisher locks and cleanup mechanics so finalization
  * supplies policy only and can never accidentally select an unlocked mode.
  */
-export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(params: {
+export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(
+  params: Parameters<typeof createRetireConfirmedGraphScopedSwmTwinIfOrphanedWithEvidence>[0],
+): RetireConfirmedGraphScopedSwmTwinIfOrphaned {
+  const retire = createRetireConfirmedGraphScopedSwmTwinIfOrphanedWithEvidence(params);
+  return async (candidate, ctx) => { await retire(candidate, ctx); };
+}
+
+/** Agent completion consumes evidence without changing the historical void callback. */
+export function createRetireConfirmedGraphScopedSwmTwinIfOrphanedWithEvidence(params: {
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly retire: RetireConfirmedGraphScopedSwmTwinIfOrphaned;
   /** Reports a torn head removed because the confirmed VM copy supersedes it. */
   readonly onTornHeadRemoved?: (message: string, ctx: OperationContext) => void;
-}): RetireConfirmedGraphScopedSwmTwinIfOrphaned {
+}): (candidate: Readonly<ConfirmedGraphScopedSwmOrphanCandidate>, ctx: OperationContext) => Promise<boolean> {
   const graphManager = new GraphManager(params.store);
   return async (candidate, ctx) => {
     const lockKey = swmKaWriteLockKey(
@@ -97,7 +104,7 @@ export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(params: {
       candidate.subGraphName,
       candidate.ual,
     );
-    await withKeyedLocks(params.writeLocks, [lockKey], async () => {
+    return withKeyedLocks(params.writeLocks, [lockKey], async () => {
       let currentHead: PublishedKnowledgeAssetWorkspaceHead | undefined;
       try {
         currentHead = await resolvePublishedKnowledgeAssetWorkspaceHead({
@@ -123,8 +130,9 @@ export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(params: {
       }
       // Any current mutable head owns the stable per-KA SWM graph. Preserve it
       // regardless of version; the verified VM copy remains independently safe.
-      if (currentHead !== undefined) return;
+      if (currentHead !== undefined) return false;
       await params.retire(candidate, ctx);
+      return true;
     });
   };
 }
@@ -199,11 +207,27 @@ export async function reconcileFinalizedSwmTwin(params: {
   readonly asset: VerifiedGraphScopedAsset;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
+  return (await reconcileFinalizedSwmTwinEvidence({
+    store: params.store,
+    writeLocks: params.writeLocks,
+    evidence: evidenceFromVmAsset(params.asset),
+    completeHeadlessVm: false,
+    retire: params.retire,
+  })).outcome;
+}
+
+export async function reconcileFinalizedSwmTwinWithEvidence(params: {
+  readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly asset: VerifiedGraphScopedAsset;
+  readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
+}): Promise<FinalizedSwmTwinReconciliationResult> {
   const evidence = evidenceFromVmAsset(params.asset);
   return reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
     evidence,
+    completeHeadlessVm: true,
     retire: params.retire,
   });
 }
@@ -222,6 +246,16 @@ export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
   readonly descriptor: GraphScopedSwmRecoveryDescriptor;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
+  return (await reconcileFinalizedSwmTwinFromDescriptorWithEvidence(params)).outcome;
+}
+
+export async function reconcileFinalizedSwmTwinFromDescriptorWithEvidence(params: {
+  readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly contextGraphId: string;
+  readonly descriptor: GraphScopedSwmRecoveryDescriptor;
+  readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
+}): Promise<FinalizedSwmTwinReconciliationResult> {
   const evidence = evidenceFromSwmDescriptor(params.contextGraphId, params.descriptor);
   return reconcileFinalizedSwmTwinEvidence({
     store: params.store,
@@ -244,6 +278,15 @@ export async function reconcileFinalizedSwmTwinFromCatalogProjection(params: {
   readonly evidence: Readonly<FinalizedSwmTwinCatalogProjectionEvidence>;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
+  return (await reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence(params)).outcome;
+}
+
+export async function reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence(params: {
+  readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly evidence: Readonly<FinalizedSwmTwinCatalogProjectionEvidence>;
+  readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
+}): Promise<FinalizedSwmTwinReconciliationResult> {
   const evidence = evidenceFromCatalogProjection(params.evidence);
   return reconcileFinalizedSwmTwinEvidence({
     store: params.store,
@@ -291,8 +334,9 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly evidence: FinalizedSwmTwinEvidence;
+  readonly completeHeadlessVm?: boolean;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-}): Promise<FinalizedSwmTwinReconciliationOutcome> {
+}): Promise<FinalizedSwmTwinReconciliationResult> {
   const { evidence } = params;
   const lockKey = swmKaWriteLockKey(
     evidence.contextGraphId,
@@ -301,16 +345,19 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
   );
 
   return withKeyedLocks(params.writeLocks, [lockKey], async () => {
-    // VM-first arrival has nothing to retire without an exact SWM head. Check
-    // under the shared SWM write lock before rereading the complete VM payload;
-    // a later SWM arrival runs its own symmetric reconciliation after commit.
+    // Compatibility callers need only the physical outcome. Agent-owned
+    // completion also proves a headless VM so failed marker retirement can
+    // be retried after a previous pass already removed the exact SWM twin.
     const vmArrivalHead = evidence.arrival === 'vm'
       ? await readExactSwmHead(params.store, {
           metaGraph: evidence.swmMetaGraph,
           headSubject: evidence.headSubject,
         })
       : undefined;
-    if (vmArrivalHead === null) return 'head-missing-or-ambiguous';
+    if (evidence.arrival === 'vm' && vmArrivalHead === undefined && params.completeHeadlessVm === false) {
+      return Object.freeze({ outcome: 'head-missing-or-ambiguous' });
+    }
+    if (vmArrivalHead === null) return Object.freeze({ outcome: 'head-missing-or-ambiguous' });
 
     // A public-byte match alone is insufficient: VM graph names are stable
     // across assertion versions and a private-only update can preserve every
@@ -318,31 +365,31 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     // confirmed assertion and private commitment before considering deletion.
     const vmQuads = await readExactGraph(params.store, evidence.vmGraph);
     const vmDigest = workspacePublicQuadsDigest(vmQuads);
-    if (vmDigest !== evidence.expectedVmDigest) return 'vm-changed';
+    if (vmDigest !== evidence.expectedVmDigest) return Object.freeze({ outcome: 'vm-changed' });
     const vmMetadata = await readExactVmMetadata(params.store, evidence);
     if (!vmMetadataMatchesEvidence(vmMetadata, evidence, vmQuads)) {
-      return 'vm-metadata-mismatch';
+      return Object.freeze({ outcome: 'vm-metadata-mismatch' });
     }
 
-    const head = vmArrivalHead ?? await readExactSwmHead(params.store, {
+    const head = evidence.arrival === 'vm' ? vmArrivalHead : await readExactSwmHead(params.store, {
       metaGraph: evidence.swmMetaGraph,
       headSubject: evidence.headSubject,
     });
-    if (head === null) {
-      // Only the post-SWM-materialization call can interpret a missing head as
-      // terminal. At that call site the descriptor and graph were just written
-      // under the same KA lock; a missing head here means a concurrent VM-first
-      // reconciliation completed after that lock was released. Suppressing the
-      // outer bulk metadata append prevents resurrection of a dangling head.
+    if (head === null) return Object.freeze({ outcome: 'head-missing-or-ambiguous' });
+    if (head === undefined) {
+      // A proved VM with no head or SWM bytes is already retired. A missing
+      // head with remaining bytes is terminal only for a just-authenticated
+      // SWM/catalog arrival; a VM arrival cannot infer a mutable commitment.
       const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
-      if (swmQuads.length === 0) return 'already-retired-finalized';
-      if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
+      if (swmQuads.length === 0) return Object.freeze({ outcome: 'already-retired-finalized', retirement: projectRetirement(evidence) });
+      if (evidence.arrival === 'vm') return Object.freeze({ outcome: 'head-missing-or-ambiguous' });
+      if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return Object.freeze({ outcome: 'content-mismatch' });
       await retireAndInvalidate(params, evidence);
-      return 'retired';
+      return Object.freeze({ outcome: 'retired', retirement: projectRetirement(evidence) });
     }
-    if (head.version !== evidence.assertionVersion) return 'head-version-mismatch';
+    if (head.version !== evidence.assertionVersion) return Object.freeze({ outcome: 'head-version-mismatch' });
     if (head.kaUal !== evidence.kaUal || head.assertionGraph !== evidence.swmGraph) {
-      return 'head-missing-or-ambiguous';
+      return Object.freeze({ outcome: 'head-missing-or-ambiguous' });
     }
     const swmCommitment = await readExactSwmOperationCommitment(
       params.store,
@@ -350,7 +397,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       head.shareOperationId,
     );
     if (!swmCommitmentMatchesEvidence(swmCommitment, evidence)) {
-      return 'swm-commitment-mismatch';
+      return Object.freeze({ outcome: 'swm-commitment-mismatch' });
     }
     const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
     // Retirement drops the SWM graph before its metadata. If that second step
@@ -358,12 +405,17 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     // cleanup instead of permanently returning early on an absent graph.
     if (swmQuads.length === 0) {
       await retireAndInvalidate(params, evidence);
-      return 'retired';
+      return Object.freeze({ outcome: 'retired', retirement: projectRetirement(evidence) });
     }
-    if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
+    if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return Object.freeze({ outcome: 'content-mismatch' });
     await retireAndInvalidate(params, evidence);
-    return 'retired';
+    return Object.freeze({ outcome: 'retired', retirement: projectRetirement(evidence) });
   });
+}
+
+function projectRetirement(evidence: FinalizedSwmTwinEvidence) {
+  const { contextGraphId, subGraphName, kaUal, swmGraph, agentAddress, kaNumber, assertionVersion } = evidence;
+  return Object.freeze({ contextGraphId, subGraphName, kaUal, swmGraph, agentAddress, kaNumber, assertionVersion });
 }
 
 async function retireAndInvalidate(
@@ -373,7 +425,7 @@ async function retireAndInvalidate(
   },
   evidence: FinalizedSwmTwinEvidence,
 ): Promise<void> {
-  await params.retire(evidence);
+  await params.retire(projectRetirement(evidence));
   await invalidateSwmMaterializationWitness(params.store, evidence.swmGraph, {
     priority: 'background',
     source: 'agent.durableSync.finalizedSwmTwin.witnessInvalidate',
@@ -715,22 +767,6 @@ function requiredMetadataHex32(asset: VerifiedGraphScopedAsset, predicate: strin
   return value;
 }
 
-async function readExactGraph(store: TripleStore, graph: string): Promise<Quad[]> {
-  const result = await store.query(
-    `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o } }`,
-    { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.readGraph' },
-  );
-  // The persistent Oxigraph worker reports an empty CONSTRUCT as the generic
-  // zero-row bindings shape, while the in-process adapter reports `quads: []`.
-  // Accept only that exact empty compatibility shape; non-empty bindings stay
-  // fail-closed because converting them would lose RDF term identity.
-  if (result.type === 'bindings' && result.bindings.length === 0) return [];
-  if (result.type !== 'quads') {
-    throw new Error(`Unexpected exact-graph query result for ${graph}: ${result.type}`);
-  }
-  return result.quads.map((quad) => ({ ...quad, graph: '' }));
-}
-
 async function readExactSwmHead(
   store: TripleStore,
   input: Readonly<{ metaGraph: string; headSubject: string }>,
@@ -739,7 +775,7 @@ async function readExactSwmHead(
   kaUal: string;
   assertionGraph: string;
   shareOperationId: string;
-}> | null> {
+}> | null | undefined> {
   const result = await store.query(
     `SELECT DISTINCT ?version ?kaUal ?assertionGraph ?shareOperationId WHERE { `
     + `GRAPH <${assertSafeIri(input.metaGraph)}> { `
@@ -748,7 +784,9 @@ async function readExactSwmHead(
     + `<${DKG}shareOperationId> ?shareOperationId } }`,
     { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.readHead' },
   );
-  if (result.type !== 'bindings' || result.bindings.length !== 1) return null;
+  if (result.type !== 'bindings') return null;
+  if (result.bindings.length === 0) return undefined;
+  if (result.bindings.length !== 1) return null;
   const row = result.bindings[0]!;
   const version = parseInteger(row['version']);
   const kaUal = row['kaUal'];
@@ -756,42 +794,4 @@ async function readExactSwmHead(
   const shareOperationId = literalValue(row['shareOperationId'])?.trim();
   if (version === null || !kaUal || !assertionGraph || !shareOperationId) return null;
   return { version, kaUal, assertionGraph, shareOperationId };
-}
-
-function parseInteger(value: string | undefined): bigint | null {
-  if (!value) return null;
-  const match = /^"?([0-9]+)"?(?:\^\^<[^>]+>)?$/.exec(value);
-  if (!match?.[1]) return null;
-  try {
-    return BigInt(match[1]);
-  } catch {
-    return null;
-  }
-}
-
-function parseSafeCount(value: string | undefined): number | null {
-  const parsed = parseInteger(value);
-  if (parsed === null || parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(parsed);
-}
-
-function literalValue(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const match = /^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^<[^>]+>|@[A-Za-z0-9-]+)?$/.exec(value);
-  return match?.[1] ?? value;
-}
-
-function normalizeHex32(value: string): string {
-  const raw = literalValue(value)?.trim().replace(/^0x/i, '').toLowerCase();
-  if (!raw || !/^[0-9a-f]{64}$/.test(raw)) throw new Error('Expected a 32-byte hexadecimal value');
-  return `0x${raw}`;
-}
-
-function optionalHex32(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  try {
-    return normalizeHex32(value);
-  } catch {
-    return undefined;
-  }
 }

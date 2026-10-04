@@ -9,6 +9,8 @@
  * class.
  */
 
+
+import { contextGraphBindingAbortReason, raceContextGraphBindingAgainstAbort } from './internal/context-graph-binding-abort.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   resolveApprovedPrivateReplicaAuthority,
@@ -472,40 +474,6 @@ export type FinalizedContextGraphAuthorityTargetsResolutionV1 = Readonly<
     }
   | { kind: 'legacy-current' }
 >;
-
-function contextGraphBindingAbortReason(signal: AbortSignal): Error {
-  if (signal.reason instanceof Error) return signal.reason;
-  const error = new Error(String(signal.reason ?? 'Context Graph binding resolution aborted'));
-  error.name = 'AbortError';
-  return error;
-}
-
-function raceContextGraphBindingAgainstAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) return Promise.reject(contextGraphBindingAbortReason(signal));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup();
-      reject(contextGraphBindingAbortReason(signal));
-    };
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      },
-    );
-    if (signal.aborted) onAbort();
-  });
-}
 
 function localContextGraphIdFromTerm(raw: unknown): string | undefined {
   const uri = typeof raw === 'string' ? raw.replace(/^<|>$/g, '') : '';
@@ -2256,8 +2224,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     publishPolicy?: number;
     publishAuthorityAccountId?: bigint;
   }> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const cgMetaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
     const result = await this.store.query(
       `SELECT ?pp ?paa WHERE { GRAPH <${cgMetaGraph}> {
         OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PUBLISH_POLICY}> ?pp }

@@ -888,7 +888,7 @@ export class OwnershipMethods extends DKGAgentBase {
   } = {}): Promise<PolicyApprovalBinding[]> {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const filters: string[] = [];
-    if (opts.contextGraphId) filters.push(`?contextGraph = <did:dkg:context-graph:${opts.contextGraphId}>`);
+    if (opts.contextGraphId) filters.push(`?contextGraph = <${assertSafeIri(contextGraphDataGraphUri(opts.contextGraphId))}>`);
     if (opts.name) filters.push(`?name = ${sparqlString(opts.name)}`);
     const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
     const result = await this.store.query(`

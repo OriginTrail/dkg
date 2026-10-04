@@ -1,10 +1,32 @@
 import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  isContextGraphReadAuthorityUnavailableReason,
+  type ContextGraphReadAuthoritySource,
+  type ContextGraphReadAuthorityDependency,
+} from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
 
 /** Where an unavailable read authority came from, as the agent attributes it. */
 export interface ContextGraphReadAuthorityAttribution {
   readonly source: string;
   readonly reason: string;
   readonly dependency: string;
+}
+
+/**
+ * The attribution a thrown read-authority marker carries. The agent's error is
+ * recognised structurally, so each field is read defensively; a missing,
+ * non-string or throwing field becomes `unknown` here and nowhere else.
+ */
+export function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
+  const field = (key: keyof ContextGraphReadAuthorityAttribution): string => {
+    try {
+      const value: unknown = Reflect.get(err as object, key);
+      return typeof value === 'string' ? value : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  };
+  return { source: field('source'), reason: field('reason'), dependency: field('dependency') };
 }
 
 export interface ReadAuthorityDiagnosticsOptions {
@@ -22,12 +44,20 @@ export interface ReadAuthorityDiagnostics {
   record(ctx: OperationContext, attribution: ContextGraphReadAuthorityAttribution): void;
 }
 
-const ATTRIBUTION_TOKEN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const SAFE_READ_AUTHORITY_SOURCES = new Set(Object.keys({
+  'system': true,
+  'registered-chain': true,
+  'rfc64-private': true,
+  'rfc64-public': true,
+  'legacy-local': true,
+} as const satisfies Record<ContextGraphReadAuthoritySource, true>));
 
-/** An attribution token as the agent emits them; anything else logs as `unknown`. */
-function attributionToken(value: string): string {
-  return ATTRIBUTION_TOKEN.test(value) ? value : 'unknown';
-}
+const SAFE_READ_AUTHORITY_DEPENDENCIES = new Set(Object.keys({
+  'store': true,
+  'chain': true,
+  'local-state': true,
+  'unknown': true,
+} as const satisfies Record<ContextGraphReadAuthorityDependency, true>));
 
 /** Whether an attribution warns now, and how many repeats it held back since its last warning. */
 type WarningDecision = { readonly warn: true; readonly heldBack: number } | { readonly warn: false };
@@ -83,9 +113,9 @@ export function createReadAuthorityDiagnostics(
   );
   return {
     record(ctx, attribution) {
-      const detail = `source=${attributionToken(attribution.source)}`
-        + ` reason=${attributionToken(attribution.reason)}`
-        + ` dependency=${attributionToken(attribution.dependency)}`;
+      const detail = `source=${(SAFE_READ_AUTHORITY_SOURCES.has(attribution.source) ? attribution.source : 'unknown')}`
+        + ` reason=${(isContextGraphReadAuthorityUnavailableReason(attribution.reason) ? attribution.reason : 'unknown')}`
+        + ` dependency=${(SAFE_READ_AUTHORITY_DEPENDENCIES.has(attribution.dependency) ? attribution.dependency : 'unknown')}`;
       const decision = warningDue(detail);
       if (decision.warn) {
         logger.warn(

@@ -333,7 +333,8 @@ describe('runPromoteJob', () => {
         throw createPromoteRetryableFailure(Object.assign(new Error('private graph id'), {
           code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
           reason: 'local-existence-unavailable',
-          detail: 'Context graph "private graph id" metadata authority changed while resolving its agent gate',
+          detail: 'Different wording with private graph id',
+          origin: 'agent-gate-revision',
         }));
       },
       now: fixture.clock.now,

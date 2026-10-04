@@ -162,11 +162,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
       },
     }) as TripleStore;
     let invalidations = 0;
-    const dirtyMarks: Array<{ quads: Quad[]; targetGraph: string | undefined }> = [];
+    const dirtyTargets: Array<{ quads: readonly Quad[] | undefined; graph: string | undefined }> = [];
     const wrapped = createListContextGraphsCacheInvalidatingStore(
       adapter,
       () => { invalidations += 1; },
-      (quads, targetGraph) => { dirtyMarks.push({ quads: [...(quads ?? [])], targetGraph }); },
+      (quads, graph) => { dirtyTargets.push({ quads, graph }); },
     );
     const graphQuads: Quad[] = [{
       subject: 'urn:data:s', predicate: 'urn:data:p', object: '"data"', graph: 'urn:data',
@@ -193,12 +193,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
       options,
     );
     expect(invalidations).toBe(1);
-    // Complete graph-and-subject replacement can delete authority facts that
-    // are absent from the replacement payload, so projection invalidation is
-    // keyed by the two replaced targets rather than by the inserted quads.
-    expect(dirtyMarks).toEqual([
-      { quads: [], targetGraph: 'urn:data' },
-      { quads: [], targetGraph: 'urn:meta' },
+    // Complete replacement can delete facts absent from the payload. Its two
+    // explicit graphs fence those deletions without dirtying unrelated CGs.
+    expect(dirtyTargets).toEqual([
+      { quads: undefined, graph: 'urn:data' },
+      { quads: undefined, graph: 'urn:meta' },
     ]);
 
     await wrapped.close();

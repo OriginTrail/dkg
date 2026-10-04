@@ -90,6 +90,7 @@ describe('SWM target executor session factory', () => {
       deletePublicCheckpoint: () => {},
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin: async () => {},
+      completeFinalizedSwmTwinRetirement: async (result) => result,
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},

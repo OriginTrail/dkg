@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ContextGraphReadAuthorityUnavailableError,
   contextGraphReadAuthorityDependencyOf,
+  isContextGraphReadAuthorityUnavailableReason,
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
 } from '../src/context-graph-read-authority.js';
@@ -90,8 +91,9 @@ describe('read-authority dependency attribution (#2834)', () => {
     await expect(resolveContextGraphReadAuthorityDecision(input({
       getLegacyParticipants: async () => { throw storeRecovering(); },
     }))).resolves.toMatchObject({ source: 'legacy-local', reason: 'legacy-participant-authority-unavailable', dependency: 'store' });
-    await expect(resolveContextGraphReadAuthorityDecision(input({ isPendingMetadata: true })))
-      .resolves.toMatchObject({ reason: 'pending-authoritative-metadata', dependency: 'local-state' });
+    const pending = await resolveContextGraphReadAuthorityDecision(input({ isPendingMetadata: true }));
+    expect(pending).toMatchObject({ reason: 'pending-authoritative-metadata', dependency: 'local-state' });
+    expect(isContextGraphReadAuthorityUnavailableReason(pending.reason)).toBe(true);
   });
 
   it('attributes a failed peer-allowlist read for a chain-registered private graph', async () => {
@@ -131,6 +133,12 @@ describe('read-authority dependency attribution (#2834)', () => {
 
     expect(error).toMatchObject({ source: 'registered-chain', reason: 'registered-authority-error', dependency: 'store' });
     expect(error.message).toContain('(registered-chain/registered-authority-error/store)');
+  });
+
+  it('withholds raw and inherited tokens from the shared diagnostic vocabulary', () => {
+    for (const reason of ['RPC https://user:secret@rpc.invalid failed', 'toString', 'constructor', '__proto__', undefined, {}]) {
+      expect(isContextGraphReadAuthorityUnavailableReason(reason)).toBe(false);
+    }
   });
 
   it('attributes store admission shedding to the store', async () => {

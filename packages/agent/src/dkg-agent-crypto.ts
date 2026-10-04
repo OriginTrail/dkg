@@ -9,6 +9,8 @@
  * composed class.
  */
 
+
+import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -414,7 +416,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
+
 import {
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
@@ -426,42 +428,6 @@ import {
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 const SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS = 3;
-
-function delegationIsCurrentlyActive(expiresAtValues: readonly string[], nowMs: number): boolean {
-  if (expiresAtValues.length === 0) return true;
-  return expiresAtValues.some((value) => {
-    const expiresAt = Number(value);
-    return !Number.isFinite(expiresAt) || expiresAt <= 0 || expiresAt >= nowMs;
-  });
-}
-
-function collectProjectedDelegatees(
-  meta: ContextGraphMetaRecord,
-  field: 'allowedPeers' | 'allowedKeys',
-  normalizeValue: (value: string) => string,
-): Map<string, string[]> {
-  const members = new Set(
-    [...meta.allowedAgents, ...meta.participantAgents].map((agent) => agent.toLowerCase()),
-  );
-  const revoked = new Set(meta.revokedAgents.map((agent) => agent.toLowerCase()));
-  const out = new Map<string, string[]>();
-  const nowMs = Date.now();
-
-  for (const delegation of meta.delegations) {
-    if (!delegationIsCurrentlyActive(delegation.expiresAtValues, nowMs)) continue;
-    for (const rawAgent of delegation.agents) {
-      const agent = rawAgent.toLowerCase();
-      if (!agent || !members.has(agent) || revoked.has(agent)) continue;
-      const values = out.get(agent) ?? [];
-      for (const rawValue of delegation[field]) {
-        const value = normalizeValue(rawValue);
-        if (value && !values.includes(value)) values.push(value);
-      }
-      if (values.length > 0) out.set(agent, values);
-    }
-  }
-  return out;
-}
 
 type ContextGraphSlotBindingOutcome =
   | { kind: 'match' }

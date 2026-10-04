@@ -70,6 +70,8 @@ export type LoopbackJsonRpcHandler = (
 
 export interface LoopbackJsonRpcTestHarness {
   readonly start: (handler: LoopbackJsonRpcHandler) => Promise<LoopbackJsonRpcServer>;
+  /** Capture ownership before unrelated teardown awaits; stop only those servers later. */
+  readonly captureStopAll: () => () => Promise<void>;
   readonly stopAll: () => Promise<void>;
 }
 
@@ -180,12 +182,11 @@ export function createLoopbackJsonRpcTestHarness(): LoopbackJsonRpcTestHarness {
     return loopback;
   };
 
-  return Object.freeze({
-    start,
-    stopAll: async () => {
-      await Promise.all(activeServers.splice(0).map((server) => server.stop()));
-    },
-  });
+  const captureStopAll = () => {
+    const owned = activeServers.splice(0);
+    return async () => { await Promise.all(owned.map((server) => server.stop())); };
+  };
+  return Object.freeze({ start, captureStopAll, stopAll: () => captureStopAll()() });
 }
 
 export function sendJsonRpcResult(

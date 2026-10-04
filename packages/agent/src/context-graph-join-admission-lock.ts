@@ -24,7 +24,6 @@ export type ContextGraphJoinAdmissionLockToken = Readonly<{
 export class ContextGraphJoinAdmissionLockManager {
   private readonly queues = new Map<string, Promise<void>>();
   private readonly liveTokens = new WeakMap<object, string>();
-
   async withLock<T>(
     contextGraphId: string,
     operation: (token: ContextGraphJoinAdmissionLockToken) => Promise<T>,

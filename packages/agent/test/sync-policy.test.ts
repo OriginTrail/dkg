@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY,
@@ -253,6 +253,14 @@ describe('curator sync-peer provenance', () => {
       discovery: { findAgents },
     };
   }
+
+  it('keeps the bootstrap hint when the real registry resolver is unavailable', async () => {
+    const hints = new Map([[CG, HINT]]);
+    const agent = agentWithMeta({ curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' },
+      async () => { throw new Error('registry unavailable'); });
+    expect(await resolveCuratorSyncPeer(agent as never, hints, CG)).toEqual({ peerId: HINT, provenance: 'bootstrap-hint' });
+    expect(hints.get(CG)).toBe(HINT);
+  });
 
   it('prefers a declared curator over the bootstrap hint, and consumes the hint', async () => {
     // The ordinary case on a healthy network: the join approval came from the
@@ -592,5 +600,20 @@ describe('curator sync-peer provenance', () => {
 
     expect(await rank.call(hintOnly as never, CG)).toBe(HINT);
     expect(await authority.call(hintOnly as never, CG)).toBeUndefined();
+  });
+});
+
+describe('disabled recovery accounting at its lifecycle owner', () => {
+  it('returns the complete empty result without starting recovery and does not share mutable round state', async () => {
+    const start = vi.fn(() => { throw new Error('disabled recovery started'); });
+    const agent = { config: { durableSyncEnabled: false }, log: { warn: vi.fn() }, createSwmTargetExecutorSessionV1: start };
+    const first = await LifecycleSyncMethods.prototype.recoverContextGraphSwmFromPeer.call(agent as never, 'peer', 'graph');
+    expect(first).toEqual({ replacedRoots: 0, replacedGraphs: 0, insertedDataQuads: 0, insertedMetaQuads: 0,
+      droppedDataTriples: 0, readySnapshots: 0, totalSnapshots: 0, completed: true });
+    Object.assign(first, { readySnapshots: 42 });
+    const next = await LifecycleSyncMethods.prototype.recoverContextGraphSwmFromPeer.call(agent as never, 'peer', 'graph');
+    expect(next).toEqual({ replacedRoots: 0, replacedGraphs: 0, insertedDataQuads: 0, insertedMetaQuads: 0,
+      droppedDataTriples: 0, readySnapshots: 0, totalSnapshots: 0, completed: true });
+    expect(next).not.toBe(first); expect(start).not.toHaveBeenCalled();
   });
 });

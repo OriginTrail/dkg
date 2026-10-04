@@ -18,13 +18,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
-  assertCanonicalDigest,
   assertContextGraphIdV1,
   assertNetworkIdV1,
   canonicalizeContextGraphPolicyPayloadV1,
   canonicalizeMemberRosterPayloadV1,
-  parseCanonicalContextGraphPolicyPayloadV1,
-  parseCanonicalMemberRosterPayloadV1,
   type ContextGraphIdV1,
   type ContextGraphPolicyV1,
   type Digest32V1,
@@ -35,6 +32,7 @@ import {
   type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
 
+import { publicSnapshot, snapshotPolicy, snapshotRoster, snapshotDigest } from './catalog-access-snapshot-v1.js';
 import { classifyRfc64PolicyCellV1 } from './policy-cell-v1.js';
 
 export type Rfc64CatalogAccessOperationV1 =
@@ -91,13 +89,17 @@ export interface Rfc64CatalogAccessAuthorizationV1 {
   readonly policyDigest: Digest32V1;
 }
 
+export type Rfc64AcceptedAuthorityProvenanceV1 = 'authenticated' | 'join-approval';
+
 export interface AcceptRfc64CatalogAccessSnapshotInputV1 {
+  readonly provenance?: Rfc64AcceptedAuthorityProvenanceV1;
   readonly policy: ContextGraphPolicyV1;
   readonly policyDigest: Digest32V1;
   readonly roster?: MemberRosterV1 | null;
 }
 
 export interface AcceptedRfc64CatalogAccessSnapshotV1 {
+  readonly provenance: Rfc64AcceptedAuthorityProvenanceV1;
   readonly policy: Readonly<ContextGraphPolicyV1>;
   readonly policyDigest: Digest32V1;
   readonly roster: Readonly<MemberRosterV1> | null;
@@ -361,7 +363,11 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     }
 
     const key = policyKey(policy.networkId, policy.contextGraphId);
-    const held = Object.freeze({ policy, policyDigest, roster, members });
+    const provenance = input.provenance ?? 'authenticated';
+    if (provenance !== 'authenticated' && provenance !== 'join-approval') {
+      throw new Error('invalid accepted RFC-64 authority provenance');
+    }
+    const held = Object.freeze({ policy, policyDigest, roster, members, provenance });
     const current = this.#byKey.get(key);
     if (current !== undefined) {
       if (!sameSnapshot(current, held)) {
@@ -372,6 +378,10 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
         }
         if (transition === 'linked') assertDirectMonotonicPolicyTransition(current, held);
         else assertAuthoritativeMonotonicPolicyTransition(current, held);
+        this.#byKey.set(key, held);
+        return publicSnapshot(held);
+      }
+      if (current.provenance !== held.provenance) {
         this.#byKey.set(key, held);
         return publicSnapshot(held);
       }
@@ -394,6 +404,12 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   ): AcceptedRfc64CatalogAccessSnapshotV1 | null {
     const held = this.#byKey.get(policyKey(networkId, contextGraphId));
     return held === undefined ? null : publicSnapshot(held);
+  }
+
+  /** Catalog responsibility may use join approval; reads keep proving its live generation. */
+  lookupForReads(networkId: NetworkIdV1, contextGraphId: ContextGraphIdV1): AcceptedRfc64CatalogAccessSnapshotV1 | null {
+    const held = this.lookup(networkId, contextGraphId);
+    return held?.provenance === 'join-approval' ? null : held;
   }
 
   get size(): number {
@@ -735,33 +751,6 @@ function snapshotOperation(input: unknown): Rfc64CatalogAccessOperationV1 {
   }
 }
 
-function publicSnapshot(
-  held: HeldCatalogAccessSnapshotV1,
-): AcceptedRfc64CatalogAccessSnapshotV1 {
-  return Object.freeze({
-    policy: held.policy,
-    policyDigest: held.policyDigest,
-    roster: held.roster,
-  });
-}
-
-function snapshotPolicy(input: ContextGraphPolicyV1): Readonly<ContextGraphPolicyV1> {
-  return deepFreeze(parseCanonicalContextGraphPolicyPayloadV1(
-    canonicalizeContextGraphPolicyPayloadV1(input),
-  ));
-}
-
-function snapshotRoster(input: MemberRosterV1): Readonly<MemberRosterV1> {
-  return deepFreeze(parseCanonicalMemberRosterPayloadV1(
-    canonicalizeMemberRosterPayloadV1(input),
-  ));
-}
-
-function snapshotDigest(input: Digest32V1, label: string): Digest32V1 {
-  assertCanonicalDigest(input, label);
-  return input;
-}
-
 function snapshotAgentAddress(input: EvmAddressV1, label: string): EvmAddressV1 {
   if (typeof input !== 'string' || !EVM_ADDRESS.test(input) || input === ZERO_ADDRESS) {
     throw new TypeError(`${label} must be a canonical nonzero EVM address`);
@@ -820,14 +809,4 @@ function assertDirectMonotonicPolicyTransition(
 
 function policyKey(networkId: NetworkIdV1, contextGraphId: ContextGraphIdV1): string {
   return `${networkId}\n${contextGraphId}`;
-}
-
-function deepFreeze<T>(value: T): Readonly<T> {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const child of Object.values(value as Record<string, unknown>)) {
-      deepFreeze(child);
-    }
-    Object.freeze(value);
-  }
-  return value as Readonly<T>;
 }

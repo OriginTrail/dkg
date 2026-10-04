@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   encodePublishRequest,
   DKG_ONTOLOGY,
@@ -79,6 +79,24 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
 }
 
 describe('GossipPublishHandler', () => {
+  it('refuses malformed topic ids before decoding, authority lookup or storage', async () => {
+    let queried = false;
+    let checked = false;
+    const { store, handler } = createHandler(undefined, {
+      contextGraphExists: async () => { checked = true; return false; },
+    });
+    const original = store.query.bind(store);
+    store.query = async (...args) => { queried = true; return original(...args); };
+    const phase = vi.fn();
+    try {
+      // Without topic validation the omitted graph id inherits this hostile topic.
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: '' }), 'victim> } UNION { GRAPH ?g { ?s ?p ?o } } #', phase);
+      expect(phase).not.toHaveBeenCalled();
+      expect(queried).toBe(false);
+      expect(checked).toBe(false);
+    } finally { await store.close(); }
+  });
+
   it('materializes a graph-scoped KA into one exact VM graph without root metadata', async () => {
     const { store, handler } = createHandler();
     const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
@@ -641,6 +659,28 @@ describe('GossipPublishHandler', () => {
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings.length).toBeGreaterThan(0);
+  });
+
+  it('rejects malformed ontology definition IDs without hiding a valid neighboring definition', async () => {
+    const exists = vi.fn(async (_id: string) => false);
+    const discovered = vi.fn();
+    const { store, handler } = createHandler(undefined, {
+      contextGraphExists: exists, recordDiscoveredContextGraph: discovered,
+    });
+    const validId = 'valid-ontology-neighbor';
+    const graph = `did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}`;
+    const data = makePublishMessage({
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      nquads: ['../cg', validId].map((id) =>
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> <${graph}> .`,
+      ).join('\n'),
+    });
+    try {
+      await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      expect(exists.mock.calls.map(([id]) => id)).toEqual([validId]);
+      expect(discovered).toHaveBeenCalledExactlyOnceWith(validId, { name: validId, onChainId: undefined });
+      expect(await store.countQuads(graph)).toBe(2);
+    } finally { await store.close(); }
   });
 
   it('inserts validated ontology definitions without activating a member subscription', async () => {

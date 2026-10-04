@@ -624,10 +624,14 @@ describe('Context Graph authority index over the one log', () => {
   it('rechecks a cached tip before exhausting an endpoint whose cursor just advanced', async () => {
     let phase: 'prime' | 'race' = 'prime';
     let racedHeadReads = 0;
+    let staleSince: number | undefined;
     const { reader, attempts } = makeReader({
-      latestBlockNumber: () => phase === 'prime'
-        ? LIVE_HEAD
-        : racedHeadReads++ === 0 ? LIVE_HEAD - 1 : LIVE_HEAD + 1,
+      latestBlockNumber: () => {
+        if (phase === 'prime') return LIVE_HEAD;
+        racedHeadReads += 1;
+        staleSince ??= performance.now();
+        return performance.now() - staleSince < 250 ? LIVE_HEAD - 1 : LIVE_HEAD + 1;
+      },
     });
     await reader.snapshots.refresh();
     phase = 'race';

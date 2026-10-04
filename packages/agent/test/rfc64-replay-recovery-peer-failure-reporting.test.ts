@@ -829,16 +829,9 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     expect(status.stableReason).not.toBe('catalog-replay-incomplete');
   });
 
-  it.each([
-    { authors: 'the owner alone', accessPolicy: 1 as const, memberAddresses: [AUTHOR], soleAuthor: true },
-    {
-      authors: 'the owner and another member',
-      accessPolicy: 1 as const,
-      memberAddresses: [AUTHOR, `0x${'ab'.repeat(20)}` as typeof AUTHOR],
-      soleAuthor: false,
-    },
-    { authors: 'anyone, in a public graph', accessPolicy: 0 as const, memberAddresses: [], soleAuthor: false },
-  ])('keeps curated local owner parity when nonproviders cannot corroborate its head only if the owner is the sole author (authors: $authors)', async ({ accessPolicy, memberAddresses, soleAuthor }) => {
+  it.each(['current-sole-private-owner', 'older-owner-head', 'multi-member-private', 'public-curated'] as const)(
+    'keeps applied inventory unverified after failed replay across owner and roster cases: %s', async (scenario) => {
+    const accessPolicy = scenario === 'public-curated' ? 0 : 1;
     const contextGraphId = `${AUTHOR}/curated-owner-replay`;
     const edge = await startAgent({
       name: 'curated-owner-replay',
@@ -848,10 +841,11 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       networkId: NETWORK_ID,
       contextGraphId,
       ownerAddress: AUTHOR,
-      accessPolicy,
+      accessPolicy: scenario === 'public-curated' ? 0 : 1,
       publishPolicy: 0,
       publishAuthorityAccountId: '0',
-      memberAddresses,
+      memberAddresses: scenario === 'multi-member-private'
+        ? [AUTHOR, '0x1111111111111111111111111111111111111111'] : [AUTHOR],
       rosterVersion: '0',
     });
     edge.acceptRfc64CatalogAccessSnapshotV1({
@@ -859,6 +853,18 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       policyDigest: authority.policyDigest,
       roster: authority.roster,
     });
+    // Keep the authority lease current through the real composition boundary;
+    // this suite isolates inventory freshness from lifecycle-source validation.
+    vi.spyOn(edge, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(true);
+    vi.spyOn(edge, 'getContextGraphOwner').mockResolvedValue(`did:dkg:agent:${AUTHOR}`);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(
+      scenario === 'public-curated' ? 'public' : 'private',
+    );
+    vi.spyOn(edge, 'getStoredContextGraphRegistrationOptions').mockResolvedValue({ publishPolicy: 0 });
+    vi.spyOn(edge, 'resolveRfc64VerifiedPrivateRosterV1').mockResolvedValue(
+      scenario === 'multi-member-private' ? [AUTHOR, '0x1111111111111111111111111111111111111111'] : [AUTHOR],
+    );
+    await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, undefined, { kind: 'finalized-absence' });
     const localAgents = vi.spyOn(edge, 'listLocalAgents').mockReturnValue([
       { agentAddress: AUTHOR },
     ] as ReturnType<typeof edge.listLocalAgents>);
@@ -892,6 +898,21 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
     });
+    if (scenario === 'older-owner-head') {
+      // Produce a newer signed head on this node but leave the old head applied.
+      // The local owner key alone cannot establish freshness of that old inventory.
+      await edge.publishAuthorCatalogGenesisV1({
+        scope,
+        author: Object.freeze({
+          address: AUTHOR,
+          signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+        }),
+        peers: [],
+        issuedAt: String(BigInt(GENESIS_ISSUED_AT) + 1n) as TimestampMsV1,
+        catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+        catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+      });
+    }
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
     const persistence = (edge as any).rfc64PersistenceV1;
     persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
@@ -920,26 +941,14 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     await edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
     const status = (await edge.readRfc64CatalogOperationalStatusV1())
       .find((row) => row.contextGraphId === contextGraphId);
-    if (!soleAuthor) {
-      // Another member, or any author of a public graph, may hold a catalog
-      // this node never heard of: nothing corroborated the inventory.
-      expect(status).toMatchObject({
-        authorityState: 'accepted',
-        phase: 'unknown-freshness',
-        expectedRowCount: null,
-        missingRowCount: null,
-      });
-      return;
-    }
+    // A current locally produced head cannot rule out a successor signed on
+    // another node with the same owner key; none of these rosters proves freshness.
     expect(status).toMatchObject({
-      authorityState: 'accepted',
-      appliedRowCount: '0',
-      expectedRowCount: '0',
-      missingRowCount: '0',
-      stableReason: null,
+      authorityState: 'accepted', phase: 'unknown-freshness',
+      stableReason: 'catalog-replay-unverified', appliedRowCount: '0',
+      expectedRowCount: null, missingRowCount: null,
+      appliedCatalogHeadDigest: publication.headObjectDigest,
     });
-    expect(status?.expectedCatalogHeadDigest).toBe(status?.appliedCatalogHeadDigest);
-    expect(status?.expectedInventoryDigest).toBe(status?.appliedInventoryDigest);
 
     localAgents.mockReturnValue([]);
     const unowned = (await edge.readRfc64CatalogOperationalStatusV1())

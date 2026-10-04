@@ -16,8 +16,11 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { ethers } from 'ethers';
 import {
   reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinWithEvidence,
   reconcileFinalizedSwmTwinFromCatalogProjection,
   reconcileFinalizedSwmTwinFromDescriptor,
+  reconcileFinalizedSwmTwinFromDescriptorWithEvidence,
+  reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
@@ -262,6 +265,93 @@ describe('durable VM / SWM tier reconciliation', () => {
     expect(query.mock.calls.map(([, options]) => options?.source)).toEqual([
       'agent.durableSync.finalizedSwmTwin.readHead',
     ]);
+  });
+
+  it('returns normalized named-subgraph evidence when a VM arrival finds the exact twin already retired', async () => {
+    const store = new OxigraphStore();
+    const input = fixture('updates');
+    await seedTwin(store, input);
+    const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+      await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      await store.deleteByPattern({ graph: input.swmMetaGraph,
+        subject: `urn:dkg:share:${CG}:${OPERATION_ID}` });
+    });
+    const params = { store, writeLocks: new Map<string, Promise<void>>(), asset: input.asset, retire };
+    const first = await reconcileFinalizedSwmTwinWithEvidence(params);
+    expect(first).toMatchObject({ outcome: 'retired', retirement: {
+      contextGraphId: CG, subGraphName: 'updates', assertionVersion: 3n, kaUal: UAL,
+    } });
+    const retry = await reconcileFinalizedSwmTwinWithEvidence(params);
+    expect(retry).toMatchObject({ outcome: 'already-retired-finalized', retirement: {
+      contextGraphId: CG, subGraphName: 'updates', assertionVersion: 3n, kaUal: UAL,
+    } });
+    const keys = ['agentAddress', 'assertionVersion', 'contextGraphId', 'kaNumber', 'kaUal', 'subGraphName', 'swmGraph'];
+    for (const result of [first, retry]) {
+      if (!('retirement' in result)) throw new Error('expected settled retirement');
+      expect(Object.keys(result.retirement).sort()).toEqual(keys);
+      expect(Object.isFrozen(result.retirement)).toBe(true);
+    }
+    expect(Object.keys(retire.mock.calls[0][0]).sort()).toEqual(keys);
+    expect(retire).toHaveBeenCalledOnce();
+    await store.close();
+  });
+
+  it.each(['descriptor', 'catalog'] as const)('projects only public retirement fields for settled %s recovery', async (arrival) => {
+    const store = new OxigraphStore();
+    try {
+      const input = fixture('updates');
+      await seedTwin(store, input);
+      // Authenticated recovery can complete either headless matching bytes or
+      // the metadata-only tail of a prior retirement attempt.
+      if (arrival === 'catalog') await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      else await store.dropGraph(input.swmGraph);
+      const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+        await store.dropGraph(candidate.swmGraph);
+        await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      });
+      const reconcile = () => arrival === 'catalog'
+        ? reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence({ store, writeLocks: new Map(), evidence: catalogEvidenceFor(input), retire })
+        : reconcileFinalizedSwmTwinFromDescriptorWithEvidence({ store, writeLocks: new Map(), contextGraphId: CG, descriptor: descriptorFor(input), retire });
+      const keys = ['agentAddress', 'assertionVersion', 'contextGraphId', 'kaNumber', 'kaUal', 'subGraphName', 'swmGraph'];
+      for (const expected of ['retired', 'already-retired-finalized']) {
+        const result = await reconcile();
+        expect(result.outcome).toBe(expected);
+        if (!('retirement' in result)) throw new Error('expected settled retirement');
+        expect(Object.keys(result.retirement).sort()).toEqual(keys);
+        expect(result.retirement.assertionVersion).toBe(3n);
+      }
+      expect(Object.keys(retire.mock.calls[0][0]).sort()).toEqual(keys);
+    } finally { await store.close(); }
+  });
+
+  it.each([undefined, 'updates'])('preserves headless nonempty SWM on a VM evidence arrival for subgraph %s', async (subGraphName) => {
+    const store = new OxigraphStore();
+    try {
+      const input = fixture(subGraphName);
+      await seedTwin(store, input);
+      await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      const readSwm = () => store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.swmGraph}> { ?s ?p ?o } }`);
+      const readMetadata = () => store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.swmMetaGraph}> { ?s ?p ?o } }`);
+      const before = JSON.stringify(await readSwm());
+      const metadataBefore = JSON.stringify(await readMetadata());
+      const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+        await store.dropGraph(candidate.swmGraph);
+        await store.dropGraph(input.swmMetaGraph);
+      });
+
+      const result = await reconcileFinalizedSwmTwinWithEvidence({
+        store, writeLocks: new Map(), asset: input.asset, retire,
+      });
+
+      expect(result).toEqual({ outcome: 'head-missing-or-ambiguous' });
+      expect('retirement' in result).toBe(false);
+      expect(retire).not.toHaveBeenCalled();
+      expect(JSON.stringify(await readSwm())).toBe(before);
+      expect(JSON.stringify(await readMetadata())).toBe(metadataBefore);
+    } finally {
+      await store.close();
+    }
   });
 
   it('reconciles a later SWM arrival after a VM-first absence check', async () => {
@@ -785,7 +875,7 @@ describe('durable VM / SWM tier reconciliation', () => {
     expect(await store.countQuads(input.swmGraph)).toBe(input.payload.length);
   });
 
-  it('re-checks the SWM head after waiting behind a live writer', async () => {
+  it.each(['historical', 'with-evidence'] as const)('re-checks the SWM head after waiting behind a live writer through %s', async (entrypoint) => {
     const store = new OxigraphStore();
     const input = fixture();
     await seedTwin(store, input);
@@ -812,16 +902,28 @@ describe('durable VM / SWM tier reconciliation', () => {
     });
     await acquired;
     const retire = vi.fn(async () => {});
-    const reconciliation = reconcileFinalizedSwmTwin({
+    const query = vi.spyOn(store, 'query');
+    const reconcile = entrypoint === 'historical'
+      ? reconcileFinalizedSwmTwin
+      : reconcileFinalizedSwmTwinWithEvidence;
+    const reconciliation = reconcile({
       store,
       writeLocks,
       asset: input.asset,
       retire,
     });
-    release();
-    await writer;
+    try {
+      await Promise.resolve();
+      expect(query).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await writer;
+    }
 
-    await expect(reconciliation).resolves.toBe('head-version-mismatch');
+    await expect(reconciliation).resolves.toEqual(entrypoint === 'historical'
+      ? 'head-version-mismatch'
+      : { outcome: 'head-version-mismatch' });
     expect(retire).not.toHaveBeenCalled();
+    await store.close();
   });
 });

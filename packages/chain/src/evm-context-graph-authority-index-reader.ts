@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { setTimeout as sleep } from 'node:timers/promises';
+import { snapshotAuthorityRevisionTargetsV1, snapshotAuthorityNameHashTargetsV1, authoritySnapshotV1 } from './evm-context-graph-authority-snapshot.js';
 import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ContextGraphAuthorityReadOptions,
@@ -15,8 +16,6 @@ import {
   isContextGraphAuthorityIndexRetryableError,
   type ContextGraphAuthorityIndexScanInput,
 } from './context-graph-authority-index.js';
-import type { ContextGraphAuthorityIndexState } from
-  './context-graph-authority-index-checkpoint.js';
 import type { RawContextGraphAuthorityIndexEvent } from
   './context-graph-authority-index-reducer.js';
 import {
@@ -35,7 +34,6 @@ import type {
 import type { ChainEventLogAuthoritySource } from './chain-event-log-binding.js';
 import type { ChainIndexAuthorityAnchor } from './chain-index/index.js';
 import {
-  assertContextGraphAuthorityIndexId,
   contextGraphAuthorityIndexIdFromBigInt,
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
@@ -56,6 +54,10 @@ import {
 } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 
+import { retryCachedAuthorityIndexHeadV1 } from './context-graph-authority-index-admission.js';
+import { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
+export { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
+
 /**
  * Keep authority-index eth_getLogs requests inside the strictest production
  * provider limit currently supported. The configured registry page size can
@@ -63,26 +65,6 @@ import { withRpcUsageConsumer } from './rpc-usage.js';
  * range reader below.
  */
 const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
-
-/** Refresh an ethers-cached tip once before classifying cursor skew as endpoint failure. */
-async function retryCachedAuthorityIndexHeadV1<T>(
-  read: () => Promise<T>,
-  lifecycleSignal: AbortSignal,
-  callerSignal?: AbortSignal,
-): Promise<T> {
-  try {
-    return await read();
-  } catch (error) {
-    if (!isContextGraphAuthorityIndexRetryableError(error)
-      || error.reason !== 'cursor-ahead') throw error;
-    // Rapid writes can advance the durable cursor while `getBlock('latest')`
-    // still returns a recently cached block from this very endpoint. A
-    // persistent lag remains retryable and takes the usual endpoint failover.
-    await sleep(300, undefined, { signal: lifecycleSignal });
-    callerSignal?.throwIfAborted();
-    return read();
-  }
-}
 
 /** Bound one physical authority-index RPC without capping the durable scan. */
 export function readEvmContextGraphAuthorityIndexRpcV1<T>(
@@ -100,30 +82,6 @@ export function readEvmContextGraphAuthorityIndexRpcV1<T>(
     : withRpcRequestContext({ signal }, bounded);
 }
 
-/**
- * The single fail-closed error both authority-anchor resolvers raise.
- *
- * The message is preserved verbatim as a prefix: it is the contract callers
- * (and operators reading logs) already recognize. The detail only says which
- * step of the anchor resolution failed.
- *
- * RETRYABLE by type, not by message. Every condition it reports — a head an
- * endpoint could not answer, an anchor below the configured depth, a block that
- * came back at the wrong height — is one that a different endpoint or a later
- * attempt can satisfy, so it must fail over rather than abort the authority
- * read that gates catalog admission. Typing it also keeps it away from
- * `classifyRpcRetryDisposition`'s message regex, which alternates bare
- * `429|503|502|500` with no word boundaries: the details here interpolate block
- * numbers, so a head of 31500123 would classify as `failover` and 31499123 as
- * `fail` purely on its digits.
- */
-export function contextGraphAuthorityAnchorUnavailableV1(
-  detail: string,
-): ContextGraphAuthorityIndexRetryableError {
-  return new ContextGraphAuthorityIndexRetryableError(
-    `finalized Context Graph authority block is unavailable: ${detail}`,
-  );
-}
 
 type ContextGraphAuthorityLogFoldAdmission =
   | Readonly<{ kind: 'served' }>
@@ -462,57 +420,6 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
    * coverage recorded for a retired `ContextGraphStorage`.
    */
   readonly chainEventLogAuthority?: () => ChainEventLogAuthoritySource | undefined;
-}
-
-function snapshotAuthorityRevisionTargetsV1(
-  contextGraphIds: unknown,
-): readonly ContextGraphAuthorityIndexId[] {
-  if (!Array.isArray(contextGraphIds)) {
-    throw new Error('Context Graph authority revision target set is invalid');
-  }
-  const targets = new Set<ContextGraphAuthorityIndexId>();
-  for (const contextGraphId of contextGraphIds as readonly unknown[]) {
-    assertContextGraphAuthorityIndexId(
-      contextGraphId,
-      'Context Graph authority revision target id',
-    );
-    targets.add(contextGraphId);
-  }
-  return Object.freeze([...targets]);
-}
-
-function snapshotAuthorityNameHashTargetsV1(
-  nameHashes: unknown,
-): readonly string[] {
-  if (!Array.isArray(nameHashes)) {
-    throw new Error('Context Graph authority name-hash target set is invalid');
-  }
-  const targets = new Set<string>();
-  for (const nameHash of nameHashes as readonly unknown[]) {
-    if (typeof nameHash !== 'string' || !ethers.isHexString(nameHash, 32)) {
-      throw new TypeError('Context Graph authority name-hash target must be bytes32');
-    }
-    const normalized = nameHash.toLowerCase();
-    if (normalized !== ethers.ZeroHash) targets.add(normalized);
-  }
-  return Object.freeze([...targets]);
-}
-
-function authoritySnapshotV1(
-  state: ContextGraphAuthorityIndexState,
-  chainId: string,
-  contractAddress: string,
-): ContextGraphAuthoritySnapshot {
-  return Object.freeze({
-    chainId,
-    governanceContract: contractAddress,
-    ...state,
-    contextGraphId: state.contextGraphId,
-    ownershipEra: state.ownershipEra.toString(10),
-    policyVersion: state.policyVersion.toString(10),
-    rosterVersion: state.rosterVersion.toString(10),
-    sourceBlockNumber: state.sourceBlockNumber.toString(10),
-  });
 }
 
 /** Physical provider attempts outlive a cancelled caller and must be drained. */

@@ -4,6 +4,7 @@ import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
+import { Logger, getMetrics, type CanonicalLogRecord } from '@origintrail-official/dkg-core';
 import { daemonState } from '../src/daemon/state.js';
 
 interface TestAuthorityDecision {
@@ -190,6 +191,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
   }): Promise<{
     response: any;
     responseStatus: number;
+    responseHeaders: Headers;
     job: any;
     runCalls: number;
     metadataBootstrapCalls: number;
@@ -402,6 +404,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     return {
       response,
       responseStatus: httpResponse.status,
+      responseHeaders: httpResponse.headers,
       job: jobId ? catchupTracker.jobs.get(jobId) : undefined,
       runCalls,
       metadataBootstrapCalls,
@@ -502,23 +505,47 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.patches).toEqual([]);
   });
 
-  it('logs a bounded unavailable reason without exposing arbitrary decision text', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it.each([false, true])('records a private-safe subscription diagnostic and catch-up telemetry (SWM=%s)', async (includeSharedMemory) => {
+    const records: CanonicalLogRecord[] = [];
+    const metrics = getMetrics();
+    const originalRequests = metrics.contextGraphCatchupRequestsTotal;
+    const add = vi.fn();
+    // The no-op meter shares instrument objects; replace the request property
+    // so this proves the request counter, independently of job accounting.
+    metrics.contextGraphCatchupRequestsTotal = { add } as typeof originalRequests;
+    Logger.setSink((record) => { records.push(record); });
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const result = await subscribe({
-        hasConfirmedMeta: false,
+        hasConfirmedMeta: false, includeSharedMemory,
         authorityDecision: {
           outcome: 'unavailable', source: 'registered-chain',
           reason: 'private diagnostic text', metadataBootstrap: 'eligible',
         },
       });
       expect(result.responseStatus).toBe(503);
-      expect(warn).toHaveBeenCalledWith(
-        '[context-graph-subscribe] authority unavailable: reason=other dependency=undefined',
-      );
-      expect(JSON.stringify(warn.mock.calls)).not.toContain('private diagnostic text');
+      expect(result.response).toEqual({
+        error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', retryable: true,
+      });
+      expect(result.responseHeaders.get('Retry-After')).toBe('3');
+      expect(result.responseHeaders.has('x-dkg-operation-id')).toBe(false);
+      const diagnostic = records.filter((record) => record.module === 'read-authority');
+      expect(diagnostic).toHaveLength(1);
+      expect(diagnostic[0]?.operationId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(diagnostic[0]?.message).toContain('source=registered-chain reason=unknown dependency=unknown');
+      expect(JSON.stringify(diagnostic)).not.toContain('private diagnostic text');
+      expect(add.mock.calls).toEqual([[1, {
+        result: 'authority_unavailable', include_shared_memory: includeSharedMemory,
+      }]]);
+      expect(result.subscribeCalls).toEqual([]);
+      expect(result.job).toBeUndefined();
     } finally {
-      warn.mockRestore();
+      Logger.setSink(null);
+      metrics.contextGraphCatchupRequestsTotal = originalRequests;
+      stdout.mockRestore();
+      stderr.mockRestore();
     }
   });
 

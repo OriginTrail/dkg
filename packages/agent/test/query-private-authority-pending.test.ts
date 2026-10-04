@@ -14,6 +14,7 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { DKGAgent } from '../src/index.js';
+import type { Rfc64PublicCatalogServiceV1 } from '../src/rfc64/public-catalog-service-v1.js';
 
 const OWNER = '0x0000000000000000000000000000000000000001';
 const OUTSIDER = '0x00000000000000000000000000000000000000ff';
@@ -77,14 +78,19 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     const runtime = agent as unknown as {
       config: { syncContextGraphs?: string[]; rfc64CatalogBootstrap?: unknown };
       subscribedContextGraphs: Map<string, unknown>;
-      rfc64PublicCatalogServiceV1: { acceptedPolicySnapshot: () => null } | undefined;
+      rfc64PublicCatalogServiceV1: Pick<
+        Rfc64PublicCatalogServiceV1, 'acceptedPolicySnapshot' | 'acceptedPolicySnapshotForReads'
+      > | undefined;
     };
-    const acceptedPolicySnapshot = vi.fn(() => null);
+    // Ownership classification and current read authority have separate lookups.
+    // This pending fixture has no accepted snapshot at either boundary.
+    const acceptedPolicySnapshot = vi.fn<Rfc64PublicCatalogServiceV1['acceptedPolicySnapshot']>(() => null);
+    const acceptedPolicySnapshotForReads = vi.fn<Rfc64PublicCatalogServiceV1['acceptedPolicySnapshotForReads']>(() => null);
     vi.spyOn(runtime, 'rfc64PublicCatalogServiceV1', 'get')
-      .mockReturnValue({ acceptedPolicySnapshot });
+      .mockReturnValue({ acceptedPolicySnapshot, acceptedPolicySnapshotForReads });
     expect(runtime.config.rfc64CatalogBootstrap).toBeUndefined();
     expect(agent.resolveRfc64PrivateReadRosterV1(PRIVATE_CG)).toBeUndefined();
-    expect(acceptedPolicySnapshot).toHaveBeenCalled();
+    expect(acceptedPolicySnapshotForReads).toHaveBeenCalled();
 
     // Only external registration and chain reads are replaced. Candidate
     // discovery, metadata, read authority, and query execution remain real.

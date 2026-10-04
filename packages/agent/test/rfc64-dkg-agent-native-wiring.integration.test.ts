@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -109,6 +109,7 @@ import {
   '../src/rfc64/public-catalog-receiver-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
 import type {
@@ -247,13 +248,27 @@ function rfc64M0RecoveryTitle(scenario: Rfc64M0RecoveryScenario): string {
   return metadata.title;
 }
 
+async function retireNativeFixtureResources(owned: {
+  readonly agents: readonly Pick<DKGAgent, 'stop'>[];
+  readonly tempDirs: readonly string[];
+  readonly stopRpc: () => Promise<void>;
+}): Promise<void> {
+  // Fence all live peers together, and wait for every physical stop even when
+  // one rejects. Closing a later case's servers is never a cleanup fallback.
+  await Promise.allSettled(owned.agents.map(async (agent) => { await agent.stop(); }));
+  try { await owned.stopRpc(); }
+  finally { await Promise.all(owned.tempDirs.map((path) => rm(path, { recursive: true, force: true }))); }
+}
+
 afterEach(async () => {
-  for (const agent of agents.splice(0)) {
-    try { await agent.stop(); } catch { /* best-effort */ }
-  }
-  await Promise.all(tempDirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
-  await rpcHarness.stopAll();
-});
+  await retireNativeFixtureResources({
+    agents: agents.splice(0),
+    tempDirs: tempDirs.splice(0),
+    stopRpc: rpcHarness.captureStopAll(),
+  });
+  // Production cancellation and physical retirement can exceed the unit hook's
+  // default 10 seconds. This budget bounds the concurrent drain of live peers.
+}, 60_000);
 
 async function startNativeAgent(
   name: string,
@@ -1632,6 +1647,76 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     },
     60_000,
   );
+
+  it.each([0, 1] as const)('keeps locally produced private inventory unverified when another node shares its owner (publish policy %i)', async (publishPolicy) => {
+    const networkId = await computeNetworkId() as NetworkIdV1;
+    const deployment = Object.freeze({ ...NATIVE_DEPLOYMENT, networkId });
+    const ownerPeers = new Map<string, EvmAddressV1>();
+    const [first, second] = await Promise.all(['first', 'second'].map((name) => startNativeAgentWithOptions({
+      name: `same-owner-private-${publishPolicy}-${name}`, deployment, networkIdentityChainId: NETWORK_ID,
+      operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      accessPolicyAuthority: { localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId) => ownerPeers.get(peerId) ?? null },
+    })));
+    for (const agent of [first, second]) ownerPeers.set(agent.peerId, AUTHOR);
+    for (const agent of [first, second]) {
+      expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(AUTHOR);
+      await agent.createContextGraph({ id: CONTEXT_GRAPH_ID, name: 'Shared owner catalog',
+        callerAgentAddress: AUTHOR, accessPolicy: 1, publishPolicy });
+      await agent.whenRfc64CatalogResponsibilitiesIdleV1();
+    }
+    const publish = async (agent: DKGAgent, kaNumber: bigint, suffix: string) => {
+      const assertionCoordinate = `same-owner-${suffix}`;
+      const shareOperationId = `same-owner-operation-${suffix}`;
+      await seedSignedSwmWorkspaceV1(agent, { contextGraphId: CONTEXT_GRAPH_ID,
+        assertionCoordinate, shareOperationId, kaNumber, accessPolicy: 'ownerOnly', networkId });
+      await agent.afterDurableSwmPromotionV1({ contextGraphId: CONTEXT_GRAPH_ID,
+        assertionCoordinate, lifecycleAgentAddress: AUTHOR, shareOperationId,
+        ctx: createOperationContext('share') });
+      await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+      await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    };
+    await publish(first, 230n, 'first');
+    const scope = { catalogScopeDigest: catalogScopeDigest(networkId), authorAddress: AUTHOR };
+    const oldHead = first.readRfc64AppliedCatalogHeadV1(scope);
+    expect(oldHead).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    await connectBothWays(first, second);
+    const initialReplay = await second.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID);
+    expect(initialReplay.failed).toBe(0);
+    await second.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(second.readRfc64AppliedCatalogHeadV1(scope)?.currentCatalogHeadDigest).toBe(oldHead?.currentCatalogHeadDigest);
+    // The second node advances the exact shared predecessor but cannot announce
+    // it to the first while that provider's replay transport is unavailable.
+    const announce = vi.spyOn(second, 'announceRfc64PublicCatalogHeadV1')
+      .mockImplementation(async ({ announcement, peers }) => ({ announcement, announcedPeers: [], failedPeers: peers }));
+    const replay = vi.spyOn(second, 'reannounceRfc64CatalogHeadsToPeerV1')
+      .mockRejectedValue(new Error('provider replay unavailable'));
+    await publish(second, 230n, 'first');
+    await publish(second, 231n, 'second-successor');
+    const newHead = second.readRfc64AppliedCatalogHeadV1(scope);
+    expect(newHead).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    expect(oldHead?.currentCatalogHeadDigest).not.toBe(newHead?.currentCatalogHeadDigest);
+    const failedReplay = await first.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID);
+    expect(failedReplay.requested).toBe(0);
+    expect(failedReplay.failed).toBeGreaterThan(0);
+    expect(replay).toHaveBeenCalled();
+    expect(first.readRfc64AppliedCatalogHeadV1(scope)?.currentCatalogHeadDigest).toBe(oldHead?.currentCatalogHeadDigest);
+    await expect(first.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(expect.objectContaining({
+      contextGraphId: CONTEXT_GRAPH_ID, accessPolicy: 1, publishPolicy,
+      phase: 'unknown-freshness', stableReason: 'catalog-replay-unverified',
+      appliedRowCount: '1', expectedRowCount: null, missingRowCount: null,
+    }));
+    replay.mockRestore();
+    announce.mockRestore();
+    const verifiedReplay = await first.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID);
+    expect(verifiedReplay.requested).toBeGreaterThan(0);
+    expect(verifiedReplay.failed).toBe(0);
+    await first.whenRfc64PublicCatalogReceiverIdleV1();
+    await expect(first.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(expect.objectContaining({
+      contextGraphId: CONTEXT_GRAPH_ID, phase: 'complete', stableReason: null,
+      appliedCatalogHeadDigest: newHead?.currentCatalogHeadDigest, appliedRowCount: '2', expectedRowCount: '2', missingRowCount: '0',
+    }));
+  }, 60_000);
 
   it('bounds default catalog peers deterministically while publication advances', async () => {
     const defaultNetworkId = await computeNetworkId() as NetworkIdV1;
@@ -5855,6 +5940,64 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     )).toBeNull();
   }, 60_000);
 
+  it.each(['reject', 'late-success'] as const)('cancels and drains a held join replay announcement with %s transport completion', async (completion) => {
+    const provider = await startNativeAgentWithOptions({ name: 'join-replay-abort-provider', operationalPrivateKey: AUTHOR_WALLET.privateKey });
+    await provider.createContextGraph({ id: CONTEXT_GRAPH_ID, name: 'Held join replay', callerAgentAddress: AUTHOR });
+    await provider.whenRfc64CatalogResponsibilitiesIdleV1();
+    const peer = await startNativeAgent('join-replay-abort-peer');
+    provider.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+    const scope = Object.freeze({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null, governanceContractAddress: null, ownershipTransitionDigest: null,
+      subGraphName: null, authorAddress: AUTHOR, era: '0', bucketCount: '1' }) as const;
+    await provider.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+      scope, author: AUTHOR_WALLET, deployment: NATIVE_DEPLOYMENT,
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      asset: { assertionCoordinate: 'held-announcement-abort' as never,
+        projectionBytes: PROJECTION, seal: await authorSeal(90n) }, peers: [],
+    });
+    const dispatcher = Reflect.get(provider, 'rfc64BackgroundWorkDispatcherV1');
+    const router = Reflect.get(provider, 'router');
+    const nodeStopSignal = Reflect.get(provider, 'node').stopSignal as AbortSignal;
+    const send = router.send.bind(router);
+    let enter!: () => void; let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    let transportSignal: AbortSignal | undefined;
+    let aborted = false;
+    let nodeStoppedAtTransportAbort: boolean | undefined;
+    const wire = vi.spyOn(router, 'send').mockImplementation(async (peerId, protocolId, bytes, options: { signal?: AbortSignal } | undefined) => {
+      if (protocolId !== RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1) return send(peerId, protocolId, bytes, options);
+      transportSignal = options?.signal;
+      return new Promise<Uint8Array>((resolve, reject) => {
+        release = () => resolve(Uint8Array.of(1));
+        transportSignal?.addEventListener('abort', () => {
+          aborted = true;
+          nodeStoppedAtTransportAbort = nodeStopSignal.aborted;
+          if (completion === 'reject') reject(transportSignal!.reason);
+          else release();
+        }, { once: true });
+        enter();
+      });
+    });
+    const pending = provider.runRfc64CatalogAfterJoinApprovalV1(CONTEXT_GRAPH_ID, AUTHOR, peer.peerId)
+      .catch((cause: unknown) => cause);
+    try {
+      await entered;
+      expect(transportSignal).toBeInstanceOf(AbortSignal);
+      expect(transportSignal!.aborted).toBe(false);
+      await provider.stop();
+      expect(nodeStoppedAtTransportAbort).toBe(false);
+      expect(nodeStopSignal.aborted).toBe(true);
+      expect(aborted).toBe(true);
+      expect(await pending).toMatchObject({ name: 'AbortError' });
+      expect(wire).toHaveBeenCalledOnce();
+      await dispatcher.whenIdle();
+    } finally {
+      release(); await pending; await dispatcher.closeAndDrain();
+      wire.mockRestore();
+    }
+  });
+
   it('keeps status incomplete until a replayed successor is durably applied', async () => {
     const [provider, receiver] = await Promise.all([
       startNativeAgent('replay-completion-provider'),
@@ -8421,6 +8564,52 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       row: staleWorkspaceRow,
     })).rejects.toThrow('durable RFC-64 workspace head differs');
   }, 90_000);
+
+  it('captures native teardown ownership while a failed peer stop is held', async () => {
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const ownedDir = await mkdtemp(join(tmpdir(), 'dkg-native-retiring-'));
+    const nextDir = await mkdtemp(join(tmpdir(), 'dkg-native-next-'));
+    const handler = (call: Parameters<typeof sendJsonRpcResult>[1], response: Parameters<typeof sendJsonRpcResult>[0]) =>
+      sendJsonRpcResult(response, call, '0x1');
+    const old = await rpc.start(handler);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    let secondStarted = false;
+    let failedStopEnded = false;
+    let cleanupSettled = false;
+    const cleanup = retireNativeFixtureResources({
+      agents: [
+        { stop: async () => { await gate; failedStopEnded = true; throw new Error('one peer stop refused'); } },
+        { stop: async () => { secondStarted = true; await secondGate; } },
+      ],
+      tempDirs: [ownedDir],
+      stopRpc: rpc.captureStopAll(),
+    });
+    const settlement = cleanup.then(() => { cleanupSettled = true; }, () => { cleanupSettled = true; });
+    const next = await rpc.start(handler);
+    const request = (url: string) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) });
+    try {
+      expect(secondStarted).toBe(true);
+      expect((await request(old.url)).status).toBe(200);
+      release();
+      await vi.waitFor(() => expect(failedStopEnded).toBe(true));
+      expect(cleanupSettled).toBe(false);
+      expect((await request(old.url)).status).toBe(200);
+      await expect(access(ownedDir)).resolves.toBeUndefined();
+      releaseSecond(); await cleanup;
+      await expect(request(old.url)).rejects.toThrow();
+      expect((await request(next.url)).status).toBe(200);
+      await expect(access(ownedDir)).rejects.toThrow();
+      await expect(access(nextDir)).resolves.toBeUndefined();
+    } finally {
+      release(); releaseSecond(); await settlement;
+      await rpc.stopAll();
+      await Promise.all([ownedDir, nextDir].map((path) => rm(path, { recursive: true, force: true })));
+    }
+  });
 
   it('awaits production private retirement and reports a real finalized missing-placement path', async () => {
     const providerAgentAddress = `0x${'91'.repeat(20)}` as EvmAddressV1;

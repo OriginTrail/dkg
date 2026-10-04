@@ -65,6 +65,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-responsibility-registry-v1.test.ts",
   "test/rfc64-catalog-bootstrap-outcome-v1.test.ts",
   "test/rfc64-background-work-dispatcher-v1.test.ts",
+  "test/rfc64-join-approved-catalog-replay-v1.test.ts",
+  "test/catalog-lifecycle-authority-source-v1.test.ts",
   "test/rfc64-coalescing-supervisor-v1.test.ts",
   "test/rfc64-authority-rpc-circuit-breaker-v1.test.ts",
   "test/rfc64-catalog-rollout-config-v1.test.ts",

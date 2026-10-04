@@ -9,6 +9,8 @@
  * composed class.
  */
 
+
+import { isLocalPrivateMember } from './internal/local-private-member.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -241,8 +243,8 @@ import {
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import {
-  createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
-  reconcileFinalizedSwmTwinFromCatalogProjection,
+  createRetireConfirmedGraphScopedSwmTwinIfOrphanedWithEvidence,
+  reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence,
 } from
   './sync/requester/finalized-swm-twin-reconciliation.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -408,40 +410,6 @@ export interface ContextGraphSubscribeOptions {
   syncMode?: 'on-demand' | 'always-on';
   /** Authoritative numeric slot established by the admission owner. */
   onChainId?: string;
-}
-
-/** A context graph member identity: a bare agent address or its `did:dkg:agent:` DID. */
-function memberAgentAddress(value: string): string | undefined {
-  const match = /^(?:did:dkg:agent:)?(0x[0-9a-fA-F]{40})$/.exec(value.trim());
-  return match?.[1]?.toLowerCase();
-}
-
-/**
- * Whether `meta` declares an explicit private policy (#865) and lists one of
- * `localAgents` among its allowed agents, participants, curators or creators,
- * and not among its revoked agents.
- */
-function isLocalPrivateMember(
-  meta: {
-    readonly accessPolicy?: string;
-    readonly allowedAgents: readonly string[];
-    readonly participantAgents: readonly string[];
-    readonly curators: readonly string[];
-    readonly creators: readonly string[];
-    readonly revokedAgents: readonly string[];
-  },
-  localAgents: readonly (string | undefined)[],
-): boolean {
-  if (meta.accessPolicy?.trim().toLowerCase() !== 'private') return false;
-  const revoked = new Set(meta.revokedAgents.map(memberAgentAddress));
-  const members = new Set(
-    [...meta.allowedAgents, ...meta.participantAgents, ...meta.curators, ...meta.creators]
-      .map(memberAgentAddress)
-      .filter((member) => member !== undefined && !revoked.has(member)),
-  );
-  return localAgents.some((local) => (
-    local !== undefined && members.has(memberAgentAddress(local))
-  ));
 }
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -2119,7 +2087,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           },
           workspaceWriteLocks: this.writeLocks,
           retireConfirmedGraphScopedSwmTwinIfOrphaned: (() => {
-            const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+            const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphanedWithEvidence({
               store: this.store,
               writeLocks: this.writeLocks,
               retire: async (candidate, ctx) => {
@@ -2140,29 +2108,27 @@ export class SwmSubstrateMethods extends DKGAgentBase {
               onTornHeadRemoved: (message, ctx) => this.log.warn(ctx, message),
             });
             return async (candidate, ctx) => {
-              await retireOrphaned(candidate, ctx);
-              await this.retireLegacySwmAfterVerifiedVmTwin({
-                contextGraphId: candidate.contextGraphId,
-                kaUal: candidate.ual,
-                assertionVersion: candidate.assertionVersion,
-                subGraphName: candidate.subGraphName,
-              });
+              if (await retireOrphaned(candidate, ctx)) {
+                await this.completeVerifiedVmMarkerRetirement({
+                  contextGraphId: candidate.contextGraphId,
+                  kaUal: candidate.ual,
+                  assertionVersion: candidate.assertionVersion,
+                  subGraphName: candidate.subGraphName,
+                }, ctx);
+              }
             };
           })(),
           reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
-            const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({
-              store: this.store,
-              writeLocks: this.writeLocks,
-              evidence,
-              retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
-            });
-            if (retirement === 'retired') {
-              await this.retireLegacySwmAfterVerifiedVmTwin({
-                contextGraphId: evidence.contextGraphId,
-                kaUal: evidence.kaUal,
-                assertionVersion: evidence.assertionVersion,
-                subGraphName: evidence.subGraphName,
-              });
+            const retirement = await this.completeFinalizedSwmTwinRetirement(
+              await reconcileFinalizedSwmTwinFromCatalogProjectionWithEvidence({
+                store: this.store,
+                writeLocks: this.writeLocks,
+                evidence,
+                retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+              }),
+              ctx,
+            );
+            if (retirement.outcome === 'retired') {
               this.invalidateListContextGraphsCache();
               this.log.info(
                 ctx,

@@ -8,6 +8,11 @@ if ('createRandomSamplingRuntime' in root.DKGAgent.prototype) {
   throw new Error('internal Random Sampling runtime factory leaked from the agent surface');
 }
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const legacyAgentBase = await import('@origintrail-official/dkg-agent/dist/dkg-agent-base.js');
+const legacyAgentPublish = await import('@origintrail-official/dkg-agent/dist/dkg-agent-publish.js');
+const legacyFinalizedSwmTwin = await import(
+  '@origintrail-official/dkg-agent/dist/sync/requester/finalized-swm-twin-reconciliation.js'
+);
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
 );
@@ -48,6 +53,13 @@ const expectedRfc64PublicCatalogReconciliationOutcomes = [
 if (
   typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
+  || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
+  || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
+  || typeof root.GossipPublishHandler !== 'function'
+  || typeof legacyFinalizedSwmTwin.createRetireConfirmedGraphScopedSwmTwinIfOrphaned !== 'function'
+  || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwin !== 'function'
+  || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwinFromDescriptor !== 'function'
+  || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwinFromCatalogProjection !== 'function'
   || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
   || typeof root.computeRfc64AppliedInventoryDigestV1 !== 'function'
   || typeof root.classifyRfc64PolicyCellV1 !== 'function'
@@ -89,22 +101,30 @@ for (const [subpath, target] of Object.entries(packageExports)) {
     throw new Error(`internal export exception must remain blocked: ${subpath}`);
   }
 }
-const representativeInternalSpecifier =
-  '@origintrail-official/dkg-agent/dist/internal/context-graph-authority/' +
-  'context-graph-agent-gate-authority.js';
-try {
-  await import(representativeInternalSpecifier);
-  throw new Error(`internal module unexpectedly resolved: ${representativeInternalSpecifier}`);
-} catch (error) {
-  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-}
-try {
-  require.resolve(representativeInternalSpecifier);
-  throw new Error(
-    `internal module unexpectedly resolved via require: ${representativeInternalSpecifier}`,
-  );
-} catch (error) {
-  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+const emittedInternalModules = await listEmittedModules('internal', ['.js', '.d.ts', '.map']);
+if (emittedInternalModules.length === 0) throw new Error('internal module boundary has no emitted controls');
+for (const module of emittedInternalModules) {
+  const specifier = `@origintrail-official/dkg-agent/dist/internal/${module}`;
+  try {
+    await import(specifier);
+    throw new Error(`internal module unexpectedly imported: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  try {
+    require.resolve(specifier);
+    throw new Error(`internal module unexpectedly resolved via require: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  if (module.endsWith('.js')) {
+    try {
+      require(specifier);
+      throw new Error(`internal module unexpectedly required: ${specifier}`);
+    } catch (error) {
+      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+    }
+  }
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',
@@ -266,6 +286,8 @@ const blockedRfc64Modules = [
   'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
+  'catalog-access-snapshot-v1.js',
+  'catalog-policy-scope-v1.js',
   'catalog-authority-config-v1.js',
   'catalog-authority-refresh-binding-v1.js',
   'catalog-authority-refresh-loop-v1.js',
@@ -275,7 +297,12 @@ const blockedRfc64Modules = [
   'public-catalog-workload-owner-v1.js',
   'catalog-responsibility-registry-v1.js',
   'release-native-catalog-authority-v1.js',
+  'catalog-lifecycle-authority-source-v1.js',
   'legacy-swm-boundary-v1.js',
+  'legacy-swm-boundary-codec-v1.js',
+  'catalog-operational-targets-v1.js',
+  'private-read-roster-v1.js',
+  'join-approved-catalog-replay-v1.js',
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-reconciliation-v1.js',
   'applied-catalog-authority-transition-v1.js',
@@ -355,7 +382,7 @@ const blockedRfc64Modules = [
   'catalog-shadow-observability-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
-const emittedRfc64Modules = await listEmittedRfc64Modules();
+const emittedRfc64Modules = await listEmittedModules('rfc64');
 const classifiedRfc64Modules = new Set([
   ...publicRfc64Modules,
   ...blockedRfc64Modules,
@@ -413,8 +440,8 @@ for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.j
   }
 }
 
-async function listEmittedRfc64Modules() {
-  const rootPath = fileURLToPath(new URL('../dist/rfc64/', import.meta.url));
+async function listEmittedModules(namespace, extensions = ['.js']) {
+  const rootPath = fileURLToPath(new URL(`../dist/${namespace}/`, import.meta.url));
   const pending = [rootPath];
   const modules = [];
   while (pending.length > 0) {
@@ -424,7 +451,7 @@ async function listEmittedRfc64Modules() {
       const entryPath = join(directory, entry.name);
       if (entry.isDirectory()) {
         pending.push(entryPath);
-      } else if (entry.isFile() && entry.name.endsWith('.js')) {
+      } else if (entry.isFile() && extensions.some(extension => entry.name.endsWith(extension))) {
         modules.push(relative(rootPath, entryPath).split(sep).join('/'));
       }
     }

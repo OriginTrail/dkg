@@ -23,11 +23,13 @@ export interface ContextGraphAgentGateAuthorityInput {
 function unavailableAuthority(
   reason: ContextGraphAgentGateUnavailableReason,
   detail?: string,
+  origin?: 'agent-gate-revision',
 ): Extract<ContextGraphAgentGateAuthority, { kind: 'unavailable' }> {
   return {
     kind: 'unavailable',
     reason,
     ...(detail === undefined ? {} : { detail }),
+    ...(origin === undefined ? {} : { origin }),
   };
 }
 
@@ -103,5 +105,6 @@ export async function resolveContextGraphAgentGateAuthorityDecision(
   return unavailableAuthority(
     'local-existence-unavailable',
     `Context graph "${input.contextGraphId}" metadata authority changed while resolving its agent gate`,
+    'agent-gate-revision',
   );
 }
