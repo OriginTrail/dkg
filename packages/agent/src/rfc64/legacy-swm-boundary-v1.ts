@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 
-import {
+import  {
   assertCanonicalDeterministicUalV1,
   assertAuthorCatalogScopeV1,
   assertContextGraphIdV1,
@@ -14,7 +14,6 @@ import {
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
   type AuthorCatalogScopeV1,
-  type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
   type PositiveDecimalU64V1,
 } from '@origintrail-official/dkg-core';
