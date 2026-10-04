@@ -46,6 +46,7 @@ import {
 import {
   NoChainAdapter,
   activeRpcRequestAbortSignal,
+  activeRpcRequestContext,
   createRpcRequestProvider,
   RpcRequestGovernor,
   RpcEndpointsExhaustedError,
@@ -2481,7 +2482,10 @@ describe('RFC-64 rollout authority integration', () => {
       contextGraphId: '10',
       accessPolicy: 0,
     });
+    const readLanes: Array<Readonly<{ requestClass: string; admissionPriority?: string }>> = [];
     const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
+      const { requestClass, admissionPriority } = activeRpcRequestContext();
+      readLanes.push({ requestClass, admissionPriority });
       if (nameHashes.includes(firstSnapshot.nameHash)) {
         throw new Error('durably bound duplicate name hash is ambiguous');
       }
@@ -2524,12 +2528,15 @@ describe('RFC-64 rollout authority integration', () => {
         contextGraphId === localFirstContextGraphId
       ));
 
-    const requests = await edge.createRfc64CatalogAuthorityRefreshRequestsV1(
-      [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
-      new AbortController().signal,
-    );
+    const requests = await withRpcRequestContext({ requestClass: 'background' }, () => (
+      edge.createRfc64CatalogAuthorityRefreshRequestsV1(
+        [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
+        new AbortController().signal,
+      )
+    ));
 
     expect(resolveSnapshots).toHaveBeenCalledOnce();
+    expect(readLanes).toEqual([{ requestClass: 'foreground', admissionPriority: 'authority' }]);
     expect(resolveSnapshots).toHaveBeenCalledWith([
       secondSnapshot.nameHash,
     ], {
@@ -5926,7 +5933,7 @@ describe('RFC-64 rollout authority integration', () => {
     const curatorPeerId = '12D3KooWVerifiedPrivateCurator';
     const memberPeerId = '12D3KooWVerifiedPrivateMember';
     const edge = await startAgent({ name: 'private-peer-binding' });
-    vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
+    const profile = vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
     const delegateePeers = vi.spyOn(edge, 'getContextGraphAllowedDelegateePeers')
       .mockResolvedValue(new Map([[MEMBER, [memberPeerId]]]));
@@ -5935,6 +5942,15 @@ describe('RFC-64 rollout authority integration', () => {
       memberPeerId,
       contextGraphId,
     )).resolves.toBe(MEMBER);
+
+    // A generic profile can arrive after the private delegatee binding and
+    // name another local agent. It must not replace the graph-scoped identity.
+    profile.mockResolvedValue({ agentAddress: AUTHOR } as never);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      memberPeerId,
+      contextGraphId,
+    )).resolves.toBe(MEMBER);
+    profile.mockResolvedValue(null);
 
     delegateePeers.mockResolvedValue(new Map());
     (edge as any).localApprovedAgentByCG.set(contextGraphId, MEMBER);
@@ -5954,6 +5970,12 @@ describe('RFC-64 rollout authority integration', () => {
       curatorPeerId,
       contextGraphId,
     )).resolves.toBe(AUTHOR);
+    profile.mockResolvedValue({ agentAddress: MEMBER } as never);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBe(AUTHOR);
+    profile.mockResolvedValue(null);
 
     currentCuratorBinding.mockResolvedValue({ agentAddress: MEMBER, authorityEra: '1' });
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
@@ -5985,8 +6007,38 @@ describe('RFC-64 rollout authority integration', () => {
       [MEMBER, [memberPeerId]],
       [AUTHOR, [memberPeerId]],
     ]));
+    profile.mockResolvedValue({ agentAddress: MEMBER } as never);
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
       memberPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    // Transient failures in graph-scoped binding reads must not manufacture
+    // an identity when no verified profile can supply one.
+    profile.mockResolvedValue(null);
+    delegateePeers.mockRejectedValueOnce(new Error('delegatee roster unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    delegateePeers.mockResolvedValue(new Map());
+    requesterState.mockRejectedValueOnce(new Error('join state unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    requesterState.mockResolvedValue({
+      status: 'approved',
+      requestGeneration: `0x${'11'.repeat(32)}`,
+      curatorPeerId,
+      curatorAgentAddress: AUTHOR,
+      curatorAuthorityEra: '0',
+    });
+    currentCuratorBinding.mockRejectedValueOnce(new Error('curator binding unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
       contextGraphId,
     )).resolves.toBeNull();
   });

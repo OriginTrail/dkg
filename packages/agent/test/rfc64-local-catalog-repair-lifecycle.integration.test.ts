@@ -93,6 +93,132 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     expect(requestProjection).toHaveBeenCalledTimes(2);
   });
 
+  it('retries a committed share whose inventory authority turns over before its CAS', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'inventory-authority-transition',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+      AUTHOR_WALLET.privateKey,
+    );
+    agent.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const seeded = await seedDurableWorkspaceAssetV1(
+      agent,
+      'inventory-authority-transition',
+      86n,
+    );
+    const originalRecord = agent.recordRfc64SwmAuthorInventoryShadowV1.bind(agent);
+    const record = vi.spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockResolvedValueOnce({
+        status: 'dormant',
+        action: 'upsert',
+        attempts: 0,
+        headObjectDigest: null,
+        error: null,
+        dormantReason: 'authority-transition',
+      })
+      .mockImplementation(originalRecord);
+    const reconcileResponsibility = vi.spyOn(
+      agent,
+      'reconcileRfc64CatalogResponsibilityV1',
+    ).mockResolvedValue({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      responsible: true,
+      responsibilityReason: 'private-membership',
+      active: true,
+      mode: 'catalog',
+      selectionSource: 'default',
+    });
+
+    await agent.observeRfc64DurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: seeded.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: seeded.shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    expect(reconcileResponsibility).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: seeded.scopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { totalRows: '1' } },
+      rows: [expect.objectContaining({
+        assertionCoordinate: seeded.assertionCoordinate,
+        shareOperationId: seeded.shareOperationId,
+      })],
+    });
+  });
+
+  it('classifies an authority turnover after row preparation as retriable', async () => {
+    const agent = await startRepairAgentV1({
+      name: 'inventory-authority-cas-fence',
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
+      AUTHOR_WALLET.privateKey,
+    );
+    agent.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const seeded = await seedDurableWorkspaceAssetV1(
+      agent,
+      'inventory-authority-cas-fence',
+      87n,
+    );
+    const internal = agent as any;
+    const originalPrepare = internal.prepareRfc64SwmAuthorInventoryRowV1.bind(agent);
+    const originalResolve = internal.resolveRfc64CatalogAuthoringLaneV1.bind(agent);
+    let transitioned = false;
+    const resolve = vi.spyOn(internal, 'resolveRfc64CatalogAuthoringLaneV1')
+      .mockImplementation((...args: unknown[]) => (
+        transitioned ? null : originalResolve(...args)
+      ));
+    const prepare = vi.spyOn(internal, 'prepareRfc64SwmAuthorInventoryRowV1')
+      .mockImplementation(async (...args: unknown[]) => {
+        const row = await originalPrepare(...args);
+        transitioned = true;
+        return row;
+      });
+
+    await expect(agent.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: seeded.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: seeded.shareOperationId,
+    })).resolves.toMatchObject({
+      status: 'dormant',
+      dormantReason: 'authority-transition',
+    });
+    prepare.mockRestore();
+    resolve.mockRestore();
+    await expect(agent.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: seeded.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: seeded.shareOperationId,
+    })).resolves.toMatchObject({ status: 'applied' });
+    expect(agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: seeded.scopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toHaveLength(1);
+  });
+
   it('retains a committed promotion across a transient default-responsibility rejection', async () => {
     const agent = await startRepairAgentV1({
       name: 'transient-default-responsibility',
