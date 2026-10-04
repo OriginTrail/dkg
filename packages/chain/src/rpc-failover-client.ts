@@ -63,7 +63,7 @@ import {
   rpcHost,
 } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
-import { EndpointReadRefusals, isEndpointPolicyRefusal } from './endpoint-read-refusals.js';
+import { EndpointReadRefusals } from './endpoint-read-refusals.js';
 import {
   ChainRpcTransportError,
   RpcEndpointsExhaustedError,
@@ -880,14 +880,16 @@ export class RpcFailoverClient {
     // binding its endpoint + outcome recorders. Same members, possibly reordered —
     // so the cap/exhaustion contract stays canonical while only the try-order changes.
     const canonical = this.getEndpoints();
-    const preferredFirst = this.stickiness.attempts(canonical, options.intent);
     // A read that an endpoint has refused by policy starts at the others; the
-    // refusing endpoint stays in the pass, last. Each entry keeps the outcome
-    // recorders it was bound with, so the preference moves exactly as it does
-    // without this. A tip-sensitive read keeps the configured order, as it does
-    // under stickiness, and so does every read when ordering is switched off.
-    const remembersRefusals = options.intent !== 'transparentRead' && this.endpointOrderingEnabled();
-    const attempts = remembersRefusals ? this.readRefusals.order(label, preferredFirst) : preferredFirst;
+    // refusing endpoint stays in the pass, last. `readRefusals` builds the pass
+    // from the stickiness order and owns what each outcome is recorded as. A
+    // tip-sensitive read keeps the configured order, as it does under
+    // stickiness, and so does every read when ordering is switched off.
+    const attempts = this.readRefusals.attempts(
+      label,
+      this.stickiness.attempts(canonical, options.intent),
+      options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
+    );
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let lastRetryable: unknown;
     let allEndpointsThrottled = true;
@@ -947,16 +949,13 @@ export class RpcFailoverClient {
         if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!options.isRetryable(err)) throw err;
         lastRetryable = err;
-        if (remembersRefusals && isEndpointPolicyRefusal(err)) {
-          this.readRefusals.record(label, endpoint.rpcUrl);
-        }
         if (!isThrottleRpcError(err)) {
           allEndpointsThrottled = false;
         } else {
           const hint = errorRetryAfterMs(err);
           if (hint !== undefined) retryAfterMs = Math.max(retryAfterMs ?? 0, hint);
         }
-        attempt.recordFailure(); // de-prefer a failed backend
+        attempt.recordFailure(err); // de-prefer a failed backend; remember a refusal
         const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
         if (!isLast && canTryNext) {
           noteRpcFailover(label, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);

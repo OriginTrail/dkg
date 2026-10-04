@@ -3,8 +3,9 @@
 /**
  * A read that an endpoint refuses by policy stops starting at that endpoint.
  *
- * The first block is the memory on its own. The second is the failover client
- * over three endpoints, with the case this exists for: an endpoint that serves
+ * The first two blocks are the memory on its own: which errors count, and the
+ * attempts it builds from a stickiness order. The third is the failover client
+ * over real stickiness, with the case this exists for: an endpoint that serves
  * contract calls and answers every receipt lookup with HTTP 403.
  */
 
@@ -15,6 +16,7 @@ import {
   EndpointReadRefusals,
   isEndpointPolicyRefusal,
 } from '../src/endpoint-read-refusals.js';
+import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { makeClient, NEVER_SIGN, recorder, retryable429 } from './rpc-failover-test-helpers.js';
 
@@ -22,9 +24,7 @@ const PRIMARY = 'https://primary.example';
 const REFUSER = 'https://refuser.example';
 const THIRD = 'https://third.example';
 const URLS = [PRIMARY, REFUSER, THIRD];
-
-const attemptsFor = (...urls: string[]) => urls.map((rpcUrl) => ({ endpoint: { rpcUrl } }));
-const urlsOf = (attempts: Array<{ endpoint: { rpcUrl: string } }>) => attempts.map(({ endpoint }) => endpoint.rpcUrl);
+const LABEL = 'receipt lookup';
 
 /** What the transport raises for an HTTP error response, as ethers shapes it. */
 function httpError(status: number, statusText: string): Error {
@@ -35,6 +35,38 @@ function httpError(status: number, statusText: string): Error {
   });
 }
 const refused403 = () => httpError(403, 'Forbidden');
+
+/** A stickiness order whose bound recorders write what they were told to `log`. */
+function stickyOrder(...urls: string[]) {
+  const log: string[] = [];
+  const attempts = urls.map((rpcUrl) => ({
+    endpoint: { rpcUrl },
+    recordSuccess: () => { log.push(`success ${rpcUrl}`); },
+    recordFailure: () => { log.push(`failure ${rpcUrl}`); },
+  }));
+  return { attempts, log };
+}
+const urlsOf = (attempts: Array<{ endpoint: { rpcUrl: string } }>) => attempts.map(({ endpoint }) => endpoint.rpcUrl);
+
+/** Run one pass: fail the endpoints in `failing` (with their error), be served by the first other one. */
+function runPass(
+  refusals: EndpointReadRefusals,
+  label: string,
+  order: ReturnType<typeof stickyOrder>,
+  failing: Record<string, Error> = {},
+): { tried: string[]; servedBy: string | undefined } {
+  const tried: string[] = [];
+  for (const attempt of refusals.attempts(label, order.attempts)) {
+    tried.push(attempt.endpoint.rpcUrl);
+    const error = failing[attempt.endpoint.rpcUrl];
+    if (error === undefined) {
+      attempt.recordSuccess();
+      return { tried, servedBy: attempt.endpoint.rpcUrl };
+    }
+    attempt.recordFailure(error);
+  }
+  return { tried, servedBy: undefined };
+}
 
 afterEach(() => { _resetRpcFailoverStatsForTest(); });
 
@@ -59,71 +91,174 @@ describe('isEndpointPolicyRefusal', () => {
   });
 });
 
-describe('EndpointReadRefusals', () => {
-  it('leaves the order alone until an endpoint has refused that read', () => {
+describe('EndpointReadRefusals.attempts', () => {
+  it('is the stickiness order and its recorders until an endpoint has refused the read', () => {
     const refusals = new EndpointReadRefusals({ now: () => 0 });
-    const attempts = attemptsFor(REFUSER, PRIMARY, THIRD);
+    const order = stickyOrder(REFUSER, PRIMARY, THIRD);
 
-    expect(refusals.order('receipt lookup', attempts)).toBe(attempts);
+    const pass = runPass(refusals, LABEL, order, { [REFUSER]: retryable429() });
+
+    expect(pass).toEqual({ tried: [REFUSER, PRIMARY], servedBy: PRIMARY });
+    expect(order.log).toEqual([`failure ${REFUSER}`, `success ${PRIMARY}`]);
+    // A throttle is not remembered: the next pass starts at the same endpoint.
+    expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+      .toEqual([REFUSER, PRIMARY, THIRD]);
   });
 
-  it('moves the endpoint that refused a read behind the others, for that read only', () => {
+  it('records the refusal as the failure it always was, and remembers it for that read only', () => {
     const refusals = new EndpointReadRefusals({ now: () => 0 });
-    refusals.record('receipt lookup', REFUSER);
+    const order = stickyOrder(REFUSER, PRIMARY, THIRD);
 
-    const attempts = attemptsFor(REFUSER, PRIMARY, THIRD);
-    const ordered = refusals.order('receipt lookup', attempts);
+    runPass(refusals, LABEL, order, { [REFUSER]: refused403() });
 
-    expect(urlsOf(ordered)).toEqual([PRIMARY, THIRD, REFUSER]);
-    // The same entries, so whatever each carries stays with its endpoint.
-    expect(ordered[2]).toBe(attempts[0]);
-    expect(refusals.order('kas.getLatestMerkleRoot', attempts)).toBe(attempts);
+    expect(order.log).toEqual([`failure ${REFUSER}`, `success ${PRIMARY}`]);
+    expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+      .toEqual([PRIMARY, THIRD, REFUSER]);
+    expect(urlsOf(refusals.attempts('kas.getLatestMerkleRoot', stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+      .toEqual([REFUSER, PRIMARY, THIRD]);
   });
 
-  it('keeps the relative order of the endpoints on each side', () => {
-    const refusals = new EndpointReadRefusals({ now: () => 0 });
-    refusals.record('receipt lookup', PRIMARY);
-    refusals.record('receipt lookup', THIRD);
+  describe('when the endpoint stickiness starts at has refused the read', () => {
+    function refusedByTheFirst() {
+      const refusals = new EndpointReadRefusals({ now: () => 0 });
+      runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD), { [REFUSER]: refused403() });
+      return refusals;
+    }
 
-    expect(urlsOf(refusals.order('receipt lookup', attemptsFor(THIRD, REFUSER, PRIMARY))))
-      .toEqual([REFUSER, THIRD, PRIMARY]);
+    it('goes to the others and tells stickiness nothing', () => {
+      const refusals = refusedByTheFirst();
+      const order = stickyOrder(REFUSER, PRIMARY, THIRD);
+
+      const pass = runPass(refusals, LABEL, order);
+
+      expect(pass).toEqual({ tried: [PRIMARY], servedBy: PRIMARY });
+      expect(order.log).toEqual([]);
+    });
+
+    it('tells stickiness nothing about the others failing either', () => {
+      const refusals = refusedByTheFirst();
+      const order = stickyOrder(REFUSER, PRIMARY, THIRD);
+
+      const pass = runPass(refusals, LABEL, order, { [PRIMARY]: retryable429() });
+
+      expect(pass).toEqual({ tried: [PRIMARY, THIRD], servedBy: THIRD });
+      expect(order.log).toEqual([]);
+    });
+
+    it('starts the next pass at the endpoint that served it instead', () => {
+      const refusals = refusedByTheFirst();
+      runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD), { [PRIMARY]: retryable429() });
+
+      expect(runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD)))
+        .toEqual({ tried: [THIRD], servedBy: THIRD });
+    });
+
+    it('drops that endpoint again when it fails, and goes on in the stickiness order', () => {
+      const refusals = refusedByTheFirst();
+      runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD), { [PRIMARY]: retryable429() });
+
+      expect(runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD), { [THIRD]: retryable429() }))
+        .toEqual({ tried: [THIRD, PRIMARY], servedBy: PRIMARY });
+      expect(runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD)))
+        .toEqual({ tried: [PRIMARY], servedBy: PRIMARY });
+    });
+
+    it('asks the refusing endpoint last, and records it as stickiness would', () => {
+      const refusals = refusedByTheFirst();
+      const order = stickyOrder(REFUSER, PRIMARY, THIRD);
+
+      const pass = runPass(refusals, LABEL, order, {
+        [PRIMARY]: retryable429(), [THIRD]: retryable429(), [REFUSER]: refused403(),
+      });
+
+      expect(pass).toEqual({ tried: [PRIMARY, THIRD, REFUSER], servedBy: undefined });
+      expect(order.log).toEqual([`failure ${REFUSER}`]);
+    });
+
+    it('forgets the refusal when that endpoint serves the read after all', () => {
+      const refusals = refusedByTheFirst();
+      const order = stickyOrder(REFUSER, PRIMARY, THIRD);
+
+      runPass(refusals, LABEL, order, { [PRIMARY]: retryable429(), [THIRD]: retryable429() });
+
+      expect(order.log).toEqual([`success ${REFUSER}`]);
+      expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+        .toEqual([REFUSER, PRIMARY, THIRD]);
+    });
+
+    it('remembers another endpoint that refuses the read while it is being tried instead', () => {
+      const refusals = refusedByTheFirst();
+      runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD), { [PRIMARY]: refused403() });
+
+      expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+        .toEqual([THIRD, REFUSER, PRIMARY]);
+    });
+  });
+
+  it('moves a refusing endpoint further down last and keeps every recorder as bound', () => {
+    const refusals = new EndpointReadRefusals({ now: () => 0 });
+    runPass(refusals, LABEL, stickyOrder(PRIMARY, REFUSER, THIRD), {
+      [PRIMARY]: retryable429(), [REFUSER]: refused403(),
+    });
+    const order = stickyOrder(PRIMARY, REFUSER, THIRD);
+
+    const pass = runPass(refusals, LABEL, order, { [PRIMARY]: retryable429() });
+
+    // The endpoint stickiness starts at was tried first, so what follows means what it meant.
+    expect(pass).toEqual({ tried: [PRIMARY, THIRD], servedBy: THIRD });
+    expect(order.log).toEqual([`failure ${PRIMARY}`, `success ${THIRD}`]);
   });
 
   it('changes nothing when every endpoint has refused the read', () => {
     const refusals = new EndpointReadRefusals({ now: () => 0 });
-    for (const url of URLS) refusals.record('receipt lookup', url);
-    const attempts = attemptsFor(REFUSER, PRIMARY, THIRD);
+    const everyoneRefuses = { [REFUSER]: refused403(), [PRIMARY]: refused403(), [THIRD]: refused403() };
+    runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD), everyoneRefuses);
+    const order = stickyOrder(REFUSER, PRIMARY, THIRD);
 
-    expect(refusals.order('receipt lookup', attempts)).toBe(attempts);
+    const pass = runPass(refusals, LABEL, order, everyoneRefuses);
+
+    expect(pass.tried).toEqual([REFUSER, PRIMARY, THIRD]);
+    expect(order.log).toEqual([`failure ${REFUSER}`, `failure ${PRIMARY}`, `failure ${THIRD}`]);
   });
 
   it('forgets a refusal after its time, and a new refusal renews it', () => {
     let clock = 1_000;
     const refusals = new EndpointReadRefusals({ now: () => clock });
-    const attempts = attemptsFor(REFUSER, PRIMARY);
-    refusals.record('receipt lookup', REFUSER);
+    const next = () => urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY).attempts));
+    runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY), { [REFUSER]: refused403() });
 
     clock += ENDPOINT_READ_REFUSAL_TTL_MS - 1;
-    expect(urlsOf(refusals.order('receipt lookup', attempts))).toEqual([PRIMARY, REFUSER]);
+    expect(next()).toEqual([PRIMARY, REFUSER]);
     clock += 1;
-    expect(refusals.order('receipt lookup', attempts)).toBe(attempts);
+    expect(next()).toEqual([REFUSER, PRIMARY]);
 
-    refusals.record('receipt lookup', REFUSER);
+    runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY), { [REFUSER]: refused403() });
     clock += ENDPOINT_READ_REFUSAL_TTL_MS - 1;
-    expect(urlsOf(refusals.order('receipt lookup', attempts))).toEqual([PRIMARY, REFUSER]);
+    expect(next()).toEqual([PRIMARY, REFUSER]);
   });
 
   it('keeps a bounded number of refusals, the most recently seen ones', () => {
     const refusals = new EndpointReadRefusals({ now: () => 0, maxEntries: 2 });
-    refusals.record('read a', REFUSER);
-    refusals.record('read b', REFUSER);
-    refusals.record('read a', REFUSER);
-    refusals.record('read c', REFUSER);
-    const attempts = attemptsFor(REFUSER, PRIMARY);
+    for (const label of ['read a', 'read b', 'read a', 'read c']) {
+      runPass(refusals, label, stickyOrder(PRIMARY, REFUSER), { [PRIMARY]: retryable429(), [REFUSER]: refused403() });
+    }
+    const next = (label: string) => urlsOf(refusals.attempts(label, stickyOrder(PRIMARY, REFUSER, THIRD).attempts));
 
-    expect(refusals.order('read b', attempts)).toBe(attempts);
-    expect(urlsOf(refusals.order('read a', attempts))).toEqual([PRIMARY, REFUSER]);
-    expect(urlsOf(refusals.order('read c', attempts))).toEqual([PRIMARY, REFUSER]);
+    expect(next('read b')).toEqual([PRIMARY, REFUSER, THIRD]);
+    expect(next('read a')).toEqual([PRIMARY, THIRD, REFUSER]);
+    expect(next('read c')).toEqual([PRIMARY, THIRD, REFUSER]);
+  });
+
+  it('is the stickiness order with nothing remembered when told not to remember', () => {
+    const refusals = new EndpointReadRefusals({ now: () => 0 });
+    const order = stickyOrder(REFUSER, PRIMARY);
+    const [first, second] = refusals.attempts(LABEL, order.attempts, false);
+
+    first!.recordFailure(refused403());
+    second!.recordSuccess();
+
+    expect(order.log).toEqual([`failure ${REFUSER}`, `success ${PRIMARY}`]);
+    expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY).attempts))).toEqual([REFUSER, PRIMARY]);
   });
 });
 
@@ -196,6 +331,79 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
     }
     expect(primary.call.calls).toHaveLength(2);
     expect(refuser.getTransactionReceipt.calls).toHaveLength(1);
+  });
+
+  /**
+   * The refuser has refused one receipt lookup and is preferred again, and the
+   * primary now fails receipt lookups as well, so they are served by the third.
+   */
+  async function refuserPreferredAndPrimaryFailingReceipts() {
+    const { primary, refuser, third } = endpoints();
+    const client = makeClient([primary, refuser, third], URLS, NEVER_SIGN, { enabled: true });
+    await call(client);
+    await client.getReceipt('0xhash'); // refused by the refuser, served by the primary
+    await call(client);              // the preference is on the refuser again
+    primary.getTransactionReceipt = recorder(async (): Promise<typeof receipt> => { throw retryable429(); });
+    return { client, primary, refuser, third };
+  }
+
+  it('does not move the preference to an endpoint that served the receipt instead', async () => {
+    const { client, third } = await refuserPreferredAndPrimaryFailingReceipts();
+
+    await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
+    expect(third.getTransactionReceipt.calls).toHaveLength(1);
+
+    // Calls still start at the refuser, not at the endpoint the receipt came from.
+    await expect(call(client)).resolves.toBe('refuser');
+    expect(third.call.calls).toHaveLength(0);
+  });
+
+  it('does not stall on a failing endpoint again once another has served the receipt', async () => {
+    const { client, primary, refuser, third } = await refuserPreferredAndPrimaryFailingReceipts();
+
+    for (let i = 0; i < 5; i += 1) await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
+
+    // One attempt at the failing primary, then every lookup starts at the third.
+    expect(primary.getTransactionReceipt.calls).toHaveLength(1);
+    expect(third.getTransactionReceipt.calls).toHaveLength(5);
+    expect(refuser.getTransactionReceipt.calls).toHaveLength(1);
+  });
+
+  it('keeps a write-proven preference when the receipt is served by another endpoint', async () => {
+    // The backup refused a receipt lookup earlier. It then accepts a write, so
+    // it is the endpoint whose pending nonce is current. A receipt lookup that
+    // goes to the primary because of the remembered refusal must not change
+    // that: the next transaction is still prepared at the backup.
+    const primary: any = { getTransactionReceipt: recorder(async () => receipt) };
+    const backup: any = {
+      getTransactionReceipt: recorder(async (): Promise<typeof receipt> => { throw refused403(); }),
+    };
+    const populatedAt: string[] = [];
+    const makeSigner = () => ({
+      address: `0x${'ab'.repeat(20)}`,
+      connect: (p: unknown) => ({ address: `0x${'ab'.repeat(20)}`, boundTo: p }),
+    }) as any;
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => {
+      const at = s.boundTo === primary ? 'primary' : 'backup';
+      populatedAt.push(at);
+      return at === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' });
+    } } }) } as any;
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient(
+      [primary, backup], URLS.slice(0, 2), signPopulated as SignPopulatedFn, { enabled: true },
+    );
+
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write-proven: the backup
+    await client.getReceipt('0xold');                                          // refused there once
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write-proven again
+    expect(populatedAt).toEqual(['primary', 'backup', 'primary', 'backup']);
+
+    await expect(client.getReceipt('0xold')).resolves.toBe(receipt);
+    expect(backup.getTransactionReceipt.calls).toHaveLength(1);
+
+    populatedAt.length = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    expect(populatedAt).toEqual(['backup']);
   });
 
   it('still reaches the refusing endpoint when no other endpoint answers', async () => {
