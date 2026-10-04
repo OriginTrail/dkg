@@ -153,6 +153,7 @@ import {
 } from './rfc64/public-catalog-successor-producer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
   Rfc64PublicCatalogTransportErrorV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
@@ -1337,6 +1338,7 @@ type Rfc64CatalogAuthorityFailureCodeV1 =
   | 'registered-authority-unfinalized'
   /** Private graph whose authenticated lifecycle roster is not resolvable YET. */
   | 'registered-private-roster-unresolved'
+  | 'unregistered-private-roster-unresolved'
   | 'unregistered-owner-unresolved'
   | 'access-policy-unresolved';
 
@@ -1383,6 +1385,7 @@ function requireRfc64ContextGraphAuthorityReaderV1(
 const RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1: ReadonlySet<string> = new Set([
   'registered-authority-unfinalized',
   'registered-private-roster-unresolved',
+  'unregistered-private-roster-unresolved',
 ]);
 
 /**
@@ -2053,10 +2056,35 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
       return null;
     }
-    const gate = await withRpcUsageSite(
-      CG_AUTH_RPC_SITES.rfc64Roster,
-      () => this.getMemberRecoveryRosterSource(contextGraphId),
-    ).catch(() => null);
+    // The creator's explicit local-first registration marker already proves
+    // this graph has no chain roster. Reading the general member-recovery
+    // authority here would ask the accepted catalog policy we are currently
+    // rotating to authorize its own successor. A concurrent admission can
+    // then make that read return unavailable and strand the new member behind
+    // the old policy. Read the creator's own confirmed _meta instead, while
+    // keeping merged revocations effective and fencing registration changes.
+    const localFirst = await this.isLocalFirstUnregisteredContextGraph(contextGraphId);
+    const gate = localFirst
+      ? await (async () => {
+          const revision = this.contextGraphMetaProjection
+            .readContextGraphAuthorityFactsRevision(contextGraphId);
+          const merged = await this.getLocalMetadataMemberRecoveryGate(contextGraphId);
+          const own = await this.getOwnCgMetaFacts(contextGraphId);
+          if (
+            !await this.isLocalFirstUnregisteredContextGraph(contextGraphId)
+            || this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId) !== revision
+          ) return null;
+          const named = new Set(
+            [...own.allowedAgents, ...own.participantAgents]
+              .map((address) => address.toLowerCase()),
+          );
+          return merged?.filter((address) => named.has(address.toLowerCase())) ?? null;
+        })().catch(() => null)
+      : await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.rfc64Roster,
+          () => this.getMemberRecoveryRosterSource(contextGraphId),
+        ).catch(() => null);
     if (gate === null || gate.length === 0) return null;
     const members = new Set<EvmAddressV1>();
     for (const candidate of gate) {
@@ -3699,7 +3727,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             }
           }
           if (accessPolicy === 'private' && members === null) {
-            throw new Error(
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              localFirstUnregistered
+                ? 'unregistered-private-roster-unresolved'
+                : 'unregistered-owner-unresolved',
               'unregistered private RFC-64 Context Graph has no authenticated lifecycle roster',
             );
           }
@@ -4924,6 +4955,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         });
       },
     });
+  }
+
+  /** Replay only this graph's current head to the exact approved peer. */
+  async reannounceRfc64CatalogAfterJoinApprovalV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    approvedAgentAddress: string,
+    peerId: string,
+  ): Promise<boolean> {
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    if (accepted === null) return false;
+    if (
+      accepted.policy.accessPolicy === 1
+      && !accepted.roster?.members.some((member) =>
+        member.agentAddress.toLowerCase() === approvedAgentAddress.toLowerCase())
+    ) return false;
+    const replay = await this.reannounceRfc64CatalogHeadsToPeerV1(peerId, {
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+      networkId: accepted.policy.networkId,
+      contextGraphId: accepted.policy.contextGraphId,
+      policyDigest: accepted.policyDigest,
+    });
+    return replay.failed === 0;
   }
 
   /** Request scoped head replay from already-connected peers after late activation. */

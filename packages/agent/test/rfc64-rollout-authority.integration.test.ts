@@ -5397,6 +5397,7 @@ describe('RFC-64 rollout authority integration', () => {
     // graph `blocked`, closing the only root-scope SWM lane a catalog-selected
     // graph has.
     expect(isRfc64TransientAuthorityRefreshFailureV1('registered-private-roster-unresolved')).toBe(true);
+    expect(isRfc64TransientAuthorityRefreshFailureV1('unregistered-private-roster-unresolved')).toBe(true);
     expect(isRfc64TransientAuthorityRefreshFailureV1('registered-authority-unfinalized')).toBe(true);
     // Genuine denials must still fail closed.
     for (const denial of [
@@ -6168,6 +6169,55 @@ describe('RFC-64 rollout authority integration', () => {
     expect(BigInt(await curator.readRfc64PrivateRosterVersionV1(contextGraphId)))
       .toBeGreaterThan(admittedVersion);
     expect(curator.resolveRfc64PrivateReadRosterV1(contextGraphId)).toEqual([AUTHOR]);
+  });
+
+  it('uses only confirmed own metadata for a local-first private roster during catalog rotation', async () => {
+    const contextGraphId = `${AUTHOR}/local-first-roster-rotation` as ContextGraphIdV1;
+    const curator = await startAgent({ name: 'local-first-roster-rotation' });
+    (curator as any).defaultAgentAddress = AUTHOR;
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name: 'Local-first private roster',
+      accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    await curator.inviteAgentToContextGraph(contextGraphId, MEMBER, AUTHOR);
+    expect(await curator.hasConfirmedMetaState(contextGraphId)).toBe(true);
+    expect(await curator.isLocalFirstUnregisteredContextGraph(contextGraphId)).toBe(true);
+
+    const generalRecovery = vi.spyOn(curator, 'getMemberRecoveryRosterSource')
+      .mockRejectedValue(new Error('catalog policy is rotating'));
+    vi.spyOn(curator, 'getLocalMetadataMemberRecoveryGate')
+      .mockResolvedValue([AUTHOR, MEMBER, NONMEMBER]);
+    await expect(curator.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
+      .resolves.toEqual([AUTHOR, MEMBER].sort());
+    expect(generalRecovery).not.toHaveBeenCalled();
+  });
+
+  it('replays an approved private catalog only to a member of its accepted roster', async () => {
+    const contextGraphId = `${AUTHOR}/approved-catalog-replay` as ContextGraphIdV1;
+    const curator = await startAgent({ name: 'approved-catalog-replay' });
+    const policyDigest = `0x${'ab'.repeat(32)}` as Digest32V1;
+    vi.spyOn(curator, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue({
+      policy: { networkId: NETWORK_ID, contextGraphId, accessPolicy: 1 },
+      policyDigest,
+      roster: { members: [{ agentAddress: MEMBER }] },
+    } as any);
+    const replay = vi.spyOn(curator, 'reannounceRfc64CatalogHeadsToPeerV1')
+      .mockResolvedValue(Object.freeze({ announced: 1, failed: 0, manifest: Object.freeze([]) }));
+
+    await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
+      contextGraphId, NONMEMBER, 'nonmember-peer',
+    )).resolves.toBe(false);
+    expect(replay).not.toHaveBeenCalled();
+    await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
+      contextGraphId, MEMBER, 'member-peer',
+    )).resolves.toBe(true);
+    expect(replay).toHaveBeenCalledWith('member-peer', expect.objectContaining({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      policyDigest,
+    }));
   });
 
   it('rejects an out-of-order unregistered roster refresh after removal', async () => {
