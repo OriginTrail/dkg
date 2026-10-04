@@ -47,6 +47,29 @@ import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-au
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
 
+// Lets one test act at the await boundary of a successful join proof: after
+// the proof's own final checks, and before its caller resumes.
+const afterApprovedPrivateProof = vi.hoisted(() => ({
+  run: null as null | (() => Promise<void>),
+}));
+vi.mock('../src/approved-private-replica.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/approved-private-replica.js')>();
+  return {
+    ...original,
+    resolveApprovedPrivateReplicaAuthority: async (
+      ...args: Parameters<typeof original.resolveApprovedPrivateReplicaAuthority>
+    ) => {
+      const result = await original.resolveApprovedPrivateReplicaAuthority(...args);
+      const run = afterApprovedPrivateProof.run;
+      if (run !== null && result?.kind === 'unregistered-private-replica') {
+        afterApprovedPrivateProof.run = null;
+        await run();
+      }
+      return result;
+    },
+  };
+});
+
 const OWNER = '0x4bf5c3c4b96894c7f1e7f7d625e4b48051b443b4';
 const OUTSIDER = '0x1111111111111111111111111111111111111111';
 const CONTEXT_GRAPH_ID = 'eu-open-calls';
@@ -1808,6 +1831,67 @@ describe('approved private bare-name replica authorization', () => {
       .toBeNull();
   });
 
+  it.each([
+    {
+      mismatch: 'the lifecycle owner is not the proved curator',
+      message: 'does not match lifecycle metadata',
+    },
+    {
+      mismatch: 'the confirmation of the private definition cannot be read',
+      message: 'no authenticated lifecycle roster',
+    },
+    {
+      mismatch: 'the roster does not contain the approved member',
+      message: 'absent from the authenticated roster',
+    },
+  ] as const)('accepts no catalog authority when $mismatch', async ({ mismatch, message }) => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const receiver = fixture.receiver as unknown as Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    >;
+    if (mismatch === 'the lifecycle owner is not the proved curator') {
+      vi.spyOn(receiver, 'getContextGraphOwner')
+        .mockResolvedValue(`did:dkg:agent:0x${'ab'.repeat(20)}`);
+    } else if (mismatch === 'the confirmation of the private definition cannot be read') {
+      vi.spyOn(receiver, 'hasConfirmedMetaState').mockRejectedValue(new Error('store read failed'));
+    } else {
+      vi.spyOn(receiver, 'getLocalMetadataMemberRecoveryGate').mockResolvedValue([OWNER]);
+    }
+
+    await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    )).rejects.toThrow(message);
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+  });
+
+  it.each(REQUESTER_STATE_CHANGES)(
+    'accepts no catalog authority when the join request is %s as its successful proof returns',
+    async (change) => {
+      const fixture = await approvedBareNameReplicaFixture();
+      // The proof has passed its own final checks; the composition that
+      // awaits it has not resumed yet. A revision captured after this point
+      // would already contain the change and could not see it any more.
+      afterApprovedPrivateProof.run = () => changeApprovedJoinRequest(fixture, change);
+      try {
+        await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+          CONTEXT_GRAPH_ID,
+          undefined,
+          { kind: 'finalized-absence' },
+        )).rejects.toThrow('no authenticated owner authority');
+      } finally {
+        afterApprovedPrivateProof.run = null;
+      }
+      expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+        .toBeNull();
+    },
+  );
+
   it('retains an approved private proof when only another graph changes', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     const proof = pauseApprovedPrivateProofOnce(fixture);
@@ -1990,6 +2074,65 @@ describe('approved private bare-name replica authorization', () => {
     paused.release();
 
     await expect(roster).resolves.toBeNull();
+  });
+
+  it.each([
+    'the join proof',
+    'the first registration read',
+    'the roster read',
+    'the own-metadata read',
+    'the second registration read',
+  ] as const)('returns no catalog peer roster when %s fails', async (failing) => {
+    const fixture = await approvedBareNameReplicaFixture();
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    await expect(fixture.receiver.resolveRfc64VerifiedPrivateRosterV1(CONTEXT_GRAPH_ID))
+      .resolves.toEqual([OWNER, fixture.memberAddress].sort());
+
+    const receiver = fixture.receiver as unknown as Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    >;
+    const failure = new Error('store read failed');
+    if (failing === 'the join proof') {
+      const originalQuery = fixture.receiver.store.query.bind(fixture.receiver.store);
+      vi.spyOn(fixture.receiver.store, 'query').mockImplementation(async (query, options) => {
+        if (options?.source === 'agent.contextGraph.approvedPrivateReplica') throw failure;
+        return originalQuery(query, options);
+      });
+    } else if (failing === 'the first registration read') {
+      vi.spyOn(receiver, 'readRfc64RegisteredAuthoritySnapshotV1').mockRejectedValue(failure);
+    } else if (failing === 'the roster read') {
+      vi.spyOn(receiver, 'getLocalMetadataMemberRecoveryGate').mockRejectedValue(failure);
+    } else if (failing === 'the own-metadata read') {
+      // The proof reads the graph's own metadata too; fail only the read
+      // that follows the roster read.
+      const rosterRead = receiver.getLocalMetadataMemberRecoveryGate!.bind(fixture.receiver);
+      const ownRead = receiver.getOwnCgMetaFacts!.bind(fixture.receiver);
+      let rosterWasRead = false;
+      vi.spyOn(receiver, 'getLocalMetadataMemberRecoveryGate').mockImplementation(async (...args) => {
+        rosterWasRead = true;
+        return rosterRead(...args);
+      });
+      vi.spyOn(receiver, 'getOwnCgMetaFacts').mockImplementation(async (...args) => {
+        if (rosterWasRead) throw failure;
+        return ownRead(...args);
+      });
+    } else {
+      const registrationRead = receiver.readRfc64RegisteredAuthoritySnapshotV1!
+        .bind(fixture.receiver);
+      vi.spyOn(receiver, 'readRfc64RegisteredAuthoritySnapshotV1')
+        .mockImplementationOnce(registrationRead)
+        .mockRejectedValue(failure);
+    }
+
+    await expect(fixture.receiver.resolveRfc64VerifiedPrivateRosterV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeNull();
+    await expect(fixture.receiver.resolveRfc64CatalogLocalAgentAddressV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeNull();
   });
 
   it('does not use an unconfirmed private definition as a catalog roster', async () => {

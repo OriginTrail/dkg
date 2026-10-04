@@ -3715,6 +3715,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // this revision only before the later roster read could combine an
           // old owner with a new policy/roster generation and still pass the
           // acceptance-time fence.
+          //
+          // A join-approved composition keeps the revision its proof was
+          // taken against. Capturing a fresh one here would make a change
+          // that landed between the proof's last check and this line the new
+          // baseline, and the acceptance-time fence could no longer see it.
           metadataAuthorityRevision = source.kind === 'approved-private'
             ? source.metadataRevision
             : this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId);
