@@ -16,11 +16,24 @@ afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(
 async function fixture() {
   const store = new OxigraphStore(); stores.push(store);
   const publisher = new DKGPublisher({ store, chain: new NoChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
-  await publisher.assertionCreate(CG, NAME, AUTHOR); await publisher.markSwmShareComplete(CG, NAME, AUTHOR);
-  return { store, publisher, graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AUTHOR, NAME) };
+  await publisher.assertionCreate(CG, NAME, AUTHOR);
+  const graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
+  // Ownership rejection must be the deciding guard, independent of layer eligibility.
+  await store.deleteByPattern({ graph, subject, predicate: `${DKG}memoryLayer` });
+  await store.insert([{ graph, subject, predicate: `${DKG}memoryLayer`, object: '"SWM"' }]);
+  await publisher.markSwmShareComplete(CG, NAME, AUTHOR);
+  return { store, publisher, graph, subject };
 }
 
 describe('publication lifecycle owner boundary', () => {
+  it('consumes completion for the matching owner on an eligible SWM lifecycle', async () => {
+    const f = await fixture();
+    await f.store.insert([{ graph: f.graph, subject: f.subject, predicate: `${DKG}shareOperationId`, object: '"original"' }]);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, 'original');
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+  });
+
   it.each([['"different"'], ['urn:invalid:owner'], ['""'], ['"original"', '"other"']])(
     'does not consume completion with corrupt or replaced owner rows %j', async (...objects) => {
       const f = await fixture();
