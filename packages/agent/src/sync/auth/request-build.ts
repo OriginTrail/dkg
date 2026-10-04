@@ -200,8 +200,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // and a NEW responder treats a request WITHOUT meta pageMode as non-negotiated
   // (plain meta serializer). The signed `limit` still rides the 500-row legacy
   // cap below, so digests stay wire-compatible.
-  const useByteBudgetPage = !includeSharedMemory
-    && (phase === 'data' || phase === 'meta')
+  const useByteBudgetPage = (phase === 'data' || phase === 'meta')
     && (
       requestedLimit > SYNC_PAGE_SIZE
       // Exact DATA must remain on the responder's bounded page-only path after

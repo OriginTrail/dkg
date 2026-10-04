@@ -1,6 +1,7 @@
 import { materializeConfirmedGraphKnowledgeAsset, materializeTentativeGraphKnowledgeAsset } from './confirmed-graph-publish-materialization.js';
 import { replaceExactKnowledgeAssetGraph } from './knowledge-asset-graph-write.js';
 import { createKnowledgeAssetsWithMintAdoption } from './adopt-existing-mint.js';
+import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
@@ -6982,45 +6983,13 @@ export class DKGPublisher implements Publisher {
     }
   }
 
-  /**
-   * A draft mutation is only valid while the lifecycle is exactly created/WM.
-   * The checks are separate and bounded so corrupt duplicate rows cannot form
-   * an unbounded Cartesian product in a recovery path.
-   */
   private async assertWorkingMemoryLifecycleMutable(
     contextGraphId: string,
     name: string,
     agentAddress: string,
     subGraphName?: string,
   ): Promise<void> {
-    const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const [stateResult, layerResult] = await Promise.all([
-      this.store.query(
-        `SELECT ?state WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
-          <${assertSafeIri(lifecycle)}> <http://dkg.io/ontology/state> ?state
-        } } LIMIT 2`,
-      ),
-      this.store.query(
-        `SELECT ?layer WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
-          <${assertSafeIri(lifecycle)}> <http://dkg.io/ontology/memoryLayer> ?layer
-        } } LIMIT 2`,
-      ),
-    ]);
-    const state = stateResult.type === 'bindings' && stateResult.bindings.length === 1
-      ? stripOptionalLiteral(stateResult.bindings[0]?.['state'])
-      : undefined;
-    const layer = layerResult.type === 'bindings' && layerResult.bindings.length === 1
-      ? stripOptionalLiteral(layerResult.bindings[0]?.['layer'])
-      : undefined;
-    if (state !== 'created' || layer !== MemoryLayer.WorkingMemory) {
-      throw Object.assign(
-        new Error(
-          `Assertion "${name}" is not an active Working Memory draft; reopen it before mutating it`,
-        ),
-        { code: 'KA_WM_LIFECYCLE_REQUIRED' },
-      );
-    }
+    return assertWorkingMemoryLifecycleMutable(this.store, contextGraphId, name, agentAddress, subGraphName);
   }
 
   /**

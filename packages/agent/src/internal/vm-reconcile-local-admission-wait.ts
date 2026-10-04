@@ -8,6 +8,9 @@
  * graph is kept in arrival order and nudged once the admission can take its
  * fetch, one graph at a time.
  *
+ * A pass that could not start its work at all, because the source it had to
+ * ask did not answer, waits here too (see {@link VmReconcileLocalAdmissionWait.defer}).
+ *
  * It owns no sync lease and no VM worker. A nudge re-enters the ordinary
  * bounded dispatcher, and the periodic sweep still visits a waiting graph.
  */
@@ -30,6 +33,8 @@ export interface LocalAdmissionWaitOptions {
 }
 
 interface Waiter extends LocalAdmissionWaitOptions {
+  /** Parked by `defer`: its last pass ended as a failed one. */
+  deferred: boolean;
   onAbort: () => void;
 }
 
@@ -44,8 +49,10 @@ export interface VmReconcileLocalAdmissionWaitDeps {
   /**
    * Nudge one graph and return its pass's completion. Undefined when the
    * nudge was not admitted (held after a failed pass, or no queue room).
+   * `deferred` says the graph was parked by `defer`, so the hold a failed
+   * pass leaves is its own and this nudge is the retry.
    */
-  readonly nudge: (key: string) => Promise<unknown> | undefined;
+  readonly nudge: (key: string, deferred: boolean) => Promise<unknown> | undefined;
   /** Bound on retained waiters. */
   readonly maxWaiters: number;
 }
@@ -104,6 +111,26 @@ export class VmReconcileLocalAdmissionWait {
     return parked;
   }
 
+  /**
+   * A pass ended before its work started: the source it had to ask gave no
+   * answer. Nothing here can read when it will, so the graph goes behind the
+   * others and no waiter is nudged for one delay. A graph that keeps getting
+   * no answer then costs one short pass per delay, in turn with the rest.
+   * `canAdmit` is the same readiness contract as for a refused fetch: the
+   * graph is not asked again while its fetch could not start anyway.
+   *
+   * Returns `again` when the pass was this wait's own nudge, `parked` when it
+   * came from elsewhere, and undefined when the graph was not taken.
+   */
+  defer(key: string, options: LocalAdmissionWaitOptions): 'parked' | 'again' | undefined {
+    if (this.closed || options.signal?.aborted || !options.isCurrent()) return undefined;
+    const nudged = this.turn?.key === key;
+    if (!this.park(key, options, 'back', true)) return undefined;
+    this.holdUntil = Date.now() + RETRY_MS;
+    this.armTimer();
+    return nudged ? 'again' : 'parked';
+  }
+
   /** A pass of this graph is starting. Hand the result to {@link passEnded}. */
   passStarted(key: string): LocalAdmissionPass {
     return { key, waiting: this.waiters.get(key) };
@@ -133,10 +160,12 @@ export class VmReconcileLocalAdmissionWait {
     key: string,
     options: LocalAdmissionWaitOptions,
     position: 'front' | 'back' | 'keep',
+    deferred = false,
   ): boolean {
     const existing = this.waiters.get(key);
     if (!existing && this.waiters.size >= this.deps.maxWaiters) return false;
     const waiter: Waiter = {
+      deferred,
       canAdmit: options.canAdmit,
       isCurrent: options.isCurrent,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -187,7 +216,7 @@ export class VmReconcileLocalAdmissionWait {
         }
         if (!admissionAvailable(waiter)) continue;
         this.remove(key);
-        const completion = this.deps.nudge(key);
+        const completion = this.deps.nudge(key, waiter.deferred);
         // Not admitted: the periodic sweep owns the graph.
         if (!completion) continue;
         const started = { key, startedAt: now };

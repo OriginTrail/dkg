@@ -285,6 +285,55 @@ describe('context graph open enrollment policy', () => {
     });
   }
 
+  it('replays catalog authority only after the approved requester receives its join notice', async () => {
+    const { agent, owner } = await boot();
+    vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1')
+      .mockReturnValue({ track2Enabled: true } as any);
+    vi.spyOn(agent, 'readRfc64CurrentCuratorAuthorityBindingV1').mockResolvedValue(null);
+    const deliver = vi.spyOn(agent, 'deliverPrivateJoinNotification')
+      .mockResolvedValueOnce({ delivered: true, peerId: 'approved-peer', error: null })
+      .mockResolvedValueOnce({ delivered: false, peerId: 'queued-peer', error: 'queued' });
+    const refresh = vi.spyOn(agent, 'reconcileRfc64CatalogAccessAuthorityV1')
+      .mockResolvedValue(null);
+    const replay = vi.spyOn(agent, 'reannounceRfc64CatalogAfterJoinApprovalV1')
+      .mockResolvedValue(true);
+
+    await agent.notifyJoinApproval('private-join-replay', owner.agentAddress, 'generation');
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(replay).toHaveBeenCalledWith(
+      'private-join-replay', owner.agentAddress, 'approved-peer',
+    );
+
+    await agent.notifyJoinApproval('private-join-replay', owner.agentAddress, 'generation');
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(replay).toHaveBeenCalledOnce();
+  });
+
+  it('retains an exact approved-peer replay demand when authority is still settling', async () => {
+    const { agent, owner } = await boot();
+    vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1')
+      .mockReturnValue({ track2Enabled: true } as any);
+    vi.spyOn(agent, 'readRfc64CurrentCuratorAuthorityBindingV1').mockResolvedValue(null);
+    vi.spyOn(agent, 'deliverPrivateJoinNotification')
+      .mockResolvedValue({ delivered: true, peerId: 'approved-peer', error: null });
+    const refresh = vi.spyOn(agent, 'reconcileRfc64CatalogAccessAuthorityV1')
+      .mockResolvedValue(null);
+    const replay = vi.spyOn(agent, 'reannounceRfc64CatalogAfterJoinApprovalV1')
+      .mockResolvedValue(false);
+    const retry = vi.spyOn(agent, 'scheduleRfc64CatalogAfterJoinApprovalRetryV1')
+      .mockReturnValue(true);
+
+    await agent.notifyJoinApproval('private-join-pending-replay', owner.agentAddress, 'generation');
+
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(replay).toHaveBeenCalledTimes(3);
+    expect(retry).toHaveBeenCalledOnce();
+    expect(retry).toHaveBeenCalledWith(
+      'private-join-pending-replay', owner.agentAddress, 'approved-peer',
+    );
+  });
+
   async function buildColdKeyDelegation(input: {
     wallet: ethers.Wallet;
     deploymentId: string | undefined;

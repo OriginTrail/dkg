@@ -1477,6 +1477,65 @@ describe('durable sync lifecycle chain binding', () => {
     expect(agentLike.invalidateListContextGraphsCache).toHaveBeenCalled();
   });
 
+  it.each([
+    ['the root graph', undefined],
+    ['a named subgraph', 'code'],
+  ] as const)(
+    'retires the legacy marker in the namespace of a twin retired from %s',
+    async (_label, subGraphName) => {
+      const root = new Uint8Array(32);
+      root[31] = 2;
+      const chain = {
+        chainId: 'otp:2043',
+        getLatestMerkleRoot: async () => root,
+        getMerkleRootCount: async () => 2n,
+        getKAContextGraphId: async () => 14n,
+        getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+        getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+        verifyKAUpdate: async () => ({
+          verified: true,
+          onChainMerkleRoot: root,
+          blockNumber: 123,
+          txIndex: 4,
+          merkleRootCount: 2n,
+        }),
+      } as ChainAdapter;
+      // The reconciler derives the twin's namespace from the authenticated
+      // asset and hands it to the retirement callback.
+      mockedReconcileFinalizedSwmTwin.mockImplementationOnce(async ({ retire }) => {
+        await retire({
+          contextGraphId,
+          kaUal: ual,
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+          swmGraph: 'urn:swm',
+          ...(subGraphName === undefined ? {} : { subGraphName }),
+        } satisfies FinalizedSwmTwinRetirement);
+        return 'retired';
+      });
+      const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async () => {});
+      const warnings = vi.fn();
+      const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings, {
+        onAgentLike: (value) => {
+          value.retireLegacySwmAfterVerifiedVmTwin = retireLegacySwmAfterVerifiedVmTwin;
+        },
+      });
+
+      await expect(storeGraphScopedAsset(
+        graphScopedStoreRequest(graphScopedAsset(root), Date.now() + 60_000),
+      )).resolves.toBe('applied');
+
+      // A root marker must never be retired on the evidence of a subgraph twin.
+      expect(retireLegacySwmAfterVerifiedVmTwin).toHaveBeenCalledExactlyOnceWith({
+        contextGraphId,
+        kaUal: ual,
+        assertionVersion: 2n,
+        subGraphName,
+      });
+      expect(warnings).not.toHaveBeenCalled();
+    },
+  );
+
   it('maps already-retired SWM recovery evidence to metadata suppression at the lifecycle boundary', async () => {
     let disposition: unknown;
     mockedReconcileFinalizedSwmTwinFromDescriptor.mockResolvedValueOnce(
