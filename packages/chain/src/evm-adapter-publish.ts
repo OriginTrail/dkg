@@ -94,9 +94,6 @@ class ChainProofAnchorUnavailableError extends Error {
 }
 
 export class PublishMethods extends EVMChainAdapterBase {
-  // Installed by the concrete adapter's existing storage-read mixin assembly.
-  declare readKnowledgeAssetVersionSnapshot: StorageReadMethods['readKnowledgeAssetVersionSnapshot'];
-  declare knowledgeAssetVersionSnapshotIsCurrent: StorageReadMethods['knowledgeAssetVersionSnapshotIsCurrent'];
   async resolvePublisherPublishPlan(
     request: PublisherPublishPlanRequest,
   ): Promise<PublisherPublishPlan> {
@@ -828,6 +825,14 @@ export class PublishMethods extends EVMChainAdapterBase {
     expectedMerkleRoot: Uint8Array,
     expectedContextGraphId: bigint,
   ): Promise<OnChainPublishResult | null> {
+    // Concrete EVMChainAdapter assembly requires both storage-read methods.
+    // An incomplete mixin holder cannot prove current provenance; refuse it
+    // once at composition rather than treating a missing reader as a null read.
+    const readers = this as Partial<Pick<StorageReadMethods,
+      'readKnowledgeAssetVersionSnapshot' | 'knowledgeAssetVersionSnapshotIsCurrent'>>;
+    const readCurrentVersion = readers.readKnowledgeAssetVersionSnapshot;
+    const versionIsCurrent = readers.knowledgeAssetVersionSnapshotIsCurrent;
+    if (typeof readCurrentVersion !== 'function' || typeof versionIsCurrent !== 'function') return null;
     return getEvmMintedKnowledgeAssetProvenance({
       storage: this.contracts.knowledgeAssetStorage,
       readRoots: (storage, id) => this.readContract(storage, 'kas.getMerkleRoots', 'getMerkleRoots', id),
@@ -842,8 +847,8 @@ export class PublishMethods extends EVMChainAdapterBase {
       },
       resolveCanonicalPublish: (hash, options) => this.resolveCanonicalFinalizationPublish(hash, options),
       isReceiptFinalAndCanonical: (receipt) => this.isReceiptBlockFinalAndCanonical(receipt),
-      readCurrentVersion: async (id) => this.readKnowledgeAssetVersionSnapshot?.(id) ?? null,
-      versionIsCurrent: async (id, snapshot) => this.knowledgeAssetVersionSnapshotIsCurrent?.(id, snapshot) ?? false,
+      readCurrentVersion: (id) => readCurrentVersion.call(this, id),
+      versionIsCurrent: (id, snapshot) => versionIsCurrent.call(this, id, snapshot),
     }, kaId, expectedMerkleRoot, expectedContextGraphId);
   }
 

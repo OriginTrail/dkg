@@ -32,12 +32,14 @@ import {
   createOperationContext,
   Logger,
   generateEd25519Keypair,
+  ed25519Sign, encodeAccessRequest, decodeAccessResponse,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter, type OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetsWithMintAdoption } from '../src/adopt-existing-mint.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
+import { AccessHandler } from '../src/access-handler.js';
 import { buildSeal, buildUpdateSeal, mockSealCtx } from './_helpers/seal.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
 
@@ -170,6 +172,41 @@ async function setupSealedGraphPublish(privateQuads: Quad[] = []) {
 }
 
 describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
+  it.each(['allowList', 'ownerOnly'] as const)('converges equal-version adoption metadata after revoking peers to %s', async policy => {
+    const privateQuads = [{ subject: 'urn:test:adopt-existing-mint', predicate: 'urn:test:secret', object: '"private value"', graph: '' }];
+    const s = await setupSealedGraphPublish(privateQuads);
+    try {
+      // Real access reads require the registration owned by joined context graphs.
+      await s.store.insert([{ subject: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://dkg.network/ontology#ContextGraph', graph: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_meta` }]);
+      const original = await s.publisher.publish({ ...s.publishOptions, accessPolicy: 'allowList', allowedPeers: ['Alice', 'Bob'] });
+      expect(original.status).toBe('confirmed');
+      const handler = new AccessHandler(s.store, new TypedEventBus());
+      const key = await generateEd25519Keypair();
+      const request = encodeAccessRequest({ kaUal: s.ual, requesterPeerId: 'Bob', paymentProof: new Uint8Array(0),
+        requesterSignature: await ed25519Sign(new TextEncoder().encode(s.ual), key.secretKey), requesterPublicKey: key.publicKey });
+      async function access(peer: string) { return decodeAccessResponse(await handler.handler(request, peer as never)); }
+      expect(await access('Bob')).toMatchObject({ granted: true, rejectionReason: '' });
+      s.chain.mintError = kaIdAlreadyMintedRevert(s.reservedKaId);
+      s.chain.provenanceResult = original.onChainResult!;
+      const retry = await s.publisher.publish({ ...s.publishOptions, accessPolicy: policy,
+        ...(policy === 'allowList' ? { allowedPeers: ['Alice'] } : {}) });
+      expect(retry.status).toBe('confirmed');
+      expect(retry.onChainResult?.txHash).toBe(original.onChainResult?.txHash);
+      expect(s.chain.provenanceCalls).toHaveLength(1);
+      const meta = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_meta`;
+      expect(await s.store.query(`SELECT ?policy WHERE { GRAPH <${meta}> { <${s.ual}> <http://dkg.io/ontology/accessPolicy> ?policy } }`))
+        .toMatchObject({ bindings: [{ policy: JSON.stringify(policy) }] });
+      const peers = await s.store.query(`SELECT ?peer WHERE { GRAPH <${meta}> { <${s.ual}> <http://dkg.io/ontology/allowedPeer> ?peer } }`);
+      expect(peers).toMatchObject({ bindings: policy === 'allowList' ? [{ peer: '"Alice"' }] : [] });
+      expect(await access('Bob')).toMatchObject({ granted: false });
+      const permitted = await access(policy === 'allowList' ? 'Alice' : 'adoption-publisher');
+      expect(permitted.granted).toBe(true);
+      expect(new TextDecoder().decode(permitted.nquads)).toContain('private value');
+    } finally { await s.store.close(); }
+  });
+
   it('adopts OUR already-minted kaId: synthesized provenance flows through the confirmed path', async () => {
     const s = await setupSealedGraphPublish();
     s.chain.mintError = kaIdAlreadyMintedRevert(s.reservedKaId);

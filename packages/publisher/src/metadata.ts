@@ -43,7 +43,7 @@ const SCHEMA = 'http://schema.org/';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
-const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
+export const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
 const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
   `${DKG}accessPolicy`,
   `${DKG}allowedPeer`,

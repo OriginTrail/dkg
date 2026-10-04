@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { createGraphKnowledgeAssetScope, MemoryLayer, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
 import { materializeConfirmedGraphPublish } from '../src/confirmed-graph-publish-materialization.js';
-import { generateGraphKnowledgeAssetMetadata, withMaterializationLock, writeMaterializedVersion } from '../src/metadata.js';
+import { computePrivateRootV10 } from '../src/merkle.js';
+import { replaceCatalogQuads } from '../src/catalog-persistence.js';
+import { generateGraphKnowledgeAssetMetadata, readMaterializedVersion, withMaterializationLock, writeMaterializedVersion } from '../src/metadata.js';
 
 function fixture() {
   const store = new OxigraphStore();
@@ -23,6 +25,63 @@ function fixture() {
 }
 
 describe('confirmed graph publish materialization', () => {
+  it('persists every successful slice and ordering, then refuses older writes to the same assertion', async () => {
+    const input = fixture();
+    const privateQuads = [{ subject: 'urn:data', predicate: 'urn:secret', object: '"persisted private"', graph: '' }];
+    const catalogGraph = 'urn:materialization-catalog';
+    const catalogRows = [{ subject: input.scope.ual, predicate: 'urn:catalog-status', object: '"confirmed"', graph: catalogGraph }];
+    const confirmedQuads = generateGraphKnowledgeAssetMetadata({ ual: input.scope.ual, contextGraphId: input.contextGraphId,
+      assertionVersion: 1, assertionGraph: input.vmGraph, publisherPeerId: 'owner', accessPolicy: 'ownerOnly',
+      merkleRoot: new Uint8Array(32).fill(7), timestamp: new Date(0), publicTripleCount: 1,
+      privateTripleCount: 1, privateMerkleRoot: computePrivateRootV10(privateQuads)!,
+    }, { status: 'confirmed', confirmation: { kind: 'transaction', provenance: { batchId: 7n, txHash: `0x${'11'.repeat(32)}` } } });
+    const persistCatalogEntry = vi.fn(async () => replaceCatalogQuads(input.store, catalogGraph, catalogRows));
+    const successful = { ...input, privateQuads, confirmedQuads, persistCatalogEntry };
+    try {
+      expect(await materializeConfirmedGraphPublish(successful)).toBe(true);
+      const data = () => input.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.vmGraph}> { ?s ?p ?o } }`);
+      expect(await data()).toMatchObject({ quads: [expect.objectContaining({ object: '"old"' })] });
+      const freshPrivateReader = new PrivateContentStore(input.store, new GraphManager(input.store));
+      expect(await freshPrivateReader.getKnowledgeAssetPrivateTriples(input.contextGraphId, input.scope)).toEqual(privateQuads);
+      expect(await input.store.query(`SELECT ?policy ?status WHERE { GRAPH <${input.metaGraph}> {
+        <${input.scope.ual}> <http://dkg.io/ontology/accessPolicy> ?policy ; <http://dkg.io/ontology/status> ?status } }`))
+        .toMatchObject({ bindings: [{ policy: '"ownerOnly"', status: '"confirmed"' }] });
+      expect(await input.store.query(`ASK { GRAPH <${catalogGraph}> { <${input.scope.ual}> <urn:catalog-status> "confirmed" } }`))
+        .toMatchObject({ value: true });
+      expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
+      for (const version of [{ blockNumber: 9, txIndex: 9 }, { blockNumber: 10, txIndex: 1 }]) {
+        expect(await materializeConfirmedGraphPublish({ ...successful, version,
+          vmQuads: input.vmQuads.map(q => ({ ...q, object: '"stale public"' })),
+          privateQuads: privateQuads.map(q => ({ ...q, object: '"stale private"' })),
+          confirmedQuads: confirmedQuads.map(q => q.predicate.endsWith('accessPolicy') ? { ...q, object: '"public"' } : q),
+        })).toBe(false);
+      }
+      expect(await data()).toMatchObject({ quads: [expect.objectContaining({ object: '"old"' })] });
+      expect(await freshPrivateReader.getKnowledgeAssetPrivateTriples(input.contextGraphId, input.scope)).toEqual(privateQuads);
+      expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
+      expect(persistCatalogEntry).toHaveBeenCalledOnce();
+    } finally { await input.store.close(); }
+  });
+
+  it('keeps the committed ordering fence after an interrupted equal-version metadata retry', async () => {
+    const input = fixture();
+    try {
+      expect(await materializeConfirmedGraphPublish(input)).toBe(true);
+      vi.spyOn(input.privateStore, 'replaceKnowledgeAssetPrivateTriples').mockRejectedValueOnce(new Error('private retry failed'));
+      await expect(materializeConfirmedGraphPublish({ ...input,
+        confirmedQuads: input.confirmedQuads.map(q => q.predicate.endsWith('accessPolicy')
+          ? { ...q, object: '"ownerOnly"' } : q),
+      })).rejects.toThrow('private retry failed');
+      expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
+      expect(await materializeConfirmedGraphPublish({ ...input, version: { blockNumber: 9, txIndex: 9 },
+        vmQuads: input.vmQuads.map(q => ({ ...q, object: '"stale after interrupted retry"' })),
+      })).toBe(false);
+      expect(await input.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.vmGraph}> { ?s ?p ?o } }`))
+        .toMatchObject({ quads: [expect.objectContaining({ object: '"old"' })] });
+      expect(input.persistCatalogEntry).toHaveBeenCalledOnce();
+    } finally { await input.store.close(); }
+  });
+
   it.each([{ blockNumber: 11, txIndex: 0 }, { blockNumber: 10, txIndex: 3 }])(
     'retains the newer chain ordering %j even at the same assertion version', async newer => {
       const input = fixture();

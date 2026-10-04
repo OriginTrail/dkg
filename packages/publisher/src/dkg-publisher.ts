@@ -1,6 +1,7 @@
 import { resolveKaUal } from './knowledge-asset-chain-identity.js';
 import { materializeConfirmedGraphPublish } from './confirmed-graph-publish-materialization.js';
 import { replaceExactKnowledgeAssetGraph } from './knowledge-asset-graph-write.js';
+import { convergeKnowledgeAssetMetadataRows } from './knowledge-asset-metadata-write.js';
 import { createKnowledgeAssetsWithMintAdoption } from './adopt-existing-mint.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
@@ -5126,7 +5127,8 @@ export class DKGPublisher implements Publisher {
             graphUpdate.scope.ual,
             metadata,
           );
-          await this.convergeKnowledgeAssetMetadataRows(
+          await convergeKnowledgeAssetMetadataRows(
+            this.store,
             labelMeta,
             graphUpdate.scope.ual,
             metadata,
@@ -7284,38 +7286,6 @@ export class DKGPublisher implements Publisher {
     operation: string,
   ): Promise<void> {
     return replaceExactKnowledgeAssetGraph(this.store, graphUri, quads, operation);
-  }
-
-  /**
-   * Retry-safe replacement of one KA's rows inside a shared metadata graph.
-   * Insert the complete new row set first, then prune rows from the previous
-   * snapshot that are no longer present. An interruption can temporarily leave
-   * duplicate values, but never removes the only discoverable metadata copy;
-   * retry converges to the exact requested set.
-   */
-  private async convergeKnowledgeAssetMetadataRows(
-    metaGraph: string,
-    subject: string,
-    quads: readonly Quad[],
-  ): Promise<void> {
-    const previous = await this.store.query(
-      `CONSTRUCT { <${assertSafeIri(subject)}> ?p ?o } WHERE { ` +
-        `GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(subject)}> ?p ?o } }`,
-    );
-    await this.store.insert(quads.map((quad) => ({ ...quad, graph: metaGraph })));
-    if (previous.type !== 'quads') return;
-    const nextKeys = new Set(
-      quads.map((quad) => JSON.stringify([quad.subject, quad.predicate, quad.object])),
-    );
-    const stale = previous.quads.filter(
-      (quad) => !nextKeys.has(JSON.stringify([quad.subject, quad.predicate, quad.object])),
-    );
-    if (stale.length > 0) {
-      // CONSTRUCT results carry no graph — restore the metadata graph before
-      // deleting, otherwise the delete targets the default graph and every
-      // superseded control-plane row survives alongside the new value.
-      await this.store.delete(stale.map((quad) => ({ ...quad, graph: metaGraph })));
-    }
   }
 
   /** Load the immutable access/sub-graph identity of an existing graph KA. */

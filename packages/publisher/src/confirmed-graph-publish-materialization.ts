@@ -2,6 +2,7 @@
 import type { GraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type { PrivateContentStore, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { replaceExactKnowledgeAssetGraph } from './knowledge-asset-graph-write.js';
+import { convergeKnowledgeAssetMetadataRows } from './knowledge-asset-metadata-write.js';
 import {
   replaceLocallyTrustedKnowledgeAssetControls,
   shouldApplyMaterialization,
@@ -31,7 +32,7 @@ export async function materializeConfirmedGraphPublish(input: Readonly<{
     await replaceLocallyTrustedKnowledgeAssetControls(input.store, input.scope.ual, input.confirmedQuads);
     await replaceExactKnowledgeAssetGraph(input.store, input.vmGraph, input.vmQuads,
       'Graph-scoped confirmed publish');
-    await input.store.insert(input.confirmedQuads);
+    await convergeKnowledgeAssetMetadataRows(input.store, input.metaGraph, input.scope.ual, input.confirmedQuads);
     // GH #1078 — supersede/persist private slices only now that the chain
     // has confirmed (before returning 'confirmed', so no read sees the KA
     // confirmed without its private data).

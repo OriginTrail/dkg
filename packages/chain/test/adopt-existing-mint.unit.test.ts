@@ -1,6 +1,8 @@
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
+import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { StorageReadMethods } from '../src/evm-adapter-storage-reads.js';
 import { EvmReceiptFinalityReader } from '../src/evm-adapter-receipt-finality.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { AdoptExistingMintRefusalError } from '../src/index.js';
@@ -65,6 +67,25 @@ function longHistoryFixture() {
 }
 
 describe('existing mint provenance', () => {
+  it('requires coherent read methods on the concrete assembled adapter', () => {
+    // This assignment also checks the public adapter's required type contract.
+    const assembled: Pick<StorageReadMethods, 'readKnowledgeAssetVersionSnapshot' | 'knowledgeAssetVersionSnapshotIsCurrent'>
+      = Object.create(EVMChainAdapter.prototype) as EVMChainAdapter;
+    expect(assembled.readKnowledgeAssetVersionSnapshot).toBe(StorageReadMethods.prototype.readKnowledgeAssetVersionSnapshot);
+    expect(assembled.knowledgeAssetVersionSnapshotIsCurrent).toBe(StorageReadMethods.prototype.knowledgeAssetVersionSnapshotIsCurrent);
+  });
+
+  it.each(['readKnowledgeAssetVersionSnapshot', 'knowledgeAssetVersionSnapshotIsCurrent'] as const)(
+    'refuses an incomplete holder without %s before starting provenance I/O', async missing => {
+      const f = fixture();
+      Reflect.set(f.chain, missing, undefined);
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID)).resolves.toBeNull();
+      expect(Reflect.get(f.chain, 'readContract')).not.toHaveBeenCalled();
+      expect(f.queryEventLogsPage).not.toHaveBeenCalled();
+      expect(f.readPublishReceipt).not.toHaveBeenCalled();
+    },
+  );
+
   it('recovers the actual transaction only after verifying root, graph and receipt finality', async () => {
     const f = fixture();
     await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
