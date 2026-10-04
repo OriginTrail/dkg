@@ -708,6 +708,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             finalityConfirmations: dependencies.finalityConfirmations(),
           })).anchor;
           if (anchor !== undefined) {
+            try {
             const logged = await readEvmContextGraphAuthorityIndexProjectionV1(
               { ...readInput, finalized: anchor.finalized, logSource: { anchor, source } },
               (scan) => project(scan, {
@@ -746,6 +747,15 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               if (admission.kind === 'fault') {
                 return contextGraphAuthorityIndexProjectionFault(admission.fault);
               }
+            }
+            } catch (error) {
+              options.signal?.throwIfAborted();
+              projectionSignal.throwIfAborted();
+              if (!isContextGraphAuthorityIndexRetryableError(error)
+                || error.reason !== 'cursor-ahead') throw error;
+              // A newer live read may have advanced the durable cursor past
+              // this tick's otherwise valid log anchor. The log can no longer
+              // answer this read; use the fresh provider scan below instead.
             }
           }
         }

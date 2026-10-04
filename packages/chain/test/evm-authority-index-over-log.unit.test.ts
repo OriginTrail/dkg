@@ -637,6 +637,24 @@ describe('Context Graph authority index over the one log', () => {
     expect(attempts).toEqual([]);
   });
 
+  it('falls through to a live scan when the event-log anchor trails the durable cursor', async () => {
+    const store = seededStore({ head: LIVE_HEAD - 1, rows: [] });
+    const source = logSource(store);
+    let enableLog = false;
+    const { reader, calls, attempts } = makeReader({
+      sourceProvider: () => enableLog ? source : undefined,
+    });
+    // A live reader advances the durable index while the independent event
+    // log still describes the preceding block.
+    await reader.snapshots.refresh();
+    const initialHeadReads = calls.getBlock;
+    enableLog = true;
+
+    await expect(reader.snapshots.refresh()).resolves.toBeUndefined();
+    expect(calls.getBlock).toBeGreaterThan(initialHeadReads);
+    expect(attempts).toEqual([]);
+  });
+
   it('keeps its live scan while the backfill has not reached the deploy block', async () => {
     // The rows the log holds would answer — but nothing proves that the blocks
     // BELOW them hold no earlier commitment for this name.
