@@ -10,6 +10,9 @@ if ('createRandomSamplingRuntime' in root.DKGAgent.prototype) {
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const legacyAgentBase = await import('@origintrail-official/dkg-agent/dist/dkg-agent-base.js');
 const legacyAgentPublish = await import('@origintrail-official/dkg-agent/dist/dkg-agent-publish.js');
+const legacyFinalizedSwmTwin = await import(
+  '@origintrail-official/dkg-agent/dist/sync/requester/finalized-swm-twin-reconciliation.js'
+);
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
 );
@@ -52,6 +55,10 @@ if (
   || typeof legacyAgent.DKGAgent !== 'function'
   || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
   || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
+  || typeof root.GossipPublishHandler !== 'function'
+  || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwin !== 'function'
+  || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwinFromDescriptor !== 'function'
+  || typeof legacyFinalizedSwmTwin.reconcileFinalizedSwmTwinFromCatalogProjection !== 'function'
   || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
   || typeof root.computeRfc64AppliedInventoryDigestV1 !== 'function'
   || typeof root.classifyRfc64PolicyCellV1 !== 'function'
@@ -437,6 +444,10 @@ const privateImplementationModules = [
   'local-private-member',
   'storage-ack-owned-request',
   'workspace-projected-delegatees',
+  'dkg-agent-finalized-swm-retirement',
+  'gossip-publish-decode',
+  'sync/requester/finalized-swm-retirement-completion',
+  'sync/requester/finalized-swm-twin-storage',
 ];
 for (const module of privateImplementationModules) {
   for (const extension of ['', '.js', '.d.ts', '.js.map', '.d.ts.map']) {
