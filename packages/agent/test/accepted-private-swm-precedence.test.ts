@@ -911,6 +911,64 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     expect(resolveRegisteredContextGraphAuthority).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    { method: 'getMemberRecoveryGate' as const, changedOwner: 'unrelated' },
+    { method: 'getMemberRecoveryRosterSource' as const, changedOwner: 'unrelated' },
+    { method: 'getMemberRecoveryGate' as const, changedOwner: 'target' },
+    { method: 'getMemberRecoveryRosterSource' as const, changedOwner: 'target' },
+  ])('$method fences $changedOwner writes through the real projection during metadata reads', async ({ method, changedOwner }) => {
+    const member = ethers.Wallet.createRandom();
+    const innerStore = new OxigraphStore();
+    stores.push(innerStore);
+    let projection!: ContextGraphMetaProjection;
+    const store = createListContextGraphsCacheInvalidatingStore(
+      innerStore, () => undefined,
+      (quads, targetGraph) => {
+        if (targetGraph !== undefined) {
+          projection.markDirtyForGraph(targetGraph);
+          if (quads) projection.markDirtyFromQuads(quads);
+        } else if (quads) projection.markDirtyFromQuads(quads);
+        else projection.markAllDirty();
+      },
+    );
+    projection = new ContextGraphMetaProjection(store);
+    let metadataEntered!: () => void;
+    let releaseMetadata!: () => void;
+    const entered = new Promise<void>((resolve) => { metadataEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseMetadata = resolve; });
+    const host = {
+      contextGraphMetaProjection: projection,
+      resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
+      resolveRegisteredContextGraphAuthority: vi.fn(async () => approvedUnregisteredAuthority(member.address)),
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => undefined,
+      getLocalMetadataMemberRecoveryGate: vi.fn(async () => {
+        metadataEntered();
+        await release;
+        return [member.address];
+      }),
+    };
+    const resolution = WorkspaceCryptoMethods.prototype[method].call(host as never, CONTEXT_GRAPH_ID);
+    await entered;
+    const beforeGlobal = projection.readAuthorityFactsRevision;
+    const beforeTarget = projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID);
+    const changedGraph = changedOwner === 'target' ? CONTEXT_GRAPH_ID : 'unrelated-recovery-graph';
+    await store.insert([{
+      subject: contextGraphDataUri(changedGraph),
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `did:dkg:agent:${member.address}`,
+      graph: contextGraphMetaUri(changedGraph),
+    }]);
+    expect(projection.readAuthorityFactsRevision).toBeGreaterThan(beforeGlobal);
+    if (changedOwner === 'unrelated') {
+      expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID)).toBe(beforeTarget);
+    } else {
+      expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID)).not.toBe(beforeTarget);
+    }
+    releaseMetadata();
+    await expect(resolution).resolves.toEqual(changedOwner === 'target' ? null : [member.address]);
+  });
+
   it('fails recovery closed when metadata authority facts change during the read', async () => {
     const removed = ethers.Wallet.createRandom();
     const contextGraphMetaProjection = { readAuthorityFactsRevision: 4, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } };
