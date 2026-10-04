@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-import { mkdir, open } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { persistDirectoryRange, persistFileAndParent } from './file-durability.js';
 
 /** One preparation task owns creation and its full ancestry barrier for every blob. */
 export class DurableDirectoryPreparation {
@@ -34,19 +35,5 @@ export class DurableDirectoryPreparation {
 export async function persistContentAddressedFile(
   path: string, platform: NodeJS.Platform = process.platform,
 ): Promise<void> {
-  const absolutePath = resolve(path);
-  const file = await open(absolutePath, 'r+');
-  try { await file.sync(); } finally { await file.close(); }
-  const directory = dirname(absolutePath);
-  await persistDirectoryRange(directory, directory, platform);
-}
-
-async function persistDirectoryRange(directory: string, last: string, platform: NodeJS.Platform): Promise<void> {
-  // Windows exposes file FlushFileBuffers but cannot open directories this way.
-  if (platform === 'win32') return;
-  for (;; directory = dirname(directory)) {
-    const handle = await open(directory, 'r');
-    try { await handle.sync(); } finally { await handle.close(); }
-    if (directory === last || dirname(directory) === directory) break;
-  }
+  await persistFileAndParent(path, platform);
 }
