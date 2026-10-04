@@ -583,6 +583,13 @@ const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
   250,
   1_000,
   4_000,
+]);
+/**
+ * A join-approved replica can accept its policy before its providers have the
+ * roster that names it. Only that replica keeps asking for this long.
+ */
+const RFC64_JOIN_DERIVED_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
+  ...RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1,
   15_000,
   30_000,
   60_000,
@@ -3906,6 +3913,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
         contextGraphId,
         acceptedAuthority.policyDigest,
+        { awaitsProviderAuthorization: source.kind === 'approved-private' },
       );
       return authority;
     } catch (error) {
@@ -3970,14 +3978,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     policyDigest: Digest32V1,
+    options: Readonly<{ awaitsProviderAuthorization?: boolean }> = {},
   ): void {
+    const awaitsProviderAuthorization = options.awaitsProviderAuthorization === true;
+    const retryDelays = awaitsProviderAuthorization
+      ? RFC64_JOIN_DERIVED_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1
+      : RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1;
     const workKey = `authority-catalog-recovery\0${contextGraphId}\0${policyDigest}`;
     this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(workKey, async (signal) => {
-      for (
-        let attempt = 0;
-        attempt <= RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1.length;
-        attempt += 1
-      ) {
+      for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
         try {
           await this.promoteRfc64OwnerSignedSwmInventoriesV1(contextGraphId, signal);
           signal.throwIfAborted();
@@ -3989,8 +3998,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // peers have the current member roster. A peer may answer replay
           // while the subsequent native fetch is still denied. The replay
           // runtime's settled parity, not an answered request alone, is the
-          // evidence that the promised catalog rows were applied. Keep this
-          // bounded demand alive until that parity is clean.
+          // evidence that the promised catalog rows were applied, so that
+          // replica keeps this bounded demand alive until the parity is clean.
+          // For every other graph an answered request is final, as it was:
+          // zero replays is a normal answer there (no connected peer has
+          // anything to serve), and this runs after every authority refresh,
+          // so repeating it would keep promotion and replay work running for
+          // each accepted graph.
+          if (!awaitsProviderAuthorization) return;
           const progress = this.rfc64CatalogReplayRecoveryRuntimeV1().status(
             contextGraphId,
             policyDigest,
@@ -4002,16 +4017,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ) return;
         } catch (error) {
           if (signal.aborted) throw signal.reason ?? error;
-          const retryDelayMs = RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1[
-            attempt
-          ];
+          const retryDelayMs = retryDelays[attempt];
           if (retryDelayMs === undefined) throw error;
           await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
           continue;
         }
-        const retryDelayMs = RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1[
-          attempt
-        ];
+        const retryDelayMs = retryDelays[attempt];
         if (retryDelayMs === undefined) return;
         await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
       }

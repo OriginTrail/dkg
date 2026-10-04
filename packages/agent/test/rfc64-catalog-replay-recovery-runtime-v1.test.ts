@@ -236,6 +236,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
+            options?: { awaitsProviderAuthorization?: boolean },
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -245,7 +246,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
         rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
-      }, 'private-cg', `0x${'33'.repeat(32)}`);
+      }, 'private-cg', `0x${'33'.repeat(32)}`, { awaitsProviderAuthorization: true });
 
       await vi.advanceTimersByTimeAsync(0);
       expect(replay).toHaveBeenCalledOnce();
@@ -278,6 +279,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
+            options?: { awaitsProviderAuthorization?: boolean },
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -287,7 +289,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         promoteRfc64OwnerSignedSwmInventoriesV1: promote,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
         rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
-      }, 'private-cg', `0x${'44'.repeat(32)}`);
+      }, 'private-cg', `0x${'44'.repeat(32)}`, { awaitsProviderAuthorization: true });
 
       await vi.advanceTimersByTimeAsync(0);
       expect(replay).toHaveBeenCalledOnce();
@@ -315,6 +317,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
+            options?: { awaitsProviderAuthorization?: boolean },
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -324,12 +327,49 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
         rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status: () => null }),
-      }, 'private-cg', `0x${'55'.repeat(32)}`);
+      }, 'private-cg', `0x${'55'.repeat(32)}`, { awaitsProviderAuthorization: true });
 
       await vi.advanceTimersByTimeAsync(480_000);
       await dispatcher.whenIdle();
 
       expect(replay).toHaveBeenCalledTimes(9);
+      expect(onError).not.toHaveBeenCalled();
+      await dispatcher.closeAndDrain();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes a zero-provider replay as final unless the replica awaits provider authorization', async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+      const promote = vi.fn(async () => undefined);
+      const replay = vi.fn(async () => Object.freeze({ requested: 0, failed: 0 }));
+      const scheduleAcceptedRecovery = (
+        Rfc64CatalogMethods.prototype as unknown as {
+          scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+            contextGraphId: string,
+            policyDigest: string,
+          ): void;
+        }
+      ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+
+      // Scheduled after every authority refresh of every accepted graph: a
+      // graph nobody has anything to serve for must not keep it running.
+      scheduleAcceptedRecovery.call({
+        rfc64BackgroundWorkDispatcherV1: dispatcher,
+        promoteRfc64OwnerSignedSwmInventoriesV1: promote,
+        requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      }, 'public-cg', `0x${'66'.repeat(32)}`);
+
+      await vi.advanceTimersByTimeAsync(0);
+      await dispatcher.whenIdle();
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(promote).toHaveBeenCalledOnce();
+      expect(replay).toHaveBeenCalledOnce();
       expect(onError).not.toHaveBeenCalled();
       await dispatcher.closeAndDrain();
     } finally {
