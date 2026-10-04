@@ -213,7 +213,13 @@ export async function reconcileFinalizedSwmTwin(params: {
   readonly asset: VerifiedGraphScopedAsset;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
-  return (await reconcileFinalizedSwmTwinWithEvidence(params, false)).outcome;
+  return (await reconcileFinalizedSwmTwinEvidence({
+    store: params.store,
+    writeLocks: params.writeLocks,
+    evidence: evidenceFromVmAsset(params.asset),
+    completeHeadlessVm: false,
+    retire: params.retire,
+  })).outcome;
 }
 
 export async function reconcileFinalizedSwmTwinWithEvidence(params: {
@@ -221,13 +227,13 @@ export async function reconcileFinalizedSwmTwinWithEvidence(params: {
   readonly writeLocks: Map<string, Promise<void>>;
   readonly asset: VerifiedGraphScopedAsset;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-}, completeHeadlessVm = true): Promise<FinalizedSwmTwinReconciliationResult> {
+}): Promise<FinalizedSwmTwinReconciliationResult> {
   const evidence = evidenceFromVmAsset(params.asset);
   return reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
     evidence,
-    completeHeadlessVm,
+    completeHeadlessVm: true,
     retire: params.retire,
   });
 }

@@ -838,7 +838,7 @@ describe('durable VM / SWM tier reconciliation', () => {
     expect(await store.countQuads(input.swmGraph)).toBe(input.payload.length);
   });
 
-  it('re-checks the SWM head after waiting behind a live writer', async () => {
+  it.each(['historical', 'with-evidence'] as const)('re-checks the SWM head after waiting behind a live writer through %s', async (entrypoint) => {
     const store = new OxigraphStore();
     const input = fixture();
     await seedTwin(store, input);
@@ -865,16 +865,28 @@ describe('durable VM / SWM tier reconciliation', () => {
     });
     await acquired;
     const retire = vi.fn(async () => {});
-    const reconciliation = reconcileFinalizedSwmTwin({
+    const query = vi.spyOn(store, 'query');
+    const reconcile = entrypoint === 'historical'
+      ? reconcileFinalizedSwmTwin
+      : reconcileFinalizedSwmTwinWithEvidence;
+    const reconciliation = reconcile({
       store,
       writeLocks,
       asset: input.asset,
       retire,
     });
-    release();
-    await writer;
+    try {
+      await Promise.resolve();
+      expect(query).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await writer;
+    }
 
-    await expect(reconciliation).resolves.toBe('head-version-mismatch');
+    await expect(reconciliation).resolves.toEqual(entrypoint === 'historical'
+      ? 'head-version-mismatch'
+      : { outcome: 'head-version-mismatch' });
     expect(retire).not.toHaveBeenCalled();
+    await store.close();
   });
 });
