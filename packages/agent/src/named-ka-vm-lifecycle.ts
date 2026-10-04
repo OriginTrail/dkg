@@ -29,8 +29,8 @@ export interface PublishedNamedKaVmLifecycleInput {
 }
 
 interface LifecycleMetadataPlan {
-  readonly deletes: readonly Partial<Quad>[];
-  readonly inserts: readonly Quad[];
+  readonly deletes: readonly Pick<Quad, 'subject' | 'predicate'>[];
+  readonly inserts: readonly Omit<Quad, 'graph'>[];
   readonly metaGraph: string;
 }
 interface WorkspaceLifecycleValues {
@@ -66,20 +66,20 @@ function planPublishedNamedKaVmLifecycle(
   const consumedTentativePrior = input.tentative === true && prior !== undefined && wm === prior;
   const preserveWorkspace = reopenedDraft || (activeSeal !== undefined && activeSeal !== root)
     || (wm !== undefined && wm !== root && !consumedTentativePrior) || (swm !== undefined && swm !== root);
-  const deletes: Partial<Quad>[] = [], inserts: Quad[] = [];
+  const deletes: Pick<Quad, 'subject' | 'predicate'>[] = [], inserts: Omit<Quad, 'graph'>[] = [];
   const replace = (subject: string, predicate: string, object: string) => {
-    deletes.push({ subject, predicate, graph: metaGraph });
-    inserts.push({ subject, predicate, object, graph: metaGraph });
+    deletes.push({ subject, predicate });
+    inserts.push({ subject, predicate, object });
   };
   replace(lifecycleUri, VM_CURRENT_ASSERTION_PRED, JSON.stringify(root));
   if (!preserveWorkspace && (wm === root || consumedTentativePrior)) {
-    deletes.push({ subject: lifecycleUri, predicate: WM_CURRENT_ASSERTION_PRED, graph: metaGraph });
+    deletes.push({ subject: lifecycleUri, predicate: WM_CURRENT_ASSERTION_PRED });
   }
   if (prior !== undefined) {
     const priorUri = `${lifecycleUri}#assertion-${prior}`;
     inserts.push(
-      { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-      { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: JSON.stringify(prior), graph: metaGraph },
+      { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri },
+      { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: JSON.stringify(prior) },
     );
   }
   if (!preserveWorkspace) {
@@ -101,7 +101,7 @@ async function commitLifecycleMetadata(store: TripleStore, plan: LifecycleMetada
   if (store.atomicUpdate) {
     const term = (value: string, position: 'subject' | 'predicate' | 'object' | 'graph') => formatSparqlTerm(value, { position });
     const graph = term(plan.metaGraph, 'graph');
-    const deletes = plan.deletes.map(q => `DELETE WHERE { GRAPH ${graph} { ${term(q.subject!, 'subject')} ${term(q.predicate!, 'predicate')} ?o } }`);
+    const deletes = plan.deletes.map(q => `DELETE WHERE { GRAPH ${graph} { ${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ?o } }`);
     const inserts = plan.inserts.map(q => `${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ${term(q.object, 'object')} .`).join('\n');
     try {
       await store.atomicUpdate([...deletes, `INSERT DATA { GRAPH ${graph} { ${inserts} } }`].join(';\n'), {
@@ -114,8 +114,8 @@ async function commitLifecycleMetadata(store: TripleStore, plan: LifecycleMetada
   }
   // Compatibility stores expose partial writes. The admitted durable repair journal
   // retries this idempotent plan after failures; update() alone is never certification.
-  for (const pattern of plan.deletes) await deleteByPatternWithoutCount(store, pattern);
-  await store.insert([...plan.inserts]);
+  for (const target of plan.deletes) await deleteByPatternWithoutCount(store, { ...target, graph: plan.metaGraph });
+  await store.insert(plan.inserts.map(triple => ({ ...triple, graph: plan.metaGraph })));
 }
 
 /** Caller holds the publisher's same-KA lifecycle lock across admission and commit. */

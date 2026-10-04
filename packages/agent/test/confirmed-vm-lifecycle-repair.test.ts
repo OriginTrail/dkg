@@ -10,6 +10,7 @@ import { OxigraphStore, StoreOperationTimeoutError, UnsupportedTripleStoreCapabi
 import { computeFlatKCRootV10, DKGPublisher, TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
@@ -294,6 +295,71 @@ describe('review regression boundaries', () => {
     expect(result).toMatchObject({ bindings: [{ state: JSON.stringify(preserve ? rows.state : 'published'), layer: JSON.stringify(preserve ? rows.layer : 'VM') }] });
     if (result.type !== 'bindings') throw new Error('Expected bindings');
     expect(result.bindings[0].wm).toBe(preserve && !reopened ? JSON.stringify(HEX.slice(2)) : undefined);
+  });
+
+  const metadataRows = (): Quad[] => [
+    { subject: LIFECYCLE, predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify(PRIOR), graph: META },
+    { subject: LIFECYCLE, predicate: `${DKG}wmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
+    { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"shared"', graph: META },
+    { subject: LIFECYCLE, predicate: `${DKG}memoryLayer`, object: '"SWM"', graph: META },
+    { subject: ASSERTION, predicate: `${DKG}memoryLayer`, object: '"SWM"', graph: META },
+    { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"unrelated graph"', graph: 'urn:unrelated:metadata' },
+  ];
+  const metadataSnapshot = (store: OxigraphStore) => store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+
+  it('commits once through the production agent wrapper without separate lifecycle writes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-wrapped-atomic-repair-')); dirs.push(dir);
+    const store = new OxigraphStore(), agent = agentFor(store, dir, 1);
+    await store.insert(metadataRows());
+    const commit = vi.spyOn(store, 'atomicUpdate'), insert = vi.spyOn(store, 'insert');
+    const remove = vi.spyOn(store, 'deleteByPattern'), removeWithoutCount = vi.spyOn(store, 'deleteByPatternWithoutCount');
+    const invalidate = vi.fn(), dirty = vi.fn();
+    agent.store = createListContextGraphsCacheInvalidatingStore(store, invalidate, dirty);
+    try {
+      expect(await agent._repairConfirmedNamedKaVmLifecycle({ ...input, priorMerkleRoot: PRIOR })).toBe(false);
+      expect(commit).toHaveBeenCalledTimes(1); expect(insert).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled(); expect(removeWithoutCount).not.toHaveBeenCalled();
+      expect(invalidate).toHaveBeenCalledTimes(1); expect(dirty).toHaveBeenCalledTimes(1);
+      expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" } }`)).toMatchObject({ value: true });
+    } finally { await agent.namedKaVmLifecycleRepair.stop(); }
+  });
+
+  it('propagates a wrapped atomic execution failure without falling back or exposing partial metadata', async () => {
+    const store = new OxigraphStore(); stores.push(store); await store.insert(metadataRows());
+    const before = await metadataSnapshot(store), failure = new Error('atomic execution failed');
+    const commit = vi.spyOn(store, 'atomicUpdate').mockRejectedValue(failure);
+    const insert = vi.spyOn(store, 'insert'), remove = vi.spyOn(store, 'deleteByPattern');
+    const removeWithoutCount = vi.spyOn(store, 'deleteByPatternWithoutCount');
+    const invalidate = vi.fn(), dirty = vi.fn();
+    const wrapped = createListContextGraphsCacheInvalidatingStore(store, invalidate, dirty);
+    await expect(applyPublishedNamedKaVmLifecycle(wrapped, { ...input, priorMerkleRoot: PRIOR })).rejects.toBe(failure);
+    expect(commit).toHaveBeenCalledTimes(1); expect(insert).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled(); expect(removeWithoutCount).not.toHaveBeenCalled();
+    expect(await metadataSnapshot(store)).toEqual(before);
+    // An unclassified response could have followed a commit, so invalidate conservatively.
+    expect(invalidate).toHaveBeenCalledTimes(1); expect(dirty).toHaveBeenCalledTimes(1);
+    commit.mockRejectedValue(new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'update', outcome: 'not_started' }));
+    await expect(applyPublishedNamedKaVmLifecycle(wrapped, input)).rejects.toBeInstanceOf(StoreOperationTimeoutError);
+    expect(invalidate).toHaveBeenCalledTimes(1); expect(dirty).toHaveBeenCalledTimes(1);
+    expect(await metadataSnapshot(store)).toEqual(before);
+  });
+
+  it('produces identical graph-scoped metadata on atomic and both compatibility stores', async () => {
+    const snapshots = [];
+    for (const capability of ['atomic', 'absent', 'typed-refusal'] as const) {
+      const store = new OxigraphStore(); stores.push(store); await store.insert(metadataRows());
+      if (capability !== 'atomic') Object.defineProperty(store, 'atomicUpdate', { value: capability === 'absent'
+        ? undefined : async () => { throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'legacy-test-store'); } });
+      const wrapped = createListContextGraphsCacheInvalidatingStore(store, vi.fn(), vi.fn());
+      await applyPublishedNamedKaVmLifecycle(wrapped, { ...input, priorMerkleRoot: PRIOR });
+      snapshots.push(await metadataSnapshot(store));
+    }
+    expect(snapshots[1]).toEqual(snapshots[0]); expect(snapshots[2]).toEqual(snapshots[0]);
+    expect(snapshots[0]).toMatchObject({ type: 'bindings', bindings: expect.arrayContaining([
+      { g: 'urn:unrelated:metadata', s: LIFECYCLE, p: `${DKG}state`, o: '"unrelated graph"' },
+      { g: META, s: LIFECYCLE, p: `${DKG}state`, o: '"published"' },
+      { g: META, s: LIFECYCLE, p: 'http://www.w3.org/ns/prov#wasRevisionOf', o: `${LIFECYCLE}#assertion-${PRIOR}` },
+    ]) });
   });
 
   it('commits the planned metadata atomically and leaves every row unchanged on commit failure', async () => {

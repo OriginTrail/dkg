@@ -584,10 +584,7 @@ export function createListContextGraphsCacheInvalidatingStore(
           'replaceGraph',
         )
       : undefined,
-    // Rootless KA materialization replaces the assertion graph and its UAL
-    // metadata subject in one backend transaction. Preserve that optional
-    // capability through the agent decorator just like replaceGraph/update;
-    // omitting it makes every capable production backend appear unsupported.
+    // Preserve atomic rootless KA graph+metadata materialization.
     replaceGraphAndSubject: innerStore.replaceGraphAndSubject
       ? (graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, options) =>
           invalidateAfterMutation(
@@ -606,11 +603,7 @@ export function createListContextGraphsCacheInvalidatingStore(
             'replaceGraphAndSubject',
           )
       : undefined,
-    // #1863 — the async-lift publisher persists a job transition via this atomic
-    // single-subject replace. Preserve the optional capability through the agent
-    // decorator just like replaceGraph/replaceGraphAndSubject/update; omitting it
-    // makes every capable production backend appear unsupported, so the publisher
-    // silently falls back to non-atomic delete-then-insert and the fix is a no-op.
+    // Preserve atomic async-lift job transitions through the agent decorator.
     replaceSubject: innerStore.replaceSubject
       ? (graphUri, subject, quads, options) =>
           invalidateAfterMutation(
@@ -623,10 +616,8 @@ export function createListContextGraphsCacheInvalidatingStore(
             'replaceSubject',
           )
       : undefined,
-    // RFC-64 author publication moves a complete public-SWM projection and
-    // its bounded semantic control state through one backend CAS. Preserve the
-    // capability through this cache-invalidation decorator and invalidate only
-    // after a proven commit; a clean guard conflict changes nothing.
+    // RFC-64 author publication moves its projection+control state through one CAS.
+    // Invalidate only after a proven commit; a clean guard conflict changes nothing.
     rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
       ? (input, options) => invalidateAfterMutation(
           () => innerStore.rfc64AuthorCommitCasV1!(input, options),
@@ -638,9 +629,7 @@ export function createListContextGraphsCacheInvalidatingStore(
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },
-    // This wrapper changes mutation-side cache state but not graph visibility,
-    // so forwarding the direct inner capability preserves the same public
-    // boundary while keeping the responder's identity-stable catalog path live.
+    // Forward unchanged graph visibility to preserve the responder's stable catalog path.
     listGraphsSorted: sortedSource
       ? (options) => sortedSource.listGraphsSorted(options)
       : undefined,
@@ -660,14 +649,20 @@ export function createListContextGraphsCacheInvalidatingStore(
     countQuads(graphUri, options) {
       return innerStore.countQuads(graphUri, options);
     },
-    // Defined iff the inner store supports it, so the capability propagates
-    // truthfully up the decorator chain (callers gate on `typeof store.update
-    // === 'function'`). A server-side UPDATE can create/drop named graphs and
-    // mutate projected content, so it invalidates the listGraphs cache and
-    // marks the projection dirty just like insert/delete.
+    // Forward the optional UPDATE capability truthfully. An opaque mutation can
+    // create/drop graphs or recipient facts, so invalidate both caches.
     update: innerStore.update
       ? (sparql, options) => invalidateAfterMutation(
         () => innerStore.update!(sparql, options),
+        () => true,
+        () => markProjectionDirty?.(),
+        'update',
+      )
+      : undefined,
+    // Preserve explicit whole-request atomicity and the same outcome-aware invalidation as UPDATE.
+    atomicUpdate: innerStore.atomicUpdate
+      ? (sparql, options) => invalidateAfterMutation(
+        () => innerStore.atomicUpdate!(sparql, options),
         () => true,
         () => markProjectionDirty?.(),
         'update',
