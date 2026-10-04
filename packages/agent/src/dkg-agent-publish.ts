@@ -199,6 +199,7 @@ export interface ResolveAssertionAuthorOptions {
 }
 import { RootlessUpdateError, isRootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
 import { ConfirmedNamedKaVmLifecycleRecoveryError, type ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
+import type { NamedKaVmPublishResult } from './named-ka-vm-publish-result.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -5440,7 +5441,7 @@ export class PublishMethods extends DKGAgentBase {
       onPhase?: PhaseCallback;
       publisherOverride?: DKGPublisher;
     },
-  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+  ): Promise<NamedKaVmPublishResult> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
     // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
@@ -5948,7 +5949,7 @@ export class PublishMethods extends DKGAgentBase {
       clearSharedMemoryAfter?: boolean;
       publisherOverride?: DKGPublisher;
     },
-  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+  ): Promise<NamedKaVmPublishResult> {
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const assertionUri = contextGraphAssertionUri(
