@@ -8,6 +8,8 @@
  * assertions. Bodies are a 1:1 move from the original module.
  */
 import { ethers } from 'ethers';
+import { activeRpcRequestAbortSignal } from './rpc-request-transport.js';
+import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
 import {
   enrichEvmError,
   errorCode,
@@ -215,4 +217,11 @@ export function isKnownTransactionError(err: unknown): boolean {
     || msg.includes('already exists')
     || msg.includes('already have transaction')
     || msg.includes('duplicate transaction');
+}
+
+/** Local interruption is never evidence that an optional initialized contract is absent. */
+export function rethrowInterruptedInitialization(error: unknown): void {
+  activeRpcRequestAbortSignal()?.throwIfAborted();
+  // Local refusal is not proof that an optional contract is absent.
+  if (isRpcRequestGovernorQueueFullError(error)) throw error;
 }

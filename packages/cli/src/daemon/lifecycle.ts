@@ -65,9 +65,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
   buildEvmDeploymentId,
-  drainRpcReadBatchingWindow,
   MockChainAdapter,
-  mergeRpcUsageWindows,
   snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -193,7 +191,7 @@ import {
   createTelemetryRuntime,
 } from './telemetry-runtime.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
-import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { createDaemonRpcTelemetrySource, startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
 import { handleSharedMemoryTtlSettingsRequest } from './shared-memory-ttl-route.js';
 import { nodeUiTokenForRequest } from './node-ui-access.js';
@@ -3044,17 +3042,11 @@ async function runDaemonInnerWithStartupOwnership(
   // override only rpcUrl).
   const rpcUsageLogger = new Logger("chain-rpc");
   const rpcUsageTelemetry = startRpcUsageTelemetry({
-    source: {
-      drainRpcUsage: () => mergeRpcUsageWindows(
-        agent.drainRpcUsage(),
-        publisherState.runtime?.drainRpcUsage(),
-        daemonRpcRuntime?.drainRouteRpcUsage(),
-      ),
-      ...(rpcRequestGovernor === undefined
-        ? {}
-        : { drainRpcRequestGovernor: () => rpcRequestGovernor.drainWindow() }),
-      drainRpcReadBatching: drainRpcReadBatchingWindow,
-    },
+    source: createDaemonRpcTelemetrySource([
+      () => agent.drainRpcUsage(),
+      () => publisherState.runtime?.drainRpcUsage(),
+      () => daemonRpcRuntime?.drainRouteRpcUsage(),
+    ], rpcRequestGovernor),
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
     chainId: chainBase?.chainId ?? config.chain?.chainId,
   });
