@@ -65,6 +65,35 @@ describe('graph-scoped private content', () => {
     ).resolves.toEqual([]);
   });
 
+  it('keeps both private commitments when an unpublished version number is reused', async () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const first = [quad('urn:first', '"private B"')];
+    const second = [quad('urn:second', '"private C"')];
+    const b = `0x${'ab'.repeat(32)}`;
+    const c = `0x${'cd'.repeat(32)}`;
+    await privateStore.replaceKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, first, undefined, b);
+    await privateStore.replaceKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, second, undefined, c);
+    // A recreated reader proves archive identity is durable, rather than cached.
+    const restarted = new PrivateContentStore(store, new GraphManager(store));
+    await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, undefined, { commitmentId: b })).resolves.toEqual(first);
+    await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, undefined, { commitmentId: c })).resolves.toEqual(second);
+    await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope)).resolves.toEqual(second);
+  });
+
+  it('backfills a sealed archive without replacing the latest same-number payload', async () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const oldPayload = [quad('urn:old', '"private B"')];
+    const latest = [quad('urn:latest', '"private C"')];
+    const oldRoot = `0x${'ab'.repeat(32)}`;
+    const latestRoot = `0x${'cd'.repeat(32)}`;
+    await privateStore.replaceKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, latest, undefined, latestRoot);
+    await privateStore.archiveKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, oldPayload, oldRoot);
+    const restarted = new PrivateContentStore(store, new GraphManager(store));
+    await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope)).resolves.toEqual(latest);
+    await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, undefined,
+      { commitmentId: oldRoot })).resolves.toEqual(oldPayload);
+  });
+
   it('fails closed when the store cannot atomically replace private graphs', async () => {
     // The private graph is the Merkle commitment boundary: without atomic
     // whole-graph replacement the writer must reject rather than fall back to

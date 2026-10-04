@@ -515,14 +515,14 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('pull-from <name>')
-      .description('Seed a fresh WM draft from SWM or VM state')
-      .requiredOption('--layer <layer>', 'Source layer: swm or vm')
+      .description('Reopen a sealed WM draft or seed one from SWM or VM')
+      .requiredOption('--layer <layer>', 'Source layer: wm, swm or vm')
       .option('--on-conflict <mode>', 'Draft conflict mode: reject or replace (default: reject)')
       .option('--json', 'Print JSON'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const layer = String(opts.layer);
-      if (layer !== 'swm' && layer !== 'vm') throw new Error('--layer must be swm or vm');
+      if (layer !== 'wm' && layer !== 'swm' && layer !== 'vm') throw new Error('--layer must be wm, swm or vm');
       const onConflict = opts.onConflict === undefined ? undefined : String(opts.onConflict);
       if (onConflict !== undefined && onConflict !== 'reject' && onConflict !== 'replace') {
         throw new Error('--on-conflict must be reject or replace');

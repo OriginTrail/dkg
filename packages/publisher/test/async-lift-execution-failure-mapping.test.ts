@@ -105,7 +105,21 @@ const row = (
   evidence?: ExecutionFailureEvidence,
 ): MappingRow => ({ name, persisted, requested, error, expected, evidence });
 
+const DRAFT_PRECONDITIONS = [
+  ['ROOTLESS_UPDATE_TARGET_NOT_CONFIRMED', 'workspace_slice_not_found'],
+  ['ROOTLESS_KA_NOT_MATERIALIZED', 'workspace_slice_not_found'],
+  ['ROOTLESS_UPDATE_TARGET_CORRUPT', 'canonicalization_failed'],
+  ['ROOTLESS_UPDATE_INVALID_KA_ID', 'canonicalization_failed'],
+  ['KA_UPDATE_AUTHOR_NOT_OWNER', 'authority_forbidden'],
+  ['LEGACY_KA_READ_ONLY', 'canonicalization_failed'],
+  ['KA_UPDATE_VERSION_MISMATCH', 'publish_intent_stale'],
+] as const;
+
 const MAPPING_ROWS: readonly MappingRow[] = [
+  ...DRAFT_PRECONDITIONS.map(([code, mapped]) => row(code, 'validated', 'validated',
+    () => withCode('deterministic refusal', { code }), to('validated', mapped))),
+  row('a deterministic code cannot discard persisted transaction evidence', 'broadcast', 'validated',
+    () => withCode('deterministic refusal', { code: 'ROOTLESS_KA_NOT_MATERIALIZED' }), to('broadcast', 'rpc_unavailable')),
   // --- A. a failure while the job is still 'claimed' (the preflight / validation call sites) ---------
   row('A typed transient failure with no keyword is recorded retryable (the C conjunct)', 'claimed', 'claimed',
     keyedExhaustedWithoutKeywords, to('claimed', 'workspace_unavailable')),
@@ -473,5 +487,14 @@ describe('GH#2945 mapExecutionFailure: the same decision as a pure function', ()
 
       expect(failure).toMatchObject({ failedFromState: 'broadcast', code: 'rpc_unavailable' });
     });
+  });
+});
+
+
+describe('GH#2964 deterministic draft publish failures', () => {
+  it.each(DRAFT_PRECONDITIONS)('%s is pre-send and terminal', (code, mapped) => {
+    const error = withCode('deterministic refusal', { code });
+    expect(isKnowledgeAssetPublishPreconditionFailure(error)).toBe(true);
+    expect(getLiftJobFailurePolicy(mapped)).toMatchObject({ retryable: false, autoRetry: false });
   });
 });

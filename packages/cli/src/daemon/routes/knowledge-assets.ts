@@ -11,19 +11,14 @@
 //   POST /api/knowledge-assets/:name/wm/write        append quads to the draft
 //   POST /api/knowledge-assets/:name/wm/finalize     seal the draft (git commit)
 //   POST /api/knowledge-assets/:name/wm/discard      throw the draft away
-//   POST /api/knowledge-assets/:name/wm/pull-from    seed draft from SWM/VM  [TODO]
+//   POST /api/knowledge-assets/:name/wm/pull-from    recover a draft from WM/SWM/VM
 //   POST /api/knowledge-assets/:name/swm/share       advance the SWM pointer
 //   POST /api/knowledge-assets/:name/vm/publish      mint/update on chain
 //   POST /api/knowledge-assets/:name/vm/publish-async enqueue mint/update on chain
-//
 // These delegate to the agent lifecycle methods directly. Public content
 // authoring and VM publish must enter through named KA lifecycle routes; retired
 // loose/direct publish surfaces are guarded below with explicit 404s.
 //
-// Identifier note (OT-RFC-43 §10.5.7): for the v10.0 floor the KA is addressed
-// by its lifecycle NAME (the file handle) + `contextGraphId`. Minter-namespaced
-// `(agent, number)` addressing is layered on by Option 1 later, on these same
-// routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
@@ -264,6 +259,10 @@ function respondPromoteRecoveryError(
  */
 export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   if (respondPromoteRecoveryError(res, e, context)) return;
+  if (e?.code === 'KA_FINALIZE_VERSION_PROOF_UNAVAILABLE') {
+    jsonResponse(res, 503, { code: e.code, error: e.message, retryable: true });
+    return;
+  }
   if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
     jsonResponse(res, 409, { code: e.code, error: e.message });
     return;
@@ -1515,8 +1514,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // Net-new primitive (the git-checkout equivalent): seed a fresh WM
         // draft from the current SWM or VM state (OT-RFC-43 §10.5.3).
         const sourceLayer = parsed.layer;
-        if (sourceLayer !== "swm" && sourceLayer !== "vm") {
-          return jsonResponse(res, 400, { error: 'pull-from requires "layer": "swm" | "vm"' });
+        if (sourceLayer !== "wm" && sourceLayer !== "swm" && sourceLayer !== "vm") {
+          return jsonResponse(res, 400, { error: 'pull-from requires "layer": "wm" | "swm" | "vm"' });
         }
         const onConflict = parsed.onConflict === "replace" ? "replace" : "reject";
         try {
@@ -1755,6 +1754,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (respondPublicationPricingPolicyError(res, err)) return;
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
+            code: err.code,
             error: err.message,
             existingJobId: err.existingJobId,
           });

@@ -1016,7 +1016,7 @@ export class ApiClient {
   async knowledgeAssetPullFrom(
     contextGraphId: string,
     name: string,
-    layer: 'swm' | 'vm',
+    layer: 'wm' | 'swm' | 'vm',
     options?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
   ): Promise<Record<string, unknown>> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`, { contextGraphId, layer, ...(options ?? {}) });

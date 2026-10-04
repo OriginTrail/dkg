@@ -213,6 +213,7 @@ export class AccessHandler {
             meta.subGraphName,
             {
               expectedQuadCount: meta.privateTripleCount,
+              commitmentId: meta.privateMerkleRoot ? `0x${toHex(meta.privateMerkleRoot)}` : undefined,
               queryOptions: { source: 'publisher.access' },
             },
           );

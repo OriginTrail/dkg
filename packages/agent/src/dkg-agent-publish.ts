@@ -303,6 +303,8 @@ import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { resolveFinalizedDraftVersion } from './finalize-draft-version.js';
+import { withDraftArtifactReferences, withKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -2275,6 +2277,7 @@ export class PublishMethods extends DKGAgentBase {
         updateScope,
         canonicalParts.privateQuads,
         opts?.subGraphName,
+        canonicalPrivateMerkleRoot ? ethers.hexlify(canonicalPrivateMerkleRoot) : undefined,
       );
     }
     // Stage a direct update, or validate the existing queued snapshot, before
@@ -2819,7 +2822,14 @@ export class PublishMethods extends DKGAgentBase {
    *
    * See `assertion.finalize` (the public-facing wrapper) for usage docs.
    */
-  async assertionFinalize(this: DKGAgent,
+  async assertionFinalize(this: DKGAgent, ...args: Parameters<PublishMethods['_assertionFinalizeUnlocked']>): ReturnType<PublishMethods['_assertionFinalizeUnlocked']> {
+    const [contextGraphId, name, agentAddress, opts] = args;
+    return withDraftArtifactReferences(this.store, () => withKeyedLocks(this.publisher.writeLocks, [
+      assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, opts?.subGraphName),
+    ], () => this._assertionFinalizeUnlocked(...args)));
+  }
+
+  async _assertionFinalizeUnlocked(this: DKGAgent,
     contextGraphId: string,
     name: string,
     agentAddress: string,
@@ -2922,7 +2932,7 @@ export class PublishMethods extends DKGAgentBase {
 
     // Read any durable seal before loading the private partition. A completed
     // finalize removes the mutable private draft, so an idempotent retry must
-    // recover that partition from the immutable `(UAL, assertionVersion)` graph.
+    // recover that partition from its archived private commitment.
     const existingMetaResult = await this.store.query(
       `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
       { source: 'agent.assertionFinalize.existingSeal' },
@@ -2968,6 +2978,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         createGraphKnowledgeAssetScope(existingSeal.kaUal, existingSeal.assertionVersion),
         opts?.subGraphName,
+        { commitmentId: existingSeal.privateMerkleRoot ? ethers.hexlify(existingSeal.privateMerkleRoot) : undefined },
       );
     }
     if (rawQuads.length === 0 && rawPrivateQuads.length === 0) {
@@ -3142,6 +3153,7 @@ export class PublishMethods extends DKGAgentBase {
         existingScope,
         normalizedPrivateKnowledgeAssetQuads,
         opts?.subGraphName,
+        existingSeal.privateMerkleRoot ? ethers.hexlify(existingSeal.privateMerkleRoot) : undefined,
       );
       await stampFinalizedLifecycle(
         existingSeal.assertionVersion,
@@ -3296,17 +3308,6 @@ export class PublishMethods extends DKGAgentBase {
     if (persistedScopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
-    let assertionVersion = 1n;
-    if (hasConfirmedVm) {
-      if (persistedAssertionVersion === undefined) {
-        throw new Error(
-          `Graph-scoped lifecycle <${lifecycleUri}> is missing its assertion version`,
-        );
-      }
-      assertionVersion = BigInt(persistedAssertionVersion) + 1n;
-    } else if (persistedAssertionVersion !== undefined) {
-      assertionVersion = BigInt(persistedAssertionVersion);
-    }
     const existingKaIdRes = await this.store.query(
       `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
       { source: 'agent.assertionFinalize.existingKaId' },
@@ -3457,22 +3458,13 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // GH#2958 — a draft of a PUBLISHED KA is numbered from the confirmed record `update()` will
-    // validate, not from the lifecycle counter. That counter is "last FINALIZED": it only ever
-    // grows, so every finalized update that is abandoned before it is published (superseded,
-    // discarded, replaced by pull-from) would push the next draft one number too high, past
-    // what `update()`, the publisher and the chain accept, and the KA could never be updated
-    // again. An abandoned draft instead shares its number with its successor, as an
-    // unpublished mint already does. The lifecycle counter above stays the fallback for a
-    // record that cannot answer. The number is not signed (the attestation binds merkleRoot,
-    // author, reservedKaId and scheme), so deriving it here changes no signature.
-    if (hasConfirmedVm) {
-      assertionVersion = await this._nextUpdateVersionOrUndefined(
-        reservedKaId,
-        contextGraphId,
-        opts?.subGraphName,
-      ) ?? assertionVersion;
-    }
+    const assertionVersion = await resolveFinalizedDraftVersion({
+      chain: this.chain,
+      kaUal: `did:dkg:${this.chain.chainId}/${authorAddress.toLowerCase()}/${reservedKaId & ((1n << 96n) - 1n)}`,
+      persistedVersion: persistedAssertionVersion,
+      vmPointerPresent: hasConfirmedVm,
+      readLocalNextVersion: () => this._nextUpdateVersionOrUndefined(reservedKaId, contextGraphId, opts?.subGraphName),
+    });
 
     // 8. Build EIP-712 typed data (binds reservedKaId — OT-RFC-43 §F2).
     const typedData = buildAuthorAttestationTypedData({
@@ -3633,6 +3625,7 @@ export class PublishMethods extends DKGAgentBase {
       canonicalScope,
       normalizedPrivateKnowledgeAssetQuads,
       opts?.subGraphName,
+      privateMerkleRoot ? ethers.hexlify(privateMerkleRoot) : undefined,
     );
     await this.store.insert(sealQuads);
     await stampFinalizedLifecycle(assertionVersion, merkleRoot);
@@ -6116,10 +6109,11 @@ export class PublishMethods extends DKGAgentBase {
       sharedMemoryScope,
     );
     const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
-    const scopedPrivateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
+    const scopedPrivateQuads = seal.privateTripleCount === 0 ? [] : await privateStore.getKnowledgeAssetPrivateTriples(
       contextGraphId,
       graphScope,
       opts?.subGraphName,
+      { commitmentId: seal.privateMerkleRoot ? ethers.hexlify(seal.privateMerkleRoot) : undefined },
     );
     if (scopedSwmQuads.length === 0 && scopedPrivateQuads.length === 0) {
       throw new Error(

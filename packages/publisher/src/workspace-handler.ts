@@ -51,7 +51,7 @@ import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
-import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
+import { checkWorkspaceDraftReplacementOrder, checkWorkspaceDraftVersionsUnpublished, headIsUnpromotedOwedAckCopy } from './workspace-draft-replacement.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -341,6 +341,9 @@ export class SharedMemoryHandler {
     contextGraphId: string,
     subGraphName: string | null,
   ) => boolean | Promise<boolean>;
+  /** Coherent confirmed chain version; null means the receiver cannot prove a draft is unpublished. */
+  private readonly readConfirmedKnowledgeAssetVersion?: (kaUal: string) => Promise<bigint | null>;
+  private readonly pendingAckTxWindowMs: number;
   private readonly resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
   private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
@@ -488,6 +491,8 @@ export class SharedMemoryHandler {
         contextGraphId: string,
         subGraphName: string | null,
       ) => boolean | Promise<boolean>;
+      readConfirmedKnowledgeAssetVersion?: (kaUal: string) => Promise<bigint | null>;
+      pendingAckTxWindowMs?: number;
       resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
       markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
@@ -550,6 +555,8 @@ export class SharedMemoryHandler {
     this.publicAccessPolicyOracle = options?.publicAccessPolicyOracle
       ?? options?.publicAccessPolicyOnChainOracle;
     this.legacyApplyAllowedOracle = options?.legacyApplyAllowedOracle;
+    this.readConfirmedKnowledgeAssetVersion = options?.readConfirmedKnowledgeAssetVersion;
+    this.pendingAckTxWindowMs = options?.pendingAckTxWindowMs ?? 300_000;
     this.resolveDurableRootAtomicCompanion =
       options?.resolveDurableRootAtomicCompanion;
     this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
@@ -889,30 +896,9 @@ export class SharedMemoryHandler {
    * absent from VM. A local self-ACK keeps the queued head, so its ledger
    * operation need not appear among the head aliases.
    */
-  private async headIsUnpromotedOwedAckCopy(
-    contextGraphId: string,
-    head: { readonly kaUal: string },
-    version: bigint,
-    subGraphName?: string,
-  ): Promise<boolean> {
-    const owed = await this.store.query(storageAckOwedCopiesByScopeQuery({
-      namespace: contextGraphId,
-      metaGraph: this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName),
-      kaUal: head.kaUal,
-      assertionVersion: version,
-    }), {
-      source: 'publisher.swm.graphScoped.owedAckCopy',
-    });
-    if (owed.type !== 'bindings' || owed.bindings.length === 0) return false;
-    const promoted = await this.store.query(
-      `ASK { GRAPH <${contextGraphMetaUri(contextGraphId)}> {
-        <${head.kaUal}> <http://dkg.io/ontology/status> "confirmed" ;
-          <http://dkg.io/ontology/assertionVersion> ?version .
-        FILTER(?version >= ${version})
-      } }`,
-      { source: 'publisher.swm.graphScoped.owedAckCopyPromoted' },
-    );
-    return !(promoted.type === 'boolean' && promoted.value);
+  private headIsUnpromotedOwedAckCopy(contextGraphId: string, head: { readonly kaUal: string }, version: bigint, subGraphName?: string): Promise<boolean> {
+    return headIsUnpromotedOwedAckCopy({ store: this.store, graphManager: this.graphManager, contextGraphId, head, version, subGraphName,
+      pendingAckTxWindowMs: this.pendingAckTxWindowMs, readConfirmedKnowledgeAssetVersion: this.readConfirmedKnowledgeAssetVersion });
   }
 
   /**
@@ -1607,12 +1593,6 @@ export class SharedMemoryHandler {
         if (currentHead) {
           const incomingVersion = BigInt(contentScope.assertionVersion);
           const currentVersion = BigInt(currentHead.assertionVersion);
-          if (incomingVersion < currentVersion) {
-            const reason =
-              `STALE_KA_ASSERTION_VERSION: incoming=${incomingVersion}, current=${currentVersion}`;
-            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
-            return rejectWithinLocks('validation', reason);
-          }
           if (incomingVersion === currentVersion) {
             const sameAssertion =
               workspaceHeadIncludesShareOperationId(currentHead, shareOperationId) &&
@@ -1659,19 +1639,11 @@ export class SharedMemoryHandler {
               await persistLocallyTrustedControls();
               return swmWriteApplied;
             }
-            const reason =
-              `CONFLICTING_KA_ASSERTION_VERSION: ${contentScope.ual} version ${incomingVersion} ` +
-              'is already bound to a different operation or content digest';
-            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
-            return rejectWithinLocks('validation', reason);
           }
-          if (currentHead.publisherPeerId !== publisherPeerId) {
-            const reason =
-              `KA_PUBLISHER_MISMATCH: ${contentScope.ual} is owned in SWM by ` +
-              `${currentHead.publisherPeerId}, not ${publisherPeerId}`;
-            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
-            return rejectWithinLocks('validation', reason);
-          }
+          const rejection = await checkWorkspaceDraftReplacementOrder({ head: currentHead,
+            incomingVersion, publisherPeerId, timestamp: operationTimestamp, readConfirmedVersion: this.readConfirmedKnowledgeAssetVersion });
+          if (rejection) return rejectWithinLocks(rejection.phase, rejection.reason);
+
           // A core replaces the StorageACK copy it signed only once that
           // version is in its VM (or the chain moved past it, which releases
           // the copy). Defer the newer share meanwhile, like a head repair:
@@ -1711,6 +1683,12 @@ export class SharedMemoryHandler {
             'authority',
             `legacy SWM apply is not authoritative for ${scope} of context graph "${contextGraphId}"`,
           );
+        }
+
+        if (currentHead && BigInt(contentScope.assertionVersion) <= BigInt(currentHead.assertionVersion)) {
+          const rejection = await checkWorkspaceDraftVersionsUnpublished(contentScope.ual,
+            BigInt(currentHead.assertionVersion), BigInt(contentScope.assertionVersion), this.readConfirmedKnowledgeAssetVersion);
+          if (rejection) return rejectWithinLocks(rejection.phase, rejection.reason);
         }
 
         const rootCompanion = resolveRootCompanion();

@@ -24,6 +24,8 @@ export interface KnowledgeAssetPrivateReadOptions
   extends Omit<ReadExactGraphPagedOptions, 'expectedQuadCount' | 'outputGraph'> {
   /** Trusted metadata count. When omitted, the store's current count is used. */
   expectedQuadCount?: number;
+  /** Exact immutable payload selected by an authenticated seal/private commitment. */
+  commitmentId?: string;
 }
 
 /**
@@ -277,6 +279,41 @@ export class PrivateContentStore {
     );
   }
 
+  knowledgeAssetPrivateCommitmentGraphUri(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    commitmentId: string,
+    subGraphName?: string,
+  ): string {
+    if (!/^(?:0x)?[0-9a-fA-F]{64}$/.test(commitmentId)) {
+      throw new Error('Private KA commitment must be a 32-byte hexadecimal Merkle root');
+    }
+    const commitment = commitmentId.replace(/^0x/, '').toLowerCase();
+    return `${this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName)}/commitments/${commitment}`;
+  }
+
+  /** Archive already seal-validated bytes without changing the latest version partition. */
+  async archiveKnowledgeAssetPrivateTriples(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    quads: readonly Quad[],
+    commitmentId: string,
+    subGraphName?: string,
+  ): Promise<string> {
+    for (const quad of quads) assertSafePrivateQuad(quad);
+    const archive = this.knowledgeAssetPrivateCommitmentGraphUri(contextGraphId, scope, commitmentId, subGraphName);
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    await this.withGraphWriteLock(graphUri, () => this.replacePrivateCommitmentArchive(archive, quads));
+    return archive;
+  }
+
+  private async replacePrivateCommitmentArchive(archive: string, quads: readonly Quad[]): Promise<void> {
+    if (!await tryReplaceGraphAtomically(this.store, archive, quads.map(quad => ({ ...quad, graph: archive })))) {
+      throw Object.assign(new Error('Triple store cannot atomically archive graph-scoped private content'),
+        { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED' });
+    }
+  }
+
   /**
    * Atomically replace the complete private triple set of one graph-scoped KA.
    * No marker triples are mixed into this graph: its contents are exactly the
@@ -287,10 +324,15 @@ export class PrivateContentStore {
     scope: GraphKnowledgeAssetScope,
     quads: readonly Quad[],
     subGraphName?: string,
+    commitmentId?: string,
   ): Promise<string> {
     for (const quad of quads) assertSafePrivateQuad(quad);
     const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
     await this.withGraphWriteLock(graphUri, async () => {
+      if (commitmentId !== undefined && quads.length > 0) {
+        const archive = this.knowledgeAssetPrivateCommitmentGraphUri(contextGraphId, scope, commitmentId, subGraphName);
+        await this.replacePrivateCommitmentArchive(archive, quads);
+      }
       const replaced = await tryReplaceGraphAtomically(
         this.store,
         graphUri,
@@ -315,7 +357,13 @@ export class PrivateContentStore {
     subGraphName?: string,
     readOptions?: KnowledgeAssetPrivateReadOptions,
   ): Promise<Quad[]> {
-    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    let graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    if (readOptions?.commitmentId !== undefined) {
+      const archive = this.knowledgeAssetPrivateCommitmentGraphUri(contextGraphId, scope, readOptions.commitmentId, subGraphName);
+      // Pre-upgrade content has only the version graph; consumers still verify
+      // its count/root. New drafts always write their immutable archive first.
+      if (await this.store.countQuads(archive) > 0) graphUri = archive;
+    }
     if (readOptions?.expectedQuadCount !== undefined) {
       return readExactGraphPaged(this.store, graphUri, {
         ...readOptions,

@@ -591,14 +591,7 @@ export type {
   ImportedArtifactByteStore,
 };
 
-/**
- * OT-RFC-43 A2 (decision 5) — the `agent.assertion.history()` return shape:
- * the core `AssertionDescriptor` plus the three per-layer pointers, the
- * §10.5.4 derived status, and the finalize-stamped KA identity. The pointers
- * are merkle-root hex (bare, no 0x); divergence between them (e.g.
- * `wmCurrentAssertion !== vmCurrentAssertion`) is the observable signal that a
- * layer is ahead of another.
- */
+/** Assertion history includes each memory layer's root and the finalized KA identity. */
 export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   /** Merkle hex of the assertion currently sealed in WM (bare, no 0x). */
   wmCurrentAssertion?: string;
@@ -612,6 +605,8 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   status: KaStatus;
   /** The per-author KA NUMBER (low 96 bits) stamped at finalize, as a string. */
   kaNumber?: string;
+  /** The current finalized assertion number, independent of the stable KA number. */
+  assertionVersion?: string;
   /** did:dkg:<chainId>/<agentAddrLower>/<number> reserved at finalize. */
   reservedUal?: string;
   /**
@@ -3980,17 +3975,17 @@ export class DKGAgent extends DKGAgentBase {
         const queryAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionQueryPrivate(contextGraphId, name, queryAgentAddress, opts?.subGraphName);
       },
-      /** Re-open a sealed rootless KA from its exact SWM/VM graph. */
+      /** Re-open a sealed rootless KA from its exact WM/SWM/VM graph. */
       async pullFrom(
         contextGraphId: string,
         name: string,
-        sourceLayer: 'swm' | 'vm',
+        sourceLayer: 'wm' | 'swm' | 'vm',
         opts?: { subGraphName?: string; agentAddress?: string; onConflict?: 'reject' | 'replace' },
       ): Promise<{
         seeded: number;
         seededPublic: number;
         seededPrivate: number;
-        fromLayer: 'swm' | 'vm';
+        fromLayer: 'wm' | 'swm' | 'vm';
         contentScopeVersion: number;
         kaUal: string;
         assertionVersion: string;
@@ -4254,7 +4249,7 @@ export class DKGAgent extends DKGAgentBase {
             opts?.subGraphName,
           );
           const entityResult = await agent.store.query(
-            `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal ?contentScopeVersion WHERE {
+            `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal ?contentScopeVersion ?assertionVersion WHERE {
               GRAPH <${metaGraph}> {
                 <${candidateLifecycleUri}> <${DKG_NS}state> ?state .
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
@@ -4267,6 +4262,7 @@ export class DKGAgent extends DKGAgentBase {
                 OPTIONAL { <${candidateLifecycleUri}> <${RESERVED_UAL_PRED}> ?reservedUal }
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}publishedUal> ?publishedUal }
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}contentScopeVersion> ?contentScopeVersion }
+                OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}assertionVersion> ?assertionVersion }
               }
             } LIMIT 1`,
             { source: 'agent.history.lifecycleState' },
@@ -4418,6 +4414,7 @@ export class DKGAgent extends DKGAgentBase {
           currentShareOperationId,
           status: deriveStatus(pointers),
           kaNumber: kaNumberStr,
+          assertionVersion: strip(row['assertionVersion']),
           reservedUal,
           publishedUal,
         };

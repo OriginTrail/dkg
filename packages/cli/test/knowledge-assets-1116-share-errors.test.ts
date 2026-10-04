@@ -1051,6 +1051,22 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueueCalls).toBe(0);
   });
 
+  it('wm/finalize returns a retryable503 for unavailable coherent version evidence', async () => {
+    await startWith({ finalize: async () => { throw Object.assign(new Error('version proof unavailable'), { code: 'KA_FINALIZE_VERSION_PROOF_UNAVAILABLE' }); } });
+    const res = await post('wm/finalize', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ code: 'KA_FINALIZE_VERSION_PROOF_UNAVAILABLE', retryable: true });
+  });
+
+  it('wm/pull-from accepts a sealed WM source without a share detour', async () => {
+    const calls: unknown[] = [];
+    await startWith({ pullFrom: async (...args: unknown[]) => { calls.push(args); return { fromLayer: 'wm', seeded: 1 }; } });
+    const res = await post('wm/pull-from', { contextGraphId: CG_ID, layer: 'wm' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ fromLayer: 'wm', wmDraft: 'open' });
+    expect(calls[0]).toEqual([CG_ID, ASSERTION_NAME, 'wm', expect.any(Object)]);
+  });
+
   it('vm/publish-async maps incompatible duplicate jobs to 409 with existingJobId', async () => {
     const intent = {
       contextGraphId: CG_ID,
@@ -1086,6 +1102,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({
       error: 'conflict',
+      code: 'ASYNC_LIFT_JOB_CONFLICT',
       existingJobId: 'job-existing',
     });
   });

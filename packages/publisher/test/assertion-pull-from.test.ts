@@ -142,6 +142,34 @@ function legacySeal(rootEntities: string[]): Quad[] {
 }
 
 describe('rootless assertionPullFrom', () => {
+  it('reopens an unshared sealed WM draft in place with its full private partition and sibling intact', async () => {
+    const { publisher, store } = await makePublisher();
+    await publisher.assertionCreate(CG, NAME, AGENT);
+    await publisher.assertionWrite(CG, NAME, AGENT, [q(ENTITY_1, SCHEMA, '"local sealed"')]);
+    await publisher.assertionWritePrivate(CG, NAME, AGENT, [q(ENTITY_1, 'urn:secret', '"private sealed"')]);
+    await publisher.assertionCreate(CG, 'sibling', AGENT);
+    await publisher.assertionWrite(CG, 'sibling', AGENT, [q(ENTITY_2, SCHEMA, '"sibling"')]);
+    const seal = await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AGENT });
+    const result = await publisher.assertionPullFrom(CG, NAME, AGENT, 'wm');
+    expect(result).toMatchObject({ fromLayer: 'wm', seededPublic: 1, seededPrivate: 1, assertionVersion: seal.assertionVersion });
+    await publisher.assertionWrite(CG, NAME, AGENT, [q(ENTITY_3, SCHEMA, '"editable"')]);
+    expect(await publisher.assertionQuery(CG, NAME, AGENT)).toHaveLength(2);
+    expect(await publisher.assertionQueryPrivate(CG, NAME, AGENT)).toEqual([expect.objectContaining({ object: '"private sealed"' })]);
+    expect(await publisher.assertionQuery(CG, 'sibling', AGENT)).toEqual([expect.objectContaining({ object: '"sibling"' })]);
+  });
+
+  it('leaves a damaged sealed WM source intact instead of reopening unverified content', async () => {
+    const { publisher, store } = await makePublisher();
+    await publisher.assertionCreate(CG, NAME, AGENT);
+    await publisher.assertionWrite(CG, NAME, AGENT, [q(ENTITY_1, SCHEMA, '"sealed"')]);
+    await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AGENT });
+    const graph = await publisher.wmGraphUri(CG, AGENT, NAME);
+    await store.insert([q(ENTITY_2, SCHEMA, '"corrupt residue"', graph)]);
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'wm')).rejects.toThrow(/mismatch/);
+    expect(await publisher.assertionQuery(CG, NAME, AGENT)).toHaveLength(2);
+    await expect(publisher.assertionWrite(CG, NAME, AGENT, [q(ENTITY_3, SCHEMA, '"blocked"')])).rejects.toMatchObject({ code: 'KA_ASSERTION_ALREADY_FINALIZED' });
+  });
+
   it('re-opens the complete exact SWM graph and ignores bucket and root-row decoys', async () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store, {

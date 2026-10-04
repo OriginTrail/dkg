@@ -1,3 +1,4 @@
+import { assertDraftOperationNotRetired, withDraftArtifactReferences } from './draft-artifact-retention.js';
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
@@ -760,12 +761,13 @@ export class TripleStoreAsyncLiftPublisher
     request: KnowledgeAssetVmPublishRequest,
     admission?: AsyncLiftAdmissionContext,
   ): Promise<string> {
-    return this.claimCoordinator.runClaimTransaction(async () => {
+    return withDraftArtifactReferences(this.store, () => this.claimCoordinator.runClaimTransaction(async () => {
       await this.ensureGraph();
       if (!request.shareOperationId.trim()) {
         throw new Error('Knowledge asset VM publish requires a shareOperationId');
       }
       assertGraphScopedLiftSnapshot(request);
+      await assertDraftOperationNotRetired(this.store, request);
       const existing = await this.findActiveKnowledgeAssetVmPublishJob(request);
       if (existing?.compatible) {
         if (isFailedJob(existing.job)) {
@@ -795,7 +797,7 @@ export class TripleStoreAsyncLiftPublisher
       };
       await this.writeJob(job, 'admission');
       return jobId;
-    });
+    }));
   }
 
 
@@ -2834,11 +2836,7 @@ export class TripleStoreAsyncLiftPublisher
       });
     }
 
-    // #1837 — reaccept (failed→accepted) is a terminal→active transition; it MUST be
-    // serialized with claimNext/enqueue AND with clearTerminalJob (which also runs under
-    // withClaimLock) so a by-id clear that read a job as clearable-failed cannot be swept
-    // after retry() flips it active. Without this lock the "a transitioning job cannot be
-    // swept" guarantee does not hold.
+    // Serialize terminal reaccept with admission and terminal deletion.
     return this.claimCoordinator.runClaimTransaction(async () => {
       const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
       for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {

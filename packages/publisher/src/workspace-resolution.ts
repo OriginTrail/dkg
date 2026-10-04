@@ -126,17 +126,7 @@ export function isKnowledgeAssetWorkspaceHeadCorruptError(
   }
 }
 
-/**
- * Typed outcome boundary over `resolveKnowledgeAssetWorkspaceHead` for callers
- * whose local POLICY on corruption differs (discard archives, gossip receive
- * permanently rejects) — they switch on the result instead of each hand-rolling
- * a try/catch + flag around the thrown resolver error. Non-corrupt errors
- * (store failures etc.) still throw. Callers that consume the error AFTER
- * cross-package propagation (the async classifier, the daemon route) stay on
- * the thrown-error path deliberately: the throw is the carrier across those
- * boundaries and `isKnowledgeAssetWorkspaceHeadCorruptError` is their
- * recognition point.
- */
+/** Resolver corruption is an explicit policy outcome; storage failures propagate. */
 export type KnowledgeAssetWorkspaceHeadResolution =
   | { readonly status: 'missing' }
   | { readonly status: 'resolved'; readonly head: KnowledgeAssetWorkspaceHead }
@@ -183,7 +173,7 @@ export interface KnowledgeAssetWorkspaceHead {
    * always first; every identity/timestamp compatibility view derives from it.
    */
   readonly operationAliases: KnowledgeAssetWorkspaceOperationAliasClass;
-  /** @deprecated Derived from operationAliases[0]; retained for patch compatibility. */
+  /** @deprecated Use operationAliases[0].publishedAt. */
   readonly publishedAt?: TimestampMsV1;
   /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
   readonly publisherPeerId: string;
@@ -1290,10 +1280,11 @@ export async function resolveLiftWorkspaceSlice(params: {
       );
     }
     const privateStore = new PrivateContentStore(params.store, params.graphManager);
-    const privateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
+    const privateQuads = request.privateTripleCount === 0 ? [] : await privateStore.getKnowledgeAssetPrivateTriples(
       request.contextGraphId,
       scope,
       subGraphName,
+      { commitmentId: request.privateMerkleRoot },
     );
     if (privateQuads.length !== request.privateTripleCount) {
       throw new Error(

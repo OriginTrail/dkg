@@ -1,3 +1,4 @@
+import { collectAbandonedDraftArtifacts, withUnqueuedDraftOperation } from './draft-artifact-gc.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -11538,13 +11539,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ])];
 
         for (const pid of contextGraphs) {
+          await collectAbandonedDraftArtifacts({ store: this.store, chain: this.chain, writeLocks: this.writeLocks, contextGraphId: pid, now });
           let graphDeleted = 0;
           let expiredOpsCount = 0;
 
-          // Graph-scoped V2 operations and heads for sub-graph shares live in
-          // per-subgraph `…/{subGraph}/_shared_memory_meta` graphs (see
-          // GraphManager.sharedMemoryMetaUri), not only in the root
-          // `…/_shared_memory_meta` bucket — expire every meta graph.
+          // Include the root and sub-graph SWM metadata buckets.
           const wsMetaGraphs = await listSharedMemoryMetaGraphs(this.store, pid);
 
           // Graph-scoped KAs are confirmed in the root `_meta`, sub-graphs included.
@@ -11608,6 +11607,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const opUri = row['op'];
                 if (!opUri) continue;
 
+                await withUnqueuedDraftOperation(this.store, pid, wsSubGraphName, opUri, now, async () => {
                 const rootEntitiesResult = await this.store.query(
                   `SELECT ?re WHERE {
                   GRAPH <${wsMetaGraph}> {
@@ -11636,16 +11636,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   }
                 }
 
-                // Graph-scoped V2 operations (dkg:contentScopeVersion=2) have no
-                // rootEntity rows, so the legacy sweep above no-ops for them and
-                // the generic op-subject delete below would strand the rest of the
-                // KA: the per-KA SWM assertion graph, the `${kaUal}#dkg-swm-head`
-                // subject and the operation's public snapshot graph. Discard them
-                // here. The snapshot graph always dies with its operation; the
-                // head and assertion graph die only when the head still points at
-                // THIS operation — when a newer operation owns the head they carry
-                // live data, and a surviving head whose operation rows are gone
-                // reads as CORRUPT in resolveKnowledgeAssetWorkspaceHead.
+                // Expire only this operation’s V2 snapshot and its owned head.
                 const v2Meta = await this.store.query(
                   `SELECT ?scopeVersion ?kaUal ?snapshotGraph WHERE {
                   GRAPH <${wsMetaGraph}> {
@@ -11734,6 +11725,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     ownedSet.delete(re);
                   }
                 }
+                });
               }
               if (metadataDeleted === 0) {
                 this.log.warn(

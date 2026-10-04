@@ -16,13 +16,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
   failing as a retryable `rpc_unavailable` that looped on every re-submit, and
   `wm/finalize` now returns `assertionVersion` and `kaUal`. KAs already stuck
   need `POST /api/publisher/clear-job` for the failed job, then `wm/pull-from`
-  (`layer: "swm"`), `wm/finalize`, `swm/share`, `vm/publish-async`. **Known
-  limits** (tracked in #2964): the successor of an abandoned *shared* draft is
-  shared under the same number, which peers' share gate, the RFC-64 catalog
-  ("strictly newer" rule) and curator confirmation (`swmAwaitCuratorAck`)
-  do not yet replace, so peers may keep showing the earlier draft until the
-  update is published; and the replacement replaces the private payload sealed
-  under that number.
+  (`layer: "swm"`), `wm/finalize`, `swm/share`, `vm/publish-async`.
+- **Replacement unpublished drafts replicate under a reused number** (#2964):
+  authenticated newer draft shares and curator confirmation can replace the same
+  unpublished number. Recovering a burned higher draft additionally requires a
+  coherent chain view proving both numbers exceed the confirmed version.
+  RFC-64 replacements preserve signed remove/insert ancestry and reject old
+  finalization evidence. Private content remains addressable by its sealed
+  commitment, so an earlier shared draft can be reopened after an unshared
+  replacement. Signed StorageACK copies remain protected during the pending
+  transaction window; mixed fleets retain the old receiver behavior until upgraded.
 
 - **`@origintrail-official/dkg-core/dist/absolute-rfc3987-iri.js` resolves
   again** (#2926): 10.0.19 moved `isAbsoluteRfc3987IriV1` to

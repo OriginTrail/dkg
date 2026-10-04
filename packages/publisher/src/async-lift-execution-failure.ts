@@ -64,7 +64,24 @@ function isTransientRpcFailure(error: unknown): boolean {
 // (`isKnowledgeAssetPublishPreconditionFailure`), with no write-ahead proof; the store-rejection
 // case is decided in `mapExecutionFailure`, where that proof and the persisted status are both in
 // hand.
+function deterministicDraftPreconditionCode(error: unknown): LiftJobFailureCode | null {
+  let code: unknown;
+  try { code = (error as { code?: unknown } | null)?.code; } catch { return null; }
+  switch (code) {
+    case 'ROOTLESS_UPDATE_TARGET_NOT_CONFIRMED':
+    case 'ROOTLESS_KA_NOT_MATERIALIZED': return 'workspace_slice_not_found';
+    case 'ROOTLESS_UPDATE_TARGET_CORRUPT':
+    case 'ROOTLESS_UPDATE_INVALID_KA_ID':
+    case 'LEGACY_KA_READ_ONLY': return 'canonicalization_failed';
+    case 'KA_UPDATE_AUTHOR_NOT_OWNER': return 'authority_forbidden';
+    case 'KA_UPDATE_VERSION_MISMATCH': return 'publish_intent_stale';
+    default: return null;
+  }
+}
+
 function classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJobFailureCode | null {
+  const draftCode = deterministicDraftPreconditionCode(error);
+  if (draftCode !== null) return draftCode;
   // GH#1786 — permanent author-capability refusal; no transaction was ever sent.
   if (isPermanentAuthorCapabilityFailure(error)) return 'authority_forbidden';
   let structuredCode: unknown;
@@ -200,7 +217,10 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
   const claimedTransientRpc = requestedOrigin === 'claimed'
     && currentStatus === 'claimed'
     && transientRpc;
-  const origin: LiftJobState = preDispatchRecoverable ? 'validated' : requestedOrigin;
+  const retainedTransactionOrigin = deterministicDraftPreconditionCode(error) !== null
+    && (currentStatus === 'broadcast' || currentStatus === 'included');
+  const origin: LiftJobState = retainedTransactionOrigin ? currentStatus
+    : preDispatchRecoverable ? 'validated' : requestedOrigin;
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
   const errorPayloadRef = `urn:dkg:publisher:error:${jobId}`;

@@ -70,3 +70,15 @@ export function swmKaWriteLockKey(
     : contextGraphId;
   return `${lockNamespace}\0ka\0${kaUal.toLowerCase()}`;
 }
+
+/** Every mutation of a named KA's lifecycle descriptor shares this exact lock domain. */
+export function assertionLifecycleWriteLockKey(
+  contextGraphId: string,
+  name: string,
+  agentAddress: string,
+  subGraphName?: string,
+): string {
+  const normalizedAgentAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
+    ? agentAddress.toLowerCase() : agentAddress;
+  return `assertion-lifecycle:${JSON.stringify([contextGraphId, subGraphName ?? '', normalizedAgentAddress, name])}`;
+}

@@ -389,6 +389,7 @@ import {
   deserializeSwmSenderReceiveState,
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
+import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -1350,13 +1351,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             `Context graph "${cgId}" metadata authority kept changing while resolving its SWM gate`,
           );
         },
-        // Same predicate the SENDER uses to decide plaintext vs encrypted SWM
-        // (`resolveWorkspaceRecipientsGated`), so both sides of the wire stay
-        // on one authority. Without it the receiver judged from local
-        // allowedAgent/participantAgent triples and permanently dropped the
-        // plaintext writes the sender is supposed to send on a public CG —
-        // silently breaking member->curator SWM shares on every public/curated
-        // context graph, registered or owner-signed unregistered (#2827).
+        // Match sender access authority: public CGs allow plaintext reads while
+        // their participant gate still controls write authority (#2827).
         publicAccessPolicyOracle: (cgId: string) =>
           withRpcUsageSite(
             CG_AUTH_RPC_SITES.swmPublicOracle,
@@ -1372,6 +1368,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           this.rfc64LegacySwmApplyAllowedForScope(cgId, subGraphName)
           || (subGraphName === null && await this.rfc64PrivateRootSwmOnLegacyLaneV1(cgId))
         ),
+        readConfirmedKnowledgeAssetVersion: kaUal => readConfirmedDraftVersion(this.chain, kaUal),
+        pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
         resolveDurableRootAtomicCompanion: (input) => {
           if (this.config.dataDir === undefined) return;
           return prepareRfc64LateLegacySwmBoundaryV1(
