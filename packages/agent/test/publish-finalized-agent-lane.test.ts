@@ -112,6 +112,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.writeLocks = new Map<string, Promise<void>>();
     agent.chain = {};
     agent.defaultAgentAddress = DEFAULT_AGENT;
     Object.defineProperty(agent, 'peerId', {
@@ -219,6 +220,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.writeLocks = new Map<string, Promise<void>>();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-source-empty', configurable: true });
@@ -270,6 +272,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishCalls = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.writeLocks = new Map<string, Promise<void>>();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-legacy-finalized', configurable: true });
@@ -315,6 +318,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const updateCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.writeLocks = new Map<string, Promise<void>>();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-update', configurable: true });
@@ -384,6 +388,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishes = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.writeLocks = new Map<string, Promise<void>>();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-namespace', configurable: true });
