@@ -1812,13 +1812,32 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // could not be replayed from surface through providerHealth instead.
       const replayFailed = currentReplayProgress?.failed === true;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
+      // A curated unregistered graph has exactly one permitted author. When
+      // this node is that owner and its verified applied heads all belong to
+      // it, an unanswered connected peer cannot reveal another author's
+      // catalog. Keep the provider failure visible in providerHealth, but do
+      // not turn locally complete owner inventory into unknown graph parity.
+      const curatedOwnerAddress = accepted?.policy.source.kind === 'owner-signed-unregistered'
+        ? accepted.policy.source.ownerAddress
+        : null;
+      const localCuratedOwnerHeads = accepted !== null
+        && accepted.policy.publishPolicy === 0
+        && curatedOwnerAddress !== null
+        && heads.length > 0
+        && this.listLocalAgents().some(({ agentAddress }) => (
+          agentAddress.toLowerCase() === curatedOwnerAddress
+        ))
+        && heads.every(({ snapshot }) => (
+          snapshot.authorAddress === curatedOwnerAddress
+        ));
       // A full pass that reached no provider at all corroborated nothing: with
       // an empty promised set parity is vacuously satisfied, so applied rows
       // would otherwise be reported as agreed by every provider. It is not
       // evidence of missing rows, so it stays distinct from `replayFailed`, and
       // it can only mislead once something has been applied.
       const replayUnverified = currentReplayProgress?.unverified === true
-        && heads.length > 0;
+        && heads.length > 0
+        && !localCuratedOwnerHeads;
       const replayUnsettled = replayActive || replayFailed || replayUnverified;
       const targets = targetsByContextGraph.get(selection.contextGraphId) ?? [];
       const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;

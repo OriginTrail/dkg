@@ -655,6 +655,28 @@ describe('Context Graph authority index over the one log', () => {
     expect(attempts).toEqual([]);
   });
 
+  it('reacquires a newer event-log anchor before falling back to a live scan', async () => {
+    const stale = logSource(seededStore({ head: LIVE_HEAD - 1 }));
+    const fresh = logSource(seededStore({ head: LIVE_HEAD + 1 }), {
+      readBlockHash: async (blockNumber) => hash(blockNumber),
+    });
+    let phase: 'prime' | 'race' = 'prime';
+    let sourceReads = 0;
+    const { reader, calls, attempts } = makeReader({
+      sourceProvider: () => phase === 'prime'
+        ? undefined
+        : sourceReads++ === 0 ? stale : fresh,
+    });
+    await reader.snapshots.refresh();
+    const initialHeadReads = calls.getBlock;
+    phase = 'race';
+
+    await expect(reader.snapshots.refresh()).resolves.toBeUndefined();
+    expect(sourceReads).toBeGreaterThanOrEqual(2);
+    expect(calls.getBlock).toBe(initialHeadReads);
+    expect(attempts).toEqual([]);
+  });
+
   it('keeps its live scan while the backfill has not reached the deploy block', async () => {
     // The rows the log holds would answer — but nothing proves that the blocks
     // BELOW them hold no earlier commitment for this name.

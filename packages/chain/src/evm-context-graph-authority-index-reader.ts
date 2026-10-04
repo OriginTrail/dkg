@@ -701,14 +701,18 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // Bound to the address the TICK walked. A rotation the adapter has not
         // yet rebuilt around leaves these unequal, and reading the log then
         // would prove a range against coverage recorded for a retired proxy.
-        const source = dependencies.chainEventLogAuthority?.();
-        if (source !== undefined && source.contractAddress === contractAddress) {
+        for (let logAttempt = 0; logAttempt < 2; logAttempt += 1) {
+          // A concurrent reader may advance the durable authority cursor after
+          // this tick supplied an anchor. Reacquire the live log generation
+          // once before spending an RPC scan on that ordinary local race.
+          const source = dependencies.chainEventLogAuthority?.();
+          if (source === undefined || source.contractAddress !== contractAddress) break;
           const anchor = (await source.resolveAnchor({
             deploymentBlockNumber,
             finalityConfirmations: dependencies.finalityConfirmations(),
           })).anchor;
-          if (anchor !== undefined) {
-            try {
+          if (anchor === undefined) break;
+          try {
             const logged = await readEvmContextGraphAuthorityIndexProjectionV1(
               { ...readInput, finalized: anchor.finalized, logSource: { anchor, source } },
               (scan) => project(scan, {
@@ -748,15 +752,17 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                 return contextGraphAuthorityIndexProjectionFault(admission.fault);
               }
             }
-            } catch (error) {
-              options.signal?.throwIfAborted();
-              projectionSignal.throwIfAborted();
-              if (!isContextGraphAuthorityIndexRetryableError(error)
-                || error.reason !== 'cursor-ahead') throw error;
-              // A newer live read may have advanced the durable cursor past
-              // this tick's otherwise valid log anchor. The log can no longer
-              // answer this read; use the fresh provider scan below instead.
+          } catch (error) {
+            options.signal?.throwIfAborted();
+            projectionSignal.throwIfAborted();
+            if (!isContextGraphAuthorityIndexRetryableError(error)
+              || error.reason !== 'cursor-ahead') throw error;
+            if (logAttempt === 0) {
+              await sleep(300, undefined, { signal: projectionSignal });
+              continue;
             }
+            // The second local anchor also lags the durable cursor. Let the
+            // fresh provider scan below establish a new finalized boundary.
           }
         }
 
