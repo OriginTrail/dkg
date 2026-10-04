@@ -583,6 +583,9 @@ const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
   250,
   1_000,
   4_000,
+  15_000,
+  30_000,
+  60_000,
 ]);
 const RFC64_JOIN_APPROVAL_CATALOG_REPLAY_RETRY_DELAYS_MS_V1 = Object.freeze([
   5_000,
@@ -4070,11 +4073,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           await this.promoteRfc64OwnerSignedSwmInventoriesV1(contextGraphId, signal);
           signal.throwIfAborted();
-          await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+          const replay = await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
             contextGraphId,
             signal,
           );
-          return;
+          // A private join may accept its owner-signed policy before both
+          // peers have the current member roster. Every peer can then answer
+          // "not provider" even though an authorized provider becomes
+          // reachable shortly afterward. Zero completed replays corroborate
+          // no catalog rows, so keep the bounded recovery demand alive.
+          if (replay.requested > 0) return;
         } catch (error) {
           if (signal.aborted) throw signal.reason ?? error;
           const retryDelayMs = RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1[
@@ -4082,7 +4090,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ];
           if (retryDelayMs === undefined) throw error;
           await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
+          continue;
         }
+        const retryDelayMs = RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1[
+          attempt
+        ];
+        if (retryDelayMs === undefined) return;
+        await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
       }
     });
   }
