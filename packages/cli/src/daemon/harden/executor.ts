@@ -118,11 +118,9 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
       try { await phase.execute(ctx); }
       catch (cause) {
         if (phase.rollbackPhase === undefined) throw cause;
-        try { await rollbackMigrationFailure(ctx, phase.rollbackPhase, cause); }
-        catch (error) {
-          if ((error as { code?: string })?.code === 'STORE_HARDEN_ROLLBACK_COMPLETE') recoveryRequired = false;
-          throw error;
-        }
+        const failure = await rollbackMigrationFailure(ctx, phase.rollbackPhase, cause);
+        recoveryRequired = !failure.rollback.complete;
+        throw failure.error;
       }
     }
     const exported = migration.exported;

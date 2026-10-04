@@ -21,7 +21,7 @@ import { join, relative, resolve } from 'node:path';
 import { planHardenMigration, executeHardenMigration, HARDEN_DISK_PREFLIGHT_FACTOR, HARDEN_EXPORT_FILENAME, type HardenStep } from '../src/daemon/blazegraph-harden.js';
 import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_JOURNAL_FILE, type DockerRunner } from '../src/daemon/blazegraph-docker.js';
 import { storeHardenLockPath } from '../src/daemon/store-runtime-monitor.js';
-import { NAME, BACKUP, VOLUME, NAMESPACE, JOURNAL_BYTES, inspectJson, notFound, ok, scriptedDocker, verifierFetch, assertSafetyInvariants } from './_helpers/blazegraph-harden-fixtures.js';
+import { NAME, BACKUP, VOLUME, NAMESPACE, JOURNAL_BYTES, inspectJson, notFound, ok, scriptedDocker, verifierFetch, assertSafetyInvariants, uncertainInspectionResults } from './_helpers/blazegraph-harden-fixtures.js';
 
 describe('executeHardenMigration', () => {
   let migrationDir: string;
@@ -48,6 +48,27 @@ describe('executeHardenMigration', () => {
     freeDiskBytes: async () => 10 ** 12,
     readyIntervalMs: 1,
     readyTimeoutMs: 200,
+  });
+
+  it.each(uncertainInspectionResults(BACKUP))('refuses ASK-only hardened verification when backup inspection is uncertain (%s)', async (_, response) => {
+    const { runner, calls } = scriptedDocker({ initial: 'hardened', migrationDir,
+      failOn: args => args[0] === 'inspect' && args[1] === BACKUP ? response : null });
+    const { fn, calls: queries } = verifierFetch();
+    await expect(executeHardenMigration(baseOpts(runner, fn))).rejects.toThrow(/Cannot determine whether migration backup/);
+    expect(calls.every(args => args[0] === 'inspect')).toBe(true);
+    expect(queries).toEqual([]);
+  });
+
+  it.each(uncertainInspectionResults(NAME))('retains the recovery barrier when rollback replacement inspection is uncertain (%s)', async (_, response) => {
+    let created = false;
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir, failOn: args => {
+      if (args[0] === 'run' && args[1] === '-d') created = true;
+      return created && args[0] === 'inspect' && args[1] === NAME ? response : null;
+    } });
+    await expect(executeHardenMigration(baseOpts(runner, verifierFetch({ askOk: false }).fn))).rejects.toThrow(/rollback is INCOMPLETE.*inspect-gate/is);
+    expect(calls.some(args => args[0] === 'rm' || args[0] === 'start' || (args[0] === 'rename' && args[1] === BACKUP))).toBe(false);
+    expect(JSON.parse(readFileSync(storeHardenLockPath(dkgHome), 'utf8')).recoveryRequired).toBe(true);
+    assertSafetyInvariants(calls, migrationDir, true);
   });
 
   it('resolves a relative migration directory before disk preflight, export, seeding and result construction', async () => {
@@ -459,6 +480,9 @@ describe('executeHardenMigration', () => {
     const { fn } = verifierFetch({ askOk: false });
     await expect(executeHardenMigration(baseOpts(runner, fn)))
       .rejects.toThrow(/verification failed.*restored/is);
+    expect(existsSync(storeHardenLockPath(dkgHome))).toBe(false);
+
+    expect(existsSync(storeHardenLockPath(dkgHome))).toBe(false);
 
     // Rollback sequence: rm -f NEW container (volume-gated), rename the
     // backup back, restore the restart policy, start it.
@@ -561,6 +585,8 @@ describe('executeHardenMigration', () => {
     // Never claims the legacy container was restored.
     expect((err as Error).message).toMatch(/rollback is INCOMPLETE/i);
     expect((err as Error).message).not.toMatch(/was restored/);
+    expect(existsSync(storeHardenLockPath(dkgHome))).toBe(true);
+    expect(JSON.parse(readFileSync(storeHardenLockPath(dkgHome), 'utf8')).recoveryRequired).toBe(true);
     // No later step ran — `docker start dkg-blazegraph-dkg` here would have
     // started the FAILED-VERIFICATION container.
     expect(calls.some((c) => c[0] === 'rename' && c[1] === BACKUP)).toBe(false);

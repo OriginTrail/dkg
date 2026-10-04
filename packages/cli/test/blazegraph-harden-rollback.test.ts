@@ -2,9 +2,17 @@
 import { describe, it, expect } from 'vitest';
 import { type DockerRunner } from '../src/daemon/blazegraph-docker.js';
 import { rollbackToBackup } from '../src/daemon/harden/rollback.js';
-import { NAME, BACKUP, inspectJson, notFound, ok } from './_helpers/blazegraph-harden-fixtures.js';
+import { NAME, BACKUP, inspectJson, notFound, ok, uncertainInspectionResults } from './_helpers/blazegraph-harden-fixtures.js';
 
 describe('rollbackToBackup command retirement', () => {
+  it.each(uncertainInspectionResults(NAME))('does not mutate containers when replacement inspection is uncertain (%s)', async (_, response) => {
+    const calls: string[][] = [];
+    const docker: DockerRunner = { run: async args => { calls.push([...args]); return args[0] === 'inspect' ? response : ok(); } };
+    await expect(rollbackToBackup({ docker, containerName: NAME, backupName: BACKUP, log() {} }))
+      .resolves.toMatchObject({ complete: false, failedStep: 'inspect-gate' });
+    expect(calls).toEqual([['inspect', NAME]]);
+  });
+
   it.each([0, 1, 2, 3])('reports exactly the rollback suffix beginning at failed command %s', async (failed) => {
     const commands = [
       ['rm', '-f', NAME], ['rename', BACKUP, NAME],

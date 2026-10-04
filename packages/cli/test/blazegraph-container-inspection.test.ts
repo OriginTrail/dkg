@@ -1,13 +1,41 @@
 import { describe, expect, it } from 'vitest';
 import { blazegraphNamespaceEndpointParts } from '@origintrail-official/dkg-storage';
-import { inspectBlazegraphContainerFacts, parseBlazegraphContainerInspection } from '../src/daemon/blazegraph-container-inspection.js';
+import { classifyBlazegraphContainerInspection, inspectBlazegraphContainerFacts, parseBlazegraphContainerInspection } from '../src/daemon/blazegraph-container-inspection.js';
 import { parseBlazegraphNamespaceEndpoint } from '../src/daemon/blazegraph-container-policy.js';
 import { BLAZEGRAPH_LOG_MAX_SIZE, BLAZEGRAPH_LOG_MAX_FILE } from '../src/daemon/blazegraph-docker.js';
 import { inspectHardenState } from '../src/daemon/harden/state.js';
+import { ok, uncertainInspectionResults } from './_helpers/blazegraph-harden-fixtures.js';
 
 const name = 'dkg-blazegraph-facts';
 const policy = { containerName: name, dataPath: '/data', containerPort: 8080,
   logMaxSize: BLAZEGRAPH_LOG_MAX_SIZE, logMaxFile: BLAZEGRAPH_LOG_MAX_FILE };
+
+describe('canonical Docker inspection outcome', () => {
+  it('requires successful, valid found-container evidence independently of stderr', () => {
+    const response = { ...ok(JSON.stringify([{ State: { Running: false }, Mounts: [] }])), stderr: `Error: No such object: ${name}` };
+    expect(classifyBlazegraphContainerInspection(response, name, policy)).toMatchObject({ kind: 'found', facts: { running: false } });
+    expect(classifyBlazegraphContainerInspection({ ...response, exitCode: 1, stderr: 'permission denied' }, name, policy))
+      .toEqual({ kind: 'failed', reason: 'command', detail: 'permission denied' });
+  });
+  it.each(['Error: No such object:', 'Error: No such container:', 'Error response from daemon: No such object:', 'Error response from daemon: No such container:'])('certifies only the exact queried name (%s)', prefix => {
+    const response = { stdout: '', stderr: `${prefix} ${name}`, exitCode: 1 };
+    expect(classifyBlazegraphContainerInspection(response, name, policy)).toEqual({ kind: 'missing' });
+    expect(classifyBlazegraphContainerInspection(response, `${name}-backup`, policy).kind).toBe('failed');
+  });
+  it.each(uncertainInspectionResults(name))('does not infer absence from %s', async (_, response) => {
+    expect(classifyBlazegraphContainerInspection(response, name, policy).kind).toBe('failed');
+    const calls: string[][] = [];
+    await expect(inspectHardenState({ run: async args => { calls.push([...args]); return response; } }, name)).rejects.toThrow();
+    expect(calls).toEqual([['inspect', name]]);
+  });
+  it.each(['[]', '[null]', '[{}]', '[[]]', '[{"State":{}}]', '[{"State":{"Running":false}},{"State":{"Running":true}}]'])('rejects malformed container output (%s)', stdout => {
+    expect(classifyBlazegraphContainerInspection(ok(stdout), name, policy)).toEqual({ kind: 'failed', reason: 'output', detail: 'unparseable container facts' });
+  });
+  it('reports an empty failed command without interpreting valid-looking stdout', () => {
+    expect(classifyBlazegraphContainerInspection({ stdout: '[]', stderr: '', exitCode: 1 }, name, policy))
+      .toEqual({ kind: 'failed', reason: 'command', detail: 'Docker inspect failed' });
+  });
+});
 
 describe('shared Blazegraph inspection facts', () => {
   it.each(['data', 'hardened-data'])('recognizes %s journal volumes for provisioning and migration', async suffix => {

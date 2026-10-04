@@ -1,4 +1,5 @@
 import { blazegraphVolumeName, blazegraphMigrationVolumeName } from './blazegraph-container-policy.js';
+import type { DockerCommandResult } from './blazegraph-docker.js';
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -91,9 +92,35 @@ export function inspectBlazegraphContainerFacts(info: unknown, policy: Blazegrap
 
 /** Decode one Docker inspect response. Invalid top-level data is never a stopped-container proof. */
 export function parseBlazegraphContainerInspection(stdout: string, policy: BlazegraphInspectionPolicy): BlazegraphContainerFacts | null {
+  const values = containerInspectionValues(stdout);
+  return values && record(values[0]) !== undefined
+    ? inspectBlazegraphContainerFacts(values[0], policy) : null;
+}
+
+function containerInspectionValues(stdout: string): unknown[] | undefined {
   try {
     const values: unknown = JSON.parse(stdout);
-    return Array.isArray(values) && record(values[0]) !== undefined
-      ? inspectBlazegraphContainerFacts(values[0], policy) : null;
-  } catch { return null; }
+    return Array.isArray(values) ? values : undefined;
+  } catch { return undefined; }
+}
+
+export type BlazegraphContainerInspectionOutcome =
+  | Readonly<{ kind: 'found'; facts: BlazegraphContainerFacts }>
+  | Readonly<{ kind: 'missing' }>
+  | Readonly<{ kind: 'failed'; reason: 'command' | 'output'; detail: string }>;
+
+/** Only Docker's exact queried-name absence certifies missing; uncertainty never does. */
+export function classifyBlazegraphContainerInspection(result: DockerCommandResult,
+  queriedName: string, policy: BlazegraphInspectionPolicy): BlazegraphContainerInspectionOutcome {
+  if (result.exitCode !== 0) {
+    const detail = result.stderr.trim() || 'Docker inspect failed';
+    const absent = /^(?:Error:|Error response from daemon:)\s*No such (?:object|container):\s*(.+)$/iu.exec(detail);
+    return absent?.[1] === queriedName ? { kind: 'missing' } : { kind: 'failed', reason: 'command', detail };
+  }
+  const values = containerInspectionValues(result.stdout);
+  const root = values?.length === 1 ? record(values[0]) : undefined;
+  // A partial/foreign JSON object cannot prove that an authoritative container is stopped.
+  if (root && typeof record(root.State)?.Running === 'boolean')
+    return { kind: 'found', facts: inspectBlazegraphContainerFacts(root, policy) };
+  return { kind: 'failed', reason: 'output', detail: 'unparseable container facts' };
 }

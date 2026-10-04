@@ -6,7 +6,8 @@ import { assertDaemonStoppedForStoreMigration, storeHardenLockPath } from '../st
 import { fileSize, verifyReplacement, type HardenWorkflowInputs } from './actions.js';
 import type { HardenMigrationResult } from './executor.js';
 import type { HardenStep } from './steps.js';
-import { BLAZEGRAPH_JOURNAL_FILE } from '../blazegraph-docker.js';
+import { BLAZEGRAPH_JOURNAL_FILE, BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_CONTAINER_PORT } from '../blazegraph-docker.js';
+import { classifyBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
 
 /** The sole recovery command is also its dry-run rendering. */
 export function hardenRecoveryStep(containerName: string): HardenStep & { dockerArgs: string[] } {
@@ -47,9 +48,10 @@ export async function recoverHardenMigration(ctx: HardenWorkflowInputs): Promise
     if (await readFile(evidence.path, 'utf8') !== evidence.text) throw new Error('Migration marker changed before recovery.');
     await assertDaemonStoppedForStoreMigration(ctx.opts.dkgHome);
     if (ctx.info.state !== 'hardened' && ctx.info.state !== 'legacy') throw new Error('Restore the backup or replacement before verifying recovery.');
-    const backup = await ctx.docker.run(['inspect', ctx.backupName]);
-    if (backup.exitCode !== 0 && !/no such (?:object|container)/i.test(backup.stderr)) throw new Error('Cannot verify the migration backup state.');
-    const backupExists = backup.exitCode === 0;
+    const backup = classifyBlazegraphContainerInspection(await ctx.docker.run(['inspect', ctx.backupName]), ctx.backupName,
+      { containerName: ctx.containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT });
+    if (backup.kind === 'failed') throw new Error('Cannot verify the migration backup state.');
+    const backupExists = backup.kind === 'found';
     if (ctx.info.state === 'legacy' && backupExists) throw new Error('The original-name legacy container is not a completed backup restore.');
     if (await fileSize(ctx.exportPath) !== evidence.exportBytes) throw new Error('Retained migration export is missing or changed; startup remains blocked.');
     await verifyReplacement(ctx, hardenRecoveryStep(ctx.containerName).dockerArgs, { path: ctx.exportPath, bytes: evidence.exportBytes });

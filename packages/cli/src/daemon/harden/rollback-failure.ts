@@ -3,7 +3,7 @@ import type { HardenWorkflowInputs } from './actions.js';
 
 /** Only phases after the authoritative source rename enter automatic rollback. */
 export async function rollbackMigrationFailure(ctx: HardenWorkflowInputs,
-  phase: 'post-swap setup' | 'verification', err: unknown): Promise<never> {
+  phase: 'post-swap setup' | 'verification', err: unknown): Promise<Readonly<{ rollback: RollbackResult; error: Error }>> {
   const { log, docker, containerName, backupName, exportPath } = ctx;
   log(
     `${phase === 'verification' ? 'Verification' : 'Post-swap setup'} FAILED ` +
@@ -23,17 +23,17 @@ export async function rollbackMigrationFailure(ctx: HardenWorkflowInputs,
     log(`ROLLBACK INCOMPLETE: docker invocation failed (${rollback.detail}).`);
   }
   if (rollback.complete) {
-    throw Object.assign(new Error(
+    return { rollback, error: new Error(
       `Harden ${phase} failed and the legacy container was restored. ` +
       `Cause: ${(err as Error).message}. The journal export is retained at ${exportPath}.`,
-    ), { code: 'STORE_HARDEN_ROLLBACK_COMPLETE' });
+    ) };
   }
-  throw new Error(
+  return { rollback, error: new Error(
     `Harden ${phase} failed and the automatic rollback is INCOMPLETE ` +
     `(stopped at step "${rollback.failedStep}": ${rollback.detail ?? 'see log'}). ` +
     `The legacy container was NOT restored to service. Your data is still safe in ` +
     `container "${backupName}" and in the export at ${exportPath} — see the log above ` +
     `for the exact docker commands to finish the restore by hand. ` +
     `Cause of the failed ${phase}: ${(err as Error).message}.`,
-  );
+  ) };
 }

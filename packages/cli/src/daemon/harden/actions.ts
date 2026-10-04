@@ -2,7 +2,7 @@ import { stat, statfs } from 'node:fs/promises';
 import { BLAZEGRAPH_JOURNAL_FILE, waitForBlazegraphReady, type DockerRunner } from '../blazegraph-docker.js';
 import { askOk, identityTagPresent } from './verify.js';
 import type { HardenStateInfo } from './state.js';
-import { parseBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
+import { classifyBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
 import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_CONTAINER_PORT } from '../blazegraph-docker.js';
 import { HARDEN_DISK_PREFLIGHT_FACTOR, type HardenPlanInput } from './steps.js';
 import type { ExecuteHardenMigrationOptions } from './executor.js';
@@ -41,9 +41,13 @@ async function mustRun(docker: DockerRunner, args: readonly string[], what: stri
   return result.stdout;
 }
 async function stoppedSnapshot(ctx: HardenWorkflowInputs, args: readonly string[], what: string): Promise<StoppedContainerSnapshot> {
-  const out = await mustRun(ctx.docker, args, what, { hint: ctx.stoppedHint });
-  const info = parseBlazegraphContainerInspection(out, { containerName: ctx.containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT });
-  if (info === null) throw new Error(`${what} returned unparseable docker inspect output. ${ctx.stoppedHint}`);
+  const result = await ctx.docker.run(args);
+  const outcome = classifyBlazegraphContainerInspection(result, ctx.sourceName,
+    { containerName: ctx.containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT });
+  if (outcome.kind === 'failed' && outcome.reason === 'output') throw new Error(`${what} returned unparseable docker inspect output. ${ctx.stoppedHint}`);
+  if (outcome.kind !== 'found') throw new Error(`${what} failed — docker inspect exited ${result.exitCode}. `
+    + `stderr: ${result.stderr.trim() || '(empty)'} ${ctx.stoppedHint}`);
+  const info = outcome.facts;
   return Object.freeze({ running: info.running, startedAt: info.startedAt,
     finishedAt: info.finishedAt, sizeRw: info.writableLayerSize });
 }
@@ -148,11 +152,12 @@ export async function verifyReplacement(ctx: HardenWorkflowInputs, args: readonl
 export async function verifyAlreadyHardened(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<{
   readonly backupExists: boolean; readonly exported: VerifiedJournalExport | null;
 }> {
-  const backup = await ctx.docker.run(['inspect', ctx.backupName]);
-  if (backup.exitCode !== 0 && !/no such (?:object|container)/i.test(backup.stderr)) throw new Error(
-    `Cannot determine whether migration backup "${ctx.backupName}" remains: ${backup.stderr.trim() || 'Docker inspect failed'}. `
+  const backup = classifyBlazegraphContainerInspection(await ctx.docker.run(['inspect', ctx.backupName]), ctx.backupName,
+    { containerName: ctx.containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT });
+  if (backup.kind === 'failed') throw new Error(
+    `Cannot determine whether migration backup "${ctx.backupName}" remains: ${backup.detail}. `
     + 'Refusing ASK-only verification while migration state is unknown.');
-  const backupExists = backup.exitCode === 0;
+  const backupExists = backup.kind === 'found';
   const savedSize = await fileSize(ctx.exportPath);
   const exported = savedSize === null ? null : Object.freeze({ path: ctx.exportPath, bytes: savedSize });
   if (backupExists || exported !== null) {

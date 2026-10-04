@@ -7,7 +7,7 @@ import { executeHardenMigration } from '../src/daemon/blazegraph-harden.js';
 import { daemonRuntimeState } from '../src/daemon/shutdown-wait.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 import { storeHardenLockPath } from '../src/daemon/store-maintenance-gate.js';
-import { NAME, BACKUP, NAMESPACE, scriptedDocker, verifierFetch } from './_helpers/blazegraph-harden-fixtures.js';
+import { NAME, BACKUP, NAMESPACE, scriptedDocker, verifierFetch, uncertainInspectionResults } from './_helpers/blazegraph-harden-fixtures.js';
 
 const originalHome = process.env.DKG_HOME;
 let home: string;
@@ -37,6 +37,19 @@ async function expectStartupAllowed() {
 }
 
 describe('incomplete harden rollback startup barrier', () => {
+  it.each(uncertainInspectionResults(BACKUP))('retains the original startup barrier when recovery backup inspection is uncertain (%s)', async (_, response) => {
+    const f = await incompleteRollback(), marker = readFileSync(storeHardenLockPath(home), 'utf8');
+    const calls: string[][] = [], verifier = verifierFetch();
+    const docker = { run: async (args: readonly string[]) => {
+      calls.push([...args]); return args[0] === 'inspect' && args[1] === BACKUP ? response : f.runner.run(args);
+    } };
+    await expect(executeHardenMigration({ ...f.options, docker, recover: true, fetch: verifier.fn }))
+      .rejects.toThrow(/Cannot verify the migration backup state/);
+    expect(calls.every(args => args[0] === 'inspect')).toBe(true);
+    expect(verifier.calls).toEqual([]);
+    expect(readFileSync(storeHardenLockPath(home), 'utf8')).toBe(marker);
+    await expectStartupBlocked();
+  });
   it('blocks daemon startup until the retained replacement passes explicit recovery verification', async () => {
     const f = await incompleteRollback(); await expectStartupBlocked();
     const recoveryStart = f.calls.length;

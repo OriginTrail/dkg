@@ -51,6 +51,18 @@ export const notFound: DockerCommandResult = {
 };
 export const ok = (stdout = ''): DockerCommandResult => ({ stdout, stderr: '', exitCode: 0 });
 
+/** Inspection uncertainty never certifies that the queried container is absent. */
+export function uncertainInspectionResults(name: string): readonly (readonly [string, DockerCommandResult])[] {
+  return [
+    ['wrong-name absence', { stdout: '', stderr: `Error: No such object: ${name}-other`, exitCode: 1 }],
+    ['engine', { stdout: '', stderr: 'Cannot connect to the Docker daemon', exitCode: 1 }],
+    ['permission', { stdout: '', stderr: 'permission denied on Docker socket', exitCode: 1 }],
+    ['transport', { stdout: '', stderr: 'context deadline exceeded', exitCode: 1 }],
+    ['malformed JSON', ok('{bad')],
+    ['malformed shape', ok(JSON.stringify([{ State: { Running: 'false' } }]))],
+  ];
+}
+
 /**
  * Stateful scripted docker: models the world across the migration
  * (stop flips Running, rename flips inspect results, `run -d` creates

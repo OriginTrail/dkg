@@ -11,7 +11,7 @@ import {
   blazegraphMigrationVolumeName as blazegraphVolumeName,
   type DockerRunner,
 } from '../blazegraph-docker.js';
-import { parseBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
+import { classifyBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
 
 export interface RollbackResult {
   complete: boolean;
@@ -58,13 +58,15 @@ export async function rollbackToBackup(opts: {
   // Paranoia gate: only rm a container that provably mounts the named
   // volume (i.e. is the hardened container we just created, holding a
   // COPY). A name collision with anything else must abort the rm.
-  const inspect = await docker.run(['inspect', containerName]);
-  if (inspect.exitCode === 0) {
-    const parsed = parseBlazegraphContainerInspection(inspect.stdout, {
+  const inspect = classifyBlazegraphContainerInspection(await docker.run(['inspect', containerName]), containerName, {
       containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT,
       journalVolumeNames: [blazegraphVolumeName(containerName)], journalMountType: 'any',
     });
-    const hasVolume = parsed?.journalVolumeName !== undefined;
+  if (inspect.kind === 'failed') return failStep('inspect-gate',
+    `Cannot determine whether replacement "${containerName}" exists: ${inspect.detail}; rollback refused`,
+    [`docker inspect ${containerName}`]);
+  if (inspect.kind === 'found') {
+    const hasVolume = inspect.facts.journalVolumeName !== undefined;
     if (!hasVolume) {
       log(
         `ROLLBACK HALTED: "${containerName}" does not mount the expected volume — ` +
@@ -78,7 +80,7 @@ export async function rollbackToBackup(opts: {
     }
   }
   const commands = [
-    ...(inspect.exitCode === 0 ? [{ id: 'rm-failed-container', args: ['rm', '-f', containerName] }] : []),
+    ...(inspect.kind === 'found' ? [{ id: 'rm-failed-container', args: ['rm', '-f', containerName] }] : []),
     { id: 'rename-backup', args: ['rename', backupName, containerName] },
     { id: 'restore-restart-policy', args: ['update', '--restart=unless-stopped', containerName] },
     { id: 'start-legacy-container', args: ['start', containerName] },

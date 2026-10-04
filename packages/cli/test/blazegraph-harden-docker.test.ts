@@ -103,6 +103,18 @@ try {
     migrationDir, dkgHome: `${temporary}/config`, docker: uncertainDocker,
     env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, log: console.log }), /Cannot determine whether primary container/);
   assert.deepEqual(uncertainCalls, [['inspect', name]]);
+  // A diagnostic naming another container cannot release verification of this retained backup.
+  const backupCalls: string[][] = [];
+  const wrongMissingBackup = { run: async (args: string[], options?: Parameters<typeof docker.run>[1]) => {
+    backupCalls.push([...args]);
+    return args[0] === 'inspect' && args[1] === `${name}-backup`
+      ? { stdout: '', stderr: `Error: No such object: ${name}-other`, exitCode: 1 }
+      : docker.run(args, options);
+  } };
+  await assert.rejects(executeHardenMigration({ containerName: name, namespace, migrationDir,
+    dkgHome: `${temporary}/config`, docker: wrongMissingBackup, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, log: console.log }),
+    /Cannot determine whether migration backup/);
+  assert.deepEqual(backupCalls, [['inspect', name], ['inspect', `${name}-backup`]]);
   const newerRead = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' }, body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:new-after-migration> { <urn:new> <urn:value> ?v } }')}` });
   assert.equal((await newerRead.json()).results.bindings[0].v.value, 'newer-primary');
   assert.equal((await docker.run(['stop', '-t', '120', name])).exitCode, 0);
