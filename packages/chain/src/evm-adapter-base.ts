@@ -1,3 +1,4 @@
+import { rpcReadDescriptor } from './rpc-read-descriptor.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
