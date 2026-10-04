@@ -173,6 +173,11 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import { UnansweredAuthorityObservation } from './internal/context-graph-authority/unanswered-authority-read.js';
+import {
+  describeUnansweredAuthorityCheck,
+  unansweredAuthorityRecheckFor,
+} from './internal/unanswered-authority-recheck.js';
 import {
   projectRfc64CatalogTransportStateV1,
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
@@ -2918,17 +2923,56 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         // chain evidence keeps precedence whenever a numeric binding exists.
         accessPolicy = this.readAcceptedRfc64CatalogAccessPolicyV1(contextGraphId);
       }
+      const rosterRead = new UnansweredAuthorityObservation(contextGraphId);
       const privateMembershipVerified = accessPolicy === 'private'
-        && await this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId);
-      const reason = resolveRfc64CatalogResponsibilityReasonV1({
+        && await rosterRead.run(() => this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId));
+      const lifecycleFacts = {
         nodeRole: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
         subscribed: subscription.subscribed === true,
         coreHosted: subscription.coreHosted === true,
         accessPolicy,
+      } as const;
+      const reason = resolveRfc64CatalogResponsibilityReasonV1({
+        ...lifecycleFacts,
         privateMembershipVerified,
       });
       if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
         return registry.read(contextGraphId);
+      }
+      const authorityRecheck = unansweredAuthorityRecheckFor(
+        this,
+        this.rfc64BackgroundWorkDispatcherV1.shutdownSignal,
+      );
+      const memberReason = resolveRfc64CatalogResponsibilityReasonV1({
+        ...lifecycleFacts,
+        privateMembershipVerified: true,
+      });
+      const unansweredRosterRead = rosterRead.unanswered;
+      if (unansweredRosterRead === undefined || memberReason === reason) {
+        authorityRecheck.settle(contextGraphId);
+      } else {
+        // The roster read behind the membership check got no answer, which is
+        // the node's RPC budget or its endpoint and not the graph. The answer
+        // would decide this graph's responsibility, so it is asked again
+        // without waiting for the next lifecycle event. Until then a
+        // responsibility this node holds as a member stays: it is what a
+        // "yes" would give, and no roster said otherwise.
+        const held = registry.read(contextGraphId);
+        const kept = held.responsibilityReason === memberReason;
+        const unansweredChecks = authorityRecheck.defer(contextGraphId, () => {
+          this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
+        });
+        this.log[unansweredChecks <= 1 ? 'info' : 'debug'](
+          createOperationContext('system'),
+          describeUnansweredAuthorityCheck({
+            subject: `RFC-64 catalog responsibility for "${contextGraphId}"`,
+            waitingFor: 'the member roster',
+            read: unansweredRosterRead,
+            meanwhile: kept ? 'the responsibility is kept' : 'not responsible yet',
+            unansweredChecks,
+          }),
+        );
+        if (kept) return held;
       }
       const next = commit(reason);
       if (

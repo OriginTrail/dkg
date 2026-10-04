@@ -395,6 +395,9 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
+import { sharedMemoryAuthorityRecheckOf } from './gossip-session.js';
+import { UnansweredAuthorityObservation } from './internal/context-graph-authority/unanswered-authority-read.js';
+import { describeUnansweredAuthorityCheck } from './internal/unanswered-authority-recheck.js';
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { projectRfc64CatalogTransportStateV1 } from
@@ -936,8 +939,35 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       }
       return;
     }
-    const canUseSharedMemory = await this.canUseSharedMemoryForContextGraph(contextGraphId);
+    const authorityRead = new UnansweredAuthorityObservation(contextGraphId);
+    const canUseSharedMemory = await authorityRead.run(
+      () => this.canUseSharedMemoryForContextGraph(contextGraphId),
+    );
     if (!session.active || this.gossipSession !== session) return;
+    const unanswered = authorityRead.unanswered;
+    if (!canUseSharedMemory && unanswered !== undefined) {
+      // The chain read behind the check got no answer, which is the node's RPC
+      // budget or its endpoint and not the graph. That is neither a grant nor
+      // a refusal: a subscription this node holds stays, one it does not hold
+      // is not made, and the graph is asked again without waiting for the
+      // next event that would reconcile it.
+      const unansweredChecks = sharedMemoryAuthorityRecheckOf(session).defer(
+        contextGraphId,
+        () => this.queueSharedMemoryGossipSubscription(contextGraphId),
+      );
+      this.log[unansweredChecks <= 1 ? 'info' : 'debug'](ctx, describeUnansweredAuthorityCheck({
+        subject: `SWM gossip subscription for "${contextGraphId}"`,
+        waitingFor: 'read authority',
+        read: unanswered,
+        meanwhile: isRegistered ? 'the subscription is kept' : 'not subscribed yet',
+        unansweredChecks,
+      }));
+      // A core that holds no member subscription may still host the curated
+      // substrate, as after a refusal (see below).
+      if (!isRegistered) await this.reconcileSwmHostModeSubscription(contextGraphId);
+      return;
+    }
+    sharedMemoryAuthorityRecheckOf(session).settle(contextGraphId);
     if (!canUseSharedMemory) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
