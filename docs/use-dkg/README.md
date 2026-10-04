@@ -29,6 +29,7 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Manually subscribe a host-mode node | [Host-Mode Manual Subscribe](host-mode-manual-subscribe.md) |
 | Update or roll back | [Updates and Rollback](updates-and-rollback.md) |
 | Migrate a git checkout to npm auto-update | [Migrate to npm](migrate-to-npm.md) |
+| Harden a managed Blazegraph container | [Blazegraph Survivability](blazegraph-survivability.md) |
 | Diagnose common failures | [Troubleshooting](troubleshooting.md) |
 
 ## Setup entry point

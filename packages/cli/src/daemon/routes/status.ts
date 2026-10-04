@@ -869,6 +869,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       vmPromotion: typeof agent.getVmPromotionStatus === 'function'
         ? agent.getVmPromotionStatus()
         : undefined,
+      // Runtime store monitor (store.monitor.*) — null for local backends
+      // or pre-boot. Counters let operators see probe failures / automatic
+      // container restarts without grepping journald.
+      storeMonitor: daemonState.storeMonitor ? { ...daemonState.storeMonitor.stats } : null,
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,
