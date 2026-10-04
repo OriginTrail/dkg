@@ -1,3 +1,4 @@
+import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, requiresManualInspection } from './async-promote-recovery-policy.js';
 /**
  * `TripleStoreAsyncPromoteQueue` — RDF-backed persistent queue for
  * WM→SWM promotes. Mirrors the structure of
@@ -57,7 +58,6 @@ import {
   comparePromoteJobs,
   defaultBackoffMs,
   expectBindings,
-  isPromotePostCommitAttemptError,
   isTerminalPromoteJobState,
   jobSubject,
   literal,
@@ -221,7 +221,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (await this.abandonIfMissingStorageLane(job, now)) {
         throw new Error(`Cannot recover job ${jobId}: ${this.missingStorageLaneReason()}`);
       }
-      if (this.requiresManualInspection(job)) {
+      if (requiresManualInspection(job)) {
         throw new Error(
           `Cannot recover job ${jobId}: ${job.reason ?? job.attempt.lastError?.message ?? 'manual inspection required'}`,
         );
@@ -547,7 +547,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       'publisher.asyncPromote.recoverPostCommit',
     );
     for (const job of failed) {
-      if (!this.isAutomaticallyRecoverablePostCommitFailure(job)) continue;
+      if (!isAutomaticallyRecoverablePostCommitFailure(job)) continue;
       const attemptCount = Math.max(1, job.attempt.count);
       const maxAttempts = job.attempt.maxRetries;
       if (attemptCount >= maxAttempts) {
@@ -584,15 +584,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return events;
   }
 
-  private isAutomaticallyRecoverablePostCommitFailure(job: PromoteJob): boolean {
-    return job.state === 'failed'
-      && job.reason === undefined
-      && job.commitMarker?.swmInserted !== true
-      && (job.formatVersion ?? 0) >= ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION
-      && !this.missingStorageLaneForAuthorOnlyJob(job)
-      && !this.requiresManualInspection(job)
-      && isPromotePostCommitAttemptError(job.attempt.lastError);
-  }
 
   async pause(): Promise<void> {
     this.paused = true;
@@ -812,7 +803,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (!isTerminalPromoteJobState(job.state as PromoteJobState)) return { outcome: 'rejected', reason: 'nonterminal' };
       // The recovery sweep owns this replay-safe tail until its budget is spent.
       // A failed row is temporarily parked between sweeps, not eligible for clear.
-      if (this.isAutomaticallyRecoverablePostCommitFailure({ ...job, state: job.state as PromoteJobState })
+      if (isAutomaticallyRecoverablePostCommitFailure({ ...job, state: job.state as PromoteJobState })
         && Math.max(1, job.attempt.count) < job.attempt.maxRetries) {
         return { outcome: 'rejected', reason: 'nonterminal' };
       }
@@ -917,11 +908,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return (job.formatVersion ?? 0) < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION && job.request.agentAddress === undefined;
   }
 
-  private missingStorageLaneForAuthorOnlyJob(job: PromoteJob): boolean {
-    return (job.formatVersion ?? 0) < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION
-      && job.request.agentAddress === undefined
-      && job.request.authorAgentAddress !== undefined;
-  }
 
   private missingStorageLaneReason(): string {
     return `missing storage lane for pre-v${ASYNC_PROMOTE_QUEUE_FORMAT_VERSION} author-scoped promote job; needs operator inspection`;
@@ -932,7 +918,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   private async abandonIfMissingStorageLane(job: PromoteJob, now: number): Promise<boolean> {
-    if (!this.missingStorageLaneForAuthorOnlyJob(job)) return false;
+    if (!missingStorageLaneForAuthorOnlyJob(job)) return false;
     await this.abandonForManualInspection(
       job,
       now,
@@ -968,16 +954,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     await this.writeJob(abandonedJob);
   }
 
-  private requiresManualInspection(job: PromoteJob): boolean {
-    const reason = (job.reason ?? '').toLowerCase();
-    const lastError = (job.attempt.lastError?.message ?? '').toLowerCase();
-    return reason.includes('partial promote ambiguity')
-      || lastError.includes('partial promote ambiguity')
-      || reason.includes('legacy promote job')
-      || lastError.includes('legacy promote job')
-      || reason.includes('missing storage lane')
-      || lastError.includes('cannot prove the wm storage lane');
-  }
 
   /**
    * In-process mutex so concurrent queue mutations don't race the

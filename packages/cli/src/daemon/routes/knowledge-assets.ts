@@ -25,6 +25,7 @@
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
+import { respondPromoteRecoveryError, type PromoteRecoveryContext } from "./promote-recovery-response.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
   isPayloadTooLargeError,
@@ -226,52 +227,12 @@ function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any
   return true;
 }
 
-interface PromoteRecoveryContext {
-  contextGraphId: string;
-  name: string;
-  phase: string;
-  subGraphName?: string;
-}
-
-function promoteRecoveryResponseBody(e: any, context?: PromoteRecoveryContext) {
-  return {
-    code: e.code,
-    error: sanitizeRpcMessage(e.message ?? String(e)),
-    retryAction: 'resume_existing_knowledge_asset',
-    retryPhase: 'swm-share',
-    ...(context ? {
-      contextGraphId: context.contextGraphId,
-      retryKnowledgeAssetName: context.name,
-      ...(context.subGraphName ? { subGraphName: context.subGraphName } : {}),
-    } : {}),
-  };
-}
-
-function respondPromoteRecoveryError(
-  res: RequestContext["res"],
-  e: any,
-  context?: PromoteRecoveryContext,
-): boolean {
-  if (e?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') return false;
-  process.stderr.write(`[DKG-Daemon] ${JSON.stringify({
-    event: 'knowledge_asset_recovery_required',
-    code: e.code,
-    ...context,
-  })}\n`);
-  jsonResponse(res, 409, promoteRecoveryResponseBody(e, context));
-  return true;
-}
-
 /**
  * Map caller preconditions on WM/SWM operations to actionable 4xx responses.
  * VM publishing keeps its own mapping so chain failures remain server errors.
  */
 export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   if (respondPromoteRecoveryError(res, e, context)) return;
-  if (e?.code === 'PROMOTE_POST_COMMIT_FAILURE') {
-    jsonResponse(res, 503, { ...promoteRecoveryResponseBody(e, context), retryable: true });
-    return;
-  }
   if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
     jsonResponse(res, 409, { code: e.code, error: e.message });
     return;
