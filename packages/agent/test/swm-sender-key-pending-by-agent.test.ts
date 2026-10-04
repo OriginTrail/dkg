@@ -1012,6 +1012,9 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
       ctx: { operationId: 'test-op', operationName: 'share' },
     });
 
+    // Setup fans out to all recipients concurrently, so the sends to A and B
+    // may reach the messenger in either order.
+    expect([...sendPeers].sort()).toEqual([peerA, peerB].sort());
     const queued = internals.pendingSenderKeyByAgent.get(recipient.agentAddress.toLowerCase());
     expect(queued).toHaveLength(1);
     expect(queued?.[0].recipientPeerId).toBe(peerB);
@@ -1028,7 +1031,8 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     );
 
     expect(drained).toBe(1);
-    expect(sendPeers).toEqual([peerA, peerB, peerB]);
+    // The drain sends only the retry owed to B; A already accepted.
+    expect(sendPeers.slice(2)).toEqual([peerB]);
     expect(internals.pendingSenderKeyByAgent.size).toBe(0);
   });
 
