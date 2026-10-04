@@ -369,6 +369,15 @@ export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
   readonly validateAnchor?: (
     projection: ContextGraphAuthorityIndexProjection,
   ) => Promise<boolean | undefined>;
+  /**
+   * An explicitly opted-in incomplete projection may be served only when a
+   * fresh external finality read proves it still covers the selected block.
+   * This is used for absent name bindings; elapsed time alone cannot prove a
+   * graph has not been registered since the projection was built.
+   */
+  readonly validateIncomplete?: (
+    projection: ContextGraphAuthorityIndexProjection,
+  ) => Promise<boolean>;
   /** Today's complete read: head, cursor admission, scan, stabilize. */
   readonly refresh: () => Promise<
     ContextGraphAuthorityIndexCompletedProjection | ContextGraphAuthorityIndexProjectionFault
@@ -674,7 +683,11 @@ export class ContextGraphAuthorityIndexProjectionCache {
       }
     }
     const projected = input.project(projection);
-    if (!projected.complete) return PROJECTION_CACHE_MISS;
+    if (!projected.complete) {
+      if (input.validateIncomplete === undefined
+        || !await input.validateIncomplete(projection)) return PROJECTION_CACHE_MISS;
+      input.signal?.throwIfAborted();
+    }
     if (projection.requiresAnchorValidation === true) {
       if (input.validateAnchor === undefined) return PROJECTION_CACHE_MISS;
       let anchorIsCurrent: boolean | undefined;

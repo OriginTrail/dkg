@@ -10,7 +10,14 @@ import { createDaemonRpcTelemetrySource, formatRpcUsageLines, emitRpcUsage, star
 describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => {
   it('composes live adapter windows and retains the governor drain receiver', async () => {
     let publisherCount = 5;
-    const governor = new RpcRequestGovernor({ maxRequestsPerSecond: 10 });
+    const governor = new RpcRequestGovernor({ maxRequestsPerSecond: 10 }, {
+      clock: {
+        now: () => 0,
+        random: () => 0,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
     await governor.acquire('foreground');
     const source = createDaemonRpcTelemetrySource([
       () => ({ byMethod: { eth_call: publisherCount }, lifetimeTotal: publisherCount }),
