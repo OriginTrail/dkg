@@ -8,6 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
+import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
@@ -6327,52 +6328,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
           binding.localCgId, binding.onChainCgId, uncreditedCandidateOrder,
         )
       : undefined;
-    // Reorder only the already capped, uncredited transport list. Never add a
-    // hinted peer to curator membership or earn a clean-absence/presence credit.
-    const ordinaryTransportOrder = preferredPeerId
-      ? [preferredPeerId, ...uncreditedCandidateOrder.filter((peerId) => peerId !== preferredPeerId)]
-      : uncreditedCandidateOrder;
     const now = this.vmReconcileRotationNow();
-    const isStreamPeer = (peerId: string): boolean =>
-      binding?.experimentalStreamPeerIds?.has(peerId) === true;
-    // The peers this target has a setback with: its last attempt at them ended
-    // busy or broken, and they have not completed an exchange for the graph since.
-    const setbackPeerIds = new Set(binding === undefined
-      ? []
-      : ordinaryTransportOrder.filter((peerId) =>
-        record?.streamSetbackPeerIds?.has(peerId)
-        && this.vmReconcileStreamSetbackPolicy.inSetbackStreak(binding.localCgId, peerId, now)));
-    const withoutSetback = ordinaryTransportOrder.filter((peerId) => !setbackPeerIds.has(peerId));
-    const withSetback = ordinaryTransportOrder.filter((peerId) => setbackPeerIds.has(peerId));
-    // Stream peers go first, the one that last served this graph ahead of the
-    // others, and those without a setback ahead of those with one. Right after
-    // a setback, though, the target asks every candidate it has no setback with
-    // before it returns to one it has. Busy Cores taking turns could otherwise
-    // keep it from a peer that holds the asset.
-    const lastAttemptWasSetback = record?.lastAttemptedPeerId !== undefined
-      && setbackPeerIds.has(record.lastAttemptedPeerId);
-    const transportOrder = lastAttemptWasSetback
-      ? [
-          ...withoutSetback.filter(isStreamPeer),
-          ...withoutSetback.filter((peerId) => !isStreamPeer(peerId)),
-          ...withSetback,
-        ]
-      : [
-          ...withoutSetback.filter(isStreamPeer),
-          ...withSetback.filter(isStreamPeer),
-          ...ordinaryTransportOrder.filter((peerId) => !isStreamPeer(peerId)),
-        ];
-    // A peer whose stream just answered busy or broke is left alone for a short
-    // hold-off, on either wire: both go through the same responder limiter. The
-    // provider policy keeps it one of this slice's peer slots meanwhile, so it
-    // is asked again as soon as the hold-off ends instead of after every other
-    // peer had a turn.
-    const heldOffPeerIds = new Set(binding === undefined
-      ? []
-      : transportOrder.filter((peerId) =>
-        this.vmReconcileStreamSetbackPolicy.heldOff(binding.localCgId, peerId, now)));
+    const { order, heldOffPeerIds } = orderVmRecoveryCandidates({
+      candidatePeerIds: uncreditedCandidateOrder,
+      preferredPeerId,
+      streamPeerIds: binding?.experimentalStreamPeerIds,
+      lastAttemptedPeerId: record?.lastAttemptedPeerId,
+      hasSetback: (peerId) => binding !== undefined
+        && record?.streamSetbackPeerIds?.has(peerId) === true
+        && this.vmReconcileStreamSetbackPolicy.inSetbackStreak(binding.localCgId, peerId, now),
+      isHeldOff: (peerId) => binding !== undefined
+        && this.vmReconcileStreamSetbackPolicy.heldOff(binding.localCgId, peerId, now),
+    });
     return policy.selectNextCandidate(
-      transportOrder,
+      order,
       DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
       heldOffPeerIds,
     );
