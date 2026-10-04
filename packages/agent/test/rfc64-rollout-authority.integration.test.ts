@@ -6227,11 +6227,6 @@ describe('RFC-64 rollout authority integration', () => {
     ['its own metadata changes', (f: Awaited<ReturnType<typeof acceptedPrivateAuthorityFixture>>) => (
       f.projection.markDirty(f.contextGraphId)
     )],
-    // Any single-graph write moves the node-wide authority-facts revision, also
-    // one that cannot change this graph's owner, policy or members.
-    ['an unrelated graph is written', (f: Awaited<ReturnType<typeof acceptedPrivateAuthorityFixture>>) => (
-      f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph')
-    )],
   ] as const)('never accepts an unregistered roster read while %s, and composes again from the current facts', async (_case, move) => {
     const f = await acceptedPrivateAuthorityFixture('private-roster-revision-fence');
     const acceptedBefore = f.accepted();
@@ -6266,6 +6261,32 @@ describe('RFC-64 rollout authority integration', () => {
     expect((await f.curator.readRfc64CatalogOperationalStatusV1())
       .find((status) => status.contextGraphId === f.contextGraphId))
       .toMatchObject({ authorityState: 'accepted', policyDigest: acceptedBefore.policyDigest });
+  });
+
+  it('accepts catalog authority without recomposition while unrelated graph writes continue', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-unrelated-write-stability');
+    let releaseVersion!: () => void;
+    let versionEntered!: () => void;
+    const versionGate = new Promise<void>((resolve) => { releaseVersion = resolve; });
+    const versionRead = new Promise<void>((resolve) => { versionEntered = resolve; });
+    const readVersion = vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementationOnce(async () => {
+        versionEntered();
+        await versionGate;
+        return '9';
+      });
+    const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await versionRead;
+    for (let write = 0; write < 100; write += 1) {
+      f.projection.markDirtyForGraph(`urn:dkg:test:unrelated-${write}`);
+      f.projection.markDirty(`other-context-graph-${write}`);
+    }
+    releaseVersion();
+    const authority = await refresh;
+    expect(authority).not.toBeNull();
+    expect(authority!.roster?.version).toBe('9');
+    expect(f.rosterMembers(authority!)).toEqual([AUTHOR.toLowerCase()]);
+    expect(readVersion).toHaveBeenCalledTimes(1);
   });
 
   it('composes an unregistered authority generation again when metadata changes during the policy read', async () => {
@@ -6306,7 +6327,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
       .mockImplementation(async () => {
         compositions += 1;
-        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        f.projection.markDirty(f.contextGraphId);
         return '9';
       });
 
@@ -6334,7 +6355,7 @@ describe('RFC-64 rollout authority integration', () => {
           return '9';
         }
         // Every composition of the first refresh is discarded.
-        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        f.projection.markDirty(f.contextGraphId);
         if (compositions === 3) thirdDiscard();
         return '9';
       });
@@ -6363,7 +6384,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
       .mockImplementation(async () => {
         compositions += 1;
-        f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+        f.projection.markDirty(f.contextGraphId);
         // The second discard is followed by a real wait; cancel inside it.
         if (compositions === 2) setTimeout(() => owner.abort(cancelled), 5);
         return '9';

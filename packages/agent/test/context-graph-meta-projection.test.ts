@@ -272,6 +272,25 @@ describe('ContextGraphMetaProjection', () => {
     expect(projection.readAuthorityFactsRevision).toBe(before + 1);
   });
 
+  it('fences one graph without discarding its proof for unrelated metadata writes', () => {
+    const projection = new ContextGraphMetaProjection({} as TripleStore);
+    const target = 'projection-target';
+    const before = projection.readContextGraphAuthorityFactsRevision(target);
+
+    projection.markDirty('projection-other');
+    projection.markDirtyForGraph('urn:dkg:local:join-encryption-key-cache');
+    expect(projection.readContextGraphAuthorityFactsRevision(target)).toBe(before);
+
+    projection.markDirtyForGraph(contextGraphMetaGraphUri(target));
+    const afterOwnWrite = projection.readContextGraphAuthorityFactsRevision(target);
+    expect(afterOwnWrite).not.toBe(before);
+
+    const unseenBefore = projection.readContextGraphAuthorityFactsRevision("not-yet-projected");
+    projection.markAllDirty();
+    expect(projection.readContextGraphAuthorityFactsRevision(target)).not.toBe(afterOwnWrite);
+    expect(projection.readContextGraphAuthorityFactsRevision("not-yet-projected")).not.toBe(unseenBefore);
+  });
+
   it('rebuilds for callers that arrive after invalidation during an in-flight rebuild', async () => {
     let releaseFirstQuery!: () => void;
     const firstQuery = new Promise<void>((resolve) => { releaseFirstQuery = resolve; });

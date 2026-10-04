@@ -11,7 +11,7 @@ import type { SwmTransportAuthority } from './swm-transport-authority.js';
 export interface ContextGraphAgentGateAuthorityInput {
   contextGraphId: string;
   getTransportAuthority(): Promise<SwmTransportAuthority>;
-  readMetadataRevision(): number;
+  readMetadataRevision(): number | string;
   getLegacyMeta(): Promise<{
     allowedAgents: readonly string[];
     participantAgents: readonly string[];

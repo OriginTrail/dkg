@@ -3457,7 +3457,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // the exact revision paired with every later metadata/version await and
       // refuse to accept a composed snapshot if owner, policy, revocation, or
       // membership facts changed in the meantime.
-      let metadataAuthorityRevision: number | null = null;
+      let metadataAuthorityRevision: string | null = null;
       if (registeredAuthorityRead !== null) {
         const { expectedNameHash, snapshot } = registeredAuthorityRead;
         if (signal?.aborted) throw signal.reason;
@@ -3470,7 +3470,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         let authoritativeSnapshot = snapshot;
         if (snapshot.accessPolicy === 1) {
           metadataAuthorityRevision = this.contextGraphMetaProjection
-            .readAuthorityFactsRevision;
+            .readContextGraphAuthorityFactsRevision(contextGraphId);
           const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
           if (localRoster === null) {
             // TRANSIENT, and typed so it is classified as such. `null` here
@@ -3534,7 +3534,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // old owner with a new policy/roster generation and still pass the
           // acceptance-time fence.
           metadataAuthorityRevision = this.contextGraphMetaProjection
-            .readAuthorityFactsRevision;
+            .readContextGraphAuthorityFactsRevision(contextGraphId);
           const ownerDid = await this.getContextGraphOwner(contextGraphId);
           if (signal?.aborted) throw signal.reason;
           const normalizedOwnerDid = ownerDid
@@ -3614,7 +3614,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       )) return null;
       if (
         metadataAuthorityRevision !== null
-        && this.contextGraphMetaProjection.readAuthorityFactsRevision
+        && this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId)
           !== metadataAuthorityRevision
       ) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
       // Finalized absence was exact when the refresh request was created, but

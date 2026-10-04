@@ -191,12 +191,20 @@ function emptyContextGraphMetaRecord(
 export class ContextGraphMetaProjection {
   private readonly entries = new Map<string, ProjectionEntry>();
   private authorityFactsRevision = 0;
+  private allFactsRevision = 0;
 
   constructor(private readonly store: TripleStore) {}
 
   /** Invalidate request-local absence proofs when projection sources change. */
   get readAuthorityFactsRevision(): number {
     return this.authorityFactsRevision;
+  }
+
+  /** Fence a source-qualified proof over one CG's metadata without rejecting
+   * it when an unrelated graph changes during the read. Shared AGENTS and
+   * ONTOLOGY sources advance the all-graphs epoch, including unseen graphs. */
+  readContextGraphAuthorityFactsRevision(contextGraphId: string): string {
+    return `${this.allFactsRevision}:${this.entries.get(contextGraphId)?.invalidationVersion ?? 0}`;
   }
 
   /**
@@ -362,6 +370,7 @@ export class ContextGraphMetaProjection {
 
   markAllDirty(): void {
     this.authorityFactsRevision += 1;
+    this.allFactsRevision += 1;
     for (const entry of this.entries.values()) {
       entry.dirty = true;
       entry.invalidationVersion += 1;

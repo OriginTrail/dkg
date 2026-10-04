@@ -173,7 +173,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
     const host = {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
       resolveRegisteredContextGraphAuthority,
       hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
@@ -215,7 +215,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
     const host = {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
       resolveRegisteredContextGraphAuthority: vi.fn(async () => (
         approvedUnregisteredAuthority(owner.address)
@@ -258,6 +258,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       store,
       contextGraphMetaProjection: {
         get readAuthorityFactsRevision() { return metadataRevision; },
+        readContextGraphAuthorityFactsRevision() { return `0:${metadataRevision}`; },
       },
       resolveSwmTransportAuthority: vi.fn(async () => {
         transportReads += 1;
@@ -300,6 +301,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       store,
       contextGraphMetaProjection: {
         get readAuthorityFactsRevision() { return metadataRevision; },
+        readContextGraphAuthorityFactsRevision() { return `0:${metadataRevision}`; },
       },
       resolveSwmTransportAuthority: vi.fn(async () => {
         transportReads += 1;
@@ -337,6 +339,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       store,
       contextGraphMetaProjection: {
         get readAuthorityFactsRevision() { return metadataRevision; },
+        readContextGraphAuthorityFactsRevision() { return `0:${metadataRevision}`; },
       },
       resolveSwmTransportAuthority: vi.fn(async () => {
         transportReads += 1;
@@ -530,7 +533,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       : { kind: nextKind, allowedPeers: [] as string[] };
     const host = {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveSwmTransportAuthority: vi.fn()
         .mockResolvedValueOnce({
           kind: 'private-roster' as const,
@@ -566,7 +569,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     ]);
     const host = {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 3 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 3, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveSwmTransportAuthority: vi.fn()
         .mockResolvedValueOnce({ kind: 'legacy-unregistered' as const })
         .mockResolvedValueOnce({
@@ -674,7 +677,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     }));
     const retainedRoster = vi.fn(() => [retainedRemovedMember.address]);
     const host = {
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
       resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
       resolveRegisteredContextGraphAuthority: vi.fn(async () => (
@@ -709,6 +712,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       contextGraphMetaProjection: {
         get readAuthorityFactsRevision() { return metadataRevision; },
+        readContextGraphAuthorityFactsRevision() { return `0:${metadataRevision}`; },
       },
       resolveSwmTransportAuthority,
       getCgMeta: vi.fn(async () => ({
@@ -742,6 +746,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       contextGraphMetaProjection: {
         get readAuthorityFactsRevision() { return metadataRevision; },
+        readContextGraphAuthorityFactsRevision() { return `0:${metadataRevision}`; },
       },
       resolveSwmTransportAuthority,
       getCgMeta: vi.fn(async () => ({
@@ -768,7 +773,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const removed = ethers.Wallet.createRandom();
     let privateAuthorityActive = false;
     const host = {
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
       resolveRegisteredContextGraphAuthority: vi.fn(async () => (
         approvedUnregisteredAuthority(member.address)
@@ -806,7 +811,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       approvedUnregisteredAuthority(member.address)
     ));
     const host = {
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveRegisteredContextGraphAuthority,
       hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
       resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => (
@@ -856,7 +861,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const invitedMember = ethers.Wallet.createRandom();
     const getLocalMetadataMemberRecoveryGate = vi.fn(async () => [invitedMember.address]);
     const host = {
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
       resolveRegisteredContextGraphAuthority: vi.fn(async () => (
         approvedUnregisteredAuthority(previousMember.address)
@@ -891,7 +896,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         }
       : approvedUnregisteredAuthority(staleLocalMember.address));
     const host = {
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
       resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
       resolveRegisteredContextGraphAuthority,
       hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
@@ -908,7 +913,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
 
   it('fails recovery closed when metadata authority facts change during the read', async () => {
     const removed = ethers.Wallet.createRandom();
-    const contextGraphMetaProjection = { readAuthorityFactsRevision: 4 };
+    const contextGraphMetaProjection = { readAuthorityFactsRevision: 4, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } };
     const host = {
       contextGraphMetaProjection,
       resolveRegisteredContextGraphAuthority: vi.fn(async () => (
