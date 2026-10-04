@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, type FileHandle } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { replaceDurableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
 import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
@@ -54,25 +54,8 @@ export class NamedKaVmLifecycleRepair {
   private async persist(): Promise<void> {
     const dir = this.options.dataDir;
     if (!dir) return;
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    const path = join(dir, 'named-ka-vm-lifecycle-repairs.json');
-    const temporary = join(dir, `.named-ka-vm-lifecycle-repairs.${randomUUID()}.tmp`);
-    try {
-      const file = await open(temporary, 'wx', 0o600);
-      try {
-        await file.writeFile(JSON.stringify({ version: 1, entries: [...this.entries] }));
-        await file.sync();
-      } finally { await file.close(); }
-      await rename(temporary, path);
-      let directory: FileHandle | undefined;
-      try {
-        directory = await open(dir, 'r');
-        await directory.sync();
-      } catch (error) {
-        // Some platforms cannot fsync a directory; the journal file is already fsynced.
-        if (!['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-      } finally { await directory?.close(); }
-    } finally { await rm(temporary, { force: true }); }
+    await replaceDurableFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'),
+      JSON.stringify({ version: 1, entries: [...this.entries] }), { fileMode: 0o600, directoryMode: 0o700 });
   }
 
   async submit(input: ConfirmedNamedKaVmLifecycleInput): Promise<NamedKaVmLifecycleRepairOutcome> {

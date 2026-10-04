@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
@@ -267,6 +267,35 @@ describe('review regression boundaries', () => {
     expect(await store.query(`ASK { GRAPH <${META}> { <${wmGraph}> <${DKG}memoryLayer> "WM" } }`)).toMatchObject({ type: 'boolean', value: true });
     await repair.stop();
   });
+  it.each(['matching-pointers', 'divergent-seal', 'reopened-draft', 'tentative-prior'] as const)('decodes canonical escaped RDF workspace values for %s', async scenario => {
+    const store = new OxigraphStore(); stores.push(store);
+    const reopened = scenario === 'reopened-draft', tentative = scenario === 'tentative-prior';
+    const preserve = reopened || scenario === 'divergent-seal';
+    const rows = {
+      state: reopened ? 'created' : 'shared', layer: reopened ? 'WM' : 'SWM',
+      ...(!reopened ? { wm: tentative ? PRIOR : HEX.slice(2), swm: HEX.slice(2), activeSeal: scenario === 'divergent-seal' ? PRIOR : HEX.slice(2) } : {}),
+    };
+    await store.insert(Object.entries(rows).map(([key, value]) => ({ subject: key === 'activeSeal' ? ASSERTION : LIFECYCLE,
+      predicate: key === 'activeSeal' ? 'http://dkg.io/ontology/assertionMerkleRoot' : `${DKG}${({ wm: 'wmCurrentAssertion', swm: 'swmCurrentAssertion', layer: 'memoryLayer' } as Record<string, string>)[key] ?? key}`,
+      object: JSON.stringify(value), graph: META })));
+    const query = store.query.bind(store);
+    const encoded = (value: string) => '"' + '\\u' + value.charCodeAt(0).toString(16).padStart(4, '0') + value.slice(1) + '"^^<http://www.w3.org/2001/XMLSchema#string>';
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (options?.source === 'agent.publish.confirmedLifecycleWorkspaceGuard') return {
+        type: 'bindings', bindings: [Object.fromEntries(Object.entries(rows).map(([key, value]) => [key, encoded(value)]))],
+      };
+      return query(sparql, options);
+    });
+    await applyPublishedNamedKaVmLifecycle(store, { ...input, ...(tentative ? { tentative: true, priorMerkleRoot: PRIOR } : {}) });
+    const result = await query(`SELECT ?state ?layer ?wm WHERE { GRAPH <${META}> {
+      <${LIFECYCLE}> <${DKG}state> ?state ; <${DKG}memoryLayer> ?layer .
+      OPTIONAL { <${LIFECYCLE}> <${DKG}wmCurrentAssertion> ?wm }
+    } }`);
+    expect(result).toMatchObject({ bindings: [{ state: JSON.stringify(preserve ? rows.state : 'published'), layer: JSON.stringify(preserve ? rows.layer : 'VM') }] });
+    if (result.type !== 'bindings') throw new Error('Expected bindings');
+    expect(result.bindings[0].wm).toBe(preserve && !reopened ? JSON.stringify(HEX.slice(2)) : undefined);
+  });
+
   it('commits the planned metadata atomically and leaves every row unchanged on commit failure', async () => {
     const store = new OxigraphStore(); stores.push(store);
     await store.insert([
@@ -364,7 +393,11 @@ describe('review regression boundaries', () => {
   it('persists write-ahead evidence before the first apply callback', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-write-ahead-')); dirs.push(dir);
     const apply = vi.fn(async () => {
-      const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
+      const path = join(dir, 'named-ka-vm-lifecycle-repairs.json'), bytes = await readFile(path, 'utf8');
+      const journal = decodeLifecycleRepairJournal(JSON.parse(bytes));
+      expect(bytes).toBe(JSON.stringify(JSON.parse(bytes)));
+      expect(await readdir(dir)).toEqual(['named-ka-vm-lifecycle-repairs.json']);
+      if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600 & ~process.umask());
       expect([...journal.values()]).toMatchObject([{ input: { name: NAME, merkleRoot: HEX.slice(2), assertionVersion: '1' }, attempts: 0 }]);
     });
     const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });

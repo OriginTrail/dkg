@@ -7,6 +7,8 @@ import { deleteByPatternWithoutCount, UnsupportedTripleStoreCapabilityError,
   type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 
+import { stripMetadataLiteral } from './sync/metadata-literal.js';
+
 const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
 const STATE_PRED = 'http://dkg.io/ontology/state';
 const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
@@ -31,7 +33,20 @@ interface LifecycleMetadataPlan {
   readonly inserts: readonly Quad[];
   readonly metaGraph: string;
 }
-const bare = (value?: string) => value?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').toLowerCase().replace(/^0x/, '');
+interface WorkspaceLifecycleValues {
+  readonly wm?: string;
+  readonly swm?: string;
+  readonly activeSeal?: string;
+  readonly state?: string;
+  readonly layer?: string;
+}
+
+/** Decode RDF once at the storage boundary, then apply each field's normalization contract. */
+function decodeWorkspaceLifecycleValues(bindings: Record<string, string> | undefined): WorkspaceLifecycleValues {
+  const root = (term?: string) => stripMetadataLiteral(term)?.toLowerCase().replace(/^0x/, '');
+  return { wm: root(bindings?.wm), swm: root(bindings?.swm), activeSeal: root(bindings?.activeSeal),
+    state: stripMetadataLiteral(bindings?.state)?.toLowerCase(), layer: stripMetadataLiteral(bindings?.layer)?.toUpperCase() };
+}
 function checkedRoot(value: string): string {
   const root = value.toLowerCase().replace(/^0x/, '');
   if (!/^[0-9a-f]{64}$/.test(root)) throw Object.assign(new Error('Invalid confirmed lifecycle root'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
@@ -40,14 +55,14 @@ function checkedRoot(value: string): string {
 
 /** Pure metadata plan: workspace admission is complete before any row is mutated. */
 function planPublishedNamedKaVmLifecycle(
-  input: PublishedNamedKaVmLifecycleInput, workspace: Record<string, string> | undefined,
+  input: PublishedNamedKaVmLifecycleInput, workspace: WorkspaceLifecycleValues,
 ): LifecycleMetadataPlan {
   const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const metaGraph = contextGraphMetaUri(input.contextGraphId), root = checkedRoot(input.merkleRoot);
   const prior = input.priorMerkleRoot === undefined ? undefined : checkedRoot(input.priorMerkleRoot);
-  const wm = bare(workspace?.wm), swm = bare(workspace?.swm), activeSeal = bare(workspace?.activeSeal);
-  const reopenedDraft = bare(workspace?.state) === 'created' && bare(workspace?.layer) === 'wm' && activeSeal === undefined;
+  const { wm, swm, activeSeal } = workspace;
+  const reopenedDraft = workspace.state === 'created' && workspace.layer === MemoryLayer.WorkingMemory && activeSeal === undefined;
   const consumedTentativePrior = input.tentative === true && prior !== undefined && wm === prior;
   const preserveWorkspace = reopenedDraft || (activeSeal !== undefined && activeSeal !== root)
     || (wm !== undefined && wm !== root && !consumedTentativePrior) || (swm !== undefined && swm !== root);
@@ -122,5 +137,5 @@ export async function applyPublishedNamedKaVmLifecycle(store: TripleStore, input
   if (rows.type !== 'bindings' || rows.bindings.length > 1) {
     throw Object.assign(new Error('Invalid workspace pointers during confirmed lifecycle repair'), { code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
   }
-  await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(input, rows.bindings[0]));
+  await commitLifecycleMetadata(store, planPublishedNamedKaVmLifecycle(input, decodeWorkspaceLifecycleValues(rows.bindings[0])));
 }
