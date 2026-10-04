@@ -9,7 +9,6 @@
  * composed class.
  */
 
-import { captureContextGraphAuthorityFactsFence } from './internal/context-graph-authority/context-graph-authority-facts-fence.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -813,7 +812,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         contextGraphId,
         { signal: options.signal },
       ),
-      readMetadataRevision: () => this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId),
+      captureMetadataFence: () => this.contextGraphMetaProjection.captureContextGraphAuthorityFactsFence(contextGraphId),
       getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
       getSubscriptionAgents: () => (
         this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
@@ -870,7 +869,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
     if (recoveryAuthority.kind !== 'legacy-unregistered') return null;
 
-    const metadataFence = captureContextGraphAuthorityFactsFence(this.contextGraphMetaProjection, contextGraphId);
+    const metadataFence = this.contextGraphMetaProjection.captureContextGraphAuthorityFactsFence(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
 
     // Metadata is another async boundary. Re-resolve the authoritative state
@@ -913,7 +912,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     if (registered.kind === 'private') return [...registered.participantAgents];
     if (registered.kind !== 'unregistered') return null;
-    const metadataFence = captureContextGraphAuthorityFactsFence(this.contextGraphMetaProjection, contextGraphId);
+    const metadataFence = this.contextGraphMetaProjection.captureContextGraphAuthorityFactsFence(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
     const currentRegistered = await this.resolveSwmRegisteredAuthority(
       contextGraphId,

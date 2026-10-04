@@ -62,6 +62,10 @@ interface ProjectionEntry {
   invalidationVersion: number;
 }
 
+export interface ContextGraphAuthorityFactsFence {
+  assertCurrent(): boolean;
+}
+
 export interface ContextGraphReadAuthorityFactsSnapshot {
   /** True only while no projection source has changed since capture began. */
   assertCurrent(): boolean;
@@ -203,8 +207,13 @@ export class ContextGraphMetaProjection {
   /** Fence a source-qualified proof over one CG's metadata without rejecting
    * it when an unrelated graph changes during the read. Shared AGENTS and
    * ONTOLOGY sources advance the all-graphs epoch, including unseen graphs. */
-  readContextGraphAuthorityFactsRevision(contextGraphId: string): string {
-    return `${this.allFactsRevision}:${this.entries.get(contextGraphId)?.invalidationVersion ?? 0}`;
+  captureContextGraphAuthorityFactsFence(contextGraphId: string): ContextGraphAuthorityFactsFence {
+    const sharedRevision = this.allFactsRevision;
+    const graphRevision = this.entries.get(contextGraphId)?.invalidationVersion ?? 0;
+    return Object.freeze({
+      assertCurrent: () => this.allFactsRevision === sharedRevision
+        && (this.entries.get(contextGraphId)?.invalidationVersion ?? 0) === graphRevision,
+    });
   }
 
   /**

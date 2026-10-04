@@ -18,6 +18,7 @@
  * admits candidate rows or activates KA / SWM / VM state.
  */
 
+import type { ContextGraphAuthorityFactsFence } from './context-graph-meta-projection.js';
 import {
   SYSTEM_CONTEXT_GRAPHS,
   ZERO_DIGEST32_V1,
@@ -3457,7 +3458,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // the exact revision paired with every later metadata/version await and
       // refuse to accept a composed snapshot if owner, policy, revocation, or
       // membership facts changed in the meantime.
-      let metadataAuthorityRevision: string | null = null;
+      let metadataAuthorityFence: ContextGraphAuthorityFactsFence | null = null;
       if (registeredAuthorityRead !== null) {
         const { expectedNameHash, snapshot } = registeredAuthorityRead;
         if (signal?.aborted) throw signal.reason;
@@ -3469,8 +3470,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         }
         let authoritativeSnapshot = snapshot;
         if (snapshot.accessPolicy === 1) {
-          metadataAuthorityRevision = this.contextGraphMetaProjection
-            .readContextGraphAuthorityFactsRevision(contextGraphId);
+          metadataAuthorityFence = this.contextGraphMetaProjection
+            .captureContextGraphAuthorityFactsFence(contextGraphId);
           const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
           if (localRoster === null) {
             // TRANSIENT, and typed so it is classified as such. `null` here
@@ -3533,8 +3534,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // this revision only before the later roster read could combine an
           // old owner with a new policy/roster generation and still pass the
           // acceptance-time fence.
-          metadataAuthorityRevision = this.contextGraphMetaProjection
-            .readContextGraphAuthorityFactsRevision(contextGraphId);
+          metadataAuthorityFence = this.contextGraphMetaProjection
+            .captureContextGraphAuthorityFactsFence(contextGraphId);
           const ownerDid = await this.getContextGraphOwner(contextGraphId);
           if (signal?.aborted) throw signal.reason;
           const normalizedOwnerDid = ownerDid
@@ -3613,9 +3614,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         authorityRevision,
       )) return null;
       if (
-        metadataAuthorityRevision !== null
-        && this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId)
-          !== metadataAuthorityRevision
+        metadataAuthorityFence !== null && !metadataAuthorityFence.assertCurrent()
       ) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
       // Finalized absence was exact when the refresh request was created, but
       // RDF evidence loading is asynchronous. Discovery may bind the graph to

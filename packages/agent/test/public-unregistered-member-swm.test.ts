@@ -92,7 +92,7 @@ function joinedMember(options: {
   const isContextGraphPublicOnChain = vi.fn(async () => options.publicOnChain === true);
   const warn = vi.fn();
   const agent = {
-    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision() { return `0:${this.readAuthorityFactsRevision}`; } },
+    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, captureContextGraphAuthorityFactsFence() { const revision = this.readAuthorityFactsRevision; return { assertCurrent: () => this.readAuthorityFactsRevision === revision }; } },
     resolveContextGraphAgentGateAuthority:
       WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
     resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,

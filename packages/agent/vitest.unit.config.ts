@@ -308,6 +308,7 @@ export default defineConfig({
       "test/approved-private-replica.test.ts",
       "test/context-graph-meta-projection.test.ts",
       "test/context-graph-authority-facts-fence.test.ts",
+      "test/swm-recipient-key-fetch.test.ts",
       "test/swm-member-recovery-auth.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",

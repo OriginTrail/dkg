@@ -120,7 +120,7 @@ function makeAgentLike(opts: {
     log,
     chain,
     store: { query: storeQuery },
-    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision: () => "0:0" },
+    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, captureContextGraphAuthorityFactsFence: () => ({ assertCurrent: () => true }) },
     swmSenderKeyStateLoaded: true,
     loadSwmSenderKeyState: vi.fn(async () => {}),
     subscribedContextGraphs,

@@ -300,20 +300,20 @@ describe('ContextGraphMetaProjection', () => {
   it('fences one graph without discarding its proof for unrelated metadata writes', () => {
     const projection = new ContextGraphMetaProjection({} as TripleStore);
     const target = 'projection-target';
-    const before = projection.readContextGraphAuthorityFactsRevision(target);
+    const before = projection.captureContextGraphAuthorityFactsFence(target);
 
     projection.markDirty('projection-other');
     projection.markDirtyForGraph('urn:dkg:local:join-encryption-key-cache');
-    expect(projection.readContextGraphAuthorityFactsRevision(target)).toBe(before);
+    expect(before.assertCurrent()).toBe(true);
 
     projection.markDirtyForGraph(contextGraphMetaGraphUri(target));
-    const afterOwnWrite = projection.readContextGraphAuthorityFactsRevision(target);
-    expect(afterOwnWrite).not.toBe(before);
+    expect(before.assertCurrent()).toBe(false);
+    const afterOwnWrite = projection.captureContextGraphAuthorityFactsFence(target);
 
-    const unseenBefore = projection.readContextGraphAuthorityFactsRevision("not-yet-projected");
+    const unseenBefore = projection.captureContextGraphAuthorityFactsFence("not-yet-projected");
     projection.markAllDirty();
-    expect(projection.readContextGraphAuthorityFactsRevision(target)).not.toBe(afterOwnWrite);
-    expect(projection.readContextGraphAuthorityFactsRevision("not-yet-projected")).not.toBe(unseenBefore);
+    expect(afterOwnWrite.assertCurrent()).toBe(false);
+    expect(unseenBefore.assertCurrent()).toBe(false);
   });
 
   it('rebuilds for callers that arrive after invalidation during an in-flight rebuild', async () => {

@@ -1335,14 +1335,11 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // one changed snapshot so the ordinary revoke race does not drop an
           // otherwise valid envelope, then fail closed under continued churn.
           for (let attempt = 0; attempt < 2; attempt += 1) {
-            const metadataRevision = this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId);
+            const metadataFence = this.contextGraphMetaProjection.captureContextGraphAuthorityFactsFence(cgId);
             const meta = await this.getCgMeta(cgId);
             const allowedPeers =
               await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
-            if (
-              this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId)
-                === metadataRevision
-            ) {
+            if (metadataFence.assertCurrent()) {
               return allowedPeers === undefined ? meta : { ...meta, allowedPeers };
             }
           }

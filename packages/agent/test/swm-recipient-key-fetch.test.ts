@@ -85,7 +85,7 @@ describe('private share recipients with a missing member key (#2849)', () => {
     });
     Object.assign(host, {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, readContextGraphAuthorityFactsRevision: () => "0:0" },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, captureContextGraphAuthorityFactsFence: () => ({ assertCurrent: () => true }) },
       resolveSwmTransportAuthority: vi.fn(async () => (transportKind === 'private-roster'
         ? { kind: 'private-roster' as const, participantAgents: members.map((member) => member.address) }
         : { kind: 'legacy-unregistered' as const })),

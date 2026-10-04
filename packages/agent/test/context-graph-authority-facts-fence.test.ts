@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
-import { captureContextGraphAuthorityFactsFence } from '../src/internal/context-graph-authority/context-graph-authority-facts-fence.js';
 
 function pendingCandidates(projection: ContextGraphMetaProjection) {
   let release!: (ids: ReadonlySet<string>) => void;
@@ -13,17 +12,20 @@ function pendingCandidates(projection: ContextGraphMetaProjection) {
 }
 
 describe('owned context-graph authority facts fences', () => {
-  it('keeps unrelated writes retry-free but retires target and unseen shared-source proofs', () => {
+  it.each([SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY])('keeps unrelated writes retry-free but retires target and unseen %s proofs', sharedSource => {
     const projection = new ContextGraphMetaProjection({} as TripleStore);
-    const target = captureContextGraphAuthorityFactsFence(projection, 'target');
+    const target = projection.captureContextGraphAuthorityFactsFence('target');
+    const recipientRevision = projection.readAuthorityFactsRevision;
+    expect(Object.isFrozen(target)).toBe(true);
     projection.markDirtyForGraph(contextGraphMetaGraphUri('other'));
     projection.markDirtyForGraph('urn:dkg:local:join-encryption-key-cache');
     expect(target.assertCurrent()).toBe(true);
+    expect(projection.readAuthorityFactsRevision).toBeGreaterThan(recipientRevision);
     projection.markDirtyForGraph(contextGraphMetaGraphUri('target'));
     expect(target.assertCurrent()).toBe(false);
 
-    const unseen = captureContextGraphAuthorityFactsFence(projection, 'unseen');
-    projection.markDirtyForGraph(contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS));
+    const unseen = projection.captureContextGraphAuthorityFactsFence('unseen');
+    projection.markDirtyForGraph(contextGraphDataGraphUri(sharedSource));
     expect(unseen.assertCurrent()).toBe(false);
   });
 

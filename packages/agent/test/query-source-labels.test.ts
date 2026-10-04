@@ -158,7 +158,7 @@ function runtimePrivateQueryAgent(options: {
     store,
     contextGraphMetaProjection: {
       readAuthorityFactsRevision: 0,
-      readContextGraphAuthorityFactsRevision: () => "0:0",
+      captureContextGraphAuthorityFactsFence: () => ({ assertCurrent: () => true }),
       prepareReadAuthorityFactsSnapshot: vi.fn(async () => ({
         assertCurrent: () => true,
         isAbsent: () => true,
