@@ -490,7 +490,6 @@ export class Rfc64PublicCatalogServiceV1 {
     direction: Rfc64CatalogAuthorityDirectionV1,
   ) => Rfc64CatalogAuthorityPolicyV1;
   readonly #localPeerId: string | undefined;
-  readonly #locallyProducedHeads = new Map<string, Digest32V1>();
   readonly #announcedCurrentHeadTargets = new Map<string, AnnouncedCurrentHeadTargetV1>();
   /**
    * Targets a running pass has taken out of the map and not yet settled, by
@@ -842,7 +841,6 @@ export class Rfc64PublicCatalogServiceV1 {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    this.#locallyProducedHeads.clear();
     this.#started = false;
     try {
       // Keep both outbound transports live until the scheduler has drained.
@@ -958,14 +956,6 @@ export class Rfc64PublicCatalogServiceV1 {
     return this.#publishAuthorCatalogGenesis(input, heldPolicy, peers);
   }
 
-  recordLocallyProducedCatalogHead(announcement: Rfc64PublicCatalogHeadAnnouncementV1): void {
-    this.#locallyProducedHeads.set(rfc64CatalogTargetScopeKeyV1(announcement), announcement.catalogHeadObjectDigest);
-  }
-
-  isCurrentLocallyProducedCatalogHead(scopeKey: string, digest: Digest32V1): boolean {
-    return this.#locallyProducedHeads.get(scopeKey) === digest;
-  }
-
   async #publishAuthorCatalogGenesis(
     input: PublishAuthorCatalogGenesisInputV1,
     heldPolicy: AcceptedRfc64CatalogAccessSnapshotV1,
@@ -1043,7 +1033,6 @@ export class Rfc64PublicCatalogServiceV1 {
       signatureVariantDigest: headKeys.signatureVariantDigest,
     });
 
-    this.recordLocallyProducedCatalogHead(announcement);
     const delivery = await this.#announceCatalogHeadSnapshot(announcement, peers);
 
     return Object.freeze({

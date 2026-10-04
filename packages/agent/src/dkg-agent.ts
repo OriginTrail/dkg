@@ -525,7 +525,7 @@ import { QueryMethods } from './dkg-agent-query.js';
 import { AgentRegistryMethods } from './dkg-agent-registry.js';
 import { WorkspaceCryptoMethods } from './dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
-import { FinalizedSwmRetirementMethods, bindFinalizedSwmRetirement } from './internal/dkg-agent-finalized-swm-retirement.js';
+import { FinalizedSwmRetirementMethods } from './internal/dkg-agent-finalized-swm-retirement.js';
 import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,
@@ -942,7 +942,8 @@ export class DKGAgent extends DKGAgentBase {
         }
         return owned;
       },
-      ...bindFinalizedSwmRetirement(this),
+      retireFinalizedSwmTwin: (candidate, ctx) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+      completeFinalizedSwmTwinRetirement: (result, ctx) => this.completeFinalizedSwmTwinRetirement(result, ctx),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),

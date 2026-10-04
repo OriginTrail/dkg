@@ -1366,29 +1366,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // could not be replayed from surface through providerHealth instead.
       const replayFailed = currentReplayProgress?.failed === true;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
-      // A local identity can publish on another node. Only this process's
-      // current produced head proves our inventory, and only an owner-only
-      // private access roster rules out another authorized SWM catalog author.
-      // VM publish policy alone does not restrict SWM catalog authorship.
-      const ownerAddress = accepted?.policy.source.kind === 'owner-signed-unregistered'
-        ? accepted.policy.source.ownerAddress : null;
-      const locallyProducedSoleAuthorHeads = accepted !== null
-        && accepted.policy.accessPolicy === 1
-        && ownerAddress !== null
-        && accepted.roster?.members.length === 1
-        && accepted.roster.members[0]?.agentAddress === ownerAddress
-        && heads.length > 0
-        && this.listLocalAgents().some(({ agentAddress }) => agentAddress.toLowerCase() === ownerAddress)
-        && heads.every(({ scopeKey, snapshot }) => snapshot.authorAddress === ownerAddress
-          && service?.isCurrentLocallyProducedCatalogHead(scopeKey, snapshot.currentCatalogHeadDigest) === true);
       // A full pass that reached no provider at all corroborated nothing: with
       // an empty promised set parity is vacuously satisfied, so applied rows
       // would otherwise be reported as agreed by every provider. It is not
       // evidence of missing rows, so it stays distinct from `replayFailed`, and
       // it can only mislead once something has been applied.
+      // Local production is not current-head corroboration: another node can
+      // sign a successor with the same owner identity, even for a sole-owner roster.
       const replayUnverified = currentReplayProgress?.unverified === true
-        && heads.length > 0
-        && !locallyProducedSoleAuthorHeads;
+        && heads.length > 0;
       const replayUnsettled = replayActive || replayFailed || replayUnverified;
       const targets = targetsByContextGraph.get(selection.contextGraphId) ?? [];
       const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;
@@ -4922,7 +4908,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       catalogHeadObjectDigest: headKeys.objectDigest,
       signatureVariantDigest: headKeys.signatureVariantDigest,
     });
-    service.recordLocallyProducedCatalogHead(announcement);
     const delivery = await service.announceCatalogHead({
       announcement,
       peers,

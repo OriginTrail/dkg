@@ -1648,6 +1648,76 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     60_000,
   );
 
+  it('keeps locally produced private inventory unverified when another node shares its owner', async () => {
+    const networkId = await computeNetworkId() as NetworkIdV1;
+    const deployment = Object.freeze({ ...NATIVE_DEPLOYMENT, networkId });
+    const ownerPeers = new Map<string, EvmAddressV1>();
+    const [first, second] = await Promise.all(['first', 'second'].map((name) => startNativeAgentWithOptions({
+      name: `same-owner-private-${name}`, deployment, networkIdentityChainId: NETWORK_ID,
+      operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      accessPolicyAuthority: { localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId) => ownerPeers.get(peerId) ?? null },
+    })));
+    for (const agent of [first, second]) ownerPeers.set(agent.peerId, AUTHOR);
+    for (const agent of [first, second]) {
+      expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(AUTHOR);
+      await agent.createContextGraph({ id: CONTEXT_GRAPH_ID, name: 'Shared owner catalog',
+        callerAgentAddress: AUTHOR, accessPolicy: 1, publishPolicy: 1 });
+      await agent.whenRfc64CatalogResponsibilitiesIdleV1();
+    }
+    const publish = async (agent: DKGAgent, kaNumber: bigint, suffix: string) => {
+      const assertionCoordinate = `same-owner-${suffix}`;
+      const shareOperationId = `same-owner-operation-${suffix}`;
+      await seedSignedSwmWorkspaceV1(agent, { contextGraphId: CONTEXT_GRAPH_ID,
+        assertionCoordinate, shareOperationId, kaNumber, accessPolicy: 'ownerOnly', networkId });
+      await agent.afterDurableSwmPromotionV1({ contextGraphId: CONTEXT_GRAPH_ID,
+        assertionCoordinate, lifecycleAgentAddress: AUTHOR, shareOperationId,
+        ctx: createOperationContext('share') });
+      await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+      await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    };
+    await publish(first, 230n, 'first');
+    const scope = { catalogScopeDigest: catalogScopeDigest(networkId), authorAddress: AUTHOR };
+    const oldHead = first.readRfc64AppliedCatalogHeadV1(scope);
+    expect(oldHead).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    await connectBothWays(first, second);
+    const initialReplay = await second.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID);
+    expect(initialReplay.failed).toBe(0);
+    await second.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(second.readRfc64AppliedCatalogHeadV1(scope)?.currentCatalogHeadDigest).toBe(oldHead?.currentCatalogHeadDigest);
+    // The second node advances the exact shared predecessor but cannot announce
+    // it to the first while that provider's replay transport is unavailable.
+    const announce = vi.spyOn(second, 'announceRfc64PublicCatalogHeadV1')
+      .mockImplementation(async ({ announcement, peers }) => ({ announcement, announcedPeers: [], failedPeers: peers }));
+    const replay = vi.spyOn(second, 'reannounceRfc64CatalogHeadsToPeerV1')
+      .mockRejectedValue(new Error('provider replay unavailable'));
+    await publish(second, 230n, 'first');
+    await publish(second, 231n, 'second-successor');
+    const newHead = second.readRfc64AppliedCatalogHeadV1(scope);
+    expect(newHead).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    expect(oldHead?.currentCatalogHeadDigest).not.toBe(newHead?.currentCatalogHeadDigest);
+    const failedReplay = await first.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID);
+    expect(failedReplay.requested).toBe(0);
+    expect(failedReplay.failed).toBeGreaterThan(0);
+    expect(replay).toHaveBeenCalled();
+    expect(first.readRfc64AppliedCatalogHeadV1(scope)?.currentCatalogHeadDigest).toBe(oldHead?.currentCatalogHeadDigest);
+    await expect(first.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(expect.objectContaining({
+      contextGraphId: CONTEXT_GRAPH_ID, accessPolicy: 1, publishPolicy: 1,
+      phase: 'unknown-freshness', stableReason: 'catalog-replay-unverified',
+      appliedRowCount: '1', expectedRowCount: null, missingRowCount: null,
+    }));
+    replay.mockRestore();
+    announce.mockRestore();
+    const verifiedReplay = await first.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID);
+    expect(verifiedReplay.requested).toBeGreaterThan(0);
+    expect(verifiedReplay.failed).toBe(0);
+    await first.whenRfc64PublicCatalogReceiverIdleV1();
+    await expect(first.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(expect.objectContaining({
+      contextGraphId: CONTEXT_GRAPH_ID, phase: 'complete', stableReason: null,
+      appliedCatalogHeadDigest: newHead?.currentCatalogHeadDigest, appliedRowCount: '2', missingRowCount: '0',
+    }));
+  }, 60_000);
+
   it('bounds default catalog peers deterministically while publication advances', async () => {
     const defaultNetworkId = await computeNetworkId() as NetworkIdV1;
     const author = await startNativeAgentWithOptions({

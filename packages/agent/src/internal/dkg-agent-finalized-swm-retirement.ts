@@ -72,12 +72,3 @@ export class FinalizedSwmRetirementMethods extends DKGAgentBase {
   }
 
 }
-
-/** Keep all executor retirement callbacks bound to the same lifecycle owner. */
-export function bindFinalizedSwmRetirement(owner: DKGAgent) {
-  return {
-    retireFinalizedSwmTwin: (...args: Parameters<DKGAgent['retireFinalizedSwmTwinCandidate']>) => owner.retireFinalizedSwmTwinCandidate(...args),
-    completeFinalizedSwmTwinRetirement: (...args: Parameters<DKGAgent['completeFinalizedSwmTwinRetirement']>) => owner.completeFinalizedSwmTwinRetirement(...args),
-    retireLegacySwmAfterVerifiedVmTwin: (...args: Parameters<DKGAgent['retireLegacySwmAfterVerifiedVmTwin']>) => owner.retireLegacySwmAfterVerifiedVmTwin(...args),
-  };
-}
