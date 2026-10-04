@@ -11,12 +11,13 @@
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { waitForSharedMemorySubscriber } from './_helpers/gossip-readiness.js';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
+import { replaceDurableFile } from '../src/durable-file-replace.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
@@ -115,10 +116,14 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     options: RetryCase,
     run: (fixture: Awaited<ReturnType<typeof prepareUpdate>>) => Promise<void>,
   ) {
-    const endpoint = options.reopen ? await startOxigraphSparqlEndpoint() : undefined;
     const dataDir = options.reopen
       ? await mkdtemp(join(tmpdir(), 'dkg-queued-update-reopen-'))
       : undefined;
+    const snapshotPath = dataDir ? join(dataDir, 'http-store.nq') : undefined;
+    const endpoint = snapshotPath ? await startOxigraphSparqlEndpoint({
+      persistBeforeAcknowledgement: store => replaceDurableFile(snapshotPath,
+        store.dump({ format: 'application/n-quads' }), { fileMode: 0o600, directoryMode: 0o700 }),
+    }) : undefined;
     const ownedAgents: DKGAgent[] = [];
     const openAgent = async () => {
       const publicSnapshotStore = dataDir
@@ -130,6 +135,9 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
           store: createManagedOxigraphSparqlStoreV1({
             queryEndpoint: endpoint.queryEndpoint,
             updateEndpoint: endpoint.updateEndpoint,
+            // This in-process fixture fsyncs its snapshot before every write ACK.
+            // Atomic/readback support alone never certifies a production endpoint.
+            writesDurableOnAcknowledgement: endpoint.writesDurableOnAcknowledgement,
           }),
         } : {}),
       });
@@ -137,7 +145,21 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       return { agent, publicSnapshotStore };
     };
     try {
-      await run(await prepareUpdate(options, openAgent));
+      const fixture = await prepareUpdate(options, openAgent);
+      await run(fixture);
+      if (snapshotPath) {
+        // Read only disk bytes before either the endpoint or agent stops. A
+        // graceful close must not make the advertised durability true later.
+        const probePath = join(dataDir!, 'read-probe.nq');
+        await copyFile(snapshotPath, probePath);
+        const disk = new OxigraphStore(probePath);
+        try {
+          const lifecycle = assertionLifecycleUri(fixture.cg, fixture.agent.defaultAgentAddress ?? fixture.agent.peerId, fixture.name);
+          expect(await disk.query(`ASK { GRAPH <${contextGraphMetaUri(fixture.cg)}> {
+            <${lifecycle}> <http://dkg.io/ontology/state> "published" ; <http://dkg.io/ontology/memoryLayer> "VM"
+          } }`)).toMatchObject({ type: 'boolean', value: true });
+        } finally { await disk.close(); }
+      }
     } finally {
       vi.restoreAllMocks();
       for (const agent of ownedAgents) {
@@ -294,8 +316,9 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
       settlement = vi.spyOn(agent as any, '_repairConfirmedNamedKaVmLifecycle');
       // Fresh managed adapter, agent, file snapshot reader and native queue.
-      // The HTTP fixture remains available: this proves client/agent reopen,
-      // not backend process restart or disk crash durability.
+      // The HTTP fixture remains available: this proves client/agent reopen.
+      // Its awaited fsynced ACK contract is separately checked from disk above;
+      // it grants no durability contract to upstream oxigraph-server.
       expect(await queue.getStatus(jobId)).toMatchObject({
         jobId,
         status: 'failed',
