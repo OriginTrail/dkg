@@ -12,7 +12,9 @@ export function inside(root, file) {
   return resolved;
 }
 export function proofIdentity(root, profile) {
-  const files = [profile.file, 'scripts/qa-prove-regression.mjs', ...['profiles', 'results', 'identity', 'proof'].map((name) => `scripts/lib/regressions/${name}.mjs`)];
+  const files = [profile.file, 'scripts/qa-prove-regression.mjs',
+    'scripts/lib/regressions/profiles.mjs', 'scripts/lib/regressions/results.mjs',
+    'scripts/lib/regressions/identity.mjs', 'scripts/lib/regressions/proof.mjs'];
   return Object.fromEntries(files.map((file) => [file, sha256(fs.readFileSync(inside(root, file)))]));
 }
 export function verifyIdentity(actual, expected) {
