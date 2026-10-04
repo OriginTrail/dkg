@@ -26,6 +26,27 @@ export interface ApprovedPrivateReplicaAuthority {
    * authority shape accepted from older callers.
    */
   readonly allowedPeers?: readonly string[];
+  /**
+   * Deadline of the delegation this proof rests on, in epoch milliseconds;
+   * `null` when that delegation has no expiry. A consumer that awaits further
+   * reads before it uses the proof re-checks it with
+   * {@link isApprovedPrivateReplicaDelegationActive}. Current producers always
+   * set this; optionality preserves the public authority shape.
+   */
+  readonly delegationExpiresAtMs?: number | null;
+}
+
+/**
+ * Whether the delegation an earlier proof rested on is still active. No store
+ * write marks the moment a delegation expires, so the revision fences cannot
+ * see it; an authority without a recorded deadline is not extended.
+ */
+export function isApprovedPrivateReplicaDelegationActive(
+  authority: ApprovedPrivateReplicaAuthority,
+  nowMs = Date.now(),
+): boolean {
+  return authority.delegationExpiresAtMs !== undefined
+    && isApprovedMemberDelegationExpiryActive(authority.delegationExpiresAtMs, nowMs);
 }
 
 /**
@@ -183,6 +204,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
     // must not re-read the merged metadata projection, where source identity
     // has already been discarded.
     allowedPeers: Object.freeze([...meta.allowedPeers]),
+    delegationExpiresAtMs: delegationExpiry,
   });
   if (registeredMetaOnChainId !== null) {
     return Object.freeze({

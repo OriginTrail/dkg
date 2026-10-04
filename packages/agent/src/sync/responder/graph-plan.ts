@@ -77,11 +77,10 @@ export { createResponderExactDataSessionMemo, createResponderPageOnlyExactDataSe
 import {
   compareRows,
   metaSubjectKey,
-  serializeResponderRow,
   serializeResponderRows,
   serializedResponderRowByteLength,
 } from './row-serialization.js';
-export { compareRows, serializeResponderRows } from './row-serialization.js';
+export { compareRows, serializeResponderRows, serializeResponderRowsWithinByteBudget } from './row-serialization.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -657,32 +656,6 @@ function subjectAtomicBudgetEnd(
   return lastBoundary;
 }
 
-/**
- * Serialize the largest prefix that fits the negotiated response target.
- * Pagination advances by the number of N-Quads actually parsed by the
- * requester, so returning a prefix is cursor-safe. Always emit one row when a
- * non-empty input contains an unexpectedly oversized row; that guarantees
- * forward progress and leaves the transport's existing hard frame limit as the
- * final safety boundary for that pathological single row.
- */
-export function serializeResponderRowsWithinByteBudget(
-  rows: readonly SyncRow[],
-  maxBytes: number,
-): string {
-  const safeMaxBytes = Math.max(1, Math.floor(maxBytes));
-  const page: string[] = [];
-  let bytes = 0;
-  for (const row of rows) {
-    const serialized = serializeResponderRow(row);
-    const rowBytes = serializedResponderRowByteLength(row) + (page.length > 0 ? 1 : 0);
-    if (page.length > 0 && bytes + rowBytes > safeMaxBytes) break;
-    page.push(serialized);
-    bytes += rowBytes;
-    if (bytes >= safeMaxBytes) break;
-  }
-  return page.join('\n');
-}
-
 export async function readSwmMetaPage(params: {
   store: TripleStore;
   graphMembership: GraphMembershipSnapshot;
@@ -696,6 +669,7 @@ export async function readSwmMetaPage(params: {
   rowListCacheKey?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
+  releaseCacheOnShortPage?: boolean;
   freshMetaPlanMemo?: FreshSwmMetaPlanMemo;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
@@ -706,6 +680,7 @@ export async function readSwmMetaPage(params: {
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
       expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
     }
     : undefined;
@@ -814,6 +789,7 @@ export async function readSwmDataPage(params: {
   rowListCacheKey?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
+  releaseCacheOnShortPage?: boolean;
   freshGraphPlanMemo?: FreshSwmDataGraphPlanMemo;
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
 }): Promise<SyncRow[]> {
@@ -828,6 +804,7 @@ export async function readSwmDataPage(params: {
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
       expiredMessage: 'Shared-memory data sync session snapshot expired before page completion',
     }
     : undefined;
@@ -923,6 +900,7 @@ export async function readDurableMetaPage(params: {
       params.store,
       params.contextGraphId,
       params.signal,
+      params.assetUals,
     );
     const requested = new Set(params.assetUals);
     const confirmedUals = manifest.confirmedEntries
