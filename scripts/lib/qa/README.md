@@ -117,8 +117,9 @@ absence in both families for the same CG, with an owner control after promotion.
 Lifecycle/event/import metadata and post-promotion WM metadata checks have
 a paired `sharing_storage_absence(description, ownerPort, peerPort, sparql,
 binding)` operation: one feature query must expose owner rows before the peer
-can satisfy absence. The WM graph query is defined once in the sourceable sharing
-suite. Raw result headers must declare the explicit expected binding. A failed or empty control blocks
+can satisfy absence. The WM graph query is defined once in `devnet-sharing-helpers.sh`,
+which the executable and fixture tests both load. The executable has no sourcing
+mode; startup/authentication/counters/options remain in the executable. Raw result headers must declare the explicit expected binding. A failed or empty control blocks
 absence acceptance. The local fixture test deliberately returns an ACL-filtered
 empty API view while the raw store contains a seeded private assertion; the
 physical zero assertion correctly fails.
@@ -224,6 +225,20 @@ preserves confirmed failures alongside incomplete evidence; empty,
 zero-executed, missing or unfinished runs are INCONCLUSIVE. A complete run with
 only valid suite exit zeros remains PASS.
 
+The EXIT finalizer first turns RUNNING into CANCELLED and PENDING into NOT_RUN.
+`comprehensive-report.mjs` derives JSON, Markdown, console totals and the selection
+exit from that one finalized snapshot and `summarizeComprehensive`; the shell no
+longer maintains a second set of totals. Both reports include all six totals,
+individual suite states, overall/selection outcomes, interruption and filters.
+
+Suites run in separate Bash process groups. Cancellation sends SIGTERM to the
+active group, allows recovery/EXIT cleanup and its descendants to finish, then
+reaps the suite before finalizing the reports. The grace defaults to 300 seconds to allow RFC49’s sequential restart/health
+recovery (`DEVNET_CANCEL_GRACE_SECONDS`, 1–3600 seconds; invalid values use the default), with SIGKILL for unresponsive processes and a
+bounded settling wait. Zombies do not count as active work. The legacy signal
+exit remains 130 or 143; devnet node supervisors intentionally detach in
+`devnet.sh:start_node` / CLI lifecycle and stay outside the suite group; cancellation never produces complete success.
+
 The report writer is an explicit legacy-exit adapter: complete selection success
 returns 0; selection failures/incompleteness return 1. Preflight exit 2 and
 signal exits 130/143 remain unchanged. Existing suite exit 2 remains FAIL:2;
@@ -248,12 +263,20 @@ pnpm test:inventory
 ```
 
 The focused lane exercises the real Bash wrapper, a local HTTP fixture, actual
-sourceable sharing operations and the shared RC/invite API boundary, the full
+sharing helper operations and the actual RC/invite privacy assertions, the full
 phonebook script with controlled dependencies, authorization/physical controls,
 and the real comprehensive script with disposable fixture suites. No shell
 source slicing, fixed-line regex extraction or assignment-count check is used.
-The cancellation fixture records actual suite/descendant PIDs, waits for live
-readiness and verifies both stop; cleanup runs even on failure. Raw boundary
+The cancellation fixtures record actual suite/descendant/recovery PIDs, wait for
+live readiness and check that delayed recovery completed and all PIDs are already
+gone at runner exit for both SIGINT and SIGTERM. A TERM-ignoring fixture exercises
+the bounded SIGKILL path; cleanup runs even on failure. JSON and Markdown states
+and totals must match for complete, missing, fail-fast, interrupted and preflight
+fixtures. WM fixtures execute the generated SPARQL in the existing Oxigraph
+engine against numeric WM, legacy assertion, shared-memory and unrelated-context
+graphs rather than manufacturing rows from a query substring. RC/invite tests
+call the same functions from `devnet-privacy-helpers.sh` as the suites, checking
+exact request scopes/projections and valid empty/leaked/invalid responses. Raw boundary
 fixtures check resolver exit 2/empty stdout and no query acquisition for directory
 confinement, API port matching, chain identity, loopback and embedded-store rules.
 The missing-only, empty, fail-fast, mixed FAIL/MISSING, cancelled and complete
@@ -315,12 +338,13 @@ original runner exited **0** (`expected: 1`, `actual: 0`). Restoring the fixed
 runner makes it pass. Both demonstrations restored the fixed source before the
 final focused/tooling validation; neither defective variant is committed.
 
-### PR review follow-up validation
+### First PR review follow-up validation (`e7aa9cb0b`)
 
-All seven initial review comments are addressed by the direct interfaces,
-paired controls and callable-boundary tests described above. The runner's
-production behavior did not need a further change; its new lifetime regression
-verifies the existing recursive cancellation operation.
+The seven initial review comments were addressed by direct interfaces and paired
+controls. This revision’s lifetime regression allowed processes time to disappear
+after the runner exit, so it missed the cleanup-wait defect found in the next
+review. Its shared RC/invite and substring WM fixtures were also too weak; the
+second follow-up below replaces those tests and corrects cancellation.
 
 - Focused lane: **91 passed, 0 failed** (82 observation tests and 9 runner tests).
 - Existing `pnpm test:scripts`: **493 passed, 0 failed, 0 skipped**.
@@ -349,3 +373,64 @@ These review fixtures use only newly created temporary stores/processes. No
 product daemon was restarted for the follow-up; the initial sharing smoke's
 HTTP 503 limitation remains, and no complete live sharing or mixed-backend
 success is claimed.
+
+
+### Second PR review follow-up validation
+
+The three red findings and both adjacent maintenance comments are addressed:
+
+- Cancellation owns a separate process group, waits for delayed recovery and
+  descendants (including recovery left after the suite leader exits), reaps the
+  suite, and uses a bounded SIGKILL fallback. SIGINT/130 and SIGTERM/143 survive.
+  RFC49's recovery was inspected: `devnet.sh` starts detached CLI supervisors,
+  so intentional recovered nodes are outside the cancelling suite group. No
+  real RFC49 recovery or product daemon was executed for this follow-up.
+- The four migrated RC readers and invite outsider assertion are callable
+  operations in `devnet-privacy-helpers.sh`, used by both suites and tests.
+  Inputs are API URL, token, subject and context (plus the peer label for RC).
+  Exact queries/projections/scopes are checked for valid empty results, visible
+  rows, HTTP/API errors, malformed replies and missing bindings. The RC
+  sub-graph reader still warns/continues on valid visible rows; RC failure
+  counters and invite's immediate exit retain their public semantics.
+- The generated WM query and actual owner control execute against the existing
+  storage workspace's Oxigraph engine. Numeric-only and mixed numeric/legacy
+  fixtures include unrelated contexts and the same context's shared-memory
+  graph. The selected graph set must be exact.
+- `devnet-sharing-helpers.sh` contains the callable sharing operations. Its
+  callers supply AUTH/DEVNET_DIR and check/fail reporters. Loading it preserves
+  PASS=7, FAIL=8, WARN=9 and disabled nounset/pipefail. The executable no longer
+  has a sourcing mode.
+- JSON, Markdown, console summary and selection exit use one finalized suite
+  snapshot and one reducer; separate shell counters/report rendering are gone.
+  Complete, missing, fail-fast, preflight, signal and partial-run semantics are
+  checked, including identical states and all six totals in both reports.
+
+Observed with Node 22.23.2 and macOS Bash 3.2.57:
+
+| Check | Result |
+| --- | --- |
+| Focused observation/runner files | **124 passed, 0 failed, 0 skipped** (111 observation + 13 runner) |
+| Existing `pnpm test:scripts` | **526 passed, 0 failed, 0 skipped** |
+| `pnpm lint` | exit 0; no baseline edits |
+| `pnpm test:inventory` | exit 0; 2,108 test files across 22 packages/secondary systems |
+| Seven Bash syntax checks; unstaged/staged diff checks | exit 0 |
+
+The final source passed both full lanes after these four temporary mutations
+were restored. Every selected mutation regression exited **1**:
+
+| Mutation | Selected regression | Intended failure |
+| --- | --- | --- |
+| Restore the prior immediate cancellation implementation | `interruption waits.*\(SIGTERM\)$` | runner exits before delayed recovery marker exists |
+| Restore RC's permissive missing-result/bindings reader in its callable assertion | `actual rc_private_peer_privacy assertion handles API error` | parent reports PASS/exit 0 for an HTTP-200 API error, expected 1 |
+| Restore invite's permissive missing-result/bindings reader in its callable assertion | `actual invite_outsider_privacy assertion handles API error` | parent reports PASS/exit 0 for an HTTP-200 API error, expected 1 |
+| Negate the numeric WM inclusion predicate | `generated WM query and owner control execute against numeric-only WM RDF` | selected graph set contains shared memory and omits the numeric WM seed |
+
+Reproduce with `node --test --test-name-pattern='<selected regression>'` and
+its corresponding focused test file after applying only the stated mutation.
+No defective variant is committed. All new fixtures/stores/processes are fresh
+and local. The initial sharing smoke remains incomplete at HTTP 503
+`CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE`; later sections, mixed backends and
+integration with the overlapping #2800 / different-base #3031 remain unvalidated.
+No existing node data, CI, root package/test route, release tooling, registry or
+acceptance profiles changed. No live-network, deployment, merge or channel
+operation was performed.
