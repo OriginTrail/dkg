@@ -103,7 +103,7 @@ import {
   contextGraphMetadataHomeGraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcRequestContext, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -975,10 +975,18 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
       onRpcRead?.();
-      const snapshotsByNameHash = await resolveSnapshots.call(
-        indexReader,
-        reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
-        chainReadOptions,
+      // Registration classification gates private catalog admission and read
+      // access. A background reconciliation must not sit behind the ordinary
+      // background RPC reserve until the authority read's fail-closed deadline
+      // expires; use the same bounded foreground authority lane as explicit
+      // security reads, while retaining the caller's cancellation signal.
+      const snapshotsByNameHash = await withRpcRequestContext(
+        { requestClass: 'foreground', admissionPriority: 'authority', signal: options.signal },
+        () => resolveSnapshots.call(
+          indexReader,
+          reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+          chainReadOptions,
+        ),
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
