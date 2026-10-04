@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, Logger, TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext,
-  generateEd25519Keypair, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+  generateEd25519Keypair, assertionLifecycleUri, contextGraphMetaUri, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { computePrivateRootV10 } from '../src/index.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
@@ -689,7 +689,7 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     return rows;
   };
 
-  it('retains a same-version replacement and its completion marker when the earlier mint confirms', async () => {
+  it.each([false, true])('retains a same-version replacement and its marker when the earlier mint confirms (same content: %s)', async sameContent => {
     const f = await fixture();
     const NAME = 'same-version-mint';
     const firstPayload = [{ subject: 'urn:note:first', predicate: 'http://schema.org/value', object: '"first"', graph: '' }];
@@ -698,7 +698,7 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     const first = await finalizeRootlessAssertionForTest({ publisher: f.publisher, store: f.store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, assertionVersion: 1 });
     const firstShare = await f.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: 'peer-publisher' });
     await f.publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm');
-    await f.publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:note:replacement', predicate: 'http://schema.org/value', object: '"replacement"', graph: '' }]);
+    if (!sameContent) await f.publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:note:replacement', predicate: 'http://schema.org/value', object: '"replacement"', graph: '' }]);
     await finalizeRootlessAssertionForTest({ publisher: f.publisher, store: f.store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, assertionVersion: 1 });
     const secondShare = await f.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: 'peer-publisher' });
     const replacement = await f.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${first.sharedGraphUri}> { ?s ?p ?o } }`);
@@ -709,15 +709,33 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     await f.publisher.clearPublishedKnowledgeAssetSwm(CG,
       { kind: 'named-lifecycle', identity: { agentAddress: asset.agentAddress, kaNumber: BigInt(asset.kaNumber) } },
       undefined, createOperationContext('publish'), first.kaUal, 1,
-      { publicQuadsDigest: workspacePublicQuadsDigest(firstPayload), privateTripleCount: 0 });
-    expect(await f.store.countQuads(first.sharedGraphUri)).toBe(2);
+      { publicQuadsDigest: workspacePublicQuadsDigest(firstPayload), privateTripleCount: 0 }, firstShare.shareOperationId);
+    expect(await f.store.countQuads(first.sharedGraphUri)).toBe(sameContent ? 1 : 2);
     expect(await metaRows(f)).toEqual(before);
     await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, firstShare.shareOperationId);
     expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
     expect(secondShare.shareOperationId).not.toBe(firstShare.shareOperationId);
+    // B's own confirmation consumes its marker without consuming A's snapshot identity.
+    await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, secondShare.shareOperationId);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
     f.advance();
     expect(await f.snapshots.collectGarbage()).toMatchObject({ finalizedSnapshots: 0, deletedSnapshots: 0 });
     await expect(stat(snapshotPath(f.directory, replacementDigest))).resolves.toBeDefined();
+  });
+
+  it('separates legacy publication consumption from unconditional marker invalidation', async () => {
+    const f = await fixture(), name = 'legacy-completion';
+    await f.publisher.markSwmShareComplete(CG, name, AUTHOR);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(true);
+    await f.publisher.consumePublishedSwmShareComplete(CG, name, AUTHOR, null);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(false);
+    await f.publisher.markSwmShareComplete(CG, name, AUTHOR);
+    await f.store.insert([{ subject: assertionLifecycleUri(CG, AUTHOR, name), graph: contextGraphMetaUri(CG),
+      predicate: `${DKG}shareOperationId`, object: '"replacement-share"' }]);
+    await f.publisher.consumePublishedSwmShareComplete(CG, name, AUTHOR, null);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(true);
+    await f.publisher.clearSwmShareComplete(CG, name, AUTHOR);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(false);
   });
 
   it('serializes assertionPromote replacement and its head with confirmed-publication cleanup', async () => {
