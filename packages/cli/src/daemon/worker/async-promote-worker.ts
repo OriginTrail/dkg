@@ -50,9 +50,9 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
+import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
 import {
   classifyPromoteError,
-  diagnosticPromoteStage,
   safePromoteErrorIdentity,
   type ClassifiedPromoteError,
 } from './async-promote-error-classification.js';

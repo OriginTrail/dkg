@@ -7,11 +7,10 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   getPromoteFailureDisposition,
-  isPromoteStepName,
   type PromoteFailureDisposition,
   type PromoteFailureClassification,
-  type PromoteStepName,
 } from '@origintrail-official/dkg-publisher';
+import { untagPromoteMessage } from '../promote-stage-diagnostics.js';
 
 // Keep the publisher's discriminated union intact. Legacy prose/store results
 // cannot claim a publisher diagnostic with a contradictory queue disposition.
@@ -24,13 +23,12 @@ export type ClassifiedPromoteError = (
     }
 ) & { message?: string };
 
-const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
-
 // Three closed sets guard this boundary, under two deliberately different
 // ownership rules. A promote STAGE is by construction a producer-owned literal
 // — it only exists as an argument the publisher passes to `tagPromoteStep` —
 // so the publisher owns that set and the CLI narrows through its
-// `isPromoteStepName` predicate; a second copy here could only ever drift.
+// `isPromoteStepName` predicate. That narrowing lives in
+// `../promote-stage-diagnostics.ts`, which the synchronous routes share.
 // An error NAME or CODE can originate anywhere upstream, including in a
 // caller-influenced throw, so those two sets stay locally owned below and are
 // never widened by a producer-side change.
@@ -56,15 +54,6 @@ const SAFE_ERROR_CODES = new Set([
   'CURATOR_REJECTED',
   'ASSERTION_NOT_PERSISTED',
 ]);
-
-function untagPromoteMessage(message: string): string {
-  return message.replace(PROMOTE_STEP_TAG, '');
-}
-
-export function diagnosticPromoteStage(message: string): PromoteStepName | 'unknown' {
-  const candidate = PROMOTE_STEP_TAG.exec(message)?.[1];
-  return candidate !== undefined && isPromoteStepName(candidate) ? candidate : 'unknown';
-}
 
 export function safePromoteErrorIdentity(
   err: unknown,

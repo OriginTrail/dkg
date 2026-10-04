@@ -78,10 +78,16 @@ interface Harness {
     descriptor: RpcReadDescriptor;
     opts: ReadOpts | undefined;
     calls: Array<{ target: string; allowFailure: boolean; callData: string }>;
+    /** The call overrides, when the request was pinned to a block. */
+    overrides: { blockTag?: number } | undefined;
     context: RpcRequestContext;
     usage: ReturnType<typeof captureRpcUsageIssuerContext>;
   }>;
   codeReads: string[];
+  /** The read options each bytecode check was issued with. */
+  codeReadOpts: Array<ReadOpts | undefined>;
+  /** Keep bytecode checks out until the returned function is called. */
+  holdCodeReads(): () => void;
   setCode(code: string | Error): void;
   failAggregateWith(error: unknown | undefined): void;
   advance(ms: number): void;
@@ -95,6 +101,8 @@ function harness(initialCode: string | Error = MULTICALL3_RUNTIME_CODE): Harness
   let now = 1_000_000;
   const aggregates: Harness['aggregates'] = [];
   const codeReads: string[] = [];
+  const codeReadOpts: Array<ReadOpts | undefined> = [];
+  let codeReadsHeld: Promise<void> | undefined;
   const batching = new BackgroundContractReadBatching({
     readContract: async <T>(
       descriptor: RpcReadDescriptor, contract: Contract, fn: (c: Contract) => Promise<T>, opts?: ReadOpts,
@@ -102,9 +110,13 @@ function harness(initialCode: string | Error = MULTICALL3_RUNTIME_CODE): Harness
       expect(contract.target).toBe(MULTICALL3_ADDRESS);
       return fn({
         aggregate3: {
-          staticCall: async (calls: Array<{ target: string; allowFailure: boolean; callData: string }>) => {
+          staticCall: async (
+            calls: Array<{ target: string; allowFailure: boolean; callData: string }>,
+            overrides?: { blockTag?: number },
+          ) => {
             aggregates.push({
-              descriptor, opts, calls, context: activeRpcRequestContext(), usage: captureRpcUsageIssuerContext(),
+              descriptor, opts, calls, overrides,
+              context: activeRpcRequestContext(), usage: captureRpcUsageIssuerContext(),
             });
             if (aggregateFailure !== undefined) throw aggregateFailure;
             return calls.map(({ target, callData }) => answer(target, callData));
@@ -112,8 +124,12 @@ function harness(initialCode: string | Error = MULTICALL3_RUNTIME_CODE): Harness
         },
       } as unknown as Contract);
     },
-    readProvider: async <T>(label: string, fn: (provider: JsonRpcProvider) => Promise<T>) => {
+    readProvider: async <T>(
+      label: string, fn: (provider: JsonRpcProvider) => Promise<T>, opts?: ReadOpts,
+    ) => {
       codeReads.push(label);
+      codeReadOpts.push(opts);
+      await codeReadsHeld;
       return fn({
         getCode: async (address: string) => {
           expect(address).toBe(MULTICALL3_ADDRESS);
@@ -129,6 +145,15 @@ function harness(initialCode: string | Error = MULTICALL3_RUNTIME_CODE): Harness
     batching,
     aggregates,
     codeReads,
+    codeReadOpts,
+    holdCodeReads: () => {
+      let release!: () => void;
+      codeReadsHeld = new Promise<void>((resolve) => { release = resolve; });
+      return () => {
+        codeReadsHeld = undefined;
+        release();
+      };
+    },
     setCode: (next) => { code = next; },
     failAggregateWith: (error) => { aggregateFailure = error; },
     advance: (ms) => { now += ms; },
@@ -498,6 +523,231 @@ describe('whose request each physical request is', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     await turn();
     expect(onProgress).not.toHaveBeenCalled();
+  });
+});
+
+describe('an aggregate request a caller sends for itself', () => {
+  const calls = [
+    { target: CG_STORAGE, callData: cgStorage.interface.encodeFunctionData('kaToContextGraph', [7n]) },
+    { target: KAS, callData: kas.interface.encodeFunctionData('getLatestMerkleRoot', [404n]) },
+  ];
+  const expectedResults = calls.map(({ target, callData }) => answer(target, callData));
+
+  /** A sender that records the request context and usage attribution it ran under. */
+  function sender(h: Harness) {
+    const sent: Array<{ context: RpcRequestContext; usage: ReturnType<typeof captureRpcUsageIssuerContext> }> = [];
+    const send = vi.fn(async (
+      multicall3: Contract,
+      request: (multicall3: Contract) => Promise<readonly { success: boolean; returnData: string }[]>,
+    ) => {
+      expect(multicall3.target).toBe(MULTICALL3_ADDRESS);
+      sent.push({ context: activeRpcRequestContext(), usage: captureRpcUsageIssuerContext() });
+      return request({
+        aggregate3: {
+          staticCall: async (
+            inner: Array<{ target: string; allowFailure: boolean; callData: string }>,
+            overrides?: { blockTag?: number },
+          ) => {
+            h.aggregates.push({
+              descriptor: { label: 'caller', consumer: 'caller' },
+              opts: undefined,
+              calls: inner,
+              overrides,
+              context: activeRpcRequestContext(),
+              usage: captureRpcUsageIssuerContext(),
+            });
+            return inner.map(({ target, callData }) => answer(target, callData));
+          },
+        },
+      } as unknown as Contract);
+    });
+    return { send, sent };
+  }
+
+  it('evaluates the calls at the given block, each allowed to fail on its own', async () => {
+    const h = await primed(harness());
+    const { send } = sender(h);
+
+    const results = await background(() => h.batching.aggregateAtBlock(() => calls, 4_242, send));
+
+    expect(results).toEqual(expectedResults);
+    expect(results!.map(({ success }) => success)).toEqual([true, false]);
+    expect(h.aggregates).toHaveLength(1);
+    expect(h.aggregates[0]!.overrides).toEqual({ blockTag: 4_242 });
+    expect(h.aggregates[0]!.calls).toEqual(calls.map((call) => ({ ...call, allowFailure: true })));
+  });
+
+  it('leaves a shared batch unpinned, as before', async () => {
+    const h = await primed(harness());
+
+    await background(() => h.batching.tryRead(view(kas, 'kas.getLatestMerkleRoot', 'getLatestMerkleRoot', [1n])));
+
+    expect(h.aggregates).toHaveLength(1);
+    expect(h.aggregates[0]!.overrides).toBeUndefined();
+  });
+
+  it('waits for the bytecode check instead of turning the first caller away', async () => {
+    const h = harness();
+    const release = h.holdCodeReads();
+    const first = sender(h);
+    const second = sender(h);
+
+    const pending = background(() => Promise.all([
+      h.batching.aggregateAtBlock(() => calls, 1, first.send),
+      h.batching.aggregateAtBlock(() => calls, 1, second.send),
+    ]));
+    await turn();
+    // Nothing is sent, and no second check starts, while the answer is out.
+    expect(first.send).not.toHaveBeenCalled();
+    expect(h.codeReads).toEqual(['multicall3.getCode']);
+    // A batchable view arriving meanwhile goes out directly, as it always did.
+    expect(background(() => h.batching.tryRead(
+      view(kas, 'kas.getLatestMerkleRoot', 'getLatestMerkleRoot', [1n]),
+    ))).toBeUndefined();
+
+    release();
+    await expect(pending).resolves.toEqual([expectedResults, expectedResults]);
+    expect(h.codeReads).toEqual(['multicall3.getCode']);
+  });
+
+  it('reads the bytecode under a cap that outlasts the closed background budget at start', async () => {
+    const h = await primed(harness());
+
+    expect(h.codeReadOpts).toEqual([{ policy: 'watchdogWideLogScan' }]);
+  });
+
+  it('sends the request in the caller\'s own request context and attribution', async () => {
+    const h = await primed(harness());
+    const { send, sent } = sender(h);
+    const controller = new AbortController();
+
+    await withRpcUsageConsumer('listContextGraphsFromChain', () => withRpcRequestContext(
+      { requestClass: 'background', signal: controller.signal },
+      () => h.batching.aggregateAtBlock(() => calls, 1, send),
+    ));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.context.requestClass).toBe('background');
+    expect(sent[0]!.context.signal).toBe(controller.signal);
+    expect(sent[0]!.usage).toEqual({ consumer: 'listContextGraphsFromChain' });
+  });
+
+  it('is not offered outside the background class, and starts no bytecode check there', async () => {
+    const h = harness();
+    const { send } = sender(h);
+
+    await expect(h.batching.aggregateAtBlock(() => calls, 1, send)).resolves.toBeUndefined();
+    await expect(withRpcRequestContext(
+      { requestClass: 'foreground' },
+      () => h.batching.aggregateAtBlock(() => calls, 1, send),
+    )).resolves.toBeUndefined();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(h.codeReads).toEqual([]);
+  });
+
+  it('honours the kill switch on every request', async () => {
+    const h = harness();
+    const { send } = sender(h);
+
+    h.setEnabled(false);
+    await expect(background(() => h.batching.aggregateAtBlock(() => calls, 1, send))).resolves.toBeUndefined();
+    expect(h.codeReads).toEqual([]);
+
+    h.setEnabled(true);
+    await expect(background(() => h.batching.aggregateAtBlock(() => calls, 1, send))).resolves.toEqual(expectedResults);
+  });
+
+  it.each([
+    ['no code at the address', '0x', 10 * 60_000],
+    ['a bytecode check that could not be read', new Error('endpoint unavailable'), 60_000],
+  ])('is not offered on a chain with %s, until the next check is due', async (_name, code, recheckMs) => {
+    const h = harness(code);
+    const { send } = sender(h);
+    const request = () => background(() => h.batching.aggregateAtBlock(() => calls, 1, send));
+
+    await expect(request()).resolves.toBeUndefined();
+    h.advance(recheckMs - 1);
+    await expect(request()).resolves.toBeUndefined();
+    expect(h.codeReads).toHaveLength(1);
+    expect(send).not.toHaveBeenCalled();
+
+    h.setCode(MULTICALL3_RUNTIME_CODE);
+    h.advance(1);
+    await expect(request()).resolves.toEqual(expectedResults);
+    expect(h.codeReads).toHaveLength(2);
+  });
+
+  it('builds the calls only when the request is going to be sent', async () => {
+    const h = harness();
+    const { send } = sender(h);
+    const buildCalls = vi.fn(() => calls);
+
+    await h.batching.aggregateAtBlock(buildCalls, 1, send);
+    h.setEnabled(false);
+    await background(() => h.batching.aggregateAtBlock(buildCalls, 1, send));
+    expect(buildCalls).not.toHaveBeenCalled();
+
+    h.setEnabled(true);
+    await background(() => h.batching.aggregateAtBlock(buildCalls, 1, send));
+    expect(buildCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again at once after a check the node itself refused to send', async () => {
+    const h = harness(new RpcRequestGovernorQueueFullError(256));
+    const { send } = sender(h);
+    const request = () => background(() => h.batching.aggregateAtBlock(() => calls, 1, send));
+
+    await expect(request()).resolves.toBeUndefined();
+    expect(h.codeReads).toHaveLength(1);
+
+    // Nothing reached an endpoint, so there is nothing to wait a minute for.
+    h.setCode(MULTICALL3_RUNTIME_CODE);
+    await expect(request()).resolves.toEqual(expectedResults);
+    expect(h.codeReads).toHaveLength(2);
+  });
+
+  it('lets a caller stop waiting for the bytecode check without cancelling it', async () => {
+    const h = harness();
+    const release = h.holdCodeReads();
+    const { send } = sender(h);
+    const controller = new AbortController();
+
+    const cancelled = withRpcRequestContext(
+      { requestClass: 'background', signal: controller.signal },
+      () => h.batching.aggregateAtBlock(() => calls, 1, send),
+    );
+    await turn();
+    controller.abort(new Error('pass ended'));
+    await expect(cancelled).rejects.toThrow('pass ended');
+    expect(send).not.toHaveBeenCalled();
+
+    // The check went on and its answer serves the next caller.
+    release();
+    await turn();
+    await expect(background(() => h.batching.aggregateAtBlock(() => calls, 1, send))).resolves.toEqual(expectedResults);
+    expect(h.codeReads).toEqual(['multicall3.getCode']);
+  });
+
+  it('rejects with the request\'s own error, and when the answer does not cover every call', async () => {
+    const h = await primed(harness());
+    const refusal = new RpcRequestGovernorQueueFullError(256);
+
+    await expect(background(() => h.batching.aggregateAtBlock(() => calls, 1, async () => { throw refusal; })))
+      .rejects.toBe(refusal);
+    await expect(background(() => h.batching.aggregateAtBlock(() => calls, 1, async () => expectedResults.slice(1))))
+      .rejects.toThrow('Aggregate call answered 1 of 2 calls');
+  });
+
+  it('is not counted in the shared read batching window', async () => {
+    const h = await primed(harness());
+    drainRpcReadBatchingWindow();
+
+    await background(() => h.batching.aggregateAtBlock(() => calls, 1, sender(h).send));
+
+    expect(drainRpcReadBatchingWindow()).toEqual({
+      batches: 0, failedBatches: 0, refusedBatches: 0, calls: 0, directReads: 0, readsByLabel: {},
+    });
   });
 });
 

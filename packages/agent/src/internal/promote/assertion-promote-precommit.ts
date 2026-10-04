@@ -47,6 +47,12 @@ type AssertionPromotePreCommitResult = {
   publisherOptions: PublisherAssertionPromoteOptions;
 };
 
+/** An authority failure that can heal on its own (the shared classification). */
+function isRetryableAuthorityUnavailable(error: unknown): boolean {
+  return isContextGraphAuthorityUnavailableMarker(error)
+    && isRetryableContextGraphAuthorityUnavailableReason(error.reason);
+}
+
 /**
  * Retry translation belongs to these concrete agent prerequisite callbacks;
  * which reasons are retryable is the shared authority classification.
@@ -55,13 +61,72 @@ async function resolvePromoteAuthority<T>(resolve: () => Promise<T>): Promise<T>
   try {
     return await resolve();
   } catch (error) {
-    if (
-      isContextGraphAuthorityUnavailableMarker(error)
-      && isRetryableContextGraphAuthorityUnavailableReason(error.reason)
-    ) {
+    if (isRetryableAuthorityUnavailable(error)) {
       throw createPromoteRetryableFailure(error);
     }
     throw error;
+  }
+}
+
+/** Waits before each repeat of a promote's recipient read. */
+export const PROMOTE_RECIPIENT_RETRY_DELAYS_MS: readonly number[] = Object.freeze([100, 300, 700]);
+
+/**
+ * No repeat starts later than this after the first read began. It sits below
+ * the chain authority read deadline, so a read that ran into that deadline is
+ * reported at once instead of being asked again.
+ */
+export const PROMOTE_RECIPIENT_RETRY_BUDGET_MS = 2_000;
+
+/** The clock and sleep of the recipient repeat, replaceable in tests. */
+export interface PromoteRecipientRetryTiming {
+  now(): number;
+  sleep(delayMs: number): Promise<void>;
+}
+
+const REAL_PROMOTE_RECIPIENT_RETRY_TIMING: PromoteRecipientRetryTiming = Object.freeze({
+  now: () => performance.now(),
+  sleep: (delayMs: number) => new Promise<void>((resolve) => { setTimeout(resolve, delayMs); }),
+});
+
+/**
+ * Repeat a promote's recipient read while it fails with a retryable authority
+ * outage and the bound allows.
+ *
+ * The recipient read accepts its roster only while the node-wide authority
+ * facts revision stands still, and it gives up after a few attempts. Work that
+ * has nothing to do with this promote moves that revision: after a Context
+ * Graph is registered the node reconciles the new graph's gossip subscription
+ * several times within a few hundred milliseconds. A share sent straight after
+ * a registration can therefore use up those attempts and report the roster as
+ * temporarily unavailable, although no fact changed and the same read succeeds
+ * moments later.
+ *
+ * Repeating it is safe. It only reads authority and recipient keys, it fails
+ * closed every time, and the publisher asks for it before the attempt claims
+ * an operation id or writes Shared Memory. The bound is short on purpose: each
+ * repeat costs chain reads, and a failure that outlasts the bound is reported
+ * to the caller, which retries the whole promote.
+ */
+export async function resolvePromoteRecipientsWithinBound<T>(
+  resolve: () => Promise<T>,
+  timing: PromoteRecipientRetryTiming = REAL_PROMOTE_RECIPIENT_RETRY_TIMING,
+): Promise<T> {
+  const startedAt = timing.now();
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await resolve();
+    } catch (error) {
+      const delayMs = PROMOTE_RECIPIENT_RETRY_DELAYS_MS[attempt];
+      if (
+        delayMs === undefined
+        || !isRetryableAuthorityUnavailable(error)
+        || timing.now() - startedAt + delayMs > PROMOTE_RECIPIENT_RETRY_BUDGET_MS
+      ) {
+        throw error;
+      }
+      await timing.sleep(delayMs);
+    }
   }
 }
 
@@ -73,6 +138,7 @@ async function resolvePromoteAuthority<T>(resolve: () => Promise<T>): Promise<T>
 export async function prepareAssertionPromote(
   host: AssertionPromotePreCommitHost,
   input: AssertionPromotePreCommitInput,
+  recipientRetryTiming?: PromoteRecipientRetryTiming,
 ): Promise<AssertionPromotePreCommitResult> {
   return resolvePromoteAuthority(async () => {
     const gossipSigner = await host.resolveWorkspaceGossipSigningAgent(input.contextGraphId);
@@ -108,7 +174,10 @@ export async function prepareAssertionPromote(
           ? undefined
           : (message) => resolvePromoteAuthority(() => confirmBeforeCommit(message)),
         resolveWorkspaceRecipients: (request) => resolvePromoteAuthority(
-          () => host.resolveWorkspaceRecipientsGated(request),
+          () => resolvePromoteRecipientsWithinBound(
+            () => host.resolveWorkspaceRecipientsGated(request),
+            recipientRetryTiming,
+          ),
         ),
         ...(shareAccessPolicy !== undefined ? { accessPolicy: shareAccessPolicy } : {}),
         ...(input.options?.allowedPeers !== undefined
