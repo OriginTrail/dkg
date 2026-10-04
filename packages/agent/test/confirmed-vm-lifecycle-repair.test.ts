@@ -66,7 +66,8 @@ function agentFor(store: OxigraphStore, dir: string, version: number) {
   agent.defaultAgentAddress = AUTHOR; agent.config = { dataDir: dir }; agent.store = store;
   agent.writeLocks = new Map<string, Promise<void>>();
   agent.log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
-  agent.chain = { readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({ latestRoot: HEX, rootCount: BigInt(version) })) };
+  agent.chain = { getEvmChainId: vi.fn(async () => 31337n), getKnowledgeAssetsLifecycleAddress: vi.fn(async () => AUTHOR), readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({ latestRoot: HEX, rootCount: BigInt(version) })) };
+  agent.getContextGraphOnChainId = async () => '1';
   agent.createV10ACKProvider = () => undefined;
   agent._resolveEncryptInlinePayload = async () => undefined; agent._resolveEncryptInlineChunked = async () => undefined;
   agent._buildPrecomputedUpdateAttestationForSeal = async () => ({});
@@ -162,7 +163,7 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
 
 describe('confirmed lifecycle repair scheduling and fences', () => {
   const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, publishedUal: PUBLISHED,
-    merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED };
+    merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED, publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
   it('persists exponential retry deadlines through restart and never retries rejected evidence', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-stamp-backoff-')); dirs.push(dir);
     let now = 1_000;
@@ -252,7 +253,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
 });
 
 describe('review regression boundaries', () => {
-  const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED };
+  const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1', packedKaId: PACKED, publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
   it.each(['raw', 'agent-facade'] as const)('retains %s repair evidence across a failed snapshot and abrupt reopen, then durably retires it', async facade => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-crash-stamp-')), crashDir = await mkdtemp(join(tmpdir(), 'dkg-crash-reopen-'));
     dirs.push(dir, crashDir);

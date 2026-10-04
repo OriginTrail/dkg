@@ -5043,6 +5043,9 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent, input: ConfirmedNamedKaVmLifecycleInput,
     confirmedPublication: ConfirmedNamedKaVmPublication,
   ): Promise<boolean> {
+    if (confirmedPublication?.seal) input = { ...input, publicationDeployment: {
+      chainId: confirmedPublication.seal.chainId.toString(), lifecycleAddress: confirmedPublication.seal.kav10Address,
+    } };
     try {
       const outcome = await this.getOrCreateNamedKaVmLifecycleRepair().submit(input);
       return outcome === 'pending' || outcome === 'rejected';
@@ -5067,6 +5070,7 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId: request.contextGraphId, agentAddress, name: request.name,
         subGraphName: request.subGraphName, publishedUal, merkleRoot, packedKaId,
         assertionVersion: request.assertionVersion!,
+        publicationDeployment: { chainId: request.sealChainId, lifecycleAddress: request.sealKav10Address },
         ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
       };
       if (!await isConfirmedNamedKaVmLifecycleCurrent(

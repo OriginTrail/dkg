@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { readFile } from 'node:fs/promises';
 import { replaceDurableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
@@ -7,8 +8,14 @@ import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-off
 import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
+export interface ConfirmedNamedKaVmPublicationDeployment {
+  readonly chainId: string;
+  readonly lifecycleAddress: string;
+}
 export interface ConfirmedNamedKaVmLifecycleInput extends PublishedNamedKaVmLifecycleInput {
   readonly assertionVersion: string;
+  /** Bound by the admitted publication seal; absent only on historical/unbound or no-chain inputs. */
+  readonly publicationDeployment?: ConfirmedNamedKaVmPublicationDeployment;
   readonly priorMerkleRoot?: string;
 }
 export type NamedKaVmLifecycleRepairOutcome = 'repaired' | 'pending' | 'superseded' | 'rejected';
@@ -20,9 +27,9 @@ export class NamedKaVmLifecycleRepair {
   private journalTail: Promise<unknown> = Promise.resolve();
   private executionLocks = new Map<string, Promise<void>>();
   private inFlight = new Set<Promise<unknown>>();
-  private timer?: ReturnType<typeof setInterval>;
+  private worker?: CoalescingRecurringTask;
+  private stopping?: Promise<void>;
   private stopped = false;
-  private workerPending = false;
 
   constructor(private readonly options: {
     dataDir?: string;
@@ -142,7 +149,13 @@ export class NamedKaVmLifecycleRepair {
       return outcome;
     });
   }
-  async runDue(): Promise<void> {
+  runDue(): Promise<void> {
+    const pass = this.runDuePass();
+    this.inFlight.add(pass);
+    void pass.finally(() => this.inFlight.delete(pass)).catch(() => undefined);
+    return pass;
+  }
+  private async runDuePass(signal?: AbortSignal): Promise<void> {
     const due = await this.serial(async () => {
       if (this.stopped) return [];
       await this.load();
@@ -150,27 +163,34 @@ export class NamedKaVmLifecycleRepair {
         .sort((a, b) => a[1].nextAttemptAt - b[1].nextAttemptAt).slice(0, 10);
     });
     for (const [key, entry] of due) {
-      if (this.stopped) break;
+      if (this.stopped || signal?.aborted) break;
       await this.execute(key, entry);
     }
   }
   start(): void {
+    if (this.worker !== undefined || this.stopping !== undefined) return;
     this.stopped = false;
-    if (this.timer) return;
-    this.timer = setInterval(() => {
-      if (this.workerPending) return;
-      this.workerPending = true;
-      void this.runDue().catch(error => this.options.warn(`Named KA lifecycle repair worker failed: ${String(error)}`))
-        .finally(() => { this.workerPending = false; });
-    }, 5_000);
-    this.timer.unref?.();
+    this.worker = new CoalescingRecurringTask({
+      retryIntervalMs: 5_000, requestWhileRunning: 'drop',
+      runPass: signal => this.runDuePass(signal),
+      onError: error => this.options.warn(`Named KA lifecycle repair worker failed: ${String(error)}`),
+      closingMessage: 'Named KA lifecycle repair worker stopped',
+    });
+    this.worker.schedule(5_000);
   }
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopping !== undefined) return this.stopping;
     this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-    await this.journalTail;
-    await Promise.allSettled(this.inFlight);
-    await this.journalTail;
+    const worker = this.worker;
+    this.stopping = (async () => {
+      await worker?.close();
+      await this.journalTail;
+      await Promise.allSettled(this.inFlight);
+      await this.journalTail;
+    })().finally(() => {
+      if (this.worker === worker) this.worker = undefined;
+      this.stopping = undefined;
+    });
+    return this.stopping;
   }
 }

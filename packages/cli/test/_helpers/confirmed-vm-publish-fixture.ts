@@ -56,7 +56,9 @@ export async function confirmedVmPublishFixture(contextGraphId: string, name: st
   agent.config = { dataDir: dir }; agent.store = store; agent.defaultAgentAddress = author; agent.writeLocks = new Map();
   agent.gossipSession = new GossipSession(); agent.gossip = { publish: async () => undefined };
   agent.log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
-  agent.chain = { readKnowledgeAssetVersionSnapshot: async () => ({ latestRoot: rootHex, rootCount: 1n }) };
+  agent.chain = { getEvmChainId: async () => 31337n, getKnowledgeAssetsLifecycleAddress: async () => author,
+    readKnowledgeAssetVersionSnapshot: async () => ({ latestRoot: rootHex, rootCount: 1n }) };
+  agent.getContextGraphOnChainId = async () => '1';
   agent.createV10ACKProvider = () => undefined; agent._resolveEncryptInlinePayload = async () => undefined;
   agent._resolveEncryptInlineChunked = async () => undefined; agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined;
   const result = { status: 'confirmed' as const, ual: publishedUal, kaId: packed, merkleRoot: root, kaManifest: [],

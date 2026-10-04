@@ -43,6 +43,8 @@ export default defineConfig({
       "test/publish-finalized-agent-lane.test.ts",
       "test/confirmed-vm-lifecycle-repair.test.ts",
       "test/confirmed-lifecycle-recovery-error.test.ts",
+      "test/confirmed-lifecycle-deployment-replay.test.ts",
+      "test/confirmed-lifecycle-recurring-worker.test.ts",
       "test/confirmed-lifecycle-command-contract.test.ts",
       "test/confirmed-vm-lifecycle-lock-fence.test.ts",
       "test/publish-foreign-author-resolution.test.ts",

@@ -33,6 +33,7 @@
  * belongs here.
  */
 import { readdirSync, statSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
@@ -58,6 +59,14 @@ export const WAL_REPLAY_FLOOR_BYTES_PER_MS = 4_000;
  * derived deadline.
  */
 const WAL_SEGMENT_RE = /^\d+\.log$/;
+function isRetainedWalSegment(entry: { name: string; isFile(): boolean }): boolean {
+  return entry.isFile() && WAL_SEGMENT_RE.test(entry.name);
+}
+/** Strict runtime discovery: persistence must observe and retry I/O errors, unlike boot sizing. */
+export async function readRetainedWalSegmentNames(location: string): Promise<string[]> {
+  const entries = await readdir(location, { withFileTypes: true });
+  return entries.filter(isRetainedWalSegment).map(entry => entry.name).sort();
+}
 
 /**
  * Total bytes of RocksDB write-ahead log retained in `location`.
@@ -78,7 +87,7 @@ export function measureRetainedWalBytes(location: string): number {
   for (const entry of entries) {
     // `withFileTypes` matters: a DIRECTORY named `000005.log` would otherwise
     // contribute its inode size to the estimate.
-    if (!entry.isFile() || !WAL_SEGMENT_RE.test(entry.name)) continue;
+    if (!isRetainedWalSegment(entry)) continue;
     try {
       total += statSync(join(location, entry.name)).size;
     } catch {

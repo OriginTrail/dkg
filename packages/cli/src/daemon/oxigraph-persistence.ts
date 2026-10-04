@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import { open, readdir } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import type { QueryOptions } from './triple-store.js';
-
-export type ManagedOxigraphPersistenceBarrier = (options?: QueryOptions) => Promise<void>;
+import type { TripleStorePersistenceBarrier } from '@origintrail-official/dkg-storage';
+import { readRetainedWalSegmentNames } from './oxigraph-wal.js';
 
 /**
  * Oxigraph 0.5.8 uses the RocksDB default WAL: a successful HTTP mutation has
@@ -21,19 +20,14 @@ export function createManagedOxigraphPersistenceBarrierV1(
   location: string,
   version: string,
   platform: NodeJS.Platform = process.platform,
-): ManagedOxigraphPersistenceBarrier | undefined {
+): TripleStorePersistenceBarrier | undefined {
   if (version !== '0.5.8') return undefined;
   const directory = resolve(location);
-  const logs = async () => {
-    const entries = await readdir(directory, { withFileTypes: true });
-    return entries.filter(entry => /^\d+\.log$/u.test(entry.name) && entry.isFile())
-      .map(entry => entry.name).sort();
-  };
   return async (options) => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       options?.signal?.throwIfAborted();
       try {
-        const before = await logs();
+        const before = await readRetainedWalSegmentNames(directory);
         if (before.length === 0) throw new Error('Managed Oxigraph persistence awaits an active WAL');
         for (const name of before) {
           options?.signal?.throwIfAborted();
@@ -45,7 +39,7 @@ export function createManagedOxigraphPersistenceBarrierV1(
           try { await dir.sync(); } finally { await dir.close(); }
         }
         options?.signal?.throwIfAborted();
-        const after = await logs();
+        const after = await readRetainedWalSegmentNames(directory);
         options?.signal?.throwIfAborted();
         if (before.length === after.length && before.every((name, index) => name === after[index])) return;
       } catch (error) {

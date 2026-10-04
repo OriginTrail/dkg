@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { join, resolve } from 'node:path';
-import { createManagedOxigraphPersistenceBarrierV1 } from '../src/managed-oxigraph-persistence.js';
+import { createManagedOxigraphPersistenceBarrierV1 } from '../src/daemon/oxigraph-persistence.js';
 
 const DIRECTORY = resolve('/owned');
 const wal = (name = '000001.log') => join(DIRECTORY, name);

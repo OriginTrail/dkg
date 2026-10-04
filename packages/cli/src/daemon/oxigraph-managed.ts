@@ -23,9 +23,9 @@
  * matching the Blazegraph-Docker provisioner's contract.
  */
 import { join } from 'node:path';
+import { createManagedOxigraphPersistenceBarrierV1 } from './oxigraph-persistence.js';
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
-  createManagedOxigraphPersistenceBarrierV1,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
   type ManagedOxigraphRuntimeStoreConfigV1,
   type TripleStoreConfig,

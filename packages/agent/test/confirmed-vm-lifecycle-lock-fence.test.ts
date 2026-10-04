@@ -22,11 +22,11 @@ async function fixture(subGraphName?: string) {
   agent.config = { dataDir: dir }; agent.store = store; agent.writeLocks = new Map<string, Promise<void>>();
   agent.log = { warn: vi.fn(), info: vi.fn() };
   let current = 1;
-  agent.chain = { readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({
+  agent.chain = { getEvmChainId: vi.fn(async () => 31337n), getKnowledgeAssetsLifecycleAddress: vi.fn(async () => AUTHOR), readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({
     latestRoot: current === 1 ? ROOT1 : ROOT2, rootCount: BigInt(current),
   })) };
   const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, subGraphName,
-    packedKaId: PACKED, merkleRoot: ROOT1, assertionVersion: '1', publishedUal: 'did:dkg:mock/1' };
+    packedKaId: PACKED, merkleRoot: ROOT1, assertionVersion: '1', publishedUal: 'did:dkg:mock/1', publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
   const newer = { ...input, merkleRoot: ROOT2, assertionVersion: '2', publishedUal: 'did:dkg:mock/2' };
   const key = assertionLifecycleWriteLockKey(CG, NAME, AUTHOR, subGraphName);
   const repair = agent.getOrCreateNamedKaVmLifecycleRepair(); owners.push(repair);
@@ -102,7 +102,7 @@ describe('confirmed lifecycle lock-time authority fence', () => {
       if (scenario === 'unfinalized') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockResolvedValue({ latestRoot: ROOT1, rootCount: 0n });
       if (scenario === 'conflicting-root') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockResolvedValue({ latestRoot: ROOT2, rootCount: 1n });
       if (scenario === 'chain-error') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockRejectedValue(new Error('chain temporarily unavailable'));
-      const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'own-operation' } as unknown as KnowledgeAssetVmPublishRequest;
+      const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'own-operation', sealChainId: '31337', sealKav10Address: AUTHOR } as unknown as KnowledgeAssetVmPublishRequest;
       const commit = vi.spyOn(f.store, 'atomicUpdate');
       const queued = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.input.publishedUal, PACKED);
       if (scenario === 'current') {
@@ -124,7 +124,7 @@ describe('confirmed lifecycle lock-time authority fence', () => {
       await held; f.advance(); await applyPublishedNamedKaVmLifecycle(f.store, f.newer);
     });
     const predecessor = f.agent.writeLocks.get(f.key);
-    const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'old-operation' } as unknown as KnowledgeAssetVmPublishRequest;
+    const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'old-operation', sealChainId: '31337', sealKav10Address: AUTHOR } as unknown as KnowledgeAssetVmPublishRequest;
     const queued = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.input.publishedUal, PACKED);
     try { await vi.waitFor(() => expect(f.agent.writeLocks.get(f.key)).not.toBe(predecessor)); }
     finally { release(); }

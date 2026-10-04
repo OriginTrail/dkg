@@ -11,7 +11,7 @@ import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.j
 import type { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 
 const input = { contextGraphId: 'process-local-confirmation', agentAddress: '0x1111111111111111111111111111111111111111',
-  name: 'asset', publishedUal: 'did:dkg:mock/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1', packedKaId: 1n };
+  name: 'asset', publishedUal: 'did:dkg:mock/1', merkleRoot: 'ab'.repeat(32), assertionVersion: '1', packedKaId: 1n, publicationDeployment: { chainId: '31337', lifecycleAddress: '0x' + '22'.repeat(20) } };
 const stores: TripleStore[] = [], owners: NamedKaVmLifecycleRepair[] = [], dirs: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) await owner.stop();
   for (const store of stores.splice(0)) await store.close(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -19,7 +19,8 @@ function agentFor(store: TripleStore, dataDir?: string) {
   const agent = Object.create(DKGAgent.prototype) as DKGAgent;
   const warn = vi.fn(), current = vi.fn(async () => ({ latestRoot: `0x${input.merkleRoot}`, rootCount: 1n }));
   Object.assign(agent, { config: { dataDir }, store, writeLocks: new Map(), log: { warn }, _canStampRecoveredKnowledgeAssetVmLifecycle: async () => true,
-    chain: { readKnowledgeAssetVersionSnapshot: current } });
+    chain: { readKnowledgeAssetVersionSnapshot: current, getEvmChainId: vi.fn(async () => 31337n),
+      getKnowledgeAssetsLifecycleAddress: vi.fn(async () => input.publicationDeployment.lifecycleAddress) } });
   const owner = agent.getOrCreateNamedKaVmLifecycleRepair(); owners.push(owner); return { agent, owner, current, warn };
 }
 async function hasVm(store: TripleStore) {
@@ -52,7 +53,8 @@ describe('confirmed lifecycle persistence policy', () => {
     const dir = durable ? await mkdtemp(join(tmpdir(), 'dkg-recovered-memory-')) : undefined; if (dir) dirs.push(dir);
     const store = new OxigraphStore(); stores.push(store); const { agent, current } = agentFor(store, dir);
     const request = { contextGraphId: input.contextGraphId, name: input.name, agentAddress: input.agentAddress,
-      assertionVersion: input.assertionVersion, sealMerkleRoot: input.merkleRoot } as KnowledgeAssetVmPublishRequest;
+      assertionVersion: input.assertionVersion, sealMerkleRoot: input.merkleRoot,
+      sealChainId: input.publicationDeployment.chainId, sealKav10Address: input.publicationDeployment.lifecycleAddress } as KnowledgeAssetVmPublishRequest;
     const stamp = agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, input.publishedUal, input.packedKaId);
     if (durable) await expect(stamp).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE' });
     else expect(await stamp).toBe(true);
