@@ -11,6 +11,7 @@ import { ChangelogStore, GraphSetIndexStore, OxigraphStore, SparqlHttpStore, Sto
 import { computeFlatKCRootV10, DKGPublisher, TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish.js';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
@@ -58,12 +59,14 @@ function agentFor(store: OxigraphStore, dir: string, version: number) {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.defineProperty(agent, 'peerId', { value: 'peer-lifecycle-repair' });
   agent.defaultAgentAddress = AUTHOR; agent.config = { dataDir: dir }; agent.store = store;
+  agent.writeLocks = new Map<string, Promise<void>>();
   agent.log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
   agent.chain = { readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({ latestRoot: HEX, rootCount: BigInt(version) })) };
   agent.createV10ACKProvider = () => undefined;
   agent._resolveEncryptInlinePayload = async () => undefined; agent._resolveEncryptInlineChunked = async () => undefined;
   agent._buildPrecomputedUpdateAttestationForSeal = async () => ({});
   agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined;
+  agent.gossipSession = new GossipSession();
   agent.gossip = { publish: async () => undefined };
   return agent;
 }
@@ -132,7 +135,7 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
         const restartedStore = new OxigraphStore(storePath); stores.push(restartedStore);
         // The baseline admits no work: this owner then loads an empty journal and the assertions fail.
         const restarted = agentFor(restartedStore, dir, version);
-        const repair = restarted.getOrCreateNamedKaVmLifecycleRepair?.() ?? new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now,
+        const repair = restarted.getOrCreateNamedKaVmLifecycleRepair?.() ?? new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now,
           apply: input => applyPublishedNamedKaVmLifecycle(restartedStore, input), isCurrent: async () => true, warn: () => undefined });
         await repair.runDue();
         const rows = await restartedStore.query(`SELECT ?p ?o WHERE { GRAPH <${META}> { <${LIFECYCLE}> ?p ?o } }`);
@@ -159,7 +162,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-stamp-backoff-')); dirs.push(dir);
     let now = 1_000;
     const apply = vi.fn(async () => { throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'insert', outcome: 'indeterminate' }); });
-    const create = () => new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
+    const create = () => new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
     let repair = create();
     expect(await repair.submit(input)).toBe('pending'); expect(apply).toHaveBeenCalledTimes(1);
     await repair.runDue(); expect(apply).toHaveBeenCalledTimes(1);
@@ -182,7 +185,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
       let release!: () => void;
       const held = new Promise<void>(resolve => { release = resolve; });
       const apply = vi.fn(async () => { throw new Error('Temporary store outage'); });
-      const repair = new NamedKaVmLifecycleRepair({ now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
+      const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
       for (let i = 0; i < 12; i++) await repair.submit({ ...input, name: `asset-${i}` });
       apply.mockImplementation(async () => { await held; });
       now = 6_000;
@@ -206,9 +209,9 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
 
   it('fences a superseded chain version and a conflicting same-version root', async () => {
     const apply = vi.fn(async () => undefined);
-    const repair = new NamedKaVmLifecycleRepair({ apply, isCurrent: async () => false, warn: () => undefined });
+    const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), apply, isCurrent: async () => false, warn: () => undefined });
     expect(await repair.submit(input)).toBe('superseded'); expect(apply).not.toHaveBeenCalled(); await repair.stop();
-    const pending = new NamedKaVmLifecycleRepair({ apply: async () => { throw new Error('RPC unavailable'); }, isCurrent: async () => true, warn: () => undefined });
+    const pending = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), apply: async () => { throw new Error('RPC unavailable'); }, isCurrent: async () => true, warn: () => undefined });
     await pending.submit(input);
     await expect(pending.submit({ ...input, merkleRoot: PRIOR })).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' });
     await pending.stop();
@@ -258,7 +261,7 @@ describe('review regression boundaries', () => {
     const flush = vi.spyOn(store, 'flush');
     flushBarrier.path = `${path}.tmp`; flushBarrier.captured = entered;
     flushBarrier.release = new Promise<void>(resolve => { release = resolve; }); flushBarrier.fail = true;
-    const publish = vi.fn(); agent.publisher = { publish, writeLocks: new Map() };
+    const publish = vi.fn(); agent.publisher = { publish, writeLocks: agent.writeLocks };
     const repairing = agent._repairConfirmedNamedKaVmLifecycle(input);
     try {
       await captured;
@@ -275,7 +278,7 @@ describe('review regression boundaries', () => {
     flushBarrier.path = null;
     const reopened = new OxigraphStore(crashPath), fresh = agentFor(reopened, crashDir, 1);
     if (facade === 'agent-facade') fresh.store = createListContextGraphsCacheInvalidatingStore(reopened, vi.fn(), vi.fn());
-    fresh.publisher = { publish, writeLocks: new Map() };
+    fresh.publisher = { publish, writeLocks: fresh.writeLocks };
     expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: false });
     now += 6_000; await fresh.getOrCreateNamedKaVmLifecycleRepair().runDue();
     expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(crashDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
@@ -318,7 +321,7 @@ describe('review regression boundaries', () => {
       { subject: LIFECYCLE, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: META },
     ]);
     let now = 1_000, fail = true;
-    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now, isCurrent: async () => true, warn: () => undefined,
+    const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, isCurrent: async () => true, warn: () => undefined,
       apply: async value => { if (fail) throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'insert', outcome: 'not_started' }); await applyPublishedNamedKaVmLifecycle(store, value); } });
     expect(await repair.submit(input)).toBe('pending');
     const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
@@ -549,7 +552,7 @@ describe('review regression boundaries', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-parallel-admission-')); dirs.push(dir);
     let release!: () => void, entered!: () => void, bEntered!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; }), bStarted = new Promise<void>(resolve => { bEntered = resolve; });
-    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, isCurrent: async () => true, warn: () => undefined,
+    const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, isCurrent: async () => true, warn: () => undefined,
       apply: async value => { if (value.name === NAME) entered(); else bEntered(); await held; } });
     const a = repair.submit(input); await started; const b = repair.submit({ ...input, name: 'independent-B', packedKaId: PACKED + 1n, publishedUal: `${PUBLISHED.slice(0, -1)}2` });
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -569,12 +572,12 @@ describe('review regression boundaries', () => {
       if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600 & ~process.umask());
       expect([...journal.values()]).toMatchObject([{ input: { name: NAME, merkleRoot: HEX.slice(2), assertionVersion: '1' }, attempts: 0 }]);
     });
-    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
+    const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
     expect(await repair.submit(input)).toBe('repaired'); expect(apply).toHaveBeenCalledOnce(); await repair.stop();
   });
   it('does not apply after failed durable admission and preserves confirmed evidence in the agent error', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-failed-admission-')); dirs.push(dir);
-    const apply = vi.fn(async () => undefined), repair = new NamedKaVmLifecycleRepair({ dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
+    const apply = vi.fn(async () => undefined), repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
     const persist = vi.spyOn(repair as unknown as { persist: () => Promise<void> }, 'persist').mockRejectedValueOnce(Object.assign(new Error('journal fsync failed'), { code: 'EIO' }));
     const store = new OxigraphStore(), agent = agentFor(store, dir, 1); agent.namedKaVmLifecycleRepair = repair;
     await expect(agent._repairConfirmedNamedKaVmLifecycle(input)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1' });
@@ -589,13 +592,13 @@ describe('review regression boundaries', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-peer-identity-repair-')); dirs.push(dir);
     let now = 1_000;
     const fail = vi.fn(async () => { throw new Error('temporary store failure'); });
-    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now, apply: fail, isCurrent: async () => true, warn: () => undefined });
+    const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, apply: fail, isCurrent: async () => true, warn: () => undefined });
     for (const agentAddress of ['PeerABC', 'peerabc']) await repair.submit({ ...input, agentAddress });
     const file = join(dir, 'named-ka-vm-lifecycle-repairs.json');
     const journal = decodeLifecycleRepairJournal(JSON.parse(await readFile(file, 'utf8')));
     expect(journal.size).toBe(2); expect(new Set([...journal.values()].map(entry => entry.input.agentAddress))).toEqual(new Set(['PeerABC', 'peerabc']));
     await repair.stop(); now = 6_000;
-    const apply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => undefined), fresh = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
+    const apply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => undefined), fresh = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, apply, isCurrent: async () => true, warn: () => undefined });
     await fresh.runDue(); expect(new Set(apply.mock.calls.map(call => call[0].agentAddress))).toEqual(new Set(['PeerABC', 'peerabc']));
     await fresh.stop();
   });
@@ -603,7 +606,7 @@ describe('review regression boundaries', () => {
     const mixed = `0x${'aB'.repeat(20)}`, lower = mixed.toLowerCase();
     const dir = await mkdtemp(join(tmpdir(), 'dkg-evm-identity-repair-')); dirs.push(dir);
     const apply = vi.fn(async () => { throw new Error('temporary store failure'); });
-    const repair = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => 1_000, apply, isCurrent: async () => true, warn: () => undefined });
+    const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => 1_000, apply, isCurrent: async () => true, warn: () => undefined });
     await repair.submit({ ...input, agentAddress: mixed });
     await repair.submit({ ...input, agentAddress: lower, assertionVersion: '2' });
     expect(await repair.submit({ ...input, agentAddress: mixed })).toBe('superseded');
@@ -616,7 +619,7 @@ describe('review regression boundaries', () => {
     const migrated = decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')));
     expect(migrated.get(lifecycleRepairKey(normalized))).toMatchObject({ input: normalized, attempts: 2, nextAttemptAt: 6_000 });
     const freshApply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => { throw new Error('retry remains pending'); });
-    const fresh = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => 6_000, apply: freshApply, isCurrent: async () => true, warn: () => undefined });
+    const fresh = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => 6_000, apply: freshApply, isCurrent: async () => true, warn: () => undefined });
     await fresh.runDue(); expect(freshApply).toHaveBeenCalledWith({ ...normalized, packedKaId: PACKED });
     const rewritten = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
     expect(rewritten.version).toBe(2); expect(decodeLifecycleRepairJournal(rewritten).get(lifecycleRepairKey(normalized))).toMatchObject({ attempts: 3 });
