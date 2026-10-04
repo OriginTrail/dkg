@@ -189,4 +189,3 @@ export function assertPositiveDecimalU64V1(input: string): PositiveDecimalU64V1 
   }
   return input as PositiveDecimalU64V1;
 }
-
