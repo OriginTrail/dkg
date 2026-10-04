@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { setTimeout as sleep } from 'node:timers/promises';
 import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ContextGraphAuthorityReadOptions,
@@ -62,6 +63,26 @@ import { withRpcUsageConsumer } from './rpc-usage.js';
  * range reader below.
  */
 const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
+
+/** Refresh an ethers-cached tip once before classifying cursor skew as endpoint failure. */
+async function retryCachedAuthorityIndexHeadV1<T>(
+  read: () => Promise<T>,
+  lifecycleSignal: AbortSignal,
+  callerSignal?: AbortSignal,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (!isContextGraphAuthorityIndexRetryableError(error)
+      || error.reason !== 'cursor-ahead') throw error;
+    // Rapid writes can advance the durable cursor while `getBlock('latest')`
+    // still returns a recently cached block from this very endpoint. A
+    // persistent lag remains retryable and takes the usual endpoint failover.
+    await sleep(300, undefined, { signal: lifecycleSignal });
+    callerSignal?.throwIfAborted();
+    return read();
+  }
+}
 
 /** Bound one physical authority-index RPC without capping the durable scan. */
 export function readEvmContextGraphAuthorityIndexRpcV1<T>(
@@ -646,7 +667,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     const base = dependencies.requireContextGraphStorage();
     return dependencies.readTipProvider(
       operationLabel,
-      (provider) => withRpcRequestContext({ signal: projectionSignal }, () => lifecycle.run(async () => {
+      (provider) => retryCachedAuthorityIndexHeadV1(
+        () => withRpcRequestContext({ signal: projectionSignal }, () => lifecycle.run(async () => {
         assertOpen();
         projectionSignal.throwIfAborted();
         const contract = base.connect(provider) as Contract;
@@ -776,7 +798,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         );
         await indexed.stabilize();
         return indexed.value;
-      })),
+        })),
+        projectionSignal,
+        options.signal,
+      ),
       {
         signal: options.signal,
         isRetryable: (error: unknown) => (

@@ -188,7 +188,7 @@ function logSource(
 }
 
 /** One provider that counts every chain round trip this read could make. */
-function makeProvider() {
+function makeProvider(latestBlockNumber: () => number = () => LIVE_HEAD) {
   const calls = { getBlock: 0, getLogs: 0, getNetwork: 0 };
   const usage = new RpcUsageTracker(() => 'evm:31337');
   const authorityLogs: ethers.Log[] = [];
@@ -196,7 +196,7 @@ function makeProvider() {
     async getBlock(tag: ethers.BlockTag) {
       calls.getBlock += 1;
       usage.record('eth_getBlockByNumber');
-      const number = tag === 'latest' ? LIVE_HEAD : Number(tag);
+      const number = tag === 'latest' ? latestBlockNumber() : Number(tag);
       return { number, hash: hash(number), timestamp: HEAD_TIMESTAMP_SECONDS };
     },
     async getLogs() {
@@ -217,6 +217,7 @@ function makeReader(options: {
   sourceProvider?: () => ChainEventLogAuthoritySource | undefined;
   contractAddress?: string;
   finalityConfirmations?: number;
+  latestBlockNumber?: () => number;
   /** The projection cache's clock, where a test has to age a projection. */
   now?: () => number;
   /**
@@ -227,7 +228,7 @@ function makeReader(options: {
    */
   exhaustsOnFailover?: boolean;
 } = {}) {
-  const { provider, calls, authorityLogs, usage } = makeProvider();
+  const { provider, calls, authorityLogs, usage } = makeProvider(options.latestBlockNumber);
   const index = new ContextGraphAuthorityIndex(
     new MemoryAuthorityIndexStore(),
     undefined,
@@ -618,6 +619,22 @@ describe('Context Graph authority index over the one log', () => {
       .map((entry) => entry.consumer);
     expect(headerConsumers).toContain('authorityIndex.head');
     expect(headerConsumers).toContain('authorityIndex.stabilize');
+  });
+
+  it('rechecks a cached tip before exhausting an endpoint whose cursor just advanced', async () => {
+    let phase: 'prime' | 'race' = 'prime';
+    let racedHeadReads = 0;
+    const { reader, attempts } = makeReader({
+      latestBlockNumber: () => phase === 'prime'
+        ? LIVE_HEAD
+        : racedHeadReads++ === 0 ? LIVE_HEAD - 1 : LIVE_HEAD + 1,
+    });
+    await reader.snapshots.refresh();
+    phase = 'race';
+
+    await expect(reader.snapshots.refresh()).resolves.toBeUndefined();
+    expect(racedHeadReads).toBe(2);
+    expect(attempts).toEqual([]);
   });
 
   it('keeps its live scan while the backfill has not reached the deploy block', async () => {
