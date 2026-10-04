@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { assertSafeIri, contextGraphMetaUri, resolveWithinAbort, sparqlString } from '@origintrail-official/dkg-core';
-import { deleteByPatternWithoutCount, readKnowledgeAssetPrivateArtifactsPage, type TripleStore } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, knowledgeAssetPrivateArtifactOwnerCandidates, readKnowledgeAssetPrivateArtifactsPage, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   STORAGE_ACK_LEDGER_GRAPH, draftOperationReferenceKey, draftPrivateReferenceKey,
   markDraftOperationRetired, readDraftArtifactReferences, swmKaWriteLockKey,
-  withDraftArtifactCollection, withKeyedLocks,
+  withDraftArtifactCollection, withKeyedLocks, workspaceOperationSubject,
 } from '@origintrail-official/dkg-publisher';
 import { readConfirmedDraftVersion } from './confirmed-draft-version.js';
 
@@ -64,6 +64,9 @@ export async function collectAbandonedDraftArtifacts(input: {
       const meta = row['meta']; const op = row['op']; const ka = row['ka'];
       if (!meta || !op || !ka || !row['id']) continue;
       const id = literal(row['id']);
+      // A descendant URI can be another slash-containing CG. The canonical
+      // operation subject binds its actual CG; a prefix does not grant ownership.
+      if (workspaceOperationSubject(contextGraphId, id) !== op) continue;
       const rest = meta.slice(prefix.length);
       const subGraphName = rest === '_shared_memory_meta' ? undefined : rest.slice(0, -'/_shared_memory_meta'.length);
       if (id.startsWith('storage-ack-') || references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, id))) continue;
@@ -94,10 +97,12 @@ export async function collectAbandonedDraftArtifacts(input: {
     cursor.privateGraph = page.nextCursor;
     const chainDeadline = AbortSignal.timeout(2_000);
     for (const artifact of page.artifacts) {
-      const { graphUri: graph, subGraphName: sub, agentAddress: author, kaNumber: number, assertionVersion: version } = artifact;
-      if (references.rawNamespaces.has(JSON.stringify([contextGraphId, sub ?? '']))
-        || references.privateVersions.has(draftPrivateReferenceKey(contextGraphId, sub, author, number, version))) continue;
-      await withKeyedLocks(input.writeLocks, [swmKaWriteLockKey(contextGraphId, sub, `did:dkg:${chain.chainId}/${author}/${number}`)], async () => {
+      const { graphUri: graph, agentAddress: author, kaNumber: number, assertionVersion: version } = artifact;
+      const owners = knowledgeAssetPrivateArtifactOwnerCandidates(graph);
+      if (owners.length === 0 || owners.some(owner =>
+        references.rawNamespaces.has(JSON.stringify([owner.contextGraphId, owner.subGraphName ?? '']))
+        || references.privateVersions.has(draftPrivateReferenceKey(owner.contextGraphId, owner.subGraphName, author, number, version)))) continue;
+      await withKeyedLocks(input.writeLocks, owners.map(owner => swmKaWriteLockKey(owner.contextGraphId, owner.subGraphName, `did:dkg:${chain.chainId}/${author}/${number}`)), async () => {
         const ka = `did:dkg:${chain.chainId}/${author}/${number}`;
         const current = await resolveWithinAbort(() => readConfirmedDraftVersion(chain, ka), chainDeadline);
         if (current === null || current === undefined || BigInt(version) <= current + 1n) return;
@@ -133,6 +138,7 @@ export async function withUnqueuedDraftOperation(
     } } LIMIT 2`, { source: 'agent.draftArtifacts.ttlOperationReference', priority: 'background' });
     if (rows.type !== 'bindings' || rows.bindings.length !== 1 || !rows.bindings[0]?.['id']) return;
     const id = literal(rows.bindings[0]['id']);
+    if (workspaceOperationSubject(contextGraphId, id) !== operationSubject) return;
     if (references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, id))) return;
     await markDraftOperationRetired(store, contextGraphId, subGraphName, id, now);
     await collect();

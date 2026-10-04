@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { GraphManager, OxigraphStore, deleteByPatternWithoutCount, type Quad } from '@origintrail-official/dkg-storage';
-import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
+import { STORAGE_ACK_LEDGER_GRAPH, TripleStoreAsyncLiftPublisher, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead, swmKaWriteLockKey, withKeyedLocks, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { collectAbandonedDraftArtifacts, withUnqueuedDraftOperation } from '../src/draft-artifact-gc.js';
 const CG = 'draft-gc';
@@ -11,21 +11,66 @@ const KA = `did:dkg:31337/${AUTHOR}/7`;
 const DKG = 'http://dkg.io/ontology/';
 const NOW = Date.parse('2026-10-04T06:00:00Z');
 const META = `did:dkg:context-graph:${CG}/_shared_memory_meta`;
-const PRIVATE = `did:dkg:context-graph:${CG}/_private/${AUTHOR}/7/assertions`;
 const ROOT_META = `did:dkg:context-graph:${CG}/_meta`;
 const publicQuads: Quad[] = [{ subject: 'urn:item', predicate: 'urn:title', object: '"sealed"', graph: '' }];
-async function fixture() {
+async function fixture(contextGraphId = CG) {
   const store = new OxigraphStore(); const graphManager = new GraphManager(store);
   const chain: ChainAdapter = Object.assign(new NoChainAdapter(), { chainId: '31337', readKnowledgeAssetVersionSnapshot: async (knowledgeAssetId: bigint) => ({ knowledgeAssetId, rootCount: 1n, latestAuthor: AUTHOR, latestRoot: `0x${'11'.repeat(32)}` }) });
   const writeLocks = new Map<string, Promise<void>>();
-  const op = async (id: string, version = '3', kaUal = KA) => storeKnowledgeAssetOperationPublicQuads({ store, graphManager, contextGraphId: CG, shareOperationId: id, kaUal, assertionVersion: version, quads: publicQuads, timestamp: new Date(NOW - 10 * 60_000) });
-  const head = async (id = 'new', version = '2') => storeKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CG, kaUal: KA, assertionVersion: version, shareOperationId: id });
-  const privateGraph = async (version: number, suffix = '') => { const graph = `${PRIVATE}/${version}${suffix}`; await store.insert([{ ...publicQuads[0]!, graph }]); return graph; };
+  const op = async (id: string, version = '3', kaUal = KA) => storeKnowledgeAssetOperationPublicQuads({ store, graphManager, contextGraphId, shareOperationId: id, kaUal, assertionVersion: version, quads: publicQuads, timestamp: new Date(NOW - 10 * 60_000) });
+  const head = async (id = 'new', version = '2') => storeKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId, kaUal: KA, assertionVersion: version, shareOperationId: id });
+  const privateGraph = async (version: number, suffix = '') => { const graph = `did:dkg:context-graph:${contextGraphId}/_private/${AUTHOR}/7/assertions/${version}${suffix}`; await store.insert([{ ...publicQuads[0]!, graph }]); return graph; };
   const has = async (graph: string, subject?: string) => { const result = await store.query(`ASK { GRAPH <${graph}> { ${subject ? `<${subject}>` : '?s'} ?p ?o } }`); if (result.type !== 'boolean') throw new Error('expected ASK'); return result.value; };
-  const collect = () => collectAbandonedDraftArtifacts({ store, chain, writeLocks, contextGraphId: CG, now: NOW });
-  return { store, chain, op, head, privateGraph, has, collect };
+  const collect = () => collectAbandonedDraftArtifacts({ store, chain, writeLocks, contextGraphId, now: NOW });
+  return { store, chain, writeLocks, op, head, privateGraph, has, collect };
 }
 describe('reference-safe abandoned draft maintenance', () => {
+  it('preserves queued snapshots and commitments in slash-containing descendant context graphs', async () => {
+    const owner = 'a/b'; const f = await fixture(owner);
+    await f.op('queued'); await f.op('new', '2'); await f.head();
+    const operation = workspaceOperationSubject(owner, 'queued');
+    const meta = `did:dkg:context-graph:${owner}/_shared_memory_meta`;
+    const result = await f.store.query(`SELECT ?snapshot WHERE { GRAPH <${meta}> { <${operation}> <${DKG}publicSnapshotGraph> ?snapshot } }`);
+    if (result.type !== 'bindings') throw new Error('expected snapshot bindings');
+    const snapshot = result.bindings[0]!['snapshot']!;
+    const archive = await f.privateGraph(3, `/commitments/${'ab'.repeat(32)}`);
+    const queue = new TripleStoreAsyncLiftPublisher(f.store);
+    await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: owner, shareOperationId: 'queued', assertionVersion: '3' }));
+    expect(await collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW })).toEqual({ operations: 0, privateGraphs: 0 });
+    let deleted = false;
+    await withUnqueuedDraftOperation(f.store, 'a', 'b', operation, NOW, async () => { deleted = true; });
+    expect(deleted).toBe(false);
+    for (const graph of [snapshot, archive]) expect(await f.has(graph)).toBe(true);
+    expect(await f.has(meta, operation)).toBe(true);
+  });
+  it('serializes ambiguous private collection with the descendant CG writer and rechecks its seal', async () => {
+    const owner = 'a/b'; const f = await fixture(owner); const archive = await f.privateGraph(9);
+    const key = swmKaWriteLockKey(owner, undefined, KA);
+    let release!: () => void; let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const writing = withKeyedLocks(f.writeLocks, [key], async () => { entered(); await gate; });
+    await ready; const predecessor = f.writeLocks.get(key);
+    const collecting = collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW });
+    try {
+      await vi.waitFor(() => expect(f.writeLocks.get(key)).not.toBe(predecessor));
+      await f.store.insert([
+        { graph: `did:dkg:context-graph:${owner}/_meta`, subject: 'urn:late:seal', predicate: `${DKG}kaUal`, object: KA },
+        { graph: `did:dkg:context-graph:${owner}/_meta`, subject: 'urn:late:seal', predicate: `${DKG}assertionVersion`, object: '"9"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      ]);
+    } finally { release(); await writing; }
+    expect(await collecting).toEqual({ operations: 0, privateGraphs: 0 });
+    expect(await f.has(archive)).toBe(true);
+  });
+  it('protects a descendant queued private archive even when its operation metadata needs recovery', async () => {
+    const owner = 'a/b'; const f = await fixture(owner); await f.op('queued');
+    const archive = await f.privateGraph(3, `/commitments/${'ab'.repeat(32)}`);
+    const queue = new TripleStoreAsyncLiftPublisher(f.store);
+    await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: owner, shareOperationId: 'queued', assertionVersion: '3' }));
+    await deleteByPatternWithoutCount(f.store, { graph: `did:dkg:context-graph:${owner}/_shared_memory_meta`, subject: workspaceOperationSubject(owner, 'queued') });
+    expect(await collectAbandonedDraftArtifacts({ store: f.store, chain: f.chain, writeLocks: f.writeLocks, contextGraphId: 'a', now: NOW })).toEqual({ operations: 0, privateGraphs: 0 });
+    expect(await f.has(archive)).toBe(true);
+  });
   it('retires superseded operations before the 30-day TTL and only removes unreachable burned private versions', async () => {
     const f = await fixture(); await f.op('old'); await f.op('new', '2'); await f.head();
     const old = await f.privateGraph(3); const archive = await f.privateGraph(3, `/commitments/${'ab'.repeat(32)}`);

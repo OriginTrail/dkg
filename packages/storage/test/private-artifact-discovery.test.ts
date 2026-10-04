@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore, PrivateContentStore, decodeKnowledgeAssetPrivateArtifact, readKnowledgeAssetPrivateArtifactsPage } from '../src/index.js';
+import { GraphManager, OxigraphStore, PrivateContentStore, decodeKnowledgeAssetPrivateArtifact, knowledgeAssetPrivateArtifactOwnerCandidates, readKnowledgeAssetPrivateArtifactsPage } from '../src/index.js';
 
 const CG = 'private-artifact/layout';
 const UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
@@ -10,6 +10,14 @@ function fixture() { const store = new OxigraphStore(); stores.push(store); retu
 afterEach(async () => { for (const store of stores.splice(0)) await store.close(); });
 
 describe('storage-owned private artifact discovery', () => {
+  it('retains every legal owner interpretation of slash-containing namespaces', () => {
+    const graph = `did:dkg:context-graph:a/b/_private/${AUTHOR}/7/assertions/3/commitments/${'ab'.repeat(32)}`;
+    expect(knowledgeAssetPrivateArtifactOwnerCandidates(graph)).toEqual(expect.arrayContaining([
+      { contextGraphId: 'a', subGraphName: 'b' },
+      { contextGraphId: 'a/b', subGraphName: undefined },
+    ]));
+    expect(knowledgeAssetPrivateArtifactOwnerCandidates('urn:unrecognized')).toEqual([]);
+  });
   it.each([undefined, 'topic'])('decodes builder-produced version and commitment graphs in %s', async subGraphName => {
     const { privateStore } = fixture(); const scope = createGraphKnowledgeAssetScope(UAL, 2);
     const legacy = privateStore.knowledgeAssetPrivateGraphUri(CG, scope, subGraphName);
