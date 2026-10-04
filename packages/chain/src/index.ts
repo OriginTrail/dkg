@@ -242,6 +242,10 @@ export {
   type RpcRequestGovernorClock,
   type RpcRequestGovernorWindow,
 } from './rpc-request-governor.js';
+export {
+  drainRpcReadBatchingWindow,
+  type RpcReadBatchingWindow,
+} from './evm-background-read-batching.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
