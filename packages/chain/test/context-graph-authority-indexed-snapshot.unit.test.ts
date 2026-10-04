@@ -832,6 +832,30 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     ]);
   });
 
+  it('reuses absent name reads only while a fresh finality anchor matches', async () => {
+    const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
+      lateContextGraphNameHash: LATE_NAME_HASH,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    const scannedRanges = [...evidence.indexRanges];
+    const initialHeadReads = evidence.headReads.length;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    expect(evidence.indexRanges).toEqual(scannedRanges);
+    expect(evidence.headReads.length).toBe(initialHeadReads + 2);
+
+    advanceAuthorityHead();
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
+      .resolves.toMatchObject({ contextGraphId: '11', nameHash: LATE_NAME_HASH });
+    expect(evidence.indexRanges.at(-1)).toEqual([31, 35]);
+  });
+
   it('resolves name identity and authority state at one finalized horizon', async () => {
     const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
       lateContextGraphNameHash: NAME_HASH,
