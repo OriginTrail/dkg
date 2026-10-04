@@ -1,6 +1,6 @@
 import type { RequestContext } from './context.js';
 import { jsonResponse, sanitizeRpcMessage } from '../http-utils.js';
-import { diagnosticPromoteStage } from '../worker/async-promote-error-classification.js';
+import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
 
 export interface PromoteRecoveryContext {
   contextGraphId: string;
