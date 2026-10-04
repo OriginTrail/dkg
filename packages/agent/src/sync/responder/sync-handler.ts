@@ -152,7 +152,8 @@ interface RegisterSyncHandlerParams {
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
-const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 1;
+const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 2;
+const SYNC_RESPONDER_PER_PEER_PLANE_CONCURRENCY = 1;
 const SYNC_RESPONDER_QUEUE_LIMIT = 64;
 export const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
 const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
@@ -275,12 +276,16 @@ class SyncResponderBusyError extends Error {
   }
 }
 
+type SyncResponderPlane = 'shared-memory' | 'durable';
+
 interface SyncResponderQueuePayload {
   peerId: string;
+  plane: SyncResponderPlane;
   contextGraphId?: string;
 }
 
 type SyncResponderScheduling = {
+  plane: SyncResponderPlane;
   contextGraphId?: string;
   lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
   priority: number;
@@ -290,20 +295,29 @@ type SyncResponderScheduling = {
 function createSyncResponderLimiter() {
   let running = 0;
   const runningByPeer = new Map<string, number>();
+  const runningByPeerPlane = new Map<string, number>();
+  const peerPlaneKey = (peerId: string, plane: SyncResponderPlane) => `${peerId}\0${plane}`;
   const queue = new PriorityAdmissionQueue<SyncResponderQueuePayload>({
     canRun: (entry) => (
       running < SYNC_RESPONDER_GLOBAL_CONCURRENCY
       && (runningByPeer.get(entry.payload.peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY
+      && (runningByPeerPlane.get(peerPlaneKey(entry.payload.peerId, entry.payload.plane)) ?? 0)
+        < SYNC_RESPONDER_PER_PEER_PLANE_CONCURRENCY
     ),
     onStart: (entry) => {
-      const { peerId } = entry.payload;
+      const { peerId, plane } = entry.payload;
+      const planeKey = peerPlaneKey(peerId, plane);
       running += 1;
       runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
+      runningByPeerPlane.set(planeKey, (runningByPeerPlane.get(planeKey) ?? 0) + 1);
       return () => {
         running = Math.max(0, running - 1);
         const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
         if (peerRunning <= 0) runningByPeer.delete(peerId);
         else runningByPeer.set(peerId, peerRunning);
+        const planeRunning = (runningByPeerPlane.get(planeKey) ?? 1) - 1;
+        if (planeRunning <= 0) runningByPeerPlane.delete(planeKey);
+        else runningByPeerPlane.set(planeKey, planeRunning);
       };
     },
   });
@@ -313,7 +327,7 @@ function createSyncResponderLimiter() {
     scheduling: SyncResponderScheduling,
     signal?: AbortSignal,
   ) => ({
-    payload: { peerId, contextGraphId: scheduling.contextGraphId },
+    payload: { peerId, plane: scheduling.plane, contextGraphId: scheduling.contextGraphId },
     lane: scheduling.lane,
     priority: scheduling.priority,
     priorityClass: scheduling.priorityClass,
@@ -546,6 +560,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   // The opt-in batch profile uses two separately bounded stages. Unlike the
   // legacy runTwoStage path, it does not claim a reserved FIFO handoff between
   // authorization and response. No admission remains held across that gap.
+  // Exact-batch exports are VM data, so both stages occupy the durable plane.
   // Advertising the export-only transport requires a pre-parse bounded reader.
   // Unsupported stores retain their existing ordinary bounded page handler.
   if (params.onExperimentalExactBatchResources && supportsBoundedExactGraphExport(store)) params.onExperimentalExactBatchResources({
@@ -553,11 +568,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     snapshotBudget: responderSnapshotBudget,
     withPreAuthorizationAdmission: (remotePeerId, signal, work) => admitExactBatchStage(
       'pre-authorization', remotePeerId, signal,
-      { lane: 'pre_authorization', priority: 0, priorityClass: 'default' }, work),
+      { plane: 'durable', lane: 'pre_authorization', priority: 0, priorityClass: 'default' }, work),
     withAuthorizedResponseAdmission: (remotePeerId, contextGraphId, signal, work) => {
       const priority = prioritySchedulingEnabled ? contextGraphPriority(contextGraphPriorities, contextGraphId) : 0;
       return admitExactBatchStage('response', remotePeerId, signal,
-        { contextGraphId, lane: 'responder', priority, priorityClass: syncPriorityClass(priority) }, work);
+        { plane: 'durable', contextGraphId, lane: 'responder', priority, priorityClass: syncPriorityClass(priority) }, work);
     },
   });
   let warnedPreDispatchCancellation = false;
@@ -657,8 +672,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
     // the page ≤ budget for BOTH modes, so this only selects the belt-and-
     // suspenders response serializer and records the explicit contract.
-    const usesMetaByteBudget = !isWorkspace &&
-      phase === 'meta' &&
+    const usesMetaByteBudget = phase === 'meta' &&
       request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE;
     // The authenticated `limit` deliberately remains capped at the legacy
     // responder size for rolling-upgrade signature compatibility. Upgraded
@@ -789,7 +803,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: durableMetaLimit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
@@ -799,7 +813,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = usesMetaByteBudget
+            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+            : serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -829,7 +845,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: durableDataPolicy.limit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
@@ -840,7 +856,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = durableDataPolicy.usesByteBudgetPage
+            ? serializeResponderRowsWithinByteBudget(rows, durableDataPolicy.maxPageBytes)
+            : serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -994,7 +1012,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       return bytes;
     };
 
+    const plane: SyncResponderPlane = isWorkspace ? 'shared-memory' : 'durable';
     const preAuthorizationScheduling: SyncResponderScheduling = {
+      plane,
       lane: 'pre_authorization',
       priority: 0,
       priorityClass: 'default',
@@ -1010,6 +1030,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             const priority = contextGraphPriority(contextGraphPriorities, contextGraphId);
             return {
               scheduling: {
+                plane,
                 contextGraphId,
                 lane: 'responder' as const,
                 priority,
@@ -1026,7 +1047,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       : limiter.run(
           peerId,
           signal,
-          { contextGraphId, lane: 'responder', priority: 0, priorityClass: 'default' },
+          { plane, contextGraphId, lane: 'responder', priority: 0, priorityClass: 'default' },
           async () => {
             const prepared = await prepareResponderStage();
             return prepared.kind === 'respond'

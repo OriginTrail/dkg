@@ -85,6 +85,60 @@ function pageFetchParams(overrides: Partial<PageFetchParams> = {}): PageFetchPar
 }
 
 describe('byte-budget sync pagination', () => {
+  it.each(['data', 'meta'] as const)('negotiates shared-memory %s paging above the legacy cap', async (phase) => {
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID, offset: 0, limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: true, phase, needsAuth: false,
+      targetPeerId: REMOTE_PEER_ID, requesterPeerId: LOCAL_PEER_ID,
+      computeSyncDigest: () => new Uint8Array(32), getIdentityId: async () => 0n,
+    });
+    expect(new TextDecoder().decode(encoded)).toContain(SYNC_BYTE_BUDGET_PAGE_MODE);
+    expect(resolveDurableDataRequestPolicy({ legacyLimit: 500, includeSharedMemory: true,
+      phase: 'data', pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200,
+      hasExactAssetFilter: false })).toMatchObject({ usesByteBudgetPage: true, limit: 1200 });
+  });
+
+  it.each(['data', 'meta'] as const)('serves shared-memory %s row hints with byte-budget negotiation', async (phase) => {
+    const store = new OxigraphStore();
+    try {
+      const contextGraphId = 'byte-budget-swm';
+      const graph = `did:dkg:context-graph:${contextGraphId}/_shared_memory${phase === 'meta' ? '_meta' : ''}`;
+      await store.insert(Array.from({ length: 1200 }, (_, i) => ({ graph,
+        subject: `urn:swm:${i}`, predicate: 'urn:value', object: `"value-${i}"` })));
+      const cap = registerTestSyncHandler(store, { syncPageSize: 128 });
+      const request = { contextGraphId, offset: 0, limit: 128, includeSharedMemory: true, phase };
+      expect(linesFromNquads(await cap.invoke(request))).toHaveLength(128);
+      const upgraded = await cap.invoke({ ...request, pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200 });
+      expect(linesFromNquads(upgraded)).toHaveLength(1200);
+      expect(new TextEncoder().encode(upgraded).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+    } finally { await store.close(); }
+  });
+
+  it.each(['data', 'meta'] as const)('bounds shared-memory %s bytes and resumes the emitted row prefix', async (phase) => {
+    const store = new OxigraphStore();
+    try {
+      const contextGraphId = 'byte-fit-swm';
+      const graph = `did:dkg:context-graph:${contextGraphId}/_shared_memory${phase === 'meta' ? '_meta' : ''}`;
+      await store.insert(Array.from({ length: 220 }, (_, i) => ({ graph,
+        subject: `urn:swm:${String(i).padStart(4, '0')}`, predicate: 'urn:value',
+        object: `"${'x'.repeat(22_000)}"` })));
+      const cap = registerTestSyncHandler(store, { syncPageSize: 128 });
+      const request = { contextGraphId, limit: 128, includeSharedMemory: true, phase,
+        syncSessionId: `swm-byte-fit-${phase}`, pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200 };
+      const first = await cap.invoke({ ...request, offset: 0 });
+      const firstRows = linesFromNquads(first);
+      expect(firstRows.length).toBeGreaterThan(128);
+      expect(firstRows.length).toBeLessThan(220);
+      expect(new TextEncoder().encode(first).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+      const second = await cap.invoke({ ...request, offset: firstRows.length });
+      const allRows = [...firstRows, ...linesFromNquads(second)];
+      expect(allRows).toHaveLength(220);
+      expect(new Set(allRows).size).toBe(220);
+      expect(new TextEncoder().encode(second).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+      expect(await cap.invoke({ ...request, offset: allRows.length })).toBe('');
+    } finally { await store.close(); }
+  });
+
   it('advertises byte-budget paging in an unauthenticated public request', async () => {
     const encoded = await buildSyncRequestEnvelope({
       contextGraphId: CG_ID,

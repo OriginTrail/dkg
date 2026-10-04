@@ -923,6 +923,7 @@ export async function readDurableMetaPage(params: {
       params.store,
       params.contextGraphId,
       params.signal,
+      params.assetUals,
     );
     const requested = new Set(params.assetUals);
     const confirmedUals = manifest.confirmedEntries
