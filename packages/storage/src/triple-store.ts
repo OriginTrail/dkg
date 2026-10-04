@@ -5,6 +5,7 @@
  */
 
 import { dirname, join } from 'node:path';
+import type { TripleStoreCommitCapability } from './persistence.js';
 import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
   SharedMemoryLiteralBlobStore,
@@ -149,6 +150,8 @@ export interface UpdateOptions extends QueryOptions {
 }
 
 export interface TripleStore {
+  /** Explicit commit boundary and durability guarantee, composed through every decorator. */
+  readonly commitment?: TripleStoreCommitCapability;
   /** Present only when query response limits are enforced before decoding. */
   readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
 
@@ -252,6 +255,18 @@ export interface TripleStore {
     options?: QueryOptions,
   ): Promise<void>;
   /**
+   * Atomically replace only the selected predicates for one skolem subject.
+   * All unrelated rows, including concurrent insertions, MUST survive. The
+   * whole DELETE/INSERT is one backend transaction; generic update availability
+   * is not certification. Between 1 and 32 distinct predicates are permitted and
+   * every replacement quad must match the exact graph, subject and predicate set.
+   * Failure exposes the old or complete new selected state. Unsupported stores
+   * refuse before dispatch; callers must not use delete/insert fallback.
+   */
+  replaceSubjectPredicates?(
+    graphUri: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions,
+  ): Promise<void>;
+  /**
    * RFC-64 `SYNC_AUTHOR_COMMIT_CAS_V1`: atomically replace one complete shared
    * projection, its author-seal subject, the guarded author current-head
    * pointer, and bounded mutation/applied-set subjects.
@@ -282,6 +297,14 @@ export interface TripleStore {
    * fall back to `insert(quads)` for already-stored terms.
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
+
+  /**
+   * Explicit whole-request transaction capability: every UPDATE statement commits
+   * together, or none becomes visible. Generic update() does not certify this.
+   * Unsupported implementations must refuse before execution with the typed
+   * capability error; execution failures must propagate without fallback.
+   */
+  atomicUpdate?(sparql: string, options?: UpdateOptions): Promise<void>;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
@@ -454,6 +477,19 @@ export async function tryReplaceGraphAndSubjectAtomically(
     ) {
       return false;
     }
+    throw error;
+  }
+}
+
+/** Certified predicate replacement: only preflight refusal returns false; dispatch errors propagate. */
+export async function tryReplaceSubjectPredicatesAtomically(
+  store: TripleStore, graph: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions,
+): Promise<boolean> {
+  const replace = store.replaceSubjectPredicates;
+  if (typeof replace !== 'function') return false;
+  try { await replace.call(store, graph, subject, predicates, quads, options); return true; }
+  catch (error) {
+    if (error instanceof UnsupportedTripleStoreCapabilityError && error.capability === 'replaceSubjectPredicates') return false;
     throw error;
   }
 }

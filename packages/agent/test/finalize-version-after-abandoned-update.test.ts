@@ -5,11 +5,14 @@
  * `lifecycle row + 1`, where the lifecycle row is "last FINALIZED", so every abandoned finalize
  * pushed all later drafts one number too high and the KA could never be updated again.
  *
- * Hermetic: a real DKGPublisher + the real agent facade over an in-memory store, a chain stub,
+ * Hermetic: a real DKGPublisher + the real agent facade over a disk-backed embedded store, a chain stub,
  * and a hand-seeded "A is published and confirmed" state (the same rows a real confirmed publish
  * leaves). The end-to-end proof on a real chain is in e2e-memory-layers.test.ts.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   AUTHOR_SCHEME_VERSION_V1,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -43,6 +46,14 @@ const WALLET = new ethers.Wallet(
 const AUTHOR = WALLET.address;
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+const persistentFixtures: Array<{ store: OxigraphStore; dir: string }> = [];
+afterEach(async () => { for (const { store, dir } of persistentFixtures.splice(0)) {
+  await store.close(); await rm(dir, { recursive: true, force: true });
+} });
+async function persistentStore(): Promise<OxigraphStore> {
+  const dir = await mkdtemp(join(tmpdir(), 'dkg-finalize-confirmed-')), store = new OxigraphStore(join(dir, 'store.nq'));
+  persistentFixtures.push({ store, dir }); return store;
+}
 
 type Seal = {
   assertionVersion: string;
@@ -175,7 +186,7 @@ async function registerSubGraph(store: OxigraphStore, subGraphName: string): Pro
 
 /** create + write(A) + finalize(A) + "A is published and confirmed" at version 1. */
 async function publishedKa(opts: { subGraphName?: string; status?: string; record?: boolean } = {}) {
-  const store = new OxigraphStore();
+  const store = await persistentStore();
   if (opts.subGraphName) await registerSubGraph(store, opts.subGraphName);
   const agent = await makeAgent(store);
   await agent.assertion.create(CG, NAME, { subGraphName: opts.subGraphName });

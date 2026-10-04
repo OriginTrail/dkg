@@ -1,3 +1,4 @@
+import { submitOwnedNamedKaVmLifecycleRepair } from './named-ka-vm-publication-repair.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -9,7 +10,12 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+
+import { planKnowledgeAssetVmPublication, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+import { randomUUID } from 'node:crypto';
+import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
+import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -22,7 +28,6 @@ import {
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   contextGraphCatalogUri,
-  contextGraphLayerUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -80,7 +85,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -122,11 +127,21 @@ import {
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
-import {
-  DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
-  VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
+import  {
+  DKGPublisher,
+  PublishHandler,
+  SharedMemoryHandler,
+  UpdateHandler,
+  ChainEventPoller,
+  AccessHandler,
+  AccessClient,
+  PublishJournal,
+  StaleWriteError,
+  ACKCollector,
+  StorageACKHandler,
+  VerifyCollector,
+  VerifyProposalHandler,
+  buildVerificationMetadata,
   computeTripleHashV10 as computeTripleHash,
   computeFlatKCRootV10 as computeFlatKCRoot,
   computePrivateRootV10 as computePrivateRoot,
@@ -140,6 +155,7 @@ import {
   generatedPrivateCatalogTripleKeys,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  readPublishedAssertionOperation,
   workspaceHeadIncludesShareOperationId,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   workspacePublicQuadsDigest,
@@ -148,15 +164,25 @@ import {
   TripleStoreAsyncPromoteQueue,
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
-  type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteJob, type PromoteListFilter,
+  type AsyncPromoteQueue,
+  type AsyncPromoteQueueConfig,
+  type PromoteJob,
+  type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
-  type PublishOptions, type UpdateOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  // OT-RFC-43 A2 — per-layer pointer + KA-id predicates and stamp helpers.
-  KA_ID_PRED, RESERVED_UAL_PRED,
-  WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
+  type PublishOptions,
+  type UpdateOptions,
+  type PublishResult,
+  type PhaseCallback,
+  type KAMetadata,
+  type CASCondition,
+  KA_ID_PRED,
+  RESERVED_UAL_PRED,
+  WM_CURRENT_ASSERTION_PRED,
+  SWM_CURRENT_ASSERTION_PRED,
+  VM_CURRENT_ASSERTION_PRED,
   type CollectedACK,
-  type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest,
+  type LiftRequestAuthorSeal,
+  type KnowledgeAssetVmPublishRequest,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
   type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type WorkspaceAgentRecipient,
@@ -165,7 +191,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
-  assertPublicationPricingPolicyApplicable,
   type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
@@ -197,6 +222,8 @@ export interface ResolveAssertionAuthorOptions {
   selectedAuthorAgentAddress?: string;
 }
 import { RootlessUpdateError, isRootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
+import { ConfirmedNamedKaVmLifecycleRecoveryError, type ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
+import type { NamedKaVmPublishResult } from './named-ka-vm-publish-result.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -302,7 +329,10 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle, confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
+import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
+import { stampLifecyclePointer, stampLifecyclePointerIfDivergedFromVm } from './lifecycle-pointer-writer.js';
+import { requireNamedKaVmCompletionCapability, withNamedKaVmMetadataLock } from './named-ka-vm-metadata.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -460,113 +490,6 @@ import {
 import { createLocalContextGraphOriginMembershipRecord } from
   './local-context-graph-provenance.js';
 
-type KnowledgeAssetVmPublicationOperationPlan =
-  | {
-      readonly kind: 'initial';
-      readonly pricingPolicy: PublishOptions['pricingPolicy'];
-    }
-  | {
-      readonly kind: 'update';
-      readonly vmCurrentAssertion: string;
-    };
-
-/** One operation discriminator shared by admission, sync, and queued execution. */
-function planKnowledgeAssetVmPublication(input: {
-  readonly vmCurrentAssertion?: string;
-  readonly pricingPolicy?: PublishOptions['pricingPolicy'];
-}): KnowledgeAssetVmPublicationOperationPlan {
-  if (input.vmCurrentAssertion) {
-    assertPublicationPricingPolicyApplicable(input.pricingPolicy, { kind: 'update' });
-    return { kind: 'update', vmCurrentAssertion: input.vmCurrentAssertion };
-  }
-  assertPublicationPricingPolicyApplicable(input.pricingPolicy, {
-    kind: 'initial',
-    graphScoped: true,
-  });
-  return { kind: 'initial', pricingPolicy: input.pricingPolicy };
-}
-
-/** Rebuild the immutable graph-scoped seal carried by one queued VM request. */
-function assertionSealFromQueuedKnowledgeAssetVmPublishRequest(
-  request: KnowledgeAssetVmPublishRequest,
-): AssertionSeal {
-  // Both execution boundaries validate the immutable graph-scoped envelope
-  // before calling this shared reconstruction helper.
-  const graphScope = createGraphKnowledgeAssetScope(
-    request.kaUal!,
-    request.assertionVersion!,
-  );
-  return {
-    merkleRoot: ethers.getBytes(request.seal.merkleRoot),
-    authorAddress: ethers.getAddress(request.seal.authorAddress),
-    authorAttestationR: ethers.getBytes(request.seal.signature.r),
-    authorAttestationVS: ethers.getBytes(request.seal.signature.vs),
-    authorSchemeVersion: request.seal.schemeVersion,
-    chainId: BigInt(request.sealChainId),
-    kav10Address: ethers.getAddress(request.sealKav10Address),
-    finalizedAtIso: request.sealFinalizedAtIso,
-    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-    kaUal: graphScope.ual,
-    assertionVersion: graphScope.assertionVersion,
-    publicTripleCount: request.publicTripleCount!,
-    ...(request.privateMerkleRoot
-      ? { privateMerkleRoot: ethers.getBytes(request.privateMerkleRoot) }
-      : {}),
-    privateTripleCount: request.privateTripleCount!,
-    rootEntities: [],
-    ...(request.seal.reservedKaId !== undefined
-      ? { reservedKaId: BigInt(request.seal.reservedKaId) }
-      : {}),
-  };
-}
-
-export type KnowledgeAssetVmPublishRequestWithoutIntentKey = Omit<
-  KnowledgeAssetVmPublishRequest,
-  'intentKey'
->;
-
-/** Canonical immutable projection of the persisted queued-publish request. */
-export function createKnowledgeAssetVmPublishIntentKey(
-  request: KnowledgeAssetVmPublishRequestWithoutIntentKey,
-): string {
-  const canonicalIntent = {
-    contextGraphId: request.contextGraphId,
-    name: request.name,
-    agentAddress: request.agentAddress ?? null,
-    subGraphName: request.subGraphName ?? null,
-    shareOperationId: request.shareOperationId,
-    roots: request.roots,
-    contentScopeVersion: request.contentScopeVersion ?? null,
-    kaUal: request.kaUal ?? null,
-    assertionVersion: request.assertionVersion ?? null,
-    publicTripleCount: request.publicTripleCount ?? null,
-    privateMerkleRoot: request.privateMerkleRoot?.toLowerCase() ?? null,
-    privateTripleCount: request.privateTripleCount ?? null,
-    accessPolicy: request.accessPolicy ?? null,
-    allowedPeers: request.allowedPeers ?? [],
-    entityProofs: request.entityProofs ?? null,
-    sealMerkleRoot: request.sealMerkleRoot.toLowerCase(),
-    seal: request.seal,
-    sealChainId: request.sealChainId,
-    sealKav10Address: request.sealKav10Address,
-    sealFinalizedAtIso: request.sealFinalizedAtIso,
-    wmCurrentAssertion: request.wmCurrentAssertion ?? null,
-    swmCurrentAssertion: request.swmCurrentAssertion ?? null,
-    vmCurrentAssertion: request.vmCurrentAssertion ?? null,
-    kaNumber: request.kaNumber ?? null,
-    reservedUal: request.reservedUal ?? null,
-    publishEpochs: request.publishEpochs ?? null,
-    // Keep the pre-feature canonical JSON unchanged when the policy is omitted.
-    ...(request.pricingPolicy !== undefined
-      ? { pricingPolicy: request.pricingPolicy }
-      : {}),
-    clearSharedMemoryAfter: request.clearSharedMemoryAfter ?? null,
-    publisherNodeIdentityIdOverride:
-      request.publisherNodeIdentityIdOverride ?? null,
-  };
-  return `sha256:${createHash('sha256').update(JSON.stringify(canonicalIntent)).digest('hex')}`;
-}
-
 /**
  * #1116 (round 11) — stable code tagged on the `assertionFinalize` throws that are
  * recoverable SIGNING/CHAIN CAPABILITY GAPS (no local signing key, non-V10 chain
@@ -642,16 +565,6 @@ function versionGapError(kaUal: string, sealVersion: bigint | string | number, r
     ),
     { code: 'PUBLISH_INTENT_STALE' as const },
   );
-}
-
-function latestShareOperationId(history: {
-  events: readonly AssertionEvent[];
-  currentShareOperationId?: string;
-}): string | undefined {
-  const promoted = [...history.events]
-    .reverse()
-    .find((event) => event.type === 'promoted' && event.shareOperationId);
-  return promoted?.shareOperationId?.trim() || history.currentShareOperationId?.trim() || undefined;
 }
 
 function distinctMetadataObjects(
@@ -4686,11 +4599,15 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
     }
+    await requireNamedKaVmCompletionCapability(this.store, metaGraph);
     if (opts?.entityProofs === true) {
       throw new Error('Graph-scoped async publish does not support entityProofs');
     }
-    const shareOperationId = latestShareOperationId(history);
-    if (!shareOperationId) {
+    // Queued execution requires a modern operation; synchronous publication
+    // alone supports an explicitly absent legacy owner. Both use one RDF decoder.
+    const shareOperationId = await readPublishedAssertionOperation(this.store, metaGraph,
+      assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName));
+    if (typeof shareOperationId !== 'string') {
       throw Object.assign(
         new Error(
           `Cannot publish "${name}" asynchronously: the current SWM share is missing a shareOperationId. ` +
@@ -4882,6 +4799,7 @@ export class PublishMethods extends DKGAgentBase {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
     createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+    await requireNamedKaVmCompletionCapability(this.store, contextGraphMetaUri(request.contextGraphId));
     const bareRoot = (value?: string | null): string | undefined => {
       const trimmed = value?.trim().toLowerCase();
       if (!trimmed) return undefined;
@@ -4958,14 +4876,11 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // Completed graph-scoped promotions intentionally consume the temporary
-    // lifecycle-level operation row. The durable operation identity remains
-    // on the canonical promoted event and immutable SWM head. Read the same
-    // metadata shapes used when the intent was enqueued so a valid queued job
-    // cannot become stale merely because redundant lifecycle metadata was
-    // trimmed after the promote commit.
-    const liveShareOperationId = latestShareOperationId(history);
-    if (!liveShareOperationId || liveShareOperationId !== request.shareOperationId.trim()) {
+    // Execute only the same modern owner selected at enqueue. Already-published
+    // no-ops above do not acquire or consume a current workspace operation.
+    const liveShareOperationId = await readPublishedAssertionOperation(this.store, contextGraphMetaUri(request.contextGraphId),
+      assertionLifecycleUri(request.contextGraphId, agentAddress, request.name, request.subGraphName));
+    if (typeof liveShareOperationId !== 'string' || liveShareOperationId !== request.shareOperationId.trim()) {
       throw stale(
         `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
           `shareOperationId is ${liveShareOperationId ?? 'none'}, queued shareOperationId was ${request.shareOperationId}.`,
@@ -5023,23 +4938,63 @@ export class PublishMethods extends DKGAgentBase {
     return { action: 'execute' };
   }
 
+  /** Own only local repair after confirmation; never enter the publication primitive here. */
+  getOrCreateNamedKaVmLifecycleRepair(this: DKGAgent): NamedKaVmLifecycleRepair {
+    return this.namedKaVmLifecycleRepair ??= new NamedKaVmLifecycleRepair({
+      dataDir: this.config?.dataDir,
+      writeLocks: this.writeLocks,
+      apply: input => applyPublishedNamedKaVmLifecycle(this.store, input, confirmedNamedKaVmLifecycleApplyOptions(this.config?.dataDir)),
+      isCurrent: input => isConfirmedNamedKaVmLifecycleCurrent(
+        this.chain, input, this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir),
+      ),
+      warn: message => this.log.warn(createOperationContext('publish'), message),
+    });
+  }
+
+  async _repairConfirmedNamedKaVmLifecycle(
+    this: DKGAgent, coordinates: ConfirmedNamedKaVmCoordinates,
+    confirmedPublication: ConfirmedNamedKaVmPublication,
+  ): Promise<boolean> {
+    const input = confirmedNamedKaVmLifecycleInput(confirmedPublication, coordinates);
+    let outcome;
+    try {
+      outcome = await submitOwnedNamedKaVmLifecycleRepair(this.store, this.writeLocks,
+        this.getOrCreateNamedKaVmLifecycleRepair(), input);
+    } catch (error) {
+      // Losing the durable admission is different from a scheduled graph-store retry.
+      throw new ConfirmedNamedKaVmLifecycleRecoveryError(confirmedPublication, input, error);
+    }
+    if (outcome === 'pending' || outcome === 'rejected') throw new ConfirmedNamedKaVmLifecycleRecoveryError(
+      confirmedPublication, input, new Error(`Confirmed lifecycle completion remains ${outcome}`), outcome);
+    return false;
+  }
+
   async _stampQueuedKnowledgeAssetVmPublishedLifecycle(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
     publishedUal: string,
-    packedKaId?: bigint,
+    packedKaId: bigint,
     merkleRoot: string = request.sealMerkleRoot,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    await applyPublishedNamedKaVmLifecycle(this.store, {
-      contextGraphId: request.contextGraphId,
-      agentAddress,
-      name: request.name,
-      subGraphName: request.subGraphName,
-      publishedUal,
-      merkleRoot,
-      packedKaId,
-    });
+    const input: ConfirmedNamedKaVmLifecycleInput = {
+      contextGraphId: request.contextGraphId, agentAddress, name: request.name,
+      subGraphName: request.subGraphName, publishedUal, merkleRoot, packedKaId,
+      assertionVersion: request.assertionVersion!,
+      publicationDeployment: { chainId: request.sealChainId, lifecycleAddress: request.sealKav10Address },
+      publicationShareOperationId: request.shareOperationId,
+      ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
+    };
+    const outcome = await submitOwnedNamedKaVmLifecycleRepair(this.store, this.writeLocks,
+      this.getOrCreateNamedKaVmLifecycleRepair(), input);
+    if (outcome === 'pending' || outcome === 'rejected') {
+      const publication = { status: 'confirmed' as const, ual: publishedUal, kaId: packedKaId,
+        merkleRoot: ethers.getBytes(merkleRoot.startsWith('0x') ? merkleRoot : `0x${merkleRoot}`), kaManifest: [],
+        assertionUri: contextGraphAssertionUri(request.contextGraphId, agentAddress, request.name, request.subGraphName),
+        seal: assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request) };
+      throw new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, new Error(`Confirmed lifecycle completion remains ${outcome}`), outcome);
+    }
+    return outcome === 'repaired';
   }
 
   async _writeQueuedKnowledgeAssetVmPublishReceipt(
@@ -5093,20 +5048,12 @@ export class PublishMethods extends DKGAgentBase {
     if (liveWm && queuedWm && liveWm !== queuedWm) return false;
     if (liveVm && liveVm !== queuedSeal && liveVm !== queuedVm) return false;
 
-    // Normal post-publish cleanup removes the mutable lifecycle share pointer,
-    // while the append-only promote event remains. A crash can therefore leave
-    // recovery with no currentShareOperationId even though the named lifecycle
-    // still identifies the exact queued operation. Prefer the live pointer and
-    // otherwise use the most recent promoted event; newer content is already
-    // rejected above by the WM/SWM/VM root comparisons.
-    const liveShareOperationId = history.currentShareOperationId?.trim()
-      || [...history.events]
-        .reverse()
-        .find((event) => event.type === 'promoted' && event.shareOperationId?.trim())
-        ?.shareOperationId?.trim();
-    if (!liveShareOperationId || liveShareOperationId !== request.shareOperationId.trim()) {
-      return false;
-    }
+    // Recovery follows the same current-row precedence and retained-event
+    // validation as enqueue, preflight and completion. A queued command always
+    // needs its modern identity, even when post-publish cleanup trimmed the row.
+    const liveShareOperationId = await readPublishedAssertionOperation(this.store, contextGraphMetaUri(request.contextGraphId),
+      assertionLifecycleUri(request.contextGraphId, agentAddress, request.name, request.subGraphName));
+    if (typeof liveShareOperationId !== 'string' || liveShareOperationId !== request.shareOperationId.trim()) return false;
     if (history.kaNumber && request.kaNumber && history.kaNumber !== request.kaNumber) {
       return false;
     }
@@ -5351,16 +5298,9 @@ export class PublishMethods extends DKGAgentBase {
     );
     // `stale-target` means a still-newer local version won the race. Do not
     // regress its pointer; the exact publish receipt is nevertheless repaired.
-    const canStampLifecycle = materialization !== 'stale-target'
-      && await this._canStampRecoveredKnowledgeAssetVmLifecycle(request);
-    if (canStampLifecycle) {
-      await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-        request,
-        recovered.localUal,
-        recovered.reservedKaId,
-        recovered.materialization.merkleRoot,
-      );
-    } else if (materialization !== 'stale-target') {
+    if (materialization !== 'stale-target' && !await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
+      request, recovered.localUal, recovered.reservedKaId, recovered.materialization.merkleRoot,
+    )) {
       this.log.info(
         ctx,
         `Recovered receipt for "${request.name}" without lifecycle stamping because `
@@ -5409,7 +5349,7 @@ export class PublishMethods extends DKGAgentBase {
       onPhase?: PhaseCallback;
       publisherOverride?: DKGPublisher;
     },
-  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+  ): Promise<NamedKaVmPublishResult> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
     // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
@@ -5449,6 +5389,7 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new Error('Queued graph-scoped VM publish has an incomplete KA content envelope');
     }
+    await requireNamedKaVmCompletionCapability(this.store, contextGraphMetaUri(request.contextGraphId));
     const graphScope = createGraphKnowledgeAssetScope(
       request.kaUal,
       request.assertionVersion,
@@ -5589,7 +5530,6 @@ export class PublishMethods extends DKGAgentBase {
       },
     };
 
-    const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
     const clearPublishedGraph = async (label: string): Promise<void> => {
       try {
@@ -5600,6 +5540,12 @@ export class PublishMethods extends DKGAgentBase {
           ctx,
           graphScope.ual,
           graphScope.assertionVersion,
+          {
+            publicQuadsDigest: workspacePublicQuadsDigest(snapshotQuads),
+            privateTripleCount: snapshotPrivateQuads.length,
+            ...(snapshotPrivateRoot ? { privateMerkleRoot: ethers.hexlify(snapshotPrivateRoot) } : {}),
+          },
+          request.shareOperationId,
         );
       } catch (err) {
         this.log.warn(
@@ -5676,26 +5622,6 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
 
-      if (result.status === 'confirmed') {
-        try {
-          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
-            ? operationPlan.vmCurrentAssertion.slice(2)
-            : operationPlan.vmCurrentAssertion;
-          const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this.store.insert([
-            { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-            { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
-          ]);
-        } catch (err) {
-          this.log.warn(
-            ctx,
-            `Failed to stamp queued update provenance for <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
     } else {
       const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
       if (recoveredReservedKaId === undefined && onChainCapable) {
@@ -5843,21 +5769,13 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    if (result.status === 'confirmed') {
-      try {
-        await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-          request,
-          result.ual,
-          packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
-        );
-      } catch (err) {
-        this.log.warn(
-          ctx,
-          `Failed to stamp queued VM lifecycle marker for <${lifecycleUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
-    }
+    const lifecycleRepairPending = result.status === 'confirmed'
+      ? await this._repairConfirmedNamedKaVmLifecycle({
+          contextGraphId: request.contextGraphId, name: request.name, agentAddress,
+           subGraphName: request.subGraphName, packedKaId: packedKaId ?? seal.reservedKaId,
+           publicationShareOperationId: request.shareOperationId,
+          ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
+        }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
 
     if (result.status === 'confirmed' && result.onChainResult) {
       const rootEntities: string[] = [];
@@ -5901,7 +5819,7 @@ export class PublishMethods extends DKGAgentBase {
 
     if (result.status === 'confirmed') {
       try {
-        await publisher.clearSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.subGraphName);
+        await publisher.consumePublishedSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.shareOperationId, request.subGraphName);
       } catch (err) {
         this.log.warn(
           ctx,
@@ -5923,7 +5841,7 @@ export class PublishMethods extends DKGAgentBase {
       publicationLabel: 'queued publish',
     });
 
-    return { ...result, assertionUri, seal };
+    return { ...result, ...(lifecycleRepairPending ? { lifecycleRepairPending: true } : {}), assertionUri, seal };
   }
 
   async publishFromFinalizedAssertion(this: DKGAgent,
@@ -5947,7 +5865,7 @@ export class PublishMethods extends DKGAgentBase {
       clearSharedMemoryAfter?: boolean;
       publisherOverride?: DKGPublisher;
     },
-  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+  ): Promise<NamedKaVmPublishResult> {
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const assertionUri = contextGraphAssertionUri(
@@ -5981,6 +5899,7 @@ export class PublishMethods extends DKGAgentBase {
     ) {
       throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
     }
+    await requireNamedKaVmCompletionCapability(this.store, metaGraph);
     const graphScope = createGraphKnowledgeAssetScope(
       seal.kaUal,
       seal.assertionVersion,
@@ -6012,19 +5931,7 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    // #1116 (round 9, reviewer 🔴 #1/#2) — MARKER GATE. A valid seal is no longer
-    // SUFFICIENT to publish: it must be backed by a LIVE complete full share
-    // resident in SWM (the swmShareComplete marker). This closes the whole
-    // seal-staleness class at the consumer: a stale full seal that survived a
-    // subset re-share (subset never re-seals) or an already-consumed share
-    // (confirmed publish drains SWM + clears the marker, round 9 step 3) would
-    // otherwise be publishable via the merkle-still-matches path under the KA
-    // name. Placed AFTER the seal-read (so a genuinely-unfinalized asset still
-    // throws "is not finalized" — preserving that precondition) and BEFORE the
-    // create-vs-update routing + SWM gather, so it covers BOTH the MINT and UPDATE
-    // paths. A legitimate full-share publish has the marker (assertionPromote set
-    // it on the full share); an UPDATE re-publish re-sets it via the required
-    // re-promote (a confirmed publish drained SWM, so a re-publish MUST re-share).
+    // Publish only a complete full share; confirmation consumes its marker.
     if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(
         new Error(
@@ -6079,6 +5986,12 @@ export class PublishMethods extends DKGAgentBase {
     );
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
+    const originalShareOperationId = await readPublishedAssertionOperation(this.store, metaGraph, lifecycleUri);
+    if (originalShareOperationId === undefined) throw Object.assign(new Error('The named lifecycle publication owner is corrupt'), { code: 'PUBLISH_INTENT_STALE' });
+    if (originalShareOperationId && rfc64WorkspaceHead
+      && !workspaceHeadIncludesShareOperationId(rfc64WorkspaceHead, originalShareOperationId)) {
+      throw Object.assign(new Error('The named lifecycle share operation is outside the selected head alias class'), { code: 'PUBLISH_INTENT_STALE' });
+    }
     const vmCurrent = stripLit(pointerRow?.['vm']);
     const operationPlan = planKnowledgeAssetVmPublication({
       vmCurrentAssertion: vmCurrent,
@@ -6103,7 +6016,6 @@ export class PublishMethods extends DKGAgentBase {
         `Lifecycle kaId number ${stampedNumberStr} does not match graph-scoped UAL number ${graphScope.kaNumber}`,
       );
     }
-    const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
     if (recoveredReservedKaId !== packedKaId) {
       throw new Error(
@@ -6230,6 +6142,12 @@ export class PublishMethods extends DKGAgentBase {
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
             graphScope.ual,
             graphScope.assertionVersion,
+            {
+              publicQuadsDigest: workspacePublicQuadsDigest(canonicalSwmQuads),
+              privateTripleCount: canonicalPrivateQuads.length,
+              ...(privateMerkleRoot ? { privateMerkleRoot: ethers.hexlify(privateMerkleRoot) } : {}),
+            },
+            originalShareOperationId,
           );
           await this.retireLegacySwmAfterConfirmedLocalPublish(
             contextGraphId,
@@ -6247,32 +6165,7 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
 
-      // Stamp UPDATE provenance + re-stamp VM/WM pointers to the new merkle.
-      if (result.status === 'confirmed' || result.status === 'tentative') {
-        try {
-          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
-            ? operationPlan.vmCurrentAssertion.slice(2)
-            : operationPlan.vmCurrentAssertion;
-          const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          // Re-point VM to the new merkle (drop-then-set), then record the
-          // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
-          // Phase 2: WM converges back to VM after the update mint, so the
-          // divergence-only stamp DELETES any stale WM row instead of
-          // duplicating the new merkle (readers COALESCE missing wm → vm).
-          await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this.store.insert([
-            { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-            { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
-          ]);
-        } catch (err) {
-          this.log.warn(
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            `Failed to stamp update provenance for <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
+
     } else {
       // ── MINT PATH ──
       // Round 4 review §9 — scope the SWM CONSTRUCT to the seal's
@@ -6289,16 +6182,7 @@ export class PublishMethods extends DKGAgentBase {
       // lifecycle-URN kaId re-packed above. Both are undefined only for a
       // legacy seal that predates the §F2 binding AND was never stamped with a
       // lifecycle kaId.
-      // #1116 (round 5) — no-data preflight BEFORE the inner publisher's
-      // CG-not-registered guard. `publishFromSharedMemory` checks registration
-      // (throws CG_NOT_REGISTERED) BEFORE its own no-quads check, so an
-      // UNregistered CG + valid seal + EMPTY sealed SWM would surface
-      // CG_NOT_REGISTERED first — the /vm/publish route then auto-registers
-      // (burning mint gas) and only the retry hits the no-quads 409. The legacy
-      // memory.ts publish path had a SWM preflight to avoid exactly this; mirror
-      // it here so the no-data precondition fires for ALL callers regardless of
-      // registration. Match the publisher's wording so the route's existing 409
-      // mapping (/No quads in shared memory/) still applies.
+      // The sealed SWM preflight runs before registration, preserving the no-data 409.
       result = await this.publishFromSharedMemory(
         contextGraphId,
         'all',
@@ -6311,6 +6195,7 @@ export class PublishMethods extends DKGAgentBase {
           pricingPolicy: operationPlan.pricingPolicy,
           reservedKaId: recoveredReservedKaId,
           sharedMemoryScope,
+          publicationShareOperationId: originalShareOperationId,
           contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
           kaUal: graphScope.ual,
           assertionVersion: graphScope.assertionVersion,
@@ -6367,140 +6252,33 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // OT-RFC-43 A2 (decision 2) — stamp the VM pointer on the lifecycle URN
-    // whenever the publish/update is confirmed. (For the mint path this is the
-    // first VM pointer; for the update path the DELETE/INSERT above already set
-    // it, and this idempotent re-stamp is a no-op.)
-    if (result.status === 'confirmed' || result.status === 'tentative') {
+    const lifecycleRepairPending = result.status === 'confirmed'
+      ? await this._repairConfirmedNamedKaVmLifecycle({
+           contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName,
+           packedKaId,
+           publicationShareOperationId: originalShareOperationId,
+          ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
+        }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
+
+    // Preserve the standalone tentative publication projection. Confirmed work
+    // above uses the durable repair owner; no VM data graph is claimed here.
+    if (result.status === 'tentative') {
       try {
-        await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-        // OT-RFC-44 Design B — the assertion now lives at Verifiable Memory, so
-        // make its lifecycle marker match the on-chain reality: flip
-        // dkg:memoryLayer -> "VM" and dkg:state -> "published". The VM record is
-        // thus equivalent to the WM/SWM ones, with the extra transaction metadata
-        // (dkg:vmCurrentAssertion + dkg:kaId + the on-chain UAL) layered on top.
-        // Promote stamps memoryLayer "SWM" on BOTH the lifecycle-URN and the
-        // data-graph-URI forms, so flip both — otherwise the published assertion
-        // lingers in the Shared-Memory layer (the dedicated published-metadata
-        // flip never fired: its trigger gate joins on dkg:rootEntity/dkg:agent
-        // predicates the lifecycle record does not carry).
-        const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
-        const STATE_PRED = 'http://dkg.io/ontology/state';
-        for (const subj of [lifecycleUri, assertionUri]) {
-          await deleteByPatternWithoutCount(this.store, { subject: subj, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
-          await this.store.insert([
-            { subject: subj, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
-          ]);
-        }
-        await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
-        await this.store.insert([
-          { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
-        ]);
-        // #1104: reconcile the KA's dual identity. `dkg:reservedUal`
-        // (chain/author/kaNumber, stamped at finalize) and the published
-        // UAL (chain/contract/tokenId, returned by vm/publish) are both
-        // permanent — record the published UAL on the lifecycle URN
-        // (drop-then-set, so updates re-point to the latest published UAL).
-        //
-        // Merge note (PR #1107 ← main): #1095's separate `published`
-        // prov:Activity EVENT minting was dropped here — main's RFC
-        // ka-metadata-trim deliberately removed `generateAssertionPublishedMetadata`,
-        // and main already stamps `dkg:state="published"` above (which
-        // `deriveStatus` maps to `vm-confirmed`), so the lifecycle STATE fix
-        // #1095 targeted is satisfied without the trimmed event entity.
-        if (result.ual) {
-          try {
-            const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
-            await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
-            await this.store.insert([
-              { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, object: `"${result.ual}"`, graph: metaGraph },
-            ]);
-          } catch (err) {
-            this.log.warn(
-              opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-              `Failed to record publishedUal for <${lifecycleUri}>: ` +
-                (err instanceof Error ? err.message : String(err)),
-            );
-          }
-        }
-        // SUBSTRATE-2 — re-point dkg:assertionGraph to the per-KA verifiable-
-        // memory graph this publish actually wrote
-        // (…/_verifiable_memory/{author}/{number}). promote() left the pointer on
-        // the SWM graph, which the post-confirm SWM cleanup then empties — so
-        // without this re-stamp the _meta index follows a stale pointer to an
-        // empty graph instead of the live VM data. Mirrors the wm→swm re-stamp
-        // in generateAssertionPromotedMetadata, for the swm→vm transition. The
-        // graph URI is derived from the minted kaId exactly as the data write
-        // (publishFromSharedMemory at dkg-publisher.ts: VerifiableMemory layer,
-        // {kaId>>96}, {kaId & 2^96-1}, subGraphName) derives it, so the pointer
-        // and the data always name the same graph.
-        //
-        // Gated on confirmed + onChainResult: that's the exact branch that ran
-        // the post-confirmation VM data write, so the graph is guaranteed to
-        // exist. A `tentative` publish (no on-chain result yet) hasn't written
-        // VM data, so we leave the pointer alone rather than aim it at a graph
-        // that doesn't exist yet.
-        if (result.status === 'confirmed' && result.onChainResult) {
-          const ASSERTION_GRAPH_PRED = 'http://dkg.io/ontology/assertionGraph';
-          // Derive the VM graph URI from the packed KA id (author<<96 | number)
-          // that named the …/_verifiable_memory/{author}/{number} graph. Prefer
-          // the finalize-reserved id we threaded down as `reservedKaId`, then an
-          // explicit on-chain `kaId` if the adapter reports one. Only fall back
-          // to `result.kaId` for legacy/no-chain shapes. Do NOT use
-          // `onChainResult.batchId`: on some adapters batchId is batch metadata,
-          // not the packed KA id.
-          const vmKaId = packedKaId ?? result.onChainResult.kaId ?? result.kaId;
-          if (vmKaId !== undefined && vmKaId !== null) {
-            const vmKaIdBig = BigInt(vmKaId);
-            const vmAuthor = '0x' + (vmKaIdBig >> 96n).toString(16).padStart(40, '0');
-            const vmNumber = vmKaIdBig & ((1n << 96n) - 1n);
-            const vmGraph = contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, opts?.subGraphName);
-            await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
-            await this.store.insert([
-              { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph },
-            ]);
-            // RFC ka-metadata-trim Phase 2 (corrected by adversarial review
-            // F4) — WM-graph marker flip at the VM transition.
-            // `assertionCreate` stamps `<wmGraph> dkg:memoryLayer "WM"` on the
-            // per-KA number-keyed WM graph URI (assertionPromote flips it in
-            // place to "SWM"). The flip above only covers the lifecycle URN
-            // and the legacy name-keyed assertion URI; the data-graph-URI
-            // marker would otherwise read "SWM" forever — misleading, since
-            // the data now lives at VM. We UPDATE it to "VM" rather than
-            // DELETE it: `assertAssertionDataPersisted` (dkg-publisher.ts)
-            // reads this exact row as its "already promoted → harmless no-op"
-            // witness, so deleting it would make a stale re-promote after a
-            // successful publish misfire AssertionNotPersistedError when the
-            // preserved extraction markers are present (Codex #898 case).
-            // Any non-"WM" value short-circuits that guard, so "VM" keeps the
-            // no-op witness AND tells the truth about the layer.
-            const wmGraph = contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, vmAuthor, vmNumber, opts?.subGraphName);
-            await deleteByPatternWithoutCount(this.store, { subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
-            await this.store.insert([
-              { subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
-            ]);
-          }
-        }
+        await applyTentativeNamedKaVmLifecycle(this.store, {
+          contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName,
+          publishedUal: result.ual, merkleRoot: ethers.hexlify(seal.merkleRoot), tentative: true,
+          ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
+        });
       } catch (err) {
-        this.log.warn(
-          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          `Failed to stamp VM lifecycle marker for <${lifecycleUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
+        this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Failed to stamp tentative VM lifecycle marker for <${lifecycleUri}>: ${String(err)}`);
       }
     }
 
-    // #1116 (round 9, reviewer 🔴 #2) — a CONFIRMED publish CONSUMES the SWM full
-    // share: the mint path (publishFromSharedMemory) and the update path both
-    // DRAIN the published roots from SWM after on-chain confirmation. The
-    // swmShareComplete marker asserts "a complete full share is resident in SWM",
-    // which no longer holds once SWM is drained. Clear it (best-effort, after the
-    // chain commit) so a post-publish finalize(layer:"swm") can't pass the gate
-    // against an empty SWM, and the next publish requires a fresh full share (which
-    // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
+    // Confirmation consumes only the original share marker; a replacement stays publishable.
     if (result.status === 'confirmed') {
       try {
-        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
+        await publisher.consumePublishedSwmShareComplete(contextGraphId, name, agentAddress, originalShareOperationId, opts?.subGraphName);
       } catch (err) {
         this.log.warn(
           opts?.operationCtx ?? createOperationContext('publishFromSWM'),
@@ -6522,7 +6300,7 @@ export class PublishMethods extends DKGAgentBase {
       publicationLabel: 'publish',
     });
 
-    return { ...result, assertionUri, seal };
+    return { ...result, ...(lifecycleRepairPending ? { lifecycleRepairPending: true } : {}), assertionUri, seal };
   }
 
   private async afterConfirmedGraphScopedVmPublishV1(
@@ -6645,13 +6423,7 @@ export class PublishMethods extends DKGAgentBase {
     return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
   }
 
-  /**
-   * OT-RFC-43 A2 — idempotent per-layer pointer (re)stamp on the lifecycle URN.
-   * Drop-then-set the single value for `pred`. Uses `deleteByPattern` + `insert`
-   * (NOT a SPARQL UPDATE string) because the oxigraph storage adapter's
-   * `query()` rejects DELETE/INSERT — `stampLayerPointerSparql` is reserved for
-   * backends that accept UPDATE via query(). `merkleHex` is stored bare (no 0x).
-   */
+  /** Delegate pointer writes to the store policy shared with publication completion. */
   async _stampPointer(
     this: DKGAgent,
     lifecycleUri: string,
@@ -6659,23 +6431,10 @@ export class PublishMethods extends DKGAgentBase {
     merkleHex: string,
     metaGraph: string,
   ): Promise<void> {
-    const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
-    await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
-    await this.store.insert([
-      { subject: lifecycleUri, predicate: pred, object: `"${bare}"`, graph: metaGraph },
-    ]);
+    await withNamedKaVmMetadataLock(this.store, metaGraph, lifecycleUri,
+      () => stampLifecyclePointer(this.store, lifecycleUri, pred, merkleHex, metaGraph));
   }
 
-  /**
-   * RFC ka-metadata-trim Phase 2 — divergence-only wm/swm pointer stamp.
-   * `dkg:vmCurrentAssertion` is always materialised; the wm/swm pointers are
-   * only written when they DIVERGE from the current VM value (the common
-   * "all three equal" steady state is implicit). When the new value equals
-   * VM, any prior row for `pred` is deleted instead (drop-then-skip), so a
-   * stale divergent pointer never lingers. Readers COALESCE a missing wm/swm
-   * to the vm value (see `agent.assertion.history()`), which also keeps
-   * old-store rows (always materialised) readable unchanged.
-   */
   async _stampPointerIfDivergedFromVm(
     this: DKGAgent,
     lifecycleUri: string,
@@ -6683,25 +6442,8 @@ export class PublishMethods extends DKGAgentBase {
     merkleHex: string,
     metaGraph: string,
   ): Promise<void> {
-    const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
-    let vmBare: string | undefined;
-    try {
-      const res = await this.store.query(
-        `SELECT ?vm WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm } } LIMIT 1`,
-        { source: 'agent.publish.pointerVmGuard' },
-      );
-      const raw = res.type === 'bindings' ? res.bindings[0]?.['vm'] : undefined;
-      vmBare = raw?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
-    } catch {
-      // On a failed VM read fall back to the always-write behaviour below —
-      // an extra convergent row is harmless (readers COALESCE), a missing
-      // divergent row is not.
-    }
-    if (vmBare !== undefined && vmBare === bare) {
-      await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
-      return;
-    }
-    await this._stampPointer(lifecycleUri, pred, bare, metaGraph);
+    await withNamedKaVmMetadataLock(this.store, metaGraph, lifecycleUri,
+      () => stampLifecyclePointerIfDivergedFromVm(this.store, lifecycleUri, pred, merkleHex, metaGraph));
   }
 
   /**
@@ -6813,6 +6555,7 @@ export class PublishMethods extends DKGAgentBase {
        */
       reservedKaId?: bigint;
       sharedMemoryScope?: SharedMemoryGraphScope;
+      publicationShareOperationId?: string | null;
       contentScopeVersion?: PublishOptions['contentScopeVersion'];
       kaUal?: PublishOptions['kaUal'];
       assertionVersion?: PublishOptions['assertionVersion'];
@@ -7000,6 +6743,7 @@ export class PublishMethods extends DKGAgentBase {
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
       sharedMemoryScope: options?.sharedMemoryScope,
+      publicationShareOperationId: options?.publicationShareOperationId,
       contentScopeVersion: options?.contentScopeVersion,
       kaUal: options?.kaUal,
       assertionVersion: options?.assertionVersion,

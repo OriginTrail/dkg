@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
@@ -18,6 +18,9 @@ import {
   namedSharedMemoryScopeForFinalizedLifecycle,
   sharedMemoryScopeForFinalizedLifecycle,
 } from '../src/finalized-lifecycle-scope.js';
+
+const ownedAgents: any[] = [];
+afterEach(async () => { for (const agent of ownedAgents.splice(0)) await agent.namedKaVmLifecycleRepair?.stop(); });
 
 const DEFAULT_AGENT = `0x${'11'.repeat(20)}`;
 // The confirmed-publication hook enters RFC-64's canonical control plane, so
@@ -58,6 +61,14 @@ function buildGraphSeal(
     publicTripleCount: 1,
     privateTripleCount: 0,
   }) as Quad[];
+}
+
+function confirmedChain() {
+  return {
+    getEvmChainId: async () => 31337n,
+    getKnowledgeAssetsLifecycleAddress: async () => AGENT_B,
+    readKnowledgeAssetVersionSnapshot: async () => ({ latestRoot: Buffer.from(MERKLE).toString('hex'), rootCount: 1n }),
+  };
 }
 
 function makeLog() {
@@ -112,7 +123,11 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
-    agent.chain = {};
+    agent.writeLocks = new Map<string, Promise<void>>();
+    agent.chain = confirmedChain();
+    agent.config = {};
+    agent.getContextGraphOnChainId = async () => '1';
+    ownedAgents.push(agent);
     agent.defaultAgentAddress = DEFAULT_AGENT;
     Object.defineProperty(agent, 'peerId', {
       value: '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
@@ -132,7 +147,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         markerCalls.push({ contextGraphId, name, agentAddress, subGraphName });
         return agentAddress === AGENT_B;
       },
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async (...args: any[]) => { remainingClearCalls.push(args); },
     };
     agent.publishFromSharedMemory = async (contextGraphId: string, selection: any, opts: any) => {
@@ -219,6 +234,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.writeLocks = new Map<string, Promise<void>>();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-source-empty', configurable: true });
@@ -270,6 +286,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishCalls = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.writeLocks = new Map<string, Promise<void>>();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-legacy-finalized', configurable: true });
@@ -305,7 +322,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     };
     await store.insert([
       ...buildGraphSeal(assertionUri),
-      { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, object: '"prior"', graph: metaGraph },
+      { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, object: JSON.stringify('ab'.repeat(32)), graph: metaGraph },
       { subject: lifecycleUri, predicate: KA_ID_PRED, object: '"1"', graph: metaGraph },
       { ...PUBLIC_QUAD, graph: namedGraph },
       unrelatedLegacyQuad,
@@ -315,7 +332,11 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const updateCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
-    agent.chain = {};
+    agent.writeLocks = new Map<string, Promise<void>>();
+    agent.chain = confirmedChain();
+    agent.config = {};
+    agent.getContextGraphOnChainId = async () => '1';
+    ownedAgents.push(agent);
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-update', configurable: true });
     agent.log = makeLog();
@@ -325,7 +346,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         cleanupCalls.push(args);
         await store.dropGraph(namedGraph);
       },
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
     };
     agent._buildPrecomputedUpdateAttestationForSeal = async () => ({
       expectedNewMerkleRoot: MERKLE,
@@ -384,6 +405,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishes = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.writeLocks = new Map<string, Promise<void>>();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-namespace', configurable: true });

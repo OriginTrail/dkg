@@ -5,7 +5,7 @@
  * daemon cannot read chain truth for one of them, publishing must fail
  * closed instead of falling back to plaintext.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -15,6 +15,7 @@ import {
   CIPHERTEXT_CHUNK_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  assertionLifecycleUri,
   contextGraphDataUri,
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
@@ -905,6 +906,12 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
 
 const QUEUED_TEST_AUTHOR = '0x1111111111111111111111111111111111111111';
 const QUEUED_TEST_LIFECYCLE = '0x2222222222222222222222222222222222222222';
+const queuedStores: OxigraphStore[] = [];
+const queuedAgents: any[] = [];
+afterEach(async () => {
+  for (const agent of queuedAgents.splice(0)) await agent.namedKaVmLifecycleRepair?.stop();
+  for (const store of queuedStores.splice(0)) await store.close();
+});
 
 function makeQueuedAgentHarness(options: {
   peerId: string;
@@ -915,19 +922,33 @@ function makeQueuedAgentHarness(options: {
   encryptInlinePayload?: unknown;
   encryptInlineChunked?: unknown;
 }) {
-  const publisherPublish = recorder(async (_opts: any) => ({
+  const publisherPublish = recorder(async (opts: any) => ({
     status: options.publishStatus ?? 'tentative',
     ual: options.ual,
+    merkleRoot: opts.precomputedAttestation.expectedMerkleRoot,
+    kaManifest: [],
   }));
+  // The routing fixture still supplies only the submission boundary, but
+  // preflight and confirmed completion use the real certified store and owner.
+  const store = new OxigraphStore(); queuedStores.push(store);
+  const confirmed = options.publishStatus === 'confirmed';
   const agentLike: any = {
     peerId: options.peerId,
+    writeLocks: new Map(),
     defaultAgentAddress: QUEUED_TEST_AUTHOR,
-    chain: options.chain ?? {},
-    store: {
-      query: recorder(async () => ({ type: 'bindings', bindings: [] })),
-      insert: recorder(async () => undefined),
-      deleteByPattern: recorder(async () => undefined),
+    config: {},
+    chain: {
+      ...(confirmed ? {
+        getEvmChainId: recorder(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: recorder(async () => QUEUED_TEST_LIFECYCLE),
+        readKnowledgeAssetVersionSnapshot: recorder(async () => ({
+          rootCount: 1n,
+          latestRoot: ethers.hexlify(publisherPublish.calls.at(-1)![0].precomputedAttestation.expectedMerkleRoot),
+        })),
+      } : {}),
+      ...options.chain,
     },
+    store,
     log: {
       info: recorder(() => undefined),
       warn: recorder(() => undefined),
@@ -936,7 +957,7 @@ function makeQueuedAgentHarness(options: {
     },
     publisher: {
       publish: publisherPublish,
-      clearSwmShareComplete: recorder(async () => undefined),
+      consumePublishedSwmShareComplete: recorder(async () => undefined),
     },
     createV10ACKProvider: recorder(() => undefined),
     _resolveEncryptInlinePayload: recorder(async () => options.encryptInlinePayload),
@@ -944,6 +965,7 @@ function makeQueuedAgentHarness(options: {
     _stampPointer: recorder(async () => undefined),
     resolveRfc64CatalogAuthoringLaneV1: () => null,
   };
+  Object.setPrototypeOf(agentLike, DKGAgent.prototype);
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   agentLike.retireLegacySwmAfterConfirmedLocalPublish =
@@ -958,11 +980,12 @@ function makeQueuedAgentHarness(options: {
     headObjectDigest: null,
     error: null,
   }));
-  if (options.onChainContextGraphId !== undefined) {
+  if (options.onChainContextGraphId !== undefined || confirmed) {
     agentLike.getContextGraphOnChainId = recorder(
-      async () => options.onChainContextGraphId,
+      async () => options.onChainContextGraphId === undefined ? '7' : options.onChainContextGraphId,
     );
   }
+  queuedAgents.push(agentLike);
   return { agentLike, publisherPublish };
 }
 
@@ -1052,6 +1075,14 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       { contextGraphId: request.contextGraphId, quads: snapshotQuads },
     );
 
+    expect(agentLike.namedKaVmLifecycleRepair).toBeDefined();
+    expect(agentLike.chain.readKnowledgeAssetVersionSnapshot.calls[0]?.[0])
+      .toBe(BigInt(request.seal.reservedKaId!));
+    expect(await agentLike.store.query(`ASK { GRAPH <${contextGraphMetaUri(request.contextGraphId)}> {
+      <${assertionLifecycleUri(request.contextGraphId, QUEUED_TEST_AUTHOR, request.name)}>
+        <http://dkg.io/ontology/publishedUal> ${JSON.stringify('did:dkg:local/queued-swm-removal')} ;
+        <http://dkg.io/ontology/vmCurrentAssertion> ${JSON.stringify(request.sealMerkleRoot.slice(2))} .
+    } }`)).toMatchObject({ type: 'boolean', value: true });
     expect(removal.calls).toHaveLength(1);
     expect(removal.calls[0]?.[0]).toMatchObject({
       contextGraphId: 'public-cg',

@@ -141,6 +141,20 @@ describe('RpcReadDescriptor — explicit read attribution ownership', () => {
     expect(Object.isFrozen(descriptor)).toBe(true);
   });
 
+  it.each([
+    { label: '  ', consumer: 'stable.consumer' },
+    { label: 'human read label', consumer: '  ' },
+  ])('refuses malformed attribution before provider dispatch: %j', async descriptor => {
+    const read = vi.fn(async () => 'OK');
+    const client = makeClient([{ read }], ['https://read.example']);
+    expect(() => client.read(descriptor, (provider: any) => provider.read())).toThrow(TypeError);
+    expect(read).not.toHaveBeenCalled();
+    // Invalid admission cannot poison the transport for the next valid owner.
+    await expect(client.read({ label: 'human read label', consumer: 'stable.consumer' },
+      (provider: any) => provider.read())).resolves.toBe('OK');
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
   it('supports a deliberate unattributed read', () => {
     const descriptor = createRpcReadDescriptor('health probe', null);
     const provider = { read: recorder(async () => 'OK') };

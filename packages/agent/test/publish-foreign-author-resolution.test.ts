@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import {
   buildAssertionSealQuads,
+  parseAssertionSealQuads,
+  assertionLifecycleUri,
   contextGraphAssertionUri,
   contextGraphSharedMemoryUri,
   contextGraphMetaUri,
@@ -197,7 +199,7 @@ describe('GH#1778 an explicit agentAddress is an authoritative author selector',
     agent.chain = {};
     agent.publisher = {
       hasSwmShareComplete: async () => true,
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async () => {},
     };
     await expect(agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: OTHER }))
@@ -652,6 +654,39 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
   });
 });
 
+const confirmedAgents: any[] = [];
+const confirmedStores: OxigraphStore[] = [];
+afterEach(async () => {
+  for (const agent of confirmedAgents.splice(0)) await agent.namedKaVmLifecycleRepair?.stop();
+  for (const store of confirmedStores.splice(0)) await store.close();
+});
+
+function confirmedMemberPublicationAgent(store: OxigraphStore) {
+  const agent = stubAgent(store, CURATOR);
+  const seal = parseAssertionSealQuads(sealFor(MEMBER), contextGraphAssertionUri(CG, MEMBER, NAME));
+  if (!seal) throw new Error('Member publication fixture has no seal');
+  agent.chain = {
+    getEvmChainId: async () => seal.chainId,
+    getKnowledgeAssetsLifecycleAddress: async () => seal.kav10Address,
+    readKnowledgeAssetVersionSnapshot: async (kaId: bigint) => {
+      expect(kaId).toBe(RESERVED_KA_ID);
+      return { latestRoot: Buffer.from(seal.merkleRoot).toString('hex'), rootCount: 1n };
+    },
+  };
+  confirmedAgents.push(agent); confirmedStores.push(store);
+  return agent;
+}
+
+async function expectMemberVmHistory(store: OxigraphStore) {
+  const graph = contextGraphMetaUri(CG), predicate = 'http://dkg.io/ontology/vmCurrentAssertion';
+  expect(await store.query(`ASK { GRAPH <${graph}> {
+    <${assertionLifecycleUri(CG, MEMBER, NAME)}> <${predicate}> ${JSON.stringify(Buffer.from(MERKLE).toString('hex'))}
+  } }`)).toMatchObject({ type: 'boolean', value: true });
+  expect(await store.query(`ASK { GRAPH <${graph}> {
+    <${assertionLifecycleUri(CG, CURATOR, NAME)}> <${predicate}> ?root
+  } }`)).toMatchObject({ type: 'boolean', value: false });
+}
+
 describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author', () => {
   it('a curator publishing a member-authored KA (no agentAddress) reaches the member seal', async () => {
     const store = new OxigraphStore();
@@ -664,14 +699,13 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
 
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
     const markerCalls: Array<{ agentAddress: string }> = [];
-    const agent = stubAgent(store, CURATOR); // curator is NOT the author
-    agent.chain = {};
+    const agent = confirmedMemberPublicationAgent(store); // curator is NOT the author
     agent.publisher = {
       hasSwmShareComplete: async (_cg: string, _n: string, agentAddress: string) => {
         markerCalls.push({ agentAddress });
         return agentAddress === MEMBER;
       },
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async () => {},
     };
     agent.publishFromSharedMemory = async (contextGraphId: string, selection: any, opts: any) => {
@@ -692,6 +726,7 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
     expect(result.assertionUri).toBe(assertionUri);
     expect(markerCalls.every((c) => c.agentAddress === MEMBER)).toBe(true);
     expect(publishCalls).toHaveLength(1);
+    await expectMemberVmHistory(store);
     // The forwarded seal carries the MEMBER's attestation (never re-signed by
     // the curator). kaUal is canonicalised to lowercase by the scope helper.
     expect(publishCalls[0]?.opts).toMatchObject({
@@ -714,12 +749,11 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
     ]);
 
     const publishCalls: Array<{ opts: any }> = [];
-    const agent = stubAgent(store, CURATOR);
-    agent.chain = {};
+    const agent = confirmedMemberPublicationAgent(store);
     agent.publisher = {
       hasSwmShareComplete: async (_cg: string, _n: string, agentAddress: string) =>
         agentAddress === MEMBER,
-      clearSwmShareComplete: async () => {},
+      consumePublishedSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async () => {},
     };
     agent.publishFromSharedMemory = async (_cg: string, _sel: any, opts: any) => {
@@ -743,6 +777,7 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
     expect(result.assertionUri).toBe(contextGraphAssertionUri(CG, MEMBER, NAME));
     expect(result.seal.authorAddress).toBe(MEMBER);
     expect(publishCalls).toHaveLength(1);
+    await expectMemberVmHistory(store);
     expect(publishCalls[0]?.opts).toMatchObject({
       kaUal: KA_UAL.toLowerCase(),
       precomputedAttestation: { authorAddress: MEMBER, reservedKaId: RESERVED_KA_ID },

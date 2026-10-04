@@ -1,3 +1,7 @@
+import { forwardAtomicSubjectMutation, type AtomicSubjectMutation } from './atomic-subject-forwarding.js';
+import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
+import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
+export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 import { performance } from 'node:perf_hooks';
 import {
   codePointLowerBound,
@@ -51,6 +55,7 @@ export type GraphSetMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectPredicates'
   | 'rfc64AuthorCommitCasV1'
   | 'query'
   | 'update';
@@ -62,6 +67,7 @@ type TouchedGraphMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectPredicates'
   | 'rfc64AuthorCommitCasV1'
   | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
@@ -97,23 +103,6 @@ type GraphSetDiagnosticEvent =
       probeCount: number;
     };
 
-export interface GraphSetIndexStoreOptions {
-  enabled?: boolean;
-  /** Revalidate after this interval. Use 0 to revalidate on every read. */
-  revalidateMs?: number;
-  /**
-   * Initial retry delay after a failed warm periodic revalidation.
-   * Ignored when revalidateMs is 0.
-   */
-  revalidateFailureBackoffMs?: number;
-  /**
-   * Maximum exponential retry delay after failed warm periodic revalidations.
-   * Ignored when revalidateMs is 0.
-   */
-  revalidateFailureMaxBackoffMs?: number;
-  now?: () => number;
-  onMutation?: (event: GraphSetMutationEvent) => void;
-}
 
 /** Immutable graph catalog maintained in Unicode code-point order. */
 export interface SortedGraphSetSource {
@@ -241,6 +230,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
+  readonly commitment?: TripleStoreCommitCapability;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;
@@ -264,6 +254,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.commitment = composeTripleStoreCommitment(inner);
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(
@@ -362,14 +353,22 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    if (typeof this.inner.update !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
+    return this.runUpdate(sparql, options, 'update');
+  }
+
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    return this.runUpdate(sparql, options, 'atomicUpdate');
+  }
+
+  private async runUpdate(sparql: string, options: UpdateOptions | undefined, capability: 'update' | 'atomicUpdate'): Promise<void> {
+    if (typeof this.inner[capability] !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(capability, 'GraphSetIndexStore');
     }
     if (!this.enabled) {
-      await this.inner.update(sparql, options);
+      await this.inner[capability]!(sparql, options);
       return;
     }
-    await this.inner.update(sparql, options);
+    await this.inner[capability]!(sparql, options);
     // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
     // drop named graphs the index must learn about. When the caller declares the
     // touched graphs (#1549: RS-heal + agents-meta prune write statically-known
@@ -437,28 +436,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     if (typeof this.inner.replaceGraph !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'GraphSetIndexStore');
     }
-    if (!this.enabled) {
-      await this.inner.replaceGraph(graphUri, quads, options);
-      return;
-    }
-    try {
-      await this.inner.replaceGraph(graphUri, quads, options);
-    } catch (error) {
-      // The replaceGraph contract allows a rejected call to have committed the
-      // complete new graph (or dropped the old one). Serving the cached graph
-      // set would then hide a committed KA graph from enumeration, so mark the
-      // index dirty for a lazy rebuild — unless this was a clean preflight
-      // capability refusal or an admission rejection explicitly bound to this
-      // replace dispatch. A nested post-commit probe can also be rejected by
-      // the scheduler, but its storeOperation does not match replaceGraph and
-      // therefore still dirties this index.
-      if (!isStoreOperationNotStarted(error, 'replaceGraph')) {
-        this.scheduleFullRefresh('replaceGraph');
-      }
-      throw error;
-    }
-    this.bumpMutation();
-    await this.maintainTouchedGraphs([graphUri], 'replaceGraph', options);
+    return this.trackAtomicReplacement('replaceGraph', [graphUri],
+      () => this.inner.replaceGraph!(graphUri, quads, options), options);
   }
 
   async replaceGraphAndSubject(
@@ -475,56 +454,44 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         'GraphSetIndexStore',
       );
     }
-    try {
-      await this.inner.replaceGraphAndSubject(
-        graphUri,
-        graphQuads,
-        metaGraphUri,
-        metadataSubject,
-        metadataQuads,
-        options,
-      );
-    } catch (error) {
-      if (!isStoreOperationNotStarted(error, 'replaceGraphAndSubject')) {
-        this.scheduleFullRefresh('replaceGraphAndSubject');
-      }
-      throw error;
-    }
-    if (!this.enabled) return;
-    this.bumpMutation();
-    await this.maintainTouchedGraphs(
-      [graphUri, metaGraphUri],
-      'replaceGraphAndSubject',
-      options,
-    );
+    return this.trackAtomicReplacement('replaceGraphAndSubject', [graphUri, metaGraphUri],
+      () => this.inner.replaceGraphAndSubject!(
+        graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, options), options);
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: Quad[],
-    options?: QueryOptions,
+  async replaceSubject(graph: string, subject: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runSubjectMutation(graph, subject, undefined, quads, options);
+  }
+  async replaceSubjectPredicates(graph: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runSubjectMutation(graph, subject, predicates, quads, options);
+  }
+  private runSubjectMutation(graph: string, subject: string, predicates: readonly string[] | undefined, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return forwardAtomicSubjectMutation(this.inner, 'GraphSetIndexStore', graph, subject, predicates, quads, options,
+      (operation, execute) => this.trackAtomicReplacement(operation, [graph], execute, options));
+  }
+
+  /** Index maintenance distinguishes clean refusal from possibly committed dispatch. */
+  private async trackAtomicReplacement(
+    operation: 'replaceGraph' | 'replaceGraphAndSubject' | AtomicSubjectMutation,
+    graphs: string[], execute: () => Promise<void>, options?: QueryOptions,
   ): Promise<void> {
-    if (typeof this.inner.replaceSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
-    }
-    if (!this.enabled) {
-      await this.inner.replaceSubject(graphUri, subject, quads, options);
-      return;
-    }
-    try {
-      await this.inner.replaceSubject(graphUri, subject, quads, options);
-    } catch (error) {
-      // A committed subject replace could add/remove the graph's first/last row;
-      // dirty the index so a lazy rebuild re-derives membership — unless this was
-      // a clean preflight capability refusal, where nothing was mutated.
-      if (!isStoreOperationNotStarted(error, 'replaceSubject')) {
-        this.scheduleFullRefresh('replaceSubject');
-      }
+    if (!this.enabled) return execute();
+    try { await execute(); }
+    catch (error) {
+      // Atomic replacements allow a rejected call to have committed the complete
+      // new graph (or dropped the old one). Serving the cached graph set would
+      // then hide a committed KA graph from enumeration, so mark the index dirty
+      // for a lazy rebuild — unless this was a clean preflight capability refusal
+      // or an admission rejection explicitly bound to this replacement dispatch.
+      // A nested post-commit probe can also be rejected by the scheduler, but its
+      // storeOperation does not match the replacement and still dirties this index.
+      // A subject replacement can likewise add/remove the graph's first/last row;
+      // a lazy rebuild re-derives membership after any possibly committed dispatch.
+      if (!isStoreOperationNotStarted(error, operation)) this.scheduleFullRefresh(operation);
       throw error;
     }
     this.bumpMutation();
-    await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
+    await this.maintainTouchedGraphs(graphs, operation, options);
   }
 
   async rfc64AuthorCommitCasV1(

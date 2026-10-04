@@ -1,3 +1,4 @@
+import { prepareRemoteAtomicSubjectWrite } from './remote-atomic-subject-write.js';
 import { performance } from 'node:perf_hooks';
 import type {
   TripleStore,
@@ -33,7 +34,6 @@ import {
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
-  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
@@ -508,26 +508,15 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     }
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: DKGQuad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.replaceSubject',
-    });
-    // Blazegraph runs one UPDATE request (DELETE WHERE + INSERT DATA) as a single
-    // transaction, so the subject is replaced atomically. No staging/cleanup: a
-    // failed request commits nothing.
-    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris.replaceSubject(graphUri, subject, quads);
-    await this.sparqlUpdate(
-      update,
-      { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
-      'replaceSubject',
-    );
+  async replaceSubject(graph: string, subject: string, quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    return this.writeAtomicSubject(graph, subject, quads, options);
+  }
+  async replaceSubjectPredicates(graph: string, subject: string, predicates: readonly string[], quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    return this.writeAtomicSubject(graph, subject, quads, options, predicates);
+  }
+  private async writeAtomicSubject(graph: string, subject: string, quads: DKGQuad[], options?: QueryOptions, predicates?: readonly string[]): Promise<void> {
+    const { operation, update } = prepareRemoteAtomicSubjectWrite('blazegraph', graph, subject, quads, predicates);
+    await this.sparqlUpdate(update, { ...options, source: options?.source ?? `blazegraph.${operation}` }, operation);
   }
 
   async rfc64AuthorCommitCasV1(

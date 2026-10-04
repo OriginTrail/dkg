@@ -1,3 +1,7 @@
+import { forwardAtomicSubjectMutation } from './atomic-subject-forwarding.js';
+import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
+import type { ChangelogStoreOptions } from './changelog-store-options.js';
+export type { ChangelogStoreOptions } from './changelog-store-options.js';
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
@@ -202,25 +206,6 @@ export interface ChangelogEraGuard {
   save(era: string, highSeq: number): Promise<void>;
 }
 
-export interface ChangelogStoreOptions {
-  enabled?: boolean;
-  /**
-   * Extra reserved graphs (besides {@link CHANGELOG_GRAPH}) to hide from
-   * `listGraphs()` and never emit markers for — e.g. a future in-store catalog
-   * graph. The changelog graph is always reserved.
-   */
-  reservedGraphs?: readonly string[];
-  /** Observability hook fired after each marker is durably appended. */
-  onAppend?: (record: ChangeRecord) => void;
-  /**
-   * Optional restore-detection guard. When provided, a seq rollback under the
-   * same era rotates the era on seed (forcing peers to full-resync instead of
-   * silently skipping). When absent, no restore detection runs — the historical
-   * behavior — which is why enabling the changelog fleet-wide REQUIRES a durable
-   * guard (OT-RFC-59 §6 P0).
-   */
-  eraGuard?: ChangelogEraGuard;
-}
 
 /**
  * Write-path append-only change log. See the class-level docstring for the
@@ -233,6 +218,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
+  readonly commitment?: TripleStoreCommitCapability;
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
@@ -259,6 +245,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.commitment = composeTripleStoreCommitment(inner, () => this.drain());
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
@@ -448,27 +435,22 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     });
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'ChangelogStore');
-    }
-    if (!this.enabled) return this.inner.replaceSubject(graphUri, subject, quads, options);
-    // Structural guard on the TARGET graph only — NOT a scan of the serialized
-    // update string. Every quad targets `graphUri` (the atomic builder enforces
-    // it), so a job term that merely REFERENCES a reserved IRI as a subject/
-    // predicate/object is accepted, matching the insert() path (#1863 regression
-    // the raw-update path reintroduced via assertNoReservedRef).
-    this.assertNotReserved(graphUri, 'replaceSubject');
-    await this.runAtomicMutation({
-      operation: 'replaceSubject',
-      touchedGraphs: [graphUri],
-      options,
-      execute: () => this.inner.replaceSubject!(graphUri, subject, quads, options),
+  async replaceSubject(graph: string, subject: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runSubjectMutation(graph, subject, undefined, quads, options);
+  }
+  async replaceSubjectPredicates(graph: string, subject: string, predicates: readonly string[], quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.runSubjectMutation(graph, subject, predicates, quads, options);
+  }
+  private runSubjectMutation(graph: string, subject: string, predicates: readonly string[] | undefined, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return forwardAtomicSubjectMutation(this.inner, 'ChangelogStore', graph, subject, predicates, quads, options, (operation, execute) => {
+      if (!this.enabled) return execute();
+      // Structural guard on the TARGET graph only — NOT a scan of the serialized
+      // update string. Every quad targets the graph (the atomic builder enforces
+      // it), so a job term that merely REFERENCES a reserved IRI as a subject/
+      // predicate/object is accepted, matching the insert() path (#1863 regression
+      // the raw-update path reintroduced via assertNoReservedRef).
+      this.assertNotReserved(graph, operation);
+      return this.runAtomicMutation({ operation, touchedGraphs: [graph], options, execute });
     });
   }
 
@@ -505,14 +487,22 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    if (typeof this.inner.update !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('update', 'ChangelogStore');
+    return this.runUpdate(sparql, options, 'update');
+  }
+
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    return this.runUpdate(sparql, options, 'atomicUpdate');
+  }
+
+  private async runUpdate(sparql: string, options: UpdateOptions | undefined, capability: 'update' | 'atomicUpdate'): Promise<void> {
+    if (typeof this.inner[capability] !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(capability, 'ChangelogStore');
     }
-    if (!this.enabled) return this.inner.update(sparql, options);
+    if (!this.enabled) return this.inner[capability]!(sparql, options);
     // Reject BEFORE the mutation runs so it never touches the reserved plane.
     this.assertNoReservedRef(sparql, 'update');
     await this.runExclusive(async () => {
-      await this.inner.update!(sparql, options);
+      await this.inner[capability]!(sparql, options);
       const hinted = (options?.touchedGraphs ?? []).filter((g) => !this.isReservedGraph(g));
       if (hinted.length > 0) {
         // Strip the update-only touchedGraphs hint before the read-path hasGraph

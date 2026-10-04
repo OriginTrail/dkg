@@ -396,6 +396,7 @@ export {
   UnsafeSparqlValueError,
 } from './sparql-safe.js';
 export {
+  assertSparqlTerm,
   formatIriPrefix,
   formatSparqlTerm,
   SparqlTermValidationError,

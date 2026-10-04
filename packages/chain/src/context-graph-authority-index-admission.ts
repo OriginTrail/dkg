@@ -6,7 +6,8 @@ import {
   type ContextGraphAuthorityIndexScopedRepository,
   type ContextGraphAuthorityIndexRepositoryRecord,
 } from './context-graph-authority-index-repository.js';
-import { ContextGraphAuthorityIndexRetryableError } from
+import { setTimeout as sleep } from 'node:timers/promises';
+import { ContextGraphAuthorityIndexRetryableError, isContextGraphAuthorityIndexRetryableError } from
   './context-graph-authority-index-errors.js';
 
 const MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS = 3;
@@ -105,5 +106,25 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
     if (recovery.kind === 'invalidated') return recovery.record;
     lostInvalidations += 1;
     record = recovery.record;
+  }
+}
+
+/** Refresh an ethers-cached tip once before classifying cursor skew as endpoint failure. */
+export async function retryCachedAuthorityIndexHeadV1<T>(
+  read: () => Promise<T>,
+  lifecycleSignal: AbortSignal,
+  callerSignal?: AbortSignal,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (!isContextGraphAuthorityIndexRetryableError(error)
+      || error.reason !== 'cursor-ahead') throw error;
+    // Rapid writes can advance the durable cursor while `getBlock('latest')`
+    // still returns a recently cached block from this very endpoint. A
+    // persistent lag remains retryable and takes the usual endpoint failover.
+    await sleep(300, undefined, { signal: lifecycleSignal });
+    callerSignal?.throwIfAborted();
+    return read();
   }
 }

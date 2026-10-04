@@ -1,3 +1,4 @@
+import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -21,6 +22,7 @@
  *   updateEndpoint: same URL
  */
 
+import { prepareRemoteAtomicSubjectWrite } from './remote-atomic-subject-write.js';
 import type {
   TripleStore,
   BoundedQueryResponseCapability,
@@ -33,6 +35,8 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
+import { certifiedWriteAcknowledgement, resolveConsistencyProfile, type SparqlHttpConsistencyProfile, type SparqlHttpPersistenceOptions } from './sparql-http-consistency.js';
+export type { SparqlHttpConsistencyProfile } from './sparql-http-consistency.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import {
   externalStorePriorityScheduler,
@@ -47,7 +51,6 @@ import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-que
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
-  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
@@ -320,12 +323,7 @@ function snapshotManagedRecoveryCapability(
   });
 }
 
-export type SparqlHttpConsistencyProfile =
-  | 'best-effort'
-  | 'atomic-update'
-  | 'atomic-readback';
-
-export interface SparqlHttpStoreOptions {
+export interface SparqlHttpStoreOptions extends SparqlHttpPersistenceOptions {
   /** SPARQL query endpoint URL (required). */
   queryEndpoint: string;
   /** SPARQL update endpoint URL. Defaults to queryEndpoint if omitted (for stores that use one URL). */
@@ -356,6 +354,8 @@ export interface SparqlHttpStoreOptions {
    * present; incomplete runtime configurations are treated as unavailable.
    */
   managedRecovery?: SparqlHttpManagedRecoveryV1;
+  /** Runtime-only post-acknowledgement barrier for the daemon-owned local store. */
+  managedPersistence?: (options?: QueryOptions) => Promise<void>;
   /**
    * Certified endpoint guarantees. `atomic-update` means a whole
    * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
@@ -402,6 +402,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   readonly rfc64SemanticReadCertifiedV1: true | false;
 
   private readonly queryEndpoint: string;
+  readonly commitment?: TripleStoreCommitCapability;
+  readonly flush?: (options?: QueryOptions) => Promise<void>;
   private readonly updateEndpoint: string;
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
@@ -434,12 +436,17 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       throw new Error('sparql-http adapter requires options.queryEndpoint');
     }
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
+    const writesDurableOnAcknowledgement = certifiedWriteAcknowledgement(options);
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? DEFAULT_SPARQL_HTTP_TIMEOUT_MS;
     this.managedByDkg = options.managedByDkg === true;
     this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
       constructionAuthority,
     );
+    this.flush = this.managedOxigraph && typeof options.managedPersistence === 'function'
+      ? options.managedPersistence : undefined;
+    this.commitment = this.flush || writesDurableOnAcknowledgement
+      ? certifiedTripleStoreCommitment('restart-durable', options => this.flush?.(options) ?? Promise.resolve()) : undefined;
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
@@ -919,6 +926,13 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
    * (oxigraph-server) executes graph-to-graph `INSERT…WHERE` copies internally,
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    if (!this.supportsConsistency('atomic-update')) {
+      throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'SparqlHttpStore');
+    }
+    await this.update(sparql, options);
+  }
+
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     await this.runRemoteGraphMutation({
       // `touchedGraphs` hints only membership changes, not every graph whose
@@ -1011,30 +1025,22 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     });
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: DKGQuad[],
-    options?: QueryOptions,
-  ): Promise<void> {
+  async replaceSubject(graph: string, subject: string, quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    return this.writeAtomicSubject(graph, subject, quads, options);
+  }
+  async replaceSubjectPredicates(graph: string, subject: string, predicates: readonly string[], quads: DKGQuad[], options?: QueryOptions): Promise<void> {
+    return this.writeAtomicSubject(graph, subject, quads, options, predicates);
+  }
+  private async writeAtomicSubject(graph: string, subject: string, quads: DKGQuad[], options?: QueryOptions, predicates?: readonly string[]): Promise<void> {
     if (!this.supportsConsistency('atomic-update')) {
       // A generic endpoint may apply DELETE WHERE; INSERT DATA as separate
       // operations, re-exposing the transient-empty subject. Fail closed before
-      // any request so callers take their non-atomic delete-then-insert fallback.
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
+      // any request so callers retain recovery evidence without a fallback.
+      throw new UnsupportedTripleStoreCapabilityError(predicates === undefined ? 'replaceSubject' : 'replaceSubjectPredicates', 'SparqlHttpStore');
     }
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceSubject',
-    });
-    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris.replaceSubject(graphUri, subject, quads);
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [graphUri] },
-      update,
-      options: { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
-      operation: 'replaceSubject',
-    });
+    const { operation, update } = prepareRemoteAtomicSubjectWrite('sparql-http', graph, subject, quads, predicates);
+    await this.runRemoteGraphMutation({ scope: { kind: 'graphs', graphs: [graph] }, update,
+      options: { ...options, source: options?.source ?? `sparql-http.${operation}` }, operation });
   }
 
   async rfc64AuthorCommitCasV1(
@@ -1456,38 +1462,6 @@ export function createManagedOxigraphSparqlStoreV1(
     config.options as unknown as SparqlHttpStoreOptions,
     getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
-}
-
-function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {
-  if (value === undefined) return 'best-effort';
-  if (value === 'best-effort' || value === 'atomic-update' || value === 'atomic-readback') {
-    return value;
-  }
-  throw new Error(
-    'sparql-http consistencyProfile must be best-effort, atomic-update, or atomic-readback',
-  );
-}
-
-function resolveConsistencyProfile(
-  options: Pick<SparqlHttpStoreOptions, 'consistencyProfile' | 'atomicUpdates'>,
-): SparqlHttpConsistencyProfile {
-  const profile = normalizeConsistencyProfile(options.consistencyProfile);
-  if (options.atomicUpdates === undefined) return profile;
-
-  const legacyProfile: SparqlHttpConsistencyProfile = options.atomicUpdates
-    ? 'atomic-update'
-    : 'best-effort';
-  if (options.consistencyProfile === undefined) return legacyProfile;
-
-  const compatible = options.atomicUpdates
-    ? profile === 'atomic-update' || profile === 'atomic-readback'
-    : profile === 'best-effort';
-  if (!compatible) {
-    throw new Error(
-      'sparql-http atomicUpdates conflicts with consistencyProfile; remove the deprecated alias',
-    );
-  }
-  return profile;
 }
 
 function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {

@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+import type { RequestContext } from './context.js';
+import { isConfirmedNamedKaVmLifecycleRecoveryError, type ConfirmedNamedKaVmPublicationView } from '@origintrail-official/dkg-agent';
+import { storageAckPeerIdsFromPublishResult } from './storage-ack-peers.js';
+const hex = (bytes: Uint8Array): string => '0x' + Buffer.from(bytes).toString('hex');
+
+export type FinalizedPublishResult = Awaited<
+  ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
+> & {
+  /** Backward-compatible response aliases still accepted by the HTTP route. */
+  authorAddress?: string;
+  kas?: unknown[];
+};
+
+/** The same sealed-to-minted projection is used after normal completion and failed local admission. */
+export function vmPublishResponseBody(pub: FinalizedPublishResult | ConfirmedNamedKaVmPublicationView, reason?: string): Record<string, unknown> {
+  const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
+  return {
+    kaId: pub?.kaId,
+    status: pub?.status,
+    ...(pub?.lifecycleRepairPending ? { lifecycleRepairPending: true } : {}),
+    ual: pub?.ual,
+    txHash: pub?.onChainResult?.txHash,
+    ...(pub?.assertionUri !== undefined ? { assertionUri: pub.assertionUri } : {}),
+    ...(pub?.seal?.authorAddress ?? pub?.authorAddress ? { authorAddress: pub?.seal?.authorAddress ?? pub?.authorAddress } : {}),
+    ...(pub?.merkleRoot !== undefined
+      ? { merkleRoot: typeof pub.merkleRoot === "string" ? pub.merkleRoot : hex(pub.merkleRoot) }
+      : {}),
+    ...(Array.isArray(pub?.kas) ? { kas: pub.kas } : {}),
+    ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
+    ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
+    ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
+    ...(storageAckPeerIds.length > 0 ? { storageAckPeerIds } : {}),
+    ...(reason ? { error: reason } : {}),
+  };
+}
+
+/** Confirmation survives unfinished local completion; publication must never be retried. */
+export function confirmedVmRecoveryRequiredResponse(error: unknown): Record<string, unknown> | undefined {
+  if (!isConfirmedNamedKaVmLifecycleRecoveryError(error)) return undefined;
+  return {
+    ...vmPublishResponseBody(error.confirmedPublication),
+    onChainResult: error.confirmedPublication.onChainResult,
+    code: error.code,
+    error: error.repairAdmission === 'unadmitted'
+      ? 'Publication confirmed, but local lifecycle recovery was not admitted. Restore local persistence and recover the confirmed publication.'
+      : 'Publication confirmed, but local lifecycle completion remains unfinished. Recover the confirmed publication.',
+    lifecycleRecoveryRequired: true, lifecycleRepairAdmitted: error.repairAdmission !== 'unadmitted',
+    lifecycleRepairPending: error.repairAdmission === 'pending',
+    recovery: error.lifecycleRecovery,
+  };
+}

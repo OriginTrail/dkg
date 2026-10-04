@@ -22,6 +22,8 @@ import {
   StoreOperationTimeoutError,
   createTripleStore,
   tryReplaceSubjectAtomically,
+  tryReplaceSubjectPredicatesAtomically,
+  UnsupportedTripleStoreCapabilityError,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -45,6 +47,35 @@ async function changelogSnapshot(store: TripleStore): Promise<string> {
   if (result.type !== 'bindings') return '';
   return result.bindings.map((b) => `${b['s']} ${b['p']} ${b['o']}`).join('\n');
 }
+
+describe('predicate-scoped agent store facade', () => {
+  it('preserves a real predicate commit and invalidates its exact graph/subject', async () => {
+    const inner = new OxigraphStore(), invalidate = vi.fn(), dirty = vi.fn();
+    const store = createListContextGraphsCacheInvalidatingStore(inner, invalidate, dirty);
+    try {
+      await inner.insert([quad(JOB, 'urn:dkg:publisher:status', '"promoted"'), quad(JOB, 'urn:test:receipt', '"keep"')]);
+      const changed = [quad(JOB, 'urn:dkg:publisher:status', '"published"')];
+      expect(await tryReplaceSubjectPredicatesAtomically(store, GRAPH, JOB, ['urn:dkg:publisher:status'], changed)).toBe(true);
+      expect(invalidate).toHaveBeenCalledTimes(1); expect(dirty).toHaveBeenCalledWith(changed, GRAPH, JOB);
+      expect(await inner.query(`ASK { GRAPH <${GRAPH}> { <${JOB}> <urn:test:receipt> "keep" ; <urn:dkg:publisher:status> "published" } }`))
+        .toEqual({ type: 'boolean', value: true });
+    } finally { await inner.close(); }
+  });
+  it.each(['absent', 'refused', 'indeterminate'] as const)('preserves %s predicate-capability outcome', async outcome => {
+    const inner = new OxigraphStore(), invalidate = vi.fn(), dirty = vi.fn();
+    if (outcome === 'absent') Object.defineProperty(inner, 'replaceSubjectPredicates', { value: undefined });
+    else vi.spyOn(inner, 'replaceSubjectPredicates').mockRejectedValue(outcome === 'refused'
+      ? new UnsupportedTripleStoreCapabilityError('replaceSubjectPredicates', 'fixture') : new Error('response lost'));
+    const store = createListContextGraphsCacheInvalidatingStore(inner, invalidate, dirty);
+    try {
+      const work = tryReplaceSubjectPredicatesAtomically(store, GRAPH, JOB, ['urn:test:state'], [quad(JOB, 'urn:test:state', '"VM"')]);
+      if (outcome === 'indeterminate') await expect(work).rejects.toThrow('response lost');
+      else expect(await work).toBe(false);
+      expect(invalidate).toHaveBeenCalledTimes(outcome === 'indeterminate' ? 1 : 0);
+      expect(dirty).toHaveBeenCalledTimes(outcome === 'indeterminate' ? 1 : 0);
+    } finally { await inner.close(); }
+  });
+});
 
 describe('#1863 replaceSubject through the agent store wrapper', () => {
   const tempDirs: string[] = [];

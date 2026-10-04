@@ -9,9 +9,11 @@ import {
  */
 export type TripleStoreCapability =
   | 'update'
+  | 'atomicUpdate'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'replaceSubjectPredicates'
   | 'rfc64AuthorCommitCasV1';
 
 /**
@@ -27,14 +29,14 @@ export class UnsupportedTripleStoreCapabilityError extends Error implements Stor
   readonly storeOperationOutcomeTag = STORE_OPERATION_OUTCOME_TAG;
   readonly outcome = 'not_started' as const;
   readonly capability: TripleStoreCapability;
-  readonly storeOperation: TripleStoreCapability;
+  readonly storeOperation: Exclude<TripleStoreCapability, 'atomicUpdate'>;
   readonly storeName: string;
 
   constructor(capability: TripleStoreCapability, storeName: string) {
     super(`${storeName}: inner store does not support ${capability}()`);
     this.name = 'UnsupportedTripleStoreCapabilityError';
     this.capability = capability;
-    this.storeOperation = capability;
+    this.storeOperation = capability === 'atomicUpdate' ? 'update' : capability;
     this.storeName = storeName;
   }
 }

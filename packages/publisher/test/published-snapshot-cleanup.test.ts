@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, Logger, TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext,
-  generateEd25519Keypair, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+  generateEd25519Keypair, assertionLifecycleUri, contextGraphMetaUri, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { computePrivateRootV10 } from '../src/index.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '../src/workspace-snapshot-store.js';
 import { snapshotReferenceCheck } from '../src/workspace-snapshot-lifecycle.js';
@@ -675,7 +676,9 @@ describe('published snapshot cleanup: bounded by the version a publication confi
   /** The cleanup a publication runs once `finalizedVersion` is confirmed; without one, the call a lock-holding caller makes. */
   const confirm = (f: Fixture, finalizedVersion?: number) => f.publisher.clearPublishedKnowledgeAssetSwm(CG,
     { kind: 'named-lifecycle', identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) } },
-    undefined, createOperationContext('publish'), UAL, finalizedVersion);
+    undefined, createOperationContext('publish'), UAL, finalizedVersion, finalizedVersion === undefined ? undefined : {
+      publicQuadsDigest: workspacePublicQuadsDigest(makeQuads(finalizedVersion, `version-${finalizedVersion}`)), privateTripleCount: 0,
+    });
   /** Every row of the SWM meta graph, by subject. */
   const metaRows = async (f: Fixture) => {
     const result = await f.store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${META}> { ?s ?p ?o } }`);
@@ -685,6 +688,95 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     }
     return rows;
   };
+
+  it.each([false, true])('retains a same-version replacement and its marker when the earlier mint confirms (same content: %s)', async sameContent => {
+    const f = await fixture();
+    const NAME = 'same-version-mint';
+    const firstPayload = [{ subject: 'urn:note:first', predicate: 'http://schema.org/value', object: '"first"', graph: '' }];
+    await f.publisher.assertionCreate(CG, NAME, AUTHOR);
+    await f.publisher.assertionWrite(CG, NAME, AUTHOR, firstPayload);
+    const first = await finalizeRootlessAssertionForTest({ publisher: f.publisher, store: f.store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, assertionVersion: 1 });
+    const firstShare = await f.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: 'peer-publisher' });
+    await f.publisher.assertionPullFrom(CG, NAME, AUTHOR, 'swm');
+    if (!sameContent) await f.publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:note:replacement', predicate: 'http://schema.org/value', object: '"replacement"', graph: '' }]);
+    await finalizeRootlessAssertionForTest({ publisher: f.publisher, store: f.store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, assertionVersion: 1 });
+    const secondShare = await f.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: 'peer-publisher' });
+    const replacement = await f.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${first.sharedGraphUri}> { ?s ?p ?o } }`);
+    if (replacement.type !== 'quads') throw new Error('Expected replacement quads');
+    const replacementDigest = workspacePublicQuadsDigest(replacement.quads);
+    const before = await metaRows(f);
+    const asset = createGraphKnowledgeAssetScope(first.kaUal, 1);
+    await f.publisher.clearPublishedKnowledgeAssetSwm(CG,
+      { kind: 'named-lifecycle', identity: { agentAddress: asset.agentAddress, kaNumber: BigInt(asset.kaNumber) } },
+      undefined, createOperationContext('publish'), first.kaUal, 1,
+      { publicQuadsDigest: workspacePublicQuadsDigest(firstPayload), privateTripleCount: 0 }, firstShare.shareOperationId);
+    expect(await f.store.countQuads(first.sharedGraphUri)).toBe(sameContent ? 1 : 2);
+    expect(await metaRows(f)).toEqual(before);
+    await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, firstShare.shareOperationId);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    expect(secondShare.shareOperationId).not.toBe(firstShare.shareOperationId);
+    // B's own confirmation consumes its marker without consuming A's snapshot identity.
+    await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, secondShare.shareOperationId);
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+    f.advance();
+    expect(await f.snapshots.collectGarbage()).toMatchObject({ finalizedSnapshots: 0, deletedSnapshots: 0 });
+    await expect(stat(snapshotPath(f.directory, replacementDigest))).resolves.toBeDefined();
+  });
+
+  it('separates legacy publication consumption from unconditional marker invalidation', async () => {
+    const f = await fixture(), name = 'legacy-completion';
+    // A completed legacy share has no operation ID, but promotion still owns
+    // its SWM lifecycle layer. A marker without that proof is not consumable.
+    await f.store.insert([{ subject: assertionLifecycleUri(CG, AUTHOR, name), graph: contextGraphMetaUri(CG),
+      predicate: `${DKG}memoryLayer`, object: '"SWM"' }]);
+    await f.publisher.markSwmShareComplete(CG, name, AUTHOR);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(true);
+    await f.publisher.consumePublishedSwmShareComplete(CG, name, AUTHOR, null);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(false);
+    await f.publisher.markSwmShareComplete(CG, name, AUTHOR);
+    await f.store.insert([{ subject: assertionLifecycleUri(CG, AUTHOR, name), graph: contextGraphMetaUri(CG),
+      predicate: `${DKG}shareOperationId`, object: '"replacement-share"' }]);
+    await f.publisher.consumePublishedSwmShareComplete(CG, name, AUTHOR, null);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(true);
+    await f.publisher.clearSwmShareComplete(CG, name, AUTHOR);
+    expect(await f.publisher.hasSwmShareComplete(CG, name, AUTHOR)).toBe(false);
+  });
+
+  it('retains an equal-version head without evidence or with a different private count', async () => {
+    const f = await fixture();
+    const v1 = await share(f, 1);
+    const before = await metaRows(f);
+    await f.publisher.clearPublishedKnowledgeAssetSwm(CG,
+      { kind: 'named-lifecycle', identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) } },
+      undefined, createOperationContext('publish'), UAL, 1);
+    await f.publisher.clearPublishedKnowledgeAssetSwm(CG,
+      { kind: 'named-lifecycle', identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) } },
+      undefined, createOperationContext('publish'), UAL, 1,
+      { publicQuadsDigest: workspacePublicQuadsDigest(v1.quads), privateTripleCount: 1, privateMerkleRoot: '0x' + 'ab'.repeat(32) });
+    expect(await metaRows(f)).toEqual(before);
+    expect(await f.store.countQuads(SWM)).toBe(v1.quads.length);
+    await confirm(f, 1);
+    expect(await f.store.countQuads(SWM)).toBe(0);
+  });
+
+  it('compares private roots when version, public digest and private triple counts all match', async () => {
+    const f = await fixture();
+    const publicPayload = makeQuads(1, 'same-public');
+    const privateA = makeQuads(1, 'private-A'), privateB = makeQuads(1, 'private-B');
+    const rootA = computePrivateRootV10(privateA)!, rootB = computePrivateRootV10(privateB)!;
+    expect(rootA).not.toEqual(rootB);
+    await f.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({ contextGraphId: CG, kaUal: UAL, assertionVersion: 1,
+      shareOperationId: 'same-count-private-B', quads: publicPayload, privateMerkleRoot: rootB, privateTripleCount: 1, publisherPeerId: 'peer-publisher' });
+    const before = await metaRows(f), publicQuadsDigest = workspacePublicQuadsDigest(publicPayload);
+    const clear = (root: Uint8Array) => f.publisher.clearPublishedKnowledgeAssetSwm(CG,
+      { kind: 'named-lifecycle', identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) } },
+      undefined, createOperationContext('publish'), UAL, 1,
+      { publicQuadsDigest, privateTripleCount: 1, privateMerkleRoot: `0x${Buffer.from(root).toString('hex')}` });
+    await clear(rootA);
+    expect(await metaRows(f)).toEqual(before); expect(await f.store.countQuads(SWM)).toBe(publicPayload.length);
+    await clear(rootB);
+    expect((await metaRows(f)).has(HEAD)).toBe(false); expect(await f.store.countQuads(SWM)).toBe(0);
+  });
 
   it('leaves version 3, its StorageACK copy and its snapshot in place when version 2 confirms after version 3 was shared', async () => {
     const f = await fixture();
@@ -783,7 +875,12 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     const promoted = createGraphKnowledgeAssetScope(kaUal, 1);
     const confirmPromoted = (finalizedVersion: number) => f.publisher.clearPublishedKnowledgeAssetSwm(CG,
       { kind: 'named-lifecycle', identity: { agentAddress: promoted.agentAddress, kaNumber: BigInt(promoted.kaNumber) } },
-      undefined, createOperationContext('publish'), kaUal, finalizedVersion);
+      undefined, createOperationContext('publish'), kaUal, finalizedVersion, {
+        publicQuadsDigest: workspacePublicQuadsDigest([
+          { subject: 'urn:note:two', predicate: 'http://schema.org/value', object: '"two"', graph: '' },
+          ...(finalizedVersion === 3 ? [{ subject: 'urn:note:three', predicate: 'http://schema.org/value', object: '"three"', graph: '' }] : []),
+        ]), privateTripleCount: 0,
+      });
     await confirmPromoted(2);
     expect(await f.store.countQuads(sharedGraphUri)).toBe(2);
     expect((await metaRows(f)).get(`${kaUal}#dkg-swm-head`)).toEqual(expect.arrayContaining([`${DKG}assertionVersion ${version(3)}`]));

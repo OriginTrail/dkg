@@ -11,6 +11,10 @@
  * the external public API is unchanged.
  */
 
+
+import { rpcReadDescriptor } from './rpc-read-descriptor.js';
+import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
+export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
@@ -36,10 +40,11 @@ import type {
   BrowserWalletRpcMethod,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
+import { waitForSignal } from './wait-for-signal.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
@@ -63,10 +68,9 @@ import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
-import {
+import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
-  rpcReadDescriptor,
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
@@ -346,40 +350,6 @@ const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
 export type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
-
-/**
- * B8 — decode the `CostCovered` event from a publish receipt's logs via the
- * PublishingConviction LOGIC ABI (the event is emitted by the logic contract, a
- * different address than KA storage, so the KA-storage receipt loop skips it).
- * Returns the discount detail (cost fields bigint → decimal strings via the
- * daemon's JSON replacer; `epoch` a number) when a publish drew on a Publishing
- * Conviction Account, else `undefined`. `coverPublishingCost` runs once per
- * publish tx, so a (batch) publish emits ONE CostCovered covering the batch's
- * total draw — this returns that single event (the "discount applied" badge is
- * tx-level; a precise per-KA breakdown would be a future enhancement). Exported
- * for unit testing.
- */
-export function decodeConvictionCostCovered(
-  logs: ReadonlyArray<{ topics: ReadonlyArray<string>; data: string }>,
-): OnChainPublishResult['convictionCostCovered'] {
-  const pcaLogic = getPcaLogicInterface();
-  for (const log of logs) {
-    try {
-      const parsed = pcaLogic.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === 'CostCovered') {
-        return {
-          accountId: BigInt(parsed.args.accountId),
-          epoch: Number(parsed.args.epoch),
-          baseCost: BigInt(parsed.args.baseCost),
-          discountedCost: BigInt(parsed.args.discountedCost),
-          drawnFromEpoch: BigInt(parsed.args.drawnFromEpoch),
-          drawnFromTopUp: BigInt(parsed.args.drawnFromTopUp),
-        };
-      }
-    } catch { /* not a PublishingConviction event */ }
-  }
-  return undefined;
-}
 
 function normalizeScanPageSize(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 1
@@ -3984,7 +3954,8 @@ export class EVMChainAdapterBase {
     );
   }
 
-  async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
+  async getKnowledgeAssetsLifecycleAddress(options: ChainReadOptions = {}): Promise<string> {
+    options.signal?.throwIfAborted();
     // PR3 / RC11: TTL-cached. KAV10 address only changes on a contract
     // redeploy + Hub-rotation event; 1h staleness is harmless and the
     // ACK digest mismatch the contract would surface on actually-stale
@@ -3993,11 +3964,11 @@ export class EVMChainAdapterBase {
     if (EVMChainAdapterBase.preflightCacheFresh(this.cachedKav10Address, now)) {
       return this.cachedKav10Address!.value;
     }
-    await this.init();
+    await waitForSignal(this.init(), options.signal);
     if (!this.contracts.knowledgeAssetsLifecycle) {
       throw new Error('KnowledgeAssetsLifecycle / KnowledgeAssetsLifecycle contract not deployed on this chain.');
     }
-    const addr = await this.contracts.knowledgeAssetsLifecycle.getAddress();
+    const addr = await waitForSignal(this.contracts.knowledgeAssetsLifecycle.getAddress(), options.signal);
     this.cachedKav10Address = { value: addr, cachedAt: now };
     return addr;
   }
@@ -4010,7 +3981,8 @@ export class EVMChainAdapterBase {
     return this.finalityConfirmations;
   }
 
-  async getEvmChainId(): Promise<bigint> {
+  async getEvmChainId(options: ChainReadOptions = {}): Promise<bigint> {
+    options.signal?.throwIfAborted();
     // PR3 / RC11: TTL-cached so an `eth_chainId` rate-limit on the
     // public RPC (the dzudza failure mode) cannot kill steady-state
     // publish traffic. Chain id is structurally immutable for a given
@@ -4021,11 +3993,12 @@ export class EVMChainAdapterBase {
       return this.cachedChainId!.value;
     }
     const chainId = this.configuredStaticChainId == null
-      ? (await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId
-      : await this.rpcFailover.read(
+      ? (await waitForSignal(this.readProvider('getNetwork (chainId)', (p) => p.getNetwork(), options), options.signal)).chainId
+      : await waitForSignal(this.rpcFailover.read(
           createRpcReadDescriptor('validate configured chainId'),
           (p) => this.ensureConfiguredStaticChainIdValidated(p),
-        );
+          options,
+        ), options.signal);
     this.cachedChainId = { value: chainId, cachedAt: now };
     return chainId;
   }

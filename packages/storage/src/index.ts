@@ -1,3 +1,4 @@
+export { persistFileAndParent, persistDirectoryRange, type DirectorySyncPolicy } from './file-durability.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
@@ -39,6 +40,7 @@ export {
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   tryReplaceSubjectAtomically,
+  tryReplaceSubjectPredicatesAtomically,
   tryRfc64AuthorCommitCasV1,
   isExternalBackend,
   getSparqlEndpoint,
@@ -47,13 +49,17 @@ export {
 export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   assertSubjectReplacementPayload,
+  assertSubjectPredicatesReplacementPayload,
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
+  buildAtomicSubjectPredicatesReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+export type { TripleStorePersistenceBarrier, TripleStoreCommitDurability, TripleStoreCommitCapability } from './persistence.js';
+export { composeTripleStoreCommitment } from './persistence.js';
 /**
  * Stable caller contract for one bounded RFC-64 author commit. Compilation,
  * receipt execution, normalization, and decorator mapping stay module-internal.

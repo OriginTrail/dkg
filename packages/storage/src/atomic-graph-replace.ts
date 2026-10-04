@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { assertSafeIri, formatSparqlTerm } from '@origintrail-official/dkg-core';
+import { assertSafeIri, assertSparqlTerm, formatSparqlTerm } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
@@ -150,6 +150,38 @@ export function buildAtomicSubjectReplaceUpdate(
   const del = `DELETE WHERE { GRAPH <${target}> { <${safeSubject}> ?p ?o } }`;
   if (insertQuads.length === 0) return del;
   return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;
+}
+
+/** One certified DELETE/INSERT operation replaces selected predicates without reading history. */
+export function buildAtomicSubjectPredicatesReplaceUpdate(
+  graphUri: string, subject: string, predicates: readonly string[], quads: readonly Quad[],
+): string {
+  assertSubjectPredicatesReplacementPayload(graphUri, subject, predicates, quads);
+  const inserted = quads.length ? `INSERT { ${formatGraphBlock(graphUri, quads)} }` : '';
+  return `DELETE { GRAPH <${graphUri}> { <${subject}> ?predicate ?old } }
+    ${inserted}
+    WHERE { OPTIONAL { GRAPH <${graphUri}> {
+      <${subject}> ?predicate ?old FILTER (?predicate IN (${predicates.map(predicate => `<${predicate}>`).join(', ')}))
+    } } }`;
+}
+
+/** Validate predicate scope and every object term before dispatch or blob creation. */
+export function assertSubjectPredicatesReplacementPayload(
+  graphUri: string, subject: string, predicates: readonly string[], quads: readonly Quad[],
+): void {
+  assertSafeIri(graphUri); assertSafeIri(subject);
+  assertSubjectReplacementPayload(graphUri, subject, quads);
+  if (predicates.length === 0 || predicates.length > 32) {
+    throw new Error('Atomic predicate replacement requires between 1 and 32 predicates');
+  }
+  const selected = predicates.map(predicate => {
+    if (predicate.startsWith('_:')) throw new Error('Atomic predicate replacement requires IRI predicates');
+    return assertSafeIri(predicate);
+  });
+  if (new Set(selected).size !== selected.length) throw new Error('Atomic predicate replacement has duplicate predicates');
+  const allowed = new Set(selected);
+  if (quads.some(quad => !allowed.has(quad.predicate))) throw new Error('Atomic predicate replacement payload escapes selected predicates');
+  for (const quad of quads) assertSparqlTerm(quad.object, { position: 'object' });
 }
 
 export function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {

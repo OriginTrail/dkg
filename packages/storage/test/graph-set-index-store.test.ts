@@ -224,6 +224,9 @@ describe('GraphSetIndexStore', () => {
           ['replaceSubject', () => store.replaceSubject(
             'urn:graph', 'urn:subject', [q('urn:graph', 'urn:subject')],
           )],
+          ['replaceSubjectPredicates', () => store.replaceSubjectPredicates(
+            'urn:graph', 'urn:subject', ['urn:p'], [q('urn:graph', 'urn:subject')],
+          )],
         ] as const) {
           await expect(work()).rejects.toMatchObject({
             code: 'STORE_SCHEDULER_BUSY',
