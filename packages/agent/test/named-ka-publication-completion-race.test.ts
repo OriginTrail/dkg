@@ -70,6 +70,58 @@ async function modelLegacyPublicationOwner(f: Awaited<ReturnType<typeof fixture>
 }
 
 describe('agent publication completion marker fencing', () => {
+  it.each(['synchronous', 'queued'].flatMap(lane => ['absent', 'refused'].map(capability => ({ lane, capability }))))(
+    'refuses $lane submission when atomic lifecycle completion is $capability', async ({ lane, capability }) => {
+      const f = await fixture(), request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+      const submit = vi.spyOn(f.publisher, 'publish').mockResolvedValue(f.result);
+      if (capability === 'absent') Object.defineProperty(f.store, 'replaceSubjectPredicates', { value: undefined });
+      else vi.spyOn(f.store, 'replaceSubjectPredicates').mockRejectedValue(new UnsupportedTripleStoreCapabilityError('replaceSubjectPredicates', 'fixture'));
+      const publishing = lane === 'synchronous'
+        ? f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR })
+        : f.agent.publishQueuedKnowledgeAssetVmPublish(request, { contextGraphId: CG, quads: [] });
+      await expect(publishing).rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
+      expect(submit).not.toHaveBeenCalled();
+      expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+      expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'SWM', state: 'promoted' });
+    });
+
+  it('retains the actual inline queued confirmation until interrupted lifecycle completion is repaired', async () => {
+    const f = await fixture(), request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    const txHash = f.result.onChainResult.txHash as `0x${string}`, packed = f.result.kaId.toString() as `${bigint}`;
+    const recovery = { inclusion: { txHash, blockNumber: 1, blockHash: `0x${'cd'.repeat(32)}` as `0x${string}` },
+      finalization: { mode: 'published' as const, txHash, ual: f.result.ual, batchId: packed, startKAId: packed, endKAId: packed, publisherAddress: AUTHOR },
+      publishProof: { merkleRoot: request.sealMerkleRoot, authorAddress: AUTHOR, txIndex: 0 } };
+    const submit = vi.spyOn(f.publisher, 'publish').mockImplementation(async options => {
+      await options.onBeforeBroadcast?.({ txHash, nonce: 0 }); return f.result;
+    });
+    const replace = f.store.replaceSubjectPredicates.bind(f.store); let failCompletion = true;
+    vi.spyOn(f.store, 'replaceSubjectPredicates').mockImplementation(async (graph, subject, predicates, quads, options) => {
+      if (failCompletion && quads.some(q => q.predicate === `${DKG}memoryLayer` && q.object === '"VM"')) throw new Error('interrupted confirmed completion');
+      return replace(graph, subject, predicates, quads, options);
+    });
+    const queue = new TripleStoreAsyncLiftPublisher(f.store, {
+      knowledgeAssetVmPublishRecoveryResolver: async () => recovery,
+      knowledgeAssetVmPublishHandler: {
+        execute: ({ request, publishOptions }) => f.agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+        finalizeRecovered: async () => {
+          await f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.result.ual, f.result.kaId);
+          await f.publisher.consumePublishedSwmShareComplete(CG, NAME, AUTHOR, request.shareOperationId);
+        },
+      },
+    });
+    const jobId = await queue.enqueueKnowledgeAssetVmPublish(request);
+    expect(await queue.processNext('wallet')).toMatchObject({ status: 'broadcast', broadcast: { txHash } });
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
+    expect(await queue.recover()).toBe(0);
+    expect(await queue.getStatus(jobId)).toMatchObject({ status: 'broadcast', broadcast: { txHash } });
+    failCompletion = false;
+    expect(await queue.recover()).toBe(1);
+    expect(await queue.getStatus(jobId)).toMatchObject({ status: 'finalized', jobId });
+    expect(await f.agent.assertion.history(CG, NAME)).toMatchObject({ memoryLayer: 'VM', state: 'published' });
+    expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(false);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
   it('completes a KA with 129 legitimate revision links without dropping its history', async () => {
     const f = await fixture(), graph = contextGraphMetaUri(CG), subject = assertionLifecycleUri(CG, AUTHOR, NAME);
     const request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
