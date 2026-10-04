@@ -12,7 +12,6 @@ import {
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
-import { prepareReadAuthorityFactsSnapshot } from './internal/context-graph-authority/context-graph-authority-facts-fence.js';
 
 export interface ContextGraphSubGraphMeta {
   uri: string;
@@ -267,11 +266,24 @@ export class ContextGraphMetaProjection {
     return present;
   }
 
+  /**
+   * Capture an owned request-local absence snapshot. Consumers never compare
+   * revision counters themselves; they ask this projection whether its proof
+   * is still current at the exact point where absence would be used.
+   */
   async prepareReadAuthorityFactsSnapshot(
     contextGraphIds: readonly string[],
     options: QueryOptions = {},
   ): Promise<ContextGraphReadAuthorityFactsSnapshot> {
-    return prepareReadAuthorityFactsSnapshot(this, contextGraphIds, options);
+    const revision = this.readAuthorityFactsRevision;
+    const present = new Set(
+      await this.findContextGraphIdsWithReadAuthorityFacts(contextGraphIds, options),
+    );
+    options.signal?.throwIfAborted();
+    return Object.freeze({
+      assertCurrent: () => this.readAuthorityFactsRevision === revision,
+      isAbsent: (contextGraphId: string) => !present.has(contextGraphId),
+    });
   }
 
   async get(contextGraphId: string, options: QueryOptions = {}): Promise<ContextGraphMetaRecord> {
@@ -410,24 +422,29 @@ export class ContextGraphMetaProjection {
       }
     }
 
-    for (const id of await this.listRootMetaDeclaredContextGraphIds(options)) {
+    for (const id of await this.listStoredDeclaredContextGraphIds('meta', options)) {
       ids.add(id);
     }
 
     // OT-RFC-49 §5.9: surface CGs known only through their public `_catalog`
     // entry (e.g. discovered from a peer with no local `_meta`).
-    for (const id of await this.listCatalogDeclaredContextGraphIds(options)) {
+    for (const id of await this.listStoredDeclaredContextGraphIds('catalog', options)) {
       ids.add(id);
     }
 
     return [...ids].sort();
   }
 
-  private async listRootMetaDeclaredContextGraphIds(options: QueryOptions): Promise<string[]> {
+  /** Both local declaration sources share exact subject/graph matching and batching. */
+  private async listStoredDeclaredContextGraphIds(
+    source: 'meta' | 'catalog', options: QueryOptions,
+  ): Promise<string[]> {
+    const idFromGraph = source === 'meta' ? contextGraphIdFromMetaGraphUri : contextGraphIdFromCatalogGraphUri;
+    const declarationType = source === 'meta' ? DKG_ONTOLOGY.DKG_CONTEXT_GRAPH : DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH;
     const graphUris = (await this.listGraphsByPrefix(CONTEXT_GRAPH_PREFIX, options))
       .filter((graphUri) => {
-        const id = contextGraphIdFromMetaGraphUri(graphUri);
-        return id !== null && isRootContextGraphId(id);
+        const id = idFromGraph(graphUri);
+        return id !== null && (source === 'catalog' || isRootContextGraphId(id));
       });
     if (graphUris.length === 0) return [];
 
@@ -438,9 +455,9 @@ export class ContextGraphMetaProjection {
         SELECT DISTINCT ?ctxGraph WHERE {
           VALUES ?g { ${chunk.map((graphUri) => `<${graphUri}>`).join(' ')} }
           GRAPH ?g {
-            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${declarationType}> .
             FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_PREFIX}"))
-            FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
+            FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_${source}"))
           }
         }
       `, options);
@@ -448,35 +465,7 @@ export class ContextGraphMetaProjection {
       for (const row of result.bindings) {
         const uri = typeof row['ctxGraph'] === 'string' ? stripTerm(row['ctxGraph']) : '';
         const id = contextGraphIdFromContextGraphUri(uri);
-        if (id && isRootContextGraphId(id)) ids.add(id);
-      }
-    }
-    return [...ids].sort();
-  }
-
-  private async listCatalogDeclaredContextGraphIds(options: QueryOptions): Promise<string[]> {
-    const graphUris = (await this.listGraphsByPrefix(CONTEXT_GRAPH_PREFIX, options))
-      .filter((graphUri) => contextGraphIdFromCatalogGraphUri(graphUri) !== null);
-    if (graphUris.length === 0) return [];
-
-    const ids = new Set<string>();
-    for (const chunk of chunks(graphUris, 128)) {
-      for (const graphUri of chunk) assertSafeIri(graphUri);
-      const result = await this.store.query(`
-        SELECT DISTINCT ?ctxGraph WHERE {
-          VALUES ?g { ${chunk.map((graphUri) => `<${graphUri}>`).join(' ')} }
-          GRAPH ?g {
-            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH}> .
-            FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_PREFIX}"))
-            FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_catalog"))
-          }
-        }
-      `, options);
-      if (result.type !== 'bindings') continue;
-      for (const row of result.bindings) {
-        const uri = typeof row['ctxGraph'] === 'string' ? stripTerm(row['ctxGraph']) : '';
-        const id = contextGraphIdFromContextGraphUri(uri);
-        if (id) ids.add(id);
+        if (id && (source === 'catalog' || isRootContextGraphId(id))) ids.add(id);
       }
     }
     return [...ids].sort();

@@ -6,6 +6,31 @@ import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection
 import { DKGAgent } from '../src/dkg-agent.js';
 
 describe('ContextGraphMetaProjection', () => {
+  it('keeps source-specific declaration types and exact subject ownership in stored discovery', async () => {
+    const store = new OxigraphStore();
+    try {
+      const projection = new ContextGraphMetaProjection(store);
+      const root = '0x0000000000000000000000000000000000000abc/discovery-root';
+      const declaration = (id: string, source: 'meta' | 'catalog', type: string, subject = id): Quad => ({
+        subject: contextGraphDataUri(subject), predicate: DKG_ONTOLOGY.RDF_TYPE, object: type,
+        graph: source === 'meta' ? contextGraphMetaGraphUri(id) : contextGraphCatalogUri(id),
+      });
+      await store.insert([
+        declaration(root, 'meta', DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+        declaration(`${root}/child`, 'meta', DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+        declaration('catalog-only', 'catalog', DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH),
+        declaration(`${root}/catalog-child`, 'catalog', DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH),
+        declaration('meta-wrong-type', 'meta', DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH),
+        declaration('catalog-wrong-type', 'catalog', DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+        declaration('meta-owner', 'meta', DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, 'foreign-meta-subject'),
+        declaration('catalog-owner', 'catalog', DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH, 'foreign-catalog-subject'),
+      ]);
+      await expect(projection.listDeclaredContextGraphIds()).resolves.toEqual([
+        root, 'catalog-only', `${root}/catalog-child`,
+      ].sort());
+    } finally { await store.close(); }
+  });
+
   it('enumerates declared context graph ids from ontology, agents, and root _meta graphs', async () => {
     const store = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(store);
