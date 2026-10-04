@@ -562,7 +562,13 @@ export class VmReconcileSchedulingRuntime<T> {
       (admission) => { sweepAdmission = admission; },
     );
     this.localAdmissionWait = new VmReconcileLocalAdmissionWait({
-      nudge: (key) => this.dispatcher.nudgeLive(key),
+      nudge: (key, deferred) => {
+        // A deferred graph's last pass ended as a failed one and left the
+        // live hold. This nudge is that pass's retry, so it lifts the hold it
+        // is about to use; nudges from elsewhere stayed held meanwhile.
+        if (deferred) this.dispatcher.releaseLiveHold(key);
+        return this.dispatcher.nudgeLive(key);
+      },
       maxWaiters: options.maxPending ?? 256,
     });
     this.planner = new VmReconcileSweepPlanner({
@@ -591,6 +597,22 @@ export class VmReconcileSchedulingRuntime<T> {
    */
   yieldLocalAdmissionTurn(key: string, options: LocalAdmissionWaitOptions): boolean {
     return this.localAdmissionWait.yieldTurn(key, options);
+  }
+
+  /**
+   * A pass whose read-authority check got no answer did none of its work, so
+   * its end says nothing about the graph. The graph waits with those refused
+   * by sync admission and is asked again from there (see `defer` in
+   * `internal/vm-reconcile-local-admission-wait.ts`). The pass still ends as
+   * a failed one, so live nudges from elsewhere stay held; only the wait's own
+   * nudge lifts that hold. Undefined when the wait did not take the graph: the
+   * periodic sweep then retries it, as after any failed pass.
+   */
+  deferForReadAuthority(
+    key: string,
+    options: LocalAdmissionWaitOptions,
+  ): 'parked' | 'again' | undefined {
+    return this.localAdmissionWait.defer(key, options);
   }
   releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }

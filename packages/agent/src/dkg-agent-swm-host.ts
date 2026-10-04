@@ -270,6 +270,11 @@ import {
   type ContextGraphReconcileResult,
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
+import {
+  isUnansweredVmReconcileReadAuthority,
+  VmReconcileReadAuthorityUnansweredError,
+} from './internal/vm-reconcile-read-authority.js';
+import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveVmRecoveryExperimentPolicy } from './vm-recovery-experiment-policy.js';
 import { VmRecoveryTimingObserver } from './vm-recovery-timing-observer.js';
@@ -4197,6 +4202,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
             );
             return;
           }
+          // Reported where the graph was parked (executeVmReconcileForCg): it
+          // is asked again shortly and does not wait for the sweep.
+          if (err instanceof VmReconcileReadAuthorityUnansweredError) return;
           this.log.warn(
             createOperationContext('system'),
             `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
@@ -4246,7 +4254,30 @@ export class SwmHostModeMethods extends DKGAgentBase {
         localCgId,
         isLifecycleCurrent,
         lifecycleSignal,
-      );
+      ).catch((err: unknown): never => {
+        if (!(err instanceof VmReconcileReadAuthorityUnansweredError)) throw err;
+        // The chain read behind the read-authority check got no answer, which
+        // is the node's RPC budget or its endpoint and not the graph. An
+        // automatic pass leaves the graph waiting to be asked again; without
+        // that its next attempt is the periodic sweep, up to a full interval
+        // after the read would have been answered. It is asked again only
+        // while its fetch could start, the readiness every waiter uses. An
+        // operator's request, and a graph the wait cannot take, end as they
+        // always did.
+        const waiting = source === 'manual'
+          ? undefined
+          : this.vmReconcileScheduling?.deferForReadAuthority(localCgId, {
+              signal: lifecycleSignal,
+              isCurrent: isLifecycleCurrent,
+              canAdmit: () => this.vmRecoverySyncAdmissionAvailable(localCgId),
+            });
+        if (waiting === undefined) throw new ContextGraphNotFoundError(localCgId);
+        const message = `VM reconcile for "${localCgId}" is waiting for read authority `
+          + `(${err.readAuthority}): the chain read got no answer; asking again shortly`;
+        if (waiting === 'parked') this.log.info(createOperationContext('system'), message);
+        else this.log.debug(createOperationContext('system'), message);
+        throw err;
+      });
       const resolveTargetMs = performance.now() - passStartedAt;
       const isTargetCurrent = () => isLifecycleCurrent()
         && this.isVmReconcileTargetCurrent(localCgId, target, lifecycleGeneration);
@@ -4495,10 +4526,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Central defense for periodic, live-chain, and manual reconciliation.
     // Every dispatcher entry point converges here and must independently prove
     // read authority. Never let a persisted subscription authorize itself.
+    let authorityDecision: ContextGraphReadAuthorityDecision | undefined;
     const authorityRead = withRpcUsageSite(
       CG_AUTH_RPC_SITES.vmReconcile,
       () => this.canReadContextGraph(localCgId, {
         allowSubscriptionFallback: false,
+        onReadAuthorityDecision: (decision) => { authorityDecision = decision; },
       }),
     );
     // Cancellation releases the dispatcher worker, but an underlying store/RPC
@@ -4506,7 +4539,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
     const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
-    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
+    if (!canRead) {
+      // Still a refusal for this pass. The class only records that the chain
+      // never answered, so scheduling can ask again instead of treating the
+      // graph as unreadable until the next sweep.
+      const decision = authorityDecision;
+      if (isUnansweredVmReconcileReadAuthority(decision)) {
+        throw new VmReconcileReadAuthorityUnansweredError(localCgId, decision);
+      }
+      throw new ContextGraphNotFoundError(localCgId);
+    }
     if (
       this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
       && sub.subscribed
