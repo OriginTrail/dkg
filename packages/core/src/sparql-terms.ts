@@ -83,6 +83,18 @@ export function unwrapIri(term: string): string {
  * {@link SparqlTermValidationError} for anything the position cannot hold.
  */
 export function formatSparqlTerm(term: string, context: SparqlTermContext): string {
+  const { kind, value } = validatedSparqlTerm(term, context);
+  return kind === 'iri' ? `<${value}>` : value;
+}
+
+/** Validate the same position/grammar contract without rendering a SPARQL term. */
+export function assertSparqlTerm(term: string, context: SparqlTermContext): void {
+  validatedSparqlTerm(term, context);
+}
+
+function validatedSparqlTerm(
+  term: string, context: SparqlTermContext,
+): { kind: SparqlTermKind; value: string } {
   const { position } = context;
   if (term.startsWith('_:')) {
     const allowed = (context.position === 'subject' || context.position === 'object')
@@ -99,7 +111,7 @@ export function formatSparqlTerm(term: string, context: SparqlTermContext): stri
         'blank-node',
       );
     }
-    return term;
+    return { kind: 'blank-node', value: term };
   }
   if (term.startsWith('"')) {
     if (position !== 'object') {
@@ -107,10 +119,11 @@ export function formatSparqlTerm(term: string, context: SparqlTermContext): stri
     }
     const literal = normalizeLiteralDatatype(term);
     validated('literal', () => assertSafeRdfTerm(literal));
-    return literal;
+    return { kind: 'literal', value: literal };
   }
   const iri = unwrapIri(term);
-  return validated('iri', () => sparqlIri(iri));
+  validated('iri', () => assertSafeIri(iri));
+  return { kind: 'iri', value: iri };
 }
 
 /** Bracket a legacy bare datatype (`"v"^^http://…`), as N-Quads and SPARQL require. */

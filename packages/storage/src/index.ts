@@ -48,6 +48,7 @@ export {
 export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   assertSubjectReplacementPayload,
+  assertSubjectPredicatesReplacementPayload,
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,

@@ -1,4 +1,4 @@
-import { buildAtomicSubjectPredicatesReplaceUpdate } from './atomic-graph-replace.js';
+import { assertSubjectPredicatesReplacementPayload } from './atomic-graph-replace.js';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -181,7 +181,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   ): Promise<void> {
     const replace = this.inner.replaceSubjectPredicates;
     if (typeof replace !== 'function') throw new UnsupportedTripleStoreCapabilityError('replaceSubjectPredicates', 'SharedMemoryLiteralBlobStore');
-    buildAtomicSubjectPredicatesReplaceUpdate(graph, subject, predicates, quads);
+    assertSubjectPredicatesReplacementPayload(graph, subject, predicates, quads);
     await this.withExternalizedQuads(quads, externalized => replace.call(this.inner, graph, subject, predicates, externalized, options));
   }
 

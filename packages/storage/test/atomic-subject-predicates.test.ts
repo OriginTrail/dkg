@@ -5,7 +5,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  buildAtomicSubjectPredicatesReplaceUpdate, createTripleStore, OxigraphStore, SparqlHttpStore, BlazegraphStore,
+  assertSubjectPredicatesReplacementPayload, buildAtomicSubjectPredicatesReplaceUpdate, createTripleStore, OxigraphStore, SparqlHttpStore, BlazegraphStore,
   tryReplaceSubjectPredicatesAtomically, CHANGELOG_GRAPH, UnsupportedTripleStoreCapabilityError,
   ChangelogStore, GraphSetIndexStore, SharedMemoryLiteralBlobStore, type Quad, type TripleStore,
 } from '../src/index.js';
@@ -59,6 +59,7 @@ describe('certified atomic subject predicate replacement', () => {
     ['wrong graph', [LAYER], [{ ...q(LAYER, '"VM"'), graph: 'urn:test:wrong' }]],
     ['blank object', [LAYER], [q(LAYER, '_:blank')]],
   ] as const)('rejects %s before dispatch', (_name, predicates, quads) => {
+    expect(() => assertSubjectPredicatesReplacementPayload(GRAPH, SUBJECT, predicates, quads)).toThrow();
     expect(() => buildAtomicSubjectPredicatesReplaceUpdate(GRAPH, SUBJECT, predicates, quads)).toThrow();
   });
 
@@ -72,7 +73,10 @@ describe('certified atomic subject predicate replacement', () => {
     await expectPreserved(store);
     // A missing selected value still inserts once; empty payload removes only that predicate.
     await store.replaceSubjectPredicates(GRAPH, SUBJECT, ['urn:test:new'], [q('urn:test:new', '"new"')]);
+    const readNew = () => store.query(`SELECT ?o WHERE { GRAPH <${GRAPH}> { <${SUBJECT}> <urn:test:new> ?o } } LIMIT 2`);
+    expect(await readNew()).toEqual({ type: 'bindings', bindings: [{ o: '"new"' }] });
     await store.replaceSubjectPredicates(GRAPH, SUBJECT, ['urn:test:new'], []);
+    expect(await readNew()).toEqual({ type: 'bindings', bindings: [] });
     await expectPreserved(store);
   });
 
@@ -118,13 +122,16 @@ describe('certified atomic subject predicate replacement', () => {
     await expectPreserved(f.backing);
   });
 
-  it('rejects an escaping blob payload before creating files or dispatching', async () => {
+  it.each([
+    ['escaping predicate', 'urn:test:escaping', JSON.stringify('x'.repeat(1000)), 'escapes selected predicates'],
+    ['malformed literal', LAYER, `${JSON.stringify('x'.repeat(1000))}@12`, 'Unsafe RDF term'],
+  ])('rejects a blob payload with %s before creating files or dispatching', async (_name, predicate, object, error) => {
     const directory = await mkdtemp(join(tmpdir(), 'predicate-blobs-')); cleanup.push(() => rm(directory, { recursive: true, force: true }));
     const raw = new OxigraphStore(); cleanup.push(() => raw.close());
     const store = new SharedMemoryLiteralBlobStore(raw, { blobDir: directory, thresholdBytes: 16 });
     const replace = vi.spyOn(raw, 'replaceSubjectPredicates');
-    await expect(store.replaceSubjectPredicates(GRAPH, SUBJECT, [LAYER], [q('urn:test:escaping', JSON.stringify('x'.repeat(1000)))]))
-      .rejects.toThrow('escapes selected predicates');
+    await expect(store.replaceSubjectPredicates(GRAPH, SUBJECT, [LAYER], [q(predicate, object)]))
+      .rejects.toThrow(error);
     expect(replace).not.toHaveBeenCalled(); expect(await readdir(directory)).toEqual([]);
   });
 

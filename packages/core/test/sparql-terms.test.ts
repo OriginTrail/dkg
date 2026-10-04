@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assertSparqlTerm,
   formatIriPrefix,
   formatSparqlTerm,
   SparqlTermValidationError,
@@ -24,6 +25,7 @@ describe('formatSparqlTerm, the one serializer', () => {
     ['an object literal with a bare datatype', { position: 'object' }, `"42"^^${XSD_INTEGER}`, `"42"^^<${XSD_INTEGER}>`],
     ['an object blank node where allowed', { position: 'object', blankNodes: 'allow' }, '_:b1', '_:b1'],
   ])('renders %s', (_name, context, term, rendered) => {
+    expect(assertSparqlTerm(term, context)).toBeUndefined();
     expect(formatSparqlTerm(term, context)).toBe(rendered);
   });
 
@@ -39,6 +41,7 @@ describe('formatSparqlTerm, the one serializer', () => {
     ['a literal with a raw line break', { position: 'object' }, '"x\ny"', 'literal'],
     ['an IRI with a space', { position: 'predicate' }, 'urn:p q', 'iri'],
   ])('rejects %s', (_name, context, term, kind) => {
+    expect(() => assertSparqlTerm(term, context)).toThrow(SparqlTermValidationError);
     let error: unknown;
     try {
       formatSparqlTerm(term, context);
