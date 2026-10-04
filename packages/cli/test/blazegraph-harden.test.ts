@@ -142,8 +142,49 @@ describe('inspectHardenState', () => {
     await expect(inspectHardenState(runner, NAME)).resolves.toMatchObject({ state: 'backup-only' });
   });
 
+  it.each(['json-file', 'local'])('does not accept unlimited %s logging as hardened', async (driver) => {
+    const info = JSON.parse(inspectJson({ hardened: true }));
+    info[0].HostConfig.LogConfig = { Type: driver, Config: {} };
+    const runner: DockerRunner = { async run() { return ok(JSON.stringify(info)); } };
+    await expect(inspectHardenState(runner, NAME)).resolves.toMatchObject({
+      state: 'legacy', usesMigrationVolume: true,
+    });
+  });
+
+  it.each(['Cannot connect to the Docker daemon', '', `Error: No such object: ${BACKUP}`])(
+    'refuses an inspection failure that does not prove this primary absent: %s', async (stderr) => {
+      const calls: string[][] = [];
+      const runner: DockerRunner = { async run(args) {
+        calls.push([...args]);
+        return args[1] === NAME ? { stdout: '', stderr, exitCode: 1 }
+          : ok(inspectJson({ running: false }));
+      } };
+      await expect(inspectHardenState(runner, NAME)).rejects.toThrow(/Cannot determine whether primary container/);
+      expect(calls).toEqual([['inspect', NAME]]);
+    },
+  );
+
+  it('refuses an uncertain backup inspection after confirmed primary absence', async () => {
+    const runner: DockerRunner = { async run(args) {
+      return args[1] === NAME ? notFound
+        : { stdout: '', stderr: 'Docker engine unavailable', exitCode: 1 };
+    } };
+    await expect(inspectHardenState(runner, NAME)).rejects.toThrow(/Cannot determine whether backup container/);
+  });
+
+  it.each(['Error: No such object:', 'Error: No such container:',
+    'Error response from daemon: No such object:', 'Error response from daemon: No such container:'])(
+    'recognizes a confirmed missing primary only from its exact Docker diagnostic: %s', async prefix => {
+      const runner: DockerRunner = { async run(args) {
+        return args[1] === NAME ? { stdout: '', stderr: `${prefix} ${NAME}\n`, exitCode: 1 }
+          : ok(inspectJson({ running: false }));
+      } };
+      await expect(inspectHardenState(runner, NAME)).resolves.toMatchObject({ state: 'backup-only' });
+    },
+  );
+
   it('classifies neither container as absent', async () => {
-    const runner: DockerRunner = { async run() { return notFound; } };
+    const runner: DockerRunner = { async run(args) { return { ...notFound, stderr: `Error: No such object: ${args[1]}` }; } };
     await expect(inspectHardenState(runner, NAME)).resolves.toEqual({ state: 'absent' });
   });
 

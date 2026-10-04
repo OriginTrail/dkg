@@ -10,6 +10,8 @@
 import {
   BLAZEGRAPH_CONTAINER_PORT,
   BLAZEGRAPH_DATA_DIR,
+  BLAZEGRAPH_LOG_MAX_SIZE,
+  BLAZEGRAPH_LOG_MAX_FILE,
   blazegraphMigrationVolumeName,
   type DockerRunner,
 } from '../blazegraph-docker.js';
@@ -35,7 +37,8 @@ export interface HardenStateInfo {
  * migration resumes correctly from whatever the world actually looks
  * like:
  *   - 'hardened': container exists with the named journal volume mounted
- *     at /data (the migration's end state, also the fresh-provision shape).
+ *     at /data, bounded JVM/logs and ASK health policy (the migration's end
+ *     state, also the fresh-provision shape).
  *   - 'legacy': container exists without that mount (fleet-verified
  *     shape: `Mounts: []`, `Config.Volumes: null`).
  *   - 'backup-only': container missing but `<name>-backup` exists — a
@@ -50,18 +53,22 @@ export async function inspectHardenState(
   if (result.exitCode === 0) {
     const facts = parseBlazegraphContainerInspection(result.stdout, {
       containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT,
+      logMaxSize: BLAZEGRAPH_LOG_MAX_SIZE, logMaxFile: BLAZEGRAPH_LOG_MAX_FILE,
     });
     if (facts === null) throw new Error('Docker inspect returned unparseable container facts');
-    const hardened = facts.journalVolumeName !== undefined && facts.boundedJvm && facts.healthProbe;
+    const hardened = facts.journalVolumeName !== undefined && facts.boundedJvm && facts.healthProbe && facts.boundedLogs;
     return { state: hardened ? 'hardened' : 'legacy', hostPort: facts.hostPort, running: facts.running,
       ...(!hardened && facts.journalVolumeName === blazegraphMigrationVolumeName(containerName)
         ? { usesMigrationVolume: true as const } : {}) };
 
   }
-  const backup = await docker.run(['inspect', `${containerName}${HARDEN_BACKUP_SUFFIX}`]);
+  requireConfirmedContainerAbsence(result.stderr, containerName, 'primary');
+  const backupName = `${containerName}${HARDEN_BACKUP_SUFFIX}`;
+  const backup = await docker.run(['inspect', backupName]);
   if (backup.exitCode === 0) {
     const facts = parseBlazegraphContainerInspection(backup.stdout, {
       containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT,
+      logMaxSize: BLAZEGRAPH_LOG_MAX_SIZE, logMaxFile: BLAZEGRAPH_LOG_MAX_FILE,
     });
     if (facts === null) throw new Error('Docker inspect returned unparseable backup facts');
     return { state: 'backup-only', hostPort: facts.hostPort, running: facts.running,
@@ -69,5 +76,14 @@ export async function inspectHardenState(
         ? { usesMigrationVolume: true as const } : {}) };
 
   }
+  requireConfirmedContainerAbsence(backup.stderr, backupName, 'backup');
   return { state: 'absent' };
+}
+
+/** A failed engine request is not permission to replace an authoritative journal. */
+function requireConfirmedContainerAbsence(stderr: string, name: string, role: 'primary' | 'backup'): void {
+  const missing = /^(?:Error:|Error response from daemon:)\s*No such (?:object|container):\s*(.+)$/iu.exec(stderr.trim());
+  if (missing?.[1] === name) return;
+  throw new Error(`Cannot determine whether ${role} container "${name}" exists: ${stderr.trim() || 'Docker inspect failed'}. `
+    + 'Refusing migration while the authoritative journal is unknown.');
 }

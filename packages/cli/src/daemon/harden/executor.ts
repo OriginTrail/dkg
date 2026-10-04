@@ -73,7 +73,7 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
     (opts.env ?? process.env).DKG_BLAZEGRAPH_HEAP_MB);
   const info = await inspectHardenState(docker, containerName);
   if (info.usesMigrationVolume) throw new Error(`Container "${containerName}" already uses the replacement journal volume. `
-    + 'Refusing to overwrite the original or backup data; restore its JVM/health policy manually before retrying.');
+    + 'Refusing to overwrite the original or backup data; restore its JVM/health/log policy manually before retrying.');
   if (info.state === 'absent') throw new Error(`Container "${containerName}" not found (and no "${backupName}") — nothing to harden. `
     + 'Check `docker ps -a` and pass --container if the name differs.');
   const hostPort = opts.hostPort ?? info.hostPort;

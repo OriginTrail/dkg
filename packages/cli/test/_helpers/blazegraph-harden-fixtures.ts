@@ -3,7 +3,7 @@ import { expect } from 'vitest';
 import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { HARDEN_BACKUP_SUFFIX, HARDEN_EXPORT_FILENAME } from '../../src/daemon/blazegraph-harden.js';
-import { BLAZEGRAPH_DATA_DIR, blazegraphMigrationVolumeName as blazegraphVolumeName, type DockerRunner, type DockerCommandResult } from '../../src/daemon/blazegraph-docker.js';
+import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_LOG_MAX_SIZE, BLAZEGRAPH_LOG_MAX_FILE, blazegraphMigrationVolumeName as blazegraphVolumeName, type DockerRunner, type DockerCommandResult } from '../../src/daemon/blazegraph-docker.js';
 
 export const NAME = 'dkg-blazegraph-dkg';
 export const BACKUP = `${NAME}${HARDEN_BACKUP_SUFFIX}`;
@@ -37,7 +37,8 @@ export function inspectJson(shape: {
       ? [{ Destination: BLAZEGRAPH_DATA_DIR, Name: VOLUME }]
       : [],
     Config: shape.hardened ? { Env: ['TOMCAT_JAVA_OPTS=-Xmx2048m -XX:+ExitOnOutOfMemoryError'], Healthcheck: { Test: ['CMD-SHELL', 'curl ASK%7B%7D'] } } : {},
-    HostConfig: { PortBindings: shape.noPorts ? {} : bindings },
+    HostConfig: { PortBindings: shape.noPorts ? {} : bindings,
+      ...(shape.hardened ? { LogConfig: { Type: 'local', Config: { 'max-size': BLAZEGRAPH_LOG_MAX_SIZE, 'max-file': BLAZEGRAPH_LOG_MAX_FILE } } } : {}) },
     NetworkSettings: {
       Ports: shape.noPorts || shape.networkPortsEmpty ? {} : bindings,
     },
@@ -99,7 +100,7 @@ export function scriptedDocker(opts: {
         const target = withSize ? args[2] : args[1];
         if (target === NAME) {
           if (hardenedCreated) return ok(inspectJson({ hardened: true }));
-          if (opts.initial === 'absent' || renamed) return notFound;
+          if (opts.initial === 'absent' || renamed) return { ...notFound, stderr: `Error: No such object: ${target}` };
           const interfered = cpDone && opts.interfereAfterCp !== undefined;
           return ok(inspectJson({
             running: interfered
@@ -119,9 +120,9 @@ export function scriptedDocker(opts: {
           // The backup is always stopped: runtime Ports empty (realistic).
           return renamed
             ? ok(inspectJson({ running: false, networkPortsEmpty: true }))
-            : notFound;
+            : { ...notFound, stderr: `Error: No such object: ${target}` };
         }
-        return notFound;
+        return { ...notFound, stderr: `Error: No such object: ${target}` };
       }
       if (cmd === 'exec') return ok(`${opts.statStdout ?? String(JOURNAL_BYTES)}\n`);
       if (cmd === 'stop') { stopped = true; return ok(); }

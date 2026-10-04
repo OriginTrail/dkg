@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { blazegraphNamespaceEndpointParts } from '@origintrail-official/dkg-storage';
 import { inspectBlazegraphContainerFacts, parseBlazegraphContainerInspection } from '../src/daemon/blazegraph-container-inspection.js';
 import { parseBlazegraphNamespaceEndpoint } from '../src/daemon/blazegraph-container-policy.js';
+import { BLAZEGRAPH_LOG_MAX_SIZE, BLAZEGRAPH_LOG_MAX_FILE } from '../src/daemon/blazegraph-docker.js';
 import { inspectHardenState } from '../src/daemon/harden/state.js';
 
 const name = 'dkg-blazegraph-facts';
 const policy = { containerName: name, dataPath: '/data', containerPort: 8080,
-  logMaxSize: '100m', logMaxFile: '4' };
+  logMaxSize: BLAZEGRAPH_LOG_MAX_SIZE, logMaxFile: BLAZEGRAPH_LOG_MAX_FILE };
 
 describe('shared Blazegraph inspection facts', () => {
   it.each(['data', 'hardened-data'])('recognizes %s journal volumes for provisioning and migration', async suffix => {
@@ -15,7 +16,7 @@ describe('shared Blazegraph inspection facts', () => {
       Config: { Env: ['TOMCAT_JAVA_OPTS=-Xmx256m -XX:+ExitOnOutOfMemoryError'],
         Healthcheck: { Test: ['CMD-SHELL', 'curl ASK%7B%7D'] } },
       HostConfig: { PortBindings: { '8080/tcp': [{ HostPort: '9999' }] },
-        LogConfig: { Type: 'local', Config: { 'max-size': '100m', 'max-file': '4' } } },
+        LogConfig: { Type: 'local', Config: { 'max-size': BLAZEGRAPH_LOG_MAX_SIZE, 'max-file': BLAZEGRAPH_LOG_MAX_FILE } } },
       State: { Running: false },
     };
     expect(inspectBlazegraphContainerFacts(info, policy)).toMatchObject({

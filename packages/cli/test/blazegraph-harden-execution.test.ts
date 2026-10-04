@@ -133,6 +133,42 @@ describe('executeHardenMigration', () => {
     assertSafetyInvariants(calls, migrationDir, true);
   });
 
+  it('refuses an uncertain primary inspection before using an older retained backup', async () => {
+    const { runner, calls } = scriptedDocker({ initial: 'backup-only', migrationDir });
+    const original = runner.run.bind(runner);
+    runner.run = async (args, options) => {
+      if (args[0] === 'inspect' && args[1] === NAME) {
+        calls.push([...args]);
+        return { stdout: '', stderr: 'Cannot connect to the Docker daemon', exitCode: 1 };
+      }
+      return original(args, options);
+    };
+    const { fn, calls: queries } = verifierFetch();
+    await expect(executeHardenMigration(baseOpts(runner, fn)))
+      .rejects.toThrow(/Cannot determine whether primary container/);
+    expect(calls).toEqual([['inspect', NAME]]);
+    expect(queries).toEqual([]);
+    expect(existsSync(join(migrationDir, HARDEN_EXPORT_FILENAME))).toBe(false);
+    expect(existsSync(storeHardenLockPath(dkgHome))).toBe(false);
+  });
+
+  it('refuses an unlimited-log replacement without overwriting its authoritative journal', async () => {
+    const { runner, calls } = scriptedDocker({ initial: 'hardened', migrationDir });
+    const original = runner.run.bind(runner);
+    runner.run = async (args, options) => {
+      const result = await original(args, options);
+      if (args[0] !== 'inspect' || args[1] !== NAME) return result;
+      const info = JSON.parse(result.stdout);
+      info[0].HostConfig.LogConfig = { Type: 'json-file', Config: {} };
+      return { ...result, stdout: JSON.stringify(info) };
+    };
+    const { fn, calls: queries } = verifierFetch();
+    await expect(executeHardenMigration(baseOpts(runner, fn)))
+      .rejects.toThrow(/already uses the replacement journal volume/);
+    expect(calls).toEqual([['inspect', NAME]]);
+    expect(queries).toEqual([]);
+  });
+
   it('is a no-op (verify only) for an already-hardened container', async () => {
     const { runner, calls } = scriptedDocker({ initial: 'hardened', migrationDir });
     const { fn } = verifierFetch();
