@@ -532,6 +532,14 @@ const rfc64CatalogAuthorityRevisionsV1 =
 const rfc64AuthorityAcceptedCatchupTimersV1 =
   new WeakMap<DKGAgent, ReturnType<typeof setTimeout>>();
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
+/**
+ * Context graphs whose accepted policy was composed from a private join
+ * approval rather than from owner-signed or finalized evidence. The approval
+ * proof is time-limited and bound to one request generation, so this
+ * authority may run catalog responsibility but never stands in for the live
+ * proof on reads or shared-memory access.
+ */
+const rfc64JoinDerivedAcceptedAuthorityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64ResponsibilityAuthorityBatchRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1>();
 interface Rfc64ScheduledFinalizedAbsenceRetryV1 {
@@ -1180,6 +1188,30 @@ function markRfc64DirectAcceptedCompatibilityV1(
     rfc64DirectAcceptedCompatibilityV1.set(agent, accepted);
   }
   accepted.add(contextGraphId);
+}
+
+/**
+ * Record whether the private policy just accepted for a graph is join-derived.
+ * Both ways a private policy is accepted call this (authority composition and
+ * the direct snapshot acceptance), so the mark always describes the acceptance
+ * that produced the current snapshot. An open policy cannot replace a
+ * join-derived one: the registry only takes a linked successor.
+ */
+function noteRfc64AcceptedAuthorityOriginV1(
+  agent: DKGAgent,
+  contextGraphId: string,
+  origin: 'join-approval' | 'authenticated',
+): void {
+  let joinDerived = rfc64JoinDerivedAcceptedAuthorityV1.get(agent);
+  if (origin === 'authenticated') {
+    joinDerived?.delete(contextGraphId);
+    return;
+  }
+  if (joinDerived === undefined) {
+    joinDerived = new Set<string>();
+    rfc64JoinDerivedAcceptedAuthorityV1.set(agent, joinDerived);
+  }
+  joinDerived.add(contextGraphId);
 }
 
 function rfc64CatalogAuthorityGenerationChangedV1(
@@ -3765,6 +3797,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         policyDigest: authority.policyDigest,
         roster: authority.roster,
       });
+      noteRfc64AcceptedAuthorityOriginV1(
+        this,
+        contextGraphId,
+        approvedPrivateReplicaAuthority === null ? 'authenticated' : 'join-approval',
+      );
       const authorityGenerationChanged = rfc64CatalogAuthorityGenerationChangedV1(
         previousAuthority,
         acceptedAuthority,
@@ -3951,6 +3988,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const accepted = service.acceptedPolicySnapshot(activeNetworkId, contextGraphId);
     if (accepted === null) return false;
     if (accepted.policy.accessPolicy === 0) return true;
+    // Join-derived authority does not replace the live join proof: leave the
+    // decision to the caller's read-authority check, which runs that proof.
+    if (this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) === true) return undefined;
     if (accepted.roster === null) return false;
     const effectiveCaller = opts.callerAgentAddress
       ?? this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress
@@ -3959,6 +3999,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       effectiveCaller,
       accepted.roster.members.map(({ agentAddress }) => agentAddress),
     );
+  }
+
+  /**
+   * Whether this graph's accepted policy was composed from a private join
+   * approval. Such a snapshot is labelled owner-signed-unregistered like an
+   * authenticated owner policy, but it rests on a proof that expires with the
+   * member's delegation and belongs to one request generation. Reads and
+   * shared-memory access therefore ignore it and keep running the proof.
+   */
+  isRfc64JoinDerivedAcceptedAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return rfc64JoinDerivedAcceptedAuthorityV1.get(this)?.has(contextGraphId) === true;
   }
 
   /** Whether an accepted compatibility policy, not responsibility, owns this CG's RFC-64 authority. */
@@ -4067,6 +4121,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ) {
       return undefined;
     }
+    // A join-derived roster is not owner-authenticated transport authority;
+    // the approved-replica proof path keeps governing this graph.
+    if (this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) === true) return undefined;
     if (accepted.roster === null) return null;
     return Object.freeze(
       accepted.roster.members.map(({ agentAddress }) => agentAddress),
@@ -4586,6 +4643,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
+      rfc64JoinDerivedAcceptedAuthorityV1.delete(this);
       rfc64CatalogReplayRuntimesV1.delete(this);
       rfc64CatalogReplaySnapshotRuntimesV1.delete(this);
       rfc64CatalogReplayRecoveryRuntimesV1.get(this)?.reset();
@@ -4640,6 +4698,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.clearRfc64CatalogOperationalTargetsV1(input.policy.contextGraphId);
     }
     markRfc64DirectAcceptedCompatibilityV1(this, input.policy.contextGraphId);
+    noteRfc64AcceptedAuthorityOriginV1(this, input.policy.contextGraphId, 'authenticated');
     return accepted;
   }
 
