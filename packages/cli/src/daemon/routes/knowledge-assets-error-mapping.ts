@@ -105,10 +105,11 @@ const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['KA_ASSERTION_ALREADY_FINALIZED', 409],
   ['ASSERTION_EMPTY', 409],
   ['KA_WM_LIFECYCLE_REQUIRED', 409],
+  ['KA_WM_LIFECYCLE_CORRUPT', 500],
 ]);
 
 /**
- * Map caller preconditions on WM/SWM operations to actionable 4xx responses.
+ * Map typed WM/SWM preconditions and integrity failures before message fallbacks.
  * VM publishing keeps its own mapping so chain failures remain server errors.
  */
 export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {

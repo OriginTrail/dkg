@@ -40,12 +40,12 @@ describe('knowledge-assets mutation error mapping', () => {
     expect(record.status).toBe(500);
   });
 
-  it('keeps damaged lifecycle records as server failures', () => {
+  it.each(['draft', 'InvalidAddresses', 'UnsafeImports'])('keeps damaged lifecycle records for %s as typed server failures', (name) => {
     const { record, res } = fakeResponse();
-    const message = 'Assertion "draft" has a corrupt Working Memory lifecycle record';
+    const message = `Assertion "${name}" has a corrupt Working Memory lifecycle record`;
     respondAssertionError(res, { code: 'KA_WM_LIFECYCLE_CORRUPT', message });
     expect(record.status).toBe(500);
-    expect(JSON.parse(record.body)).toEqual({ error: message });
+    expect(JSON.parse(record.body)).toEqual({ error: message, code: 'KA_WM_LIFECYCLE_CORRUPT' });
   });
 
   it('maps an inactive WM discard precondition to a typed conflict', () => {
