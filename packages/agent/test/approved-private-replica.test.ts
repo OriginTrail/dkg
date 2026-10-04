@@ -423,6 +423,47 @@ function pauseSuccessfulApprovedPrivateProofOnce(
   return { returned, release: releaseProof };
 }
 
+/** Hold the first call of one receiver method until released; later calls run through. */
+function pauseReceiverMethodOnce(
+  fixture: Awaited<ReturnType<typeof approvedBareNameReplicaFixture>>,
+  method: string,
+) {
+  let releaseCall!: () => void;
+  let callEntered!: () => void;
+  const release = new Promise<void>((resolve) => { releaseCall = resolve; });
+  const entered = new Promise<void>((resolve) => { callEntered = resolve; });
+  const receiver = fixture.receiver as unknown as Record<
+    string,
+    (...args: unknown[]) => Promise<unknown>
+  >;
+  const original = receiver[method]!.bind(fixture.receiver);
+  let paused = false;
+  vi.spyOn(receiver, method).mockImplementation(async (...args: unknown[]) => {
+    if (!paused) {
+      paused = true;
+      callEntered();
+      await release;
+    }
+    return original(...args);
+  });
+  return { entered, release: releaseCall };
+}
+
+/** The member asks again: the approved generation is replaced by a pending one. */
+async function replaceApprovedJoinRequestWithPending(
+  fixture: Awaited<ReturnType<typeof approvedBareNameReplicaFixture>>,
+) {
+  await fixture.receiver.writeRequesterJoinRequestState(
+    CONTEXT_GRAPH_ID,
+    fixture.approvedAddress,
+    {
+      status: 'pending',
+      requestGeneration: `0x${'34'.repeat(32)}`,
+      curatorPeerId: CURATOR_PEER,
+    },
+  );
+}
+
 describe('approved private bare-name replica authorization', () => {
   it('retains the proved private authority for a legacy adapter registered-metadata shape', async () => {
     const fixture = await approvedBareNameReplicaFixture({
@@ -1647,6 +1688,31 @@ describe('approved private bare-name replica authorization', () => {
       .toBeNull();
   });
 
+  it.each([
+    { read: 'getContextGraphOwner' },
+    { read: 'getStoredContextGraphRegistrationOptions' },
+    { read: 'readRfc64PrivateRosterVersionV1' },
+  ])('accepts no catalog authority when the join request is replaced during $read', async ({ read }) => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const proofReturned = pauseSuccessfulApprovedPrivateProofOnce(fixture);
+    const paused = pauseReceiverMethodOnce(fixture, read);
+    const reconciliation = fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    // The composition has its proof before any of these reads starts.
+    await proofReturned.returned;
+    proofReturned.release();
+    await paused.entered;
+    await replaceApprovedJoinRequestWithPending(fixture);
+    paused.release();
+
+    await expect(reconciliation).rejects.toThrow('no authenticated owner authority');
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+  });
+
   it('retains an approved private proof when only another graph changes', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     const proof = pauseApprovedPrivateProofOnce(fixture);
@@ -1743,6 +1809,36 @@ describe('approved private bare-name replica authorization', () => {
       object: JSON.stringify(fixture.memberAddress),
     }]);
     Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
+    await expect(fixture.receiver.resolveRfc64CatalogLocalAgentAddressV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeNull();
+  });
+
+  it.each([
+    { read: 'readRfc64RegisteredAuthoritySnapshotV1' },
+    { read: 'getLocalMetadataMemberRecoveryGate' },
+  ])('returns no catalog peer roster when the join request is replaced during $read', async ({ read }) => {
+    const fixture = await approvedBareNameReplicaFixture();
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+    await expect(fixture.receiver.resolveRfc64VerifiedPrivateRosterV1(CONTEXT_GRAPH_ID))
+      .resolves.toEqual([OWNER, fixture.memberAddress].sort());
+
+    // Rewriting the requester state invalidates every graph's facts revision,
+    // which is what lets the lookup discard a proof that was valid when it
+    // started. The roster reads below run after that proof has returned.
+    const proofReturned = pauseSuccessfulApprovedPrivateProofOnce(fixture);
+    const paused = pauseReceiverMethodOnce(fixture, read);
+    const roster = fixture.receiver.resolveRfc64VerifiedPrivateRosterV1(CONTEXT_GRAPH_ID);
+    await proofReturned.returned;
+    proofReturned.release();
+    await paused.entered;
+    await replaceApprovedJoinRequestWithPending(fixture);
+    paused.release();
+
+    await expect(roster).resolves.toBeNull();
     await expect(fixture.receiver.resolveRfc64CatalogLocalAgentAddressV1(CONTEXT_GRAPH_ID))
       .resolves.toBeNull();
   });
