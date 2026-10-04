@@ -854,6 +854,7 @@ import { reconcileRfc64CatalogAuthorityPlanV1 } from
 import {
   initializeRfc64LegacySwmBoundaryV1,
   prepareRfc64LateLegacySwmBoundaryV1,
+  retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
 
@@ -2060,6 +2061,24 @@ type StructuralCuratorPeerLookup =
     };
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  async retireLegacySwmAfterVerifiedVmTwin(
+    this: DKGAgent,
+    input: Readonly<{
+      contextGraphId: string;
+      kaUal: string;
+      assertionVersion: string | bigint;
+      subGraphName?: string;
+    }>,
+  ): Promise<void> {
+    await retireRfc64LegacySwmAfterFinalizedVmV1(
+      this,
+      input.contextGraphId,
+      input.kaUal,
+      String(input.assertionVersion),
+      input.subGraphName,
+    );
+  }
+
   async retireFinalizedSwmTwinCandidate(
     candidate: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
@@ -4060,6 +4079,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // this is now the only outbox tick — chat (PR-3) and every
     // future migrated protocol drain on the same cadence so
     // operators see a single "outbox tick" beat.
+    let senderKeyRetryInFlight = false;
     this.messengerOutboxTimer = setInterval(() => {
       const now = Date.now();
       this.messenger.processOutboxTick(now)
@@ -4078,6 +4098,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           }
         });
+      // A retryable ACK is a delivered Messenger response, so it has no
+      // outbox obligation. The sender-key queue owns that retry and must
+      // progress even if both peers stay connected and no further share is
+      // published. Keep one pass in flight and reuse its current-authority
+      // recipient check before every resend.
+      if (!senderKeyRetryInFlight && this.pendingSenderKeyByAgent.size > 0) {
+        senderKeyRetryInFlight = true;
+        void this.drainPendingSenderKeysForConnectedPeers()
+          .then((drained) => {
+            if (drained > 0) {
+              this.log.info(ctx, `Sender-key retry delivered ${drained} pending package(s)`);
+            }
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log.warn(ctx, `Sender-key retry tick failed: ${message}`);
+          })
+          .finally(() => { senderKeyRetryInFlight = false; });
+      }
     }, MESSAGE_OUTBOX_TICK_MS);
     if (this.messengerOutboxTimer.unref) this.messengerOutboxTimer.unref();
 
@@ -6478,13 +6517,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             this.invalidateListContextGraphsCache();
             this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
+              let retiredTwin: FinalizedSwmTwinRetirement | undefined;
               const retirement = await reconcileFinalizedSwmTwin({
                 store: this.store,
                 writeLocks: this.writeLocks,
                 asset: authentication.asset,
-                retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+                retire: async (candidate) => {
+                  await this.retireFinalizedSwmTwinCandidate(candidate, ctx);
+                  retiredTwin = candidate;
+                },
               });
               if (retirement === 'retired') {
+                await this.retireLegacySwmAfterVerifiedVmTwin({
+                  contextGraphId: asset.contextGraphId,
+                  kaUal: asset.ual,
+                  assertionVersion: asset.assertionVersion,
+                  // The marker of the namespace whose twin was verified and
+                  // retired. Without it a twin in a named subgraph would
+                  // retire the root marker of the same asset.
+                  subGraphName: retiredTwin?.subGraphName,
+                });
                 this.invalidateListContextGraphsCache();
                 this.log.info(
                   ctx,
