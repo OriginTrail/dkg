@@ -79,7 +79,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -642,16 +642,6 @@ function versionGapError(kaUal: string, sealVersion: bigint | string | number, r
     ),
     { code: 'PUBLISH_INTENT_STALE' as const },
   );
-}
-
-function latestShareOperationId(history: {
-  events: readonly AssertionEvent[];
-  currentShareOperationId?: string;
-}): string | undefined {
-  const promoted = [...history.events]
-    .reverse()
-    .find((event) => event.type === 'promoted' && event.shareOperationId);
-  return promoted?.shareOperationId?.trim() || history.currentShareOperationId?.trim() || undefined;
 }
 
 function distinctMetadataObjects(
@@ -4689,8 +4679,11 @@ export class PublishMethods extends DKGAgentBase {
     if (opts?.entityProofs === true) {
       throw new Error('Graph-scoped async publish does not support entityProofs');
     }
-    const shareOperationId = latestShareOperationId(history);
-    if (!shareOperationId) {
+    // Queued execution requires a modern operation; synchronous publication
+    // alone supports an explicitly absent legacy owner. Both use one RDF decoder.
+    const shareOperationId = await readPublishedAssertionOperation(this.store, metaGraph,
+      assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName));
+    if (typeof shareOperationId !== 'string') {
       throw Object.assign(
         new Error(
           `Cannot publish "${name}" asynchronously: the current SWM share is missing a shareOperationId. ` +
@@ -4958,14 +4951,11 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // Completed graph-scoped promotions intentionally consume the temporary
-    // lifecycle-level operation row. The durable operation identity remains
-    // on the canonical promoted event and immutable SWM head. Read the same
-    // metadata shapes used when the intent was enqueued so a valid queued job
-    // cannot become stale merely because redundant lifecycle metadata was
-    // trimmed after the promote commit.
-    const liveShareOperationId = latestShareOperationId(history);
-    if (!liveShareOperationId || liveShareOperationId !== request.shareOperationId.trim()) {
+    // Execute only the same modern owner selected at enqueue. Already-published
+    // no-ops above do not acquire or consume a current workspace operation.
+    const liveShareOperationId = await readPublishedAssertionOperation(this.store, contextGraphMetaUri(request.contextGraphId),
+      assertionLifecycleUri(request.contextGraphId, agentAddress, request.name, request.subGraphName));
+    if (typeof liveShareOperationId !== 'string' || liveShareOperationId !== request.shareOperationId.trim()) {
       throw stale(
         `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
           `shareOperationId is ${liveShareOperationId ?? 'none'}, queued shareOperationId was ${request.shareOperationId}.`,
@@ -5093,20 +5083,12 @@ export class PublishMethods extends DKGAgentBase {
     if (liveWm && queuedWm && liveWm !== queuedWm) return false;
     if (liveVm && liveVm !== queuedSeal && liveVm !== queuedVm) return false;
 
-    // Normal post-publish cleanup removes the mutable lifecycle share pointer,
-    // while the append-only promote event remains. A crash can therefore leave
-    // recovery with no currentShareOperationId even though the named lifecycle
-    // still identifies the exact queued operation. Prefer the live pointer and
-    // otherwise use the most recent promoted event; newer content is already
-    // rejected above by the WM/SWM/VM root comparisons.
-    const liveShareOperationId = history.currentShareOperationId?.trim()
-      || [...history.events]
-        .reverse()
-        .find((event) => event.type === 'promoted' && event.shareOperationId?.trim())
-        ?.shareOperationId?.trim();
-    if (!liveShareOperationId || liveShareOperationId !== request.shareOperationId.trim()) {
-      return false;
-    }
+    // Recovery follows the same current-row precedence and retained-event
+    // validation as enqueue, preflight and completion. A queued command always
+    // needs its modern identity, even when post-publish cleanup trimmed the row.
+    const liveShareOperationId = await readPublishedAssertionOperation(this.store, contextGraphMetaUri(request.contextGraphId),
+      assertionLifecycleUri(request.contextGraphId, agentAddress, request.name, request.subGraphName));
+    if (typeof liveShareOperationId !== 'string' || liveShareOperationId !== request.shareOperationId.trim()) return false;
     if (history.kaNumber && request.kaNumber && history.kaNumber !== request.kaNumber) {
       return false;
     }

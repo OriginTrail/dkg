@@ -11,7 +11,13 @@ function nonemptyString(term: string | undefined): string | undefined {
     && literal.value.length > 0 ? literal.value : undefined;
 }
 
-/** Capture the retained named operation; null is legacy absence, undefined is corrupt. */
+/**
+ * Authoritative operation selection for every publication lane: the singleton
+ * current row wins; only an absent row permits the latest retained promotion.
+ * Null is explicit legacy absence, undefined is corrupt. Synchronous callers
+ * may support null; queued commands require a string. Neither may fall back
+ * past a corrupt current row or silently choose a conflicting promotion.
+ */
 export async function readPublishedAssertionOperation(
   store: TripleStore, graph: string, lifecycle: string,
 ): Promise<string | null | undefined> {

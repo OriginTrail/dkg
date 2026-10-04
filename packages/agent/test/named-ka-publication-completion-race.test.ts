@@ -270,3 +270,89 @@ describe('agent publication completion marker fencing', () => {
     expect(publish).not.toHaveBeenCalled(); expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(true);
   });
 });
+
+
+type OwnershipShape = 'current-over-event' | 'trimmed-event' | 'legacy' | 'conflicting-current' | 'iri-current' | 'empty-current' | 'corrupt-event';
+async function operationSelectionFixture(shape: OwnershipShape) {
+  const f = await fixture(), graph = contextGraphMetaUri(CG), lifecycle = assertionLifecycleUri(CG, AUTHOR, NAME);
+  let request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+  let expected: string | null | undefined = f.promoted.shareOperationId;
+  if (shape === 'current-over-event') {
+    const prior = await f.store.query(`CONSTRUCT { ?event ?p ?o } WHERE { GRAPH <${graph}> {
+      ?event a <${DKG}AssertionPromoted> ; <${DKG}shareOperationId> ${JSON.stringify(f.promoted.shareOperationId)} ; ?p ?o
+    } }`);
+    if (prior.type !== 'quads' || prior.quads.length === 0) throw new Error('Expected real prior promotion metadata');
+    const current = await f.replace(true);
+    request = await f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress: AUTHOR });
+    expected = current.shareOperationId;
+    const events = await f.store.query(`SELECT ?event WHERE { GRAPH <${graph}> {
+      ?event a <${DKG}AssertionPromoted> ; <${DKG}shareOperationId> ${JSON.stringify(expected)}
+    } } LIMIT 2`);
+    if (events.type !== 'bindings' || events.bindings.length !== 1) throw new Error('Expected one replacement promotion event');
+    await f.store.deleteByPattern({ graph, subject: events.bindings[0]!.event! });
+    // Retain the actual old publisher event, as a historical metadata record
+    // may remain across a replacement in read-both/imported stores.
+    await f.store.insert(prior.quads.map(quad => ({ ...quad, graph })));
+    await f.store.deleteByPattern({ graph, subject: lifecycle, predicate: `${DKG}shareOperationId` });
+    await f.store.insert([{ graph, subject: lifecycle, predicate: `${DKG}shareOperationId`, object: JSON.stringify(expected) }]);
+    // A valid current C row and retained prior B event are one real replacement,
+    // not two hand-built seals or a stubbed assertion history response.
+    expect((await f.agent.assertion.history(CG, NAME))?.events.filter((event: {type:string}) => event.type === 'promoted'))
+      .toEqual([expect.objectContaining({ shareOperationId:f.promoted.shareOperationId })]);
+  } else if (shape === 'legacy') {
+    await modelLegacyPublicationOwner(f); expected = null;
+  } else {
+    await f.store.deleteByPattern({ graph, subject: lifecycle, predicate: `${DKG}shareOperationId` });
+    if (shape === 'conflicting-current') {
+      await f.store.insert([f.promoted.shareOperationId!, 'conflicting-current'].map(id => ({ graph, subject:lifecycle, predicate:`${DKG}shareOperationId`, object:JSON.stringify(id) })));
+      expected = undefined;
+    } else if (shape === 'iri-current' || shape === 'empty-current') {
+      await f.store.insert([{ graph, subject:lifecycle, predicate:`${DKG}shareOperationId`, object:shape === 'iri-current' ? 'urn:invalid:operation' : '""' }]);
+      expected = undefined;
+    } else if (shape === 'corrupt-event') {
+      const events = await f.store.query(`SELECT ?event WHERE { GRAPH <${graph}> {
+        ?event a <${DKG}AssertionPromoted> ; <${DKG}shareOperationId> ${JSON.stringify(f.promoted.shareOperationId)}
+      } } LIMIT 2`);
+      if (events.type !== 'bindings' || events.bindings.length !== 1) throw new Error('Expected one retained promotion event');
+      const event = events.bindings[0]!.event!;
+      await f.store.deleteByPattern({ graph, subject:event, predicate:'http://www.w3.org/ns/prov#startedAtTime' });
+      await f.store.insert([{ graph, subject:event, predicate:'http://www.w3.org/ns/prov#startedAtTime', object:'"not-a-date"' }]);
+      expected = undefined;
+    }
+  }
+  return { ...f, request, expected };
+}
+
+describe('publisher-owned operation selection across publication lanes', () => {
+  const shapes: OwnershipShape[] = ['current-over-event', 'trimmed-event', 'legacy', 'conflicting-current', 'iri-current', 'empty-current', 'corrupt-event'];
+  it.each(shapes.flatMap(shape => (['admission', 'preflight', 'recovery', 'completion'] as const).map(lane => ({shape,lane}))))(
+    'applies one selection policy for $shape during $lane', async ({shape,lane}) => {
+      const f = await operationSelectionFixture(shape);
+      if (lane === 'admission') {
+        const admission = f.agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, { agentAddress:AUTHOR });
+        if (typeof f.expected === 'string') expect((await admission).shareOperationId).toBe(f.expected);
+        else await expect(admission).rejects.toMatchObject({code:'PUBLISH_INTENT_STALE'});
+      } else if (lane === 'preflight') {
+        const preflight = f.agent.preflightQueuedKnowledgeAssetVmPublishExecution(f.request);
+        if (typeof f.expected === 'string') await expect(preflight).resolves.toMatchObject({action:'execute'});
+        else await expect(preflight).rejects.toMatchObject({code:'PUBLISH_INTENT_STALE'});
+      } else if (lane === 'recovery') {
+        expect(await f.agent._canStampRecoveredKnowledgeAssetVmLifecycle(f.request)).toBe(typeof f.expected === 'string');
+      } else {
+        const consume = vi.spyOn(f.publisher,'consumePublishedSwmShareComplete');
+        const publish = vi.spyOn(f.publisher,'publish').mockResolvedValueOnce(f.result);
+        const completion = f.agent.publishFromFinalizedAssertion(CG, NAME, {agentAddress:AUTHOR});
+        if (f.expected === undefined) {
+          await expect(completion).rejects.toMatchObject({code:'PUBLISH_INTENT_STALE'});
+          expect(publish).not.toHaveBeenCalled();
+          expect(consume).not.toHaveBeenCalled();
+        } else {
+          await completion;
+          expect(consume.mock.calls.at(-1)?.[3]).toBe(f.expected);
+        }
+        expect(await f.publisher.hasSwmShareComplete(CG, NAME, AUTHOR)).toBe(f.expected === undefined);
+        // Synchronous publication supports an explicitly absent legacy owner,
+        // while corrupt modern ownership must fail before chain submission.
+      }
+    });
+});
