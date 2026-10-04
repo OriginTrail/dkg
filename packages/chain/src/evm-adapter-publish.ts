@@ -916,14 +916,33 @@ export class PublishMethods extends EVMChainAdapterBase {
       }
     }
 
-    // 3. Recover the mint tx via the KnowledgeAssetCreated(kaId indexed) log.
-    //    The contract stored block.timestamp verbatim into roots[0].timestamp,
-    //    so binary-search the block by timestamp and scan a padded window.
-    //    Everything below is best-effort: any failure -> null (caller rethrows).
+    const observation = await this.readExistingMintObservation(storage, kaId, Number(roots[0].timestamp));
+    if (observation === null) return null;
+    const { receipt, publish, eventRoot } = observation;
+    // Content refusals are deliberately outside the best-effort read boundary.
+    if (receipt.kaId !== kaId || receipt.startKAId !== kaId || receipt.endKAId !== kaId
+      || ethers.hexlify(receipt.merkleRoot).toLowerCase() !== expectedHex) {
+      throw Object.assign(new Error(`adopt-existing-mint: kaId ${kaId} receipt does not match the sealed mint`),
+        { code: 'KA_ID_COLLISION' });
+    }
+    if (eventRoot !== expectedHex) {
+      throw Object.assign(new Error(`adopt-existing-mint: kaId ${kaId} mint-event root does not match sealed root`),
+        { code: 'KA_ID_COLLISION' });
+    }
+    // Retain the receipt parser's provenance. These three overrides come from
+    // the verified storage/seal state rather than a second event decoder.
+    return { ...publish, merkleRoot: expectedMerkleRoot,
+      blockTimestamp: Number(roots[0].timestamp), publisherAddress: roots[0].publisher };
+  }
+
+  /** Pruned/unavailable RPC evidence leaves adoption unavailable; no refusals are thrown here. */
+  private async readExistingMintObservation(storage: Contract, kaId: bigint, mintTs: number): Promise<{
+    receipt: CanonicalFinalizationReceipt; publish: OnChainPublishResult; eventRoot: string;
+  } | null> {
     try {
-      const mintTs = Number(roots[0].timestamp);
-      const storageAddress = String(storage.target);
-      const { fromBlock, head, scanProviders } = await this.resolveKaStorageDeployBlock(storageAddress);
+      // Storage records block.timestamp verbatim: locate the mint within a
+      // bounded padded window, including adjacent blocks sharing a timestamp.
+      const { fromBlock, head, scanProviders } = await this.resolveKaStorageDeployBlock(String(storage.target));
       let lo = fromBlock;
       let hi = head;
       while (lo < hi) {
@@ -931,58 +950,26 @@ export class PublishMethods extends EVMChainAdapterBase {
         const ts = await this.getBlockTimestamp(mid);
         if (ts >= mintTs) hi = mid; else lo = mid + 1;
       }
-      const PAD = 128; // absorbs same-timestamp neighbours; single getLogs page
-      const scanLo = Math.max(fromBlock, lo - PAD);
-      const scanHi = Math.min(head, lo + PAD);
+      const padding = 128;
       const filter = storage.filters.KnowledgeAssetCreated(kaId);
-      const connected = new Map<JsonRpcProvider, Contract>();
-      const { logs } = await this.queryEventLogsPage(
-        storage, filter, scanLo, scanHi, scanProviders, connected, 'adoptExistingMint',
-      );
+      const { logs } = await this.queryEventLogsPage(storage, filter,
+        Math.max(fromBlock, lo - padding), Math.min(head, lo + padding), scanProviders,
+        new Map<JsonRpcProvider, Contract>(), 'adoptExistingMint');
       if (logs.length === 0) return null;
       const found = logs[0];
-      const parsed = 'args' in found && (found as ethers.EventLog).args
-        ? (found as ethers.EventLog)
-        : null;
-      const parsedArgs = parsed?.args ?? storage.interface.parseLog(found)?.args;
-      if (!parsedArgs || BigInt(parsedArgs.id) !== kaId) return null;
-      // An event read alone is not a confirmed receipt. Apply the same current
-      // canonicality/finality gate as the normal transaction recovery path.
-      const canonical = await this.resolveCanonicalFinalizationReceipt(found.transactionHash, {
-        expectedBlockNumber: found.blockNumber,
-        expectedBlockHash: found.blockHash,
+      const args = 'args' in found && (found as ethers.EventLog).args
+        ? (found as ethers.EventLog).args : storage.interface.parseLog(found)?.args;
+      if (!args || BigInt(args.id) !== kaId) return null;
+      const canonical = await this.resolveCanonicalFinalizationPublish(found.transactionHash, {
+        expectedBlockNumber: found.blockNumber, expectedBlockHash: found.blockHash,
       });
       if (canonical.status !== 'confirmed') return null;
-      const receipt = canonical.receipt;
-      if (receipt.kaId !== kaId || receipt.startKAId !== kaId || receipt.endKAId !== kaId
-        || ethers.hexlify(receipt.merkleRoot).toLowerCase() !== expectedHex) {
-        throw Object.assign(new Error(`adopt-existing-mint: kaId ${kaId} receipt does not match the sealed mint`),
-          { code: 'KA_ID_COLLISION' });
-      }
-      // Independent binding of the tx to the content: the event's merkleRoot
-      // must equal the sealed root too, not just storage state.
-      if (ethers.hexlify(parsedArgs.merkleRoot).toLowerCase() !== expectedHex) {
-        throw Object.assign(
-          new Error(`adopt-existing-mint: kaId ${kaId} mint-event root does not match sealed root`),
-          { code: 'KA_ID_COLLISION' },
-        );
-      }
-      return {
-        batchId: kaId,
-        kaId,
-        startKAId: kaId,
-        endKAId: kaId,
-        merkleRoot: expectedMerkleRoot,
-        knowledgeAssetsContract: storageAddress.toLowerCase(),
-        txHash: receipt.txHash,
-        blockNumber: receipt.blockNumber,
-        txIndex: receipt.txIndex,
-        blockTimestamp: mintTs,
-        publisherAddress: roots[0].publisher,
-        authorAddress: String(parsedArgs.author),
-      };
-    } catch (err) {
-      if ((err as { code?: string })?.code === 'KA_ID_COLLISION') throw err;
+      // Matching the recovered log is necessary, but only the live receipt
+      // gate proves the configured confirmation depth and hash at that height.
+      if (!await this.isReceiptBlockFinalAndCanonical(canonical.receipt)) return null;
+      return { receipt: canonical.receipt, publish: canonical.publish,
+        eventRoot: ethers.hexlify(args.merkleRoot).toLowerCase() };
+    } catch {
       return null;
     }
   }
@@ -991,6 +978,19 @@ export class PublishMethods extends EVMChainAdapterBase {
     txHash: string,
     options: CanonicalFinalizationReceiptReadOptions = {},
   ): Promise<CanonicalFinalizationReceiptResolution> {
+    const resolution = await this.resolveCanonicalFinalizationPublish(txHash, options);
+    return resolution.status === 'confirmed'
+      ? { status: 'confirmed', receipt: resolution.receipt } : resolution;
+  }
+
+  /** Shared receipt classification retains the already decoded publish for adoption. */
+  private async resolveCanonicalFinalizationPublish(
+    txHash: string,
+    options: CanonicalFinalizationReceiptReadOptions = {},
+  ): Promise<
+    | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt; publish: OnChainPublishResult }
+    | Exclude<CanonicalFinalizationReceiptResolution, { status: 'confirmed' }>
+  > {
     await this.init();
     const { receipt, publish: parsedPublish } = await this.readPublishReceipt(
       txHash,
@@ -1014,7 +1014,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     if (!parsedPublish) return { status: 'rejected' };
     const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, parsedPublish);
     return canonicalReceipt
-      ? { status: 'confirmed', receipt: canonicalReceipt }
+      ? { status: 'confirmed', receipt: canonicalReceipt, publish: parsedPublish }
       : { status: 'rejected' };
   }
 

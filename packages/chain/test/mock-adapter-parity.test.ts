@@ -81,6 +81,10 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // The mock implements that public reader directly from its in-memory event
   // state and has no ethers TransactionReceipt to project.
   'projectCanonicalFinalizationReceipt',
+  // Private EVM evidence readers share the decoded receipt between canonical
+  // recovery and adoption. The mock's public capabilities read its event array.
+  'readExistingMintObservation',
+  'resolveCanonicalFinalizationPublish',
   // Physical EVM contract-binding and one-log generation fences. These are
   // protected implementation details rather than ChainAdapter capabilities;
   // the mock has neither Hub-bound contract handles nor a persisted one-log.
