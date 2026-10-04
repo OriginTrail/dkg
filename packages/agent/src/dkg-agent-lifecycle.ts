@@ -4042,6 +4042,7 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
     // this is now the only outbox tick — chat (PR-3) and every
     // future migrated protocol drain on the same cadence so
     // operators see a single "outbox tick" beat.
+    let senderKeyRetryInFlight = false;
     this.messengerOutboxTimer = setInterval(() => {
       const now = Date.now();
       this.messenger.processOutboxTick(now)
@@ -4060,6 +4061,25 @@ export class LifecycleSyncMethods extends FinalizedSwmRetirementMethods {
             );
           }
         });
+      // A retryable ACK is a delivered Messenger response, so it has no
+      // outbox obligation. The sender-key queue owns that retry and must
+      // progress even if both peers stay connected and no further share is
+      // published. Keep one pass in flight and reuse its current-authority
+      // recipient check before every resend.
+      if (!senderKeyRetryInFlight && this.pendingSenderKeyByAgent.size > 0) {
+        senderKeyRetryInFlight = true;
+        void this.drainPendingSenderKeysForConnectedPeers()
+          .then((drained) => {
+            if (drained > 0) {
+              this.log.info(ctx, `Sender-key retry delivered ${drained} pending package(s)`);
+            }
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log.warn(ctx, `Sender-key retry tick failed: ${message}`);
+          })
+          .finally(() => { senderKeyRetryInFlight = false; });
+      }
     }, MESSAGE_OUTBOX_TICK_MS);
     if (this.messengerOutboxTimer.unref) this.messengerOutboxTimer.unref();
 
