@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => ({
   checkOrSetStoreIdentity: vi.fn(),
   attemptManagedStoreBootRecovery: vi.fn(),
   createStoreRuntimeMonitor: vi.fn(),
+  logWriters: [] as Array<{ shutdown(): Promise<void> }>,
 }));
 
 vi.mock('node:http', () => ({
@@ -94,6 +95,15 @@ vi.mock('../src/daemon/store-runtime-monitor.js', async importOriginal => {
     attemptManagedStoreBootRecovery: mocks.attemptManagedStoreBootRecovery,
     createStoreRuntimeMonitor: mocks.createStoreRuntimeMonitor,
   };
+});
+
+vi.mock('../src/daemon/daemon-log-file-writer.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/daemon-log-file-writer.js')>();
+  return { ...actual, startDaemonLogFileWriter: (...args: Parameters<typeof actual.startDaemonLogFileWriter>) => {
+    const writer = actual.startDaemonLogFileWriter(...args);
+    mocks.logWriters.push(writer);
+    return writer;
+  } };
 });
 
 const { resolveShutdownPolicy } = await import('../src/daemon/shutdown-policy.js');
@@ -217,6 +227,9 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
   });
 
   afterEach(async () => {
+    // A mocked forced exit leaves physical retirement running in this process.
+    // Drain each real writer before removing its temporary daemon home.
+    await Promise.all(mocks.logWriters.splice(0).map(writer => writer.shutdown()));
     daemonState.storeMonitor = null;
     vi.restoreAllMocks();
     vi.clearAllMocks();
@@ -294,7 +307,7 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
     }) as typeof setTimeout);
   }
 
-  it('a healthy managed-store startup installs the runtime monitor into daemonState with the harden lock path, and shutdown stops it', async () => {
+  it.each([false, true])('a slow issued restart reserves producer teardown before forced exit (restart held through deadline: %s)', async heldThroughDeadline => {
     unrefBootTimers();
     let finishMonitorStop!: () => void;
     const monitorDrain = new Promise<void>(resolve => { finishMonitorStop = resolve; });
@@ -323,7 +336,7 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
     };
     mocks.agentCreate.mockResolvedValue(fakeAgent);
 
-    await runDaemonInner(true, baseConfig({ store: MANAGED_STORE }), Date.now(), resolveShutdownPolicy(undefined));
+    await runDaemonInner(true, baseConfig({ store: MANAGED_STORE }), Date.now(), resolveShutdownPolicy(heldThroughDeadline ? '5000' : undefined));
 
     // No recovery needed on a healthy store.
     expect(mocks.attemptManagedStoreBootRecovery).not.toHaveBeenCalled();
@@ -354,9 +367,19 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
     }));
     try {
       await vi.waitFor(() => expect(fakeMonitor.stop).toHaveBeenCalled());
-      expect(fakeAgent.stop).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(fakeAgent.stop).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+      // The already-issued restart still owns retirement; producers can flush
+      // before it settles, and graceful completion must continue to await it.
       expect(daemonState.storeMonitor).toBe(fakeMonitor);
-    } finally { finishMonitorStop(); await shuttingDown; }
+      expect(process.exit).not.toHaveBeenCalled();
+      if (heldThroughDeadline) {
+        await shuttingDown;
+        expect(process.exit).toHaveBeenCalledWith(100);
+        // Forced exit follows producer flushing even though the physical
+        // restart still owes retirement to the monitor's closed owner.
+        expect(daemonState.storeMonitor).toBe(fakeMonitor);
+      }
+    } finally { finishMonitorStop(); await shuttingDown; await monitorDrain; }
     expect(fakeAgent.stop).toHaveBeenCalledTimes(1);
     expect(fakeMonitor.stop).toHaveBeenCalled();
     expect(daemonState.storeMonitor).toBeNull();

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { blazegraphNamespaceEndpointParts } from '@origintrail-official/dkg-storage';
-import { inspectBlazegraphContainerFacts } from '../src/daemon/blazegraph-container-inspection.js';
+import { inspectBlazegraphContainerFacts, parseBlazegraphContainerInspection } from '../src/daemon/blazegraph-container-inspection.js';
 import { parseBlazegraphNamespaceEndpoint } from '../src/daemon/blazegraph-container-policy.js';
 import { inspectHardenState } from '../src/daemon/harden/state.js';
 
@@ -18,7 +18,7 @@ describe('shared Blazegraph inspection facts', () => {
         LogConfig: { Type: 'local', Config: { 'max-size': '100m', 'max-file': '4' } } },
       State: { Running: false },
     };
-    expect(inspectBlazegraphContainerFacts(info, policy)).toEqual({
+    expect(inspectBlazegraphContainerFacts(info, policy)).toMatchObject({
       journalVolumeName: `${name}-${suffix}`, journalMountIsVolume: true, boundedJvm: true,
       healthProbe: true, boundedLogs: true, hostPort: 9999, running: false,
     });
@@ -38,6 +38,34 @@ describe('shared Blazegraph inspection facts', () => {
         healthProbe: false, boundedLogs: false, hostPort: undefined,
       });
     }
+  });
+
+  it('normalizes export-integrity facts and mounts without exposing Docker field shapes', () => {
+    const mounts = [{ Destination: '/data', Name: `${name}-hardened-data`, Type: 'volume' },
+      { Destination: 9, Name: false }, null];
+    const facts = inspectBlazegraphContainerFacts({ Mounts: mounts, State: {
+      Running: false, StartedAt: '2026-10-04T08:00:00Z', FinishedAt: '2026-10-04T09:00:00Z',
+    }, SizeRw: 123 }, policy);
+    expect(facts).toMatchObject({ mounts: [
+      { destination: '/data', name: `${name}-hardened-data`, type: 'volume' }, {},
+    ], startedAt: '2026-10-04T08:00:00Z', finishedAt: '2026-10-04T09:00:00Z', writableLayerSize: 123 });
+    expect(inspectBlazegraphContainerFacts({ State: { StartedAt: 3 }, SizeRw: -1 }, policy))
+      .toMatchObject({ mounts: [], startedAt: undefined, writableLayerSize: undefined });
+  });
+
+  it('refuses invalid inspect roots and preserves explicit rollback mount policy', () => {
+    for (const stdout of ['bad json', '[]', '[null]', '[3]', '[[]]', '{}']) {
+      expect(parseBlazegraphContainerInspection(stdout, policy)).toBeNull();
+    }
+    const stdout = JSON.stringify([{ Mounts: [{ Destination: '/data', Name: `${name}-hardened-data`, Type: 'bind' }] }]);
+    expect(parseBlazegraphContainerInspection(stdout, policy)?.journalVolumeName).toBeUndefined();
+    expect(parseBlazegraphContainerInspection(stdout, { ...policy,
+      journalVolumeNames: [`${name}-hardened-data`], journalMountType: 'any',
+    })?.journalVolumeName).toBe(`${name}-hardened-data`);
+    const original = { Mounts: [{ Destination: '/data', Name: `${name}-data`, Type: 'volume' }] };
+    const facts = inspectBlazegraphContainerFacts(original, policy);
+    original.Mounts[0]!.Name = 'changed';
+    expect(facts.mounts[0]?.name).toBe(`${name}-data`);
   });
 
   it('expresses published reuse and configured migration port policies over the same parser', () => {

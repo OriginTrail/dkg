@@ -5,7 +5,30 @@ function record(value: unknown): Record<string, unknown> | undefined {
     ? value as Record<string, unknown> : undefined;
 }
 
+export interface DockerJournalMount {
+  readonly destination?: string;
+  readonly name?: string;
+  readonly type?: string;
+}
+
+export interface BlazegraphInspectionPolicy {
+  readonly containerName: string;
+  readonly dataPath: string;
+  readonly containerPort: number;
+  readonly logMaxSize?: string;
+  readonly logMaxFile?: string;
+  /** Provisioning follows published ports; migration needs stopped-container bindings. */
+  readonly portSource?: 'published' | 'configured-first';
+  /** Rollback accepts only its replacement volume; other readers accept either owned volume. */
+  readonly journalVolumeNames?: readonly string[];
+  readonly journalMountType?: 'any' | 'volume-or-unspecified';
+}
+
 export interface BlazegraphContainerFacts {
+  readonly mounts: readonly DockerJournalMount[];
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly writableLayerSize?: number;
   readonly journalVolumeName?: string;
   readonly journalMountIsVolume: boolean;
   readonly boundedJvm: boolean;
@@ -16,21 +39,21 @@ export interface BlazegraphContainerFacts {
 }
 
 /** Normalize Docker's untyped inspection once; consumers retain their policy decisions. */
-export function inspectBlazegraphContainerFacts(info: unknown, policy: {
-  readonly containerName: string;
-  readonly dataPath: string;
-  readonly containerPort: number;
-  readonly logMaxSize?: string;
-  readonly logMaxFile?: string;
-  /** Provisioning follows published ports; migration also needs stopped-container bindings. */
-  readonly portSource?: 'published' | 'configured-first';
-}): BlazegraphContainerFacts {
+export function inspectBlazegraphContainerFacts(info: unknown, policy: BlazegraphInspectionPolicy): BlazegraphContainerFacts {
   const root = record(info);
-  const mounts = Array.isArray(root?.Mounts) ? root.Mounts : [];
-  const journal = mounts.map(record).find(mount => mount?.Destination === policy.dataPath
-    && (mount.Name === blazegraphVolumeName(policy.containerName)
-      || mount.Name === blazegraphMigrationVolumeName(policy.containerName))
-    && (mount.Type === undefined || mount.Type === 'volume'));
+  const string = (value: unknown) => typeof value === 'string' ? value : undefined;
+  const mounts = (Array.isArray(root?.Mounts) ? root.Mounts : []).map(record)
+    .filter((mount): mount is Record<string, unknown> => mount !== undefined)
+    .map(mount => Object.freeze({
+      ...(string(mount.Destination) === undefined ? {} : { destination: string(mount.Destination) }),
+      ...(string(mount.Name) === undefined ? {} : { name: string(mount.Name) }),
+      ...(string(mount.Type) === undefined ? {} : { type: string(mount.Type) }),
+    }));
+  const ownedNames = policy.journalVolumeNames ?? [blazegraphVolumeName(policy.containerName),
+    blazegraphMigrationVolumeName(policy.containerName)];
+  const journal = mounts.find(mount => mount.destination === policy.dataPath
+    && mount.name !== undefined && ownedNames.includes(mount.name)
+    && (policy.journalMountType === 'any' || mount.type === undefined || mount.type === 'volume'));
   const config = record(root?.Config);
   const env = Array.isArray(config?.Env) ? config.Env : [];
   const boundedJvm = env.some(value => typeof value === 'string'
@@ -54,10 +77,23 @@ export function inspectBlazegraphContainerFacts(info: unknown, policy: {
     const port = typeof value === 'string' ? Number(value) : undefined;
     return port !== undefined && Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
   };
-  return Object.freeze({ journalVolumeName: typeof journal?.Name === 'string' ? journal.Name : undefined,
-    journalMountIsVolume: journal?.Type === 'volume', boundedJvm, healthProbe, boundedLogs,
+  const state = record(root?.State);
+  const size = root?.SizeRw;
+  return Object.freeze({ mounts: Object.freeze(mounts), startedAt: string(state?.StartedAt),
+    finishedAt: string(state?.FinishedAt),
+    writableLayerSize: typeof size === 'number' && Number.isSafeInteger(size) && size >= 0 ? size : undefined,
+    journalVolumeName: journal?.name, journalMountIsVolume: journal?.type === 'volume', boundedJvm, healthProbe, boundedLogs,
     hostPort: policy.portSource === 'published'
       ? portFrom(record(root?.NetworkSettings)?.Ports)
       : portFrom(hostConfig?.PortBindings) ?? portFrom(record(root?.NetworkSettings)?.Ports),
     running: record(root?.State)?.Running === true });
+}
+
+/** Decode one Docker inspect response. Invalid top-level data is never a stopped-container proof. */
+export function parseBlazegraphContainerInspection(stdout: string, policy: BlazegraphInspectionPolicy): BlazegraphContainerFacts | null {
+  try {
+    const values: unknown = JSON.parse(stdout);
+    return Array.isArray(values) && record(values[0]) !== undefined
+      ? inspectBlazegraphContainerFacts(values[0], policy) : null;
+  } catch { return null; }
 }

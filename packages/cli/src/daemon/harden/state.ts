@@ -14,7 +14,7 @@ import {
   type DockerRunner,
 } from '../blazegraph-docker.js';
 
-import { inspectBlazegraphContainerFacts } from '../blazegraph-container-inspection.js';
+import { parseBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
 
 /** Suffix for the renamed legacy container kept as the recovery path. */
 export const HARDEN_BACKUP_SUFFIX = '-backup';
@@ -27,27 +27,6 @@ export interface HardenStateInfo {
   hostPort?: number;
   running?: boolean;
   usesMigrationVolume?: true;
-}
-
-type PortBindingMap = Record<string, Array<{ HostPort?: string }> | null>;
-
-export interface DockerInspectShape {
-  State?: { Running?: boolean; StartedAt?: string; FinishedAt?: string };
-  Mounts?: Array<{ Destination?: string; Name?: string }>;
-  Config?: { Env?: string[]; Healthcheck?: { Test?: string[] } };
-  HostConfig?: { PortBindings?: PortBindingMap };
-  NetworkSettings?: { Ports?: PortBindingMap };
-  /** Writable-layer bytes; only populated by `docker inspect --size`. */
-  SizeRw?: number;
-}
-
-export function parseInspect(stdout: string): DockerInspectShape | null {
-  try {
-    const arr = JSON.parse(stdout);
-    return Array.isArray(arr) && arr.length > 0 ? (arr[0] as DockerInspectShape) : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -69,10 +48,10 @@ export async function inspectHardenState(
 ): Promise<HardenStateInfo> {
   const result = await docker.run(['inspect', containerName]);
   if (result.exitCode === 0) {
-    const info = parseInspect(result.stdout);
-    const facts = inspectBlazegraphContainerFacts(info, {
+    const facts = parseBlazegraphContainerInspection(result.stdout, {
       containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT,
     });
+    if (facts === null) throw new Error('Docker inspect returned unparseable container facts');
     const hardened = facts.journalVolumeName !== undefined && facts.boundedJvm && facts.healthProbe;
     return { state: hardened ? 'hardened' : 'legacy', hostPort: facts.hostPort, running: facts.running,
       ...(!hardened && facts.journalVolumeName === blazegraphMigrationVolumeName(containerName)
@@ -81,10 +60,10 @@ export async function inspectHardenState(
   }
   const backup = await docker.run(['inspect', `${containerName}${HARDEN_BACKUP_SUFFIX}`]);
   if (backup.exitCode === 0) {
-    const info = parseInspect(backup.stdout);
-    const facts = inspectBlazegraphContainerFacts(info, {
+    const facts = parseBlazegraphContainerInspection(backup.stdout, {
       containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT,
     });
+    if (facts === null) throw new Error('Docker inspect returned unparseable backup facts');
     return { state: 'backup-only', hostPort: facts.hostPort, running: facts.running,
       ...(facts.journalVolumeName === blazegraphMigrationVolumeName(containerName)
         ? { usesMigrationVolume: true as const } : {}) };

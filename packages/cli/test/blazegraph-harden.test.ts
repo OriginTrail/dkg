@@ -1,6 +1,6 @@
 /** Hardening plans, port validation and state inspection. */
 import { describe, it, expect } from 'vitest';
-import { inspectHardenState, planHardenMigration, HARDEN_EXPORT_FILENAME } from '../src/daemon/blazegraph-harden.js';
+import { inspectHardenState, planHardenMigration, hardenStepDefs, HARDEN_EXPORT_FILENAME } from '../src/daemon/blazegraph-harden.js';
 import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_IMAGE, BLAZEGRAPH_JOURNAL_FILE, type DockerRunner } from '../src/daemon/blazegraph-docker.js';
 import { parseHardenPortOption } from '../src/commands/store.js';
 import { NAME, BACKUP, VOLUME, NAMESPACE, inspectJson, notFound, ok } from './_helpers/blazegraph-harden-fixtures.js';
@@ -48,6 +48,14 @@ describe('planHardenMigration', () => {
     expect(byId['run-hardened'].dockerArgs).toContain('--health-cmd');
     expect(byId['run-hardened'].dockerArgs?.join(' ')).toContain('-XX:+ExitOnOutOfMemoryError');
     expect(byId['run-hardened'].dockerArgs?.join(' ')).toContain(`source=${VOLUME},target=${BLAZEGRAPH_DATA_DIR}`);
+  });
+
+  it('keeps the exported command-definition view source-compatible for a backup source', () => {
+    const definitions = hardenStepDefs({ ...input, sourceContainerName: BACKUP });
+    expect(definitions.stop.dockerArgs).toEqual(['stop', '-t', '120', BACKUP]);
+    expect(definitions.exportJournal.dockerArgs[1]).toBe(`${BACKUP}:${BLAZEGRAPH_JOURNAL_FILE}`);
+    expect(definitions.diskPreflight.dockerArgs).toBeUndefined();
+    expect(definitions.runHardened.dockerArgs).toContain(NAME);
   });
 
   it('resumes from backup-only by re-exporting the current stopped backup', () => {

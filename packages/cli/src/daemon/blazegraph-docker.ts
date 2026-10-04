@@ -42,7 +42,7 @@ import {
   normalizeBlazegraphNamespace,
   type BlazegraphNamespaceEnsureResult,
 } from '@origintrail-official/dkg-storage';
-import { inspectBlazegraphContainerFacts, type BlazegraphContainerFacts } from './blazegraph-container-inspection.js';
+import { inspectBlazegraphContainerFacts, parseBlazegraphContainerInspection, type BlazegraphContainerFacts } from './blazegraph-container-inspection.js';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
 const {
@@ -256,18 +256,16 @@ interface ContainerInspectInfo extends BlazegraphContainerFacts { exists: boolea
 
 async function inspectContainer(docker: DockerRunner, containerName: string): Promise<ContainerInspectInfo> {
   const result = await docker.run(['inspect', containerName]);
-  let info: unknown = null;
-  if (result.exitCode === 0) {
-    try { const rows = JSON.parse(result.stdout); info = Array.isArray(rows) ? rows[0] : null; }
-    catch { /* An unreadable existing container retains conservative facts. */ }
-  }
-  return { exists: result.exitCode === 0, ...inspectBlazegraphContainerFacts(info, {
+  const policy = {
     containerName, dataPath: BLAZEGRAPH_DATA_PATH, containerPort: BLAZEGRAPH_CONTAINER_PORT,
     logMaxSize: BLAZEGRAPH_LOG_MAX_SIZE, logMaxFile: BLAZEGRAPH_LOG_MAX_FILE,
     // Reuse follows the actual published port; migration uses configured-first
     // inspection because stopped containers may have no published bindings.
-    portSource: 'published',
-  }) };
+    portSource: 'published' as const,
+  };
+  // An unreadable existing container retains conservative facts.
+  const facts = result.exitCode === 0 ? parseBlazegraphContainerInspection(result.stdout, policy) : null;
+  return { exists: result.exitCode === 0, ...(facts ?? inspectBlazegraphContainerFacts(null, policy)) };
 }
 
 function warnForLegacyContainerConfiguration(

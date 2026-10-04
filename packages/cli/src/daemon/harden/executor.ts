@@ -7,9 +7,8 @@ import { BLAZEGRAPH_CONTAINER_PORT, computeBlazegraphHeapMb, defaultDockerRunner
 import { storeHardenLockPath } from '../store-runtime-monitor.js';
 import { assertDaemonStoppedForStoreMigration } from '../store-maintenance-gate.js';
 import { HARDEN_BACKUP_SUFFIX, inspectHardenState } from './state.js';
-import { HARDEN_EXPORT_FILENAME, hardenStepDefs, planHardenMigration, type HardenStep } from './steps.js';
-import * as actions from './actions.js';
-import { fileSize, type HardenWorkflowInputs } from './actions.js';
+import { HARDEN_EXPORT_FILENAME, buildHardenMigration, planHardenMigration, type HardenStep } from './steps.js';
+import { type HardenWorkflowInputs } from './actions.js';
 import { rollbackMigrationFailure } from './rollback-failure.js';
 
 export interface ExecuteHardenMigrationOptions {
@@ -80,7 +79,7 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
     + 'Refusing to guess. Pass --port <port> (the port in your store URL, typically 9999).');
   const input = { containerName, namespace, hostPort, heapMb, migrationDir, state: info.state, running: info.running };
   const sourceName = info.state === 'backup-only' ? backupName : containerName;
-  const defs = hardenStepDefs({ ...input, sourceContainerName: sourceName });
+  const migration = buildHardenMigration({ ...input, sourceContainerName: sourceName });
   if (opts.dryRun) return { outcome: 'dry-run', containerName,
     backupContainerName: info.state === 'backup-only' ? backupName : null,
     hostPort, exportPath: null, journalBytes: null, heapMb, steps: planHardenMigration(input) };
@@ -92,22 +91,10 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
       + `restore service with: docker start ${sourceName} (then re-run harden when ready).`,
   };
   if (info.state === 'hardened') {
-    const backup = await docker.run(['inspect', backupName]);
-    if (backup.exitCode !== 0 && !/no such (?:object|container)/i.test(backup.stderr)) throw new Error(
-      `Cannot determine whether migration backup "${backupName}" remains: ${backup.stderr.trim() || 'Docker inspect failed'}. `
-      + 'Refusing ASK-only verification while migration state is unknown.');
-    const backupExists = backup.exitCode === 0;
-    const savedSize = await fileSize(exportPath);
-    if (backupExists || savedSize !== null) {
-      if (savedSize === null || savedSize <= 0) throw new Error(
-        `Migration replacement "${containerName}" has no valid retained export for journal verification. `
-        + `Keep backup "${backupName}" and restore or locate the export before retrying.`);
-      // Docker's hardened shape is reached before first-run verification.
-      // Retained migration copies require the same identity/size proof on retry.
-      await actions.verifyReplacement(ctx, defs.verify, { path: exportPath, bytes: savedSize });
-    } else await actions.verifyExisting(ctx);
-    return { outcome: 'already-hardened', containerName, backupContainerName: backupExists ? backupName : null,
-      hostPort, exportPath: savedSize === null ? null : exportPath, journalBytes: savedSize, heapMb };
+    for (const phase of migration.phases) await phase.execute(ctx);
+    return { outcome: 'already-hardened', containerName,
+      backupContainerName: migration.backupExists ? backupName : null, hostPort,
+      exportPath: migration.exported?.path ?? null, journalBytes: migration.exported?.bytes ?? null, heapMb };
   }
   await mkdir(migrationDir, { recursive: true });
   await mkdir(opts.dkgHome, { recursive: true });
@@ -118,20 +105,15 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
   try {
     await assertDaemonStoppedForStoreMigration(opts.dkgHome);
     log(`Wrote harden lock ${lockPath} — daemon startup and automatic store restarts stay blocked through verification and rollback.`);
-    const preSize = info.running ? await actions.readJournalSize(ctx, defs.journalSize) : null;
-    if (info.running) await actions.checkFreeDisk(ctx, preSize);
-    const stopped = await actions.stopSource(ctx, defs.stop, defs.exportIntegrity);
-    await actions.exportJournal(ctx, defs.exportJournal);
-    const exported = await actions.verifyExport(ctx, stopped, preSize, defs.exportIntegrity);
-    await actions.createVolume(ctx, defs.volumeCreate);
-    await actions.seedVolume(ctx, defs.seedVolume, exported);
-    if (info.state === 'legacy') await actions.renameBackup(ctx, defs.renameBackup);
-    try {
-      await actions.disableBackupRestart(ctx, defs.disableBackupRestart);
-      await actions.runHardened(ctx, defs.runHardened);
-    } catch (cause) { await rollbackMigrationFailure(ctx, 'post-swap setup', cause); }
-    try { await actions.verifyReplacement(ctx, defs.verify, exported); }
-    catch (cause) { await rollbackMigrationFailure(ctx, 'verification', cause); }
+    for (const phase of migration.phases) {
+      try { await phase.execute(ctx); }
+      catch (cause) {
+        if (phase.rollbackPhase === undefined) throw cause;
+        await rollbackMigrationFailure(ctx, phase.rollbackPhase, cause);
+      }
+    }
+    const exported = migration.exported;
+    if (exported === null) throw new Error('Migration completed without a verified export');
     log(`Verification passed — ${containerName} is hardened.`);
     return { outcome: 'hardened', containerName, backupContainerName: backupName, hostPort,
       exportPath, journalBytes: exported.bytes, heapMb };

@@ -7,10 +7,11 @@
  */
 import {
   BLAZEGRAPH_DATA_DIR,
+  BLAZEGRAPH_CONTAINER_PORT,
   blazegraphMigrationVolumeName as blazegraphVolumeName,
   type DockerRunner,
 } from '../blazegraph-docker.js';
-import { parseInspect } from './state.js';
+import { parseBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
 
 export interface RollbackResult {
   complete: boolean;
@@ -59,11 +60,11 @@ export async function rollbackToBackup(opts: {
   // COPY). A name collision with anything else must abort the rm.
   const inspect = await docker.run(['inspect', containerName]);
   if (inspect.exitCode === 0) {
-    const parsed = parseInspect(inspect.stdout);
-    const hasVolume = parsed?.Mounts?.some(
-      (m) => m.Destination === BLAZEGRAPH_DATA_DIR
-        && m.Name === blazegraphVolumeName(containerName),
-    ) === true;
+    const parsed = parseBlazegraphContainerInspection(inspect.stdout, {
+      containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT,
+      journalVolumeNames: [blazegraphVolumeName(containerName)], journalMountType: 'any',
+    });
+    const hasVolume = parsed?.journalVolumeName !== undefined;
     if (!hasVolume) {
       log(
         `ROLLBACK HALTED: "${containerName}" does not mount the expected volume — ` +

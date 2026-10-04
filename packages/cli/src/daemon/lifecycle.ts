@@ -3811,7 +3811,7 @@ async function runDaemonInnerWithStartupOwnership(
         autoUpdate.stop();
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
-        await stopDaemonStoreMonitor(daemonState);
+        await stopDaemonStoreMonitor(daemonState, { policy: shutdownPolicy, log });
         await runChainDiscoveryScan.close().catch((err: unknown) => {
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });
@@ -3890,6 +3890,7 @@ async function runDaemonInnerWithStartupOwnership(
           closeDashboardDb: () => dashDb.close(),
           log,
         });
+        await stopDaemonStoreMonitor(daemonState);
         if (backingStoresClosed) log("Stopped.");
       } finally {
         await cleanupStateFiles();

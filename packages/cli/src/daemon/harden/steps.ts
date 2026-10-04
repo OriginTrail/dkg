@@ -1,10 +1,9 @@
 /**
  * Harden migration — step definitions and plan generation.
  *
- * `hardenStepDefs` is the SINGLE source of truth for every migration
- * step (id, operator-facing description, and — for docker-backed steps —
- * the exact argv). Both the dry-run plan (`planHardenMigration`) and the
- * executor (executor.ts) consume these objects, so the rendered plan
+ * `buildHardenMigration` owns each migration phase (id, operator-facing
+ * description, Docker argv and action) and its state-dependent position.
+ * Dry-run rendering and execution consume this same sequence, so the plan
  * cannot drift from what actually runs; a conformance test drives the
  * executor against a scripted docker and asserts every planned argv is
  * executed in plan order. See the facade (../blazegraph-harden.ts) for
@@ -20,6 +19,7 @@ import {
   buildBlazegraphRunArgs,
 } from '../blazegraph-docker.js';
 import { HARDEN_BACKUP_SUFFIX, type HardenState } from './state.js';
+import * as actions from './actions.js';
 
 /** Where the journal export lands inside the migration dir. */
 export const HARDEN_EXPORT_FILENAME = 'bigdata.jnl';
@@ -93,112 +93,104 @@ function seedRunArgs(input: { containerName: string; migrationDir: string }): st
   ];
 }
 
-/**
- * SINGLE source of truth for every migration step: id, operator-facing
- * description, and — for docker-backed steps — the exact argv. Both the
- * dry-run plan (`planHardenMigration`) and the executor
- * (`executeHardenMigration`) consume THESE objects, so the rendered plan
- * cannot drift from what actually runs: an argv change here changes both
- * sides at once, and the plan/executor conformance test (drives the
- * executor against a scripted docker and asserts every planned argv is
- * executed in plan order) fails if the executor stops sourcing a command
- * from its step definition or reorders/skips a step.
- */
-export function hardenStepDefs(input: HardenStepDefsInput) {
-  const backupName = `${input.containerName}${HARDEN_BACKUP_SUFFIX}`;
-  const sourceName = input.sourceContainerName ?? input.containerName;
-  const exportPath = join(input.migrationDir, HARDEN_EXPORT_FILENAME);
-
-  return {
-    journalSize: {
-      id: 'journal-size',
-      description: `read in-container journal size (docker exec stat ${BLAZEGRAPH_JOURNAL_FILE})`,
-      dockerArgs: ['exec', sourceName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
-    },
-    diskPreflight: {
-      id: 'disk-preflight',
-      description:
-        `require free disk at ${input.migrationDir} >= ${HARDEN_DISK_PREFLIGHT_FACTOR}x journal size ` +
-        `(export copy + docker-volume seed copy usually share the root filesystem)`,
-    },
-    stop: {
-      id: 'stop',
-      description: `docker stop -t 120 ${sourceName} (graceful s6 -> Tomcat shutdown flushes RWStore)`,
-      dockerArgs: ['stop', '-t', '120', sourceName],
-    },
-    exportJournal: {
-      id: 'export-journal',
-      description:
-        `docker cp the current journal from ${sourceName} to ${exportPath} (always re-exported; saved exports may be stale)`,
-      dockerArgs: ['cp', `${sourceName}:${BLAZEGRAPH_JOURNAL_FILE}`, exportPath],
-    },
-    exportIntegrity: {
-      id: 'export-integrity',
-      description:
-        `re-inspect ${sourceName} after the export: it must NOT have run during the ` +
-        `copy (Running false, StartedAt/FinishedAt unchanged since the post-stop baseline) and ` +
-        `the writable-layer size (SizeRw) must be unchanged`,
-      dockerArgs: ['inspect', '--size', sourceName],
-    },
-    volumeCreate: {
-      id: 'volume-create',
-      description: `create named journal volume ${blazegraphVolumeName(input.containerName)} (idempotent)`,
-      dockerArgs: ['volume', 'create', blazegraphVolumeName(input.containerName)],
-    },
-    seedVolume: {
-      id: 'seed-volume',
-      description:
-        `seed the volume from ${exportPath} via a helper container (same pinned image; ` +
-        `the volume journal is ALWAYS overwritten from the current export — equal size ` +
-        `does not imply equal content; chown ${BLAZEGRAPH_TOMCAT_UID_GID})`,
-      dockerArgs: seedRunArgs(input),
-    },
-    renameBackup: {
-      id: 'rename-backup',
-      description: `docker rename ${input.containerName} ${backupName} (backup is NEVER removed by this tool)`,
-      dockerArgs: ['rename', input.containerName, backupName],
-    },
-    disableBackupRestart: {
-      id: 'disable-backup-restart',
-      description: `docker update --restart=no ${backupName} (backup can never auto-start on host reboot)`,
-      dockerArgs: ['update', '--restart=no', backupName],
-    },
-    runHardened: {
-      id: 'run-hardened',
-      description:
-        `create hardened container ${input.containerName} (heap ${input.heapMb} MB, ` +
-        `journal volume, healthcheck, log caps)`,
-      dockerArgs: buildBlazegraphRunArgs({
-        containerName: input.containerName,
-        hostPort: input.hostPort,
-        namespace: input.namespace,
-        heapMb: input.heapMb,
-        volumeName: blazegraphVolumeName(input.containerName),
-      }),
-    },
-    verify: {
-      id: 'verify',
-      dockerArgs: ['exec', input.containerName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
-      description:
-        `verify: /bigdata/status ready + ASK {} HTTP 200 + identity-tag SELECT returns a ` +
-        `binding + in-container journal size >= exported size (on failure: automatic ` +
-        `rollback to ${backupName}; exported journal kept at ${exportPath})`,
-    },
-  } satisfies Record<string, HardenStep>;
+/** Each selected phase owns its description, command, action and rollback boundary. */
+export interface HardenExecutablePhase extends HardenStep {
+  readonly rollbackPhase?: 'post-swap setup' | 'verification';
+  execute(context: actions.HardenWorkflowInputs): Promise<void>;
 }
 
-/** The plan shares the executor's named command definitions and their order. */
-export function planHardenMigration(input: HardenPlanInput): HardenStep[] {
-  const defs = hardenStepDefs({ ...input, sourceContainerName: input.state === 'backup-only'
-    ? `${input.containerName}${HARDEN_BACKUP_SUFFIX}` : input.containerName });
-  if (input.state === 'absent') return [];
-  if (input.state === 'hardened') return [{ id: 'verify', description:
-    'verify ASK; repeat identity and journal verification when migration backup/export remains' }];
-  const readableJournal = input.running ?? (input.state !== 'backup-only');
-  return [
-    ...(readableJournal ? [defs.journalSize, defs.diskPreflight] : []),
-    defs.stop, defs.exportJournal, defs.exportIntegrity, defs.volumeCreate, defs.seedVolume,
-    ...(input.state === 'legacy' ? [defs.renameBackup] : []),
-    defs.disableBackupRestart, defs.runHardened, defs.verify,
+function dockerPhase(id: string, description: string, dockerArgs: string[],
+  execute: (context: actions.HardenWorkflowInputs, command: readonly string[]) => Promise<void>,
+  rollbackPhase?: HardenExecutablePhase['rollbackPhase']): HardenExecutablePhase {
+  return { id, description, dockerArgs,
+    ...(rollbackPhase === undefined ? {} : { rollbackPhase }),
+    execute: context => execute(context, dockerArgs) };
+}
+
+/** One state-selected sequence serves both dry-run rendering and execution. */
+export function buildHardenMigration(input: HardenPlanInput & { sourceContainerName?: string }) {
+  const backupName = `${input.containerName}${HARDEN_BACKUP_SUFFIX}`;
+  const sourceName = input.sourceContainerName ?? (input.state === 'backup-only' ? backupName : input.containerName);
+  const exportPath = join(input.migrationDir, HARDEN_EXPORT_FILENAME);
+  const integrityCommand = ['inspect', '--size', sourceName];
+  let preSize: number | null = null;
+  let stopped: actions.StoppedContainerSnapshot | null = null;
+  let exported: actions.VerifiedJournalExport | null = null;
+  let backupExists = input.state !== 'hardened';
+  const requireExport = () => {
+    if (exported === null) throw new Error('Migration phase requires a verified journal export');
+    return exported;
+  };
+  const verifyCommand = ['exec', input.containerName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE];
+  const phases: HardenExecutablePhase[] = input.state === 'absent' ? [] : input.state === 'hardened' ? [
+    dockerPhase('verify', 'verify ASK; repeat identity and journal verification when migration backup/export remains',
+      verifyCommand, async (ctx, command) => {
+        const result = await actions.verifyAlreadyHardened(ctx, command);
+        exported = result.exported; backupExists = result.backupExists;
+      }),
+  ] : [
+    ...((input.running ?? input.state !== 'backup-only') ? [
+      dockerPhase('journal-size', `read in-container journal size (docker exec stat ${BLAZEGRAPH_JOURNAL_FILE})`,
+        ['exec', sourceName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
+        async (ctx, command) => { preSize = await actions.readJournalSize(ctx, command); }),
+      { id: 'disk-preflight', description:
+        `require free disk at ${input.migrationDir} >= ${HARDEN_DISK_PREFLIGHT_FACTOR}x journal size `
+        + `(export copy + docker-volume seed copy usually share the root filesystem)`,
+        execute: (ctx: actions.HardenWorkflowInputs) => actions.checkFreeDisk(ctx, preSize) },
+    ] : []),
+    dockerPhase('stop', `docker stop -t 120 ${sourceName} (graceful s6 -> Tomcat shutdown flushes RWStore)`,
+      ['stop', '-t', '120', sourceName], async (ctx, command) => {
+        stopped = await actions.stopSource(ctx, command, integrityCommand);
+      }),
+    dockerPhase('export-journal', `docker cp the current journal from ${sourceName} to ${exportPath} (always re-exported; saved exports may be stale)`,
+      ['cp', `${sourceName}:${BLAZEGRAPH_JOURNAL_FILE}`, exportPath], actions.exportJournal),
+    dockerPhase('export-integrity',
+      `re-inspect ${sourceName} after the export: it must NOT have run during the `
+      + `copy (Running false, StartedAt/FinishedAt unchanged since the post-stop baseline) and `
+      + `the writable-layer size (SizeRw) must be unchanged`, integrityCommand, async (ctx, command) => {
+        if (stopped === null) throw new Error('Migration export requires a stopped-container baseline');
+        exported = await actions.verifyExport(ctx, stopped, preSize, command);
+      }),
+    dockerPhase('volume-create', `create named journal volume ${blazegraphVolumeName(input.containerName)} (idempotent)`,
+      ['volume', 'create', blazegraphVolumeName(input.containerName)], actions.createVolume),
+    dockerPhase('seed-volume',
+      `seed the volume from ${exportPath} via a helper container (same pinned image; `
+      + `the volume journal is ALWAYS overwritten from the current export — equal size `
+      + `does not imply equal content; chown ${BLAZEGRAPH_TOMCAT_UID_GID})`, seedRunArgs(input),
+      (ctx, command) => actions.seedVolume(ctx, command, requireExport())),
+    ...(input.state === 'legacy' ? [dockerPhase('rename-backup',
+      `docker rename ${input.containerName} ${backupName} (backup is NEVER removed by this tool)`,
+      ['rename', input.containerName, backupName], actions.renameBackup)] : []),
+    dockerPhase('disable-backup-restart', `docker update --restart=no ${backupName} (backup can never auto-start on host reboot)`,
+      ['update', '--restart=no', backupName], actions.disableBackupRestart, 'post-swap setup'),
+    dockerPhase('run-hardened', `create hardened container ${input.containerName} (heap ${input.heapMb} MB, journal volume, healthcheck, log caps)`,
+      buildBlazegraphRunArgs({ containerName: input.containerName, hostPort: input.hostPort,
+        namespace: input.namespace, heapMb: input.heapMb, volumeName: blazegraphVolumeName(input.containerName) }),
+      actions.runHardened, 'post-swap setup'),
+    dockerPhase('verify', `verify: /bigdata/status ready + ASK {} HTTP 200 + identity-tag SELECT returns a `
+      + `binding + in-container journal size >= exported size (on failure: automatic `
+      + `rollback to ${backupName}; exported journal kept at ${exportPath})`, verifyCommand,
+      (ctx, command) => actions.verifyReplacement(ctx, command, requireExport()), 'verification'),
   ];
+  return { phases, get exported() { return exported; }, get backupExists() { return backupExists; } };
+}
+
+function description(phase: HardenExecutablePhase): HardenStep {
+  return { id: phase.id, description: phase.description,
+    ...(phase.dockerArgs === undefined ? {} : { dockerArgs: [...phase.dockerArgs] }) };
+}
+
+type HardenDockerStepKey = 'journalSize' | 'stop' | 'exportJournal' | 'exportIntegrity'
+  | 'volumeCreate' | 'seedVolume' | 'renameBackup' | 'disableBackupRestart' | 'runHardened' | 'verify';
+type HardenStepDefinitions = Record<HardenDockerStepKey, HardenStep & { dockerArgs: string[] }>
+  & { diskPreflight: HardenStep };
+
+/** Compatibility metadata view, derived from the executable definitions. */
+export function hardenStepDefs(input: HardenStepDefsInput): HardenStepDefinitions {
+  return Object.fromEntries(buildHardenMigration({ ...input, state: 'legacy', running: true }).phases
+    .map(phase => [phase.id.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase()), description(phase)])) as HardenStepDefinitions;
+}
+
+export function planHardenMigration(input: HardenPlanInput): HardenStep[] {
+  return buildHardenMigration(input).phases.map(description);
 }

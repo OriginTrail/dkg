@@ -1,8 +1,10 @@
 import { stat, statfs } from 'node:fs/promises';
 import { BLAZEGRAPH_JOURNAL_FILE, waitForBlazegraphReady, type DockerRunner } from '../blazegraph-docker.js';
 import { askOk, identityTagPresent } from './verify.js';
-import { parseInspect, type HardenStateInfo } from './state.js';
-import { HARDEN_DISK_PREFLIGHT_FACTOR, type HardenStep, type HardenStepDefsInput } from './steps.js';
+import type { HardenStateInfo } from './state.js';
+import { parseBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
+import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_CONTAINER_PORT } from '../blazegraph-docker.js';
+import { HARDEN_DISK_PREFLIGHT_FACTOR, type HardenStepDefsInput } from './steps.js';
 import type { ExecuteHardenMigrationOptions } from './executor.js';
 
 export interface HardenWorkflowInputs extends Readonly<HardenStepDefsInput> {
@@ -31,30 +33,26 @@ export async function fileSize(path: string): Promise<number | null> {
 async function defaultFreeDiskBytes(dir: string): Promise<number> {
   const info = await statfs(dir); return info.bsize * info.bavail;
 }
-async function mustRun(docker: DockerRunner, args: string[], what: string,
+async function mustRun(docker: DockerRunner, args: readonly string[], what: string,
   opts?: { timeoutMs?: number; hint?: string }): Promise<string> {
   const result = await docker.run(args, opts?.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs });
   if (result.exitCode !== 0) throw new Error(`${what} failed — docker ${args[0]} exited ${result.exitCode}. `
     + `stderr: ${result.stderr.trim() || '(empty)'}` + (opts?.hint ? ` ${opts.hint}` : ''));
   return result.stdout;
 }
-function command(step: HardenStep): string[] {
-  if (step.dockerArgs === undefined) throw new Error(`Migration phase ${step.id} has no Docker command`);
-  return step.dockerArgs;
-}
-async function stoppedSnapshot(ctx: HardenWorkflowInputs, step: HardenStep, what: string): Promise<StoppedContainerSnapshot> {
-  const out = await mustRun(ctx.docker, command(step), what, { hint: ctx.stoppedHint });
-  const info = parseInspect(out);
+async function stoppedSnapshot(ctx: HardenWorkflowInputs, args: readonly string[], what: string): Promise<StoppedContainerSnapshot> {
+  const out = await mustRun(ctx.docker, args, what, { hint: ctx.stoppedHint });
+  const info = parseBlazegraphContainerInspection(out, { containerName: ctx.containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT });
   if (info === null) throw new Error(`${what} returned unparseable docker inspect output. ${ctx.stoppedHint}`);
-  return Object.freeze({ running: info.State?.Running === true, startedAt: info.State?.StartedAt,
-    finishedAt: info.State?.FinishedAt, sizeRw: typeof info.SizeRw === 'number' ? info.SizeRw : undefined });
+  return Object.freeze({ running: info.running, startedAt: info.startedAt,
+    finishedAt: info.finishedAt, sizeRw: info.writableLayerSize });
 }
-export async function readJournalSize(ctx: HardenWorkflowInputs, step: HardenStep): Promise<number | null> {
+export async function readJournalSize(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<number | null> {
   if (!ctx.info.running) {
     ctx.log('WARNING: container is stopped — in-container journal size unknown; export validation falls back to size > 0.');
     return null;
   }
-  const out = await mustRun(ctx.docker, command(step), 'reading in-container journal size');
+  const out = await mustRun(ctx.docker, args, 'reading in-container journal size');
   const preSize = Number.parseInt(out.trim(), 10);
   if (!Number.isFinite(preSize) || preSize <= 0) throw new Error(
     `Unexpected journal size "${out.trim()}" from ${ctx.sourceName}:${BLAZEGRAPH_JOURNAL_FILE} — refusing to migrate.`);
@@ -69,21 +67,21 @@ export async function checkFreeDisk(ctx: HardenWorkflowInputs, preSize: number |
     + `(${HARDEN_DISK_PREFLIGHT_FACTOR}x journal — the export copy plus the docker-volume seed copy typically share the root filesystem), `
     + `have ${free}. Pass --migration-dir <dir> on a larger mount.`);
 }
-export async function stopSource(ctx: HardenWorkflowInputs, step: HardenStep, integrity: HardenStep): Promise<StoppedContainerSnapshot> {
+export async function stopSource(ctx: HardenWorkflowInputs, args: readonly string[], integrity: readonly string[]): Promise<StoppedContainerSnapshot> {
   ctx.log(`Stopping ${ctx.sourceName} (up to 120s for a clean RWStore flush)…`);
-  await mustRun(ctx.docker, command(step), 'stopping the legacy container', { timeoutMs: 180_000 });
+  await mustRun(ctx.docker, args, 'stopping the legacy container', { timeoutMs: 180_000 });
   const snapshot = await stoppedSnapshot(ctx, integrity, 'inspecting the stopped legacy container');
   if (snapshot.running) throw new Error(`Container "${ctx.sourceName}" reports Running=true immediately after docker stop — `
     + 'something restarted it (the daemon\'s store monitor? systemd? another operator?). Stop the daemon (dkg stop) '
     + 'or find the interfering process, then re-run harden. Nothing was migrated; the legacy container remains authoritative.');
   return snapshot;
 }
-export async function exportJournal(ctx: HardenWorkflowInputs, step: HardenStep): Promise<void> {
+export async function exportJournal(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<void> {
   ctx.log(`Exporting current journal from ${ctx.sourceName} to ${ctx.exportPath}…`);
-  await mustRun(ctx.docker, command(step), 'exporting the journal (docker cp)', { hint: ctx.stoppedHint });
+  await mustRun(ctx.docker, args, 'exporting the journal (docker cp)', { hint: ctx.stoppedHint });
 }
 export async function verifyExport(ctx: HardenWorkflowInputs, baseline: StoppedContainerSnapshot,
-  preSize: number | null, integrity: HardenStep): Promise<VerifiedJournalExport> {
+  preSize: number | null, integrity: readonly string[]): Promise<VerifiedJournalExport> {
   const after = await stoppedSnapshot(ctx, integrity, 're-inspecting the legacy container after the export');
   if (after.running || after.startedAt !== baseline.startedAt || after.finishedAt !== baseline.finishedAt) {
     throw new Error(`Journal export integrity check failed: container "${ctx.sourceName}" ran during the export `
@@ -105,26 +103,26 @@ export async function verifyExport(ctx: HardenWorkflowInputs, baseline: StoppedC
   ctx.log(`Export verified: ${measured} bytes.`);
   return Object.freeze({ path: ctx.exportPath, bytes: measured });
 }
-export async function createVolume(ctx: HardenWorkflowInputs, step: HardenStep): Promise<void> {
-  await mustRun(ctx.docker, command(step), 'creating the journal volume', { hint: ctx.stoppedHint });
+export async function createVolume(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<void> {
+  await mustRun(ctx.docker, args, 'creating the journal volume', { hint: ctx.stoppedHint });
 }
-export async function seedVolume(ctx: HardenWorkflowInputs, step: HardenStep, exported: VerifiedJournalExport): Promise<void> {
+export async function seedVolume(ctx: HardenWorkflowInputs, args: readonly string[], exported: VerifiedJournalExport): Promise<void> {
   ctx.log(`Seeding replacement journal volume from the current export…`);
-  const out = await mustRun(ctx.docker, command(step), 'seeding the journal volume', { hint: ctx.stoppedHint });
+  const out = await mustRun(ctx.docker, args, 'seeding the journal volume', { hint: ctx.stoppedHint });
   if (Number.parseInt(out.trim(), 10) !== exported.bytes) throw new Error(
     `Volume seed validation failed: volume journal is ${out.trim()} bytes, export is ${exported.bytes}. `
     + `Legacy container "${ctx.sourceName}" is untouched; re-run to retry. ${ctx.stoppedHint}`);
 }
-export async function renameBackup(ctx: HardenWorkflowInputs, step: HardenStep): Promise<void> {
+export async function renameBackup(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<void> {
   ctx.log(`Renaming ${ctx.containerName} → ${ctx.backupName} (kept until you remove it).`);
-  await mustRun(ctx.docker, command(step), 'renaming the legacy container', { hint: ctx.stoppedHint });
+  await mustRun(ctx.docker, args, 'renaming the legacy container', { hint: ctx.stoppedHint });
 }
-export async function disableBackupRestart(ctx: HardenWorkflowInputs, step: HardenStep): Promise<void> {
-  await mustRun(ctx.docker, command(step), 'disabling the backup restart policy');
+export async function disableBackupRestart(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<void> {
+  await mustRun(ctx.docker, args, 'disabling the backup restart policy');
 }
-export async function runHardened(ctx: HardenWorkflowInputs, step: HardenStep): Promise<void> {
+export async function runHardened(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<void> {
   ctx.log(`Creating hardened container ${ctx.containerName} (heap ${ctx.heapMb} MB)…`);
-  await mustRun(ctx.docker, command(step), 'creating the hardened container');
+  await mustRun(ctx.docker, args, 'creating the hardened container');
 }
 export async function verifyExisting(ctx: HardenWorkflowInputs): Promise<void> {
   ctx.log(`Container "${ctx.containerName}" already has the journal volume mounted — verifying.`);
@@ -133,15 +131,37 @@ export async function verifyExisting(ctx: HardenWorkflowInputs): Promise<void> {
     + `Check \`docker ps\` / \`docker logs ${ctx.containerName}\`.`);
   ctx.log(`ASK probe OK at ${ctx.sparqlUrl} — nothing to do.`);
 }
-export async function verifyReplacement(ctx: HardenWorkflowInputs, step: HardenStep, exported: VerifiedJournalExport): Promise<void> {
+export async function verifyReplacement(ctx: HardenWorkflowInputs, args: readonly string[], exported: VerifiedJournalExport): Promise<void> {
   await waitForBlazegraphReady({ url: ctx.baseUrl, fetch: ctx.fetchImpl, log: ctx.log,
     intervalMs: ctx.opts.readyIntervalMs ?? 2_000, timeoutMs: ctx.opts.readyTimeoutMs ?? 180_000,
     probeTimeoutMs: ctx.opts.probeTimeoutMs });
   if (!await askOk(ctx.fetchImpl, ctx.sparqlUrl, ctx.opts.probeTimeoutMs)) throw new Error(`ASK probe failed at ${ctx.sparqlUrl}`);
   if (!await identityTagPresent(ctx.fetchImpl, ctx.sparqlUrl, ctx.opts.probeTimeoutMs)) throw new Error(
     `identity-tag probe returned no binding at ${ctx.sparqlUrl} — the migrated data did not follow`);
-  const out = await mustRun(ctx.docker, command(step), 'reading the migrated journal size');
+  const out = await mustRun(ctx.docker, args, 'reading the migrated journal size');
   const size = Number.parseInt(out.trim(), 10);
   if (!Number.isFinite(size) || size < exported.bytes) throw new Error(
     `migrated journal is ${out.trim()} bytes, expected >= ${exported.bytes}`);
+}
+
+/** Retry of a hardened shape still proves retained migration copies, when present. */
+export async function verifyAlreadyHardened(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<{
+  readonly backupExists: boolean; readonly exported: VerifiedJournalExport | null;
+}> {
+  const backup = await ctx.docker.run(['inspect', ctx.backupName]);
+  if (backup.exitCode !== 0 && !/no such (?:object|container)/i.test(backup.stderr)) throw new Error(
+    `Cannot determine whether migration backup "${ctx.backupName}" remains: ${backup.stderr.trim() || 'Docker inspect failed'}. `
+    + 'Refusing ASK-only verification while migration state is unknown.');
+  const backupExists = backup.exitCode === 0;
+  const savedSize = await fileSize(ctx.exportPath);
+  const exported = savedSize === null ? null : Object.freeze({ path: ctx.exportPath, bytes: savedSize });
+  if (backupExists || exported !== null) {
+    if (exported === null || exported.bytes <= 0) throw new Error(
+      `Migration replacement "${ctx.containerName}" has no valid retained export for journal verification. `
+      + `Keep backup "${ctx.backupName}" and restore or locate the export before retrying.`);
+    // Docker's hardened shape is reached before first-run verification.
+    // Retained migration copies require the same identity/size proof on retry.
+    await verifyReplacement(ctx, args, exported);
+  } else await verifyExisting(ctx);
+  return Object.freeze({ backupExists, exported });
 }
