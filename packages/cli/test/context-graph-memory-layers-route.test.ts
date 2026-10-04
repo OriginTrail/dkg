@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -36,7 +37,7 @@ describe('memory-layer route', () => {
     } else expect(JSON.parse(res.body).layers.wm.bindings).toEqual([]);
   });
 
-  it('reads registered partitions through canonical agent queries, preserving normalization and per-layer SWM gating', async () => {
+  it.each(['allowed', 'read-denied', 'swm-denied'] as const)('reads through the real agent methods with %s authority', async permission => {
     const store = new OxigraphStore();
     try {
       const wm = `${ROOT}/_working_memory/0xagent/1`;
@@ -46,12 +47,28 @@ describe('memory-layer route', () => {
         ...[wm, swm, ROOT].map(graph => ({ subject: `urn:${graph.split('/')[3] ?? 'vm'}`, predicate: 'urn:p', object: '"visible"', graph })),
       ]);
       const engine = new DKGQueryEngine(store);
-      const query = vi.fn((sparql, options) => engine.query(sparql, options));
-      const { ctx, res } = fixture({ store, query, listContextGraphQueryPartitions: (_cg: string, options: object) => engine.listContextGraphQueryPartitions(CG, options) }, undefined, true);
+      // Use the SDK's composed methods; control authority below that boundary.
+      const agent = Object.assign(Object.create(DKGAgent.prototype), { store, queryEngine: engine,
+        node: { peerId: 'test-node' }, log: { info() {} },
+        resolveContextGraphSubscriptionBootstrapAuthority: vi.fn(async () => ({ outcome: 'allowed' })),
+        resolveContextGraphReadAuthority: vi.fn(async () => ({ outcome: permission === 'read-denied' ? 'denied' : 'allowed' })),
+        canUseSharedMemoryForContextGraph: vi.fn(async () => permission !== 'swm-denied'),
+      }) as DKGAgent;
+      const query = vi.spyOn(agent, 'query');
+      const list = vi.spyOn(agent, 'listContextGraphQueryPartitions');
+      const { ctx, res } = fixture(agent);
       await handleContextGraphRoutes(ctx);
       expect(res.statusCode).toBe(200);
       const layers = JSON.parse(res.body).layers;
-      expect([layers.wm.bindings.length, layers.swm.bindings.length, layers.vm.bindings.length]).toEqual([1, 1, 1]);
+      expect([layers.wm.bindings.length, layers.swm.bindings.length, layers.vm.bindings.length])
+        .toEqual(permission === 'read-denied' ? [0, 0, 0] : [1, permission === 'swm-denied' ? 0 : 1, 1]);
+      expect(list).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: '0xcaller' }));
+      expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: '0xcaller' }));
+      if (permission === 'read-denied') {
+        expect(query).not.toHaveBeenCalled();
+        return;
+      }
+      expect(agent.canUseSharedMemoryForContextGraph).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: '0xcaller' }));
       expect(query).toHaveBeenCalledTimes(3);
       expect(query.mock.calls.map(([, options]) => options.includeSharedMemory)).toEqual([false, true, false]);
       for (const [sparql, options] of query.mock.calls) {

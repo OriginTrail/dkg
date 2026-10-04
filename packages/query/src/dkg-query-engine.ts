@@ -34,7 +34,6 @@ import {
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   ASSERTION_NAMED_GRAPH_PREFIX,
-  isAssertionScopedChildGraph,
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
@@ -66,6 +65,8 @@ import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
+import { isScopedContentGraph } from './scoped-content-graph-policy.js';
+import { authorizeExactContextGraphPartitions } from './exact-context-graph-partitions.js';
 
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
@@ -426,6 +427,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     )) throw new Error('Exact context-graph reads require a scoped, concrete GRAPH query with partition access');
     if (options?.exactContextGraphPartitions) assertExactGraphRead(initialGraphScope);
 
+    if (options?.exactContextGraphPartitions && effectiveContextGraphId) {
+      const admission = await authorizeExactContextGraphPartitions(this.store, reads,
+        effectiveContextGraphId,
+        initialGraphScope.graphTargets.flatMap(target => target.kind === 'iri' ? [target.iri] : []), options);
+      assertExplicitGraphIrisAllowed(initialGraphScope, admission.allowed);
+      admission.assertUnchanged();
+      const result = await this.execAndNormalize(initialGraphScope, reads);
+      admission.assertUnchanged();
+      return result;
+    }
+
     if (effectiveContextGraphId && !options?.view) {
       const dataGraph = options?.subGraphName
         ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
@@ -526,7 +538,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
       const shouldExpandGraphVariables =
         options?.includeContextGraphPartitions === true
-        && (initialGraphScope.graphVariables.length > 0 || options.exactContextGraphPartitions === true);
+        && initialGraphScope.graphVariables.length > 0;
       const variableAllowedGraphs = shouldExpandGraphVariables
         ? await this.resolveScopedGraphVariableAllowList(
             effectiveContextGraphId,
@@ -539,11 +551,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // allow-list. GRAPH variables only gain known same-CG content
       // partitions for callers that explicitly opt into broad count scans;
       // legacy scoped routes keep their selected memory-layer contract.
-      assertExplicitGraphIrisAllowed(initialGraphScope,
-        options?.exactContextGraphPartitions ? variableAllowedGraphs : explicitAllowedGraphs);
-      if (options?.exactContextGraphPartitions) {
-        return this.execAndNormalize(initialGraphScope, reads);
-      }
+      assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
       routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
         initialGraphScope,
         variableAllowedGraphs,
@@ -1463,96 +1471,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return { bindings: allBindings };
   }
 
-}
-
-function isScopedContentGraph(
-  graph: string,
-  contextGraphId: string,
-  registeredSubGraphs: Set<string>,
-  registeredAssertionGraphs: Set<string>,
-  knownChildContextGraphs: Set<string>,
-  subGraphName?: string,
-): boolean {
-  const root = contextGraphDataUri(contextGraphId);
-  if (graph === root) return !subGraphName;
-  if (!graph.startsWith(`${root}/`)) return false;
-  if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return false;
-
-  const tail = graph.slice(root.length + 1);
-  if (
-    !tail ||
-    isMetadataGraphTail(tail) ||
-    isPrivateGraphTail(tail) ||
-    isRulesGraphTail(tail) ||
-    isStagingGraphTail(tail)
-  ) {
-    return false;
-  }
-
-  if (!subGraphName) {
-    if (tail.startsWith('_shared_memory/')) return true;
-    if (tail.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(tail);
-    if (tail.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
-  }
-
-  const slash = tail.indexOf('/');
-  const firstSegment = slash >= 0 ? tail.slice(0, slash) : tail;
-  const remaining = slash >= 0 ? tail.slice(slash + 1) : '';
-  if (subGraphName && firstSegment !== subGraphName) return false;
-  if (!registeredSubGraphs.has(firstSegment) || !validateSubGraphName(firstSegment).valid) {
-    return false;
-  }
-
-  if (!remaining) return true;
-  if (remaining.startsWith('_shared_memory/')) return true;
-  if (remaining.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(remaining);
-  if (remaining.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
-  return false;
-}
-
-function isRegisteredAssertionGraphOrScopedChild(
-  graph: string,
-  registeredAssertionGraphs: Set<string>,
-): boolean {
-  if (registeredAssertionGraphs.has(graph)) return true;
-  for (const registeredGraph of registeredAssertionGraphs) {
-    if (isAssertionScopedChildGraph(graph, registeredGraph)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isMetadataGraphTail(tail: string): boolean {
-  return (
-    tail === '_meta' ||
-    tail === '_shared_memory_meta' ||
-    tail.endsWith('/_meta') ||
-    tail.endsWith('/_shared_memory_meta') ||
-    tail.includes('/_meta/') ||
-    tail.includes('/_shared_memory_meta/')
-  );
-}
-
-function isPrivateGraphTail(tail: string): boolean {
-  return tail === '_private' || tail.startsWith('_private/') || tail.endsWith('/_private') || tail.includes('/_private/');
-}
-
-function isRulesGraphTail(tail: string): boolean {
-  return tail === '_rules' || tail.startsWith('_rules/') || tail.endsWith('/_rules') || tail.includes('/_rules/');
-}
-
-function isKnownChildContextGraphPartition(graph: string, knownChildContextGraphs: Set<string>): boolean {
-  for (const childContextGraph of knownChildContextGraphs) {
-    if (graph === childContextGraph || graph.startsWith(`${childContextGraph}/`)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isStagingGraphTail(tail: string): boolean {
-  return tail.startsWith('_verifiable_memory/staging/') || tail.includes('/_verifiable_memory/staging/');
 }
 
 function stripSparqlLiteralValue(value: string | undefined): string {

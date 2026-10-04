@@ -51,8 +51,8 @@ function wmBindings(contextGraphId: string, revision: number) {
   );
 }
 
-function Probe({ contextGraphId }: { contextGraphId: string }) {
-  const memory = useMemoryEntities(contextGraphId);
+function Probe({ contextGraphId, includeQueryCatalog = false }: { contextGraphId: string; includeQueryCatalog?: boolean }) {
+  const memory = useMemoryEntities(contextGraphId, { includeQueryCatalog });
   return React.createElement(
     'div',
     {
@@ -60,6 +60,8 @@ function Probe({ contextGraphId }: { contextGraphId: string }) {
       'data-total': String(memory.counts.total),
       'data-wm': String(memory.counts.wm),
       'data-loading': String(memory.loading),
+      'data-error': String(memory.error),
+      'data-status': memory.layerStatus.wm,
     },
   );
 }
@@ -155,6 +157,50 @@ describe('useMemoryEntities live updates', () => {
 
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
+  });
+
+  it('completes the current refresh after a StrictMode effect remount', async () => {
+    await act(async () => root.render(React.createElement(React.StrictMode, null,
+      React.createElement(Probe, { contextGraphId: 'project-strict' }))));
+    await flush();
+    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
+    expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
+  });
+
+  it.each(['graph', 'catalog'] as const)('clears the previous snapshot when a changed %s read fails', async change => {
+    await act(async () => root.render(React.createElement(Probe, {
+      contextGraphId: 'project-a', includeQueryCatalog: true,
+    })));
+    expect(container.querySelector('#probe')?.getAttribute('data-total')).toBe('1');
+    let rejectRead!: (error: Error) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((_resolve, reject) => { rejectRead = reject; })));
+    await act(async () => root.render(React.createElement(Probe, {
+      contextGraphId: change === 'graph' ? 'project-b' : 'project-a', includeQueryCatalog: false,
+    })));
+    expect(container.querySelector('#probe')?.getAttribute('data-total')).toBe('0');
+    await act(async () => rejectRead(new Error('Authority unavailable')));
+    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
+    expect(container.querySelector('#probe')?.getAttribute('data-error')).toBe('null');
+    expect(container.querySelector('#probe')?.getAttribute('data-status')).toBe('error');
+    expect(container.querySelector('#probe')?.getAttribute('data-total')).toBe('0');
+  });
+
+  it('discards a queued trailing refresh after unmount', async () => {
+    let resolveRead!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { resolveRead = resolve; })));
+    await act(async () => root.render(React.createElement(Probe, { contextGraphId: 'project-a' })));
+    await act(async () => {
+      MockEventSource.instances[0].emit('memory_graph_changed', { contextGraphId: 'project-a', layers: ['wm'], operation: 'write' });
+      vi.advanceTimersByTime(350);
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+    await act(async () => resolveRead({ ok: true, json: async () => ({ contextGraphId: 'project-a', layers: {
+      wm: { ok: true, truncated: false, bindings: wmBindings('project-a', 1) },
+      swm: { ok: true, truncated: false, bindings: [] },
+      vm: { ok: true, truncated: false, bindings: [] },
+    } }) } as Response));
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('collapses events during an active read to one trailing refresh', async () => {

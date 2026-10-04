@@ -3,14 +3,21 @@ import {
 } from '@origintrail-official/dkg-core';
 import type {
   QueryOptions,
-  TripleStore,
+  QueryResult,
 } from '@origintrail-official/dkg-storage';
 
 export interface MemoryReadOptions extends QueryOptions {
   includeQueryCatalog?: boolean;
-  /** Daemon callers pass the canonical agent query boundary. */
-  query?: TripleStore['query'];
-  listGraphs?: (options: QueryOptions) => Promise<string[]>;
+}
+
+export interface ContextGraphBatchPolicy {
+  includeSharedMemory: boolean;
+}
+
+/** Both operations belong to one admitted, caller-bound partition reader. */
+export interface ContextGraphReader {
+  listGraphs(options: QueryOptions): Promise<string[]>;
+  query(sparql: string, options: QueryOptions, policy: ContextGraphBatchPolicy): Promise<QueryResult>;
 }
 
 export type MemoryLayerKey = 'wm' | 'swm' | 'vm';
@@ -111,21 +118,6 @@ export function classifyMemoryGraph(
   return undefined;
 }
 
-async function listContextGraphNamedGraphs(
-  store: TripleStore,
-  contextGraphId: string,
-  options?: QueryOptions,
-): Promise<string[]> {
-  const root = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
-  const graphs = store.listGraphsByPrefix
-    ? await store.listGraphsByPrefix(root, options)
-    : await store.listGraphs(options);
-  return graphs
-    .filter((graph) => isScopedGraph(graph, root))
-    .map((graph) => assertSafeIri(graph))
-    .sort();
-}
-
 function exactGraphUnion(graphs: readonly string[]): string {
   return graphs
     .map((graph) =>
@@ -172,7 +164,7 @@ async function readLayer(
   layer: MemoryLayerKey,
   options: QueryOptions,
   contextGraphId: string,
-  query: TripleStore['query'],
+  query: ContextGraphReader['query'],
 ): Promise<MemoryLayerReadResult> {
   const bindings: MemoryLayerBinding[] = [];
 
@@ -183,6 +175,7 @@ async function readLayer(
     const result = await query(
       buildLayerQuery(batch, remaining + 1, layer, contextGraphId),
       options,
+      { includeSharedMemory: layer === 'swm' },
     );
     if (result.type !== 'bindings') {
       throw new Error('Memory-layer read expected SELECT bindings');
@@ -220,17 +213,17 @@ async function readLayer(
  * cannot occupy three external-store scheduler slots at once.
  */
 export async function readMemoryLayers(
-  store: TripleStore,
+  reader: ContextGraphReader,
   contextGraphId: string,
   options: MemoryReadOptions = {},
 ): Promise<MemoryLayersSnapshot> {
-  const { query: _query, includeQueryCatalog: _catalog, listGraphs: _listGraphs, ...storeOptions } = options;
+  const { includeQueryCatalog: _catalog, ...storeOptions } = options;
   const queryOptions: QueryOptions = {
     ...storeOptions,
     priority: options.priority ?? 'background',
     source: options.source ?? 'node-ui.memory-layers',
   };
-  const discovered = options.listGraphs ? await options.listGraphs(queryOptions) : await listContextGraphNamedGraphs(store, contextGraphId, queryOptions);
+  const discovered = await reader.listGraphs(queryOptions);
   const graphs = [...new Set(discovered)].filter(graph => isScopedGraph(graph, `did:dkg:context-graph:${contextGraphId}`)).map(assertSafeIri).sort();
   const byLayer: Record<MemoryLayerKey, string[]> = { wm: [], swm: [], vm: [] };
   for (const graph of graphs) {
@@ -252,7 +245,7 @@ export async function readMemoryLayers(
         layer,
         { ...queryOptions, source: `node-ui.memory-layers.${layer}` },
         contextGraphId,
-        options.query ?? store.query.bind(store),
+        reader.query.bind(reader),
       );
     } catch (error) {
       if (isAborted(options.signal)) throw error;
@@ -268,27 +261,29 @@ export async function readMemoryLayers(
  * GRAPH-variable aggregate and its giant query-engine VALUES allow-list.
  */
 export async function readContextGraphNamedGraphStats(
-  store: TripleStore,
+  reader: ContextGraphReader,
   contextGraphId: string,
   options: MemoryReadOptions = {},
 ): Promise<ContextGraphNamedGraphStats[]> {
-  const { query: _query, includeQueryCatalog: _catalog, listGraphs: _listGraphs, ...storeOptions } = options;
+  const { includeQueryCatalog: _catalog, ...storeOptions } = options;
   const queryOptions: QueryOptions = {
     ...storeOptions,
     priority: options.priority ?? 'background',
     source: options.source ?? 'node-ui.sub-graph-stats',
   };
-  const discovered = options.listGraphs ? await options.listGraphs(queryOptions) : await listContextGraphNamedGraphs(store, contextGraphId, queryOptions);
+  const discovered = await reader.listGraphs(queryOptions);
   const graphs = [...new Set(discovered)].filter(graph => isScopedGraph(graph, `did:dkg:context-graph:${contextGraphId}`)).map(assertSafeIri).sort();
   const stats: ContextGraphNamedGraphStats[] = [];
 
-  const groups = [graphs.filter(graph => classifyMemoryGraph(graph, contextGraphId) !== 'swm'),
-    graphs.filter(graph => classifyMemoryGraph(graph, contextGraphId) === 'swm')];
+  // Catalog graphs are hidden from the entity-layer classifier, but all SWM
+  // partitions still require shared-memory authority for their counts.
+  const isSharedMemory = (graph: string) => graph.endsWith('/_shared_memory') || graph.includes('/_shared_memory/');
+  const groups = [graphs.filter(graph => !isSharedMemory(graph)), graphs.filter(isSharedMemory)];
   for (const [index, group] of groups.entries()) {
     for (let offset = 0; offset < group.length; offset += EXACT_GRAPH_QUERY_BATCH_SIZE) {
       throwIfAborted(queryOptions.signal);
       const batch = group.slice(offset, offset + EXACT_GRAPH_QUERY_BATCH_SIZE);
-      const result = await (options.query ?? store.query.bind(store))(buildStatsQuery(batch), { ...queryOptions, source: `${queryOptions.source}.${index === 1 ? 'swm' : 'public'}` });
+      const result = await reader.query(buildStatsQuery(batch), { ...queryOptions, source: `${queryOptions.source}.${index === 1 ? 'swm' : 'public'}` }, { includeSharedMemory: index === 1 });
       if (result.type !== 'bindings') {
         throw new Error('Context-graph stats read expected SELECT bindings');
       }

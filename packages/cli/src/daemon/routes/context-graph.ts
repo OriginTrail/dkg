@@ -362,10 +362,23 @@ import {
 import {
   readContextGraphNamedGraphStats,
   readMemoryLayers,
+  type ContextGraphReader,
 } from '../context-graph-read-model.js';
 
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
+
+function contextGraphReader(agent: DKGAgent, contextGraphId: string, callerAgentAddress?: string): ContextGraphReader {
+  return {
+    listGraphs: options => agent.listContextGraphQueryPartitions(contextGraphId, { ...options, callerAgentAddress }),
+    query: async (sparql, options, policy) => {
+      const result = await agent.query(sparql, { ...options, contextGraphId,
+        includeContextGraphPartitions: true, exactContextGraphPartitions: true,
+        includeSharedMemory: policy.includeSharedMemory, callerAgentAddress });
+      return { type: 'bindings', bindings: result.bindings };
+    },
+  };
+}
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -1123,19 +1136,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
     const lifecycle = createStoreQueryRequestLifecycle(req, res, 'node-ui.memory-layers');
     try {
-      const snapshot = await readMemoryLayers(agent.store, contextGraphId, {
+      const snapshot = await readMemoryLayers(contextGraphReader(agent, contextGraphId, actor.authenticatedAgentAddress), contextGraphId, {
         signal: lifecycle.signal,
         priority: lifecycle.priority,
         includeQueryCatalog: parsed.includeQueryCatalog === true,
-        listGraphs: options => agent.listContextGraphQueryPartitions(contextGraphId, {
-          ...options, callerAgentAddress: actor.authenticatedAgentAddress }),
-        query: async (sparql, options) => {
-          const result = await agent.query(sparql, { ...options, contextGraphId,
-            includeContextGraphPartitions: true, exactContextGraphPartitions: true,
-            includeSharedMemory: options?.source?.endsWith('.swm') === true,
-            callerAgentAddress: actor.authenticatedAgentAddress });
-          return { type: 'bindings', bindings: result.bindings };
-        },
       });
       if (!res.writableEnded && !res.destroyed) {
         return jsonResponse(res, 200, { contextGraphId, ...snapshot });
@@ -1171,17 +1175,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       const counts = new Map<string, { entityCount: number; tripleCount: number }>();
       try {
         const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-        const graphStats = await readContextGraphNamedGraphStats(agent.store, contextGraphId!, {
+        const graphStats = await readContextGraphNamedGraphStats(contextGraphReader(agent, contextGraphId!, actor.authenticatedAgentAddress), contextGraphId!, {
           signal: lifecycle.signal, priority: lifecycle.priority,
-          listGraphs: options => agent.listContextGraphQueryPartitions(contextGraphId!, {
-            ...options, callerAgentAddress: actor.authenticatedAgentAddress }),
-          query: async (sparql, options) => {
-            const result = await agent.query(sparql, { ...options, contextGraphId: contextGraphId!,
-              includeContextGraphPartitions: true, exactContextGraphPartitions: true,
-              includeSharedMemory: options?.source?.endsWith('.swm') === true,
-              callerAgentAddress: actor.authenticatedAgentAddress });
-            return { type: 'bindings', bindings: result.bindings };
-          },
         });
         for (const row of graphStats) {
           if (!row.graph.startsWith(prefix)) continue;

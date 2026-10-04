@@ -472,6 +472,8 @@ export function isFirstClassEntity(e: MemoryEntity): boolean {
   return e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0;
 }
 
+const EMPTY_LAYERED_TRIPLES: LayeredTriple[] = [];
+
 export function useMemoryEntities(
   contextGraphId: string,
   opts?: { signalErrors?: boolean; includeQueryCatalog?: boolean },
@@ -482,7 +484,12 @@ export function useMemoryEntities(
   // the failed-vs-empty distinction it needs (Codex).
   const signalErrors = opts?.signalErrors ?? false;
   const includeQueryCatalog = opts?.includeQueryCatalog ?? false;
-  const [layeredTriples, setLayeredTriples] = useState<LayeredTriple[]>([]);
+  const [ownedSnapshot, setOwnedSnapshot] = useState({
+    contextGraphId, includeQueryCatalog, triples: EMPTY_LAYERED_TRIPLES,
+  });
+  const layeredTriples = ownedSnapshot.contextGraphId === contextGraphId
+    && ownedSnapshot.includeQueryCatalog === includeQueryCatalog
+    ? ownedSnapshot.triples : EMPTY_LAYERED_TRIPLES;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partial, setPartial] = useState(false);
@@ -494,6 +501,7 @@ export function useMemoryEntities(
   const signalErrorsRef = useRef(signalErrors);
   const refreshRunningRef = useRef(false);
   const refreshPendingRef = useRef(false);
+  const mountedRef = useRef(false);
   activeContextGraphRef.current = contextGraphId;
   signalErrorsRef.current = signalErrors;
   const includeQueryCatalogRef = useRef(includeQueryCatalog);
@@ -501,6 +509,7 @@ export function useMemoryEntities(
 
   const fetchOnce = useCallback(async (requestedContextGraphId: string) => {
     if (!requestedContextGraphId) return;
+    const requestedIncludeQueryCatalog = includeQueryCatalogRef.current;
     const version = ++versionRef.current;
     setLoading(true);
     setError(null);
@@ -508,7 +517,7 @@ export function useMemoryEntities(
     setLayerStatus(LOADING_LAYER_STATUS);
 
     try {
-      const snapshot = await fetchMemoryLayersDeduped(requestedContextGraphId, includeQueryCatalogRef.current);
+      const snapshot = await fetchMemoryLayersDeduped(requestedContextGraphId, requestedIncludeQueryCatalog);
       const wmR = normalizeLayer(snapshot.layers.wm, requestedContextGraphId);
       const swmR = normalizeLayer(snapshot.layers.swm, requestedContextGraphId);
       const vmR = normalizeLayer(snapshot.layers.vm, requestedContextGraphId);
@@ -516,6 +525,8 @@ export function useMemoryEntities(
       if (
         version !== versionRef.current
         || requestedContextGraphId !== activeContextGraphRef.current
+        || requestedIncludeQueryCatalog !== includeQueryCatalogRef.current
+        || !mountedRef.current
       ) return;
 
       const all: LayeredTriple[] = [
@@ -527,7 +538,8 @@ export function useMemoryEntities(
       const wmOk = wmR.ok;
       const swmOk = swmR.ok;
 
-      setLayeredTriples(all);
+      setOwnedSnapshot({ contextGraphId: requestedContextGraphId,
+        includeQueryCatalog: requestedIncludeQueryCatalog, triples: all });
       setLayerStatus({
         wm: wmOk ? 'ok' : 'error',
         swm: swmOk ? 'ok' : 'error',
@@ -554,7 +566,11 @@ export function useMemoryEntities(
       if (
         version === versionRef.current
         && requestedContextGraphId === activeContextGraphRef.current
+        && requestedIncludeQueryCatalog === includeQueryCatalogRef.current
+        && mountedRef.current
       ) {
+        setOwnedSnapshot({ contextGraphId: requestedContextGraphId,
+          includeQueryCatalog: requestedIncludeQueryCatalog, triples: EMPTY_LAYERED_TRIPLES });
         setError(signalErrorsRef.current ? (err.message ?? 'Failed to load memory data') : null);
         setPartial(false);
         setLayerStatus(ERROR_LAYER_STATUS);
@@ -563,6 +579,8 @@ export function useMemoryEntities(
       if (
         version === versionRef.current
         && requestedContextGraphId === activeContextGraphRef.current
+        && requestedIncludeQueryCatalog === includeQueryCatalogRef.current
+        && mountedRef.current
       ) setLoading(false);
     }
   }, []);
@@ -572,7 +590,7 @@ export function useMemoryEntities(
   // singleflight coalesces sibling views of the same CG. This keeps live data
   // fresh without allowing refresh storms to overlap storage work.
   const fetchAll = useCallback(async () => {
-    if (!activeContextGraphRef.current) return;
+    if (!mountedRef.current || !activeContextGraphRef.current) return;
     if (refreshRunningRef.current) {
       refreshPendingRef.current = true;
       return;
@@ -582,7 +600,7 @@ export function useMemoryEntities(
       do {
         refreshPendingRef.current = false;
         await fetchOnce(activeContextGraphRef.current);
-      } while (refreshPendingRef.current);
+      } while (mountedRef.current && refreshPendingRef.current);
     } finally {
       refreshRunningRef.current = false;
     }
@@ -591,8 +609,11 @@ export function useMemoryEntities(
   useMemoryGraphEvents(contextGraphId, fetchAll);
 
   useEffect(() => {
+    mountedRef.current = true;
     fetchAll();
     return () => {
+      mountedRef.current = false;
+      refreshPendingRef.current = false;
       versionRef.current++;
     };
   }, [contextGraphId, includeQueryCatalog, fetchAll]);
