@@ -15,6 +15,7 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEVNET_DIR="$SCRIPT_DIR/../.devnet"
+source "$SCRIPT_DIR/devnet-observation-helpers.sh"
 
 # Devnet daemon log paths — used by `assert_curator_log` to validate
 # server-side observability of the invite flow. Without these checks
@@ -707,15 +708,14 @@ for attempt in $(seq 1 30); do
 done
 [ "$outsider_refused" = yes ] || fail "N3 never returned an explicit authorization refusal: $sub3_resp"
 ok "N3's subscription was refused by the private graph's agent gate"
-outside_query=$(api "$N3" POST /api/query "$query_body")
-if QUERY="$outside_query" python3 - <<'PYCHECK'
-import json,os,sys
-try:
-    bindings=json.loads(os.environ['QUERY']).get('result',{}).get('bindings',[])
-    sys.exit(0 if len(bindings)==0 else 1)
-except Exception: sys.exit(1)
-PYCHECK
-then ok "N3's public query cannot read private SWM"; else fail "outsider N3 read private SWM: $outside_query"; fi
+outside_query=$(devnet_capture -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" --data "$query_body" "$N3/api/query") || devnet_observation_abort
+outside_count=$(printf '%s' "$outside_query" | devnet_observe rows '' api) || devnet_observation_abort
+if [ "$outside_count" = 0 ]; then
+  ok "N3's public query cannot read private SWM"
+else
+  fail "outsider N3 read private SWM"
+fi
 curator_live_count=$(store_subject_count 1 "$SUBJECT") || fail "cannot inspect curator's live SWM store"
 [ "$curator_live_count" -ge 1 ] || fail "curator's live SWM subject is absent from its backing store"
 outsider_before_count=$(store_subject_count 3 "$PRE_SUBJECT") || fail "cannot inspect N3's historical SWM store"

@@ -33,6 +33,7 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 NUM_NODES="${NUM_NODES:-6}"
+source "$SCRIPT_DIR/devnet-observation-helpers.sh"
 # shellcheck source=devnet-update-helpers.sh
 source "$SCRIPT_DIR/devnet-update-helpers.sh"
 if [ -n "${DKG_AUTH:-}" ]; then
@@ -59,6 +60,13 @@ warn() { WARN=$((WARN+1)); echo "  ⚠️  $*"; }
 api()  { curl -s -H "$H" "$@"; }
 post() { local port=$1; shift; api -X POST "http://127.0.0.1:$port$@"; }
 get()  { local port=$1; shift; api "http://127.0.0.1:$port$@"; }
+# Strict adapter for query observations; legacy suite exits 1 on invalid evidence.
+query_post() {
+  local port="$1" response; shift
+  response=$(devnet_capture -H "$H" -X POST "http://127.0.0.1:$port$@") || return 2
+  printf '%s' "$response" | devnet_observe rows '' api
+}
+
 http_code() {
   local port=$1; shift
   curl -s -o /dev/null -w "%{http_code}" -H "$H" "$@" "http://127.0.0.1:$port$1" 2>/dev/null
@@ -240,12 +248,10 @@ JSON
   echo ""
   echo "--- 4b: Private triples NOT visible on other nodes ---"
   for PORT in 9202 9203 9204; do
-    LEAK=$(post $PORT /api/query -H "Content-Type: application/json" -d "{
+    BINDINGS=$(query_post $PORT /api/query -H "Content-Type: application/json" -d "{
       \"sparql\": \"SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }\",
       \"contextGraphId\": \"$CG\"
-    }")
-    BINDINGS=$(echo "$LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-    [ -z "$BINDINGS" ] && BINDINGS=0
+    }") || devnet_observation_abort
     if [ "$BINDINGS" = "0" ]; then
       ok "Node $PORT: no private triple leak"
     else
@@ -268,16 +274,14 @@ JSON
   #       on the PUBLISHER itself — not just on §4b's peer nodes. This is
   #       the strongest "privacy boundary" assertion we can make without
   #       leaking the decryption key into a test fixture.
-  PUB_LEAK=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
+  PUB_BINDINGS=$(query_post 9201 /api/query -H "Content-Type: application/json" -d "{
     \"sparql\": \"SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }\",
     \"contextGraphId\": \"$CG\"
-  }")
-  PUB_BINDINGS=$(echo "$PUB_LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-  [ -z "$PUB_BINDINGS" ] && PUB_BINDINGS=0
+  }") || devnet_observation_abort
   if [ "$PUB_BINDINGS" = "0" ]; then
     ok "Publisher (node 9201) public view does NOT leak private email — privacy boundary intact"
   else
-    fail "Publisher (node 9201) public view leaked private email ($PUB_BINDINGS bindings): $PUB_LEAK"
+    fail "Publisher (node 9201) public view leaked private email ($PUB_BINDINGS bindings)"
   fi
 else
   warn "Skipping §4 — §3 publish did not yield a kaId (private-update path needs an existing KC)"
@@ -446,12 +450,10 @@ else
 fi
 
 echo "--- 7d: WM data NOT visible on other nodes (isolation) ---"
-WM_LEAK=$(post 9202 /api/query -H "Content-Type: application/json" -d "{
+WM_LEAK_COUNT=$(query_post 9202 /api/query -H "Content-Type: application/json" -d "{
   \"sparql\": \"SELECT ?name WHERE { <$FINDING_URI> <http://schema.org/name> ?name }\",
   \"contextGraphId\": \"$CG\"
-}")
-WM_LEAK_COUNT=$(echo "$WM_LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-[ -z "$WM_LEAK_COUNT" ] && WM_LEAK_COUNT=0
+}") || devnet_observation_abort
 if [ "$WM_LEAK_COUNT" = "0" ]; then
   ok "WM data correctly isolated — not visible on node 2"
 else
@@ -535,12 +537,10 @@ else
 fi
 
 echo "--- 10d: Sub-graph data isolated from root graph ---"
-SG_ROOT=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
+SG_ROOT_COUNT=$(query_post 9201 /api/query -H "Content-Type: application/json" -d "{
   \"sparql\": \"SELECT ?name WHERE { <$DECISION_URI> <http://schema.org/name> ?name }\",
   \"contextGraphId\": \"$CG\"
-}")
-SG_ROOT_COUNT=$(echo "$SG_ROOT" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-[ -z "$SG_ROOT_COUNT" ] && SG_ROOT_COUNT=0
+}") || devnet_observation_abort
 if [ "$SG_ROOT_COUNT" = "0" ]; then
   ok "Sub-graph data correctly isolated from root graph"
 else
