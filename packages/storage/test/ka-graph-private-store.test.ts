@@ -75,8 +75,10 @@ describe('graph-scoped private content', () => {
     await privateStore.replaceKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, second, undefined, c);
     // A recreated reader proves archive identity is durable, rather than cached.
     const restarted = new PrivateContentStore(store, new GraphManager(store));
-    await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, undefined, { commitmentId: b })).resolves.toEqual(first);
-    await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, undefined, { commitmentId: c })).resolves.toEqual(second);
+    await expect(restarted.getSealedKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope,
+      { privateTripleCount: first.length, privateMerkleRoot: b })).resolves.toEqual(first);
+    await expect(restarted.getSealedKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope,
+      { privateTripleCount: second.length, privateMerkleRoot: c })).resolves.toEqual(second);
     await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope)).resolves.toEqual(second);
   });
 
@@ -90,8 +92,8 @@ describe('graph-scoped private content', () => {
     await privateStore.archiveKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, oldPayload, oldRoot);
     const restarted = new PrivateContentStore(store, new GraphManager(store));
     await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope)).resolves.toEqual(latest);
-    await expect(restarted.getKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope, undefined,
-      { commitmentId: oldRoot })).resolves.toEqual(oldPayload);
+    await expect(restarted.getSealedKnowledgeAssetPrivateTriples(CONTEXT_GRAPH, scope,
+      { privateTripleCount: oldPayload.length, privateMerkleRoot: oldRoot })).resolves.toEqual(oldPayload);
   });
 
   it('fails closed when the store cannot atomically replace private graphs', async () => {
