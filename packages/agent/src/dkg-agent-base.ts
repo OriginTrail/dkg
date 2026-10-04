@@ -397,8 +397,6 @@ import {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
-  type VmReconcileNegativeRecord,
-  type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
@@ -1159,8 +1157,6 @@ export class DKGAgentBase {
     'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
     1_000,
   );
-  static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
     'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
     1_000,
@@ -1414,20 +1410,6 @@ export class DKGAgentBase {
   }
   /** StorageACK declines per minute bucket and code, for the last hour. */
   protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
-  /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
-  protected readonly vmReconcileNegativeCache = new Map<
-    string,
-    Omit<
-      VmReconcileNegativeRecord,
-      'cacheKey' | 'peerTopologyKey' | 'peerTopology' | 'cleanMissPeerIds'
-    > & {
-      peerTopology: VmReconcilePeerTopology;
-      cleanMissPeerIds: string[];
-    }
-  >();
-  /** Bounded access-ordered keys already consulted in the durable store. */
-  protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
-  protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
   protected readonly vmReconcileTransportBudgetPolicy = new VmRecoveryTransportBudgetPolicy();
