@@ -436,9 +436,10 @@ const privateImplementationModules = [
 ];
 for (const module of privateImplementationModules) {
   for (const extension of ['', '.js', '.d.ts', '.js.map', '.d.ts.map']) {
-    const specifier = `@origintrail-official/dkg-agent/dist/${module}${extension}`;
+    const path = `${module}${extension}`;
+    const specifier = `@origintrail-official/dkg-agent/dist/${path}`;
     try {
-      await import(specifier);
+      await import(`@origintrail-official/dkg-agent/dist/${path}`);
       throw new Error(`private implementation module unexpectedly imported: ${specifier}`);
     } catch (error) {
       if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
