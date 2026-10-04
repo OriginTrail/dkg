@@ -302,7 +302,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
 import { withKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
@@ -5029,7 +5029,7 @@ export class PublishMethods extends DKGAgentBase {
   getOrCreateNamedKaVmLifecycleRepair(this: DKGAgent): NamedKaVmLifecycleRepair {
     return this.namedKaVmLifecycleRepair ??= new NamedKaVmLifecycleRepair({
       dataDir: this.config?.dataDir,
-      writeLocks: this.writeLocks ?? this.publisher?.writeLocks ?? new Map(),
+      writeLocks: this.writeLocks,
       apply: input => applyPublishedNamedKaVmLifecycle(this.store, input),
       isCurrent: input => isConfirmedNamedKaVmLifecycleCurrent(
         this.chain, input, this.chainAuthorityReadBudgets.requestTimeoutMs, Boolean(this.config?.dataDir),
@@ -5040,6 +5040,7 @@ export class PublishMethods extends DKGAgentBase {
 
   async _repairConfirmedNamedKaVmLifecycle(
     this: DKGAgent, input: ConfirmedNamedKaVmLifecycleInput,
+    confirmedPublication: PublishResult & { assertionUri: string; seal: AssertionSeal },
   ): Promise<boolean> {
     try {
       const outcome = await this.getOrCreateNamedKaVmLifecycleRepair().submit(input);
@@ -5049,6 +5050,7 @@ export class PublishMethods extends DKGAgentBase {
       throw Object.assign(new Error(`Confirmed publish requires lifecycle recovery: ${String(error)}`), {
         code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: input.publishedUal,
         merkleRoot: input.merkleRoot, assertionVersion: input.assertionVersion, cause: error,
+        confirmedPublication, lifecycleRecovery: { ...input, action: 'recover_confirmed_publication', publicationRetrySafe: false },
       });
     }
   }
@@ -5061,7 +5063,7 @@ export class PublishMethods extends DKGAgentBase {
     merkleRoot: string = request.sealMerkleRoot,
   ): Promise<boolean> {
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    return withKeyedLocks(this.writeLocks ?? this.publisher?.writeLocks ?? new Map(), [
+    return withKeyedLocks(this.writeLocks, [
       assertionLifecycleWriteLockKey(request.contextGraphId, request.name, agentAddress, request.subGraphName),
     ], async () => {
       const input: ConfirmedNamedKaVmLifecycleInput = {
@@ -5850,7 +5852,7 @@ export class PublishMethods extends DKGAgentBase {
           packedKaId: packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
           merkleRoot: ethers.hexlify(seal.merkleRoot), assertionVersion: graphScope.assertionVersion,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
-        }) : false;
+        }, { ...result, assertionUri, seal }) : false;
 
     if (result.status === 'confirmed' && result.onChainResult) {
       const rootEntities: string[] = [];
@@ -6334,13 +6336,13 @@ export class PublishMethods extends DKGAgentBase {
           assertionVersion: graphScope.assertionVersion,
           packedKaId: packedKaId ?? result.onChainResult?.kaId ?? result.kaId,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
-        }) : false;
+        }, { ...result, assertionUri, seal }) : false;
 
     // Preserve the standalone tentative publication projection. Confirmed work
     // above uses the durable repair owner; no VM data graph is claimed here.
     if (result.status === 'tentative') {
       try {
-        await applyPublishedNamedKaVmLifecycle(this.store, {
+        await applyTentativeNamedKaVmLifecycle(this.store, {
           contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName,
           publishedUal: result.ual, merkleRoot: ethers.hexlify(seal.merkleRoot), tentative: true,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),

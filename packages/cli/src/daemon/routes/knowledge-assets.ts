@@ -96,17 +96,10 @@ import {
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
+import { confirmedVmRecoveryRequiredResponse, vmPublishResponseBody, type FinalizedPublishResult } from './vm-publish-response.js';
 import { authenticatedAgentAddress } from '../../auth.js';
 
 const PREFIX = "/api/knowledge-assets";
-
-type FinalizedPublishResult = Awaited<
-  ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
-> & {
-  /** Backward-compatible response aliases still accepted by the HTTP route. */
-  authorAddress?: string;
-  kas?: unknown[];
-};
 
 // Decode + validate a `:name` path segment (parity with the legacy routes,
 // which `safeDecodeURIComponent` then `validateAssertionName` every name). A
@@ -1177,6 +1170,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
+          const confirmedRecovery = confirmedVmRecoveryRequiredResponse(e);
+          if (confirmedRecovery) return jsonResponse(res, 207, { created: true, ...result, ...confirmedRecovery,
+            ...(errors.length > 0 ? { errors } : {}), phase: 'vm-publish' });
           if (respondWithPartialStoreFailure(e, 'vm-publish')) return;
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
@@ -1666,6 +1662,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(subGraphName ? { subGraphName } : {}),
         });
       } catch (err: any) {
+        const confirmedRecovery = confirmedVmRecoveryRequiredResponse(err);
+        if (confirmedRecovery) return jsonResponse(res, 207, confirmedRecovery);
         // A store read may have an indeterminate outcome while this request has
         // not created a publish job. Keep these separate; enqueue itself may
         // persist a job before throwing, so never make a no-job claim then.
@@ -1810,27 +1808,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           recordActivityAndNotify(ctx, { contextGraphId, kind: "published", actorAgentAddress: pub?.seal?.authorAddress ?? pub?.authorAddress ?? requestAgentAddress, subGraphName });
         }
         recordPcaDiscount(ctx, contextGraphId, pub?.onChainResult);
-        const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
         // Full publish payload (PR #971) so clients can reconcile sealed↔minted.
-        return jsonResponse(res, httpStatus, {
-          kaId: pub?.kaId,
-          status: pub?.status,
-          ...(pub?.lifecycleRepairPending ? { lifecycleRepairPending: true } : {}),
-          ual: pub?.ual,
-          txHash: pub?.onChainResult?.txHash,
-          ...(pub?.assertionUri !== undefined ? { assertionUri: pub.assertionUri } : {}),
-          ...(pub?.seal?.authorAddress ?? pub?.authorAddress ? { authorAddress: pub?.seal?.authorAddress ?? pub?.authorAddress } : {}),
-          ...(pub?.merkleRoot !== undefined
-            ? { merkleRoot: typeof pub.merkleRoot === "string" ? pub.merkleRoot : hex(pub.merkleRoot) }
-            : {}),
-          ...(Array.isArray(pub?.kas) ? { kas: pub.kas } : {}),
-          ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
-          ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
-          ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
-          ...(storageAckPeerIds.length > 0 ? { storageAckPeerIds } : {}),
-          ...(reason ? { error: reason } : {}),
-        });
+        return jsonResponse(res, httpStatus, vmPublishResponseBody(pub, reason));
       } catch (e: any) {
+        const confirmedRecovery = confirmedVmRecoveryRequiredResponse(e);
+        if (confirmedRecovery) return jsonResponse(res, 207, confirmedRecovery);
         const msg = e?.message ?? String(e);
         // A vm/publish on a KA that hasn't been finalized, or hasn't been
         // shared to SWM, is a caller precondition error (4xx), not a
