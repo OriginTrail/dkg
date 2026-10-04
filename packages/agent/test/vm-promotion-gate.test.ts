@@ -54,6 +54,10 @@ import {
   generateKnowledgeAssetShareMetadata,
   storageAckLedgerEntryQuads,
   storeKnowledgeAssetWorkspaceHead,
+  storeKnowledgeAssetOperationPublicQuads,
+  resolveKnowledgeAssetWorkspaceHead,
+  resolveKnowledgeAssetOperationPublicQuads,
+  workspaceOperationSubject,
   xsdDateTimeLiteral,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -587,28 +591,77 @@ describe('core VM-promotion guarantees', () => {
       expect(await count(internals.store, registered.assertionGraph)).toBe(1);
     });
 
-    it('keeps a head shared with a retained ACK copy when an older alias operation expires', async () => {
+    it('retains a complete equivalent head and snapshots until its ACK copy is released', async () => {
       const internals = await boot({ sharedMemoryTtlMs: 60_000 });
       await internals.ensureStorageAckLedgerReady();
       const cg = 'ttl-alias-cg';
-      const retained = await seedCopy(internals.store, { namespace: cg, n: 30, ageMs: HOUR });
-      const originatorOp = `urn:dkg:share:${cg}:originator-30`;
+      const kaUal = ual(30);
+      const graphManager = new GraphManager(internals.store);
+      const metaGraph = contextGraphSharedMemoryMetaUri(cg);
+      const publisherId = 'originator-30';
+      const ackId = 'storage-ack-alias-30';
+      const publishedAt = new Date(Date.now() - 2 * HOUR);
+      const signedAt = new Date(Date.now() - HOUR);
+      const payload: Quad[] = [{
+        subject: 'urn:entity:30', predicate: 'http://schema.org/name', object: '"alias content"', graph: '',
+      }];
+      for (const [shareOperationId, timestamp] of [[publisherId, publishedAt], [ackId, signedAt]] as const) {
+        await storeKnowledgeAssetOperationPublicQuads({
+          store: internals.store, graphManager, contextGraphId: cg, kaUal, assertionVersion: 1,
+          shareOperationId, timestamp, quads: payload, publisherPeerId: 'publisher-peer', accessPolicy: 'public',
+        });
+      }
+      const publisherOp = workspaceOperationSubject(cg, publisherId);
+      const ackOp = workspaceOperationSubject(cg, ackId);
+      await storeKnowledgeAssetWorkspaceHead({
+        store: internals.store, graphManager, contextGraphId: cg, kaUal,
+        assertionVersion: 1, shareOperationId: publisherId,
+      });
+      const headSubject = `${kaUal}#dkg-swm-head`;
+      const assertionGraph = knowledgeAssetLayerGraphUri(
+        cg, MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(kaUal, 1),
+      );
       await internals.store.insert([
-        { subject: originatorOp, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${DKG}WorkspaceOperation`, graph: retained.metaGraph },
-        { subject: originatorOp, predicate: `${DKG}shareOperationId`, object: '"originator-30"', graph: retained.metaGraph },
-        { subject: originatorOp, predicate: `${DKG}publishedAt`, object: `"${new Date(Date.now() - 2 * HOUR).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: retained.metaGraph },
-        { subject: originatorOp, predicate: `${DKG}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: retained.metaGraph },
-        { subject: originatorOp, predicate: `${DKG}kaUal`, object: ual(30), graph: retained.metaGraph },
-        // The head carries both operation ids as aliases.
-        { subject: retained.head, predicate: `${DKG}shareOperationId`, object: '"originator-30"', graph: retained.metaGraph },
+        { subject: headSubject, predicate: `${DKG}shareOperationId`, object: JSON.stringify(ackId), graph: metaGraph },
+        ...payload.map(row => ({ ...row, graph: assertionGraph })),
+        ...storageAckLedgerEntryQuads({
+          operationSubject: ackOp, namespace: cg, metaGraph, contextGraphId: '55',
+          kaUal, assertionVersion: 1, operation: 'publish', signedAt,
+        }),
+        { subject: ackOp, predicate: LEDGER.registeredAt, object: xsdDateTimeLiteral(signedAt), graph: STORAGE_ACK_LEDGER_GRAPH },
       ]);
+      const readHead = () => resolveKnowledgeAssetWorkspaceHead({
+        store: internals.store, graphManager, contextGraphId: cg, kaUal,
+      });
+      const readSnapshot = (shareOperationId: string) => resolveKnowledgeAssetOperationPublicQuads({
+        store: internals.store, graphManager, contextGraphId: cg, kaUal, assertionVersion: 1, shareOperationId,
+      });
+      const aliases = [publisherId, ackId].sort();
+      expect((await readHead())?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual(aliases);
+      const snapshotsBefore = await Promise.all(aliases.map(readSnapshot));
 
       await internals.cleanupExpiredSharedMemory();
 
-      expect(await count(internals.store, retained.metaGraph, originatorOp)).toBe(0);
-      expect(await count(internals.store, retained.metaGraph, retained.op)).toBeGreaterThan(0);
-      expect(await count(internals.store, retained.metaGraph, retained.head)).toBeGreaterThan(0);
-      expect(await count(internals.store, retained.assertionGraph)).toBe(1);
+      expect((await readHead())?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual(aliases);
+      expect(await Promise.all(aliases.map(readSnapshot))).toEqual(snapshotsBefore);
+      for (const subject of [publisherOp, ackOp, headSubject]) {
+        expect(await count(internals.store, metaGraph, subject)).toBeGreaterThan(0);
+      }
+      expect(await count(internals.store, assertionGraph)).toBe(1);
+      expect(await ledgerHas(internals.store, ackOp, LEDGER.registeredAt)).toBe(true);
+
+      // Releasing the ACK removes the final retention owner: ordinary TTL
+      // collection must now retire the complete expired class and its data.
+      await internals.store.insert([{
+        subject: ackOp, predicate: LEDGER.unregisteredAt, object: xsdDateTimeLiteral(new Date()), graph: STORAGE_ACK_LEDGER_GRAPH,
+      }]);
+      await internals.cleanupExpiredSharedMemory();
+      await expect(readHead()).resolves.toBeUndefined();
+      for (const subject of [publisherOp, ackOp, headSubject]) {
+        expect(await count(internals.store, metaGraph, subject)).toBe(0);
+      }
+      expect(await count(internals.store, assertionGraph)).toBe(0);
+      expect(await count(internals.store, STORAGE_ACK_LEDGER_GRAPH, ackOp)).toBe(0);
     });
 
     it('grandfathers pre-ledger copies once, and never copies stored after the ledger started', async () => {
