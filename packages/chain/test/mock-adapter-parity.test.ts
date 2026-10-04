@@ -755,6 +755,32 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     });
   });
 
+  it('adopts only an unchanged graph-bound mint with recoverable confirmed provenance', async () => {
+    const mock = new MockChainAdapter('mock:31337');
+    mock.minimumRequiredSignatures = 0;
+    const root = new Uint8Array(32).fill(7);
+    const created = await mock.createKnowledgeAssets({
+      publishOperationId: 'adopt-mock-mint', contextGraphId: 1n, merkleRoot: root,
+      knowledgeAssetsAmount: 1, byteSize: 1n, epochs: 1, tokenAmount: 1n,
+      isImmutable: false, merkleLeafCount: 1, publisherNodeIdentityId: 1n,
+      author: { address: '0x1111111111111111111111111111111111111111',
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) }, schemeVersion: 1 },
+      ackSignatures: [],
+    });
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n))
+      .resolves.toMatchObject({ txHash: created.txHash, batchId: created.batchId });
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 2n))
+      .rejects.toMatchObject({ code: 'KA_CG_MISMATCH' });
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, new Uint8Array(32), 1n))
+      .rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    mock.__setTransactionUnfinalized(created.txHash);
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n)).resolves.toBeNull();
+    mock.__setTransactionUnfinalized(created.txHash, false);
+    (mock as any).collections.get(created.batchId).updateContext.merkleRootsCount = 2n;
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n))
+      .rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
+  });
+
   it('preserves delegated V10 publisher attribution across mock updates', async () => {
     const mock = new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111');
     mock.minimumRequiredSignatures = 0;

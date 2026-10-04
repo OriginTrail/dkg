@@ -458,6 +458,38 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  async getMintedKnowledgeAssetProvenance(
+    kaId: bigint,
+    expectedMerkleRoot: Uint8Array,
+    expectedContextGraphId: bigint,
+  ): Promise<OnChainPublishResult | null> {
+    const collection = this.collections.get(kaId);
+    if (collection === undefined || toHex(collection.merkleRoot).toLowerCase()
+      !== toHex(expectedMerkleRoot).toLowerCase()) {
+      throw Object.assign(new Error(`Mock: minted KA ${kaId} does not match the sealed root`),
+        { code: 'KA_ID_COLLISION' });
+    }
+    if (collection.updateContext.merkleRootsCount !== 1n) {
+      throw Object.assign(new Error(`Mock: minted KA ${kaId} has been updated`), { code: 'KA_SUPERSEDED' });
+    }
+    if (collection.cgId !== expectedContextGraphId) {
+      throw Object.assign(new Error(`Mock: minted KA ${kaId} belongs to another context graph`),
+        { code: 'KA_CG_MISMATCH' });
+    }
+    const events = this.events.filter((event) => event.type === 'KCCreated'
+      && event.data.kaId === kaId.toString());
+    if (events.length !== 1) return null;
+    const txHash = events[0]!.data.txHash;
+    if (typeof txHash !== 'string' || this.unfinalizedTxHashes.has(txHash)) return null;
+    const resolution = await this.resolveCanonicalFinalizationReceipt(txHash, {
+      expectedBlockNumber: events[0]!.blockNumber,
+      expectedBlockHash: mockBlockHash(events[0]!.blockNumber),
+    });
+    if (resolution.status !== 'confirmed' || resolution.receipt.kaId !== kaId
+      || toHex(resolution.receipt.merkleRoot).toLowerCase() !== toHex(expectedMerkleRoot).toLowerCase()) return null;
+    return this.resolvePublishByTxHash(txHash);
+  }
+
   async resolvePublishTransaction(
     txHash: string,
     _options: ChainReadOptions = {},
