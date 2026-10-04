@@ -1,8 +1,10 @@
+import { workspacePublisherOperationTimestamp } from '../src/workspace-draft-replacement.js';
+import { normalizeWorkspaceOperationProvenance } from '../src/workspace-operation-equivalence.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { persistWorkspaceOperationEvidence, readAuthenticatedWorkspaceOperations, RECOVERED_OPERATION_CHRONOLOGY } from '../src/workspace-operation-alias.js';
+import { persistWorkspaceOperationEvidence, readAuthenticatedWorkspaceOperations, RECOVERED_OPERATION_CHRONOLOGY, workspaceOperationAlias } from '../src/workspace-operation-alias.js';
 
 const SUBJECT = 'urn:test:operation', GRAPH = 'urn:test:operation-meta', DKG = 'http://dkg.io/ontology/';
 const EVIDENCE_GRAPH = 'urn:dkg:publisher:authenticated-operation-evidence';
@@ -24,6 +26,17 @@ async function fixture(input = rows()) {
 }
 
 describe('canonical operation evidence round trips', () => {
+  it.each([true, false])('keeps decoded and projected chronology authentication explicitly %s', authenticated => {
+    const alias = workspaceOperationAlias({ provenance: { shareOperationId: 'publisher-alias', publishedAtMs: 2000, publisherChronologyAuthenticated: authenticated }, snapshotLocator: { kind: 'store', ref: 'sha256:content' } });
+    expect(alias.publisherChronologyAuthenticated).toBe(authenticated);
+    expect(normalizeWorkspaceOperationProvenance(alias).publisherChronologyAuthenticated).toBe(authenticated);
+    expect(workspacePublisherOperationTimestamp([alias, { ...alias, shareOperationId: 'storage-ack-local', publishedAt: '9000', publisherChronologyAuthenticated: true }])).toBe(authenticated ? 2000 : undefined);
+  });
+  it('normalizes compatibility aliases before policy rather than erasing decoded evidence', () => {
+    const legacy = { shareOperationId: 'legacy-publisher', publishedAt: '1000' };
+    expect(normalizeWorkspaceOperationProvenance(legacy)).toEqual({ shareOperationId: legacy.shareOperationId, publishedAtMs: 1000, publisherChronologyAuthenticated: true });
+    expect(workspacePublisherOperationTimestamp([legacy])).toBe(1000);
+  });
   it('preserves the existing digest of canonical rows across timestamp formatting, ordering and duplicates', async () => {
     const f = await fixture([...rows().reverse(), ...rows()]);
     const result = await f.store.query(`SELECT ?digest WHERE { GRAPH <${EVIDENCE_GRAPH}> { <${SUBJECT}> ?p ?digest } }`);

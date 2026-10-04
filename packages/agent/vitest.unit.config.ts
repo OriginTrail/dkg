@@ -203,6 +203,7 @@ export default defineConfig({
       "test/swm-draft-replacement-chronology.test.ts",
       "test/swm-recovery.test.ts",
       "test/swm-recovery-identity-preservation.test.ts",
+      "test/swm-recovery-corrupt-head.test.ts",
       // #2083: the discoverable suffix keeps runtime/type adoption in sync.
       "test/shared-memory-sync-ownership.typechecked.test.ts",
       "test/dkg-agent-snapshot-store-injection.test.ts",

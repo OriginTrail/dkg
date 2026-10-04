@@ -1,3 +1,4 @@
+import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { persistWorkspaceOperationEvidence } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
 import { ethers } from 'ethers';
@@ -6,7 +7,7 @@ import { encodeRootlessWorkspaceRequest } from '../../publisher/test/_helpers/ro
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { workspaceKnowledgeAssetOperationSnapshotGraph, TypedEventBus, computeGossipSigningPayload, encodeGossipEnvelope, GOSSIP_ENVELOPE_VERSION, GOSSIP_TYPE_WORKSPACE_PUBLISH, type OperationContext } from '@origintrail-official/dkg-core';
-import { resolveKnowledgeAssetWorkspaceHead, SharedMemoryHandler, withKeyedLocks, swmKaWriteLockKey, storageAckLedgerEntryQuads, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
+import { resolveKnowledgeAssetWorkspaceHead, SharedMemoryHandler, TripleStoreAsyncLiftPublisher, resolveKnowledgeAssetOperationPublicQuads, withKeyedLocks, swmKaWriteLockKey, storageAckLedgerEntryQuads, workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
@@ -74,6 +75,51 @@ const staleCases = (['publicRun', 'privateRun'] as const).flatMap(lane =>
     [undefined, 'team'].flatMap(subGraph => [false, true].map(graphLocator => ({ lane, oldVersion, currentVersion, subGraph, scope: subGraph ?? 'root', graphLocator })))));
 
 describe('legacy catch-up respects publisher draft chronology', () => {
+  it.each(['publicRun', 'privateRun', 'preserveSkipped'] as const)('%s extends healthy equivalent aliases without stranding a queued ACK snapshot', async lane => {
+    const store = new OxigraphStore(); stores.push(store);
+    const make = (id: string, clock: number) => swmFixtures(CG).share({ version: 2, operationId: id, marker: 'same-queued-content', ual: UAL, timestamp: new Date(clock) });
+    const original = make('a-publisher', 1000); const ack = make('storage-ack-B', 2000); const newer = make('publisher-C', 3000);
+    const ackLocator = ack.meta.find(row => row.subject === ack.operationSubject && row.predicate === `${DKG}publicSnapshotRef`)!;
+    ackLocator.predicate = `${DKG}publicSnapshotGraph`; ackLocator.object = workspaceKnowledgeAssetOperationSnapshotGraph(CG, ack.operationId);
+    const headRows = original.meta.filter(row => row.subject === original.headSubject);
+    for (const f of [original, ack]) await persistLocalSwmOperation(store, CG, f);
+    await store.insert([...headRows, { ...headRows.find(row => row.predicate === `${DKG}shareOperationId`)!, object: JSON.stringify(ack.operationId) }, ...inGraph(original)]);
+    const queue = new TripleStoreAsyncLiftPublisher(store);
+    await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: CG, kaUal: UAL, assertionVersion: '2', shareOperationId: ack.operationId }));
+    await persistLocalSwmOperation(store, CG, newer);
+    const readSnapshot = () => resolveKnowledgeAssetOperationPublicQuads({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: UAL, assertionVersion: '2', shareOperationId: ack.operationId });
+    const before = await readSnapshot(); expect(before.quads).toHaveLength(ack.payload.length);
+    const query = vi.spyOn(store, 'query');
+    const h = harness(store, newer);
+    if (lane === 'preserveSkipped') expect(await h.materializer.preserveStoredIdentityForSkippedAsset(CG, parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: newer.meta })[0]!)).toMatchObject({ outcome: 'preserved' });
+    else await h[lane]();
+    expect(query.mock.calls.filter(([, options]) => options?.source === 'agent.swmRecovery.localPublisherEvidence')).toHaveLength(1);
+    expect(query.mock.calls.some(([, options]) => ['agent.swmRecovery.storedHead', 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates', 'agent.sharedMemorySync.snapshotMaterializer.selectRepairIdentity'].includes(options?.source ?? ''))).toBe(false);
+    const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: UAL });
+    expect(head?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual([original.operationId, ack.operationId, newer.operationId].sort());
+    expect(await readSnapshot()).toEqual(before);
+    expect(await queue.list()).toHaveLength(1);
+  });
+  it.each([undefined, 'team'])('repairs corrupt %s head rows using decoded equivalent identities and authenticated publisher chronology', async subGraph => {
+    const store = new OxigraphStore(); stores.push(store);
+    const make = (id: string, timestamp: number) => {
+      const f = share(2, id, timestamp, subGraph);
+      const same = swmFixtures(CG).share({ version: 2, operationId: id, marker: 'same-repair-content', ual: UAL, timestamp: new Date(timestamp) });
+      return { ...f, payload: same.payload, digest: same.digest, meta: f.meta.map(row => row.predicate === `${DKG}publicQuadsDigest` || row.predicate === `${DKG}publicSnapshotRef` ? { ...row, object: JSON.stringify(same.digest) } : row) };
+    };
+    const old = make('a-local-publisher', 1000); const ack = make('storage-ack-unowned-clock', 9000); const incoming = make('publisher-C', 3000);
+    for (const op of [old, ack, incoming]) await persistLocalSwmOperation(store, CG, op);
+    const headRows = old.meta.filter(row => row.subject === old.headSubject);
+    await store.insert([...headRows, { ...headRows.find(row => row.predicate === `${DKG}shareOperationId`)!, object: JSON.stringify(ack.operationId) }, ...inGraph(old)]);
+    await store.deleteByPattern({ graph: old.meta[0]!.graph, subject: old.headSubject, predicate: `${DKG}assertionVersion` });
+    await store.insert([{ graph: old.meta[0]!.graph, subject: old.headSubject, predicate: `${DKG}assertionVersion`, object: '"malformed"' }]);
+    const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: incoming.meta, registeredSubGraphNames: ['team'] })[0]!;
+    const h = harness(store, incoming); expect((await h.materializer.prepareRecoveredDescriptor(descriptor)).storedHead.status).toBe('corrupt');
+    await h.publicRun();
+    const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: UAL, subGraphName: subGraph });
+    expect(head?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual([old.operationId, incoming.operationId].sort());
+    expect(head?.operationAliases.find(alias => alias.shareOperationId === incoming.operationId)).toMatchObject({ publishedAt: '3000', publisherChronologyAuthenticated: true });
+  });
   it('does not pair a cached subject with another authenticated operation identity', async () => {
     const store = new OxigraphStore(); stores.push(store);
     const incoming = share(2, 'provider-identity', 3000);
@@ -159,7 +205,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     expect(authenticated?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual([b.operationId, ack.operationId].sort());
     expect(authenticated?.operationAliases.find(alias => alias.shareOperationId === b.operationId))
       .toMatchObject({ publishedAt: '2000' });
-    expect(authenticated?.operationAliases.find(alias => alias.shareOperationId === b.operationId)?.publisherChronologyAuthenticated).not.toBe(false);
+    expect(authenticated?.operationAliases.find(alias => alias.shareOperationId === b.operationId)?.publisherChronologyAuthenticated).toBe(true);
     // An older exact replay cannot replace the newly authenticated clock.
     expect(await signed(b, 1000)).toMatchObject({ applied: true });
     expect((await readHead())?.operationAliases.find(alias => alias.shareOperationId === b.operationId)?.publishedAt).toBe('2000');

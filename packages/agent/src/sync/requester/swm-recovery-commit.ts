@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { workspaceOperationSubject, type DurableRootAtomicCompanionResolver } from '@origintrail-official/dkg-publisher';
+import { healthyRecoveredAliasRows } from './swm-draft-order.js';
+import type { DurableRootAtomicCompanionResolver } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
@@ -68,13 +69,12 @@ export async function commitRecoveredSwmAsset(input: {
       if (companion) await materializer.replaceGraphWithAtomicCompanion(descriptor.assertionGraph, [...quads], companion);
       else if (!equivalent) await (input.replaceGraph?.(descriptor.assertionGraph, quads) ?? materializer.replaceGraph(descriptor.assertionGraph, [...quads]));
     }
-    const stored = await materializer.readStoredHead(descriptor);
+    const stored = descriptor.storedHead;
     const selected = await materializer.selectRepairIdentity(contextGraphId, descriptor);
     // Equivalent healthy aliases are a normal resolved state. Keep the whole
     // class, including queued ACK identities; no head/operation repair is owed.
-    if (selected && stored.status === 'resolved' && (!descriptor.authenticatedPublisherOperation?.shareOperationId || stored.head.operationAliases.some(alias => alias.shareOperationId === descriptor.authenticatedPublisherOperation?.shareOperationId))) {
-      const ownedSubjects = new Set(stored.head.operationAliases.map(alias => workspaceOperationSubject(contextGraphId, alias.shareOperationId)));
-      const history = descriptor.metadataQuads.filter(row => row.subject !== descriptor.headSubject && !ownedSubjects.has(row.subject));
+    if (selected && stored.status === 'resolved') {
+      const history = healthyRecoveredAliasRows(contextGraphId, descriptor)!;
       if (history.length > 0) await input.insertMetadata(history);
       const providerKeys = new Set(asset.descriptor.metadataQuads.map(canonicalQuadKey));
       return result('committed', equivalent ? 0 : quads?.length ?? 0, history.filter(row => providerKeys.has(canonicalQuadKey(row))).length);

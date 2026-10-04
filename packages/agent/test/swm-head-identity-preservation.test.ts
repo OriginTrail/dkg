@@ -287,7 +287,7 @@ describe('operation identity preservation (GH#2273)', () => {
     }
   });
 
-  it('repairHeadPreservingIdentity heals a two-valued head to the stored identity', async () => {
+  it('repairHeadPreservingIdentity retains the complete healthy equivalent alias class', async () => {
     const store = new OxigraphStore();
     stores.push(store);
     await seedMaterializedLocal(store);
@@ -296,15 +296,14 @@ describe('operation identity preservation (GH#2273)', () => {
     await store.insert(opRowsOf(remoteEquivalent));
     const { materializer } = materializerFor(store);
     await materializer.repairHeadPreservingIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)), 'op-v1');
-    // Head certifies exactly the local identity again, the winner's operation
-    // rows were NEVER deleted (they may be the only durable copy a queued job
-    // references), and the loser's operation subject is gone.
+    // Every healthy equivalent identity remains readable. Any member can be
+    // the only durable snapshot frozen by an already admitted queued job.
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-      .toEqual(['"op-v1"']);
+      .toEqual(['"op-v1"', '"storage-ack-2273b"']);
     expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
     expect(await distinctObjects(store, WS_META, remoteEquivalent.operationSubject, `${DKG}shareOperationId`))
-      .toEqual([]);
+      .toEqual(['"storage-ack-2273b"']);
     // The full production reader agrees end-to-end — the same resolver the
     // queued-publish preflight consults.
     const head = await resolveKnowledgeAssetWorkspaceHead({
@@ -313,7 +312,7 @@ describe('operation identity preservation (GH#2273)', () => {
       contextGraphId: CG,
       kaUal: UAL,
     });
-    expect(head?.shareOperationId).toBe('op-v1');
+    expect(head?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual(['op-v1', 'storage-ack-2273b']);
   });
 
   it('catch-up preserves the local identity for identical content across both stages', async () => {
@@ -781,7 +780,7 @@ describe('operation identity preservation (GH#2273)', () => {
     }
   });
 
-  it('selects the deterministic sorted winner among multiple equivalent stored ids', async () => {
+  it('selects the deterministic repair winner while retaining healthy equivalent identities', async () => {
     // Repeated catch-up rounds can stack MORE than one equivalent stored id
     // on a dirty head. The contract breaks ties lexicographically (sorted
     // foreign ids, first wins) so every node converges on the SAME winner; a
@@ -802,7 +801,7 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(preserved).toMatchObject({ winnerShareOperationId: 'op-aa' });
     await materializer.repairHeadPreservingIdentity(CG, await materializer.prepareRecoveredDescriptor(descriptorFor(remoteEquivalent)), 'op-aa');
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-      .toEqual(['"op-aa"']);
+      .toEqual(['"op-aa"', '"op-ab"']);
   });
 
   it('integer lexical forms compare by numeric value in the identity key', async () => {

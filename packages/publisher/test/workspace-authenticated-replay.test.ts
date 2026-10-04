@@ -35,7 +35,7 @@ describe('authenticated exact replay evidence acquisition', () => {
     await authenticateWorkspaceOperationReplay({ ...input, timestamp: new Date(2000) });
     const authenticated = (await resolveKnowledgeAssetWorkspaceHead({ store: input.store, graphManager: input.graphManager, contextGraphId: CG, kaUal: UAL }))!;
     expect(authenticated.operationAliases[0]).toMatchObject({ publishedAt: '2000', snapshotLocator: input.head.operationAliases[0]!.snapshotLocator });
-    expect(authenticated.operationAliases[0]?.publisherChronologyAuthenticated).not.toBe(false);
+    expect(authenticated.operationAliases[0]?.publisherChronologyAuthenticated).toBe(true);
     expect(await input.store.query(`ASK { GRAPH <${input.graph}> { <${input.subject}> <${RECOVERED_OPERATION_CHRONOLOGY}> ?marker } }`))
       .toEqual({ type: 'boolean', value: false });
     await authenticateWorkspaceOperationReplay({ ...input, head: authenticated, timestamp: new Date(1000) });

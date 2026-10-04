@@ -59,8 +59,22 @@ export function canonicalPublisherWorkspaceOperationSemantics(
 export interface WorkspaceOperationProvenance {
   readonly shareOperationId: string;
   readonly publishedAtMs?: number;
-  /** Provider metadata is not publisher-signed ordering evidence. */
+  /** Optional for the exposed compatibility shape; internal decoding normalizes it. */
   readonly publisherChronologyAuthenticated?: boolean;
+}
+
+/** Decoded internal provenance always records the authentication decision. */
+export type NormalizedWorkspaceOperationProvenance = WorkspaceOperationProvenance & Readonly<{
+  publisherChronologyAuthenticated: boolean;
+}>;
+
+/** Normalize the legacy exposed alias shape once before chronology policy. */
+export function normalizeWorkspaceOperationProvenance(alias: Readonly<{
+  shareOperationId: string; publishedAt?: string | number; publisherChronologyAuthenticated?: boolean;
+}>): WorkspaceOperationProvenance {
+  return { shareOperationId: alias.shareOperationId,
+    publishedAtMs: alias.publishedAt === undefined ? undefined : Number(alias.publishedAt),
+    publisherChronologyAuthenticated: alias.publisherChronologyAuthenticated ?? true };
 }
 
 export interface WorkspaceOperationModel<TSemantics> {

@@ -127,7 +127,7 @@ async function collectUnqueuedDraftOperation(
   operationSubject: string,
   now: number,
   collect: () => Promise<void>,
-  ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: () => Promise<boolean> },
+  ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: (operationSubject: string) => Promise<boolean> },
 ): Promise<void> {
   if (references.rawNamespaces.has(JSON.stringify([contextGraphId, subGraphName ?? '']))) return;
   const meta = `did:dkg:context-graph:${contextGraphId}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory_meta`;
@@ -144,7 +144,7 @@ async function collectUnqueuedDraftOperation(
       const current = await store.query(`SELECT ?at WHERE { GRAPH <${meta}> { <${operationSubject}> <${DKG}publishedAt> ?at } }`, { source: 'agent.draftArtifacts.ttlCurrentExpiry', priority: 'background' });
       if (current.type !== 'bindings' || current.bindings.length === 0
         || current.bindings.some(row => !row['at'] || !Number.isFinite(Date.parse(literal(row['at']))) || Date.parse(literal(row['at'])) >= ownership.cutoffMs)) return;
-      if (ownership.mayRetire && !await ownership.mayRetire()) return;
+      if (ownership.mayRetire && !await ownership.mayRetire(operationSubject)) return;
     }
     // Every pointer in the current alias class owns the same assertion.
     // A live, queued, ACK-owned, or unreadable alias keeps the entire class,
@@ -163,6 +163,9 @@ async function collectUnqueuedDraftOperation(
         const at = Date.parse(literal(row['at']));
         if (!Number.isFinite(at) || at >= ownership.cutoffMs
           || references.operations.has(draftOperationReferenceKey(contextGraphId, subGraphName, alias))) return;
+        const aliasSubject = workspaceOperationSubject(contextGraphId, alias);
+        if (ownership.mayRetire ? !await ownership.mayRetire(aliasSubject)
+          : await exists(store, `GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <${assertSafeIri(aliasSubject)}> ?p ?o }`)) return;
       }
     }
     await markDraftOperationRetired(store, contextGraphId, subGraphName, id, now);
@@ -178,7 +181,7 @@ export interface DraftOperationCollectionSession {
   withUnqueuedOperation: (
     contextGraphId: string, subGraphName: string | undefined, operationSubject: string,
     now: number, collect: () => Promise<void>,
-    ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: () => Promise<boolean> },
+    ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: (operationSubject: string) => Promise<boolean> },
   ) => Promise<void>;
 }
 
@@ -202,7 +205,7 @@ export async function withDraftOperationCollectionBatches<T>(
 export async function withUnqueuedDraftOperation(
   store: TripleStore, contextGraphId: string, subGraphName: string | undefined,
   operationSubject: string, now: number, collect: () => Promise<void>,
-  ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: () => Promise<boolean> },
+  ownership?: { writeLocks: Map<string, Promise<void>>; cutoffMs: number; mayRetire?: (operationSubject: string) => Promise<boolean> },
 ): Promise<void> {
   await withDraftOperationCollectionBatches(store, [operationSubject], async (subject, session) => {
     await session.withUnqueuedOperation(contextGraphId, subGraphName, subject, now, collect, ownership);

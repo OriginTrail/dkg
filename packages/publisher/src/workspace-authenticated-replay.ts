@@ -2,6 +2,7 @@
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import { deleteByPatternWithoutCount, type GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import { RECOVERED_OPERATION_CHRONOLOGY, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
+import { normalizeWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
 import { xsdDateTimeLiteral } from './storage-ack-ledger.js';
@@ -15,7 +16,7 @@ export async function authenticateWorkspaceOperationReplay(input: {
   const alias = input.head.operationAliases.find(alias => alias.shareOperationId === input.shareOperationId);
   if (!alias) throw new Error('Authenticated replay has no matching head alias');
   // An older exact replay cannot downgrade established publisher chronology.
-  if (alias.publisherChronologyAuthenticated !== false) return;
+  if (normalizeWorkspaceOperationProvenance(alias).publisherChronologyAuthenticated) return;
   const subject = workspaceOperationSubject(input.contextGraphId, input.shareOperationId);
   const graph = input.graphManager.sharedMemoryMetaUri(input.contextGraphId, input.subGraphName);
   const acquired = await input.store.query(`CONSTRUCT { <${assertSafeIri(subject)}> ?p ?o } WHERE {

@@ -1,4 +1,4 @@
-import { assertSafeIri, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
+import { assertSafeIri, createGraphKnowledgeAssetScope, validateSubGraphName } from '@origintrail-official/dkg-core';
 
 /** Preserve the low-level metadata generators' existing raw-formatting contract. */
 export function formatUncheckedWorkspaceOperationSubject(contextGraphId: string, shareOperationId: string): string {
@@ -51,5 +51,17 @@ function safeWorkspaceIdPart(value: string, fieldName: 'contextGraphId' | 'share
     throw new Error(`Shared-memory resolution rejected unsafe ${fieldName}: ${value}`);
   }
 
+  return normalized;
+}
+
+/** Normalize scoped workspace names before reading or writing their metadata. */
+export function normalizeWorkspaceSubGraphName(subGraphName: string | undefined): string | undefined {
+  const normalized = subGraphName?.trim();
+  if (!normalized) return undefined;
+
+  const validation = validateSubGraphName(normalized);
+  if (!validation.valid) {
+    throw new Error(`Lift shared-memory resolution rejected invalid subGraphName "${subGraphName}": ${validation.reason}`);
+  }
   return normalized;
 }

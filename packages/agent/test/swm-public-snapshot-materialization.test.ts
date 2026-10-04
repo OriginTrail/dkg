@@ -220,7 +220,13 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [] }),
+        prepareRecoveredDescriptor: async descriptor => {
+          const state = overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
+          const storedHead: StoredWorkspaceHeadState = state.version === null ? { status: 'missing' } : state.needsRepair
+            ? { status: 'corrupt', error: new Error('fixture corruption') } as StoredWorkspaceHeadState
+            : { status: 'resolved', head: { assertionVersion: state.version, operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as StoredWorkspaceHeadState;
+          return { ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead };
+        },
         filterBulkMetadata: async (rows, withheld = []) => { const keys = new Set(withheld.map(canonicalQuadKey)); return rows.filter(row => !keys.has(canonicalQuadKey(row))); },
         // Private-lane mutations are outside this public orchestration fixture.
         readExactMaterializedGraph: async () => { throw new Error('unexpected private recovery'); },

@@ -2,6 +2,7 @@
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore, GraphManager } from '@origintrail-official/dkg-storage';
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { normalizeWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { storageAckOwedCopiesByScopeQuery, STORAGE_ACK_OPERATION_ID_PREFIX } from './storage-ack-ledger.js';
 
@@ -10,8 +11,8 @@ export type DraftReplacementRejection = { phase: 'validation' | 'corrupt-head'; 
 
 /** Only publisher aliases establish draft chronology; ACK clocks are local receipts. */
 export function workspacePublisherOperationTimestamp(aliases: readonly { shareOperationId: string; publishedAt?: string | number; publisherChronologyAuthenticated?: boolean }[]): number | undefined {
-  const value = Math.max(...aliases.filter(alias => alias.publisherChronologyAuthenticated !== false && !alias.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX))
-    .map(alias => Number(alias.publishedAt ?? NaN)).filter(Number.isFinite));
+  const value = Math.max(...aliases.map(normalizeWorkspaceOperationProvenance).filter(alias => alias.publisherChronologyAuthenticated && !alias.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX))
+    .map(alias => alias.publishedAtMs ?? NaN).filter(Number.isFinite));
   return Number.isFinite(value) ? value : undefined;
 }
 
@@ -34,7 +35,7 @@ export async function checkWorkspaceDraftReplacementOrder(input: {
   };
   // A recovered clock cannot fence a later authenticated forward assertion.
   // Reuse/lower replacement still needs a trusted predecessor chronology.
-  if (!Number.isFinite(currentTimestamp) && (incomingVersion <= currentVersion || !head.operationAliases.every(alias => alias.publisherChronologyAuthenticated === false))) return { phase: 'corrupt-head', reason: 'DRAFT_REPLACEMENT_PROOF_UNAVAILABLE: authenticated publisher chronology is unavailable' };
+  if (!Number.isFinite(currentTimestamp) && (incomingVersion <= currentVersion || !head.operationAliases.every(alias => !normalizeWorkspaceOperationProvenance(alias).publisherChronologyAuthenticated))) return { phase: 'corrupt-head', reason: 'DRAFT_REPLACEMENT_PROOF_UNAVAILABLE: authenticated publisher chronology is unavailable' };
   if (incomingVersion > currentVersion) return;
   const reason = incomingVersion < currentVersion
     ? `STALE_KA_ASSERTION_VERSION: incoming=${incomingVersion}, current=${currentVersion}`

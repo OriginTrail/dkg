@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { workspaceOperationSubject } from '@origintrail-official/dkg-publisher';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   tryResolveKnowledgeAssetWorkspaceHead,
@@ -27,7 +29,7 @@ export async function recoveredDraftMayReplace(input: {
   pendingAckTxWindowMs?: number;
 }): Promise<boolean> {
   const { store, descriptor } = input;
-  const stored = await readStoredWorkspaceHead(store, descriptor);
+  const stored = descriptor.storedHead;
   if (stored.status === 'missing') return true;
   const incoming = descriptor.operationCandidates.find(candidate => candidate.operationSubject === descriptor.operationSubject);
   const completeEquivalent = () => incoming?.identityKey != null
@@ -46,6 +48,19 @@ export async function recoveredDraftMayReplace(input: {
   if (descriptor.authenticatedPublisherOperation === undefined) return false;
   if (await headIsUnpromotedOwedAckCopy({ store, graphManager: new GraphManager(store), contextGraphId: input.contextGraphId, head, version: BigInt(head.assertionVersion), subGraphName: descriptor.subGraphName, pendingAckTxWindowMs: input.pendingAckTxWindowMs ?? 300_000, readConfirmedKnowledgeAssetVersion: input.readConfirmedVersion })) return false;
   return await checkWorkspaceDraftReplacementOrder({ head, incomingVersion: BigInt(descriptor.assertionVersion), publisherPeerId: descriptor.publisherPeerId, timestamp: new Date(descriptor.authenticatedPublisherOperation.provenance.publishedAtMs), readConfirmedVersion: input.readConfirmedVersion }) === undefined;
+}
+
+/** Called after equivalence/serveability admission; extend a healthy class without retiring any identity. */
+export function healthyRecoveredAliasRows(contextGraphId: string, descriptor: PreparedSwmRecoveryDescriptor): Quad[] | null {
+  if (descriptor.storedHead.status !== 'resolved') return null;
+  const ownedSubjects = new Set(descriptor.storedHead.head.operationAliases.map(alias => workspaceOperationSubject(contextGraphId, alias.shareOperationId)));
+  const rows = descriptor.metadataQuads.filter(row => row.subject !== descriptor.headSubject && !ownedSubjects.has(row.subject));
+  const publisherAlias = descriptor.authenticatedPublisherOperation;
+  if (publisherAlias && !ownedSubjects.has(publisherAlias.operationSubject)) {
+    const idRow = descriptor.metadataQuads.find(row => row.subject === descriptor.headSubject && row.predicate === 'http://dkg.io/ontology/shareOperationId');
+    if (idRow) rows.push({ ...idRow, object: JSON.stringify(publisherAlias.shareOperationId) });
+  }
+  return rows;
 }
 
 /** Retain the latest validated publisher clock alongside an equivalent local alias. */

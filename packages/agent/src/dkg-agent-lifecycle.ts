@@ -11710,7 +11710,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     ownedSet.delete(re);
                   }
                 }
-                }, { writeLocks: this.writeLocks, cutoffMs: now - ttl, mayRetire: () => expiredSwmOperationMayRetire(this.store, { metaGraph: wsMetaGraph, operationSubject: opUri, cutoff, retentionFilters: storageAckNotRetained('', '?op', '?ts', 'Recheck') }) });
+                }, { writeLocks: this.writeLocks, cutoffMs: now - ttl, mayRetire: operationSubject => expiredSwmOperationMayRetire(this.store, { metaGraph: wsMetaGraph, operationSubject, cutoff, retentionFilters: storageAckNotRetained('', '?op', '?ts', 'Recheck') }) });
               });
             }
           }

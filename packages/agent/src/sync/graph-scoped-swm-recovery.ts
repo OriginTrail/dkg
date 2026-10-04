@@ -496,7 +496,7 @@ export interface RecoveryOperationCandidate extends WorkspaceOperationModel<Reco
   readonly operationRows: readonly Quad[];
   readonly snapshotLocator: RecoverySnapshotLocator;
   readonly identityKey: string | null;
-  readonly provenance: Readonly<{ shareOperationId: string; publishedAtMs: number; publisherChronologyAuthenticated?: boolean }>;
+  readonly provenance: Readonly<{ shareOperationId: string; publishedAtMs: number; publisherChronologyAuthenticated: boolean }>;
 }
 
 interface ResolvedHeadOperation {
@@ -567,7 +567,7 @@ export function decodeRecoveryOperationCandidate(params: Parameters<typeof valid
   const publishedAtMs = Date.parse(stripLiteral(requireSingle(params.rows, PUBLISHED_AT, 'publishedAt')));
   if (!Number.isFinite(publishedAtMs)) throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid publishedAt`);
   return {
-    semantics, provenance: { shareOperationId: params.shareOperationId, publishedAtMs },
+    semantics, provenance: { shareOperationId: params.shareOperationId, publishedAtMs, publisherChronologyAuthenticated: false },
     shareOperationId: params.shareOperationId, operationSubject: params.operationSubject,
     operationRows: params.rows, identityKey: operationIdentityKey(params.rows),
     snapshotLocator: recoverySnapshotLocator({ ...params, publicQuadsDigest: semantics.publicQuadsDigest }),

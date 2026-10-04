@@ -1,7 +1,8 @@
+import { acquireKnowledgeAssetWorkspaceHead } from './workspace-head-acquisition.js';
 export { RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
-import { RECOVERED_OPERATION_CHRONOLOGY, workspaceOperationAlias, persistWorkspaceOperationEvidence, readAuthenticatedWorkspaceOperations } from './workspace-operation-alias.js';
+import { workspaceOperationAlias, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
 import { snapshotOperation } from './workspace-snapshot-lifecycle.js';
-import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
+import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject, normalizeWorkspaceSubGraphName as normalizeOptionalSubGraphName } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
@@ -15,7 +16,6 @@ import {
   isSafeIri,
   knowledgeAssetLayerGraphUri,
   type TimestampMsV1,
-  validateSubGraphName,
   workspaceOperationPublicSnapshotGraph,
   workspaceKnowledgeAssetOperationSnapshotGraph,
 } from '@origintrail-official/dkg-core';
@@ -35,6 +35,7 @@ import {
   publisherWorkspaceOperationSemanticsKey,
   selectEquivalentWorkspaceOperation,
   type WorkspaceOperationModel,
+  type NormalizedWorkspaceOperationProvenance,
   type WorkspaceOperationAccessEnvelope,
   type PublisherWorkspaceOperationSemantics,
 } from './workspace-operation-equivalence.js';
@@ -405,7 +406,7 @@ function decodeWorkspaceHeadRows(input: {
  */
 type DecodedPublisherWorkspaceOperation = WorkspaceOperationModel<
   PublisherWorkspaceOperationSemantics
-> & Readonly<{ snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator }>;
+> & Readonly<{ snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator; provenance: NormalizedWorkspaceOperationProvenance }>;
 
 function decodeWorkspaceOperationRows(input: {
   readonly operationValues: Map<string, string[]>;
@@ -536,7 +537,7 @@ function decodeWorkspaceOperationRows(input: {
     },
     provenance: {
       shareOperationId: input.shareOperationId,
-      ...(input.operationValues.has(RECOVERED_OPERATION_CHRONOLOGY) ? { publisherChronologyAuthenticated: false } : {}),
+      publisherChronologyAuthenticated: false,
       ...(publishedAtMs === undefined ? {} : { publishedAtMs }),
     },
     snapshotLocator,
@@ -595,34 +596,24 @@ export function isDecodableWorkspaceOperationRows(
 export async function resolveKnowledgeAssetWorkspaceHead(
   params: ResolveKnowledgeAssetWorkspaceHeadParams,
 ): Promise<KnowledgeAssetWorkspaceHead | undefined> {
+  const acquired = await acquireKnowledgeAssetWorkspaceHead(params);
+  return resolveAcquiredKnowledgeAssetWorkspaceHead(params, acquired.rows, acquired.authenticatedOperations);
+}
+
+/** Internal decoded head outcome over one acquired snapshot, shared by recovery. */
+export function resolveAcquiredKnowledgeAssetWorkspaceHead(
+  params: Pick<ResolveKnowledgeAssetWorkspaceHeadParams, 'contextGraphId' | 'kaUal' | 'subGraphName'>,
+  rows: readonly Quad[],
+  authenticatedOperations: ReadonlySet<string>,
+): KnowledgeAssetWorkspaceHead | undefined {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, 1);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
-  const metaGraph = params.graphManager.sharedMemoryMetaUri(
-    params.contextGraphId,
-    subGraphName,
-  );
   const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
-  // ONE query acquires every row the resolver will normalize — the head
-  // subject's own rows plus the rows of every operation subject the head
-  // references — so both phases below read one store snapshot and no head
-  // swap between two reads can interleave a stale id with fresh metadata.
-  const acquisition = await params.store.query(
-    `SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
-    `{ <${assertSafeIri(subject)}> ?p ?o . BIND(<${assertSafeIri(subject)}> AS ?s) } UNION ` +
-    `{ <${assertSafeIri(subject)}> <${DKG}shareOperationId> ?id . ` +
-    `?op <${DKG}shareOperationId> ?id ; ?p ?o . BIND(?op AS ?s) } } }`,
-    ...(params.queryOptions === undefined ? [] : [params.queryOptions]),
-  );
-  if (acquisition.type !== 'bindings') {
-    throw new Error(
-      `Unexpected graph-scoped SWM head query result for ${scope.ual}: ${acquisition.type}`,
-    );
-  }
   const rowsBySubject = new Map<string, { p?: string; o?: string }[]>();
-  for (const binding of acquisition.bindings) {
-    const rowSubject = binding['s'] ?? '';
+  for (const binding of rows) {
+    const rowSubject = binding.subject ?? '';
     const rows = rowsBySubject.get(rowSubject) ?? [];
-    rows.push({ p: binding['p'], o: binding['o'] });
+    rows.push({ p: binding.predicate, o: binding.object });
     rowsBySubject.set(rowSubject, rows);
   }
   // Phase 1 — the head subject's OWN rows. GH#2273: sync's bulk verified-meta
@@ -648,8 +639,6 @@ export async function resolveKnowledgeAssetWorkspaceHead(
   // snapshot. Equivalent storage-ACK/originator aliases collapse to one
   // deterministic newest operation; a missing or semantically different
   // candidate remains corruption.
-  const authenticatedOperations = await readAuthenticatedWorkspaceOperations(params.store,
-    [...rowsBySubject.entries()].filter(([key]) => key !== subject).flatMap(([key, rows]) => rows.map(row => ({ subject: key, predicate: row.p!, object: row.o!, graph: metaGraph }))));
   const candidates = decodedHead.shareOperationIds.map((shareOperationId) => {
     const operationSubject = workspaceOperationSubject(params.contextGraphId, shareOperationId);
     const operationRows = rowsBySubject.get(operationSubject) ?? [];
@@ -1629,16 +1618,7 @@ function normalizeRoots(roots: readonly string[]): string[] {
   return [...new Set(roots.map((root) => String(root).trim()).filter((root) => isSafeIri(root)))];
 }
 
-function normalizeOptionalSubGraphName(subGraphName: string | undefined): string | undefined {
-  const normalized = subGraphName?.trim();
-  if (!normalized) return undefined;
 
-  const validation = validateSubGraphName(normalized);
-  if (!validation.valid) {
-    throw new Error(`Lift shared-memory resolution rejected invalid subGraphName "${subGraphName}": ${validation.reason}`);
-  }
-  return normalized;
-}
 
 
 

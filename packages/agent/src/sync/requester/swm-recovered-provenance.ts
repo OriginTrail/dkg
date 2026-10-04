@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { workspacePublisherOperationTimestamp } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
-import { RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
+import { KnowledgeAssetWorkspaceHeadCorruptError, resolveAcquiredKnowledgeAssetWorkspaceHead, RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations, type KnowledgeAssetWorkspaceHeadResolution } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { decodeRecoveryOperationCandidate, type RecoveryOperationCandidate, type GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { stripMetadataLiteral } from '../metadata-literal.js';
@@ -15,11 +15,13 @@ type AuthenticatedCandidate = RecoveryOperationCandidate & {
 export function isAuthenticatedPublisherCandidate(candidate: RecoveryOperationCandidate): candidate is AuthenticatedCandidate {
   return candidate.provenance.publisherChronologyAuthenticated === true
     && workspacePublisherOperationTimestamp([{ shareOperationId: candidate.shareOperationId,
-      publishedAt: candidate.provenance.publishedAtMs }]) !== undefined;
+      publishedAt: candidate.provenance.publishedAtMs, publisherChronologyAuthenticated: candidate.provenance.publisherChronologyAuthenticated }]) !== undefined;
 }
 /** The prepared boundary separates decoded local evidence from provider claims. */
 export interface PreparedSwmRecoveryDescriptor extends GraphScopedSwmRecoveryDescriptor {
   readonly preparation: 'local-evidence-acquired';
+  readonly storedHead: KnowledgeAssetWorkspaceHeadResolution;
+  readonly storedAliasIds: readonly string[];
   readonly operationCandidates: readonly RecoveryOperationCandidate[];
   /** Null retains fail-closed handling of an undecodable current alias class. */
   readonly storedOperationCandidates: readonly RecoveryOperationCandidate[] | null;
@@ -40,21 +42,32 @@ export async function prepareRecoveredDescriptor(store: TripleStore, descriptor:
   // sparql-scan-allow: R4 -- exact provider subjects and the exact KA head bind both branches; this never walks the CG bucket.
   const acquired = await store.query(`SELECT ?s ?p ?o ?headId WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> {
     { VALUES ?s { ${subjects.map(subject => `<${assertSafeIri(subject)}>`).join(' ')} } ?s ?p ?o }
+    UNION { <${assertSafeIri(descriptor.headSubject)}> ?p ?o . BIND(<${assertSafeIri(descriptor.headSubject)}> AS ?s) }
     UNION { <${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?headId . ?s <${DKG}shareOperationId> ?headId ; ?p ?o }
   } }`, { priority: 'background', source: 'agent.swmRecovery.localPublisherEvidence' });
   if (acquired.type !== 'bindings') throw new Error('Publisher provenance acquisition is unavailable');
   const localBySubject = new Map<string, Map<string, Quad>>();
+  const headRows: Quad[] = [];
   const ownedSubjects = new Set<string>();
   for (const row of acquired.bindings) {
     const subject = row['s']!;
-    if (subject === descriptor.headSubject) continue;
     const quad = { subject, predicate: row['p']!, object: row['o']!, graph: descriptor.metaGraph };
+    if (subject === descriptor.headSubject) { headRows.push(quad); continue; }
     const rows = localBySubject.get(subject) ?? new Map<string, Quad>();
     rows.set(canonicalQuadKey(quad), quad); localBySubject.set(subject, rows);
     if (row['headId'] !== undefined) ownedSubjects.add(subject);
   }
   const allLocal = [...localBySubject.values()].flatMap(rows => [...rows.values()]);
   const authenticated = await readAuthenticatedWorkspaceOperations(store, allLocal);
+  let storedHead: KnowledgeAssetWorkspaceHeadResolution;
+  const contextGraphId = stripMetadataLiteral(descriptor.metadataQuads.find(row => row.subject === descriptor.operationSubject && row.predicate === `${DKG}contextGraphId`)?.object ?? '');
+  try {
+    const head = resolveAcquiredKnowledgeAssetWorkspaceHead({ contextGraphId, kaUal: descriptor.kaUal, subGraphName: descriptor.subGraphName }, [...headRows, ...allLocal], authenticated);
+    storedHead = head ? { status: 'resolved', head } : { status: 'missing' };
+  } catch (error) {
+    if (!(error instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw error;
+    storedHead = { status: 'corrupt', error };
+  }
   const locals = new Map<string, RecoveryOperationCandidate>();
   for (const [subject, rows] of localBySubject) {
     try {
@@ -86,8 +99,9 @@ export async function prepareRecoveredDescriptor(store: TripleStore, descriptor:
   const authenticatedPublisherOperation = operationCandidates
     .filter(isAuthenticatedPublisherCandidate)
     .sort((a, b) => b.provenance.publishedAtMs - a.provenance.publishedAtMs)[0];
+  const storedAliasIds = [...new Set(headRows.filter(row => row.predicate === `${DKG}shareOperationId`).map(row => stripMetadataLiteral(row.object).trim()))];
   const storedOperationCandidates = [...ownedSubjects].every(subject => locals.has(subject))
     ? [...ownedSubjects].map(subject => locals.get(subject)!) : null;
   return { ...descriptor, metadataQuads, preparation: 'local-evidence-acquired',
-    operationCandidates, storedOperationCandidates, authenticatedPublisherOperation };
+    operationCandidates, storedOperationCandidates, authenticatedPublisherOperation, storedHead, storedAliasIds };
 }

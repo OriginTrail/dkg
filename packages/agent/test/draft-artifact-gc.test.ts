@@ -1,3 +1,6 @@
+import { swmFixtures } from './swm-descriptor-fixtures.js';
+import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
+import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -27,6 +30,27 @@ async function fixture(contextGraphId = CG) {
   return { store, chain, writeLocks, op, head, privateGraph, has, collect };
 }
 describe('reference-safe abandoned draft maintenance', () => {
+  it.each([true, false])('retains the complete expired alias class when registered ACK ownership=%s', async retained => {
+    const f = await fixture(); const clock = new Date(NOW - 2 * 60 * 60_000);
+    const make = (operationId: string) => swmFixtures(CG).share({ version: 2, operationId, marker: 'same-expired-content', ual: KA, timestamp: clock });
+    const publisher = make('expired-publisher'); const ack = make('storage-ack-expired');
+    for (const op of [publisher, ack]) await persistLocalSwmOperation(f.store, CG, op);
+    const headRows = publisher.meta.filter(row => row.subject === publisher.headSubject);
+    await f.store.insert([...headRows, { ...headRows.find(row => row.predicate === `${DKG}shareOperationId`)!, object: JSON.stringify(ack.operationId) }, ...publisher.payload.map(row => ({ ...row, graph: publisher.assertionGraph }))]);
+    await f.store.insert(storageAckLedgerEntryQuads({ namespace: CG, metaGraph: META, contextGraphId: '42', kaUal: KA, assertionVersion: '2', operation: 'publish', operationSubject: ack.operationSubject, signedAt: clock }));
+    await f.store.insert([{ graph: STORAGE_ACK_LEDGER_GRAPH, subject: ack.operationSubject, predicate: `${DKG}${retained ? 'storageAckRegisteredAt' : 'storageAckUnregisteredAt'}`, object: JSON.stringify(clock.toISOString()) }]);
+    const cutoff = new Date(NOW - 60 * 60_000).toISOString();
+    const mayRetire = (operationSubject = publisher.operationSubject) => expiredSwmOperationMayRetire(f.store, { metaGraph: META, operationSubject, cutoff, retentionFilters: storageAckNotRetainedFilters({ rootMetaGraph: ROOT_META, metaGraph: META, binding: '', opVar: '?op', tsVar: '?ts', retentionCutoffIso: new Date(NOW - 90 * 60_000).toISOString(), suffix: 'AliasRecheck', ledgerReady: true }) });
+    const collect = vi.fn(() => deleteByPatternWithoutCount(f.store, { graph: META, subject: publisher.operationSubject }));
+    try {
+      await withUnqueuedDraftOperation(f.store, CG, undefined, publisher.operationSubject, NOW, collect, { writeLocks: f.writeLocks, cutoffMs: Date.parse(cutoff), mayRetire });
+      expect(collect).toHaveBeenCalledTimes(retained ? 0 : 1);
+      if (retained) {
+        const head = await resolveKnowledgeAssetWorkspaceHead({ store: f.store, graphManager: new GraphManager(f.store), contextGraphId: CG, kaUal: KA });
+        expect(head?.operationAliases.map(alias => alias.shareOperationId).sort()).toEqual([publisher.operationId, ack.operationId].sort());
+      }
+    } finally { await f.store.close(); }
+  });
   it.each(['plain', 'rdf-unicode'] as const)('uses the shared literal decoder for %s collector bindings', async form => {
     const f = await fixture(); const id = 'obsolete-🦉'; await f.op(id); await f.op('new', '2'); await f.head();
     const original = f.store.query.bind(f.store);

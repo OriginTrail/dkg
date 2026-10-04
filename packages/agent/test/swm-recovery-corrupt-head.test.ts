@@ -31,7 +31,7 @@ describe('real corrupt-head recovery admission', () => {
     expect(await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }')).toEqual(before);
   });
 
-  it.each(['agent.swmRecovery.storedHead', 'agent.swmRecovery.draftOrder.equivalence', 'publisher.workspace.authenticatedOperationEvidence'])('propagates unavailable store evidence at %s without rewriting metadata', async source => {
+  it.each(['agent.swmRecovery.localPublisherEvidence', 'publisher.workspace.authenticatedOperationEvidence'])('propagates unavailable store evidence at %s without rewriting metadata', async source => {
     const store = new OxigraphStore(); stores.push(store);
     const local = share(2, 'same-evidence-id', 'current');
     await store.insert([...local.meta, ...local.payload.map(row => ({ ...row, graph: local.assertionGraph }))]);
@@ -42,8 +42,9 @@ describe('real corrupt-head recovery admission', () => {
     await materializer.isGraphAssetMaterialized(descriptor);
     const before = await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }');
     const error = new Error('backend query unavailable'); const original = store.query.bind(store);
-    vi.spyOn(store, 'query').mockImplementation((text, options) => options?.source === source ? Promise.reject(error) : original(text, options));
+    const query = vi.spyOn(store, 'query').mockImplementation((text, options) => options?.source === source ? Promise.reject(error) : original(text, options));
     await expect(applyVerifiedSwmRecoveryGraphAsset({ contextGraphId: CG, asset: { kind: 'preserve-equivalent', descriptor }, ports: { store, snapshotMaterializer: materializer, replaceMetaForGraphAssets: assets => materializer.replaceMetaForGraphAssets(assets) } })).rejects.toBe(error);
+    expect(query.mock.calls.some(([, options]) => options?.source === source)).toBe(true);
     expect(await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }')).toEqual(before);
   });
 

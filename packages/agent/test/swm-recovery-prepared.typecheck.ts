@@ -29,6 +29,8 @@ void [unpaired, completed, equivalent, replacement, missingLoader, contradictory
 const candidate = prepared.operationCandidates[0]!;
 const decodedOwner: string = candidate.semantics.publisherIdentity;
 const decodedClock: number = candidate.provenance.publishedAtMs;
+const authenticatedChronology: boolean = candidate.provenance.publisherChronologyAuthenticated;
+const storedOutcome = prepared.storedHead.status;
 const immutableIdentity: string | null = candidate.identityKey;
 if (prepared.authenticatedPublisherOperation) {
   const authenticated: true = prepared.authenticatedPublisherOperation.provenance.publisherChronologyAuthenticated;
@@ -36,4 +38,4 @@ if (prepared.authenticatedPublisherOperation) {
 }
 // @ts-expect-error a timestamp-only projection cannot cross the prepared candidate boundary
 const incompleteCandidate: typeof candidate = { provenance: { shareOperationId: 'B', publishedAtMs: 1 } };
-void [decodedOwner, decodedClock, immutableIdentity, incompleteCandidate];
+void [decodedOwner, decodedClock, immutableIdentity, incompleteCandidate, authenticatedChronology, storedOutcome];

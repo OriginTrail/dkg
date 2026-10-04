@@ -3,20 +3,20 @@ import { createHash } from 'node:crypto';
 import { assertSafeIri, canonicalizeObjectTermForHash, sparqlString, type TimestampMsV1 } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import type { WorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
+import type { NormalizedWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceOperationAlias, KnowledgeAssetWorkspaceSnapshotLocator } from './workspace-resolution.js';
 
 /** Local recovery writes impose this marker; remote metadata cannot clear it. */
 export const RECOVERED_OPERATION_CHRONOLOGY = 'http://dkg.io/ontology/recoveredOperationChronology';
 
 export function workspaceOperationAlias(candidate: {
-  provenance: WorkspaceOperationProvenance;
+  provenance: NormalizedWorkspaceOperationProvenance;
   snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator;
 }): KnowledgeAssetWorkspaceOperationAlias {
   return Object.freeze({
     shareOperationId: candidate.provenance.shareOperationId,
     ...(candidate.provenance.publishedAtMs === undefined ? {} : { publishedAt: candidate.provenance.publishedAtMs.toString() as TimestampMsV1 }),
-    ...(candidate.provenance.publisherChronologyAuthenticated === false ? { publisherChronologyAuthenticated: false } : {}),
+    publisherChronologyAuthenticated: candidate.provenance.publisherChronologyAuthenticated,
     snapshotLocator: candidate.snapshotLocator,
   });
 }

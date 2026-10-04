@@ -14,7 +14,7 @@ import { filterRecoveredBulkMetadata } from './swm-recovery-bulk-metadata.js';
  * subject, the operation subject, or the KA's own assertion graph), so each
  * query is bounded by one KA's size — never by context-graph or fleet growth.
  */
-import { assertSafeIri, isSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
   swmKaWriteLockKey,
   tryReplaceGraphWithDurableRootCompanionAtomically,
@@ -29,14 +29,13 @@ import {
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
-import { recoveredDraftMayReplace, readStoredWorkspaceHead, retainedPublisherAlias } from './swm-draft-order.js';
+import { recoveredDraftMayReplace, readStoredWorkspaceHead, retainedPublisherAlias, healthyRecoveredAliasRows } from './swm-draft-order.js';
 import { prepareRecoveredDescriptor, type PreparedSwmRecoveryDescriptor } from './swm-recovered-provenance.js';
 import type { KnowledgeAssetWorkspaceHeadResolution } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { ConfirmedKnowledgeAssetVersionReader } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
-import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
+import type { RecoveryOperationCandidate } from '../graph-scoped-swm-recovery.js';
 import { createSwmMaterializationMemo } from './swm-materialization-memo.js';
-import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
 
 const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -47,38 +46,6 @@ const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
  * behavior of each is pinned by its own polarity row in
  * swm-head-identity-preservation.test.ts.
  */
-
-/** Same share under a different id: allow-list identity keys are equal. */
-function operationIdentityMatches(storedRows: readonly Quad[], descriptorKey: string): boolean {
-  const storedKey = operationIdentityKey(storedRows);
-  return storedKey !== null && storedKey === descriptorKey;
-}
-
-/** The head resolver's decoder accepts the rows (incl. the RFC64 stamp rule). */
-function storedWinnerIsDecodable(
-  storedRows: readonly Quad[],
-  descriptor: GraphScopedSwmRecoveryDescriptor,
-  foreignId: string,
-): boolean {
-  return isDecodableWorkspaceOperationRows(storedRows, {
-    kaUal: descriptor.kaUal,
-    assertionVersion: descriptor.assertionVersion,
-    shareOperationId: foreignId,
-    requirePublishedAt: true,
-  });
-}
-
-/**
- * The VM-publish preflight requires a persisted LIVE access envelope. The
- * identity key deliberately treats an absent legacy row as the effective
- * default for equality, but preserving a legacy-default winner would park the
- * KA on an operation queued publishes cannot use. Descriptor-wins instead
- * converges to the peer's persisted-policy operation. Key equality and
- * envelope usability are separate concerns.
- */
-function storedWinnerHasUsableAccessEnvelope(storedRows: readonly Quad[]): boolean {
-  return storedRows.some((row) => row.predicate === `${DKG}accessPolicy`);
-}
 
 /** The sync responder's serving join requires the WorkspaceOperation type row. */
 function storedWinnerHasResponderType(storedRows: readonly Quad[]): boolean {
@@ -323,30 +290,11 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    * content-addressed, no worse than the descriptor's own — and pass.
    */
   const snapshotLocatorIsServeable = async (
-    storedRows: readonly Quad[],
+    candidate: RecoveryOperationCandidate,
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<boolean> => {
-    const snapshotRefs = [...new Set(storedRows
-      .filter((row) => row.predicate === `${DKG}publicSnapshotRef`)
-      .map((row) => literalValue(row.object) ?? row.object))];
-    if (snapshotRefs.length > 1) return false;
-    const snapshotGraphs = [...new Set(storedRows
-      .filter((row) => row.predicate === `${DKG}publicSnapshotGraph`)
-      .map((row) => row.object))];
-    if (snapshotGraphs.length > 1) return false;
-    if (snapshotGraphs.length === 0) {
-      return snapshotRefs.length === 0 || snapshotRefs[0] === descriptor.publicQuadsDigest;
-    }
-    if (snapshotRefs.length > 0) return false;
-    // The READER's locator rule, not just SPARQL-injection safety: the public
-    // snapshot resolver only follows graph locators that pass `isSafeIri`
-    // (absolute, scheme-prefixed). A locator readers would reject must not
-    // certify a preserved winner — and a malformed stored value must rank as
-    // non-serveable rather than THROW out of the preservation check, which
-    // would stall descriptor-wins repair on exactly the corrupt rows repair
-    // exists for.
-    const graphLocator = snapshotGraphs[0]!;
-    if (!isSafeIri(graphLocator)) return false;
+    if (candidate.snapshotLocator.kind === 'store') return candidate.snapshotLocator.ref === descriptor.publicQuadsDigest;
+    const graphLocator = candidate.snapshotLocator.graph;
     let snapshotContent;
     try {
       snapshotContent = await deps.store.query(
@@ -402,101 +350,29 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     return subjects;
   };
 
-  const readStoredHead = (descriptor: GraphScopedSwmRecoveryDescriptor) => readStoredWorkspaceHead(deps.store, descriptor);
+  const readStoredHead = (descriptor: GraphScopedSwmRecoveryDescriptor) => 'preparation' in descriptor
+    ? Promise.resolve((descriptor as PreparedSwmRecoveryDescriptor).storedHead) : readStoredWorkspaceHead(deps.store, descriptor);
 
-  /** One bounded head join acquires the complete candidate model for both consumers. */
-  const loadStoredOperationCandidates = async (
-    descriptor: GraphScopedSwmRecoveryDescriptor,
-  ): Promise<Map<string, Quad[]> | null> => {
-    const operationResult = await deps.store.query(
-      `SELECT ?op ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?id . `
-      + `?op <${DKG}shareOperationId> ?id ; ?p ?o } }`,
-      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates' },
-    );
-    if (operationResult.type !== 'bindings') return null;
-    const rowsBySubject = new Map<string, Quad[]>();
-    for (const row of operationResult.bindings) {
-      const subject = row['op'] ?? '';
-      // The head itself also carries shareOperationId + kaUal. It proves the
-      // pointer, but it is not the WorkspaceOperation whose commitment must
-      // be decoded.
-      if (!subject || subject === descriptor.headSubject) continue;
-      const rows = rowsBySubject.get(subject) ?? [];
-      rows.push({
-        subject,
-        predicate: row['p'] ?? '',
-        object: row['o'] ?? '',
-        graph: descriptor.metaGraph,
-      });
-      rowsBySubject.set(subject, rows);
+  /** Select from the same locked decoded class; only locator bytes need a new read. */
+  const selectRepairIdentity: SharedMemorySnapshotMaterializer['selectRepairIdentity'] = async (contextGraphId, descriptor) => {
+    const prepared = 'preparation' in descriptor ? descriptor as PreparedSwmRecoveryDescriptor : await prepareRecoveredDescriptor(deps.store, descriptor);
+    const incoming = prepared.operationCandidates.find(candidate => candidate.operationSubject === descriptor.operationSubject);
+    const candidates = prepared.storedOperationCandidates;
+    if (incoming?.identityKey == null || candidates === null
+      || prepared.storedAliasIds.some(id => !candidates.some(candidate => candidate.shareOperationId === id))) return null;
+    const foreign = candidates.filter(candidate => candidate.shareOperationId !== descriptor.shareOperationId);
+    if (foreign.length === 0) return null;
+    for (const candidate of foreign) {
+      // Decoding certifies commitment, owner, timestamp and locator structure.
+      // Serving and queued-publish admission additionally need a responder type,
+      // a persisted access envelope, and the locator's actual committed bytes.
+      if (candidate.operationSubject !== `urn:dkg:share:${contextGraphId}:${candidate.shareOperationId}`
+        || candidate.identityKey !== incoming.identityKey || candidate.semantics.access.kind !== 'persisted'
+        || !storedWinnerHasResponderType(candidate.operationRows)
+        || !await snapshotLocatorIsServeable(candidate, descriptor)) return null;
     }
-    return rowsBySubject;
-  };
-
-  /** The complete stored-operation invariant, shared by preservation and empty projection. */
-  const validateStoredOperation = async (input: Readonly<{
-    storedRows: readonly Quad[];
-    descriptor: GraphScopedSwmRecoveryDescriptor;
-    descriptorKey: string;
-    shareOperationId: string;
-  }>): Promise<boolean> => {
-    const { storedRows, descriptor, descriptorKey, shareOperationId } = input;
-    return operationIdentityMatches(storedRows, descriptorKey)
-      && storedWinnerIsDecodable(storedRows, descriptor, shareOperationId)
-      && storedWinnerHasResponderType(storedRows)
-      && storedWinnerHasUsableAccessEnvelope(storedRows)
-      && await snapshotLocatorIsServeable(storedRows, descriptor);
-  };
-
-  const selectRepairIdentity: SharedMemorySnapshotMaterializer['selectRepairIdentity'] = async (
-    contextGraphId,
-    descriptor,
-  ) => {
-    const shareIds = await deps.store.query(
-      `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
-      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.selectRepairIdentity' },
-    );
-    if (shareIds.type !== 'bindings') return null;
-    const foreignIds = [...new Set(
-      shareIds.bindings
-        .map((row) => literalValue(row?.['op']))
-        .filter((id): id is string => Boolean(id && id.length > 0)),
-    )].filter((id) => id !== descriptor.shareOperationId).sort();
-    if (foreignIds.length === 0) return null;
-    const descriptorKey = operationIdentityKey(
-      descriptor.metadataQuads.filter((quad) => quad.subject === descriptor.operationSubject),
-    );
-    if (descriptorKey === null) return null;
-    const rowsBySubject = await loadStoredOperationCandidates(descriptor);
-    if (rowsBySubject === null) return null;
-    for (const foreignId of foreignIds) {
-      const operationSubject = `urn:dkg:share:${contextGraphId}:${foreignId}`;
-      const storedRows = rowsBySubject.get(operationSubject) ?? [];
-      if (storedRows.length === 0) return null;
-      // The preserved-winner contract, as NAMED validators (each pinned by
-      // its own polarity row): identity-equivalent under the allow-list,
-      // acceptable to the head resolver's decoder + stamp rule, carries
-      // the responder-join type row, and its snapshot locator (if graph-
-      // form) actually serves the committed content. Any failure routes to
-      // descriptor-wins — today's behavior, and the correct one both for a
-      // GENUINE change and for a winner some reader would reject (a
-      // preserved-but-unreadable winner is the wedge shape: preserved this
-      // round, corrupt to a reader, preserved again next round).
-      if (!(await validateStoredOperation({
-        storedRows,
-        descriptor,
-        descriptorKey,
-        shareOperationId: foreignId,
-      }))) return null;
-    }
-    return {
-      winnerShareOperationId: foreignIds[0]!,
-      withholdRows: descriptor.metadataQuads.filter((quad) =>
-        quad.subject === descriptor.headSubject
-        && quad.predicate === `${DKG}shareOperationId`),
-    };
+    return { winnerShareOperationId: foreign.map(candidate => candidate.shareOperationId).sort()[0]!,
+      withholdRows: descriptor.metadataQuads.filter(quad => quad.subject === descriptor.headSubject && quad.predicate === `${DKG}shareOperationId`) };
   };
 
   /**
@@ -525,6 +401,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   };
 
   const repairHeadPreservingIdentity: SharedMemorySnapshotMaterializer['repairHeadPreservingIdentity'] = async (contextGraphId, descriptor, winnerShareOperationId) => {
+    const extension = healthyRecoveredAliasRows(contextGraphId, descriptor);
+    if (extension !== null) {
+      if (extension.length > 0) await deps.store.insert(extension);
+      deps.invalidateListContextGraphsCache();
+      return;
+    }
     const publisherAlias = retainedPublisherAlias(descriptor, winnerShareOperationId);
     const loserSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
       seed: descriptor.shareOperationId !== winnerShareOperationId
@@ -809,7 +691,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         deps.writeLocks,
         [swmKaWriteLockKey(contextGraphId, descriptor.subGraphName, descriptor.kaUal)],
         async () => {
-          const stored = await readStoredHead(descriptor);
+          const prepared = await prepareRecoveredDescriptor(deps.store, descriptor);
+          const stored = prepared.storedHead;
           // Every conjunct applies to BOTH the same-id and foreign-id cases:
           // an id-equal head with a stale or corrupt version row is NOT
           // healthy, and preserving it would leave unrepaired metadata in
@@ -832,7 +715,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
             // the KA on rows the resolver fails closed on, forever.
             return { outcome: 'replace' as const };
           }
-          const selected = await selectRepairIdentity(contextGraphId, descriptor);
+          const selected = await selectRepairIdentity(contextGraphId, prepared);
           if (selected === null) return { outcome: 'replace' as const };
           const { winnerShareOperationId, withholdRows } = selected;
           // ENACT while still holding the lock: rewrite the head from the
@@ -844,7 +727,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           // replacement it suppresses.
           await repairHeadPreservingIdentity(
             contextGraphId,
-            await prepareRecoveredDescriptor(deps.store, descriptor),
+            prepared,
             winnerShareOperationId,
           );
           return { outcome: 'preserved' as const, withholdRows };
