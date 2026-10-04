@@ -97,7 +97,7 @@ import {
   type StageKnowledgeAssetSharedWorkingMemoryInputV1,
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
-import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import type { DurableRootAtomicCompanionResolver } from
   './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
@@ -2642,6 +2642,11 @@ export class DKGPublisher implements Publisher {
           ctx,
           graphPublish.scope.ual,
           graphPublish.scope.assertionVersion,
+          {
+            publicQuadsDigest: workspacePublicQuadsDigest(quads),
+            privateTripleCount: privateQuads.length,
+            ...(graphPublish.expectedPrivateMerkleRoot ? { privateMerkleRoot: ethers.hexlify(graphPublish.expectedPrivateMerkleRoot) } : {}),
+          },
         );
       } else {
         const kaMap = skolemizeByEntity(quads);
@@ -6564,13 +6569,25 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
+    expectedShareOperationId?: string,
   ): Promise<void> {
     return this.withAssertionLifecycleWriteLock(
       contextGraphId,
       name,
       agentAddress,
       subGraphName,
-      () => this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName),
+      async () => {
+        if (expectedShareOperationId !== undefined) {
+          const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+          const metaGraph = contextGraphMetaUri(contextGraphId);
+          const result = await this.store.query(`SELECT ?operation WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
+            <${assertSafeIri(lifecycle)}> <${SHARE_OPERATION_ID_PRED}> ?operation
+          } } LIMIT 2`);
+          if (result.type !== 'bindings' || result.bindings.length !== 1
+            || stripOptionalLiteral(result.bindings[0]?.['operation']) !== expectedShareOperationId) return;
+        }
+        await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName);
+      },
     );
   }
 
@@ -7538,10 +7555,11 @@ export class DKGPublisher implements Publisher {
    *
    * A publication passes the assertion version it confirmed. The cleanup then
    * holds the per-KA SWM write lock and runs only while the head it finds is
-   * at or below that version: a newer head keeps its graph, operation rows,
-   * snapshot and StorageACK copies, and so does a head that cannot be
-   * resolved. Without a version the caller must already hold that lock and
-   * have ruled out a newer head itself.
+   * below that version, or at that version with matching public and private
+   * content evidence. A newer, different, unproven or unresolved head keeps
+   * its graph, operation rows, snapshot and StorageACK copies. Without a
+   * version the caller must already hold that lock and have ruled out a
+   * newer head itself.
    */
   async clearPublishedKnowledgeAssetSwm(
     contextGraphId: string,
@@ -7550,6 +7568,7 @@ export class DKGPublisher implements Publisher {
     ctx: OperationContext,
     kaUal: string,
     finalizedAssertionVersion?: string | number | bigint,
+    finalizedContent?: { publicQuadsDigest: string; privateMerkleRoot?: string; privateTripleCount: number },
   ): Promise<void> {
     if (scope.kind !== 'named-lifecycle') {
       throw new Error('Graph-scoped KA SWM cleanup requires an exact named-lifecycle scope');
@@ -7597,6 +7616,16 @@ export class DKGPublisher implements Publisher {
             `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
               `its head is at version ${headResolution.head.assertionVersion}`,
           );
+          return;
+        }
+        if (headResolution.status === 'resolved'
+          && BigInt(headResolution.head.assertionVersion) === finalizedVersion
+          && (!finalizedContent
+            || headResolution.head.publicQuadsDigest !== finalizedContent.publicQuadsDigest
+            || headResolution.head.privateTripleCount !== finalizedContent.privateTripleCount
+            || (headResolution.head.privateMerkleRoot ?? '').toLowerCase()
+              !== (finalizedContent.privateMerkleRoot ?? '').toLowerCase())) {
+          this.log.info(ctx, `Kept graph-scoped KA SWM ${kaScope.ual} at finalized version ${finalizedVersion}: its content is not proven to match the publication`);
           return;
         }
         await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
@@ -8525,6 +8554,25 @@ export class DKGPublisher implements Publisher {
       throw new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
     }
     const contentScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+    return this.withWriteLocks(
+      [swmKaWriteLockKey(contextGraphId, opts?.subGraphName, contentScope.ual)],
+      () => this.assertionPromoteSealed(
+        contextGraphId, name, agentAddress, opts, seal, promoteMetaGraph, sealSubject, contentScope,
+      ),
+    );
+  }
+
+  /** Runs with both the assertion lifecycle lock and the exact KA SWM write lock held. */
+  private async assertionPromoteSealed(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    opts: PublisherAssertionPromoteOptions | undefined,
+    seal: NonNullable<ReturnType<typeof parseAssertionSealQuads>>,
+    promoteMetaGraph: string,
+    sealSubject: string,
+    contentScope: GraphKnowledgeAssetScope,
+  ): Promise<AssertionPromoteResult> {
     const immutablePrivateQuads = await tagPromoteStep(
       'knowledgeAssetPrivateQuads',
       () => this.privateStore.getKnowledgeAssetPrivateTriples(
@@ -9253,7 +9301,6 @@ export class DKGPublisher implements Publisher {
       shareOperationId: operationId,
     };
   }
-
 
   async assertionDiscard(
     contextGraphId: string,

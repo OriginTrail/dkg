@@ -5600,6 +5600,11 @@ export class PublishMethods extends DKGAgentBase {
           ctx,
           graphScope.ual,
           graphScope.assertionVersion,
+          {
+            publicQuadsDigest: workspacePublicQuadsDigest(snapshotQuads),
+            privateTripleCount: snapshotPrivateQuads.length,
+            ...(snapshotPrivateRoot ? { privateMerkleRoot: ethers.hexlify(snapshotPrivateRoot) } : {}),
+          },
         );
       } catch (err) {
         this.log.warn(
@@ -5893,7 +5898,7 @@ export class PublishMethods extends DKGAgentBase {
 
     if (result.status === 'confirmed') {
       try {
-        await publisher.clearSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.subGraphName);
+        await publisher.clearSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.subGraphName, request.shareOperationId);
       } catch (err) {
         this.log.warn(
           ctx,
@@ -6222,6 +6227,11 @@ export class PublishMethods extends DKGAgentBase {
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
             graphScope.ual,
             graphScope.assertionVersion,
+            {
+              publicQuadsDigest: workspacePublicQuadsDigest(canonicalSwmQuads),
+              privateTripleCount: canonicalPrivateQuads.length,
+              ...(privateMerkleRoot ? { privateMerkleRoot: ethers.hexlify(privateMerkleRoot) } : {}),
+            },
           );
         } catch (err) {
           this.log.warn(
@@ -6485,7 +6495,7 @@ export class PublishMethods extends DKGAgentBase {
     // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
     if (result.status === 'confirmed') {
       try {
-        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
+        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, rfc64WorkspaceHead?.shareOperationId);
       } catch (err) {
         this.log.warn(
           opts?.operationCtx ?? createOperationContext('publishFromSWM'),
