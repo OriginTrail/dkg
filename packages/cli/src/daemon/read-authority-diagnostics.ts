@@ -1,8 +1,8 @@
 import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
-import type {
-  ContextGraphReadAuthoritySource,
-  ContextGraphReadAuthorityDependency,
-  RegisteredContextGraphAuthorityUnavailableReason,
+import {
+  isContextGraphReadAuthorityUnavailableReason,
+  type ContextGraphReadAuthoritySource,
+  type ContextGraphReadAuthorityDependency,
 } from '@origintrail-official/dkg-agent';
 
 /** Where an unavailable read authority came from, as the agent attributes it. */
@@ -26,43 +26,6 @@ export interface ReadAuthorityDiagnostics {
   /** Logs one line for a read-authority 503 under `ctx`'s operation id. */
   record(ctx: OperationContext, attribution: ContextGraphReadAuthorityAttribution): void;
 }
-
-/** Read-only fallback reasons in addition to the registered authority vocabulary. */
-type ReadSpecificAuthorityUnavailableReason =
-  | 'registered-authority-error'
-  | 'remote-local-authority-unaccepted'
-  | 'rfc64-private-read-roster-unavailable'
-  | 'no-read-authority'
-  | 'unexpected-authority-error'
-  | 'pending-authoritative-metadata'
-  | 'local-access-policy-unavailable'
-  | 'peer-authority-unavailable'
-  | 'local-agent-authority-unavailable'
-  | 'legacy-participant-authority-unavailable';
-
-const SAFE_READ_AUTHORITY_REASONS = new Set(Object.keys({
-  'finalized-name-absence-unaccepted': true,
-  'chain-name-binding-unavailable': true,
-  'registered-authority-error': true,
-  'authority-circuit-open': true,
-  'local-chain-binding-unavailable': true,
-  'local-existence-unavailable': true,
-  'chain-access-policy-unavailable': true,
-  'chain-access-policy-timeout': true,
-  'chain-access-policy-unknown': true,
-  'chain-participant-authority-unavailable': true,
-  'chain-participant-authority-unsupported': true,
-  'chain-participant-authority-invalid': true,
-  'remote-local-authority-unaccepted': true,
-  'rfc64-private-read-roster-unavailable': true,
-  'no-read-authority': true,
-  'unexpected-authority-error': true,
-  'pending-authoritative-metadata': true,
-  'local-access-policy-unavailable': true,
-  'peer-authority-unavailable': true,
-  'local-agent-authority-unavailable': true,
-  'legacy-participant-authority-unavailable': true,
-} as const satisfies Record<RegisteredContextGraphAuthorityUnavailableReason | ReadSpecificAuthorityUnavailableReason, true>));
 
 const SAFE_READ_AUTHORITY_SOURCES = new Set(Object.keys({
   'system': true,
@@ -134,7 +97,7 @@ export function createReadAuthorityDiagnostics(
   return {
     record(ctx, attribution) {
       const detail = `source=${(SAFE_READ_AUTHORITY_SOURCES.has(attribution.source) ? attribution.source : 'unknown')}`
-        + ` reason=${(SAFE_READ_AUTHORITY_REASONS.has(attribution.reason) ? attribution.reason : 'unknown')}`
+        + ` reason=${(isContextGraphReadAuthorityUnavailableReason(attribution.reason) ? attribution.reason : 'unknown')}`
         + ` dependency=${(SAFE_READ_AUTHORITY_DEPENDENCIES.has(attribution.dependency) ? attribution.dependency : 'unknown')}`;
       const decision = warningDue(detail);
       if (decision.warn) {

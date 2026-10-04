@@ -80,13 +80,13 @@ describe('read-authority 503 diagnostics (#2834)', () => {
     expect(lines.map((line) => line.level)).toEqual(['warn', 'warn']);
   });
 
-  it('filters arbitrary well-formed decision tokens through the shared closed boundary', () => {
+  it.each(['private-graph-name', 'toString', 'constructor', '__proto__'])('filters arbitrary decision token %s through the shared closed boundary', (token) => {
     const { lines, diagnostics } = harness();
     diagnostics.record(createOperationContext('query'), {
-      source: 'private-graph-name', reason: 'private-graph-name', dependency: 'private-graph-name',
+      source: token, reason: token, dependency: token,
     });
     expect(lines[0]!.message).toContain('source=unknown reason=unknown dependency=unknown');
-    expect(lines[0]!.message).not.toContain('private-graph-name');
+    expect(lines[0]!.message).not.toContain(token);
   });
 
   it('logs anything but an attribution token as unknown', () => {

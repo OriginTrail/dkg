@@ -365,8 +365,13 @@ export {
   isRootlessUpdateError,
   type RootlessUpdateErrorCode,
 } from './rootless-update-error.js';
+export {
+  CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_REASONS,
+  isContextGraphReadAuthorityUnavailableReason,
+} from './context-graph-read-authority.js';
 export type {
   ContextGraphReadAuthorityDecision,
+  ContextGraphReadAuthorityUnavailableReason,
   ContextGraphReadAuthorityDependency,
   ContextGraphReadAuthorityOutcome,
   ContextGraphReadAuthoritySource,
