@@ -2206,24 +2206,22 @@ describe('rootless graph-scoped KA lifecycle', () => {
       graph: siblingGraph,
     }]);
 
-    const realPublisher = (agent as any).publisher;
-    const publishSpy = vi.spyOn(realPublisher, 'publish').mockResolvedValue({
-      kaId: intent.seal.reservedKaId !== undefined ? BigInt(intent.seal.reservedKaId) : 1n,
-      ual: 'did:dkg:test/queued-scoped-same-root',
-      merkleRoot: ethers.getBytes(intent.sealMerkleRoot),
-      kaManifest: [{ tokenId: 1n, rootEntity: root, privateTripleCount: 0 }],
-      status: 'confirmed',
-      publicQuads: [],
+    // Submit the actual sealed mint: a fabricated confirmed receipt cannot
+    // satisfy the canonical repair owner's coherent chain-version fence.
+    const result = await agent.publishQueuedKnowledgeAssetVmPublish(intent, {
+      quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"primary"', graph: '' }],
+      publisherPeerId: 'queued-scoped-test',
     });
-    try {
-      const result = await agent.publishQueuedKnowledgeAssetVmPublish(intent, {
-        quads: [{ subject: root, predicate: 'http://schema.org/name', object: '"primary"', graph: '' }],
-        publisherPeerId: 'queued-scoped-test',
-      });
-      expect(result.status).toBe('confirmed');
-    } finally {
-      publishSpy.mockRestore();
-    }
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult?.txHash).toMatch(/^0x[0-9a-f]{64}$/i);
+    const packedKaId = BigInt(intent.seal.reservedKaId!);
+    expect(await (agent as any).chain.readKnowledgeAssetVersionSnapshot(packedKaId))
+      .toMatchObject({ rootCount: 1n, latestRoot: intent.sealMerkleRoot });
+    expect(await agent.assertion.history(CG_ID, name)).toMatchObject({
+      vmCurrentAssertion: intent.sealMerkleRoot.slice(2),
+      memoryLayer: MemoryLayer.VerifiableMemory,
+      state: 'published',
+    });
 
     const primary = await (agent as any).store.query(
       `ASK { GRAPH <${primaryGraph}> { <${root}> ?p ?o } }`,
