@@ -5994,6 +5994,35 @@ describe('RFC-64 rollout authority integration', () => {
       memberPeerId,
       contextGraphId,
     )).resolves.toBeNull();
+
+    // Transient failures in graph-scoped binding reads must not manufacture
+    // an identity when no verified profile can supply one.
+    profile.mockResolvedValue(null);
+    delegateePeers.mockRejectedValueOnce(new Error('delegatee roster unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    delegateePeers.mockResolvedValue(new Map());
+    requesterState.mockRejectedValueOnce(new Error('join state unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    requesterState.mockResolvedValue({
+      status: 'approved',
+      requestGeneration: `0x${'11'.repeat(32)}`,
+      curatorPeerId,
+      curatorAgentAddress: AUTHOR,
+      curatorAuthorityEra: '0',
+    });
+    currentCuratorBinding.mockRejectedValueOnce(new Error('curator binding unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
   });
 
   it('merges an authenticated lifecycle roster into finalized registered authority', async () => {
