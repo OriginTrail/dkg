@@ -3,7 +3,7 @@ import { expireSharedMemoryScope } from './swm-operation-expiry.js';
 
 
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './lifecycle-sync-policy.js';
-import { sameStringArray, emptySharedMemorySyncResult, mergeSharedMemorySyncResults, emptySwmRecoveryResult } from './lifecycle-sync-result.js';
+import { sameStringArray, emptySwmRecoveryResult } from './lifecycle-sync-result.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -371,7 +371,8 @@ import {
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
 import  {
-  emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
+  emptySharedMemorySyncResult,
+  mergeSamePeerSharedMemoryDiagnostics,
   mergeFleetSharedMemoryDiagnostics,
   recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
@@ -7735,7 +7736,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             },
           );
         },
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         onResult: (item, result) => {
           if (
             selectedSwmEnabled
@@ -7814,7 +7815,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             selectedSwmPriority: true,
           },
         ),
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         markDeferred: (summary) => ({
           ...summary,
           deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
@@ -7854,7 +7855,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
       });
       const { summary: continuationSummary } = continuationExecution;
-      const finalSummary = mergeSharedMemorySyncResults(
+      const finalSummary = mergeSamePeerSharedMemoryDiagnostics(
         initialSummary,
         continuationSummary,
       );
@@ -8329,7 +8330,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catchup-status endpoint and UI keep working — see
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
     const emptyShared = (): SharedMemorySyncResult =>
-      createEmptySharedMemorySyncResult(1);
+      emptySharedMemorySyncResult(1);
     // Bounded fan-out: at most CATCHUP_MAX_CONCURRENT_PEER_SYNCS peer syncs run
     // at once. The pre-cap unbounded `Promise.all` over every sync-capable peer
     // was the top amplifier of the 2026-07-07 mainnet sync storm — one
