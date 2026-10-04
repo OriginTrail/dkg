@@ -1,3 +1,4 @@
+import { knowledgeAssetWorkspaceHeadRows } from './workspace-head-rows.js';
 import { snapshotOperation } from './workspace-snapshot-lifecycle.js';
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
@@ -737,31 +738,12 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
   subGraphName?: string;
   queryOptions?: QueryOptions;
 }): Promise<void> {
-  const scope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
-  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
-  const metaGraph = params.graphManager.sharedMemoryMetaUri(
-    params.contextGraphId,
-    subGraphName,
-  );
-  const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
-  const assertionGraph = knowledgeAssetLayerGraphUri(
-    params.contextGraphId,
-    MemoryLayer.SharedWorkingMemory,
-    scope,
-    subGraphName,
-  );
+  const rows = knowledgeAssetWorkspaceHeadRows(params);
   await deleteByPatternWithoutCount(
     params.store,
-    { graph: metaGraph, subject },
+    { graph: rows[0]!.graph, subject: rows[0]!.subject },
     workspaceHeadStoreOptions(params.queryOptions, 'deleteByPattern'),
   );
-  const rows: Quad[] = [
-    { subject, predicate: `${DKG}contentScopeVersion`, object: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), graph: metaGraph },
-    { subject, predicate: `${DKG}kaUal`, object: scope.ual, graph: metaGraph },
-    { subject, predicate: `${DKG}assertionVersion`, object: intLit(BigInt(scope.assertionVersion)), graph: metaGraph },
-    { subject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: metaGraph },
-    { subject, predicate: `${DKG}shareOperationId`, object: lit(params.shareOperationId), graph: metaGraph },
-  ];
   await params.store.insert(
     rows,
     workspaceHeadStoreOptions(params.queryOptions, 'insert'),

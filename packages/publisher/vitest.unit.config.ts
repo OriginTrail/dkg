@@ -98,6 +98,7 @@ export default defineConfig({
       'test/finalized-snapshot-collector.test.ts',
       'test/workspace-snapshot-write-scope.test.ts',
       'test/published-snapshot-cleanup.test.ts',
+      'test/published-assertion-lifecycle.test.ts',
       'test/assertion-promote-confirmation.test.ts',
       'test/workspace-snapshot-validation.test.ts',
       'test/workspace-head-cardinality.test.ts',

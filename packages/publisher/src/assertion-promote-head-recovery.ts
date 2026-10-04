@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertSafeIri, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { GraphManager, TripleStore } from '@origintrail-official/dkg-storage';
-import { workspaceOperationSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
+import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
+import { knowledgeAssetWorkspaceHeadRows } from './workspace-head-rows.js';
 import type { AssertionPromoteSourceContext } from './assertion-promote-source.js';
 
 /**
@@ -16,22 +17,17 @@ export async function isInterruptedOwnPromoteHead(
   store: TripleStore, graphManager: GraphManager, context: AssertionPromoteSourceContext, operationId: string,
 ): Promise<boolean> {
   const graph = graphManager.sharedMemoryMetaUri(context.contextGraphId, context.subGraphName);
-  const subject = workspaceKnowledgeAssetHeadSubject(context.contentScope.ual);
+  const expectedRows = knowledgeAssetWorkspaceHeadRows({ graphManager, contextGraphId: context.contextGraphId,
+    kaUal: context.contentScope.ual, assertionVersion: context.contentScope.assertionVersion,
+    shareOperationId: operationId, subGraphName: context.subGraphName });
+  const subject = expectedRows[0]!.subject;
   const operation = workspaceOperationSubject(context.contextGraphId, operationId);
   const result = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(graph)}> {
     { <${assertSafeIri(subject)}> ?p ?o . BIND(<${assertSafeIri(subject)}> AS ?s) } UNION
     { <${assertSafeIri(operation)}> ?p ?o . BIND(<${assertSafeIri(operation)}> AS ?s) }
-  } } LIMIT 6`);
-  if (result.type !== 'bindings' || result.bindings.length !== 5) return false;
-  const dkg = 'http://dkg.io/ontology/';
-  const integer = (value: number | string) => `"${value}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
-  const expected = new Map([
-    [`${dkg}contentScopeVersion`, integer(GRAPH_KA_CONTENT_SCOPE_VERSION)],
-    [`${dkg}kaUal`, context.contentScope.ual],
-    [`${dkg}assertionVersion`, integer(context.contentScope.assertionVersion)],
-    [`${dkg}assertionGraph`, context.swmGraphUri],
-    [`${dkg}shareOperationId`, JSON.stringify(operationId)],
-  ]);
+  } } LIMIT ${expectedRows.length + 1}`);
+  if (result.type !== 'bindings' || result.bindings.length !== expectedRows.length) return false;
+  const expected = new Map(expectedRows.map(row => [row.predicate, row.object]));
   for (const row of result.bindings) {
     if (row['s'] !== subject || !expected.has(row['p']!) || expected.get(row['p']!) !== row['o']) return false;
     expected.delete(row['p']!);

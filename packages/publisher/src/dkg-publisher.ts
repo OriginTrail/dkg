@@ -19,6 +19,7 @@ import {
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
+import { isPublishedAssertionOwner } from './published-assertion-owner.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
@@ -6549,15 +6550,28 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string, name: string, agentAddress: string,
     expectedShareOperationId: string | null, subGraphName?: string,
   ): Promise<void> {
+    await this.withPublishedAssertionLifecycle(contextGraphId, name, agentAddress, expectedShareOperationId,
+      () => this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName), subGraphName);
+  }
+
+  /**
+   * A replacement already owns the lifecycle while its curator call is pending.
+   * Reject that old publication before waiting on the lifecycle lock, so chain
+   * completion and SWM cleanup do not wait on a network call. Positive ownership
+   * still takes the normal draft lock and rechecks after it, closing the race
+   * with a reopen that starts between this preflight and the lock acquisition.
+   */
+  async withPublishedAssertionLifecycle(
+    contextGraphId: string, name: string, agentAddress: string, expectedShareOperationId: string | null,
+    commit: () => Promise<void>, subGraphName?: string,
+  ): Promise<boolean> {
+    const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const owns = () => isPublishedAssertionOwner(this.store, metaGraph, lifecycle, expectedShareOperationId);
+    if (!await owns()) return false;
     return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, subGraphName, async () => {
-      const lifecycle = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-      const metaGraph = contextGraphMetaUri(contextGraphId);
-      const result = await this.store.query(`SELECT ?operation WHERE { GRAPH <${assertSafeIri(metaGraph)}> {
-        <${assertSafeIri(lifecycle)}> <${SHARE_OPERATION_ID_PRED}> ?operation
-      } } LIMIT 2`);
-      if (result.type !== 'bindings' || result.bindings.length > 1
-        || (stripOptionalLiteral(result.bindings[0]?.['operation']) ?? null) !== expectedShareOperationId) return;
-      await this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName);
+      if (!await owns()) return false;
+      await commit(); return true;
     });
   }
 
