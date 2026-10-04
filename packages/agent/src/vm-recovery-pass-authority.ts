@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { VmRecoveryAuthorityRetryPolicy } from './vm-recovery-experiment-policy.js';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
 
 /**
@@ -57,6 +58,7 @@ export class VmRecoveryPassAuthority {
   constructor(
     private readonly clock: () => number = () => performance.now(),
     private readonly maxEvidenceAgeMs: number = VM_RECOVERY_REGISTERED_PUBLIC_MAX_AGE_MS,
+    private readonly retryPolicy: VmRecoveryAuthorityRetryPolicy = { kind: 'disabled' },
   ) {}
 
   /**
@@ -95,8 +97,16 @@ export class VmRecoveryPassAuthority {
   }
 
   /** A miss may be read again, at most once per `minIntervalMs` since the last read began. */
-  retryDue(minIntervalMs: number): boolean {
+  retryDue(minIntervalMs: number = this.retryPolicy.kind === 'spaced'
+    ? this.retryPolicy.minIntervalMs : Number.POSITIVE_INFINITY): boolean {
     return this.missed && this.clock() - this.#lastReadStartedAt >= minIntervalMs;
+  }
+
+  /** A single bounded miss retry at pass entry; cancellation releases the wait. */
+  async waitForMissRetry(signal?: AbortSignal): Promise<boolean> {
+    if (!this.missed || this.retryPolicy.kind !== 'spaced') return false;
+    await vmRecoveryRetryDelay(this.retryPolicy.minIntervalMs, signal);
+    return !signal?.aborted;
   }
 
   /** The observation as a log label. Observation only: nothing branches on it. */
@@ -127,4 +137,27 @@ export class VmRecoveryPassAuthority {
       revoke: () => { revoked = true; },
     };
   }
+}
+
+/**
+ * Resolve after `ms`, or sooner when `signal` aborts. Never rejects and leaves neither
+ * a timer nor a listener behind, so a cancelled pass is not held by its own wait.
+ */
+export function vmRecoveryRetryDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let onAbort: (() => void) | undefined;
+    const timer = setTimeout(() => {
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    timer.unref?.();
+    if (signal) {
+      onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Buffer } from 'node:buffer';
+import type { VmRecoveryPreparation, VmRecoveryPreparationScope, VmRecoveryPreparationCandidate } from './vm-recovery-preparation.js';
 import { encodeExactAssetUals, MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
 import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import {
@@ -50,6 +51,8 @@ export interface VmRecoveryTransportPlanningOptions<T> {
   readonly sizingReadConcurrency?: number;
   /** Deadline of one live sizing read; omitted keeps the sizing bridge's default. */
   readonly sizingReadTimeoutMs?: number;
+  /** Pending candidates after a probe; the transport owner prepares their sizing. */
+  readonly probeRemainder?: readonly VmRecoveryPreparationCandidate[];
 }
 
 export interface VmRecoveryTransportPlanningPorts {
@@ -61,6 +64,7 @@ export interface VmRecoveryTransportPlanningPorts {
    * only when sizing a holder prefix; a probe sizes one asset to choose its wire.
    */
   readonly preparedHints?: VmRecoveryPreparedHints | null;
+  readonly preparation?: VmRecoveryTransportPreparation;
 }
 
 /** A sized candidate the plan left for a later batch, with the footprint already observed. */
@@ -99,8 +103,45 @@ function freezePlan<T>(
   });
 }
 
-/** Size and select one transport plan without changing provider/rotation state. */
+/** Coordinate advisory hint lifetime at transport-plan boundaries. */
+export class VmRecoveryTransportPreparation {
+  #entryPrepared = false;
+  constructor(private readonly owner: VmRecoveryPreparation, private readonly scope: VmRecoveryPreparationScope) {}
+  preparePass(candidates: readonly VmRecoveryPreparationCandidate[]): void {
+    if (this.#entryPrepared) return;
+    this.#entryPrepared = true;
+    this.owner.prepare(this.scope, candidates);
+  }
+  hints(): VmRecoveryPreparedHints { return this.owner.hintsFor(this.scope); }
+  release(): void { this.owner.release(this.scope); }
+  prepareRemainder(candidates: readonly VmRecoveryPreparationCandidate[]): void { this.owner.prepare(this.scope, candidates); }
+}
+
+/** Plan, release consumed hints, then prepare only the still-pending remainder. */
 export async function planVmRecoveryTransport<T>(
+  options: VmRecoveryTransportPlanningOptions<T>, ports: VmRecoveryTransportPlanningPorts,
+): Promise<VmRecoveryTransportPlan<T>> {
+  let plan: VmRecoveryTransportPlan<T>;
+  try {
+    plan = await selectVmRecoveryTransport(options, {
+      ...ports,
+      ...(ports.preparation ? { preparedHints: ports.preparation.hints() } : {}),
+    });
+  } finally {
+    if (options.providerAttemptKind !== 'probe') ports.preparation?.release();
+  }
+  if (plan.attempts.length > 0 && !options.signal?.aborted && options.isCurrent()) {
+    ports.preparation?.prepareRemainder(options.providerAttemptKind === 'probe'
+      ? options.probeRemainder ?? []
+      : plan.unplanned.map(({ kaId, recoveryFootprint }) => ({
+        kaId, ...(recoveryFootprint ? { footprint: recoveryFootprint } : {}),
+      })));
+  }
+  return plan;
+}
+
+/** Size and select one transport plan without changing provider/rotation state. */
+async function selectVmRecoveryTransport<T>(
   options: VmRecoveryTransportPlanningOptions<T>,
   ports: VmRecoveryTransportPlanningPorts,
 ): Promise<VmRecoveryTransportPlan<T>> {
