@@ -1948,6 +1948,15 @@ describe('approved private bare-name replica authorization', () => {
     );
   });
 
+  it('refuses unsigned ontology-only public authority through the default auto discovery path', async () => {
+    const fixture = await approvedBareNameReplicaFixture({ localApproval: false, accessPolicy: 'public' });
+    const accepted = vi.spyOn(Reflect.get(fixture.receiver, 'rfc64PublicCatalogServiceV1'), 'acceptAuthoritativePolicySnapshot');
+    await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .rejects.toThrow(/no authenticated owner authority/);
+    expect(accepted).not.toHaveBeenCalled();
+    expect(fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)).toBeNull();
+  });
+
   it('refreshes an approved private catalog without depending on its own active recovery gate', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     const recoveryGate = vi.spyOn(fixture.receiver, 'getMemberRecoveryRosterSource')
@@ -2270,6 +2279,58 @@ describe('approved private bare-name replica authorization', () => {
         expect(await composition).toBeInstanceOf(Error);
       }
       expect(fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)).toBeNull();
+    },
+  );
+
+  it.each(['already-active', 'during-proof'] as const)(
+    'withholds approved authority for an %s requester mutation and recovers after its failed write', async (timing) => {
+      const fixture = await approvedBareNameReplicaFixture();
+      await fixture.receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+      const accepted = vi.spyOn(Reflect.get(fixture.receiver, 'rfc64PublicCatalogServiceV1'), 'acceptAuthoritativePolicySnapshot');
+      let enter!: () => void; let rejectWrite!: (error: Error) => void;
+      const entered = new Promise<void>((resolve) => { enter = resolve; });
+      const backend = new Promise<void>((_resolve, reject) => { rejectWrite = reject; });
+      const update = fixture.receiver.store.update!.bind(fixture.receiver.store);
+      let held = false;
+      vi.spyOn(fixture.receiver.store, 'update').mockImplementation(async (sparql, options) => {
+        if (!held && options?.touchedGraphs?.includes('urn:dkg:local:requester-join-state')) {
+          held = true; enter(); await backend;
+        }
+        await update(sparql, options);
+      });
+      const mutate = () => fixture.receiver.writeRequesterJoinRequestState(CONTEXT_GRAPH_ID, fixture.approvedAddress, {
+        status: 'rejected', requestGeneration: `0x${'34'.repeat(32)}`, curatorPeerId: CURATOR_PEER,
+        curatorAgentAddress: OWNER, curatorAuthorityEra: '0',
+      }).catch((error: unknown) => error);
+      const proof = timing === 'during-proof' ? pauseSuccessfulApprovedPrivateProofOnce(fixture) : undefined;
+      vi.useFakeTimers();
+      let mutation: Promise<unknown> | undefined;
+      try {
+        if (timing === 'already-active') { mutation = mutate(); await entered; }
+        const composition = fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' });
+        if (proof !== undefined) {
+          await proof.returned;
+          mutation = mutate(); await entered; proof.release();
+        }
+        const oldRows = await fixture.receiver.store.query('SELECT ?status WHERE { GRAPH <urn:dkg:local:requester-join-state> { ?s <urn:dkg:local:requester-join-state:status> ?status } } LIMIT 2');
+        expect(oldRows).toMatchObject({ type: 'bindings', bindings: [{ status: '"approved"' }] });
+        // Every retry still sees the old real row while the backend write is held.
+        await vi.advanceTimersByTimeAsync(4_000);
+        expect(await composition).toBeNull();
+        expect(accepted).not.toHaveBeenCalled();
+        expect(fixture.receiver.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)).toBeNull();
+        const failure = new Error('requester backend refused replacement');
+        rejectWrite(failure);
+        expect(await mutation).toBe(failure);
+        const locks = Reflect.get(fixture.receiver, 'contextGraphJoinAdmissionLockManager');
+        expect(locks.requesterMutationActive(CONTEXT_GRAPH_ID)).toBe(false);
+        await expect(fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' }))
+          .resolves.toMatchObject({ source: 'owner-signed-unregistered', policy: { accessPolicy: 1 } });
+        expect(accepted).toHaveBeenCalledOnce();
+      } finally {
+        proof?.release(); rejectWrite(new Error('test cleanup')); await mutation;
+        vi.useRealTimers();
+      }
     },
   );
 

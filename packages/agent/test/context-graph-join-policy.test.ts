@@ -302,8 +302,9 @@ describe('context graph open enrollment policy', () => {
     expect(deliver).toHaveBeenCalledOnce();
     expect(refresh).toHaveBeenCalledOnce();
     expect(replay).toHaveBeenCalledWith(
-      'private-join-replay', owner.agentAddress, 'approved-peer',
+      'private-join-replay', owner.agentAddress, 'approved-peer', expect.any(AbortSignal),
     );
+    expect(replay.mock.calls[0]![3]).toBe(refresh.mock.calls[0]![1]);
 
     await agent.notifyJoinApproval('private-join-replay', owner.agentAddress, 'generation');
     expect(refresh).toHaveBeenCalledOnce();
@@ -336,9 +337,12 @@ describe('context graph open enrollment policy', () => {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(refresh).toHaveBeenCalledTimes(4);
       expect(replay).toHaveBeenCalledTimes(4);
-      for (const call of replay.mock.calls) expect(call).toEqual([
-        'private-join-pending-replay', owner.agentAddress, 'approved-peer',
-      ]);
+      for (const [index, call] of replay.mock.calls.entries()) {
+        expect(call).toEqual([
+          'private-join-pending-replay', owner.agentAddress, 'approved-peer', expect.any(AbortSignal),
+        ]);
+        expect(call[3]).toBe(refresh.mock.calls[index]![1]);
+      }
       await vi.advanceTimersByTimeAsync(120_000);
       expect(replay).toHaveBeenCalledTimes(4);
       expect(deliver.mock.invocationCallOrder[0]).toBeLessThan(replay.mock.invocationCallOrder[0]!);

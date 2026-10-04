@@ -76,3 +76,10 @@ void ordinaryRequester;
 void selectedRequester;
 void requesterWithoutGuard;
 void ordinaryRequesterWithRecoveryState;
+
+// The executor has one completion policy; marker-only compatibility is not a second mode.
+import type { SwmTargetExecutorPortsV1 } from '../src/sync/requester/swm-target-executor.js';
+declare const incompletePorts: Omit<SwmTargetExecutorPortsV1, 'completeFinalizedSwmTwinRetirement'>;
+// @ts-expect-error Physical reconciliation requires its completion owner.
+const missingCompletion: SwmTargetExecutorPortsV1 = incompletePorts;
+void missingCompletion;

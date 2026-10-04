@@ -79,13 +79,7 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
-  readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
-    contextGraphId: string;
-    kaUal: string;
-    assertionVersion: string;
-    subGraphName?: string;
-  }>) => Promise<void>;
-  readonly completeFinalizedSwmTwinRetirement?: (
+  readonly completeFinalizedSwmTwinRetirement: (
     reconcile: () => Promise<FinalizedSwmTwinReconciliationResult>,
     ctx: OperationContext,
   ) => Promise<FinalizedSwmTwinReconciliationResult>;
@@ -301,25 +295,9 @@ export class SwmTargetExecutorV1 {
           descriptor,
           retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
         });
-        const result = this.#ports.completeFinalizedSwmTwinRetirement
-          ? await this.#ports.completeFinalizedSwmTwinRetirement(reconcile, target.ctx)
-          : await reconcile();
+        const result = await this.#ports.completeFinalizedSwmTwinRetirement(reconcile, target.ctx);
         const retirement = result.outcome;
         const twinRetired = 'retirement' in result;
-        if (twinRetired && this.#ports.completeFinalizedSwmTwinRetirement === undefined) {
-          try {
-            await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
-              contextGraphId: result.retirement.contextGraphId,
-              kaUal: result.retirement.kaUal,
-              assertionVersion: String(result.retirement.assertionVersion),
-              subGraphName: result.retirement.subGraphName,
-            });
-          } catch (cause) {
-            this.#ports.logWarn(target.ctx,
-              `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
-                + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`);
-          }
-        }
         if (retirement === 'retired') {
           this.#ports.invalidateListContextGraphsCache();
           this.#ports.logInfo(

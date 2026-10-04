@@ -109,6 +109,7 @@ import {
   '../src/rfc64/public-catalog-receiver-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
 import type {
@@ -5854,6 +5855,64 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       published.headObjectDigest,
     )).toBeNull();
   }, 60_000);
+
+  it.each(['reject', 'late-success'] as const)('cancels and drains a held join replay announcement with %s transport completion', async (completion) => {
+    const provider = await startNativeAgentWithOptions({ name: 'join-replay-abort-provider', operationalPrivateKey: AUTHOR_WALLET.privateKey });
+    await provider.createContextGraph({ id: CONTEXT_GRAPH_ID, name: 'Held join replay', callerAgentAddress: AUTHOR });
+    await provider.whenRfc64CatalogResponsibilitiesIdleV1();
+    const peer = await startNativeAgent('join-replay-abort-peer');
+    provider.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+    const scope = Object.freeze({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null, governanceContractAddress: null, ownershipTransitionDigest: null,
+      subGraphName: null, authorAddress: AUTHOR, era: '0', bucketCount: '1' }) as const;
+    await provider.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+      scope, author: AUTHOR_WALLET, deployment: NATIVE_DEPLOYMENT,
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      asset: { assertionCoordinate: 'held-announcement-abort' as never,
+        projectionBytes: PROJECTION, seal: await authorSeal(90n) }, peers: [],
+    });
+    const dispatcher = Reflect.get(provider, 'rfc64BackgroundWorkDispatcherV1');
+    const router = Reflect.get(provider, 'router');
+    const nodeStopSignal = Reflect.get(provider, 'node').stopSignal as AbortSignal;
+    const send = router.send.bind(router);
+    let enter!: () => void; let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    let transportSignal: AbortSignal | undefined;
+    let aborted = false;
+    let nodeStoppedAtTransportAbort: boolean | undefined;
+    const wire = vi.spyOn(router, 'send').mockImplementation(async (peerId, protocolId, bytes, options: { signal?: AbortSignal } | undefined) => {
+      if (protocolId !== RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1) return send(peerId, protocolId, bytes, options);
+      transportSignal = options?.signal;
+      return new Promise<Uint8Array>((resolve, reject) => {
+        release = () => resolve(Uint8Array.of(1));
+        transportSignal?.addEventListener('abort', () => {
+          aborted = true;
+          nodeStoppedAtTransportAbort = nodeStopSignal.aborted;
+          if (completion === 'reject') reject(transportSignal!.reason);
+          else release();
+        }, { once: true });
+        enter();
+      });
+    });
+    const pending = provider.runRfc64CatalogAfterJoinApprovalV1(CONTEXT_GRAPH_ID, AUTHOR, peer.peerId)
+      .catch((cause: unknown) => cause);
+    try {
+      await entered;
+      expect(transportSignal).toBeInstanceOf(AbortSignal);
+      expect(transportSignal!.aborted).toBe(false);
+      await provider.stop();
+      expect(nodeStoppedAtTransportAbort).toBe(false);
+      expect(nodeStopSignal.aborted).toBe(true);
+      expect(aborted).toBe(true);
+      expect(await pending).toMatchObject({ name: 'AbortError' });
+      expect(wire).toHaveBeenCalledOnce();
+      await dispatcher.whenIdle();
+    } finally {
+      release(); await pending; await dispatcher.closeAndDrain();
+      wire.mockRestore();
+    }
+  });
 
   it('keeps status incomplete until a replayed successor is durably applied', async () => {
     const [provider, receiver] = await Promise.all([

@@ -6215,6 +6215,7 @@ describe('RFC-64 rollout authority integration', () => {
   it('replays an approved private catalog only to a member of its accepted roster', async () => {
     const contextGraphId = `${AUTHOR}/approved-catalog-replay` as ContextGraphIdV1;
     const curator = await startAgent({ name: 'approved-catalog-replay' });
+    const signal = new AbortController().signal;
     const policyDigest = `0x${'ab'.repeat(32)}` as Digest32V1;
     vi.spyOn(curator, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue({
       policy: { networkId: NETWORK_ID, contextGraphId, accessPolicy: 1 },
@@ -6225,20 +6226,20 @@ describe('RFC-64 rollout authority integration', () => {
       .mockResolvedValue(Object.freeze({ announced: 1, failed: 0, manifest: Object.freeze([]) }));
 
     await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
-      contextGraphId, NONMEMBER, 'nonmember-peer',
+      contextGraphId, NONMEMBER, 'nonmember-peer', signal,
     )).resolves.toBe(false);
     expect(replay).not.toHaveBeenCalled();
     await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
-      contextGraphId, MEMBER, 'member-peer',
+      contextGraphId, MEMBER, 'member-peer', signal,
     )).resolves.toBe(true);
     expect(replay).toHaveBeenCalledWith('member-peer', expect.objectContaining({
       networkId: NETWORK_ID,
       contextGraphId,
       policyDigest,
-    }));
+    }), signal);
     replay.mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
     await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
-      contextGraphId, MEMBER, 'member-peer',
+      contextGraphId, MEMBER, 'member-peer', signal,
     )).resolves.toBe(false);
   });
 

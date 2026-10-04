@@ -1,3 +1,5 @@
+import { completeFinalizedSwmRetirement } from '../src/sync/requester/finalized-swm-retirement-completion.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from '../src/sync/requester/private-swm-recovery-budget.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -89,6 +91,9 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin: async () => undefined,
+      completeFinalizedSwmTwinRetirement: (reconcile) => completeFinalizedSwmRetirement({
+        reconcile, retireMarker: async () => {}, warn: () => {}, scheduleRetry: () => false,
+      }),
       logInfo: () => undefined,
       logWarn: () => undefined,
       logDebug: () => undefined,
@@ -235,6 +240,9 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap,
       retireFinalizedSwmTwin: async () => undefined,
+      completeFinalizedSwmTwinRetirement: (reconcile) => completeFinalizedSwmRetirement({
+        reconcile, retireMarker: async () => {}, warn: () => {}, scheduleRetry: () => false,
+      }),
       logInfo: () => undefined,
       logWarn: () => undefined,
       logDebug: () => undefined,
@@ -269,8 +277,10 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
 
 describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
   const stores: OxigraphStore[] = [];
+  const dispatchers: Rfc64BackgroundWorkDispatcherV1[] = [];
 
   afterEach(async () => {
+    await Promise.all(dispatchers.splice(0).map((dispatcher) => dispatcher.closeAndDrain()));
     await Promise.all(stores.splice(0).map((store) => store.close()));
   });
 
@@ -360,13 +370,16 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     });
     const invalidateListContextGraphsCache = vi.fn();
     let invalidationsBeforeMarkerRetirement = -1;
-    const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async () => {
+    const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async (_evidence: { contextGraphId: string; kaUal: string; assertionVersion: string; subGraphName?: string }) => {
       invalidationsBeforeMarkerRetirement = invalidateListContextGraphsCache.mock.calls.length;
       throw new Error('legacy boundary store unavailable');
     });
     const logInfo = vi.fn();
     const logWarn = vi.fn();
     const ctx = createOperationContext('sync');
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1();
+    dispatchers.push(dispatcher);
+    const scheduleRetry = vi.spyOn(dispatcher, 'scheduleKeyed');
     const executor = new SwmTargetExecutorV1({
       store,
       writeLocks: new Map(),
@@ -414,7 +427,15 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin,
-      retireLegacySwmAfterVerifiedVmTwin,
+      completeFinalizedSwmTwinRetirement: (reconcile, ctx) => completeFinalizedSwmRetirement({
+        reconcile,
+        retireMarker: (evidence) => retireLegacySwmAfterVerifiedVmTwin({
+          contextGraphId: evidence.contextGraphId, kaUal: evidence.kaUal,
+          assertionVersion: String(evidence.assertionVersion), subGraphName: evidence.subGraphName,
+        }),
+        warn: (message) => logWarn(ctx, message),
+        scheduleRetry: (key, work) => dispatcher.scheduleKeyed(key, work),
+      }),
       logInfo,
       logWarn,
       logDebug: () => undefined,
@@ -429,6 +450,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     });
 
     expect(summary.failedPhases).toBe(0);
+    expect(scheduleRetry).toHaveBeenCalledOnce();
     // The snapshot was materialized with its head, then the twin was retired.
     expect(retireFinalizedSwmTwin).toHaveBeenCalledOnce();
     expect(swmRowsWhenRetired).toEqual([payload.length, 5]);

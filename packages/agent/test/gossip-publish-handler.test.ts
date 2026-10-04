@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   encodePublishRequest,
   DKG_ONTOLOGY,
@@ -87,8 +87,11 @@ describe('GossipPublishHandler', () => {
     });
     const original = store.query.bind(store);
     store.query = async (...args) => { queried = true; return original(...args); };
+    const phase = vi.fn();
     try {
-      await handler.handlePublishMessage(makePublishMessage({}), 'victim> } UNION { GRAPH ?g { ?s ?p ?o } } #');
+      // Without topic validation the omitted graph id inherits this hostile topic.
+      await handler.handlePublishMessage(makePublishMessage({ contextGraphId: '' }), 'victim> } UNION { GRAPH ?g { ?s ?p ?o } } #', phase);
+      expect(phase).not.toHaveBeenCalled();
       expect(queried).toBe(false);
       expect(checked).toBe(false);
     } finally { await store.close(); }
