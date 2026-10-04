@@ -72,6 +72,39 @@ function longHistoryFixture() {
   return f;
 }
 
+/** Keep the real constructor/initContracts; only its external reads are controlled. */
+function coldAssembledFixture() {
+  const f = fixture();
+  const chain = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998',
+    privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+    hubAddress: '0x0000000000000000000000000000000000000001',
+    chainId: 'evm:31337', staticNetwork: false });
+  const readContract = vi.fn(async (contract: ethers.Contract, label: string, method: string, id: string | bigint) => {
+    if (method === 'getContractAddress' || method === 'getAssetStorageAddress') {
+      return id === 'Token' ? ethers.ZeroAddress
+        : id === 'ContextGraphStorage' ? f.graphStorage.target : ADDRESS;
+    }
+    if (contract.target === ADDRESS && label === 'kas.getMerkleRoots' && method === 'getMerkleRoots' && id === KA_ID) return f.roots;
+    if (contract.target === f.graphStorage.target && label === 'cgStorage.kaToContextGraph' && method === 'kaToContextGraph' && id === KA_ID) return CG_ID;
+    throw new Error(`Unexpected cold contract read: ${label}/${method}/${id}`);
+  });
+  for (const name of ['queryEventLogsPage', 'readPublishReceipt', 'getTransactionWithFailover',
+    'receiptFinality', 'resolveKaStorageDeployBlock', 'getBlockTimestamp',
+    'knowledgeAssetVersionSnapshotIsCurrent'] as const) {
+    Reflect.set(chain, name, Reflect.get(f.chain, name));
+  }
+  Reflect.set(chain, 'readContract', readContract);
+  Reflect.set(chain, 'startHubRotationListener', vi.fn(async () => undefined));
+  Reflect.set(chain, 'readKnowledgeAssetVersionSnapshot', vi.fn(async () => ({
+    knowledgeAssetId: KA_ID, latestRoot: ROOT, rootCount: 1n,
+    latestAuthor: f.receipt.authorAddress, latestPublisher: ADDRESS,
+    blockNumber: f.receipt.blockNumber, blockHash: BLOCK_HASH,
+    knowledgeAssetStorageAddress: ADDRESS,
+    knowledgeAssetStorageGeneration: Reflect.get(chain, 'knowledgeAssetStorageBindingGeneration'),
+  })));
+  return { ...f, chain, readContract };
+}
+
 describe('existing mint provenance', () => {
   it('requires coherent read methods on the concrete assembled adapter', () => {
     // This assignment also checks the public adapter's required type contract.
@@ -89,8 +122,43 @@ describe('existing mint provenance', () => {
       expect(Reflect.get(f.chain, 'readContract')).not.toHaveBeenCalled();
       expect(f.queryEventLogsPage).not.toHaveBeenCalled();
       expect(f.readPublishReceipt).not.toHaveBeenCalled();
+      expect(Reflect.get(f.chain, 'init')).not.toHaveBeenCalled();
     },
   );
+
+  it('recovers an existing mint on the first public read of a cold assembled adapter', async () => {
+    const f = coldAssembledFixture();
+    try {
+      expect(Reflect.get(f.chain, 'initialized')).toBe(false);
+      expect(Reflect.get(f.chain, 'contracts').knowledgeAssetStorage).toBeUndefined();
+      expect(Reflect.get(f.chain, 'contracts').contextGraphStorage).toBeUndefined();
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+        .resolves.toEqual(f.receipt);
+      expect(Reflect.get(f.chain, 'initialized')).toBe(true);
+      const hubReads = f.readContract.mock.calls.filter(([, , method]) => method === 'getAssetStorageAddress');
+      expect(hubReads.map(([, , , name]) => name)).toContain('DKGKnowledgeAssets');
+      expect(hubReads.map(([, , , name]) => name)).toContain('ContextGraphStorage');
+      const storage = Reflect.get(f.chain, 'contracts').knowledgeAssetStorage;
+      expect(f.readContract).toHaveBeenCalledWith(storage, 'kas.getMerkleRoots', 'getMerkleRoots', KA_ID);
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+        .resolves.toEqual(f.receipt);
+      expect(f.readContract.mock.calls.filter(([, , method]) => method === 'getAssetStorageAddress'))
+        .toHaveLength(hubReads.length);
+    } finally { f.chain.destroy(); }
+  });
+
+  it('propagates cold initialization failure without reading provenance from incomplete bindings', async () => {
+    const f = coldAssembledFixture();
+    const error = new Error('Hub configuration unavailable');
+    f.readContract.mockRejectedValue(error);
+    try {
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+        .rejects.toBe(error);
+      expect(Reflect.get(f.chain, 'initialized')).toBe(false);
+      expect(f.queryEventLogsPage).not.toHaveBeenCalled();
+      expect(f.readPublishReceipt).not.toHaveBeenCalled();
+    } finally { f.chain.destroy(); }
+  });
 
   it('recovers the actual transaction only after verifying root, graph and receipt finality', async () => {
     const f = fixture();

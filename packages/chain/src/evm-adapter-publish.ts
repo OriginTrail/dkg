@@ -830,6 +830,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     const readCurrentVersion = readers.readKnowledgeAssetVersionSnapshot;
     const versionIsCurrent = readers.knowledgeAssetVersionSnapshotIsCurrent;
     if (typeof readCurrentVersion !== 'function' || typeof versionIsCurrent !== 'function') return null;
+    await this.init();
     const storage = this.contracts.knowledgeAssetStorage, graphStorage = this.contracts.contextGraphStorage;
     const address = this.knowledgeAssetStorageBindingAddress(storage);
     const generation = this.knowledgeAssetStorageBindingGeneration, hubGeneration = this.hubBindingGeneration;
