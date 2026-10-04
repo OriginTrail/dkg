@@ -696,6 +696,7 @@ export async function readSwmMetaPage(params: {
   rowListCacheKey?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
+  releaseCacheOnShortPage?: boolean;
   freshMetaPlanMemo?: FreshSwmMetaPlanMemo;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
@@ -706,6 +707,7 @@ export async function readSwmMetaPage(params: {
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
       expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
     }
     : undefined;
@@ -814,6 +816,7 @@ export async function readSwmDataPage(params: {
   rowListCacheKey?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
+  releaseCacheOnShortPage?: boolean;
   freshGraphPlanMemo?: FreshSwmDataGraphPlanMemo;
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
 }): Promise<SyncRow[]> {
@@ -828,6 +831,7 @@ export async function readSwmDataPage(params: {
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
       expiredMessage: 'Shared-memory data sync session snapshot expired before page completion',
     }
     : undefined;

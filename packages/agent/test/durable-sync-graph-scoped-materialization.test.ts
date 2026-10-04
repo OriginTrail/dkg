@@ -625,6 +625,38 @@ describe('durable graph-scoped KA materialization', () => {
     }));
   });
 
+  it.each(['valid', 'wrong-root', 'missing-transaction'] as const)(
+    'requires transaction provenance when mixed confirmation metadata is %s', async (provenance) => {
+      const data = dataQuad(1);
+      const root = computeFlatKCRootV10([data], []);
+      const receiptRoot = provenance === 'wrong-root' ? Uint8Array.from(root, (byte) => byte ^ 0xff) : root;
+      const receipt = vi.fn(async () => ({
+        batchId: BigInt(packedKaId), kaId: BigInt(packedKaId), merkleRoot: receiptRoot,
+        txHash: transactionHash(1), blockNumber: 77, txIndex: 3, blockTimestamp: 0,
+        publisherAddress: '0x1111111111111111111111111111111111111111',
+      }));
+      const chain = { chainId: 'otp:2043', getLatestMerkleRoot: async () => root,
+        getMerkleRootCount: async () => 1n, getKAContextGraphId: async () => 14n,
+        getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+        resolvePublishByTxHash: receipt } as unknown as ChainAdapter;
+      const meta = metadata(1, toHex(root)).filter((quad) => provenance !== 'missing-transaction'
+        || quad.predicate !== `${DKG}transactionHash`);
+      meta.push(...['transaction', 'finalized-materialization'].map((kind) => ({
+        subject: ual, predicate: `${DKG}confirmationKind`, object: `"${kind}"`, graph: metaGraph,
+      })));
+      const authenticate = authenticateVerifiedGraphScopedAsset(chain, {
+        contextGraphId, ual, assertionVersion: 1n, assertionGraph, metaGraph,
+        dataQuads: [data], metadataQuads: meta,
+      }, strictContextGraphBindingVerifier(chain));
+      if (provenance === 'valid') {
+        await expect(authenticate).resolves.toMatchObject({ asset: { ual } });
+        expect(receipt).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(authenticate).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+      }
+    },
+  );
+
   it('still rejects a receipt for a different root when the header lookup is skipped', async () => {
     const v1Data = dataQuad(1);
     const root = computeFlatKCRootV10([v1Data], []);
@@ -910,9 +942,9 @@ describe('durable graph-scoped KA materialization', () => {
   });
 
   it.each([
-    ['conflicting', ['"transaction"', '"finalized-materialization"']],
-    ['unsupported', ['"unsupported"']],
-  ])('rejects %s peer confirmation metadata before durable materialization', async (_label, kinds) => {
+    ['mixed-compatible', ['"transaction"', '"finalized-materialization"'], true],
+    ['unsupported', ['"unsupported"'], false],
+  ])('validates %s peer confirmation metadata before durable materialization', async (_label, kinds, accepted) => {
     const v2Data = dataQuad(2);
     const v2Meta = metadata(2);
     v2Meta.push(
@@ -969,9 +1001,14 @@ describe('durable graph-scoped KA materialization', () => {
       logDebug: () => {},
     });
 
-    expect(summary.failedPhases).toBe(1);
-    expect(summary.insertedTriples).toBe(0);
-    expect(materialized).toEqual([]);
+    expect(summary.failedPhases).toBe(accepted ? 0 : 1);
+    if (accepted) {
+      expect(materialized).toHaveLength(1);
+      expect(readGraphKnowledgeAssetConfirmationKindV1((materialized[0] as VerifiedGraphScopedAsset).metadataQuads)).toBe('transaction');
+    } else {
+      expect(summary.insertedTriples).toBe(0);
+      expect(materialized).toEqual([]);
+    }
   });
 
   it('replaces a poisoned v1 union with the verified v2 assertion and metadata', async () => {

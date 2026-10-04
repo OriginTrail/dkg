@@ -436,6 +436,40 @@ describe('sync responder protection', () => {
     await Promise.all([swm, secondVm]);
   });
 
+  it('overlaps authorized SWM and VM responses through priority handoff and serializes each plane', async () => {
+    const gates: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    const startedPlanes: string[] = [];
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH, `${SYNC_PROTECTION_DATA_GRAPH}/_shared_memory`],
+      query: async (sparql) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
+        startedPlanes.push(sparql.includes('/_shared_memory') ? 'swm' : 'vm');
+        const gate = deferred<QueryResult>();
+        gates.push(gate);
+        return gate.promise;
+      },
+    }), { contextGraphPriorities: { 'sync-protection': 5 }, authorizeSyncRequest: async () => true });
+    const firstVm = cap.invoke(makeEnvelope(), REMOTE_A);
+    const firstSwm = cap.invoke({ ...makeEnvelope(), includeSharedMemory: true }, REMOTE_A);
+    for (let i = 0; i < 100 && gates.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm']);
+    const secondVm = cap.invoke(makeEnvelope(), REMOTE_A);
+    const secondSwm = cap.invoke({ ...makeEnvelope(), includeSharedMemory: true }, REMOTE_A);
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm']);
+    gates[0]!.resolve(exactGraphRowResult());
+    await firstVm;
+    for (let i = 0; i < 100 && gates.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm', 'vm']);
+    gates[1]!.resolve(exactGraphRowResult());
+    await firstSwm;
+    for (let i = 0; i < 100 && gates.length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm', 'vm', 'swm']);
+    gates[2]!.resolve(exactGraphRowResult());
+    gates[3]!.resolve(exactGraphRowResult());
+    await Promise.all([secondVm, secondSwm]);
+  });
+
   it('applies per-peer backpressure before authorization work starts', async () => {
     const authGates: Array<ReturnType<typeof deferred<boolean>>> = [];
     let authStarted = 0;

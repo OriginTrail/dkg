@@ -1,10 +1,5 @@
-import {
-  SYNC_BYTE_BUDGET_MAX_ROWS,
-  SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
-  SYNC_BYTE_BUDGET_PAGE_MODE,
-  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
-} from '../../dkg-agent-constants.js';
-import { EXACT_SYNC_GZIP_ENCODING, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES } from '../wire-compression.js';
+import { resolveExactSyncGzipProfile } from '../wire-compression.js';
+import { resolveResponderPageFraming, type ResponderPageFraming } from './page-framing-policy.js';
 
 export type DurableDataCacheMode = 'session-snapshot' | 'page-only';
 export type ExactGraphReadMode = 'snapshot-or-page' | 'page-only';
@@ -36,32 +31,22 @@ export function resolveDurableDataRequestPolicy(params: {
   hasExactAssetFilter: boolean;
   responseEncoding?: string;
   exactAssetCount?: number;
+  framing?: ResponderPageFraming;
 }): DurableDataRequestPolicy {
-  const hintedPageRows = typeof params.pageRowsHint === 'number' &&
-    Number.isSafeInteger(params.pageRowsHint)
-    ? Math.max(1, Math.min(params.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
-    : 0;
-  const usesByteBudgetPage = params.phase === 'data' &&
-    params.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
-    hintedPageRows > 0 &&
-    (hintedPageRows > params.legacyLimit || params.hasExactAssetFilter);
+  const framing = params.framing ?? resolveResponderPageFraming(params);
+  const usesByteBudgetPage = !params.includeSharedMemory && params.phase === 'data'
+    && framing.usesByteBudgetPage;
   const pageOnlyExactFetch = usesByteBudgetPage && params.hasExactAssetFilter;
-  const usesExactAssetExport = pageOnlyExactFetch && params.exactAssetCount === 1
-    && params.responseEncoding === EXACT_SYNC_GZIP_ENCODING;
+  const usesExactAssetExport = pageOnlyExactFetch && resolveExactSyncGzipProfile({
+    ...params, assetUals: params.exactAssetCount === 1 ? ['selected'] : undefined,
+  }) !== undefined;
 
   return {
     usesByteBudgetPage,
-    limit: usesByteBudgetPage
-      ? Math.min(
-        hintedPageRows,
-        pageOnlyExactFetch && !usesExactAssetExport
-          ? SYNC_BYTE_BUDGET_EXACT_MAX_ROWS
-          : SYNC_BYTE_BUDGET_MAX_ROWS,
-      )
-      : params.legacyLimit,
+    limit: usesByteBudgetPage ? framing.limit : params.legacyLimit,
     cacheMode: pageOnlyExactFetch ? 'page-only' : 'session-snapshot',
     exactGraphReadMode: pageOnlyExactFetch ? 'page-only' : 'snapshot-or-page',
-    maxPageBytes: usesExactAssetExport ? EXACT_SYNC_GZIP_MAX_INFLATED_BYTES : SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+    maxPageBytes: framing.maxPageBytes,
     usesExactAssetExport,
   };
 }

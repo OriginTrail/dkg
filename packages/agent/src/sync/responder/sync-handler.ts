@@ -9,11 +9,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import { supportsBoundedExactGraphExport, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  SYNC_BYTE_BUDGET_MAX_ROWS,
-  SYNC_BYTE_BUDGET_PAGE_MODE,
-  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
-} from '../../dkg-agent-constants.js';
-import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
@@ -36,7 +31,6 @@ import {
   readSwmDataPage,
   readSwmMetaPage,
   serializeResponderRows,
-  serializeResponderRowsWithinByteBudget,
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
@@ -59,6 +53,7 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
+import { resolveResponderPageFraming } from './page-framing-policy.js';
 import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
 import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
 import { encodeNegotiatedExactSyncResponse } from '../wire-compression.js';
@@ -152,8 +147,6 @@ interface RegisterSyncHandlerParams {
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
-const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 2;
-const SYNC_RESPONDER_PER_PEER_PLANE_CONCURRENCY = 1;
 const SYNC_RESPONDER_QUEUE_LIMIT = 64;
 export const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
 const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
@@ -293,32 +286,18 @@ type SyncResponderScheduling = {
 };
 
 function createSyncResponderLimiter() {
-  let running = 0;
-  const runningByPeer = new Map<string, number>();
-  const runningByPeerPlane = new Map<string, number>();
+  const activePeerPlanes = new Set<string>();
   const peerPlaneKey = (peerId: string, plane: SyncResponderPlane) => `${peerId}\0${plane}`;
   const queue = new PriorityAdmissionQueue<SyncResponderQueuePayload>({
     canRun: (entry) => (
-      running < SYNC_RESPONDER_GLOBAL_CONCURRENCY
-      && (runningByPeer.get(entry.payload.peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY
-      && (runningByPeerPlane.get(peerPlaneKey(entry.payload.peerId, entry.payload.plane)) ?? 0)
-        < SYNC_RESPONDER_PER_PEER_PLANE_CONCURRENCY
+      activePeerPlanes.size < SYNC_RESPONDER_GLOBAL_CONCURRENCY
+      && !activePeerPlanes.has(peerPlaneKey(entry.payload.peerId, entry.payload.plane))
     ),
     onStart: (entry) => {
       const { peerId, plane } = entry.payload;
       const planeKey = peerPlaneKey(peerId, plane);
-      running += 1;
-      runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
-      runningByPeerPlane.set(planeKey, (runningByPeerPlane.get(planeKey) ?? 0) + 1);
-      return () => {
-        running = Math.max(0, running - 1);
-        const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
-        if (peerRunning <= 0) runningByPeer.delete(peerId);
-        else runningByPeer.set(peerId, peerRunning);
-        const planeRunning = (runningByPeerPlane.get(planeKey) ?? 1) - 1;
-        if (planeRunning <= 0) runningByPeerPlane.delete(planeKey);
-        else runningByPeerPlane.set(planeKey, planeRunning);
-      };
+      activePeerPlanes.add(planeKey);
+      return () => { activePeerPlanes.delete(planeKey); };
     },
   });
 
@@ -362,7 +341,7 @@ function createSyncResponderLimiter() {
 
   return {
     /** Responses running and requests waiting right now, for diagnostics only. */
-    pressure: (): { running: number; queued: number } => ({ running, queued: queue.length }),
+    pressure: (): { running: number; queued: number } => ({ running: activePeerPlanes.size, queued: queue.length }),
 
     async run<T>(
       peerId: string,
@@ -657,7 +636,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const assetSelectionKey = assetUals === undefined
       ? 'full'
       : exactAssetFilterKey(assetUals);
-    const durableDataPolicy = resolveDurableDataRequestPolicy({
+    const pageFraming = resolveResponderPageFraming({
       legacyLimit: limit,
       includeSharedMemory: isWorkspace,
       phase,
@@ -667,23 +646,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       responseEncoding: request.responseEncoding,
       exactAssetCount: assetUals?.length,
     });
-    const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
-    // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
-    // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
-    // the page ≤ budget for BOTH modes, so this only selects the belt-and-
-    // suspenders response serializer and records the explicit contract.
-    const usesMetaByteBudget = phase === 'meta' &&
-      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE;
-    // The authenticated `limit` deliberately remains capped at the legacy
-    // responder size for rolling-upgrade signature compatibility. Upgraded
-    // META requesters carry the larger row target in the additive hint, just
-    // like DATA. Honour it here: readDurableMetaPage and the serializer below
-    // still enforce the response byte budget and whole-subject boundaries.
-    const durableMetaLimit = usesMetaByteBudget &&
-      typeof request.pageRowsHint === 'number' &&
-      Number.isSafeInteger(request.pageRowsHint)
-      ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
-      : limit;
+    const usesByteBudgetPage = pageFraming.usesByteBudgetPage;
+    const usesMetaByteBudget = phase === 'meta' && usesByteBudgetPage;
+    const durableMetaLimit = pageFraming.limit;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -810,12 +775,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             freshMetaPlanMemo: freshSwmMetaPlanMemo,
+            releaseCacheOnShortPage: !usesByteBudgetPage,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = usesMetaByteBudget
-            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
-            : serializeResponderRows(rows);
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -845,7 +809,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit: durableDataPolicy.limit,
+            limit: pageFraming.limit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
@@ -853,12 +817,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshGeneration: session?.refreshGeneration,
             freshGraphPlanMemo: freshSwmDataGraphPlanMemo,
             exactGraphPlanMemo: swmDataExactGraphPlanMemo,
+            releaseCacheOnShortPage: !usesByteBudgetPage,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = durableDataPolicy.usesByteBudgetPage
-            ? serializeResponderRowsWithinByteBudget(rows, durableDataPolicy.maxPageBytes)
-            : serializeResponderRows(rows);
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -910,7 +873,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             assetUals,
-            maxResponseBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+            maxResponseBytes: pageFraming.maxPageBytes,
             // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail
             // loud on an oversized `_meta` subject rather than receive a byte-fit
             // SHORT page they would read as EOF — silent metadata loss + a #1788
@@ -936,14 +899,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // (byte-budget serializer) and the non-negotiated (plain serializer)
           // branches are frame-safe and never split a subject; the gate here just
           // honours the explicit contract.
-          const serialized = usesMetaByteBudget
-            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
-            : serializeResponderRows(rows);
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         }
       } else {
+        const durableDataPolicy = resolveDurableDataRequestPolicy({
+          legacyLimit: limit, includeSharedMemory: false, phase, framing: pageFraming,
+          hasExactAssetFilter: assetUals !== undefined, exactAssetCount: assetUals?.length,
+          responseEncoding: request.responseEncoding,
+        });
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
           'Durable data',
@@ -994,9 +960,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         if (page.responseLease) exactExportLeases.push(page.responseLease);
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
-        const serialized = usesByteBudgetPage
-          ? serializeResponderRowsWithinByteBudget(rows, durableDataPolicy.maxPageBytes)
-          : serializeResponderRows(rows);
+        const serialized = pageFraming.serialize(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
         logFirstPageDetail(() => `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
