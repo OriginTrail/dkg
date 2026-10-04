@@ -1,4 +1,3 @@
-import { resolveKaUal } from './knowledge-asset-chain-identity.js';
 import { materializeConfirmedGraphPublish } from './confirmed-graph-publish-materialization.js';
 import { replaceExactKnowledgeAssetGraph } from './knowledge-asset-graph-write.js';
 import { convergeKnowledgeAssetMetadataRows } from './knowledge-asset-metadata-write.js';
@@ -7,7 +6,7 @@ import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js'
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
-import { enrichEvmError } from '@origintrail-official/dkg-chain';
+import { buildKnowledgeAssetUal, enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
@@ -9514,7 +9513,9 @@ export class DKGPublisher implements Publisher {
   }
 
   private async resolveKaUal(kaId: bigint): Promise<string> {
-    return resolveKaUal(this.chain, kaId);
+    const storageAddress = await this.chain.getDKGKnowledgeAssetsAddress?.();
+    if (!storageAddress) throw new Error('Cannot resolve KA UAL: DKGKnowledgeAssets address unavailable');
+    return buildKnowledgeAssetUal(this.chain.chainId, storageAddress, kaId);
   }
 
   /**
