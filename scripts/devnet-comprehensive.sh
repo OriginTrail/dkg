@@ -48,6 +48,72 @@ ln -sfn "$RESULTS" "$(dirname "$RESULTS")/latest" 2>/dev/null || true
 
 log() { echo "[orch $(date -u +'%H:%M:%S')] $*" | tee -a "$RESULTS/orchestrator.log"; }
 
+# ── Suite registry (parallel arrays; bash 3.2 compatible) ───────
+SUITE_IDS=()
+SUITE_CMDS=()
+SUITE_GROUPS=()
+SUITE_RESULTS=()
+SUITE_LOGS=()
+SUITE_ELAPSEDS=()
+
+START=$(date +%s)
+PARTIAL=0
+FILTERS=""
+INTERRUPTED=0
+ACTIVE_PID=""
+FINAL_EXIT=0
+for flag in SKIP_RFC49 SKIP_RFC38_EXTRAS SKIP_PROBES SKIP_UI SKIP_SOAK SOAK_ONLY; do
+  value=$(printenv "$flag" 2>/dev/null || true)
+  if { [ "$flag" = SKIP_RFC49 ] && [ -n "$value" ]; } || [ "$value" = 1 ]; then
+    PARTIAL=1
+    FILTERS="${FILTERS}${FILTERS:+,}$flag=$value"
+  fi
+done
+
+write_json_report() {
+  local destination="$1" phase="$2" idx=0
+  {
+    while [ "$idx" -lt "${#SUITE_IDS[@]}" ]; do
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${SUITE_IDS[$idx]}" "${SUITE_GROUPS[$idx]}" \
+        "${SUITE_RESULTS[$idx]}" "${SUITE_ELAPSEDS[$idx]}" "${SUITE_LOGS[$idx]}" "${SUITE_CMDS[$idx]}"
+      idx=$((idx + 1))
+    done
+  } | node "$REPO_ROOT/scripts/lib/qa/comprehensive-report.mjs" "$destination" \
+    "$START" "$(date +%s)" "$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)" \
+    "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)" "$PARTIAL" "$INTERRUPTED" "$phase" "$FILTERS"
+}
+
+finish() {
+  local original_exit=$? idx=0
+  trap - EXIT INT TERM
+  while [ "$idx" -lt "${#SUITE_IDS[@]}" ]; do
+    case "${SUITE_RESULTS[$idx]}" in
+      RUNNING) SUITE_RESULTS[$idx]=CANCELLED ;;
+      PENDING) SUITE_RESULTS[$idx]=NOT_RUN ;;
+    esac
+    idx=$((idx + 1))
+  done
+  if write_json_report "$RESULTS/REPORT.json" complete; then FINAL_EXIT=0; else FINAL_EXIT=1; fi
+  if [ "$PARTIAL" -eq 1 ]; then log "PARTIAL exploratory run: $FILTERS (see selectionOutcome in REPORT.json)"; fi
+  [ "$original_exit" -eq 0 ] || FINAL_EXIT="$original_exit"
+  exit "$FINAL_EXIT"
+}
+
+terminate_tree() {
+  local pid="$1" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do terminate_tree "$child"; done
+  kill -TERM "$pid" 2>/dev/null || true
+}
+
+cancel() {
+  INTERRUPTED=1
+  [ -z "$ACTIVE_PID" ] || terminate_tree "$ACTIVE_PID"
+  exit "$1"
+}
+trap finish EXIT
+trap 'cancel 130' INT
+trap 'cancel 143' TERM
+
 # ── Pre-flight ───────────────────────────────────────────────────
 log "Pre-flight: devnet status"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
@@ -90,13 +156,6 @@ fi
 export DKG_AUTH="$AUTH"
 log "Devnet is up — all $NUM_NODES nodes healthy. Results dir: $RESULTS"
 
-# ── Suite registry (parallel arrays; bash 3.2 compatible) ───────
-SUITE_IDS=()
-SUITE_CMDS=()
-SUITE_GROUPS=()
-SUITE_RESULTS=()
-SUITE_LOGS=()
-SUITE_ELAPSEDS=()
 
 register() {
   SUITE_IDS+=("$1")
@@ -182,14 +241,21 @@ if [ "${SOAK_ONLY:-0}" = "1" ]; then
     fi
     i=$((i + 1))
   done
-  SUITE_IDS=("${NEW_IDS[@]}")
-  SUITE_CMDS=("${NEW_CMDS[@]}")
-  SUITE_GROUPS=("${NEW_GROUPS[@]}")
-  SUITE_RESULTS=("${NEW_RESULTS[@]}")
-  SUITE_LOGS=("${NEW_LOGS[@]}")
-  SUITE_ELAPSEDS=("${NEW_ELAPSEDS[@]}")
+  # Bash 3.2 with nounset rejects expanding an empty array.
+  if [ "${#NEW_IDS[@]}" -eq 0 ]; then
+    SUITE_IDS=(); SUITE_CMDS=(); SUITE_GROUPS=()
+    SUITE_RESULTS=(); SUITE_LOGS=(); SUITE_ELAPSEDS=()
+  else
+    SUITE_IDS=("${NEW_IDS[@]}")
+    SUITE_CMDS=("${NEW_CMDS[@]}")
+    SUITE_GROUPS=("${NEW_GROUPS[@]}")
+    SUITE_RESULTS=("${NEW_RESULTS[@]}")
+    SUITE_LOGS=("${NEW_LOGS[@]}")
+    SUITE_ELAPSEDS=("${NEW_ELAPSEDS[@]}")
+  fi
 fi
 
+write_json_report "$RESULTS/PLAN.json" plan || exit 2
 log "Registered ${#SUITE_IDS[@]} suite(s):"
 i=0
 while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
@@ -198,7 +264,6 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
 done
 
 # ── Run loop ────────────────────────────────────────────────────
-START=$(date +%s)
 TOTAL_PASS=0
 TOTAL_FAIL=0
 TOTAL_MISSING=0
@@ -236,8 +301,13 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
   log "RUN  $id  [$group]"
   log "============================================================"
   suite_start=$(date +%s)
-  ( cd "$REPO_ROOT" && bash -c "$cmd" ) > "$logfile" 2>&1
+  SUITE_RESULTS[$i]="RUNNING"
+  write_json_report "$RESULTS/REPORT.json" running || true
+  ( cd "$REPO_ROOT" && bash -c "$cmd" ) > "$logfile" 2>&1 &
+  ACTIVE_PID=$!
+  wait "$ACTIVE_PID"
   ec=$?
+  ACTIVE_PID=""
   suite_end=$(date +%s)
   elapsed=$((suite_end - suite_start))
   SUITE_ELAPSEDS[$i]="$elapsed"
@@ -266,7 +336,7 @@ WALL=$((END - START))
 # ── Reports ─────────────────────────────────────────────────────
 log ""
 log "============================================================"
-log "DONE — ${WALL}s wall (~$((WALL/60))m)"
+log "FINISHED — ${WALL}s wall (~$((WALL/60))m)"
 log "PASS=$TOTAL_PASS FAIL=$TOTAL_FAIL MISSING=$TOTAL_MISSING TOTAL=${#SUITE_IDS[@]}"
 log "============================================================"
 
@@ -321,31 +391,8 @@ MD="$RESULTS/REPORT.md"
   fi
 } > "$MD"
 
-# JSON report
+# EXIT trap writes the structured report and applies the legacy adapter.
 JSON="$RESULTS/REPORT.json"
-{
-  echo "{"
-  echo "  \"startedAt\": \"$(date -u -r $START +'%Y-%m-%dT%H:%M:%SZ')\","
-  echo "  \"endedAt\": \"$(date -u -r $END +'%Y-%m-%dT%H:%M:%SZ')\","
-  echo "  \"wallSeconds\": $WALL,"
-  echo "  \"branch\": \"$(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD)\","
-  echo "  \"commit\": \"$(cd "$REPO_ROOT" && git rev-parse HEAD)\","
-  echo "  \"totals\": { \"pass\": $TOTAL_PASS, \"fail\": $TOTAL_FAIL, \"missing\": $TOTAL_MISSING, \"registered\": ${#SUITE_IDS[@]} },"
-  echo "  \"suites\": ["
-  first=1
-  i=0
-  while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
-    [ "$first" -eq 0 ] && echo ","
-    first=0
-    printf '    { "id": "%s", "group": "%s", "result": "%s", "elapsedSeconds": %s, "log": "%s" }' \
-      "${SUITE_IDS[$i]}" "${SUITE_GROUPS[$i]}" "${SUITE_RESULTS[$i]}" "${SUITE_ELAPSEDS[$i]}" \
-      "$(basename "${SUITE_LOGS[$i]}")"
-    i=$((i + 1))
-  done
-  echo
-  echo "  ]"
-  echo "}"
-} > "$JSON"
 
 log "Report: $MD"
 log "JSON:   $JSON"
