@@ -652,8 +652,20 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     readonly apply: (context: RecipientChangeContext) => Promise<unknown>;
     /** The authority-facts revisions the change itself moves. */
     readonly moves: 'neither' | 'node-wide' | 'both';
-    readonly rejects: RegExp | { reason: string };
+    /** A message pattern, or the authority error's reason and the check that raised it. */
+    readonly rejects: RegExp | { reason: string; detail: string };
   }
+
+  /** The confirmation read no longer matched the roster the keys were resolved for. */
+  const TRANSPORT_CHANGED = {
+    reason: 'chain-participant-authority-unavailable',
+    detail: 'retry recipient resolution against the current private authority',
+  };
+  /** The resolved (agent, key, peer) set differed after a revision moved. */
+  const ROUTES_CHANGED = {
+    reason: 'chain-participant-authority-unavailable',
+    detail: 'recipient routes changed while retrying against current private authority',
+  };
 
   const JOIN_KEY_CACHE_GRAPH = 'urn:dkg:local:join-encryption-key-cache';
 
@@ -671,7 +683,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       seed: profileKeysBehindPeerGate,
       apply: async ({ authority, member }) => { authority.roster = [member.address]; },
       moves: 'neither',
-      rejects: { reason: 'chain-participant-authority-unavailable' },
+      rejects: TRANSPORT_CHANGED,
     },
     {
       // What a receiver selection transition does to an accepted private
@@ -680,7 +692,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       seed: profileKeysBehindPeerGate,
       apply: async ({ authority }) => { authority.rosterGoverns = false; },
       moves: 'neither',
-      rejects: { reason: 'chain-participant-authority-unavailable' },
+      rejects: TRANSPORT_CHANGED,
     },
     {
       change: 'a recipient key is revoked in the profile graph',
@@ -723,19 +735,26 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     {
       change: 'a peer route is replaced in the join key cache',
       // The member's key lives in the join key cache and the peer gate is
-      // open, so that only the replaced route can refuse the recipients.
+      // open. The replacement keeps the key, its algorithm and its proof and
+      // changes the peer route alone, so only the comparison of the resolved
+      // routes can refuse the recipients.
       seed: ({ memberKey, other, otherPeerId }) => [
         ...memberKey.quads.map((quad) => ({ ...quad, graph: JOIN_KEY_CACHE_GRAPH })),
         ...signedKeyQuads(other, otherPeerId),
       ],
-      apply: ({ store, member, memberUri }) => store.replaceSubject!(
+      apply: ({ store, memberKey, memberUri }) => store.replaceSubject!(
         JOIN_KEY_CACHE_GRAPH,
         memberUri,
-        signedKeyQuads(member, '12D3KooWAcceptedPrivateReconcileNewRoute')
-          .map((quad) => ({ ...quad, graph: JOIN_KEY_CACHE_GRAPH })),
+        memberKey.quads.map((quad) => ({
+          ...quad,
+          graph: JOIN_KEY_CACHE_GRAPH,
+          ...(quad.predicate === DKG_ONTOLOGY.DKG_PEER_ID
+            ? { object: '"12D3KooWAcceptedPrivateReconcileNewRoute"' }
+            : {}),
+        })),
       ),
       moves: 'node-wide',
-      rejects: { reason: 'chain-participant-authority-unavailable' },
+      rejects: ROUTES_CHANGED,
     },
     {
       change: 'a peer leaves the allowlist of the graph',
