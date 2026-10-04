@@ -48,7 +48,9 @@ describe('query caller-provided store labels', () => {
           expect(graphs).not.toContain(`${root}/_private`);
         } else expect(graphs).toEqual([]);
       }
-      expect(authority).toHaveBeenCalledWith(contextGraphId, options);
+      expect(authority).toHaveBeenCalledExactlyOnceWith(contextGraphId, {
+        ...options, authorityReadMode: 'finalized-index', allowSubscriptionFallback: false,
+      });
       if (outcome === 'allowed') expect(inventory).toHaveBeenCalledWith(contextGraphId, options);
       else expect(inventory).not.toHaveBeenCalled();
     } finally { await store.close(); }
