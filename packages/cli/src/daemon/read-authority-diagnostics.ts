@@ -1,4 +1,9 @@
 import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
+import type {
+  ContextGraphReadAuthoritySource,
+  ContextGraphReadAuthorityDependency,
+  RegisteredContextGraphAuthorityUnavailableReason,
+} from '@origintrail-official/dkg-agent';
 
 /** Where an unavailable read authority came from, as the agent attributes it. */
 export interface ContextGraphReadAuthorityAttribution {
@@ -22,20 +27,57 @@ export interface ReadAuthorityDiagnostics {
   record(ctx: OperationContext, attribution: ContextGraphReadAuthorityAttribution): void;
 }
 
-const SAFE_READ_AUTHORITY_REASONS = new Set([
-  'finalized-name-absence-unaccepted', 'chain-name-binding-unavailable',
-  'registered-authority-error', 'authority-circuit-open', 'local-chain-binding-unavailable',
-  'local-existence-unavailable', 'chain-access-policy-unavailable', 'chain-access-policy-timeout',
-  'chain-access-policy-unknown', 'chain-participant-authority-unavailable',
-  'chain-participant-authority-unsupported', 'chain-participant-authority-invalid',
-  'remote-local-authority-unaccepted', 'rfc64-private-read-roster-unavailable',
-  'no-read-authority', 'unexpected-authority-error', 'pending-authoritative-metadata',
-  'local-access-policy-unavailable', 'peer-authority-unavailable', 'local-agent-authority-unavailable',
-  'legacy-participant-authority-unavailable',
-]);
+/** Read-only fallback reasons in addition to the registered authority vocabulary. */
+type ReadSpecificAuthorityUnavailableReason =
+  | 'registered-authority-error'
+  | 'remote-local-authority-unaccepted'
+  | 'rfc64-private-read-roster-unavailable'
+  | 'no-read-authority'
+  | 'unexpected-authority-error'
+  | 'pending-authoritative-metadata'
+  | 'local-access-policy-unavailable'
+  | 'peer-authority-unavailable'
+  | 'local-agent-authority-unavailable'
+  | 'legacy-participant-authority-unavailable';
 
-const SAFE_READ_AUTHORITY_SOURCES = new Set(['system', 'registered-chain', 'rfc64-private', 'rfc64-public', 'legacy-local']);
-const SAFE_READ_AUTHORITY_DEPENDENCIES = new Set(['store', 'chain', 'local-state', 'unknown']);
+const SAFE_READ_AUTHORITY_REASONS = new Set(Object.keys({
+  'finalized-name-absence-unaccepted': true,
+  'chain-name-binding-unavailable': true,
+  'registered-authority-error': true,
+  'authority-circuit-open': true,
+  'local-chain-binding-unavailable': true,
+  'local-existence-unavailable': true,
+  'chain-access-policy-unavailable': true,
+  'chain-access-policy-timeout': true,
+  'chain-access-policy-unknown': true,
+  'chain-participant-authority-unavailable': true,
+  'chain-participant-authority-unsupported': true,
+  'chain-participant-authority-invalid': true,
+  'remote-local-authority-unaccepted': true,
+  'rfc64-private-read-roster-unavailable': true,
+  'no-read-authority': true,
+  'unexpected-authority-error': true,
+  'pending-authoritative-metadata': true,
+  'local-access-policy-unavailable': true,
+  'peer-authority-unavailable': true,
+  'local-agent-authority-unavailable': true,
+  'legacy-participant-authority-unavailable': true,
+} as const satisfies Record<RegisteredContextGraphAuthorityUnavailableReason | ReadSpecificAuthorityUnavailableReason, true>));
+
+const SAFE_READ_AUTHORITY_SOURCES = new Set(Object.keys({
+  'system': true,
+  'registered-chain': true,
+  'rfc64-private': true,
+  'rfc64-public': true,
+  'legacy-local': true,
+} as const satisfies Record<ContextGraphReadAuthoritySource, true>));
+
+const SAFE_READ_AUTHORITY_DEPENDENCIES = new Set(Object.keys({
+  'store': true,
+  'chain': true,
+  'local-state': true,
+  'unknown': true,
+} as const satisfies Record<ContextGraphReadAuthorityDependency, true>));
 
 /** Whether an attribution warns now, and how many repeats it held back since its last warning. */
 type WarningDecision = { readonly warn: true; readonly heldBack: number } | { readonly warn: false };
