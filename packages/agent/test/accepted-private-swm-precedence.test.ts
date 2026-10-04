@@ -18,6 +18,7 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
+import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/accepted-private';
@@ -517,6 +518,240 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       reason: 'chain-participant-authority-unavailable',
     });
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * The recipient resolver over the real store wrapper and metadata
+   * projection, with the real SWM gossip reconcile of the same graph running
+   * before and after the work of every authority read that follows the first.
+   * Each stability attempt of the resolver therefore has reconciles inside
+   * its window; `duringFinalAuthorityRead` adds a real change to the first.
+   */
+  function recipientHostUnderGossipReconciles(options: {
+    transport: () =>
+      | { kind: 'private-roster'; participantAgents: readonly string[] }
+      | { kind: 'legacy-unregistered' };
+    duringFinalAuthorityRead?: () => Promise<unknown>;
+  }) {
+    const innerStore = new OxigraphStore();
+    stores.push(innerStore);
+    let projection!: ContextGraphMetaProjection;
+    const store = createListContextGraphsCacheInvalidatingStore(
+      innerStore,
+      () => undefined,
+      (quads, targetGraph) => {
+        if (targetGraph !== undefined) {
+          projection.markDirtyForGraph(targetGraph);
+          if (quads) projection.markDirtyFromQuads(quads);
+        } else if (quads) projection.markDirtyFromQuads(quads);
+        else projection.markAllDirty();
+      },
+    );
+    projection = new ContextGraphMetaProjection(store);
+    // A live session whose member subscription for the graph is installed:
+    // the reconcile refreshes the policy view, re-checks access and returns.
+    const reconcileHost = {
+      gossipSession: {
+        active: true,
+        live: () => ({ manager: {} }),
+        sharedMemoryGossipRegistered: new Set([CONTEXT_GRAPH_ID]),
+      },
+      contextGraphMetaProjection: projection,
+      gossipWireIdFor: (contextGraphId: string) => contextGraphId,
+      rfc64LegacySwmMemberTransportAllowedForContextGraph: () => true,
+      canUseSharedMemoryForContextGraph: vi.fn(async () => true),
+    };
+    const reconciles: Promise<void>[] = [];
+    const reconcile = (): void => {
+      reconciles.push(SwmSubstrateMethods.prototype.reconcileSharedMemoryGossipSubscription
+        .call(reconcileHost as never, CONTEXT_GRAPH_ID));
+    };
+    let transportReads = 0;
+    const host = {
+      store,
+      contextGraphMetaProjection: projection,
+      resolveSwmTransportAuthority: vi.fn(async () => {
+        transportReads += 1;
+        if (transportReads > 1) {
+          reconcile();
+          if (transportReads === 2) await options.duringFinalAuthorityRead?.();
+          reconcile();
+        }
+        return options.transport();
+      }),
+      // As the agent's own lookup: the peer gate of the cached policy view.
+      getContextGraphAllowedPeers: vi.fn(async () => {
+        const peers = (await projection.get(CONTEXT_GRAPH_ID)).allowedPeers;
+        return peers.length > 0 ? peers : null;
+      }),
+      ensureAgentsInOnDemandPhonebook: vi.fn(),
+    };
+    return { store, projection, host, reconcileHost, reconciles };
+  }
+
+  function allowedPeerQuad(peerId: string): Quad {
+    return {
+      subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+      object: `"${peerId}"`,
+      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+    };
+  }
+
+  it('does not spend stability attempts on gossip reconciles of the graph', async () => {
+    const member = ethers.Wallet.createRandom();
+    const peerId = '12D3KooWAcceptedPrivateReconcilePeer';
+    const { store, projection, host, reconcileHost, reconciles } =
+      recipientHostUnderGossipReconciles({
+        transport: () => ({ kind: 'private-roster', participantAgents: [member.address] }),
+      });
+    await store.insert([...signedKeyQuads(member, peerId), allowedPeerQuad(peerId)]);
+    const nodeWide = projection.readAuthorityFactsRevision;
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID);
+
+    await expect(WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      })).resolves.toMatchObject({
+        requiresEncryption: true,
+        recipients: [expect.objectContaining({
+          agentAddress: ethers.getAddress(member.address),
+          peerId,
+        })],
+      });
+    await Promise.all(reconciles);
+
+    // One authority read to classify the graph and one to confirm it: the
+    // reconciles changed no fact, so nothing was resolved a second time.
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+    expect(reconciles).toHaveLength(2);
+    expect(reconcileHost.canUseSharedMemoryForContextGraph).toHaveBeenCalledTimes(2);
+    expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
+    expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID)).toBe(perGraph);
+  });
+
+  it.each([
+    {
+      change: 'a member leaves the roster',
+      moves: 'neither',
+      rejects: { reason: 'chain-participant-authority-unavailable' },
+    },
+    {
+      // What a receiver selection transition does to an accepted private
+      // graph: its reconcile runs, and the roster stops governing transport.
+      change: 'the accepted roster stops governing transport',
+      moves: 'neither',
+      rejects: { reason: 'chain-participant-authority-unavailable' },
+    },
+    {
+      change: 'a recipient key is revoked in the profile graph',
+      moves: 'node-wide',
+      rejects: /public encryption keys.*revoked/,
+    },
+    {
+      change: 'a peer route is removed in the profile graph',
+      moves: 'both',
+      rejects: /has no recipient key advertised by a peer in the context graph allowlist/,
+    },
+    {
+      change: 'a peer route is replaced in the join key cache',
+      moves: 'node-wide',
+      rejects: { reason: 'chain-participant-authority-unavailable' },
+    },
+    {
+      change: 'a peer leaves the allowlist of the graph',
+      moves: 'both',
+      rejects: /has no recipient key advertised by a peer in the context graph allowlist/,
+    },
+  ] as const)('still fails closed when $change between gossip reconciles', async ({ change, moves, rejects }) => {
+    const member = ethers.Wallet.createRandom();
+    const other = ethers.Wallet.createRandom();
+    const memberUri = `did:dkg:agent:${ethers.getAddress(member.address)}`;
+    const peerId = '12D3KooWAcceptedPrivateReconcileMemberPeer';
+    const otherPeerId = '12D3KooWAcceptedPrivateReconcileOtherPeer';
+    const joinCacheGraph = 'urn:dkg:local:join-encryption-key-cache';
+    const memberKey = signedKeyFixture(member, peerId);
+    let roster = [member.address, other.address];
+    let rosterGoverns = true;
+    let store!: ReturnType<typeof recipientHostUnderGossipReconciles>['store'];
+    const changes: Record<typeof change, () => Promise<unknown>> = {
+      'a member leaves the roster': async () => { roster = [member.address]; },
+      'the accepted roster stops governing transport': async () => { rosterGoverns = false; },
+      'a recipient key is revoked in the profile graph': () => {
+        const revokedAt = new Date().toISOString();
+        const proof = member.signingKey.sign(ethers.hashMessage(
+          computeWorkspaceAgentEncryptionKeyRevocationPayload({
+            agentAddress: member.address,
+            encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+            publicKeyBytes: memberKey.publicKeyBytes,
+            revokedAt,
+          }),
+        )).serialized;
+        return store.insert([
+          [DKG_ONTOLOGY.DKG_REVOKED_AT, `"${revokedAt}"`],
+          [DKG_ONTOLOGY.DKG_REVOKED_BY, memberUri],
+          [DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF, `"${proof}"`],
+        ].map(([predicate, object]) => ({
+          subject: memberKey.recipientKeyId,
+          predicate,
+          object,
+          graph: PROFILE_GRAPH,
+        })));
+      },
+      'a peer route is removed in the profile graph': () => store.deleteByPattern({
+        graph: PROFILE_GRAPH,
+        subject: memberUri,
+        predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      }),
+      'a peer route is replaced in the join key cache': () => store.replaceSubject!(
+        joinCacheGraph,
+        memberUri,
+        signedKeyQuads(member, '12D3KooWAcceptedPrivateReconcileNewRoute')
+          .map((quad) => ({ ...quad, graph: joinCacheGraph })),
+      ),
+      'a peer leaves the allowlist of the graph': () => store.deleteByPattern({
+        graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+        subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+        object: `"${peerId}"`,
+      }),
+    };
+    const fixture = recipientHostUnderGossipReconciles({
+      transport: () => (rosterGoverns
+        ? { kind: 'private-roster', participantAgents: [...roster] }
+        : { kind: 'legacy-unregistered' }),
+      duringFinalAuthorityRead: () => changes[change](),
+    });
+    store = fixture.store;
+    const { projection, host, reconciles } = fixture;
+    const inJoinCache = change === 'a peer route is replaced in the join key cache';
+    await store.insert([
+      ...memberKey.quads.map((quad) => (inJoinCache ? { ...quad, graph: joinCacheGraph } : quad)),
+      ...signedKeyQuads(other, otherPeerId),
+      // The join key cache case keeps the peer gate open, so that only the
+      // replaced route can fail it.
+      ...(inJoinCache ? [] : [allowedPeerQuad(peerId), allowedPeerQuad(otherPeerId)]),
+    ]);
+    const nodeWide = projection.readAuthorityFactsRevision;
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID);
+
+    const resolution = WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      });
+    await (rejects instanceof RegExp
+      ? expect(resolution).rejects.toThrow(rejects)
+      : expect(resolution).rejects.toMatchObject(rejects));
+    await Promise.all(reconciles);
+
+    // Refused on the first confirmation read, as without the reconciles.
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+    expect(reconciles).toHaveLength(2);
+    // Only the change itself moved a revision, and only the ones it belongs to.
+    expect(projection.readAuthorityFactsRevision !== nodeWide).toBe(moves !== 'neither');
+    expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID) !== perGraph)
+      .toBe(moves === 'both');
   });
 
   it.each([
