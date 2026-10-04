@@ -7043,6 +7043,15 @@ export class DKGPublisher implements Publisher {
         } } LIMIT 2`,
       ),
     ]);
+    if (
+      stateResult.type !== 'bindings' || layerResult.type !== 'bindings'
+      || stateResult.bindings.length > 1 || layerResult.bindings.length > 1
+    ) {
+      throw Object.assign(
+        new Error(`Assertion "${name}" has a corrupt Working Memory lifecycle record`),
+        { code: 'KA_WM_LIFECYCLE_CORRUPT' },
+      );
+    }
     const state = stateResult.type === 'bindings' && stateResult.bindings.length === 1
       ? stripOptionalLiteral(stateResult.bindings[0]?.['state'])
       : undefined;
