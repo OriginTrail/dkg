@@ -22,7 +22,6 @@ import {
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   contextGraphCatalogUri,
-  contextGraphLayerUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
