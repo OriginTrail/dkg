@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { workspacePublisherOperationTimestamp } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
-import { KnowledgeAssetWorkspaceHeadCorruptError, resolveAcquiredKnowledgeAssetWorkspaceHead, RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations, type KnowledgeAssetWorkspaceHeadResolution } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
+import { KnowledgeAssetWorkspaceHeadCorruptError, resolveAcquiredKnowledgeAssetWorkspaceHead, readAuthenticatedWorkspaceOperations, type KnowledgeAssetWorkspaceHeadResolution } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { decodeRecoveryOperationCandidate, type RecoveryOperationCandidate, type GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { stripMetadataLiteral } from '../metadata-literal.js';
@@ -79,7 +79,7 @@ export async function prepareRecoveredDescriptor(store: TripleStore, descriptor:
   const operationCandidates: RecoveryOperationCandidate[] = [];
   const metadataQuads = descriptor.metadataQuads.filter(row => row.subject === descriptor.headSubject);
   for (const subject of subjects) {
-    const wire = descriptor.metadataQuads.filter(row => row.subject === subject && row.predicate !== RECOVERED_OPERATION_CHRONOLOGY);
+    const wire = descriptor.metadataQuads.filter(row => row.subject === subject);
     const incoming = decodeCandidate(wire, descriptor);
     const local = locals.get(subject);
     const locallyAuthenticated = local?.provenance.publisherChronologyAuthenticated === true
@@ -90,8 +90,7 @@ export async function prepareRecoveredDescriptor(store: TripleStore, descriptor:
     if (locallyAuthenticated && sameOperation) {
       metadataQuads.push(...local.operationRows); operationCandidates.push(local);
     } else {
-      const rows = [...wire, { subject, predicate: RECOVERED_OPERATION_CHRONOLOGY, object: '"true"', graph: descriptor.metaGraph }];
-      metadataQuads.push(...rows); operationCandidates.push({ ...incoming, operationRows: rows,
+      metadataQuads.push(...wire); operationCandidates.push({ ...incoming,
         provenance: { ...incoming.provenance, publisherChronologyAuthenticated: false } });
     }
   }

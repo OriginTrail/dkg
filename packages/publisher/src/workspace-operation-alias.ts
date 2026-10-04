@@ -7,9 +7,6 @@ import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import type { NormalizedWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceOperationAlias, KnowledgeAssetWorkspaceSnapshotLocator } from './workspace-resolution.js';
 
-/** Local recovery writes impose this marker; remote metadata cannot clear it. */
-export const RECOVERED_OPERATION_CHRONOLOGY = 'http://dkg.io/ontology/recoveredOperationChronology';
-
 export function workspaceOperationAlias(candidate: {
   provenance: NormalizedWorkspaceOperationProvenance;
   snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator;
@@ -35,8 +32,7 @@ function evidenceDigest(rows: readonly Quad[]): string {
     }
     return canonical;
   };
-  const values = [...new Set(rows.filter(row => row.predicate !== RECOVERED_OPERATION_CHRONOLOGY)
-    .map(row => JSON.stringify([row.subject, row.predicate, term(row)])))].sort();
+  const values = [...new Set(rows.map(row => JSON.stringify([row.subject, row.predicate, term(row)])))].sort();
   return createHash('sha256').update(JSON.stringify(values)).digest('hex');
 }
 

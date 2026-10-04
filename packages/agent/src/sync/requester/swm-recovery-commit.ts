@@ -88,9 +88,6 @@ export async function commitRecoveredSwmAsset(input: {
     const keys = new Set(withheld.map(canonicalQuadKey));
     const rows = descriptor.metadataQuads.filter(row => !keys.has(canonicalQuadKey(row)));
     if (rows.length > 0) await input.insertMetadata(rows);
-    // The local provenance marker is control metadata, not a fetched triple.
-    const providerKeys = new Set(asset.descriptor.metadataQuads.map(canonicalQuadKey));
-    const insertedMetaQuads = rows.filter(row => providerKeys.has(canonicalQuadKey(row))).length;
-    return result('committed', equivalent ? 0 : quads?.length ?? 0, insertedMetaQuads);
+    return result('committed', equivalent ? 0 : quads?.length ?? 0, rows.length);
   });
 }

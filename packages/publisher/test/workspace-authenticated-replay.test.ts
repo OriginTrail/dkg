@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GraphManager, OxigraphStore, UnsupportedTripleStoreCapabilityError } from '@origintrail-official/dkg-storage';
 import { authenticateWorkspaceOperationReplay } from '../src/workspace-authenticated-replay.js';
-import { RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations } from '../src/workspace-operation-alias.js';
+import { readAuthenticatedWorkspaceOperations } from '../src/workspace-operation-alias.js';
 import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
 
 const CG = 'authenticated-replay';
 const DKG = 'http://dkg.io/ontology/';
+const LEGACY_MARKER = `${DKG}recoveredOperationChronology`;
 const UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/1';
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close(); });
@@ -24,14 +25,14 @@ async function recoveredHead() {
     kaUal: UAL, assertionVersion: 1, shareOperationId: operationId });
   // Model a pre-upgrade/cold provider operation, with no reserved local proof.
   await store.deleteByPattern({ graph: 'urn:dkg:publisher:authenticated-operation-evidence', subject });
-  await store.insert([{ subject, predicate: RECOVERED_OPERATION_CHRONOLOGY, object: '"true"', graph }]);
+  await store.insert([{ subject, predicate: LEGACY_MARKER, object: '"true"', graph }]);
   const head = (await resolveKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CG, kaUal: UAL }))!;
   expect(head.operationAliases[0]?.publisherChronologyAuthenticated).toBe(false);
   return { store, graphManager, contextGraphId: CG, shareOperationId: operationId, head, graph, subject };
 }
 
 describe('authenticated exact replay evidence acquisition', () => {
-  it('certifies the wire clock, removes recovery control metadata, and retains snapshot identity', async () => {
+  it('certifies the wire clock and retains snapshot identity and opaque legacy rows', async () => {
     const input = await recoveredHead();
     const metadata = `CONSTRUCT { <${input.subject}> ?p ?o } WHERE { GRAPH <${input.graph}> { <${input.subject}> ?p ?o } }`;
     const before = await input.store.query(metadata);
@@ -41,13 +42,13 @@ describe('authenticated exact replay evidence acquisition', () => {
     expect(replace.mock.calls.map(([graph]) => graph)).toEqual([input.graph, 'urn:dkg:publisher:authenticated-operation-evidence']);
     const after = await input.store.query(metadata);
     const unchanged = (result: typeof before) => result.type === 'quads' ? result.quads
-      .filter(row => row.predicate !== `${DKG}publishedAt` && row.predicate !== RECOVERED_OPERATION_CHRONOLOGY) : [];
+      .filter(row => row.predicate !== `${DKG}publishedAt`) : [];
     expect(unchanged(after)).toEqual(unchanged(before));
     const authenticated = (await resolveKnowledgeAssetWorkspaceHead({ store: input.store, graphManager: input.graphManager, contextGraphId: CG, kaUal: UAL }))!;
     expect(authenticated.operationAliases[0]).toMatchObject({ publishedAt: '2000', snapshotLocator: input.head.operationAliases[0]!.snapshotLocator });
     expect(authenticated.operationAliases[0]?.publisherChronologyAuthenticated).toBe(true);
-    expect(await input.store.query(`ASK { GRAPH <${input.graph}> { <${input.subject}> <${RECOVERED_OPERATION_CHRONOLOGY}> ?marker } }`))
-      .toEqual({ type: 'boolean', value: false });
+    expect(await input.store.query(`ASK { GRAPH <${input.graph}> { <${input.subject}> <${LEGACY_MARKER}> ?marker } }`))
+      .toEqual({ type: 'boolean', value: true });
     await authenticateWorkspaceOperationReplay({ ...input, head: authenticated, timestamp: new Date(1000) });
     expect((await resolveKnowledgeAssetWorkspaceHead({ store: input.store, graphManager: input.graphManager, contextGraphId: CG, kaUal: UAL }))?.operationAliases[0]?.publishedAt).toBe('2000');
   });

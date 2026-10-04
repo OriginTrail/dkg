@@ -9954,6 +9954,9 @@ describe('RFC-64 M0 recovery scenarios', () => {
 
 function stubUnpublishedCatalogState(agent: DKGAgent) {
   const chain = (agent as unknown as { chain: ChainAdapter }).chain;
+  // The coherent fixture represents this catalog's network, rather than
+  // attaching a zero-root response to an unbound NoChain adapter.
+  Object.defineProperty(chain, 'chainId', { value: NETWORK_ID });
   chain.readKnowledgeAssetVersionSnapshot = vi.fn(async (kaId) => ({
     knowledgeAssetId: kaId, rootCount: 0n, latestRoot: ethers.ZeroHash,
     latestAuthor: ethers.ZeroAddress, latestPublisher: ethers.ZeroAddress, blockNumber: 100,

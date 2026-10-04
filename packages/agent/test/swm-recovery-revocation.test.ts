@@ -9,7 +9,6 @@ import {
   generateKnowledgeAssetShareMetadata,
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
-import { RECOVERED_OPERATION_CHRONOLOGY } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -190,12 +189,7 @@ describe('SWM recovery lease revocation', () => {
     expect(committedMeta.type).toBe('bindings');
     if (expectedMeta.type === 'bindings' && committedMeta.type === 'bindings') {
       // The provider's exact metadata accompanies the admitted content commit.
-      // Its RDF clock also receives one local untrusted-recovery marker; that
-      // control row is neither a fetched triple nor publisher authentication.
-      const control = committedMeta.bindings.filter(row => row['p'] === RECOVERED_OPERATION_CHRONOLOGY);
-      expect(control).toEqual([{ s: operationSubject, p: RECOVERED_OPERATION_CHRONOLOGY, o: '"true"' }]);
-      const providerRows = committedMeta.bindings.filter(row => row['p'] !== RECOVERED_OPERATION_CHRONOLOGY);
-      expect(providerRows.map(row => JSON.stringify(row)).sort())
+      expect(committedMeta.bindings.map(row => JSON.stringify(row)).sort())
         .toEqual(expectedMeta.bindings.map(row => JSON.stringify(row)).sort());
     }
     const recovered = await store.query(

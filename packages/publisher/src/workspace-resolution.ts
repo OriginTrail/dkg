@@ -1,5 +1,5 @@
 import { acquireKnowledgeAssetWorkspaceHead } from './workspace-head-acquisition.js';
-export { RECOVERED_OPERATION_CHRONOLOGY, readAuthenticatedWorkspaceOperations, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
+export { readAuthenticatedWorkspaceOperations, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
 import { workspaceOperationAlias, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
 import { snapshotOperation } from './workspace-snapshot-lifecycle.js';
 import { withWorkspaceOperationWriteLock } from './workspace-operation-write-lock.js';

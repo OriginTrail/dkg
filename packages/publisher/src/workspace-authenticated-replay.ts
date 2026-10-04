@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { GraphManager, TripleStore } from '@origintrail-official/dkg-storage';
-import { RECOVERED_OPERATION_CHRONOLOGY, persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
+import { persistWorkspaceOperationEvidence } from './workspace-operation-alias.js';
 import { normalizeWorkspaceOperationProvenance } from './workspace-operation-equivalence.js';
 import type { KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
@@ -25,7 +25,7 @@ export async function authenticateWorkspaceOperationReplay(input: {
   }`, { source: 'publisher.workspace.authenticatedReplay' });
   if (acquired.type !== 'quads' || acquired.quads.length === 0) throw new Error('Authenticated replay operation is unavailable');
   const publishedAt = 'http://dkg.io/ontology/publishedAt';
-  const rows = acquired.quads.filter(row => row.predicate !== publishedAt && row.predicate !== RECOVERED_OPERATION_CHRONOLOGY)
+  const rows = acquired.quads.filter(row => row.predicate !== publishedAt)
     .map(row => ({ ...row, graph }));
   const clock = { subject, predicate: publishedAt, object: xsdDateTimeLiteral(input.timestamp), graph };
   // Authenticate the signed wire clock, never the provider's retained clock.

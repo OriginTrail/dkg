@@ -4,7 +4,7 @@ import { normalizeWorkspaceOperationProvenance } from '../src/workspace-operatio
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
-import { persistWorkspaceOperationEvidence, readAuthenticatedWorkspaceOperations, RECOVERED_OPERATION_CHRONOLOGY, workspaceOperationAlias } from '../src/workspace-operation-alias.js';
+import { persistWorkspaceOperationEvidence, readAuthenticatedWorkspaceOperations, workspaceOperationAlias } from '../src/workspace-operation-alias.js';
 
 const SUBJECT = 'urn:test:operation', GRAPH = 'urn:test:operation-meta', DKG = 'http://dkg.io/ontology/';
 const EVIDENCE_GRAPH = 'urn:dkg:publisher:authenticated-operation-evidence';
@@ -109,8 +109,8 @@ describe('canonical operation evidence round trips', () => {
   ])('retains authenticated chronology after %s passes through the actual store', async (_label, predicate, object) => {
     const f = await fixture(rows().map(row => row.predicate === predicate ? { ...row, object } : row));
     expect(await readAuthenticatedWorkspaceOperations(f.store, f.loaded)).toEqual(new Set([SUBJECT]));
-    const recovered = [...f.loaded, { subject: SUBJECT, predicate: RECOVERED_OPERATION_CHRONOLOGY, object: '"true"', graph: GRAPH }];
-    expect(await readAuthenticatedWorkspaceOperations(f.store, recovered)).toEqual(new Set([SUBJECT]));
+    const altered = [...f.loaded, { subject: SUBJECT, predicate: `${DKG}recoveredOperationChronology`, object: '"true"', graph: GRAPH }];
+    expect(await readAuthenticatedWorkspaceOperations(f.store, altered)).toEqual(new Set());
   });
 
   it('uses the canonical parser for an adapter-escaped persisted digest literal', async () => {

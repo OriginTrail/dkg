@@ -2,6 +2,8 @@ import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { persistWorkspaceOperationEvidence } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
 import { ethers } from 'ethers';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { readConfirmedDraftVersion } from '../src/confirmed-draft-version.js';
 import { encodeRootlessWorkspaceRequest } from '../../publisher/test/_helpers/rootless-workspace.js';
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -76,6 +78,21 @@ const staleCases = (['publicRun', 'privateRun'] as const).flatMap(lane =>
     [undefined, 'team'].flatMap(subGraph => [false, true].map(graphLocator => ({ lane, oldVersion, currentVersion, subGraph, scope: subGraph ?? 'root', graphLocator })))));
 
 describe('legacy catch-up respects publisher draft chronology', () => {
+  it.each((['publicRun', 'privateRun'] as const).flatMap(lane => [false, true].map(foreign => ({ lane, foreign }))))('$lane preserves a confirmed foreign-chain asset without treating its packed ID as unpublished ($foreign)', async ({ lane, foreign }) => {
+    const store = new OxigraphStore(); stores.push(store);
+    const current = share(1, 'bound-current', 1000), incoming = share(1, 'bound-incoming', 2000);
+    for (const item of [current, incoming]) await persistLocalSwmOperation(store, CG, item);
+    await store.insert([...current.meta.filter(row => row.subject === current.headSubject), ...inGraph(current)]);
+    // A different network has the same packed ID but zero published roots.
+    const chain = new MockChainAdapter(foreign ? 'otp:20430' : 'mock:31337');
+    const read = vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot').mockResolvedValue({ rootCount: 0n, latestRoot: `0x${'00'.repeat(32)}`, latestAuthor: `0x${'00'.repeat(20)}`, latestPublisher: `0x${'00'.repeat(20)}`, blockNumber: 42 });
+    const h = harness(store, incoming, () => readConfirmedDraftVersion(chain, UAL));
+    await h[lane]();
+    await expectHead(store, foreign ? current : incoming);
+    if (foreign) { expect(read).not.toHaveBeenCalled(); expect(h.companion).not.toHaveBeenCalled(); }
+    else { expect(read).toHaveBeenCalled(); expect(h.companion).toHaveBeenCalled(); }
+  });
+
   it.each(['publicRun', 'privateRun'] as const)('%s delegates replacement effects to the canonical materializer', async lane => {
     const store = new OxigraphStore(); stores.push(store);
     const current = share(1, 'older-effects', 1000, 'team');
@@ -227,7 +244,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
       semantics: { publisherIdentity: 'peer-source', recoveryIdentity: { kaUal: UAL, assertionVersion: '2' } },
       provenance: { shareOperationId: incoming.operationId, publishedAtMs: 3000, publisherChronologyAuthenticated: false } });
     expect(prepared.operationCandidates[0]!.identityKey).not.toBeNull();
-    expect(prepared.operationCandidates[0]!.operationRows.some(row => row.predicate === `${DKG}recoveredOperationChronology`)).toBe(true);
+    expect(prepared.operationCandidates[0]!.operationRows.some(row => row.predicate === `${DKG}recoveredOperationChronology`)).toBe(false);
     expect(prepared.storedOperationCandidates?.map(candidate => candidate.shareOperationId)).toEqual([current.operationId]);
     await h[lane](); await expectHead(store, current); expect(h.companion).not.toHaveBeenCalled();
   });
@@ -270,7 +287,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     expect((await readHead())?.shareOperationId).toBe(c.operationId);
   });
 
-  it.each((['publicRun', 'privateRun'] as const).flatMap(lane => ['cold', 'equivalent', 'same-id', 'pre-upgrade'].map(mode => ({ lane, mode }))))('$lane does not let $mode recovered 2099 metadata fence a later signed publisher share', async ({ lane, mode }) => {
+  it.each((['publicRun', 'privateRun'] as const).flatMap(lane => ['cold', 'equivalent', 'same-id', 'pre-upgrade'].flatMap(mode => ['true', 'false'].map(flag => ({ lane, mode, flag })))))('$lane does not let $mode recovered 2099 metadata with flag=$flag fence a later signed publisher share', async ({ lane, mode, flag }) => {
     const store = new OxigraphStore(); stores.push(store);
     const wallet = ethers.Wallet.createRandom();
     const ka = `did:dkg:31337/${wallet.address.toLowerCase()}/3`;
@@ -278,13 +295,13 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const local = make('local-publisher', 2000);
     const forged = make(mode === 'same-id' ? local.operationId : 'forged-peer-alias', Date.parse('2099-01-01T00:00:00Z'));
     // A provider copying the peer id and content cannot attest the clock, even
-    // when it omits the locally imposed provenance flag or spoofs a false one.
-    forged.meta.push({ subject: forged.operationSubject, predicate: `${DKG}recoveredOperationChronology`, object: '"false"', graph: forged.meta[0]!.graph });
+    // when it omits a legacy flag or spoofs a false one.
+    forged.meta.push({ subject: forged.operationSubject, predicate: `${DKG}recoveredOperationChronology`, object: JSON.stringify(flag), graph: forged.meta[0]!.graph });
     if (mode === 'pre-upgrade') await store.insert([...forged.meta.filter(row => row.predicate !== `${DKG}recoveredOperationChronology`), ...inGraph(forged)]);
     if (!['cold', 'pre-upgrade'].includes(mode)) { await persistLocalSwmOperation(store, CG, local); await store.insert([...local.meta, ...local.payload.map(row => ({ ...row, graph: local.assertionGraph }))]); }
     await harness(store, forged)[lane]();
     // Repeated transport acquisition must not upgrade the unsigned operation,
-    // erase the imposed marker, or downgrade an authenticated local operation.
+    // establish trust from a flag, or downgrade an authenticated local operation.
     await harness(store, forged)[lane]();
     const head = await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store), contextGraphId: CG, kaUal: ka });
     if (['cold', 'pre-upgrade'].includes(mode)) expect(head?.operationAliases.every(alias => alias.publisherChronologyAuthenticated === false)).toBe(true);

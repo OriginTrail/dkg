@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { canonicalizeCanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
+import { canonicalizeCanonicalGraphScopedAuthorSealV1, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
 import { readCoherentKnowledgeAssetVersionEvidence } from '../confirmed-draft-version.js';
@@ -35,6 +35,7 @@ export async function assertRfc64CatalogReplacementOrderV1(
     const evidence = await readCoherentKnowledgeAssetVersionEvidence(chain, {
       knowledgeAssetId: kaId,
       expectedAuthor: candidate.seal.authorAddress,
+      expectedChainId: createGraphKnowledgeAssetScope(candidate.seal.kaUal, 1).chainId,
       options: { signal },
       acceptsSnapshot: (snapshot) => (candidateVersion >= currentVersion || snapshot.rootCount >= 1n)
         && currentVersion > snapshot.rootCount && candidateVersion > snapshot.rootCount,

@@ -35,6 +35,7 @@ function adapter(value: KnowledgeAssetVersionSnapshot | null = snapshot(), curre
   const currency = vi.fn(async () => current);
   const independentRead = vi.fn(() => { throw new Error('must not compose separate chain views'); });
   const chain = {
+    chainId: 'otp:20430', chainType: 'evm',
     readKnowledgeAssetVersionSnapshot: read, knowledgeAssetVersionSnapshotIsCurrent: currency,
     getKnowledgeAssetRootCount: independentRead, getKnowledgeAssetLatestAuthor: independentRead,
   } as unknown as ChainAdapter;
@@ -67,8 +68,25 @@ describe.each(callers)('%s coherent chain evidence', lane => {
   });
 
   it('refuses adapters without coherent evidence instead of falling back to independent reads', async () => {
-    if (lane === 'confirmed draft') await expect(call(lane, {} as ChainAdapter)).resolves.toBeNull();
-    else await expect(call(lane, {} as ChainAdapter)).rejects.toThrow('requires coherent proof');
+    if (lane === 'confirmed draft') await expect(call(lane, { chainId: 'otp:20430', chainType: 'evm' } as ChainAdapter)).resolves.toBeNull();
+    else await expect(call(lane, { chainId: 'otp:20430', chainType: 'evm' } as ChainAdapter)).rejects.toThrow('requires coherent proof');
+  });
+
+  it.each(['base:8453', 'none', 'otp:020430', 'otp:0', undefined])('refuses an unbound adapter %s before any RPC', async chainId => {
+    const f = adapter(snapshot({ rootCount: 0n }));
+    Object.assign(f.chain, { chainId });
+    const result = call(lane, f.chain);
+    if (lane === 'confirmed draft') await expect(result).resolves.toBeNull();
+    else await expect(result).rejects.toThrow('requires coherent proof');
+    expect(f.read).not.toHaveBeenCalled(); expect(f.currency).not.toHaveBeenCalled();
+  });
+
+  it.each(['20430', 'evm:20430', 'otp:20430'])('accepts the supported numeric network alias %s', async chainId => {
+    const f = adapter(); Object.assign(f.chain, { chainId });
+    const result = call(lane, f.chain);
+    if (lane === 'confirmed draft') await expect(result).resolves.toBe(1n);
+    else await expect(result).resolves.toBeUndefined();
+    expect(f.read).toHaveBeenCalledOnce(); expect(f.currency).toHaveBeenCalledOnce();
   });
 
   it('accepts one matching view and forwards cancellation through its currency fence', async () => {
@@ -89,6 +107,16 @@ describe.each(callers)('%s coherent chain evidence', lane => {
     if (phase === 'snapshot read') f.read.mockImplementationOnce(async () => { controller.abort(reason); return snapshot(); });
     else f.currency.mockImplementationOnce(async () => { controller.abort(reason); return true; });
     await expect(call(lane, f.chain, controller.signal)).rejects.toBe(reason);
+    expect(f.currency).toHaveBeenCalledTimes(phase === 'snapshot read' ? 0 : 1);
+  });
+
+  it.each(['snapshot read', 'currency read'] as const)('refuses a chain binding that changes during the %s', async phase => {
+    const f = adapter();
+    if (phase === 'snapshot read') f.read.mockImplementationOnce(async () => { Object.assign(f.chain, { chainId: 'base:8453' }); return snapshot(); });
+    else f.currency.mockImplementationOnce(async () => { Object.assign(f.chain, { chainId: 'base:8453' }); return true; });
+    const result = call(lane, f.chain);
+    if (lane === 'confirmed draft') await expect(result).resolves.toBeNull();
+    else await expect(result).rejects.toThrow('requires coherent proof');
     expect(f.currency).toHaveBeenCalledTimes(phase === 'snapshot read' ? 0 : 1);
   });
 

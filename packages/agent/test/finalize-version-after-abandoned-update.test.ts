@@ -67,6 +67,7 @@ function int(value: bigint | number): string {
 
 async function makeAgent(store: OxigraphStore) {
   const chain = {
+    chainType: 'evm' as const,
     chainId: CHAIN_ID,
     getEvmChainId: async () => EVM_CHAIN_ID,
     getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,

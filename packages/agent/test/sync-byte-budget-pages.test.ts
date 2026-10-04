@@ -211,7 +211,8 @@ describe('byte-budget sync pagination', () => {
       const contextGraphId = `ttl-byte-fit-${phase}`;
       const rootGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
       const subGraph = `did:dkg:context-graph:${contextGraphId}/subx/_shared_memory`;
-      const now = Date.now();
+      // Force a valid fractional-second lexical form that Oxigraph canonicalizes.
+      const now = Math.floor(Date.now() / 1_000) * 1_000 + 230;
       const fresh = new Date(now - 1_000).toISOString();
       const stale = new Date(now - 600_000).toISOString();
       const freshMeta: Quad[] = [];
@@ -237,7 +238,18 @@ describe('byte-budget sync pagination', () => {
         { graph: rootGraph, subject: 'urn:ttl-root:unshared', predicate: 'urn:value', object: '"unshared"' },
         { graph: `${rootGraph}_meta`, subject: 'urn:ttl-op:undated', predicate: `${DKG_NS}note`, object: '"undated"' },
       ]);
-      const expected = new Set((phase === 'meta' ? freshMeta : freshData).map((quad) =>
+      // Compare against persisted RDF, including the backend's dateTime lexical
+      // normalization, independently of the paginated responder's window reads.
+      const sourceRows = phase === 'meta' ? freshMeta : freshData;
+      const subjects = new Set(sourceRows.map(quad => quad.subject));
+      const persisted: Quad[] = [];
+      for (const graph of new Set(sourceRows.map(quad => quad.graph))) {
+        const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+        expect(result.type).toBe('quads');
+        if (result.type === 'quads') persisted.push(...result.quads.filter(quad => subjects.has(quad.subject)).map(quad => ({ ...quad, graph })));
+      }
+      expect(persisted).toHaveLength(sourceRows.length);
+      const expected = new Set(persisted.map((quad) =>
         `<${quad.subject}> <${quad.predicate}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} <${quad.graph}> .`,
       ));
       expect(new TextEncoder().encode([...expected].join('\n')).byteLength)
