@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { describe, expect, it, onTestFinished } from 'vitest';
+import { TypedEventBus, assertionLifecycleUri, contextGraphMetaUri, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   DKGPublisher,
+  WM_CURRENT_ASSERTION_PRED,
+  assertionLayerPointerQuad,
   generateAssertionPromotedMetadata,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
@@ -23,13 +25,36 @@ import {
   stubAgent,
 } from './_helpers/foreign-author-resolution-fixtures.js';
 
+async function promotedAgentFixture(shareOperationId: string) {
+  const store = new OxigraphStore();
+  onTestFinished(() => store.close());
+  const publisher = new DKGPublisher({
+    store, chain: new NoChainAdapter(), eventBus: new TypedEventBus(),
+    keypair: await generateEd25519Keypair(),
+  });
+  const merkleHex = Buffer.from(MERKLE).toString('hex');
+  const promoted = generateAssertionPromotedMetadata({
+    contextGraphId: CG, agentAddress: MEMBER, assertionName: NAME,
+    kaNumber: 7, shareOperationId, rootEntities: [], merkleHex,
+    timestamp: new Date('2026-09-10T00:00:00.000Z'),
+  });
+  await store.insert([
+    ...sealFor(MEMBER), ...promoted.insert,
+    assertionLayerPointerQuad(assertionLifecycleUri(CG, MEMBER, NAME),
+      WM_CURRENT_ASSERTION_PRED, merkleHex, contextGraphMetaUri(CG)),
+  ]);
+  await publisher.markSwmShareComplete(CG, NAME, MEMBER);
+  const agent = stubAgent(store, CURATOR);
+  agent.publisher = publisher;
+  agent.getCustodialAgentPrivateKey = () => undefined;
+  return { store, agent, graphManager: new GraphManager(store) };
+}
+
 describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
   it('accepts an equivalent selected head alias for intent and queued preflight', async () => {
-    const store = new OxigraphStore();
-    await store.insert(sealFor(MEMBER));
-    const graphManager = new GraphManager(store);
     const originalId = 'queued-original';
     const selectedAlias = 'storage-ack-alias';
+    const { store, agent, graphManager } = await promotedAgentFixture(originalId);
     for (const [shareOperationId, accessPolicy, timestamp] of [
       [originalId, undefined, new Date('2026-09-10T00:00:00.000Z')],
       [selectedAlias, 'public', new Date('2026-09-10T00:00:01.000Z')],
@@ -71,22 +96,8 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
       access: { kind: 'persisted', accessPolicy: 'public', allowedPeers: [] },
     });
 
-    const sealRoot = `0x${Buffer.from(MERKLE).toString('hex')}`;
-    const agent = stubAgent(store, CURATOR);
-    agent.publisher = { hasSwmShareComplete: async () => true };
-    agent.getCustodialAgentPrivateKey = () => undefined;
-    Object.defineProperty(agent, 'assertion', {
-      value: {
-        history: async () => ({
-          events: [],
-          currentShareOperationId: originalId,
-          wmCurrentAssertion: sealRoot,
-          swmCurrentAssertion: sealRoot,
-        }),
-      },
-      configurable: true,
-    });
-
+    expect(await agent.assertion.history(CG, NAME, { agentAddress: MEMBER }))
+      .toMatchObject({ currentShareOperationId: originalId });
     const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME);
     expect(intent.shareOperationId).toBe(originalId);
     await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
@@ -94,10 +105,8 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
   });
 
   it('rejects a standalone legacy-default head at admission and queued preflight', async () => {
-    const store = new OxigraphStore();
-    await store.insert(sealFor(MEMBER));
-    const graphManager = new GraphManager(store);
     const shareOperationId = 'legacy-default-only';
+    const { store, agent, graphManager } = await promotedAgentFixture(shareOperationId);
     await storeKnowledgeAssetOperationPublicQuads({
       store,
       graphManager,
@@ -118,22 +127,6 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
       kaUal: KA_UAL,
       assertionVersion: 1,
     });
-    const sealRoot = `0x${Buffer.from(MERKLE).toString('hex')}`;
-    const agent = stubAgent(store, CURATOR);
-    agent.publisher = { hasSwmShareComplete: async () => true };
-    agent.getCustodialAgentPrivateKey = () => undefined;
-    Object.defineProperty(agent, 'assertion', {
-      value: {
-        history: async () => ({
-          events: [],
-          currentShareOperationId: shareOperationId,
-          wmCurrentAssertion: sealRoot,
-          swmCurrentAssertion: sealRoot,
-        }),
-      },
-      configurable: true,
-    });
-
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
       .rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
 
