@@ -725,6 +725,10 @@ describe('durable graph-scoped KA materialization', () => {
     const turn = () => new Promise<void>((resolve) => { setImmediate(resolve); });
 
     /** A chain whose views answer when released, so a test decides what is out at once. */
+    const viewGates = new WeakMap<ChainAdapter, Promise<void>>();
+    /** The gate of `chain`'s views, for a view a test replaces. */
+    const viewsReleasedFor = (chain: ChainAdapter) => viewGates.get(chain)!;
+
     function gatedChain(overrides: Partial<ChainAdapter> = {}) {
       let releaseViews!: () => void;
       const viewsReleased = new Promise<void>((resolve) => { releaseViews = resolve; });
@@ -744,6 +748,7 @@ describe('durable graph-scoped KA materialization', () => {
         resolvePublishByTxHash,
         ...overrides,
       } as ChainAdapter;
+      viewGates.set(chain, viewsReleased);
       return { chain, releaseViews, viewsStarted, resolvePublishByTxHash };
     }
 
@@ -855,6 +860,90 @@ describe('durable graph-scoped KA materialization', () => {
       await expect(authenticateVerifiedGraphScopedAsset(
         chain, firstPublish(), strictContextGraphBindingVerifier(chain),
       )).rejects.toBe(failure);
+    });
+
+    describe('when the early request finds no publish', () => {
+      it('asks once more after the views have passed and accepts the receipt it finds then', async () => {
+        // The endpoint had not seen the publish block when the receipt was
+        // requested; the views, answered after it, already reflect that block.
+        let asked = 0;
+        const viewsAnsweredAtAsk: boolean[] = [];
+        let viewsAnswered = false;
+        const { chain, releaseViews, resolvePublishByTxHash } = gatedChain({
+          getKAContextGraphId: async () => {
+            await viewsReleasedFor(chain);
+            viewsAnswered = true;
+            return 14n;
+          },
+        });
+        resolvePublishByTxHash.mockImplementation(async () => {
+          viewsAnsweredAtAsk.push(viewsAnswered);
+          asked += 1;
+          return asked === 1 ? null : publish;
+        });
+        const authenticating = authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        );
+        await turn();
+        releaseViews();
+
+        const authenticated = await authenticating;
+
+        // Once with the views, once after them.
+        expect(viewsAnsweredAtAsk).toEqual([false, true]);
+        expect(authenticated.asset.metadataQuads).toContainEqual(expect.objectContaining({
+          predicate: `${DKG}materializedVersion`,
+          object: '"77:3"',
+        }));
+      });
+
+      it('reports a publish that is still not found, and does not ask a third time', async () => {
+        const { chain, releaseViews, resolvePublishByTxHash } = gatedChain();
+        resolvePublishByTxHash.mockImplementation(async () => null);
+        releaseViews();
+
+        await expect(authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+        expect(resolvePublishByTxHash).toHaveBeenCalledTimes(2);
+      });
+
+      it('reports the second read\'s own failure', async () => {
+        const failure = Object.assign(new Error('receipt endpoint unavailable'), { code: 'NETWORK_ERROR' });
+        const { chain, releaseViews, resolvePublishByTxHash } = gatedChain();
+        resolvePublishByTxHash
+          .mockImplementationOnce(async () => null)
+          .mockImplementationOnce(async () => { throw failure; });
+        releaseViews();
+
+        await expect(authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        )).rejects.toBe(failure);
+      });
+
+      it('does not ask again when the views fail first', async () => {
+        const { chain, releaseViews, resolvePublishByTxHash } = gatedChain({
+          getLatestMerkleRoot: async () => staleRoot,
+        });
+        resolvePublishByTxHash.mockImplementation(async () => null);
+        releaseViews();
+
+        await expect(authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        )).rejects.toMatchObject({ code: 'VM_CHAIN_ROOT_MISMATCH' });
+        expect(resolvePublishByTxHash).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('does not ask again for a receipt that names another root', async () => {
+      const { chain, releaseViews, resolvePublishByTxHash } = gatedChain();
+      resolvePublishByTxHash.mockImplementation(async () => ({ ...publish, merkleRoot: staleRoot }));
+      releaseViews();
+
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+      )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+      expect(resolvePublishByTxHash).toHaveBeenCalledTimes(1);
     });
 
     it('still reports a chain that cannot resolve a publish after the views', async () => {

@@ -216,10 +216,12 @@ export async function authenticateVerifiedGraphScopedAsset(
   }
   // What the asset claims as provenance is fixed by its own metadata, so the
   // receipt of a first publish is requested with the views instead of after
-  // them. Only the request moves: a malformed claim is still reported after
-  // the checks on the views, and the receipt is still consulted last.
-  const provenanceClaim = captureProvenanceClaim(asset);
-  const publishReceipt = startPublishReceiptRead(chain, asset, provenanceClaim, options.signal);
+  // them. Only the request moves: this is awaited after the checks on the
+  // views, so a malformed claim and a failed receipt read are still reported
+  // there, and the receipt is still consulted last. A check that fails before
+  // that leaves it unawaited, so its rejection is observed here.
+  const provenance = resolveProvenance(chain, asset, options.signal);
+  provenance.catch(() => undefined);
   const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
     chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
     chain.getMerkleRootCount(kaId, { signal: options.signal }),
@@ -267,11 +269,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
     );
   }
-  if ('error' in provenanceClaim) throw provenanceClaim.error;
+  const claimed = await provenance;
 
   let materializedBlock: number;
   let materializedTxIndex: number;
-  if (provenanceClaim.kind === 'finalized-materialization') {
+  if (claimed.kind === 'finalized-materialization') {
     // RFC-64 finalized VM materialization deliberately has no receipt claim:
     // it is reconstructed from a pinned finalized chain snapshot. A later
     // durable-sync requester must not trust the serving peer's local
@@ -282,17 +284,13 @@ export async function authenticateVerifiedGraphScopedAsset(
     // remains the authoritative stale-write guard for this receiptless lane.
     materializedBlock = 0;
     materializedTxIndex = 0;
-  } else if (asset.assertionVersion === 1n) {
-    const { transactionHash } = provenanceClaim;
-    // The read was started for every first publish with a receipt claim, so
-    // it is missing only on a chain that cannot resolve a publish.
-    if (!publishReceipt) {
-      throw Object.assign(
-        new Error('Graph-scoped durable sync requires receipt-backed publish verification'),
-        { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
-      );
-    }
-    const resolved = await publishReceipt;
+  } else if (claimed.kind === 'publish') {
+    const { transactionHash } = claimed;
+    // "No such publish" from the early request may only mean the endpoint had
+    // not seen the publish block yet when it was asked, while the views,
+    // answered after it, already reflect that block. Ask once more now, which
+    // is when the receipt was always read.
+    const resolved = claimed.receipt ?? await claimed.readReceipt();
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (
       !resolved
@@ -309,7 +307,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     materializedBlock = resolved.blockNumber;
     materializedTxIndex = resolved.txIndex ?? 0;
   } else {
-    const { transactionHash } = provenanceClaim;
+    const { transactionHash } = claimed;
     if (!chain.verifyKAUpdate || !chain.getLatestMerkleRootPublisher) {
       throw Object.assign(
         new Error('Graph-scoped durable sync requires receipt-backed update verification'),
@@ -558,13 +556,34 @@ function parseBytes32Literal(raw: string, field: string): Uint8Array {
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
 }
 
-/** What a verified asset's own metadata claims as its provenance. */
-type ProvenanceClaim =
-  | { readonly kind: 'finalized-materialization' }
-  | { readonly kind: 'receipt'; readonly transactionHash: string };
+type PublishReceipt = Awaited<ReturnType<NonNullable<ChainAdapter['resolvePublishByTxHash']>>>;
 
-/** Throws what authentication reports for a malformed claim. */
-function readProvenanceClaim(asset: VerifiedGraphScopedAsset): ProvenanceClaim {
+/** A verified asset's provenance claim and, for a first publish, the receipt it names. */
+type Provenance =
+  | { readonly kind: 'finalized-materialization' }
+  | { readonly kind: 'update'; readonly transactionHash: string }
+  | {
+    readonly kind: 'publish';
+    readonly transactionHash: string;
+    /** What the receipt resolved to when it was requested with the views. */
+    readonly receipt: PublishReceipt;
+    /** The same read, again. */
+    readonly readReceipt: () => Promise<PublishReceipt>;
+  };
+
+/**
+ * Read what the asset's own metadata claims as its provenance and, for a
+ * first publish, request the receipt that claim names. It is started before
+ * the views have answered and awaited after their checks, so everything it
+ * rejects with is reported where it always was: a malformed claim, a chain
+ * that cannot resolve a publish, a failed receipt read. Nothing is requested
+ * for any other asset.
+ */
+async function resolveProvenance(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  signal: AbortSignal | undefined,
+): Promise<Provenance> {
   const transactionHashes = asset.metadataQuads
     .filter((quad) => quad.predicate === TRANSACTION_HASH)
     .map((quad) => parseTransactionHashLiteral(quad.object));
@@ -596,45 +615,22 @@ function readProvenanceClaim(asset: VerifiedGraphScopedAsset): ProvenanceClaim {
       { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
     );
   }
-  return { kind: 'receipt', transactionHash: transactionHashes[0]! };
-}
-
-/** {@link readProvenanceClaim}, with a malformed claim held for the caller to report in its turn. */
-function captureProvenanceClaim(
-  asset: VerifiedGraphScopedAsset,
-): ProvenanceClaim | { readonly error: unknown } {
-  try {
-    return readProvenanceClaim(asset);
-  } catch (error) {
-    return { error };
-  }
-}
-
-/**
- * Request the receipt that authenticates a first publish. Started before the
- * views have answered, so a check that fails first leaves this read unawaited:
- * it is observed here, it carries the caller's signal like the views do, and
- * its own failure is still reported where it is awaited. Nothing is started
- * for any other asset.
- */
-function startPublishReceiptRead(
-  chain: ChainAdapter,
-  asset: VerifiedGraphScopedAsset,
-  claim: ProvenanceClaim | { readonly error: unknown },
-  signal: AbortSignal | undefined,
-): ReturnType<NonNullable<ChainAdapter['resolvePublishByTxHash']>> | undefined {
-  if ('error' in claim || claim.kind !== 'receipt' || asset.assertionVersion !== 1n) return undefined;
+  const transactionHash = transactionHashes[0]!;
+  if (asset.assertionVersion !== 1n) return { kind: 'update', transactionHash };
   const { resolvePublishByTxHash } = chain;
-  if (!resolvePublishByTxHash) return undefined;
-  const { transactionHash } = claim;
+  if (!resolvePublishByTxHash) {
+    throw Object.assign(
+      new Error('Graph-scoped durable sync requires receipt-backed publish verification'),
+      { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
+    );
+  }
   // Only the receipt's batch, root, hash and ordering are consumed, so the
   // adapter's unused block-header lookup for `blockTimestamp` is skipped.
-  const receipt = (async () => resolvePublishByTxHash.call(chain, transactionHash, {
+  const readReceipt = () => resolvePublishByTxHash.call(chain, transactionHash, {
     signal,
     skipBlockTimestamp: true,
-  }))();
-  receipt.catch(() => undefined);
-  return receipt;
+  });
+  return { kind: 'publish', transactionHash, receipt: await readReceipt(), readReceipt };
 }
 
 function parseTransactionHashLiteral(raw: string): string {
