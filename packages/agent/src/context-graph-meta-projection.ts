@@ -12,6 +12,7 @@ import {
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { cloneMetaRecord } from './context-graph-meta-record-copy.js';
 
 export interface ContextGraphSubGraphMeta {
   uri: string;
@@ -885,27 +886,6 @@ function contextGraphIdFromCatalogGraphUri(uri: string): string | null {
   const tail = uri.slice(CONTEXT_GRAPH_PREFIX.length, -'/_catalog'.length);
   if (!tail) return null;
   return tail;
-}
-
-function cloneMetaRecord(record: ContextGraphMetaRecord): ContextGraphMetaRecord {
-  return {
-    ...record,
-    creators: [...record.creators],
-    curators: [...record.curators],
-    allowedPeers: [...record.allowedPeers],
-    allowedAgents: [...record.allowedAgents],
-    participantAgents: [...record.participantAgents],
-    participantIdentityIds: [...record.participantIdentityIds],
-    revokedAgents: [...record.revokedAgents],
-    delegations: record.delegations.map((delegation) => ({
-      ...delegation,
-      agents: [...delegation.agents],
-      allowedPeers: [...delegation.allowedPeers],
-      allowedKeys: [...delegation.allowedKeys],
-      expiresAtValues: [...delegation.expiresAtValues],
-    })),
-    subGraphs: record.subGraphs.map((subGraph) => ({ ...subGraph })),
-  };
 }
 
 function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
