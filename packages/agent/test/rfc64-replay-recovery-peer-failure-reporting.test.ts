@@ -829,7 +829,16 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     expect(status.stableReason).not.toBe('catalog-replay-incomplete');
   });
 
-  it('keeps curated local owner parity when nonproviders cannot corroborate its sole author head', async () => {
+  it.each([
+    { authors: 'the owner alone', accessPolicy: 1 as const, memberAddresses: [AUTHOR], soleAuthor: true },
+    {
+      authors: 'the owner and another member',
+      accessPolicy: 1 as const,
+      memberAddresses: [AUTHOR, `0x${'ab'.repeat(20)}` as typeof AUTHOR],
+      soleAuthor: false,
+    },
+    { authors: 'anyone, in a public graph', accessPolicy: 0 as const, memberAddresses: [], soleAuthor: false },
+  ])('keeps curated local owner parity when nonproviders cannot corroborate its head only if the owner is the sole author (authors: $authors)', async ({ accessPolicy, memberAddresses, soleAuthor }) => {
     const contextGraphId = `${AUTHOR}/curated-owner-replay`;
     const edge = await startAgent({
       name: 'curated-owner-replay',
@@ -839,10 +848,10 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       networkId: NETWORK_ID,
       contextGraphId,
       ownerAddress: AUTHOR,
-      accessPolicy: 1,
+      accessPolicy,
       publishPolicy: 0,
       publishAuthorityAccountId: '0',
-      memberAddresses: [AUTHOR],
+      memberAddresses,
       rosterVersion: '0',
     });
     edge.acceptRfc64CatalogAccessSnapshotV1({
@@ -911,6 +920,17 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     await edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
     const status = (await edge.readRfc64CatalogOperationalStatusV1())
       .find((row) => row.contextGraphId === contextGraphId);
+    if (!soleAuthor) {
+      // Another member, or any author of a public graph, may hold a catalog
+      // this node never heard of: nothing corroborated the inventory.
+      expect(status).toMatchObject({
+        authorityState: 'accepted',
+        phase: 'unknown-freshness',
+        expectedRowCount: null,
+        missingRowCount: null,
+      });
+      return;
+    }
     expect(status).toMatchObject({
       authorityState: 'accepted',
       appliedRowCount: '0',
@@ -929,6 +949,31 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       expectedRowCount: null,
       missingRowCount: null,
     });
+
+    // The roster rotates to one member who is not the owner. The owner's heads
+    // stay applied, but the only author now allowed is someone else.
+    localAgents.mockReturnValue([
+      { agentAddress: AUTHOR },
+    ] as ReturnType<typeof edge.listLocalAgents>);
+    const rotated = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      ownerAddress: AUTHOR,
+      accessPolicy,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses: [`0x${'ab'.repeat(20)}` as typeof AUTHOR],
+      rosterVersion: '1',
+    });
+    (edge as any).rfc64PublicCatalogServiceV1.acceptAuthoritativePolicySnapshot({
+      policy: rotated.policy,
+      policyDigest: rotated.policyDigest,
+      roster: rotated.roster,
+    });
+    const otherSoleMember = (await edge.readRfc64CatalogOperationalStatusV1())
+      .find((row) => row.contextGraphId === contextGraphId);
+    expect(otherSoleMember?.phase).not.toBe('complete');
+    expect(otherSoleMember).toMatchObject({ expectedRowCount: null, missingRowCount: null });
   });
 
   it('reports a verified promised row missing after its head announcement was lost', async () => {

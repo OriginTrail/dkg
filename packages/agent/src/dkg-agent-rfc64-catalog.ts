@@ -1853,17 +1853,25 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // could not be replayed from surface through providerHealth instead.
       const replayFailed = currentReplayProgress?.failed === true;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
-      // A curated unregistered graph has exactly one permitted author. When
-      // this node is that owner and its verified applied heads all belong to
-      // it, an unanswered connected peer cannot reveal another author's
-      // catalog. Keep the provider failure visible in providerHealth, but do
-      // not turn locally complete owner inventory into unknown graph parity.
+      // The owner is the only possible catalog author only in a private graph
+      // whose accepted roster is the owner alone: catalog authorship follows
+      // the access policy (any member, or any author of a public graph, which
+      // has no roster), not the publish policy. When this node is that owner
+      // and its verified applied heads all belong to it, an unanswered
+      // connected peer cannot reveal another author's catalog. Keep the
+      // provider failure visible in providerHealth, but do not turn locally
+      // complete owner inventory into unknown graph parity.
       const curatedOwnerAddress = accepted?.policy.source.kind === 'owner-signed-unregistered'
         ? accepted.policy.source.ownerAddress
         : null;
+      const ownerIsSoleCatalogAuthor = accepted !== null
+        && curatedOwnerAddress !== null
+        && accepted.roster?.members.length === 1
+        && accepted.roster.members[0]?.agentAddress === curatedOwnerAddress;
       const localCuratedOwnerHeads = accepted !== null
         && accepted.policy.publishPolicy === 0
         && curatedOwnerAddress !== null
+        && ownerIsSoleCatalogAuthor
         && heads.length > 0
         && this.listLocalAgents().some(({ agentAddress }) => (
           agentAddress.toLowerCase() === curatedOwnerAddress
