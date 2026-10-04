@@ -253,8 +253,8 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     );
 
     let dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
-    // Both CREATE and UPDATE reach this shared settlement hook after their branch.
-    let settlement = vi.spyOn(agent as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
+    // Confirmed CREATE and UPDATE submit their stamp to the canonical repair owner.
+    let settlement = vi.spyOn(agent as any, '_repairConfirmedNamedKaVmLifecycle');
     const privateReplace = vi.spyOn(PrivateContentStore.prototype, 'replaceKnowledgeAssetPrivateTriples');
     // The real queued handler and agent.update run, including the native staging
     // boundary. The author attestation already exists by design; this one-shot
@@ -292,7 +292,7 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect(agent.peerId).toBe(originalPeerId);
       queue = makeQueue();
       dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
-      settlement = vi.spyOn(agent as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
+      settlement = vi.spyOn(agent as any, '_repairConfirmedNamedKaVmLifecycle');
       // Fresh managed adapter, agent, file snapshot reader and native queue.
       // The HTTP fixture remains available: this proves client/agent reopen,
       // not backend process restart or disk crash durability.
@@ -332,6 +332,9 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect(writeAhead).toHaveBeenCalledOnce();
       expect(confirmations).toHaveBeenCalledOnce();
       expect(settlement).toHaveBeenCalledOnce();
+      expect(settlement.mock.calls[0]?.[0]).toMatchObject({ contextGraphId: fixture.cg, name: fixture.name,
+        merkleRoot: fixture.intent.sealMerkleRoot, assertionVersion: fixture.intent.assertionVersion });
+      expect(await settlement.mock.results[0]?.value).toBe(false);
       expect(writeAhead.mock.calls[0]?.[0].txHash).toBe(finalized?.broadcast?.txHash);
       expect(confirmations.mock.calls[0]?.[0].txHash).toBe(finalized?.broadcast?.txHash);
       expect(await fixture.agent.assertion.history(fixture.cg, fixture.name)).toMatchObject({
