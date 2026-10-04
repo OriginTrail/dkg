@@ -80,7 +80,7 @@ it('directory compatibility never tolerates a failed file sync or damages the pr
   const parent = await directory(), path = join(parent, 'source.json');
   await saveSourceWorkerState(path, { sources: {} });
   const before = await readFile(path, 'utf8'); failure.phase = 'file';
-  await expect(saveSourceWorkerState(path, { sources: {} })).rejects.toMatchObject({ code: 'EPERM' });
+  await expect(saveSourceWorkerState(path, { sources: { next: { fingerprint: 'different pending bytes', lastStatus: 'queued' } } })).rejects.toMatchObject({ code: 'EPERM' });
   expect(await readFile(path, 'utf8')).toBe(before);
   expect(await readdir(parent)).toEqual(['source.json']);
 });
