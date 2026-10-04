@@ -80,6 +80,80 @@ describe('confirmed lifecycle lock-time authority fence', () => {
     expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT2), ual: JSON.stringify(f.newer.publishedUal) }] });
     expect((await f.journal()).size).toBe(0);
   });
+  it('admits a newer confirmed version during a held currency read and refuses the superseded commit', async () => {
+    const f = await fixture(); let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    f.agent.chain.readKnowledgeAssetVersionSnapshot.mockImplementationOnce(async () => {
+      entered(); await held; return { latestRoot: ROOT1, rootCount: 1n };
+    });
+    const commit = vi.spyOn(f.store, 'atomicUpdate');
+    const old = f.repair.submit(f.input); await started;
+    const newer = f.repair.submit(f.newer);
+    try {
+      await vi.waitFor(async () => expect([...await f.journal()].map(([, value]) => value.input.assertionVersion)).toEqual(['2']));
+      expect(commit).not.toHaveBeenCalled();
+    } finally { release(); }
+    expect(await old).toBe('superseded'); expect(await newer).toBe('pending');
+    expect(commit).not.toHaveBeenCalled();
+    expect(await f.descriptor()).toMatchObject({ bindings: [] });
+    f.advance(); vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6_000);
+    await f.repair.runDue();
+    expect(commit).toHaveBeenCalledOnce();
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT2) }] });
+    expect((await f.journal()).size).toBe(0);
+  });
+  it('holds the lifecycle lock through durable journal retirement and shutdown drain', async () => {
+    const f = await fixture();
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    const persistence = f.repair as unknown as { persist(): Promise<void> };
+    const persist = persistence.persist.bind(persistence);
+    let writes = 0;
+    vi.spyOn(persistence, 'persist').mockImplementation(async () => {
+      if (++writes === 2) { entered(); await held; }
+      await persist();
+    });
+    const submission = f.repair.submit(f.input); await started;
+    const committed = await f.descriptor();
+    expect(committed).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });
+    expect((await f.journal()).size).toBe(1); // Real write-ahead bytes remain until the held retirement commits.
+    let mutated = false, stopped = false;
+    const mutation = withKeyedLocks(f.agent.writeLocks, [f.key], async () => {
+      expect((await f.journal()).size).toBe(0);
+      mutated = true;
+      await applyPublishedNamedKaVmLifecycle(f.store, f.newer);
+    });
+    void mutation.catch(() => undefined); // The final await reports failures after releasing the held barrier.
+    const stopping = f.repair.stop().then(() => { stopped = true; });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(mutated).toBe(false); expect(stopped).toBe(false);
+    } finally { release(); await Promise.allSettled([submission, mutation, stopping]); }
+    expect(await submission).toBe('repaired'); await mutation; await stopping;
+    expect(mutated).toBe(true); expect(stopped).toBe(true);
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT2) }] });
+  });
+  it('retains failed journal retirement before releasing the lifecycle lock, then retries without a new publication', async () => {
+    const f = await fixture();
+    const commit = vi.spyOn(f.store, 'atomicUpdate');
+    const persistence = f.repair as unknown as { persist(): Promise<void> };
+    const persist = persistence.persist.bind(persistence);
+    let writes = 0;
+    vi.spyOn(persistence, 'persist').mockImplementation(async () => {
+      if (++writes === 2) throw Object.assign(new Error('retirement directory sync failed'), { code: 'EIO' });
+      await persist();
+    });
+    await expect(f.repair.submit(f.input)).rejects.toThrow('retirement directory sync failed');
+    await withKeyedLocks(f.agent.writeLocks, [f.key], async () => {
+      expect((await f.journal()).size).toBe(1);
+      expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });
+    });
+    await f.repair.runDue();
+    expect((await f.journal()).size).toBe(0);
+    expect(commit).toHaveBeenCalledTimes(2);
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });
+    expect(f.agent.writeLocks.size).toBe(0);
+  });
   it.each(['standalone', 'durable-evm'] as const)('preserves missing chain-evidence policy for %s', async scenario => {
     const f = await fixture();
     delete f.agent.chain.readKnowledgeAssetVersionSnapshot;
