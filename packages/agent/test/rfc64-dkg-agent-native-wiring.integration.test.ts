@@ -1648,12 +1648,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     60_000,
   );
 
-  it('keeps locally produced private inventory unverified when another node shares its owner', async () => {
+  it.each([0, 1] as const)('keeps locally produced private inventory unverified when another node shares its owner (publish policy %i)', async (publishPolicy) => {
     const networkId = await computeNetworkId() as NetworkIdV1;
     const deployment = Object.freeze({ ...NATIVE_DEPLOYMENT, networkId });
     const ownerPeers = new Map<string, EvmAddressV1>();
     const [first, second] = await Promise.all(['first', 'second'].map((name) => startNativeAgentWithOptions({
-      name: `same-owner-private-${name}`, deployment, networkIdentityChainId: NETWORK_ID,
+      name: `same-owner-private-${publishPolicy}-${name}`, deployment, networkIdentityChainId: NETWORK_ID,
       operationalPrivateKey: AUTHOR_WALLET.privateKey,
       accessPolicyAuthority: { localAgentAddress: AUTHOR,
         resolveRemoteAgentAddress: async (peerId) => ownerPeers.get(peerId) ?? null },
@@ -1662,7 +1662,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     for (const agent of [first, second]) {
       expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(AUTHOR);
       await agent.createContextGraph({ id: CONTEXT_GRAPH_ID, name: 'Shared owner catalog',
-        callerAgentAddress: AUTHOR, accessPolicy: 1, publishPolicy: 1 });
+        callerAgentAddress: AUTHOR, accessPolicy: 1, publishPolicy });
       await agent.whenRfc64CatalogResponsibilitiesIdleV1();
     }
     const publish = async (agent: DKGAgent, kaNumber: bigint, suffix: string) => {
@@ -1702,7 +1702,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(replay).toHaveBeenCalled();
     expect(first.readRfc64AppliedCatalogHeadV1(scope)?.currentCatalogHeadDigest).toBe(oldHead?.currentCatalogHeadDigest);
     await expect(first.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(expect.objectContaining({
-      contextGraphId: CONTEXT_GRAPH_ID, accessPolicy: 1, publishPolicy: 1,
+      contextGraphId: CONTEXT_GRAPH_ID, accessPolicy: 1, publishPolicy,
       phase: 'unknown-freshness', stableReason: 'catalog-replay-unverified',
       appliedRowCount: '1', expectedRowCount: null, missingRowCount: null,
     }));
@@ -1714,7 +1714,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await first.whenRfc64PublicCatalogReceiverIdleV1();
     await expect(first.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(expect.objectContaining({
       contextGraphId: CONTEXT_GRAPH_ID, phase: 'complete', stableReason: null,
-      appliedCatalogHeadDigest: newHead?.currentCatalogHeadDigest, appliedRowCount: '2', missingRowCount: '0',
+      appliedCatalogHeadDigest: newHead?.currentCatalogHeadDigest, appliedRowCount: '2', expectedRowCount: '2', missingRowCount: '0',
     }));
   }, 60_000);
 

@@ -830,7 +830,7 @@ describe('RFC-64 operational status: provider failure reporting', () => {
   });
 
   it.each(['current-sole-private-owner', 'older-owner-head', 'multi-member-private', 'public-curated'] as const)(
-    'requires current sole-author production evidence despite failed replay: %s', async (scenario) => {
+    'keeps applied inventory unverified after failed replay across owner and roster cases: %s', async (scenario) => {
     const accessPolicy = scenario === 'public-curated' ? 0 : 1;
     const contextGraphId = `${AUTHOR}/curated-owner-replay`;
     const edge = await startAgent({
@@ -941,20 +941,14 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     await edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
     const status = (await edge.readRfc64CatalogOperationalStatusV1())
       .find((row) => row.contextGraphId === contextGraphId);
-    if (scenario === 'current-sole-private-owner') {
-      expect(status).toMatchObject({
-        authorityState: 'accepted', phase: 'complete', appliedRowCount: '0',
-        expectedRowCount: '0', missingRowCount: '0', stableReason: null,
-      });
-      expect(status?.expectedCatalogHeadDigest).toBe(status?.appliedCatalogHeadDigest);
-      expect(status?.expectedInventoryDigest).toBe(status?.appliedInventoryDigest);
-    } else {
-      expect(status).toMatchObject({
-        authorityState: 'accepted', phase: 'unknown-freshness',
-        stableReason: 'catalog-replay-unverified', appliedRowCount: '0',
-        expectedRowCount: null, missingRowCount: null,
-      });
-    }
+    // A current locally produced head cannot rule out a successor signed on
+    // another node with the same owner key; none of these rosters proves freshness.
+    expect(status).toMatchObject({
+      authorityState: 'accepted', phase: 'unknown-freshness',
+      stableReason: 'catalog-replay-unverified', appliedRowCount: '0',
+      expectedRowCount: null, missingRowCount: null,
+      appliedCatalogHeadDigest: publication.headObjectDigest,
+    });
 
     localAgents.mockReturnValue([]);
     const unowned = (await edge.readRfc64CatalogOperationalStatusV1())
