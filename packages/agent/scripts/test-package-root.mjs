@@ -99,22 +99,30 @@ for (const [subpath, target] of Object.entries(packageExports)) {
     throw new Error(`internal export exception must remain blocked: ${subpath}`);
   }
 }
-const representativeInternalSpecifier =
-  '@origintrail-official/dkg-agent/dist/internal/context-graph-authority/' +
-  'context-graph-agent-gate-authority.js';
-try {
-  await import(representativeInternalSpecifier);
-  throw new Error(`internal module unexpectedly resolved: ${representativeInternalSpecifier}`);
-} catch (error) {
-  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-}
-try {
-  require.resolve(representativeInternalSpecifier);
-  throw new Error(
-    `internal module unexpectedly resolved via require: ${representativeInternalSpecifier}`,
-  );
-} catch (error) {
-  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+const emittedInternalModules = await listEmittedModules('internal', ['.js', '.d.ts', '.map']);
+if (emittedInternalModules.length === 0) throw new Error('internal module boundary has no emitted controls');
+for (const module of emittedInternalModules) {
+  const specifier = `@origintrail-official/dkg-agent/dist/internal/${module}`;
+  try {
+    await import(specifier);
+    throw new Error(`internal module unexpectedly imported: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  try {
+    require.resolve(specifier);
+    throw new Error(`internal module unexpectedly resolved via require: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  if (module.endsWith('.js')) {
+    try {
+      require(specifier);
+      throw new Error(`internal module unexpectedly required: ${specifier}`);
+    } catch (error) {
+      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+    }
+  }
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',
@@ -369,7 +377,7 @@ const blockedRfc64Modules = [
   'catalog-shadow-observability-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
-const emittedRfc64Modules = await listEmittedRfc64Modules();
+const emittedRfc64Modules = await listEmittedModules('rfc64');
 const classifiedRfc64Modules = new Set([
   ...publicRfc64Modules,
   ...blockedRfc64Modules,
@@ -429,17 +437,6 @@ for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.j
 
 // Decomposition must preserve historical entrypoints without publishing new helpers.
 const privateImplementationModules = [
-  'context-graph-binding-abort',
-  'context-graph-cache-invalidating-store',
-  'context-graph-meta-record-copy',
-  'context-graph-sync-abort',
-  'join-encryption-key-bundle',
-  'knowledge-asset-vm-publish-request',
-  'lifecycle-sync-policy',
-  'lifecycle-sync-result',
-  'local-private-member',
-  'storage-ack-owned-request',
-  'workspace-projected-delegatees',
   'confirmed-draft-version',
   'draft-artifact-gc',
   'finalize-draft-version',
@@ -469,8 +466,8 @@ for (const module of privateImplementationModules) {
   }
 }
 
-async function listEmittedRfc64Modules() {
-  const rootPath = fileURLToPath(new URL('../dist/rfc64/', import.meta.url));
+async function listEmittedModules(namespace, extensions = ['.js']) {
+  const rootPath = fileURLToPath(new URL(`../dist/${namespace}/`, import.meta.url));
   const pending = [rootPath];
   const modules = [];
   while (pending.length > 0) {
@@ -480,7 +477,7 @@ async function listEmittedRfc64Modules() {
       const entryPath = join(directory, entry.name);
       if (entry.isDirectory()) {
         pending.push(entryPath);
-      } else if (entry.isFile() && entry.name.endsWith('.js')) {
+      } else if (entry.isFile() && extensions.some(extension => entry.name.endsWith(extension))) {
         modules.push(relative(rootPath, entryPath).split(sep).join('/'));
       }
     }
