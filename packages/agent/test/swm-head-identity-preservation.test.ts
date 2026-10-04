@@ -931,7 +931,7 @@ describe('operation identity preservation (GH#2273)', () => {
     },
   );
 
-  it('a verified graph-backed KA receives its head inside the KA lock', async () => {
+  it.each(['materialized', 'absent'] as const)('does not recreate a graph-backed head retired after the KA lock (%s content)', async (content) => {
     // Graph-backed descriptors (publicSnapshotGraph, no publicSnapshotRef)
     // receive their bytes from the aggregate data phase under the canonical
     // per-KA assertion graph. V2 metadata deliberately carries no rootEntity,
@@ -957,6 +957,8 @@ describe('operation identity preservation (GH#2273)', () => {
       ],
     };
     const graphData = v1.payload.map((quad) => ({ ...quad, graph: v1.assertionGraph }));
+    if (content === 'materialized') await store.insert(graphData);
+    let retired = false;
     await makeSwmSyncHarness({
       ctx,
       contextGraphId: CG,
@@ -966,8 +968,16 @@ describe('operation identity preservation (GH#2273)', () => {
       fetchPage: async ({ phase }, fallback) => phase === 'data'
         ? { ...fallback, quads: graphData, nextOffset: graphData.length }
         : fallback,
+      afterKaWriteLock: async () => {
+        expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+          .toEqual(['"op-v1"']);
+        retired = true;
+        await store.deleteByPattern({ graph: WS_META, subject: v1.headSubject });
+        await store.deleteByPattern({ graph: WS_META, subject: v1.operationSubject });
+      },
     }).run();
+    expect(retired).toBe(true);
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-      .toEqual(['"op-v1"']);
+      .toEqual([]);
   });
 });

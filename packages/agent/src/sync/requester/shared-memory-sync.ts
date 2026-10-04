@@ -1222,6 +1222,10 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
                 // digest is an OLDER version of the same size and must be
                 // replaced, not skipped.
                 if (await snapshotMaterializer.isGraphAssetMaterialized(descriptor)) {
+                  // Verification is read-only and can outlive selected authority.
+                  // Admit the upcoming metadata/head commit only while current;
+                  // once a graph or head write starts, let its metadata finish.
+                  recoveryBoundary.assertCurrent();
                   if (deferOrdinaryRootToCatalogAuthority()) return;
                   if (
                     descriptor.subGraphName === undefined

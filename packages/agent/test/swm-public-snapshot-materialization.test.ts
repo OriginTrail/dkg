@@ -212,7 +212,7 @@ function harness(overrides: HarnessOverrides = {}) {
             getExcludedSubGraphNames: async () => [],
           }
         : {}),
-      ensureContextGraph: async () => {},
+      ensureContextGraph: async () => { events.push('context-ensured'); },
       storeInsert: async (quads) => {
         await overrides.onStoreInsert?.();
         events.push('meta-inserted');
@@ -620,6 +620,24 @@ describe('public SWM snapshot materialization', () => {
     expect(lockReleased).toBeGreaterThan(-1);
     expect(metaInserted).toBeGreaterThan(headSwapped);
     expect(metaInserted).toBeLessThan(lockReleased);
+  });
+
+  it('fences metadata-only writes when authority is revoked during healthy-head verification', async () => {
+    const revoked = new Error('selected-public recovery revoked during verification');
+    const controller = new AbortController();
+    let current = true;
+    const h = harness({
+      recoveryGuard: { signal: controller.signal, assertCurrent: () => { if (!current) throw revoked; } },
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: 'snapshot-materialization-op' }),
+      contentPresent: () => { current = false; controller.abort(revoked); return true; },
+    });
+    const summary = await h.run();
+    expect(h.events).toContain('content-checked');
+    expect(h.events).not.toContain('context-ensured');
+    expect(h.events).not.toContain('meta-inserted');
+    expect(h.headSwaps).toEqual([]);
+    expect(h.replaced).toEqual([]);
+    expect(summary.failedPhases).toBe(1);
   });
 
   it('finishes graph plus head metadata but fences later work when revoked mid-replacement', async () => {
