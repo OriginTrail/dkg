@@ -7,7 +7,7 @@ export const DKG = 'http://dkg.io/ontology/';
 export const SCHEMA = 'http://schema.org/';
 export const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
-/** Shared RDF model and Oxigraph-backed assertion tools; suites own manager construction. */
+/** Node-ui's chat RDF fixture, also consumed by CLI recovery; suites own manager construction. */
 export function createChatTurnStoreFixture(store: Pick<TripleStore, 'query' | 'insert'>) {
   const tools = {
     query: (sparql: string) => store.query(sparql.replace(/\bWHERE\b/, `FROM <${GRAPH}> WHERE`)),

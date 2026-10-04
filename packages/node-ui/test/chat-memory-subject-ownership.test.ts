@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ChatMemoryManager } from '../src/chat-memory.js';
 import { OxigraphStore } from '../../storage/src/adapters/oxigraph.js';
 
-import { GRAPH, CHAT, DKG, RDF_TYPE, createChatTurnStoreFixture } from '../../../test-systems/fixtures/chat-turn-store.js';
+import { GRAPH, CHAT, DKG, RDF_TYPE, createChatTurnStoreFixture } from './helpers/chat-turn-store.js';
 
 async function fixture() {
   const store = new OxigraphStore();

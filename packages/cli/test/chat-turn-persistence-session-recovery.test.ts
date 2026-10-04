@@ -4,7 +4,7 @@ import { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { persistDurableChatTurn } from '../src/daemon/chat-turn-persistence.js';
 
-import { GRAPH, CHAT, DKG, SCHEMA, createChatTurnStoreFixture } from '../../../test-systems/fixtures/chat-turn-store.js';
+import { GRAPH, CHAT, DKG, SCHEMA, createChatTurnStoreFixture } from '../../node-ui/test/helpers/chat-turn-store.js';
 
 async function fixture() {
   const store = new OxigraphStore();
