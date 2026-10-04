@@ -748,12 +748,20 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
       /** Read-only gates may consume the finalized snapshot; defaults to `live-current`. */
       authorityReadMode?: ContextGraphAuthorityReadMode;
+      /**
+       * Receives the decision the answer is taken from, for a caller that has
+       * to tell a denial from an authority source that could not answer.
+       */
+      onReadAuthorityDecision?: (decision: ContextGraphReadAuthorityDecision) => void;
     } = {},
   ): Promise<boolean> {
-    return (await withRpcUsageSite(
+    const { onReadAuthorityDecision, ...readOpts } = opts;
+    const decision = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.canRead,
-      () => this.resolveContextGraphReadAuthority(contextGraphId, opts),
-    )).outcome === 'allowed';
+      () => this.resolveContextGraphReadAuthority(contextGraphId, readOpts),
+    );
+    onReadAuthorityDecision?.(decision);
+    return decision.outcome === 'allowed';
   }
 
   /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */
