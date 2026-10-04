@@ -220,6 +220,47 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     await dispatcher.closeAndDrain();
   });
 
+  it('retries only an observed incomplete private replay after authority acceptance', async () => {
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1();
+    const replay = vi.fn()
+      .mockResolvedValueOnce(Object.freeze({ requested: 1, failed: 0 }))
+      .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
+    const status = vi.fn()
+      .mockReturnValueOnce({ failed: false, unverified: true })
+      .mockReturnValueOnce({ failed: false, unverified: false });
+    const scheduleAcceptedRecovery = (
+      Rfc64CatalogMethods.prototype as unknown as {
+        scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+          contextGraphId: string,
+          policyDigest: string,
+          options?: { retryIncompletePrivate?: boolean },
+        ): void;
+      }
+    ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+    const host = {
+      rfc64BackgroundWorkDispatcherV1: dispatcher,
+      promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
+      requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
+    };
+
+    scheduleAcceptedRecovery.call(
+      host,
+      'private-cg',
+      `0x${'55'.repeat(32)}`,
+      { retryIncompletePrivate: true },
+    );
+    await dispatcher.whenIdle();
+    expect(replay).toHaveBeenCalledTimes(2);
+
+    replay.mockClear();
+    status.mockReturnValue({ failed: false, unverified: true });
+    scheduleAcceptedRecovery.call(host, 'public-cg', `0x${'66'.repeat(32)}`);
+    await dispatcher.whenIdle();
+    expect(replay).toHaveBeenCalledOnce();
+    await dispatcher.closeAndDrain();
+  });
+
   it('retries an answered replay whose promised catalog rows are still missing', async () => {
     vi.useFakeTimers();
     try {

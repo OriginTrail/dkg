@@ -316,6 +316,97 @@ describe('ContextGraphMetaProjection', () => {
     expect(unseenBefore.assertCurrent()).toBe(false);
   });
 
+  it('rebuilds a cached record on request without advancing either authority revision', async () => {
+    const store = new OxigraphStore();
+    const projection = new ContextGraphMetaProjection(store);
+    const id = 'projection-fresh-read';
+    const member = '0x00000000000000000000000000000000000000aa';
+    const policyQuad: Quad = {
+      subject: contextGraphDataUri(id),
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"private"',
+      graph: contextGraphMetaGraphUri(id),
+    };
+    await store.insert([policyQuad]);
+    expect((await projection.get(id)).allowedAgents).toEqual([]);
+
+    // This fixture's bare store reports nothing to the projection, so the
+    // cached record is stale from here on.
+    await store.insert([{ ...policyQuad, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${member}"` }]);
+    expect((await projection.get(id)).allowedAgents).toEqual([]);
+
+    const nodeWide = projection.readAuthorityFactsRevision;
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(id);
+    projection.requireFreshRead(id);
+    expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).toBe(perGraph);
+    expect((await projection.get(id)).allowedAgents).toEqual([member]);
+
+    // A reported change still moves both revisions after a fresh-read request.
+    projection.markDirty(id);
+    expect(projection.readAuthorityFactsRevision).toBe(nodeWide + 1);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).not.toBe(perGraph);
+    const afterOwnChange = projection.readContextGraphAuthorityFactsRevision(id);
+    projection.markAllDirty();
+    expect(projection.readAuthorityFactsRevision).toBe(nodeWide + 2);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).not.toBe(afterOwnChange);
+    await store.close();
+  });
+
+  it('leaves a graph it holds no record of untouched by a fresh-read request', async () => {
+    const store = new OxigraphStore();
+    const projection = new ContextGraphMetaProjection(store);
+    const id = 'projection-fresh-read-unknown';
+    const nodeWide = projection.readAuthorityFactsRevision;
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(id);
+
+    projection.requireFreshRead(id);
+
+    expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).toBe(perGraph);
+    expect((projection as unknown as { entries: Map<string, unknown> }).entries.has(id)).toBe(false);
+    expect((await projection.get(id)).declared).toBe(false);
+    await store.close();
+  });
+
+  it('supersedes an in-flight rebuild on a fresh-read request, as an invalidation does', async () => {
+    let releaseFirstQuery!: () => void;
+    const firstQuery = new Promise<void>((resolve) => { releaseFirstQuery = resolve; });
+    let queryCalls = 0;
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const store = {
+      async query(sparql: string) {
+        queryCalls += 1;
+        const callNumber = queryCalls;
+        if (callNumber === 1) await firstQuery;
+        if (callNumber <= 4) return { type: 'bindings', bindings: [] };
+        if (sparql.includes(`<${agentsGraph}>`)) {
+          return {
+            type: 'bindings',
+            bindings: [{ p: DKG_ONTOLOGY.DKG_ACCESS_POLICY, o: '"private"' }],
+          };
+        }
+        return { type: 'bindings', bindings: [] };
+      },
+    } as unknown as TripleStore;
+    const projection = new ContextGraphMetaProjection(store);
+    const id = 'projection-inflight-fresh-read';
+
+    const first = projection.get(id);
+    const nodeWide = projection.readAuthorityFactsRevision;
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(id);
+    projection.requireFreshRead(id);
+    const afterRequest = projection.get(id);
+    releaseFirstQuery();
+
+    expect((await first).accessPolicy).toBeUndefined();
+    expect((await afterRequest).accessPolicy).toBe('private');
+    // The superseded rebuild is not kept as the clean cached value either.
+    expect((await projection.get(id)).accessPolicy).toBe('private');
+    expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).toBe(perGraph);
+  });
+
   it('rebuilds for callers that arrive after invalidation during an in-flight rebuild', async () => {
     let releaseFirstQuery!: () => void;
     const firstQuery = new Promise<void>((resolve) => { releaseFirstQuery = resolve; });

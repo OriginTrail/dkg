@@ -313,7 +313,8 @@ export class ContextGraphMetaProjection {
       .then((record) => {
         entry.value = record;
         entry.inflight = undefined;
-        entry.dirty = entry.invalidationVersion !== rebuildVersion;
+        // A fresh-read request during the rebuild leaves the version as it is.
+        entry.dirty ||= entry.invalidationVersion !== rebuildVersion;
         this.entries.set(contextGraphId, entry);
         return record;
       })
@@ -338,6 +339,16 @@ export class ContextGraphMetaProjection {
       return;
     }
     this.entries.set(contextGraphId, { dirty: true, invalidationVersion: 1 });
+  }
+
+  /**
+   * Rebuild this graph's cached record on its next read without reporting a
+   * change of authority facts, for a caller that wrote nothing itself: no
+   * authority-facts revision advances. Supersedes a rebuild in flight.
+   */
+  requireFreshRead(contextGraphId: string): void {
+    const existing = this.entries.get(contextGraphId);
+    if (existing) existing.dirty = true;
   }
 
   /**
