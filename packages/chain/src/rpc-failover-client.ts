@@ -18,6 +18,9 @@
  * That is pure ordering — it only decides which endpoint each loop TRIES FIRST;
  * it never signs, never gates a broadcast, never re-orders the tx-safety
  * guards, and every loop still falls through to the full endpoint set. The
+ * read loop keeps one more piece of ordering state beside it, of the same
+ * kind: which endpoint refused which read (`EndpointReadRefusals`, see
+ * endpoint-read-refusals.ts), so that read starts at the others. The
  * module never references the adapter; it is constructed with two required
  * capabilities and one optional per-endpoint transport preflight:
  *   1. `getEndpoints()` — a LIVE thunk over the RPC endpoints, each a
@@ -60,6 +63,7 @@ import {
   rpcHost,
 } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
+import { EndpointReadRefusals, isEndpointPolicyRefusal } from './endpoint-read-refusals.js';
 import {
   ChainRpcTransportError,
   RpcEndpointsExhaustedError,
@@ -312,9 +316,14 @@ export function resolveCapMs(policy: ReadPolicy, providerCount: number): number 
 }
 
 export class RpcFailoverClient {
-  /** Transport-ordering preference state machine — the ONLY mutable state this
-   *  module owns (see SAFETY BOUNDARY + endpoint-stickiness.ts). */
+  /** Transport-ordering preference state machine (see SAFETY BOUNDARY +
+   *  endpoint-stickiness.ts). With `readRefusals` below, the only mutable state
+   *  this module owns, and both only order the endpoints of a pass. */
   private readonly stickiness: EndpointStickiness;
+  /** Which endpoint refused which read (see endpoint-read-refusals.ts). */
+  private readonly readRefusals: EndpointReadRefusals;
+  /** The stickiness kill switch: off means every pass uses the configured order. */
+  private readonly endpointOrderingEnabled: () => boolean;
   /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
   private readonly validateEndpoint?: ValidateEndpointFn;
   private readonly readThrottleRetries: number;
@@ -344,6 +353,8 @@ export class RpcFailoverClient {
       isEnabled,
       onEstablished: (url) => notePreferredEndpoint('rpc failover', url),
     });
+    this.readRefusals = new EndpointReadRefusals({ now: stickiness?.now ?? Date.now });
+    this.endpointOrderingEnabled = isEnabled;
   }
 
   /**
@@ -869,7 +880,14 @@ export class RpcFailoverClient {
     // binding its endpoint + outcome recorders. Same members, possibly reordered —
     // so the cap/exhaustion contract stays canonical while only the try-order changes.
     const canonical = this.getEndpoints();
-    const attempts = this.stickiness.attempts(canonical, options.intent);
+    const preferredFirst = this.stickiness.attempts(canonical, options.intent);
+    // A read that an endpoint has refused by policy starts at the others; the
+    // refusing endpoint stays in the pass, last. Each entry keeps the outcome
+    // recorders it was bound with, so the preference moves exactly as it does
+    // without this. A tip-sensitive read keeps the configured order, as it does
+    // under stickiness, and so does every read when ordering is switched off.
+    const remembersRefusals = options.intent !== 'transparentRead' && this.endpointOrderingEnabled();
+    const attempts = remembersRefusals ? this.readRefusals.order(label, preferredFirst) : preferredFirst;
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let lastRetryable: unknown;
     let allEndpointsThrottled = true;
@@ -929,6 +947,9 @@ export class RpcFailoverClient {
         if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!options.isRetryable(err)) throw err;
         lastRetryable = err;
+        if (remembersRefusals && isEndpointPolicyRefusal(err)) {
+          this.readRefusals.record(label, endpoint.rpcUrl);
+        }
         if (!isThrottleRpcError(err)) {
           allEndpointsThrottled = false;
         } else {
