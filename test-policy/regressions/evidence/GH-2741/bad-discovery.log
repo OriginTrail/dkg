@@ -1,0 +1,6 @@
+[
+  {
+    "name": "Random Sampling proof-time exact repair on the real libp2p peer store > fetches the challenged asset from a provider the peer store lists as sync-capable",
+    "file": "/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/bad/packages/agent/test/regression-peer-store-repair.test.ts"
+  }
+]

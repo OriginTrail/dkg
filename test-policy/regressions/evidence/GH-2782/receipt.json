@@ -1,0 +1,454 @@
+{
+  "schemaVersion": 1,
+  "caseId": "GH-2782",
+  "method": "historical-replay",
+  "status": "proven",
+  "requestedBadRef": "v10.0.19",
+  "patch": null,
+  "identity": {
+    "packages/agent/test/regression-on-demand-cursor.test.ts": "fb9556de0e3e9a760b151bbda35fa123faecf520425ddd960d29dc16a7938058",
+    "scripts/qa-prove-regression.mjs": "fe208ec75be58f2591ee2b5779e228d9b535004b088a4bda7b4519a850bac4af",
+    "scripts/lib/regressions/profiles.mjs": "93b5bae25b98c3d27a9bacf7f1391035a1c74c27ae5621214bc96c7b7233d1b3",
+    "scripts/lib/regressions/results.mjs": "314d65918ccfb6fe1589812e3fd8fdbca5bb9aec9751360fd6fe6109fc2e82ea",
+    "scripts/lib/regressions/identity.mjs": "ad62c73658c50098dc5a7e9e980af05b73d0465c6d52157f8cde639aafa360ec",
+    "scripts/lib/regressions/proof.mjs": "f58a6bba0fbaecf7f5136c5c5c2ee0f0f372a3fb083b7f815ea39f3c3bdb1474"
+  },
+  "toolchain": {
+    "node": "v22.23.2",
+    "executable": "/Users/aleatoric/.nvm/versions/node/v22.23.2/bin/node",
+    "nodeSha256": "18e387c90ab8a8400183e8bdd396376e1e875b91b4c874b894dcade7b35bf572",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "overlay": [
+    {
+      "file": "packages/agent/test/regression-on-demand-cursor.test.ts",
+      "sha256": "fb9556de0e3e9a760b151bbda35fa123faecf520425ddd960d29dc16a7938058"
+    }
+  ],
+  "phases": [
+    {
+      "side": "bad",
+      "name": "pnpm-version",
+      "command": "pnpm",
+      "args": [
+        "--version"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "bad",
+      "name": "install",
+      "command": "pnpm",
+      "args": [
+        "install",
+        "--frozen-lockfile"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "bad",
+      "name": "build",
+      "command": "pnpm",
+      "args": [
+        "-r",
+        "--filter",
+        "@origintrail-official/dkg-agent^...",
+        "--filter",
+        "!@origintrail-official/dkg-evm-module",
+        "run",
+        "build"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "bad",
+      "name": "discovery",
+      "command": "pnpm",
+      "args": [
+        "--dir",
+        "packages/agent",
+        "exec",
+        "vitest",
+        "list",
+        "--config",
+        "vitest.regression-replay.config.mts",
+        "test/regression-on-demand-cursor.test.ts",
+        "--json"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "bad",
+      "name": "execution",
+      "command": "pnpm",
+      "args": [
+        "--dir",
+        "packages/agent",
+        "exec",
+        "vitest",
+        "run",
+        "--config",
+        "vitest.regression-replay.config.mts",
+        "test/regression-on-demand-cursor.test.ts",
+        "-t",
+        "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
+        "--reporter=json",
+        "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/bad-report.json"
+      ],
+      "code": 1,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "pnpm-version",
+      "command": "pnpm",
+      "args": [
+        "--version"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "install",
+      "command": "pnpm",
+      "args": [
+        "install",
+        "--frozen-lockfile"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "build",
+      "command": "pnpm",
+      "args": [
+        "-r",
+        "--filter",
+        "@origintrail-official/dkg-agent^...",
+        "--filter",
+        "!@origintrail-official/dkg-evm-module",
+        "run",
+        "build"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "discovery",
+      "command": "pnpm",
+      "args": [
+        "--dir",
+        "packages/agent",
+        "exec",
+        "vitest",
+        "list",
+        "--config",
+        "vitest.unit.config.ts",
+        "test/regression-on-demand-cursor.test.ts",
+        "--json"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "execution",
+      "command": "pnpm",
+      "args": [
+        "--dir",
+        "packages/agent",
+        "exec",
+        "vitest",
+        "run",
+        "--config",
+        "vitest.unit.config.ts",
+        "test/regression-on-demand-cursor.test.ts",
+        "-t",
+        "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
+        "--reporter=json",
+        "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/candidate/candidate-report.json"
+      ],
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    }
+  ],
+  "cleanup": {
+    "candidate": "removed",
+    "bad": "removed"
+  },
+  "bad": {
+    "source": {
+      "commit": "42d7a9259ec2dd255e3257c95859c07e861d923d",
+      "tree": "b799f94a56b8c3ec8eed4949b9b498fec5a3d6cd",
+      "lockfileSha256": "88b380272fabd355f8dff04c160f333d867beb25d9cac4c7dd9ca1662bce6e08",
+      "packageManager": "pnpm@10.28.1",
+      "nodeRequirement": "22"
+    },
+    "config": {
+      "file": "packages/agent/vitest.regression-replay.config.mts",
+      "sha256": "c9f5f4d6730810e77f786e168532af2eed36d5e376323b1f07d9bf32dc30b6c3",
+      "purpose": "minimal historical test-only config; no global setup"
+    },
+    "pnpmVersion": "10.28.1",
+    "execution": {
+      "file": "packages/agent/test/regression-on-demand-cursor.test.ts",
+      "assertion": "VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write",
+      "status": "failed",
+      "runtime": "v22.23.2",
+      "observation": {
+        "error": "Cannot acknowledge join approval for \"on-demand-pending\": durable subscription intent or host state is missing",
+        "fetched": [],
+        "localCount": 19,
+        "steps": [],
+        "current": false,
+        "watermark": 0,
+        "subscriptionWatermark": 0,
+        "saves": 0,
+        "rows": 0,
+        "sameSubscription": true
+      },
+      "diagnostic": "AssertionError: GH-2782: unsaved subscription converges without durable membership: expected { …(10) } to deeply equal { error: null, …(9) }\n    at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/agent/test/regression-on-demand-cursor.test.ts:88:92\n    at file:///private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
+    },
+    "reportRoot": "/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad",
+    "dependencyInputs": {
+      ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
+      "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+      "ccl_v0_1/package.json": "0b794c79cb9d6be1356b5048326576fee04c28b6bb65be5508d6551a1d250600",
+      "demo/package.json": "b0179c05564c4e88ecb51e0b49e67ba552a794f23a141a5214295e05f8070964",
+      "devnet/_bootstrap/package.json": "d6491fd3e9a221e794d6b20e831ca0f29cb7aae0dec4f70729d9d8eee1e20208",
+      "devnet/ack-candidate-isolation/package.json": "9e69f23593816d7758f2f4f36f481f580369d57ac85f5eae10023f5a169652b1",
+      "devnet/agent-provenance/package.json": "d2d6af7c5585de56464a6cbb6d6de0ca557f06a928efa7c307311cc5a478345f",
+      "devnet/conviction-emission-bell/package.json": "014225aeed39c79c8474b306a69bb1a832c74b16528f3fdd280d4aba7b460719",
+      "devnet/core-peers-features/package.json": "9590ff8e170b5e456f3f6a78ba36562a8dc0bfb3e397fdf7f62a15f3b3329159",
+      "devnet/edge-update-flow/package.json": "32e6242cfe92830e7c90d5ea3f24c04d4e2ff8810f184232c5ffa7deb14e8129",
+      "devnet/greenfield-10min/package.json": "b1d57d1846cc9a73a073a4f8e074996dfb234afedfa9e3f9d19a5b38f117ab9a",
+      "devnet/issue-2052-system-records/package.json": "3f48adbd175fc208c6622d033f1316dc55f71e9034c4274e2532dea05adce7a6",
+      "devnet/ka-lifecycle-cli/package.json": "1ecbb93c48aea6b78a7f3c910bb41a86cd94eb2133312ee7de1dd4f03db4a453",
+      "devnet/mixed-version/package.json": "1bdafd885357519f5d0181a9f532e4c1be4101c442f5b28eb4a43ea6d9fabeb3",
+      "devnet/pr1366-pca-deposit-waiver/package.json": "563dcb4eba915263f5942d5397039ec6be65c644441c545c0275277c1d868f03",
+      "devnet/pr1369-folded-private-ack/package.json": "52703d76a56b13c96cba9114dce0f57cef93fa520ec0b23d236950c63b9e0541",
+      "devnet/pr1370-admin-op-wallet/package.json": "d30f719eb316f9536dd43400cc310cfd330fdec7952d7f86a19da0271dbd4783",
+      "devnet/pr1384-preserve-agents-on-transfer/package.json": "a2f74cec9bf4a54c596e1dcff6883347c95844fa4b936ef70c2b9ed3262604d4",
+      "devnet/pr1385-subgraph-rs/package.json": "c515ca43a6bcad986a7a7ba9e605aa8276779ac6c0af00bf17b1eb24f129f65e",
+      "devnet/pr1386-term-canon/package.json": "bd0fe9451061be8a4ef57b584a89e8a79c1af742b38a72d16008652e68dd8689",
+      "devnet/pr1387-bulk-register-agents/package.json": "30b59ceb53b48d2bae5bd2da04b902a831989e336ac4f4a3e7cd35a87f3fc88c",
+      "devnet/pr1388-okf-integration/package.json": "21662e362670b487be9c0a9bf24c7b29d19fe7a8651a4d51c801c2e02f651e5c",
+      "devnet/rfc51-publishing-allocation/package.json": "97a621f51e1cf4f32566c4906af83afd8281cda2f9ee5c4d89241cf03f37bd8d",
+      "devnet/rfc64-cp1-private-swm-recovery/package.json": "faed3b9028501a4582d2213ac1228e1d7b6c225a6a403fe36ae60b28937cd470",
+      "devnet/rfc64-cp1-public-swm-parity/package.json": "3627b49d3708194b5bc246b46a3d82ca5876574521680cc7ef866ed6688ddc21",
+      "devnet/rfc64-cp2-private-swm-vm-recovery/package.json": "704b1d7c53999de1563b0d4c3e55e4abd5d2ba96f91a5a16ec959182101d1a42",
+      "devnet/rfc64-cp3-private-provider-failover/package.json": "96d8dd19d06f17c9544542d78bbdbe215350e6875d2c3266c40b9edd37a67ad5",
+      "devnet/rfc64-gate1-public-open/package.json": "c5de8a849dd750d42461fe30246e4cc3b0b31a89aa07714ba480870f7bc4a403",
+      "devnet/rfc64-gate2-multi-asset-completeness/package.json": "8410b9bd46e34ea1feea541ad5543a962e034310a5c446b0b2a6248407697703",
+      "devnet/rfc64-m0-public-baseline/package.json": "9b33ca27563225f6633495946d1fa621e48964d1e2df1f5d34d4eb5be0882e29",
+      "devnet/rfc64-persistence-lifecycle/package.json": "c226db08f5c6ca0118c3a010779e37a393976bdf1952752e39dc2a9fbe4f7f53",
+      "devnet/rich-scenario/package.json": "99847b1238e2943c196c4a69c8acf8929f5b229f77e96f5292eab19bf9cc5601",
+      "devnet/rpc-quiet-window/package.json": "2536cbe64acfadc181735ced6af91ee56812802e939a359709326774326428c7",
+      "devnet/storage-ack-store-outage/package.json": "1bcf75e75c3fb0e43c4971905cdd96652863f36685f65bbe2df5707157547231",
+      "devnet/v10-core-flows/package.json": "95b61ac940d249a157fceb64d1ccaa621dab6299fb609788916be9c251e447ff",
+      "devnet/v10-end-to-end/package.json": "a1fd0ae1456212364a3f39165c044deadae95eabdb2a5cc866f5a018497292b7",
+      "devnet/v10-rs-prune/package.json": "cbb131e6dc76445dcffd07eca7c442f62a169ffbf74ef69e0e423c065e2945ad",
+      "devnet/v10-rs-wallet-rotation/package.json": "34df462f1e6fa8d9de93b958feabb5fc5e6ce5d8636733f53a6f961379e83fdb",
+      "devnet/v10-stress/package.json": "b71aa01a06219af67f95f00a70b7cd032d56a51dc19755e36c836727d5757136",
+      "package.json": "397c06bbb0ebc6244cc7ab693c21e20f4017533af14e349a9b6d73805f911f60",
+      "packages/adapter-elizaos/package.json": "d3f04132d38cb5830e8d0e916b24e2ea0f641e6cf49c96ec0bde8346c39d0836",
+      "packages/adapter-hermes/package.json": "bc9ace56df9bc92a6d5ded678052e9078f18633248e8f66bf41d6c945d97e4d9",
+      "packages/adapter-openclaw/package.json": "2c6db91f3833b5a11c81e6eea93d9b96066a6dedf36dfd57e9da344afa72600a",
+      "packages/adapter-prime-agent/package.json": "e66e3c322c807340a5154e0b1bfca2b19a56ba1030bd209475ed69132253eb88",
+      "packages/agent/package.json": "399ddc03156a9f670ef77305eb9c0e6e6d4bf8c4e50c90ea8b9ed3b80fa7b64c",
+      "packages/chain/package.json": "52971eb4595bf7caeb41d24a73f41fa0a0fa6899b552e9316c603205424b879c",
+      "packages/cli/package.json": "6e0a94611bdb54e08e0cd0ed1d0057021cfe6c5dd26aa139ed21c9c1101dd47e",
+      "packages/cli/test-fixtures/sample-kafka-extension/package.json": "385af6e9924ccf88b806cb843df075fdcce4a6825b933d1de01de974d8cba034",
+      "packages/cli/test-fixtures/sample-kafka-plugin/package.json": "03a5d7347c2662b2eefdbaeee5431527b7e688374ee3204a137c0680530e602c",
+      "packages/core/package.json": "3e1a3962e3979f75c13bc61ca9eba8524ea5992773e5832b320943f9add4449a",
+      "packages/epcis/package.json": "5b44e7959f4b11673b537f6d57569d913c3975fc79984574d27a06a55ab8e219",
+      "packages/evm-module/package.json": "a8fa86eb92d91d28acbb36db13b3d0f6373aec5d2d8e1f9b411e6d09f84bfc35",
+      "packages/graph-viz/package.json": "c36cfcb49fa2076ecb040fd53826ad8eca4a80adb7bc5a83df9a45e357bb9b5e",
+      "packages/http-utils/package.json": "c367f5fb97bec00eed76b87669d3d05b7610f639602f73364f538a3c01bc49e9",
+      "packages/kafka-plugin/package.json": "8a80b6c5567bc61f838aabab9155f2041cc66fb812d3c10f26afaf61b9cf5d26",
+      "packages/local-llm/package.json": "b3ca8bb12f79376cead906871746b51fe80c6a1a391c8c6fa0a8ef48d98b83cd",
+      "packages/mcp-dkg/package.json": "07a8497bee106e3900018618773bb470c5761d747ae91dc9854a188494eab14b",
+      "packages/network-sim/package.json": "9cdbfe1e4e158de492e2425e9adde97c283133ea0e15f87ef60292006a7f9fe9",
+      "packages/node-ui/package.json": "62150795ab3ef6000fe6b7cfd6e124c214515cd5b25711bccf770232a5a14627",
+      "packages/okf/package.json": "8e1c1dacf83ac1f04f624d3e9f7c245b1a515e5f12a830b6d711953c97135a10",
+      "packages/publisher/package.json": "597ebec6e3c41b3c52f2a0cc4a8399446fc5156a3cda14d38303e132877cf2eb",
+      "packages/query/package.json": "3e4fcc19ae1ef29ee9562ade23572352aa310cde2fa9e020805d0373af652cfa",
+      "packages/random-sampling/package.json": "e7a04b9cd81df9544c3620d79ca70b70fd73025af804c502489e81bd94a4cdea",
+      "packages/rdf-utils/package.json": "c5ad5a9829aae4da1c752eeeaccbd0cc9ccbbdcfe15568091d38e4d7b49a9c25",
+      "packages/storage/package.json": "776345c09beb21d907befc27282077f2d0875ea3a1ad5340cece4714f1d94806",
+      "patches/hardhat@2.28.6.patch": "0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9",
+      "pnpm-workspace.yaml": "e3fbb1107dcfe8ec290003a9b968e1e89711da4bee90a71098129d69ee6de9c7",
+      "scripts/testing/package.json": "d02836298858858f52f01f58c6afc45f02db04d86adad0fb3bba92ed1abb53f0",
+      "test-systems/package.json": "d02836298858858f52f01f58c6afc45f02db04d86adad0fb3bba92ed1abb53f0"
+    }
+  },
+  "candidate": {
+    "source": {
+      "commit": "6218e803d43a6ff8f9e51d309f00bae293ecb741",
+      "tree": "019bf142cfb8a22e84f57e6135c67077eb39fae4",
+      "lockfileSha256": "11309f3bf44b0484d0d358555fab3a964114259e67d63cbcce4482704fe91c99",
+      "packageManager": "pnpm@10.28.1",
+      "nodeRequirement": "22"
+    },
+    "config": {
+      "file": "packages/agent/vitest.unit.config.ts",
+      "sha256": "5796c4da50dd54dcb58f4d92ab687aa10581bc6fdf0bb271655d78111f95ace7",
+      "purpose": "normal required unit lane config"
+    },
+    "pnpmVersion": "10.28.1",
+    "execution": {
+      "file": "packages/agent/test/regression-on-demand-cursor.test.ts",
+      "assertion": "VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write",
+      "status": "passed",
+      "runtime": "v22.23.2",
+      "observation": {
+        "error": null,
+        "fetched": [
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "localCount": 25,
+        "steps": [
+          [
+            0,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            6,
+            25
+          ]
+        ],
+        "current": true,
+        "watermark": 25,
+        "subscriptionWatermark": 25,
+        "saves": 0,
+        "rows": 0,
+        "sameSubscription": true
+      },
+      "diagnostic": null
+    },
+    "reportRoot": "/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/candidate",
+    "dependencyInputs": {
+      ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
+      "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+      "demo/package.json": "b0179c05564c4e88ecb51e0b49e67ba552a794f23a141a5214295e05f8070964",
+      "devnet/_bootstrap/package.json": "d6491fd3e9a221e794d6b20e831ca0f29cb7aae0dec4f70729d9d8eee1e20208",
+      "devnet/ack-candidate-isolation/package.json": "9e69f23593816d7758f2f4f36f481f580369d57ac85f5eae10023f5a169652b1",
+      "devnet/agent-provenance/package.json": "d2d6af7c5585de56464a6cbb6d6de0ca557f06a928efa7c307311cc5a478345f",
+      "devnet/agent-restart-gossip/package.json": "8702ab0bfaffe876e0c482fa790e94e4a1cac0afe0f9f5da290e08d9f7978a55",
+      "devnet/conviction-emission-bell/package.json": "014225aeed39c79c8474b306a69bb1a832c74b16528f3fdd280d4aba7b460719",
+      "devnet/core-peers-features/package.json": "9590ff8e170b5e456f3f6a78ba36562a8dc0bfb3e397fdf7f62a15f3b3329159",
+      "devnet/edge-update-flow/package.json": "32e6242cfe92830e7c90d5ea3f24c04d4e2ff8810f184232c5ffa7deb14e8129",
+      "devnet/greenfield-10min/package.json": "b1d57d1846cc9a73a073a4f8e074996dfb234afedfa9e3f9d19a5b38f117ab9a",
+      "devnet/issue-2052-system-records/package.json": "3f48adbd175fc208c6622d033f1316dc55f71e9034c4274e2532dea05adce7a6",
+      "devnet/ka-lifecycle-cli/package.json": "1ecbb93c48aea6b78a7f3c910bb41a86cd94eb2133312ee7de1dd4f03db4a453",
+      "devnet/mixed-version/package.json": "1bdafd885357519f5d0181a9f532e4c1be4101c442f5b28eb4a43ea6d9fabeb3",
+      "devnet/node-store-persistence/package.json": "8527800eae57404795502bd52ff86ebbce0f89362f48b9c66353aecbbadd039e",
+      "devnet/pr1366-pca-deposit-waiver/package.json": "563dcb4eba915263f5942d5397039ec6be65c644441c545c0275277c1d868f03",
+      "devnet/pr1369-folded-private-ack/package.json": "52703d76a56b13c96cba9114dce0f57cef93fa520ec0b23d236950c63b9e0541",
+      "devnet/pr1370-admin-op-wallet/package.json": "d30f719eb316f9536dd43400cc310cfd330fdec7952d7f86a19da0271dbd4783",
+      "devnet/pr1384-preserve-agents-on-transfer/package.json": "a2f74cec9bf4a54c596e1dcff6883347c95844fa4b936ef70c2b9ed3262604d4",
+      "devnet/pr1385-subgraph-rs/package.json": "c515ca43a6bcad986a7a7ba9e605aa8276779ac6c0af00bf17b1eb24f129f65e",
+      "devnet/pr1386-term-canon/package.json": "bd0fe9451061be8a4ef57b584a89e8a79c1af742b38a72d16008652e68dd8689",
+      "devnet/pr1387-bulk-register-agents/package.json": "30b59ceb53b48d2bae5bd2da04b902a831989e336ac4f4a3e7cd35a87f3fc88c",
+      "devnet/pr1388-okf-integration/package.json": "21662e362670b487be9c0a9bf24c7b29d19fe7a8651a4d51c801c2e02f651e5c",
+      "devnet/public-cg-hash-subscription/package.json": "a289015a00fe19cb94805237e96c21116235e5cb7bbf7a4f653a9d39e91425ae",
+      "devnet/rfc51-publishing-allocation/package.json": "97a621f51e1cf4f32566c4906af83afd8281cda2f9ee5c4d89241cf03f37bd8d",
+      "devnet/rfc64-cp1-private-swm-recovery/package.json": "faed3b9028501a4582d2213ac1228e1d7b6c225a6a403fe36ae60b28937cd470",
+      "devnet/rfc64-cp1-public-swm-parity/package.json": "3627b49d3708194b5bc246b46a3d82ca5876574521680cc7ef866ed6688ddc21",
+      "devnet/rfc64-cp2-private-swm-vm-recovery/package.json": "704b1d7c53999de1563b0d4c3e55e4abd5d2ba96f91a5a16ec959182101d1a42",
+      "devnet/rfc64-cp3-private-provider-failover/package.json": "96d8dd19d06f17c9544542d78bbdbe215350e6875d2c3266c40b9edd37a67ad5",
+      "devnet/rfc64-gate1-public-open/package.json": "c5de8a849dd750d42461fe30246e4cc3b0b31a89aa07714ba480870f7bc4a403",
+      "devnet/rfc64-gate2-multi-asset-completeness/package.json": "8410b9bd46e34ea1feea541ad5543a962e034310a5c446b0b2a6248407697703",
+      "devnet/rfc64-m0-public-baseline/package.json": "9b33ca27563225f6633495946d1fa621e48964d1e2df1f5d34d4eb5be0882e29",
+      "devnet/rfc64-persistence-lifecycle/package.json": "c226db08f5c6ca0118c3a010779e37a393976bdf1952752e39dc2a9fbe4f7f53",
+      "devnet/rich-scenario/package.json": "99847b1238e2943c196c4a69c8acf8929f5b229f77e96f5292eab19bf9cc5601",
+      "devnet/rpc-quiet-window/package.json": "2536cbe64acfadc181735ced6af91ee56812802e939a359709326774326428c7",
+      "devnet/snapshot-finalized-cleanup/package.json": "ada0d68d7cf791da0e1ece5cbc299e39fa55e6adc4aae6784adbeb2aa12e68a0",
+      "devnet/storage-ack-store-outage/package.json": "1bcf75e75c3fb0e43c4971905cdd96652863f36685f65bbe2df5707157547231",
+      "devnet/subscription-persist-restart/package.json": "85be60fd7a78f5a49e6ab3cd188803a2071b16d2699bb1a5f03e1132dfae0d07",
+      "devnet/v10-core-flows/package.json": "95b61ac940d249a157fceb64d1ccaa621dab6299fb609788916be9c251e447ff",
+      "devnet/v10-end-to-end/package.json": "a1fd0ae1456212364a3f39165c044deadae95eabdb2a5cc866f5a018497292b7",
+      "devnet/v10-rs-prune/package.json": "cbb131e6dc76445dcffd07eca7c442f62a169ffbf74ef69e0e423c065e2945ad",
+      "devnet/v10-rs-wallet-rotation/package.json": "34df462f1e6fa8d9de93b958feabb5fc5e6ce5d8636733f53a6f961379e83fdb",
+      "devnet/v10-stress/package.json": "b71aa01a06219af67f95f00a70b7cd032d56a51dc19755e36c836727d5757136",
+      "package.json": "12f10e88dd7cf2b893d53d00b270bb7581c1074034e7beaf6979fa2829b522db",
+      "packages/adapter-elizaos/package.json": "32307e71470c61ead712044e07162192f32f16e006cb4db307f2346aefabdfd8",
+      "packages/adapter-hermes/package.json": "97d0a0c12d3d0870a930d6b626074320dbcecaab512440dabd25f49a1c38d9d7",
+      "packages/adapter-openclaw/package.json": "2ad99fd7c9e8a63fc0feb88b15b66d163c49bfa6d8ee06c481dc333e50769de2",
+      "packages/adapter-prime-agent/package.json": "f9051c3dcd943590e3d250d5bbcf3776842b7b5bcc08b46ff339f9a514e42906",
+      "packages/agent/ccl_v0_1/package.json": "ea8e5b1cacfd819edd3a862a434c91f2c8b9129b9022cfbb2023cba496de3c55",
+      "packages/agent/package.json": "734a4442e93eab141a1b129ca055f38179400c8d84af9772fdf03aafdd4b2c89",
+      "packages/chain/package.json": "aaf0e1fe3a035dce9567dd8d004bf6c988524aff279d39987a7d4ee2dddffac4",
+      "packages/cli/package.json": "9b8824f57550822c95dba3058c3dec99929ae43c84465540500b1a4b80ae0316",
+      "packages/cli/test-fixtures/sample-kafka-extension/package.json": "385af6e9924ccf88b806cb843df075fdcce4a6825b933d1de01de974d8cba034",
+      "packages/cli/test-fixtures/sample-kafka-plugin/package.json": "03a5d7347c2662b2eefdbaeee5431527b7e688374ee3204a137c0680530e602c",
+      "packages/core/package.json": "b8d0b92decfa3590339c6e8613adc8807484c8186b11be8de8ca9407ac567cda",
+      "packages/epcis/package.json": "afb346a7c686c0f0c7ea5e54b90fab47ba7786d0358a5fd0f842b61eee6a4b49",
+      "packages/evm-module/package.json": "894ceacd52fac34a96d083bd0afcc34894bc2aa9362e40493cf9f4ec7aec81f2",
+      "packages/graph-viz/package.json": "2b6e602b899d0e29980941dca98c3b82f49ff0e3cc6ae1e49a358b9ceb68ad94",
+      "packages/http-utils/package.json": "bb0ed23157c22d3c0e09d958876d791585530f0ba3f6909dfa9d10ce3943843f",
+      "packages/kafka-plugin/package.json": "be67ff5ef1994c0a3bec4a7d28c68915376e154fd74b8948e4eb8d5e52cbb6f0",
+      "packages/local-llm/package.json": "72639cd7c5b5a2c17639bd15389c96d55cdb3af03e4412e0c2d01f1c7990dde1",
+      "packages/mcp-dkg/package.json": "3fdbcc69dabfd48b8f3213232fe8aad7c4110c20072c7d108507a1d7a797613f",
+      "packages/network-sim/package.json": "b2264faf05f183b46fd4d6b0b744143341fba06917598b62387abb5211ef91bd",
+      "packages/node-store/package.json": "d18d398370c77ecb7cfc09f339764a6d11e5bb8bbe823460f14343b687e8fe12",
+      "packages/node-ui/package.json": "048abbbc8aaec970dbaa0ae92a58fb78e769cc3a69543c87e32e02b66b714124",
+      "packages/okf/package.json": "4b56abb788bd35a61c661a41fa4da738f9b262077556744090143d021a956823",
+      "packages/publisher/package.json": "4ebea4d56705067dd7c188066a1c05f3da6c97abbb9be6a542998f0bb896076f",
+      "packages/query/package.json": "55d1351bfa2c753e0449df12bc8564b270590c58c2573ee0fa6d1c318b1abe46",
+      "packages/random-sampling/package.json": "7183153146fb79957a5d8ad3b677f5ddc20072eacb933af28ff0f22008b4eee1",
+      "packages/rdf-utils/package.json": "574fa4e3899756c55a7fff0b2a4a7e63b63ac7ce4fe49011dc2e655961d7390b",
+      "packages/storage/package.json": "0cc1a304d2d5e8fbdc5d58ebae65cfccd2a3cff8ec937daca01f1a9a2e4864eb",
+      "patches/@libp2p__yamux@8.0.1.patch": "b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e",
+      "patches/hardhat@2.28.6.patch": "0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9",
+      "pnpm-workspace.yaml": "82271085fca0ee7cfee64f250937f5f6004ad821847d917502eeb21f287c0ed5",
+      "scripts/testing/package.json": "d02836298858858f52f01f58c6afc45f02db04d86adad0fb3bba92ed1abb53f0",
+      "test-systems/package.json": "d02836298858858f52f01f58c6afc45f02db04d86adad0fb3bba92ed1abb53f0"
+    }
+  },
+  "artifacts": {
+    "bad-build.log": "778aabead4b30c84620f0d00c4c7cd4b1883322302c8daae06e5d8040ef6c531",
+    "bad-config.txt": "c9f5f4d6730810e77f786e168532af2eed36d5e376323b1f07d9bf32dc30b6c3",
+    "bad-discovery.json": "d3c6665ad3c82a4e987b21f3d40523e0f8311eb1b1fd6baa78a5e2a21232ddab",
+    "bad-discovery.log": "d3c6665ad3c82a4e987b21f3d40523e0f8311eb1b1fd6baa78a5e2a21232ddab",
+    "bad-execution.log": "0bfc76b4c843d3dd251cff90569274e2a4aae2f4c841502a19b6bad342cdc444",
+    "bad-install.log": "2405366067ab5d9ae4a46f5d589398e7e5ad3738974a1fc3067a8264c758b560",
+    "bad-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
+    "bad-report.json": "c7c361e173c149e9071f13c4384dce94e6488f0a6d924d890040f9ca9c282c00",
+    "candidate-build.log": "11e24d151e14477088245c5a4e452a44e17a701b612b150369a70c28481c8a97",
+    "candidate-config.txt": "5796c4da50dd54dcb58f4d92ab687aa10581bc6fdf0bb271655d78111f95ace7",
+    "candidate-discovery.json": "de7d00a766d14e4500a1e65f5b45cdba3602bb0d6363c1dc7721f54f7f2c6e11",
+    "candidate-discovery.log": "de7d00a766d14e4500a1e65f5b45cdba3602bb0d6363c1dc7721f54f7f2c6e11",
+    "candidate-execution.log": "a0904d603a0106ebd362ed1e1526d9c8ebbd1ffd7f793d6c0578e7fe7eaf8248",
+    "candidate-install.log": "87996e19b5d280ee42b1109a8085eb386a1a93b47866353eab45ee68bf0a8072",
+    "candidate-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
+    "candidate-report.json": "860410b10e79d3d64f7a7eecc553fe11d521ea0ecd3f6e123808743a61f6fe10"
+  }
+}

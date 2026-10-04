@@ -1,0 +1,68 @@
+Scope: all 68 workspace projects
+Lockfile is up to date, resolution step is skipped
+Progress: resolved 1, reused 0, downloaded 0, added 0
+Packages: +1373
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Progress: resolved 1373, reused 1368, downloaded 0, added 48
+Progress: resolved 1373, reused 1369, downloaded 0, added 195
+Progress: resolved 1373, reused 1369, downloaded 0, added 403
+Progress: resolved 1373, reused 1369, downloaded 0, added 609
+Progress: resolved 1373, reused 1369, downloaded 0, added 708
+Progress: resolved 1373, reused 1369, downloaded 0, added 797
+Progress: resolved 1373, reused 1369, downloaded 0, added 968
+Progress: resolved 1373, reused 1369, downloaded 0, added 1044
+Progress: resolved 1373, reused 1369, downloaded 0, added 1184
+Progress: resolved 1373, reused 1369, downloaded 0, added 1240
+Progress: resolved 1373, reused 1369, downloaded 0, added 1367
+Progress: resolved 1373, reused 1369, downloaded 0, added 1370
+Progress: resolved 1373, reused 1369, downloaded 0, added 1371
+Progress: resolved 1373, reused 1369, downloaded 0, added 1372
+Progress: resolved 1373, reused 1369, downloaded 0, added 1373
+Progress: resolved 1373, reused 1369, downloaded 0, added 1373, done
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/mcp-dkg/dist/index.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/cli/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/cli/dist/cli.js'
+
+devDependencies:
++ @origintrail-official/dkg 10.0.20 <- packages/cli
++ @origintrail-official/dkg-core 10.0.20 <- packages/core
++ @stryker-mutator/core 10.0.0
++ @stryker-mutator/vitest-runner 10.0.0
++ @types/node 22.19.11
++ @vitest/coverage-v8 4.0.18
++ esbench 0.8.1
++ fast-check 4.9.0
++ istanbul-lib-coverage 3.2.2
++ istanbul-lib-report 3.0.1
++ istanbul-reports 3.2.0
++ knip 6.23.0
++ oxlint 1.80.0
++ saxes 6.0.0
++ tsx 4.21.0
++ turbo 2.10.5
++ typescript 5.9.3
++ vitest 4.0.18
++ yaml 2.9.0
+
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/cli/node_modules/@origintrail-official/dkg-mcp/dist/index.js'
+packages/cli preinstall$ node ./scripts/verify-node-sqlite-runtime.mjs
+packages/cli preinstall: (node:23022) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+packages/cli preinstall: (Use `node --trace-warnings ...` to show where the warning was created)
+packages/cli preinstall: Done
+packages/cli postinstall$ node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort
+packages/cli postinstall: Done
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/packages/kafka-plugin/node_modules/@origintrail-official/dkg/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/node_modules/@origintrail-official/dkg/dist/cli.js'
+. preinstall$ node packages/cli/scripts/verify-node-sqlite-runtime.mjs
+. preinstall: (node:23143) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+. preinstall: (Use `node --trace-warnings ...` to show where the warning was created)
+. preinstall: Done
+╭ Warning ─────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│   Ignored build scripts: @cyfrin/aderyn@0.6.8, assertion-tools@8.0.6,        │
+│   bufferutil@4.1.0, keccak@3.0.4, secp256k1@4.0.4, utf-8-validate@5.0.10.    │
+│   Run "pnpm approve-builds" to pick which dependencies should be allowed     │
+│   to run scripts.                                                            │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Done in 19.6s using pnpm v10.28.1

@@ -1,0 +1,5 @@
+2026-10-04 21:43:52 system 10f28550-f847-482d-a23f-af6cc590f395 [DKGAgent] No dataDir — triple store is in-memory (data will be lost on restart) [WARN]
+2026-10-04 21:43:52 system d48fc332-b460-418e-9812-ad6230ee086f [DKGAgent] reconcile on-demand-pending: watermark 0 -> 3 (head=25, processed=10, reconciled=10, pending=15)
+REGRESSION_RUNTIME GH-2782 v22.23.2
+REGRESSION_OBSERVATION GH-2782 {"error":"Cannot acknowledge join approval for \"on-demand-pending\": durable subscription intent or host state is missing","fetched":[],"localCount":19,"steps":[],"current":false,"watermark":0,"subscriptionWatermark":0,"saves":0,"rows":0,"sameSubscription":true}
+JSON report written to /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/bad-report.json
