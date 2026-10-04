@@ -55,6 +55,7 @@ import {
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
+import { AdoptExistingMintRefusalError } from './adopt-existing-mint-refusal-error.js';
 import {
   isNonexistentContextGraphStorageRevert,
   readContextGraphStorageRangeV1,
@@ -466,15 +467,15 @@ export class MockChainAdapter implements ChainAdapter {
     const collection = this.collections.get(kaId);
     if (collection === undefined || toHex(collection.merkleRoot).toLowerCase()
       !== toHex(expectedMerkleRoot).toLowerCase()) {
-      throw Object.assign(new Error(`Mock: minted KA ${kaId} does not match the sealed root`),
-        { code: 'KA_ID_COLLISION' });
+      throw new AdoptExistingMintRefusalError('KA_ID_COLLISION',
+        `Mock: minted KA ${kaId} does not match the sealed root`);
     }
     if (collection.updateContext.merkleRootsCount !== 1n) {
-      throw Object.assign(new Error(`Mock: minted KA ${kaId} has been updated`), { code: 'KA_SUPERSEDED' });
+      throw new AdoptExistingMintRefusalError('KA_SUPERSEDED', `Mock: minted KA ${kaId} has been updated`);
     }
     if (collection.cgId !== expectedContextGraphId) {
-      throw Object.assign(new Error(`Mock: minted KA ${kaId} belongs to another context graph`),
-        { code: 'KA_CG_MISMATCH' });
+      throw new AdoptExistingMintRefusalError('KA_CG_MISMATCH',
+        `Mock: minted KA ${kaId} belongs to another context graph`);
     }
     const events = this.events.filter((event) => event.type === 'KCCreated'
       && event.data.kaId === kaId.toString());

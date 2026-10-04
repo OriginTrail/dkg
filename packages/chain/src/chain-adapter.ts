@@ -2114,7 +2114,7 @@ export interface ChainAdapter {
    * receipt would have produced, or `null` when the log cannot be recovered
    * (pruned / non-archive RPCs) — callers must then rethrow their original
    * error, never synthesize a txHash (finalization-handler invariant).
-   * Throws typed errors (code KA_ID_COLLISION / KA_SUPERSEDED /
+   * Throws AdoptExistingMintRefusalError (KA_ID_COLLISION / KA_SUPERSEDED /
    * KA_CG_MISMATCH) when chain truth contradicts the caller's content.
    */
   getMintedKnowledgeAssetProvenance?(

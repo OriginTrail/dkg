@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
 import { EvmReceiptFinalityReader } from '../src/evm-adapter-receipt-finality.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { AdoptExistingMintRefusalError } from '../src/index.js';
 
 const KA_ID = 42n;
 const CG_ID = 7n;
@@ -77,16 +78,36 @@ describe('existing mint provenance', () => {
     ['a different graph', ROOT, CG_ID + 1n, 'KA_CG_MISMATCH'],
   ])('refuses %s before scanning provenance', async (_name, root, graph, code) => {
     const f = fixture();
-    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(root), graph))
-      .rejects.toMatchObject({ code });
+    const adoption = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(root), graph);
+    await expect(adoption).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(adoption).rejects.toMatchObject({ code });
     expect(f.queryEventLogsPage).not.toHaveBeenCalled();
   });
 
   it('refuses an updated asset instead of finalizing its superseded version', async () => {
     const f = fixture();
     f.roots.push({ ...f.roots[0] });
-    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
-      .rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
+    const adoption = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID);
+    await expect(adoption).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(adoption).rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
+  });
+
+  it('refuses missing roots through the shared content error', async () => {
+    const f = fixture();
+    f.roots.length = 0;
+    const adoption = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID);
+    await expect(adoption).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(adoption).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+  });
+
+  it('keeps root collision before superseded before graph mismatch refusals', async () => {
+    const f = fixture();
+    f.roots.push({ ...f.roots[0] });
+    const collision = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, new Uint8Array(32), CG_ID + 1n);
+    await expect(collision).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    const superseded = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID + 1n);
+    await expect(superseded).rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
+    expect(f.queryEventLogsPage).not.toHaveBeenCalled();
   });
 
   it('leaves an unrecoverable event without synthesized provenance', async () => {
@@ -146,8 +167,9 @@ describe('existing mint provenance', () => {
     const f = fixture();
     if (field === 'merkleRoot') f.receipt.merkleRoot = ethers.getBytes(`0x${'01'.repeat(32)}`);
     else f.receipt[field] = KA_ID + 1n;
-    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
-      .rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    const adoption = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID);
+    await expect(adoption).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(adoption).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
   });
 
   it.each(['queryEventLogsPage', 'readPublishReceipt', 'finalityProviderRead'] as const)('returns unavailable when %s fails', async read => {
@@ -159,7 +181,8 @@ describe('existing mint provenance', () => {
   it('refuses a creation event whose root differs from storage', async () => {
     const f = fixture();
     f.log.args.merkleRoot = `0x${'01'.repeat(32)}`;
-    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
-      .rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    const adoption = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID);
+    await expect(adoption).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(adoption).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
   });
 });

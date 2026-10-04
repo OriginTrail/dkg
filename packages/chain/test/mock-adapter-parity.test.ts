@@ -45,6 +45,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
+import { AdoptExistingMintRefusalError } from '../src/index.js';
 import { ethers } from 'ethers';
 
 /** Collect all own method names across the whole prototype chain, minus `constructor`. */
@@ -773,16 +774,24 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     });
     await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n))
       .resolves.toMatchObject({ txHash: created.txHash, batchId: created.batchId });
-    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 2n))
-      .rejects.toMatchObject({ code: 'KA_CG_MISMATCH' });
-    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, new Uint8Array(32), 1n))
-      .rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    const mismatch = mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 2n);
+    await expect(mismatch).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(mismatch).rejects.toMatchObject({ code: 'KA_CG_MISMATCH' });
+    const collision = mock.getMintedKnowledgeAssetProvenance(created.batchId, new Uint8Array(32), 2n);
+    await expect(collision).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(collision).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    const missing = mock.getMintedKnowledgeAssetProvenance(created.batchId + 1n, root, 1n);
+    await expect(missing).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(missing).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
     mock.__setTransactionUnfinalized(created.txHash);
     await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n)).resolves.toBeNull();
     mock.__setTransactionUnfinalized(created.txHash, false);
     (mock as any).collections.get(created.batchId).updateContext.merkleRootsCount = 2n;
-    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n))
-      .rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
+    const superseded = mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 2n);
+    await expect(superseded).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(superseded).rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, new Uint8Array(32), 2n))
+      .rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
   });
 
   it('preserves delegated V10 publisher attribution across mock updates', async () => {

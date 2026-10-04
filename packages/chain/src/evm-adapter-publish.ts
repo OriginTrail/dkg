@@ -36,6 +36,7 @@ import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
 import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { AdoptExistingMintRefusalError } from './adopt-existing-mint-refusal-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
 } from './evm-adapter-constants.js';
@@ -878,24 +879,22 @@ export class PublishMethods extends EVMChainAdapterBase {
     const roots: Array<{ publisher: string; merkleRoot: string; timestamp: bigint }> =
       await this.readContract(storage, 'kas.getMerkleRoots', 'getMerkleRoots', kaId);
     if (!roots || roots.length === 0) {
-      throw Object.assign(
-        new Error(`adopt-existing-mint: kaId ${kaId} reported minted but has no on-chain merkle roots`),
-        { code: 'KA_ID_COLLISION' },
+      throw new AdoptExistingMintRefusalError(
+        'KA_ID_COLLISION',
+        `adopt-existing-mint: kaId ${kaId} reported minted but has no on-chain merkle roots`,
       );
     }
     if (ethers.hexlify(roots[0].merkleRoot).toLowerCase() !== expectedHex) {
-      throw Object.assign(
-        new Error(
-          `adopt-existing-mint: kaId ${kaId} on-chain root ${ethers.hexlify(roots[0].merkleRoot)} `
-            + `does not match locally sealed root ${expectedHex} — refusing to adopt someone else's content`,
-        ),
-        { code: 'KA_ID_COLLISION' },
+      throw new AdoptExistingMintRefusalError(
+        'KA_ID_COLLISION',
+        `adopt-existing-mint: kaId ${kaId} on-chain root ${ethers.hexlify(roots[0].merkleRoot)} `
+          + `does not match locally sealed root ${expectedHex} — refusing to adopt someone else's content`,
       );
     }
     if (roots.length > 1) {
-      throw Object.assign(
-        new Error(`adopt-existing-mint: kaId ${kaId} has ${roots.length} merkle roots (updated since mint); use named recovery`),
-        { code: 'KA_SUPERSEDED' },
+      throw new AdoptExistingMintRefusalError(
+        'KA_SUPERSEDED',
+        `adopt-existing-mint: kaId ${kaId} has ${roots.length} merkle roots (updated since mint); use named recovery`,
       );
     }
 
@@ -909,9 +908,9 @@ export class PublishMethods extends EVMChainAdapterBase {
         ),
       );
       if (boundCg !== expectedContextGraphId) {
-        throw Object.assign(
-          new Error(`adopt-existing-mint: kaId ${kaId} bound to CG ${boundCg}, expected ${expectedContextGraphId}`),
-          { code: 'KA_CG_MISMATCH' },
+        throw new AdoptExistingMintRefusalError(
+          'KA_CG_MISMATCH',
+          `adopt-existing-mint: kaId ${kaId} bound to CG ${boundCg}, expected ${expectedContextGraphId}`,
         );
       }
     }
@@ -922,12 +921,12 @@ export class PublishMethods extends EVMChainAdapterBase {
     // Content refusals are deliberately outside the best-effort read boundary.
     if (receipt.kaId !== kaId || receipt.startKAId !== kaId || receipt.endKAId !== kaId
       || ethers.hexlify(receipt.merkleRoot).toLowerCase() !== expectedHex) {
-      throw Object.assign(new Error(`adopt-existing-mint: kaId ${kaId} receipt does not match the sealed mint`),
-        { code: 'KA_ID_COLLISION' });
+      throw new AdoptExistingMintRefusalError('KA_ID_COLLISION',
+        `adopt-existing-mint: kaId ${kaId} receipt does not match the sealed mint`);
     }
     if (eventRoot !== expectedHex) {
-      throw Object.assign(new Error(`adopt-existing-mint: kaId ${kaId} mint-event root does not match sealed root`),
-        { code: 'KA_ID_COLLISION' });
+      throw new AdoptExistingMintRefusalError('KA_ID_COLLISION',
+        `adopt-existing-mint: kaId ${kaId} mint-event root does not match sealed root`);
     }
     // Retain the receipt parser's provenance. These three overrides come from
     // the verified storage/seal state rather than a second event decoder.
