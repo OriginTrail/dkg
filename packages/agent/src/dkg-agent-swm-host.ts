@@ -248,7 +248,6 @@ import {
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import {
   FinalizationHandler,
-  KEEP_ROOT_COPY_PREDICATE,
   type ChainReconcileLocalCandidate,
   type ChainReconciledKCOutcome,
 } from './finalization-handler.js';
@@ -5800,7 +5799,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           }
         }
       } catch {
-        // Persistence is an accelerator only. Fail open to an authoritative scan.
+        // Persistence is an accelerator only. Fail open to an authoritative reconcile.
       }
     }
     if (!cached) return false;
