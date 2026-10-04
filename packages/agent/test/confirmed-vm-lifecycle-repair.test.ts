@@ -54,6 +54,11 @@ class FaultStore extends OxigraphStore {
   }
   failure() { return new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: this.operation === 'insert' ? 'insert' : 'deleteByPattern', outcome: 'not_started' }); }
 }
+async function persistentStore(): Promise<OxigraphStore> {
+  const dir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-store-')); dirs.push(dir);
+  const store = new OxigraphStore(join(dir, 'store.nq')); stores.push(store);
+  return store;
+}
 function agentFor(store: OxigraphStore, dir: string, version: number) {
   stores.push(store);
   const agent = Object.create(DKGAgent.prototype) as any;
@@ -217,7 +222,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
     await pending.stop();
   });
   it('retains a divergent newer workspace while repairing the confirmed VM descriptor', async () => {
-    const store = new OxigraphStore();
+    const store = await persistentStore();
     await store.insert([
       { subject: LIFECYCLE, predicate: `${DKG}wmCurrentAssertion`, object: JSON.stringify(PRIOR), graph: META },
       { subject: LIFECYCLE, predicate: `${DKG}memoryLayer`, object: '"WM"', graph: META },
@@ -235,7 +240,7 @@ describe('confirmed lifecycle repair scheduling and fences', () => {
   });
   it('uses coherent chain version evidence to reject a same-version mismatch and retire an older repair', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-stamp-chain-fence-')); dirs.push(dir);
-    const store = new OxigraphStore(), agent = agentFor(store, dir, 2);
+    const store = await persistentStore(), agent = agentFor(store, dir, 2);
     const repair = agent.getOrCreateNamedKaVmLifecycleRepair();
     expect(await repair.submit(input)).toBe('superseded');
     agent.chain.readKnowledgeAssetVersionSnapshot.mockResolvedValue({ latestRoot: `0x${PRIOR}`, rootCount: 1n });
@@ -290,8 +295,8 @@ describe('review regression boundaries', () => {
   });
   it.each(['raw', 'agent-facade', 'decorated'] as const)('retains the journal when the %s backend cannot certify durable completion', async facade => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-uncertified-stamp-')); dirs.push(dir);
-    const store = new OxigraphStore(), agent = agentFor(store, dir, 1);
-    Object.defineProperty(store, 'flush', { value: undefined, configurable: true });
+    const store = await persistentStore(), agent = agentFor(store, dir, 1);
+    Object.defineProperty(store, 'persist', { value: undefined, configurable: true });
     const wrapped = facade === 'decorated' ? new ChangelogStore(new GraphSetIndexStore(store)) : store;
     agent.store = facade === 'raw' ? wrapped : createListContextGraphsCacheInvalidatingStore(wrapped, vi.fn(), vi.fn());
     const commit = vi.spyOn(store, 'atomicUpdate');
@@ -303,7 +308,7 @@ describe('review regression boundaries', () => {
   });
   it.each([false, true])('preserves a reopened unsealed WM draft with matching pointer=%s', async (matchingPointer) => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-open-wm-repair-')); dirs.push(dir);
-    const store = new OxigraphStore(); stores.push(store);
+    const store = await persistentStore(); stores.push(store);
     const scope = createGraphKnowledgeAssetScope(UAL, 1), vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope), wmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.WorkingMemory, scope);
     await store.insert([
       ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,
@@ -340,7 +345,7 @@ describe('review regression boundaries', () => {
     await repair.stop();
   });
   it.each(['matching-pointers', 'divergent-seal', 'reopened-draft', 'tentative-prior'] as const)('decodes canonical escaped RDF workspace values for %s', async scenario => {
-    const store = new OxigraphStore(); stores.push(store);
+    const store = await persistentStore(); stores.push(store);
     const reopened = scenario === 'reopened-draft', tentative = scenario === 'tentative-prior';
     const preserve = reopened || scenario === 'divergent-seal';
     const rows = {
@@ -403,7 +408,7 @@ describe('review regression boundaries', () => {
 
   it('does not infer remote persistence from atomicity and readback guarantees', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-uncertified-remote-stamp-')); dirs.push(dir);
-    const agent = agentFor(new OxigraphStore(), dir, 1), fetch = vi.spyOn(globalThis, 'fetch');
+    const agent = agentFor(await persistentStore(), dir, 1), fetch = vi.spyOn(globalThis, 'fetch');
     const remote = new SparqlHttpStore({ queryEndpoint: 'http://uncertified-remote.test/sparql', consistencyProfile: 'atomic-readback' });
     agent.store = createListContextGraphsCacheInvalidatingStore(remote, vi.fn(), vi.fn());
     try {
@@ -415,7 +420,7 @@ describe('review regression boundaries', () => {
 
   it('commits once through the production agent wrapper without separate lifecycle writes', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-wrapped-atomic-repair-')); dirs.push(dir);
-    const store = new OxigraphStore(), agent = agentFor(store, dir, 1);
+    const store = await persistentStore(), agent = agentFor(store, dir, 1);
     await store.insert(metadataRows());
     const commit = vi.spyOn(store, 'atomicUpdate'), insert = vi.spyOn(store, 'insert');
     const remove = vi.spyOn(store, 'deleteByPattern'), removeWithoutCount = vi.spyOn(store, 'deleteByPatternWithoutCount');
@@ -431,7 +436,7 @@ describe('review regression boundaries', () => {
   });
 
   it('propagates a wrapped atomic execution failure without falling back or exposing partial metadata', async () => {
-    const store = new OxigraphStore(); stores.push(store); await store.insert(metadataRows());
+    const store = await persistentStore(); stores.push(store); await store.insert(metadataRows());
     const before = await metadataSnapshot(store), failure = new Error('atomic execution failed');
     const commit = vi.spyOn(store, 'atomicUpdate').mockRejectedValue(failure);
     const insert = vi.spyOn(store, 'insert'), remove = vi.spyOn(store, 'deleteByPattern');
@@ -453,7 +458,7 @@ describe('review regression boundaries', () => {
   it('produces identical graph-scoped metadata on atomic and both compatibility stores', async () => {
     const snapshots = [];
     for (const capability of ['atomic', 'absent', 'typed-refusal'] as const) {
-      const store = new OxigraphStore(); stores.push(store); await store.insert(metadataRows());
+      const store = await persistentStore(); stores.push(store); await store.insert(metadataRows());
       if (capability !== 'atomic') Object.defineProperty(store, 'atomicUpdate', { value: capability === 'absent'
         ? undefined : async () => { throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'legacy-test-store'); } });
       const wrapped = createListContextGraphsCacheInvalidatingStore(store, vi.fn(), vi.fn());
@@ -469,7 +474,7 @@ describe('review regression boundaries', () => {
   });
 
   it('commits the planned metadata atomically and leaves every row unchanged on commit failure', async () => {
-    const store = new OxigraphStore(); stores.push(store);
+    const store = await persistentStore(); stores.push(store);
     await store.insert([
       { subject: LIFECYCLE, predicate: `${DKG}vmCurrentAssertion`, object: JSON.stringify(PRIOR), graph: META },
       { subject: LIFECYCLE, predicate: `${DKG}wmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
@@ -490,7 +495,7 @@ describe('review regression boundaries', () => {
   });
 
   it.each(['absent', 'typed-refusal'] as const)('uses explicit compatibility repair when atomic capability is %s', async capability => {
-    const store = new OxigraphStore(); stores.push(store);
+    const store = await persistentStore(); stores.push(store);
     const atomic = capability === 'absent' ? undefined : vi.fn(async () => { throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'legacy-test-store'); });
     Object.defineProperty(store, 'atomicUpdate', { value: atomic });
     const update = vi.spyOn(store, 'update').mockRejectedValue(new Error('generic UPDATE is not atomic certification'));
@@ -502,7 +507,7 @@ describe('review regression boundaries', () => {
 
   it('uses the real publisher lifecycle lock while repair is paused after its workspace read', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-overlapping-wm-repair-')); dirs.push(dir);
-    const store = new OxigraphStore(), agent = agentFor(store, dir, 1);
+    const store = await persistentStore(), agent = agentFor(store, dir, 1);
     const scope = createGraphKnowledgeAssetScope(UAL, 1), vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
     await store.insert([
       ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,
@@ -579,7 +584,7 @@ describe('review regression boundaries', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-failed-admission-')); dirs.push(dir);
     const apply = vi.fn(async () => undefined), repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, apply, isCurrent: async () => true, warn: () => undefined });
     const persist = vi.spyOn(repair as unknown as { persist: () => Promise<void> }, 'persist').mockRejectedValueOnce(Object.assign(new Error('journal fsync failed'), { code: 'EIO' }));
-    const store = new OxigraphStore(), agent = agentFor(store, dir, 1); agent.namedKaVmLifecycleRepair = repair;
+    const store = await persistentStore(), agent = agentFor(store, dir, 1); agent.namedKaVmLifecycleRepair = repair;
     await expect(agent._repairConfirmedNamedKaVmLifecycle(input)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, merkleRoot: HEX, assertionVersion: '1' });
     expect(persist).toHaveBeenCalledOnce(); expect(apply).not.toHaveBeenCalled(); await repair.stop();
   });
@@ -652,7 +657,7 @@ describe('review regression boundaries', () => {
 describe('tentative normal publication projection', () => {
   it.each([1, 2])('centralizes tentative mint/update version %s without claiming a VM data graph', async (version) => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-tentative-projection-')); dirs.push(dir);
-    const store = new OxigraphStore(), scope = createGraphKnowledgeAssetScope(UAL, version), swm = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
+    const store = await persistentStore(), scope = createGraphKnowledgeAssetScope(UAL, version), swm = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
     await store.insert([
       ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,
         authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2), authorSchemeVersion: 1,
