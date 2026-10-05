@@ -234,14 +234,8 @@ function selectedSharedMemoryLaneActive(agent: any, contextGraphId: string): boo
 
 /** The kill switch or an authenticated private member may use the ordinary root lane. */
 async function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): Promise<boolean> {
-  if (typeof agent.canUseLegacySharedMemorySyncForContextGraphV1 === 'function'
-    && agent.canUseLegacySharedMemorySyncForContextGraphV1(contextGraphId) === true) return true;
-  // The public catalog predicate alone excludes approved private members.
-  // Keep the agent-owned private proof at this worker boundary too: the
-  // selected-public lane cannot recover their root SWM, and a join-derived
-  // acceptance must never authorize an outsider to use the ordinary lane.
-  return typeof agent.rfc64PrivateRootSwmOnLegacyLaneV1 === 'function'
-    && await agent.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
+  return agent.canUseLegacySharedMemorySyncForContextGraphV1?.(contextGraphId) === true
+    || await agent.rfc64PrivateRootSwmOnLegacyLaneV1?.(contextGraphId) === true;
 }
 
 /** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
