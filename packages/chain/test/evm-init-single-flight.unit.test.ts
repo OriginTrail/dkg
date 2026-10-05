@@ -8,6 +8,8 @@ import {
 } from '../src/rpc-request-transport.js';
 
 const ADDRESS = '0x0000000000000000000000000000000000000001';
+const RETIRED = '0x0000000000000000000000000000000000000002';
+const CURRENT = '0x0000000000000000000000000000000000000003';
 const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 /**
@@ -17,7 +19,9 @@ const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
  * `init` itself, the entry every public method goes through, so that nothing
  * a public method shares on its own account stands in for it. The scripted
  * boundary honours cancellation of the request it is called in, as the
- * transport does.
+ * transport does, unless a read is scripted to answer although its run was
+ * ended: an answer that was already on its way, or a read that was not the
+ * run's to cancel.
  */
 describe('adapter initialization is shared by the callers that need it', () => {
   const adapters: EVMChainAdapter[] = [];
@@ -40,7 +44,9 @@ describe('adapter initialization is shared by the callers that need it', () => {
     adapters.push(adapter);
     /** Every Hub name resolved, in order, with the request context it was resolved in. */
     const resolved: Array<{ name: string; context: RpcRequestContext }> = [];
-    const holds = new Map<string, Array<{ entered: () => void; released: Promise<void> }>>();
+    const holds = new Map<string, Array<{
+      entered: () => void; released: Promise<void>; answersWhenEnded: boolean;
+    }>>();
     const failures = new Map<string, unknown[]>();
     /** The run a resolution belongs to: the first is 1, the one after a reset 2, ... */
     let runs = 0;
@@ -53,11 +59,19 @@ describe('adapter initialization is shared by the callers that need it', () => {
       if (hold) {
         hold.entered();
         // A read that is cancelled ends at once, whatever the chain is doing.
-        await Promise.race([hold.released, cancelled(context.signal)]);
+        await (hold.answersWhenEnded
+          ? hold.released
+          : Promise.race([hold.released, cancelled(context.signal)]));
       }
-      context.signal?.throwIfAborted();
+      if (hold?.answersWhenEnded !== true) context.signal?.throwIfAborted();
       const failure = failures.get(name);
       if (failure?.length) throw failure.shift();
+      // What the transport does when a request has succeeded and was not
+      // cancelled meanwhile: an observer cannot change the outcome of the
+      // request it observes.
+      if (context.signal?.aborted !== true) {
+        try { context.onProgress?.(); } catch { /* as the transport */ }
+      }
       return { target: ADDRESS, run, getAddress: async () => ADDRESS };
     };
     vi.spyOn(adapter, 'resolveContract').mockImplementation(resolve);
@@ -70,22 +84,77 @@ describe('adapter initialization is shared by the callers that need it', () => {
       hubRotation: vi.spyOn(adapter, 'startHubRotationListener').mockResolvedValue(undefined),
     };
     adapter.tokenAddress = ADDRESS;
+    const initContracts = vi.spyOn(adapter, 'initContracts');
     return {
       adapter,
       resolved,
       starts,
       runs: () => runs,
+      /** What each run made of its bindings, in the order the runs started. */
+      initRuns: () => initContracts.mock.results.map((result) => result.value as Promise<void>),
       /** Hold the next resolution of `name` until released. */
-      holdNext(name: string) {
+      holdNext(name: string, { answersWhenEnded = false } = {}) {
         let entered!: () => void;
         let release!: () => void;
         const reached = new Promise<void>((done) => { entered = done; });
         const released = new Promise<void>((done) => { release = done; });
-        holds.set(name, [...(holds.get(name) ?? []), { entered, released }]);
+        holds.set(name, [...(holds.get(name) ?? []), { entered, released, answersWhenEnded }]);
         return { reached, release };
       },
       failNext(name: string, error: unknown) {
         failures.set(name, [...(failures.get(name) ?? []), error]);
+      },
+    };
+  }
+
+  /**
+   * The same adapter with the Hub itself scripted: the resolver, its address
+   * memo and the handling of a rotation are production code.
+   */
+  function hubFixture() {
+    const adapter: any = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1', privateKey: PRIVATE_KEY,
+      hubAddress: ADDRESS, chainId: 'evm:31337', allowNoAdminSigner: true,
+    });
+    adapters.push(adapter);
+    const registered = new Map<string, string>();
+    const reads = new Map<string, number>();
+    const lateAnswers = new Map<string, {
+      entered: () => void; released: Promise<void>; address: string;
+    }>();
+    vi.spyOn(adapter, 'readContract').mockImplementation(async (...args: unknown[]) => {
+      const name = args[3] as string;
+      reads.set(name, (reads.get(name) ?? 0) + 1);
+      const late = lateAnswers.get(name);
+      if (late) {
+        lateAnswers.delete(name);
+        late.entered();
+        // An answer that arrives whether or not its request was cancelled.
+        await late.released;
+        return late.address;
+      }
+      activeRpcRequestContext().signal?.throwIfAborted();
+      return registered.get(name) ?? ADDRESS;
+    });
+    vi.spyOn(adapter, 'startChainIndexRuntime').mockImplementation(() => {});
+    vi.spyOn(adapter, 'startHubRotationListener').mockResolvedValue(undefined);
+    adapter.tokenAddress = ADDRESS;
+    const initContracts = vi.spyOn(adapter, 'initContracts');
+    return {
+      adapter,
+      initRuns: () => initContracts.mock.results.map((result) => result.value as Promise<void>),
+      /** How often the Hub was asked for `name`. */
+      reads: (name: string) => reads.get(name) ?? 0,
+      /** The address the Hub has for `name` from now on. */
+      register(name: string, address: string) { registered.set(name, address); },
+      /** The next read of `name` answers `address` when released, even to a run that was ended. */
+      answerLate(name: string, address: string) {
+        let entered!: () => void;
+        let release!: () => void;
+        const reached = new Promise<void>((done) => { entered = done; });
+        const released = new Promise<void>((done) => { release = done; });
+        lateAnswers.set(name, { entered, released, address });
+        return { reached, release };
       },
     };
   }
@@ -126,8 +195,101 @@ describe('adapter initialization is shared by the callers that need it', () => {
       // Its own signal, not the caller's.
       expect(context.signal).toBeDefined();
       expect(context.signal).not.toBe(controller.signal);
-      expect(context.onProgress).toBeUndefined();
     }
+  });
+
+  it('tells each caller of the run\'s progress for as long as that caller waits', async () => {
+    const { adapter, resolved, holdNext } = fixture();
+    const first = holdNext('Profile');
+    const second = holdNext('ContextGraphs');
+    const starterProgress = vi.fn();
+    const starter = withRpcRequestContext({ onProgress: starterProgress }, () => adapter.init());
+    await first.reached;
+    // One binding has answered so far.
+    expect(starterProgress).toHaveBeenCalledTimes(1);
+
+    const joinerProgress = vi.fn(() => { throw new Error('an observer that fails'); });
+    const leaving = new AbortController();
+    const leaverProgress = vi.fn();
+    const joiner = withRpcRequestContext({ onProgress: joinerProgress }, () => adapter.init());
+    const leaver = withRpcRequestContext(
+      { onProgress: leaverProgress, signal: leaving.signal },
+      () => adapter.init(),
+    );
+    first.release();
+    await second.reached;
+    const heardByStarter = starterProgress.mock.calls.length;
+    expect(heardByStarter).toBeGreaterThan(1);
+    // Those who joined hear of what answered since, a failing observer included.
+    expect(joinerProgress).toHaveBeenCalledTimes(heardByStarter - 1);
+    expect(leaverProgress).toHaveBeenCalledTimes(heardByStarter - 1);
+
+    leaving.abort(new Error('caller cancelled'));
+    await expect(leaver).rejects.toThrow('caller cancelled');
+    second.release();
+    await Promise.all([starter, joiner]);
+
+    // Every binding of the run was reported to the caller that waited throughout.
+    expect(starterProgress).toHaveBeenCalledTimes(resolved.length);
+    expect(joinerProgress).toHaveBeenCalledTimes(resolved.length - 1);
+    // The caller that left heard nothing after it left.
+    expect(leaverProgress).toHaveBeenCalledTimes(heardByStarter - 1);
+  });
+
+  it('reports the initialization a read waits for to the observer of that read', async () => {
+    const { adapter, resolved } = fixture();
+    const onProgress = vi.fn();
+    await expect(
+      withRpcRequestContext({ onProgress }, () => adapter.getIdentityId()),
+    ).resolves.toBe(7n);
+
+    // Every request the read needed was reported, those of the initialization
+    // it waited for included: a caller that bounds inactivity sees them all.
+    const ofTheRun = resolved.filter(({ context }) => context.signal !== undefined);
+    expect(ofTheRun.length).toBeGreaterThan(10);
+    expect(onProgress).toHaveBeenCalledTimes(resolved.length);
+  });
+
+  it('reports nothing to a caller that was cancelled, even before its wait has ended', async () => {
+    const { adapter, holdNext } = fixture();
+    const held = holdNext('Profile');
+    const leaving = new AbortController();
+    const onProgress = vi.fn();
+    const leaver = withRpcRequestContext(
+      { onProgress, signal: leaving.signal },
+      () => adapter.init(),
+    );
+    const staying = adapter.init();
+    await held.reached;
+    expect(onProgress).toHaveBeenCalledTimes(1);
+
+    leaving.abort(new Error('caller cancelled'));
+    // What the run does when one of its requests has succeeded.
+    adapter.notifyInitObservers();
+    expect(onProgress).toHaveBeenCalledTimes(1);
+
+    await expect(leaver).rejects.toThrow('caller cancelled');
+    held.release();
+    await staying;
+    expect(onProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports nothing to a caller that has no observer, and to nobody once it is over', async () => {
+    const { adapter, holdNext } = fixture();
+    const held = holdNext('Profile');
+    const silent = adapter.init();
+    await held.reached;
+    expect(adapter.initObservers.size).toBe(0);
+
+    const onProgress = vi.fn();
+    const observed = withRpcRequestContext({ onProgress }, () => adapter.init());
+    await Promise.resolve();
+    expect(adapter.initObservers.size).toBe(1);
+    held.release();
+    await Promise.all([silent, observed]);
+
+    // Nothing is kept of a caller once its wait is over.
+    expect(adapter.initObservers.size).toBe(0);
   });
 
   it('keeps the admission priority of the caller that starts it', async () => {
@@ -161,11 +323,12 @@ describe('adapter initialization is shared by the callers that need it', () => {
     expect(contexts).toHaveLength(2);
     for (const context of contexts) {
       // What these starts run for the life of the process is neither the
-      // run's foreground work nor an authority read, and no run's signal
-      // ends it.
+      // run's foreground work nor an authority read, no run's signal ends
+      // it, and it reports to no caller.
       expect(context.requestClass).toBe('background');
       expect(context.admissionPriority).toBeUndefined();
       expect(context.signal).toBeUndefined();
+      expect(context.onProgress).toBeUndefined();
     }
   });
 
@@ -275,9 +438,8 @@ describe('adapter initialization is shared by the callers that need it', () => {
     // A caller that arrives now joins the new run.
     const arriving = adapter.init();
 
-    // The ended run is released first: it binds nothing more, starts
-    // nothing, and does not mark the adapter initialized.
-    stale.release();
+    // The read the ended run had out was cancelled with it: that run binds
+    // nothing more, starts nothing, and does not mark the adapter initialized.
     await settled();
     expect(adapter.initialized).toBe(false);
     expect(starts.chainIndex).not.toHaveBeenCalled();
@@ -292,21 +454,80 @@ describe('adapter initialization is shared by the callers that need it', () => {
     expect(adapter.contracts.contextGraphs.run).toBe(2);
   });
 
-  it('keeps the new run\'s bindings when the ended run is released after it has finished', async () => {
-    const { adapter, runs, holdNext } = fixture();
-    const stale = holdNext('ContextGraphs');
+  it.each([
+    ['an observed Hub rotation', (adapter: any) => adapter.finalizeKnownHubRotation()],
+    ['the reset of every binding', (adapter: any) => adapter.invalidateAllBoundContracts()],
+  ])('binds nothing from a run ended by %s, whatever its read still answers', async (_name, reset) => {
+    const { adapter, runs, initRuns, holdNext } = fixture();
+    const stale = holdNext('ContextGraphs', { answersWhenEnded: true });
+    const waiting = adapter.init();
+    await stale.reached;
+
+    reset(adapter);
+    const fresh = holdNext('ContextGraphs');
+    // A caller that arrives after the reset gets the run that follows it.
+    const arriving = adapter.init();
+    await fresh.reached;
+    expect(runs()).toBe(2);
+
+    // The ended run gets its answer while the new run is still reading.
+    stale.release();
+    await expect(initRuns()[0]).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+    expect(adapter.contracts.contextGraphs).toBeUndefined();
+    expect(adapter.initialized).toBe(false);
+
+    fresh.release();
+    await Promise.all([waiting, arriving]);
+    expect(runs()).toBe(2);
+    expect(adapter.initialized).toBe(true);
+    expect(adapter.contracts.contextGraphs.run).toBe(2);
+  });
+
+  it('keeps the new run\'s bindings when the read of the ended run answers after it has finished', async () => {
+    const { adapter, runs, initRuns, holdNext } = fixture();
+    const stale = holdNext('ContextGraphs', { answersWhenEnded: true });
     const waiting = adapter.init();
     await stale.reached;
 
     adapter.finalizeKnownHubRotation();
-    await waiting;
+    await adapter.init();
     expect(runs()).toBe(2);
     expect(adapter.initialized).toBe(true);
     expect(adapter.contracts.contextGraphs.run).toBe(2);
 
     stale.release();
-    await settled();
+    await expect(initRuns()[0]).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+    // The caller that waited through the reset finds the adapter as the new
+    // run left it.
+    await waiting;
+    expect(runs()).toBe(2);
+    expect(adapter.initialized).toBe(true);
     expect(adapter.contracts.contextGraphs.run).toBe(2);
+  });
+
+  it('binds the address the Hub has after a rotation, whatever it still answers the ended run', async () => {
+    const { adapter, initRuns, reads, register, answerLate } = hubFixture();
+    const retired = answerLate('ContextGraphs', RETIRED);
+    const waiting = adapter.init();
+    await retired.reached;
+
+    register('ContextGraphs', CURRENT);
+    adapter.applyHubRotationEventName('ContextGraphs');
+    await adapter.init();
+    expect(adapter.initialized).toBe(true);
+    await expect(adapter.contracts.contextGraphs.getAddress()).resolves.toBe(CURRENT);
+
+    // The Hub answers the read of the ended run with the address it had.
+    retired.release();
+    await expect(initRuns()[0]).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+    await waiting;
+    expect(reads('ContextGraphs')).toBe(2);
+
+    // Neither the binding nor the resolver's memo took it.
+    await expect(adapter.contracts.contextGraphs.getAddress()).resolves.toBe(CURRENT);
+    const resolvedNow = await adapter.resolveContract('ContextGraphs');
+    await expect(resolvedNow.getAddress()).resolves.toBe(CURRENT);
+    expect(reads('ContextGraphs')).toBe(2);
     expect(adapter.initialized).toBe(true);
   });
 

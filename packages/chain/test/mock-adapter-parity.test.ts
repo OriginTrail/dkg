@@ -185,6 +185,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // initialize.
   'runInit',
   'rearmInit',
+  'notifyInitObservers',
   'requireV9',
   'getBlockTimestamp',
   'getFinalizedBlockTimestamp',

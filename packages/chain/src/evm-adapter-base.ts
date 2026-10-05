@@ -816,6 +816,18 @@ export class EVMChainAdapterBase {
    */
   private readonly initFlight = new AbortableKeyedSingleFlight<'init', void>();
 
+  /**
+   * The progress observers of the callers waiting for the initialization that
+   * is running, one entry for each caller so that a caller that leaves takes
+   * only its own. A caller hears of the run's progress for as long as it
+   * waits and is not cancelled: one that bounds inactivity keeps seeing a run
+   * that advances.
+   */
+  private readonly initObservers = new Set<{
+    readonly notify: () => void;
+    readonly signal: AbortSignal | undefined;
+  }>();
+
   /** Set by `destroy()`: the adapter is not initialized again. */
   private destroyed = false;
 
@@ -3211,19 +3223,25 @@ export class EVMChainAdapterBase {
     while (!this.initialized) {
       if (this.destroyed) throw new Error('chain adapter was destroyed and is not initialized again');
       const starter = activeRpcRequestContext();
+      const observer = starter.onProgress === undefined
+        ? undefined
+        : { notify: starter.onProgress, signal: starter.signal };
+      if (observer !== undefined) this.initObservers.add(observer);
       try {
         await this.initFlight.run(
           'init',
           // The run belongs to the adapter and to nobody waiting for it: it
-          // has its own signal and no caller's observer or usage attribution.
-          // It is admitted in the foreground class, so no waiter is held at
-          // the background rate, with the admission priority of the caller
-          // that starts it, which is what that caller's own initialization
-          // had. The starter also decides what it always did: the request
-          // class of the long-running work initialization starts.
+          // has its own signal and no caller's usage attribution, and it
+          // reports progress to whoever is waiting at the time. It is
+          // admitted in the foreground class, so no waiter is held at the
+          // background rate, with the admission priority of the caller that
+          // starts it, which is what that caller's own initialization had.
+          // The starter also decides what it always did: the request class
+          // of the long-running work initialization starts.
           (signal) => withDetachedRpcRequestContext('foreground', () => withRpcRequestContext(
             {
               signal,
+              onProgress: () => this.notifyInitObservers(),
               ...(starter.admissionPriority === undefined
                 ? {}
                 : { admissionPriority: starter.admissionPriority }),
@@ -3237,9 +3255,19 @@ export class EVMChainAdapterBase {
       } catch (error) {
         // A reset ended the run this caller was waiting for. The next run
         // resolves the bindings as the Hub has them now.
-        if (error instanceof SingleFlightInvalidatedError && !this.destroyed) continue;
+        if (error instanceof SingleFlightInvalidatedError && error.retryable) continue;
         throw error;
+      } finally {
+        if (observer !== undefined) this.initObservers.delete(observer);
       }
+    }
+  }
+
+  private notifyInitObservers(): void {
+    for (const observer of this.initObservers) {
+      // As for a request of its own: a cancelled caller hears nothing more.
+      if (observer.signal?.aborted) continue;
+      try { observer.notify(); } catch { /* an observer cannot change the run */ }
     }
   }
 
@@ -3283,16 +3311,25 @@ export class EVMChainAdapterBase {
   protected async initContracts(
     startsRequestClass: RpcRequestClass = activeRpcRequestContext().requestClass,
   ): Promise<void> {
-    this.contracts.identity = await this.resolveContract('Identity');
-    this.contracts.profile = await this.resolveContract('Profile');
-    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
+    // Every binding this routine writes goes through `bind` (the
+    // random-sampling pair, further down, has a guard of its own). An
+    // initialization that was ended binds nothing more, whatever a read it
+    // had out still answers: the bindings belong to the run that follows it.
+    const signal = activeRpcRequestAbortSignal();
+    const bind = <K extends keyof ContractCache>(key: K, binding: ContractCache[K]): void => {
+      signal?.throwIfAborted();
+      this.contracts[key] = binding;
+    };
+    bind('identity', await this.resolveContract('Identity'));
+    bind('profile', await this.resolveContract('Profile'));
+    bind('parametersStorage', await this.resolveContract('ParametersStorage'));
 
     // V8 `Staking` is archived (PRD §4.1 — `Staking.sol` moved under
     // contracts/archive/, deploy script 023 archived). Tolerate its absence
     // so the V10 surface still initialises; the contract slot is retained
     // only to keep stale Hub bindings on older deploys resolving cleanly.
     try {
-      this.contracts.staking = await this.resolveContract('Staking');
+      bind('staking', await this.resolveContract('Staking'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // V8 Staking not deployed on this Hub — V10 surface continues.
@@ -3303,7 +3340,7 @@ export class EVMChainAdapterBase {
     // Profile 1.2.0 / ProfileStorage 1.1.0 deploy still init cleanly; the
     // relay-registry methods will throw with a clear message at call time.
     try {
-      this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
+      bind('profileStorage', await this.resolveContract('ProfileStorage'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // Older deployments without the relay registry surface.
@@ -3311,7 +3348,7 @@ export class EVMChainAdapterBase {
 
     // V10.1 KA storage. Legacy V8 KnowledgeCollection + V10.0 DKGKnowledgeAssets
     // are deleted in the rc.12 KC->KA rename — no fallback resolution.
-    this.contracts.knowledgeAssetStorage = await this.resolveAssetStorage('DKGKnowledgeAssets');
+    bind('knowledgeAssetStorage', await this.resolveAssetStorage('DKGKnowledgeAssets'));
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
     // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep
@@ -3320,36 +3357,36 @@ export class EVMChainAdapterBase {
     // split it out so a missing V9 binding doesn't strand AskStorage. The
     // V10 publish-token-amount path depends on AskStorage being resolved.
     try {
-      this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
-      this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
+      bind('knowledgeAssets', await this.resolveContract('KnowledgeAssets'));
+      bind('knowledgeAssetsStorage', await this.resolveAssetStorage('KnowledgeAssetsStorage'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // V9 contracts not deployed — V9 publish/update surface unavailable.
     }
     try {
-      this.contracts.askStorage = await this.resolveContract('AskStorage');
+      bind('askStorage', await this.resolveContract('AskStorage'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
     }
 
     try {
-      this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
+      bind('contextGraphNameRegistry', await this.resolveContract('ContextGraphNameRegistry'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
     try {
-      this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
-      this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
+      bind('contextGraphs', await this.resolveContract('ContextGraphs'));
+      bind('contextGraphStorage', await this.resolveAssetStorage('ContextGraphStorage'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // ContextGraphs not deployed — context graph operations unavailable
     }
 
     try {
-      this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle');
+      bind('knowledgeAssetsLifecycle', await this.resolveContract('KnowledgeAssetsLifecycle'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // Lifecycle not deployed — createKnowledgeAssets unavailable.
@@ -3357,14 +3394,14 @@ export class EVMChainAdapterBase {
     }
 
     try {
-      this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
+      bind('dkgPublishingConvictionNFT', await this.resolveContract('DKGPublishingConvictionNFT'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
     }
 
     try {
-      this.contracts.chronos = await this.resolveContract('Chronos');
+      bind('chronos', await this.resolveContract('Chronos'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // Chronos not deployed — update-path growth-cost sizing falls back to
@@ -3403,7 +3440,7 @@ export class EVMChainAdapterBase {
       'Token',
     );
     if (tokenAddress !== ethers.ZeroAddress) {
-      this.contracts.token = new Contract(
+      bind('token', new Contract(
         tokenAddress,
         [
           'function approve(address,uint256) returns (bool)',
@@ -3411,7 +3448,7 @@ export class EVMChainAdapterBase {
           'function allowance(address,address) view returns (uint256)',
         ],
         this.signer,
-      );
+      ));
     }
 
   }
