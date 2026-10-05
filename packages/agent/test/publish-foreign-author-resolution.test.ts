@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { resolveFinalizedAssertionAuthor as publishedResolveAuthor } from '@origintrail-official/dkg-agent/dist/finalized-assertion-author.js';
+import { resolveFinalizedAssertionAuthor as sourceResolveAuthor } from '../src/finalized-assertion-author.js';
 import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
@@ -22,6 +24,66 @@ import {
   sealFor,
   stubAgent,
 } from './_helpers/foreign-author-resolution-fixtures.js';
+
+describe.each([
+  ['source', sourceResolveAuthor],
+  ['published deep subpath', publishedResolveAuthor],
+] as const)('%s finalized author resolver compatibility', (_entryPoint, resolveAuthor) => {
+  it('preserves the released undefined result for an invalid assertion name', async () => {
+    const store = new OxigraphStore();
+    const query = vi.spyOn(store, 'query');
+    await expect(resolveAuthor(store, {
+      contextGraphId: CG, name: 'invalid/name',
+      callerAgentAddress: CURATOR, selectedAuthorAgentAddress: MEMBER,
+    })).resolves.toBeUndefined();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 'wing-a'])('honors the legacy member selector over a resident caller in scope %s', async (subGraphName) => {
+    const store = new OxigraphStore();
+    await store.insert([
+      ...sealAt(CG, CURATOR, NAME, subGraphName),
+      ...sealAt(CG, MEMBER, NAME, subGraphName),
+    ]);
+    expect(await resolveAuthor(store, {
+      contextGraphId: CG, name: NAME, subGraphName, callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER.toLowerCase(),
+    })).toBe(MEMBER);
+  });
+
+  it.each(['', null, false, 7, OTHER])('fails closed for a nonresident legacy selector %s', async (selector) => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
+    await expect(resolveAuthor(store, {
+      contextGraphId: CG, name: NAME, callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: selector as string,
+    })).rejects.toMatchObject({
+      code: 'ASSERTION_AUTHOR_NOT_RESIDENT',
+      candidates: expect.arrayContaining([CURATOR, MEMBER]),
+    });
+  });
+
+  it('preserves caller preference when the legacy selector is undefined', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
+    expect(await resolveAuthor(store, {
+      contextGraphId: CG, name: NAME, callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: undefined,
+    })).toBe(CURATOR);
+  });
+
+  it('adapts only declared legacy fields without interpreting private selector names', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
+    await expect(resolveAuthor(store, {
+      contextGraphId: CG,
+      name: NAME,
+      callerAgentAddress: CURATOR,
+      selectedAuthor: { kind: 'address', agentAddress: MEMBER },
+      residentSelection: { kind: 'address', agentAddress: MEMBER },
+    } as never)).resolves.toBe(CURATOR);
+  });
+});
 
 /**
  * GH#1778 — a curator publishes a rootless named KA authored by a MEMBER and
@@ -210,8 +272,14 @@ describe('GH#1778 an explicit agentAddress is an authoritative author selector',
     const agent = stubAgent(store, CURATOR);
     // Explicit selector wins over resolution, even when MEMBER is the sole seal.
     expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { agentAddress: OTHER })).toBe(OTHER);
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      authorSelection: { mode: 'author', agentAddress: OTHER },
+    })).toBe(OTHER);
     // A caller hint (no explicit selector) resolves the sole member author.
-    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { callerAgentAddress: CURATOR })).toBe(MEMBER);
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+    })).toBe(MEMBER);
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { authorSelection: { mode: 'callerHint', callerAgentAddress: CURATOR } })).toBe(MEMBER);
   });
 
   it('rejects supplying both agentAddress (selector) and callerAgentAddress (hint)', async () => {
@@ -219,7 +287,7 @@ describe('GH#1778 an explicit agentAddress is an authoritative author selector',
     await store.insert(sealFor(MEMBER));
     const agent = stubAgent(store, CURATOR);
     await expect(
-      agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { agentAddress: OTHER, callerAgentAddress: CURATOR }),
+      agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { authorSelection: { mode: 'author', agentAddress: OTHER, callerAgentAddress: CURATOR } as never }),
     ).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
   });
 });
@@ -243,8 +311,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
     const agent = stubAgent(store, CURATOR);
     const resolved = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER.toLowerCase(),
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER.toLowerCase() },
     });
     // Stored case, NOT the caller's lowercased input: contextGraphAssertionUri does
     // not canonicalise address case, so a lowercased author would miss the seal.
@@ -259,11 +327,11 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
     const agent = stubAgent(store, CURATOR);
     expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      callerAgentAddress: CURATOR,
+      authorSelection: { mode: 'callerHint', callerAgentAddress: CURATOR },
     })).toBe(CURATOR);
     expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER },
     })).toBe(MEMBER);
   });
 
@@ -275,8 +343,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     // retry with, and only the resolver can produce it — the route test supplies its own
     // stubbed array, so it cannot prove the resolver emits one.
     const err = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: `0x${'99'.repeat(20)}`,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: `0x${'99'.repeat(20)}` },
     }).then(() => null, (e: any) => e);
     expect(err?.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
     // Membership + stored (checksum) case. Order is deliberately NOT asserted: it follows
@@ -298,8 +366,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     // Selecting the subgraph's author resolves inside the subgraph.
     expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
       subGraphName: 'wing-a',
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER },
     })).toBe(MEMBER);
 
     // Selecting the ROOT author for a subgraph request must fail closed, not fall through
@@ -307,16 +375,16 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     // candidate set, i.e. the scope was not widened by the presence of a selector.
     const scopedErr = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
       subGraphName: 'wing-a',
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: OTHER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: OTHER },
     }).then(() => null, (e: any) => e);
     expect(scopedErr?.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
     expect(scopedErr.candidates).toEqual([MEMBER]);
 
     // And the mirror direction — a ROOT request must not reach into the subgraph.
     const rootErr = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER },
     }).then(() => null, (e: any) => e);
     expect(rootErr?.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
     expect(rootErr.candidates).toEqual([OTHER]);
@@ -331,8 +399,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     await store.insert([...sealAt(CG, MEMBER, NAME), ...sealAt(CG, MEMBER.toLowerCase(), NAME)]);
     const agent = stubAgent(store, CURATOR);
     const dupErr = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: `0x${'99'.repeat(20)}`,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: `0x${'99'.repeat(20)}` },
     }).then(() => null, (e: any) => e);
     expect(dupErr?.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
     // The contract is the COLLAPSE: one author ⇒ one candidate. Which of the two stored
@@ -348,8 +416,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     await store.insert(sealFor(MEMBER, 'some-other-name'));
     const agent = stubAgent(store, CURATOR);
     await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER },
     })).rejects.toMatchObject({ code: 'ASSERTION_AUTHOR_NOT_RESIDENT', candidates: [] });
   });
 
@@ -412,8 +480,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     // publisherOverride names the publisher that will execute, which is what makes the
     // publisher-EOA arm sound evidence at enqueue time.
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER },
       publisherOverride: agent.publisher,
     })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' });
   });
@@ -488,8 +556,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
 
     // No publisherOverride ⇒ executing signer unknown ⇒ capability indeterminate ⇒ proceed.
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER },
     })).rejects.toBe(PAST_THE_GATE);
   });
 
@@ -519,8 +587,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     });
 
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER },
       publisherOverride: agent.publisher,
     })).rejects.toBe(PAST_THE_GATE);
   });
@@ -552,8 +620,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
 
     // Neither PUBLISH_AUTHOR_NOT_CUSTODIAL nor the raw lookup error: it proceeds.
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER },
       publisherOverride: agent.publisher,
     })).rejects.toBe(PAST_THE_GATE);
   });
@@ -592,8 +660,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     const agent = stubAgent(store, CURATOR);
     for (const empty of ['', null] as const) {
       await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-        callerAgentAddress: CURATOR,
-        selectedAuthorAgentAddress: empty as unknown as string,
+        authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+        selectedAuthorAgentAddress: empty as unknown as string },
       })).rejects.toMatchObject({ code: 'ASSERTION_AUTHOR_NOT_RESIDENT' });
     }
   });
@@ -631,8 +699,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     await store.insert(sealFor(MEMBER));
     const agent = stubAgent(store, CURATOR);
     await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      agentAddress: OTHER,
-      selectedAuthorAgentAddress: MEMBER,
+      authorSelection: { mode: 'author', agentAddress: OTHER,
+      selectedAuthorAgentAddress: MEMBER } as never,
     })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
   });
 
@@ -645,8 +713,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     const agent = stubAgent(store, CURATOR);
     for (const malformed of ['', null, 'not-an-address'] as const) {
       await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-        agentAddress: OTHER,
-        selectedAuthorAgentAddress: malformed as unknown as string,
+        authorSelection: { mode: 'author', agentAddress: OTHER,
+        selectedAuthorAgentAddress: malformed as unknown as string } as never,
       })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
     }
   });
@@ -735,8 +803,8 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
     };
 
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, {
-      callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER.toLowerCase(),
+      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER.toLowerCase() },
     });
 
     // The MEMBER's coordinate + the MEMBER's own attestation — not the curator's.
