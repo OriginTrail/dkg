@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   createDaemonLocalLlmService,
   DaemonLocalLlmError,
@@ -35,6 +38,50 @@ function fakeSession(options: {
 }
 
 describe('daemon local LLM service', () => {
+  it('loads a reviewed read-only domain profile and keeps its adapter tools project-bound', async () => {
+    const folder = mkdtempSync(join(tmpdir(), 'dkg-llm-profile-'));
+    try {
+      const profile = { name: 'JPB', routingKeywords: ['order', 'PLCA'], readTools: ['dkg_query_catalog_list', 'jpb_prepare_plca'], systemContext: 'Use source evidence.' };
+      const file = join(folder, 'domain.json');
+      writeFileSync(file, JSON.stringify(profile), { mode: 0o600 });
+      const createSession = vi.fn(async () => fakeSession());
+      const service = createDaemonLocalLlmService({ dkgHome: folder, env: {
+        DKG_LLM_DOMAIN_PROFILE: file, DKG_LLM_ADAPTERS: '/reviewed/jpb-adapter.mjs',
+      }, fetch: onlineFetch(), createSession });
+      await service.chat({ message: 'Prepare PLCA', contextGraphId: 'testing' });
+      expect(createSession).toHaveBeenCalledWith(expect.objectContaining({
+        adapterPaths: ['/reviewed/jpb-adapter.mjs'], domainProfile: profile,
+        strictProjectScope: true, strictProjectScopeTools: profile.readTools,
+        strictProjectScopeUnscopedTools: ['dkg_status'], allowWrite: false,
+      }));
+      await expect(service.chat({ message: 'Another order', contextGraphId: 'another' }))
+        .rejects.toMatchObject({ code: 'LOCAL_LLM_PROJECT_MISMATCH' });
+      await service.close();
+    } finally { rmSync(folder, { recursive: true, force: true }); }
+  });
+
+  it.each(['relative/adapter.mjs', '/reviewed/adapter.mjs'])('rejects an adapter without a reviewed domain profile (%s)', async adapter => {
+    const createSession = vi.fn();
+    const service = createDaemonLocalLlmService({ dkgHome: '/tmp/dkg', env: { DKG_LLM_ADAPTERS: adapter }, fetch: onlineFetch(), createSession });
+    expect(await service.health()).toMatchObject({ ready: false, configured: true });
+    await expect(service.chat({ message: 'hello' })).rejects.toMatchObject({ code: 'LOCAL_LLM_OFFLINE' });
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('fails closed for a write-enabled or writable domain profile (writeTools=%s)', writeTools => {
+    const folder = mkdtempSync(join(tmpdir(), 'dkg-llm-profile-'));
+    try {
+      const file = join(folder, 'domain.json');
+      writeFileSync(file, JSON.stringify({ name: 'Bad', routingKeywords: ['order'], readTools: ['jpb_read'],
+        ...(writeTools ? { writeTools: ['jpb_mutate'] } : {}) }), { mode: writeTools ? 0o600 : 0o666 });
+      if (!writeTools) {
+        // umask may remove writable bits from creation; set the unsafe mode explicitly.
+        chmodSync(file, 0o666);
+      }
+      expect(resolveDaemonLocalLlmSettings(folder, { DKG_LLM_DOMAIN_PROFILE: file }).probeConfigurationError).toBeTruthy();
+    } finally { rmSync(folder, { recursive: true, force: true }); }
+  });
+
   it('registers a daemon-owned read-only chat surface that stored config cannot replace', () => {
     const integrations = listLocalAgentIntegrations({
       localAgentIntegrations: {
