@@ -128,13 +128,13 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
-  catchupResultHasCleanResponse,
   classifyContextGraphCatchupReadiness,
   classifyExistingContextGraphReadiness,
   classifyNameHashOnlyCatchup,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
+import { inspectPrivateEmptyVmCatchup } from '../../context-graph-empty-vm-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -2287,13 +2287,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${targetContextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
         } else {
-          const inspectReadiness = catchupResultHasCleanResponse(result);
-          const hasConfirmedMeta = inspectReadiness
-            ? await agent.hasConfirmedMetaState(targetContextGraphId).catch(() => undefined)
-            : undefined;
-          const isPrivate = hasConfirmedMeta
-            ? await agent.isPrivateContextGraph(targetContextGraphId).catch(() => true)
-            : false;
+          const { hasConfirmedMeta, isPrivate, finalizedEmptyRegisteredPrivateVm } =
+            await inspectPrivateEmptyVmCatchup(agent, targetContextGraphId, result, readAuthority, callerAddr);
           // A catch-up can outlive its admission's absence proof or member
           // delegation. Re-derive unregistered applicability at completion;
           // registration, revocation, and outages must not reuse an old N/A.
@@ -2309,6 +2304,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             hasConfirmedMeta,
             isPrivate,
             completionAuthority,
+            finalizedEmptyRegisteredPrivateVm,
             // Automatic catalog recovery can finish while the foreground job
             // runs. Do not overwrite its newer proof with admission-time bits.
             readinessBeforeCatchup: readContextGraphReadiness(dashDb, targetContextGraphId),

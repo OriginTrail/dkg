@@ -620,6 +620,44 @@ describe('context graph catch-up readiness classification', () => {
     expect(classification.readinessPatch).toMatchObject({ durableVerified: false });
   });
 
+  it('settles only durable VM for a registered private graph with pinned zero-chain proof', () => {
+    const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
+      result: catchupReadinessResult(),
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      finalizedEmptyRegisteredPrivateVm: true,
+      readinessBeforeCatchup,
+    });
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable', durablePlane: 'required',
+      statePatch: { synced: true, sharedMemorySynced: false },
+      readinessPatch: { durableVerified: true, sharedMemoryVerified: false },
+    });
+  });
+
+  it.each([
+    ['unregistered', { outcome: 'allowed', registration: 'unregistered' }, true, true],
+    ['public', { outcome: 'allowed' }, false, true],
+    ['metadata absent', { outcome: 'allowed' }, true, false],
+    ['authority unavailable', { outcome: 'unavailable' }, true, true],
+  ] as const)('does not transfer the registered-private zero-VM proof to %s', (
+    _label, completionAuthority, isPrivate, hasConfirmedMeta,
+  ) => {
+    const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority,
+      result: catchupReadinessResult(),
+      includeSharedMemory: true,
+      hasConfirmedMeta,
+      isPrivate,
+      finalizedEmptyRegisteredPrivateVm: true,
+      readinessBeforeCatchup,
+    });
+    expect(classification.readinessPatch?.durableVerified).not.toBe(true);
+    expect(classification.statePatch?.synced).not.toBe(true);
+  });
+
   // A registered public graph with no Knowledge Assets yet. Its host serves the
   // CG definition triples from `<cg>/_meta`, so it answers metadata-only rather
   // than wire-empty and the whole-round rule above can never fire — no peer in

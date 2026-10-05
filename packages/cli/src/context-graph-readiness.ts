@@ -524,6 +524,7 @@ interface ContextGraphCatchupReadinessInput {
   readinessBeforeCatchup: ContextGraphReadinessProvenance;
   /** Current bootstrap authority, never persisted or inferred from metadata. */
   completionAuthority: ContextGraphCatchupCompletionAuthority;
+  finalizedEmptyRegisteredPrivateVm?: boolean;
 }
 
 /**
@@ -581,7 +582,8 @@ function classifyCatchupReadiness(
     };
   }
 
-  if (catchupResultHasCleanResponse(result)) {
+  const finalizedEmptyPrivateVm = input.finalizedEmptyRegisteredPrivateVm === true && input.isPrivate && registration !== 'unregistered';
+  if (catchupResultHasCleanResponse(result) || finalizedEmptyPrivateVm) {
     if (input.hasConfirmedMeta === undefined) {
       return {
         jobStatus: 'unreachable',
@@ -599,11 +601,8 @@ function classifyCatchupReadiness(
       };
     }
 
-    const durableThisRun = catchupPlaneReadinessThisRun({
-      result,
-      plane: 'durable',
-      isPrivate: input.isPrivate,
-    });
+    const durableThisRun = finalizedEmptyPrivateVm ? { ready: true, persistable: true }
+      : catchupPlaneReadinessThisRun({ result, plane: 'durable', isPrivate: input.isPrivate });
     const sharedMemoryThisRun = input.includeSharedMemory
       ? catchupPlaneReadinessThisRun({
         result,
