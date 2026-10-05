@@ -530,6 +530,7 @@ import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,
 } from './dkg-agent-publish.js';
+export type { AssertionFinalizeOptions, AssertionFinalizeResult } from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';

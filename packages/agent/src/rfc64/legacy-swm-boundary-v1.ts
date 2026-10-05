@@ -18,6 +18,7 @@ import  {
   type PositiveDecimalU64V1,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 
 import { createRfc64DurableFileStoreV1 } from './durable-file-store-v1.js';
 import {
@@ -430,7 +431,9 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
     currentPreparationScope !== undefined
     && currentPreparationScope.retirementPending > 0
   ) {
-    throw new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion');
+    throw createPromoteRetryableFailure(
+      new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
+    );
   }
   const entry = Object.freeze({
     version: 1,

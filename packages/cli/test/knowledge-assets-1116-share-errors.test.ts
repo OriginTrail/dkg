@@ -16,9 +16,9 @@
  *     `code:'LEGACY_KA_READ_ONLY'` before invoking the engine.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -47,6 +47,11 @@ import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import {
+  acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
+  initializeRfc64LegacySwmBoundaryV1,
+  prepareRfc64LateLegacySwmBoundaryV1,
+} from '../../agent/src/rfc64/legacy-swm-boundary-v1.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -261,6 +266,57 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('UNSEALED_SHARE_BLOCKED');
     expect(String(res.body.error)).toContain('Working Memory was NOT emptied');
     expect(String(res.body.recovery)).toContain('retry');
+  });
+
+  it('swm/share retries the real held retirement lease without committing a marker', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dkg-share-retirement-'));
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+    const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, {
+      networkId: 'otp:20430', contextGraphId: CG_ID,
+      governanceChainId: null, governanceContractAddress: null,
+      ownershipTransitionDigest: null, subGraphName: null,
+      authorAddress: ROOTLESS_AUTHOR, era: '0', bucketCount: '1',
+    });
+    const insert = vi.spyOn(store, 'insert');
+    const kaUal = `did:dkg:otp:20430/${ROOTLESS_AUTHOR}/1`;
+    try {
+      await startWith({
+        promote: async () => {
+          // Exercise the actual atomic companion preparation boundary. Earlier
+          // WM sealing is independently idempotent; this refusal precedes all
+          // SWM marker writes and leaves the existing retirement lease intact.
+          const companion = prepareRfc64LateLegacySwmBoundaryV1(
+            owner, CG_ID, kaUal, 'retirement-retry-share', '1',
+          );
+          let committed = false;
+          try {
+            await store.insert([...companion.quads]);
+            committed = true;
+          } finally { companion.settle(committed); }
+          return { promotedCount: 1, sealed: true, publishReady: true,
+            shareOperationId: 'retirement-retry-share' };
+        },
+      });
+      const blocked = await post('swm/share', { contextGraphId: CG_ID });
+      expect(blocked.status).toBe(503);
+      expect(blocked.body).toMatchObject({
+        code: 'PROMOTE_RETRYABLE_FAILURE', retryable: true,
+        retryAction: 'resume_existing_knowledge_asset', retryPhase: 'swm-share',
+        contextGraphId: CG_ID, retryKnowledgeAssetName: ASSERTION_NAME,
+      });
+      expect(blocked.headers.get('retry-after')).toBe('1');
+      expect(insert).not.toHaveBeenCalled();
+      expect(await store.countQuads()).toBe(0);
+      lease.release();
+      const retried = await post('swm/share', { contextGraphId: CG_ID });
+      expect(retried.status).toBe(200);
+      expect(retried.body).toMatchObject({ sealed: true, publishReady: true,
+        shareOperationId: 'retirement-retry-share' });
+      expect(insert).toHaveBeenCalledTimes(1);
+      expect(await store.countQuads()).toBe(1);
+    } finally { lease.release(); await store.close(); await rm(root, { recursive: true, force: true }); }
   });
 
   it('swm/share preserves sealed publish-ready status for a durable replay', async () => {

@@ -453,3 +453,11 @@ async function listEmittedModules(namespace, extensions = ['.js']) {
   }
   return modules.sort();
 }
+
+// The unlocked implementation must never be copied onto the public mixin.
+if ('_assertionFinalizeUnlocked' in root.DKGAgent.prototype) {
+  throw new Error('the public agent exposes an unguarded finalizer');
+}
+if (typeof root.DKGAgent.prototype.assertionFinalize !== 'function') {
+  throw new Error('the guarded public finalizer is unavailable');
+}
