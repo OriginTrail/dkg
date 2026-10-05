@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 
 /**
@@ -36,38 +37,68 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
     await stopLiveDaemon(daemon);
   }, 30_000);
 
+  /** What the tests read from one query; `body` is kept so a failure shows the answer. */
+  interface QueryAnswer {
+    status: number;
+    retryAfter: string | null;
+    body: string;
+  }
+
+  // The admission gate's own answer. The retryable 503s the query route itself
+  // can give (store pressure, unavailable read authority) carry a `code`, so
+  // neither can pass for a shed.
+  const SHED_BODY = JSON.stringify({ error: 'Server busy, retry shortly' });
+
   // Non-exempt endpoint that awaits the store, so concurrent calls overlap and
   // contend for the single in-flight slot.
-  function selectQuery(d: LiveDaemon): Promise<Response> {
+  //
+  // The query is scoped to a system context graph so that an admitted request
+  // has one legitimate answer, 200. An UNSCOPED query releases its result only
+  // if no store write landed while it ran, and a freshly started daemon is
+  // still writing: it publishes its agent profile right after the API starts
+  // listening. A burst that met that write got an answer that has nothing to do
+  // with admission control. A scoped read has no such check, and the read
+  // authority of a system graph is decided locally, without a chain read.
+  function selectQuery(d: LiveDaemon): Promise<QueryAnswer> {
     return fetch(`${d.base}/api/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
-      body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }),
-    });
+      body: JSON.stringify({
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      }),
+    })
+      .then(async (r) => ({ status: r.status, retryAfter: r.headers.get('retry-after'), body: await r.text() }))
+      // A network error is reported as status 0, with its message as the body.
+      .catch((err: unknown) => ({ status: 0, retryAfter: null, body: String(err) }));
+  }
+
+  function burst(d: LiveDaemon, count: number): Promise<QueryAnswer[]> {
+    return Promise.all(Array.from({ length: count }, () => selectQuery(d)));
+  }
+
+  // Neither admitted nor shed: a network error (0) or an unexpected 4xx/5xx.
+  // Returned as a list, so a failing `toEqual([])` prints the answers.
+  function unexpected(answers: QueryAnswer[]): QueryAnswer[] {
+    return answers.filter((r) => r.status !== 200 && r.status !== 503);
   }
 
   it('sheds concurrent over-capacity requests with 503 + Retry-After, then recovers', async () => {
     const d = daemon!;
-    const results = await Promise.all(
-      Array.from({ length: 50 }, () =>
-        selectQuery(d)
-          .then((r) => ({ status: r.status, retryAfter: r.headers.get('retry-after') }))
-          .catch(() => ({ status: 0, retryAfter: null as string | null })),
-      ),
-    );
+    const results = await burst(d, 50);
     const shed = results.filter((r) => r.status === 503);
     const ok = results.filter((r) => r.status === 200);
 
     // Every result must be an EXPECTED status — never a network error (0) or an
     // unexpected 4xx/5xx that would otherwise hide behind the >=1/>=1 counts.
-    expect(results.every((r) => r.status === 200 || r.status === 503)).toBe(true);
+    expect(unexpected(results)).toEqual([]);
     expect(ok.length).toBeGreaterThan(0); // at least one admitted
     expect(shed.length).toBeGreaterThan(0); // cap enforced under concurrent load
-    expect(shed.every((r) => r.retryAfter === '1')).toBe(true); // Retry-After present on every 503
+    // Every 503 is the admission gate's own: Retry-After: 1 and its body.
+    expect(shed.filter((r) => r.retryAfter !== '1' || r.body !== SHED_BODY)).toEqual([]);
 
     // Slots are released after each handler completes → a fresh request succeeds.
-    const recovered = await selectQuery(d);
-    expect(recovered.status).toBe(200);
+    expect(await selectQuery(d)).toMatchObject({ status: 200 });
   }, 60_000);
 
   it('keeps the exempt liveness path (/api/status) answerable even while saturated', async () => {
@@ -75,11 +106,7 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
     // Saturate with non-exempt query work; capture the burst results so we can
     // PROVE the daemon was actually over capacity (>=1 shed) while the status
     // probes ran — otherwise "status stayed 200" would be vacuous.
-    const burst = Promise.all(
-      Array.from({ length: 40 }, () =>
-        selectQuery(d).then((r) => r.status).catch(() => 0),
-      ),
-    );
+    const saturating = burst(d, 40);
     // ...while hammering the exempt status endpoint, which must always answer 200.
     const statuses = await Promise.all(
       Array.from({ length: 12 }, () =>
@@ -88,11 +115,11 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
           .catch(() => 0),
       ),
     );
-    const burstStatuses = await burst;
+    const saturated = await saturating;
 
-    expect(statuses.every((s) => s === 200)).toBe(true); // exempt path never shed
-    expect(burstStatuses.filter((s) => s === 503).length).toBeGreaterThan(0); // saturation really happened
-    expect(burstStatuses.every((s) => s === 200 || s === 503)).toBe(true); // no unexpected failures
+    expect(statuses.filter((s) => s !== 200)).toEqual([]); // exempt path never shed
+    expect(saturated.filter((r) => r.status === 503).length).toBeGreaterThan(0); // saturation really happened
+    expect(unexpected(saturated)).toEqual([]); // no unexpected failures
   }, 60_000);
 
   it('surfaces admission stats on /api/status (effective cap + per-burst shed delta)', async () => {
@@ -116,10 +143,8 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
     expect(typeof before.inFlight).toBe('number');
 
     // Saturate the non-exempt path so this burst provably sheds.
-    const burst = await Promise.all(
-      Array.from({ length: 50 }, () => selectQuery(d).then((r) => r.status).catch(() => 0)),
-    );
-    expect(burst.filter((s) => s === 503).length).toBeGreaterThan(0); // this burst really shed
+    const saturated = await burst(d, 50);
+    expect(saturated.filter((r) => r.status === 503).length).toBeGreaterThan(0); // this burst really shed
 
     // /api/status is admission-exempt, so reading it doesn't perturb the counter:
     // `after` MUST exceed `before` by the sheds we just caused.
