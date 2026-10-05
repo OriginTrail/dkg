@@ -434,6 +434,8 @@ export {
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
   isRfc64LegacySwmBoundaryRetirementInProgressError,
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
   messageIndicatesNoFundedPublisherWallet,
   messageIndicatesPublishAuthorNotCustodial,
   formatPublishAuthorNotCustodialMessage,

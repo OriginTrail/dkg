@@ -122,6 +122,17 @@ export function isRfc64LegacySwmBoundaryRetirementInProgressError(error: unknown
 }
 
 /**
+ * An unscoped query whose dataset or read-authority facts changed while it ran: the agent
+ * withholds the result and raises this code with `retryable: true`, and the daemon answers a
+ * retryable 503 that carries the same sentence. Shared here because it crosses those packages:
+ * each side imports the code and the sentence, so neither can drift from the other. Both
+ * values are part of the wire contract.
+ */
+export const UNSCOPED_QUERY_INVALIDATED_CODE = 'UNSCOPED_QUERY_INVALIDATED';
+export const UNSCOPED_QUERY_INVALIDATED_MESSAGE =
+  'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId';
+
+/**
  * An error caused by invalid user input or a pre-condition that the user
  * can fix. CLI handlers can show these messages directly without a stack trace.
  */

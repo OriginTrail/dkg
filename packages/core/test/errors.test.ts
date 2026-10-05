@@ -11,6 +11,8 @@ import {
   messageIndicatesPublishAuthorNotCustodial,
   RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
   isRfc64LegacySwmBoundaryRetirementInProgressError,
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
 } from '../src/errors.js';
 
 describe('GH#3049 legacy SWM retirement fence code (cross-package contract)', () => {
@@ -36,6 +38,15 @@ describe('GH#3049 legacy SWM retirement fence code (cross-package contract)', ()
     ['an object whose code getter throws', new Proxy({}, { get() { throw new Error('hostile getter'); } })],
   ])('does not recognise %s', (_name, value) => {
     expect(isRfc64LegacySwmBoundaryRetirementInProgressError(value)).toBe(false);
+  });
+});
+
+describe('unscoped query invalidation (cross-package contract)', () => {
+  it('keeps its wire code and sentence: the agent throws them, the daemon answers with them', () => {
+    expect(UNSCOPED_QUERY_INVALIDATED_CODE).toBe('UNSCOPED_QUERY_INVALIDATED');
+    expect(UNSCOPED_QUERY_INVALIDATED_MESSAGE).toBe(
+      'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+    );
   });
 });
 
