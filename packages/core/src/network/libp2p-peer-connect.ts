@@ -2,11 +2,10 @@ import { peerIdFromString } from '@libp2p/peer-id';
 import type { PeerId } from '@libp2p/interface';
 import { multiaddr, type Component, type Multiaddr } from '@multiformats/multiaddr';
 import { isPublicLikeAddress } from './address-policy.js';
-import type { Address, NodeIdentity, PeerConnectOpts } from './network.js';
+import type { Address, NodeIdentity, PeerConnectOpts, PeerRecoveryStageOpts } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 import type { ConfiguredRelayTarget } from './relay-target.js';
-import type { ConnectOpts, PeerResolver } from './peer-resolver.js';
 
 export interface Libp2pConnectHost {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -251,68 +250,38 @@ export async function connectLibp2pCandidate(
   }
 }
 
-export interface Libp2pInitialConnectOpts extends ConnectOpts {
-  /** A caller-validated address to try before cached and resolved addresses. */
-  initialCandidate?: Libp2pConnectCandidate;
-  initialCandidateTimeoutMs?: number;
-  cachedPeerTimeoutMs?: number;
-  resolverTimeoutMs?: number;
-}
-
-/**
- * One libp2p connection boundary for a trusted initial candidate, a cached
- * peer-ID fast path, and the shared resolver. The candidate path deliberately
- * accepts private listener addresses; callers must validate its peer binding.
- */
-export async function connectLibp2pPeerWithResolver(
+/** Transport-owned recovery dial. The resolver owns stage order and deadlines. */
+export async function tryConnectLibp2pRecoveryStage(
   host: Libp2pConnectHost,
-  resolver: Pick<PeerResolver, 'connect'>,
   peerId: NodeIdentity,
-  options: Libp2pInitialConnectOpts = {},
-): Promise<void> {
-  throwIfAborted(options.signal);
+  stage: PeerRecoveryStageOpts,
+): Promise<boolean> {
+  throwIfAborted(stage.signal);
   const canonicalPeerId = peerIdFromString(peerId).toString();
   const isConnected = (): boolean => host.getConnections().some(
     (connection) => connection.remotePeer.toString() === canonicalPeerId,
   );
-  if (isConnected()) return;
+  if (isConnected()) return true;
 
-  if (options.initialCandidate) {
-    try {
-      await connectLibp2pCandidate(host, options.initialCandidate, {
-        expectedPeerId: canonicalPeerId,
-        signal: options.signal,
-        timeoutMs: options.initialCandidateTimeoutMs ?? DEFAULT_CANDIDATE_TIMEOUT_MS,
-        log: options.log,
-      });
-      throwIfAborted(options.signal);
-      if (isConnected()) return;
-    } catch (error) {
-      if (options.signal?.aborted) throw error;
-    }
+  if (stage.kind === 'hint') {
+    if (!stage.address) return false;
+    const candidate = parseLibp2pConnectCandidate(stage.address);
+    // A recovery hint may be private, but must bind to the exact requested peer.
+    if (candidate.targetPeerId !== canonicalPeerId) return false;
+    await connectLibp2pCandidate(host, candidate, {
+      expectedPeerId: canonicalPeerId,
+      signal: stage.signal,
+      timeoutMs: stage.timeoutMs,
+      log: stage.log,
+    });
+    return isConnected();
   }
 
-  try {
-    const timeout = AbortSignal.timeout(options.cachedPeerTimeoutMs ?? 5_000);
-    const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
-    await host.dial(peerIdFromString(canonicalPeerId), { signal });
-    throwIfAborted(options.signal);
-    if (isConnected()) return;
-  } catch (error) {
-    if (options.signal?.aborted) throw error;
-  }
-
-  throwIfAborted(options.signal);
-  const timeout = AbortSignal.timeout(options.resolverTimeoutMs ?? 15_000);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
-  await resolver.connect(canonicalPeerId, {
-    signal,
-    skipDht: options.skipDht,
-    perStepTimeoutMs: options.perStepTimeoutMs,
-    candidateTimeoutMs: options.candidateTimeoutMs,
-    log: options.log,
-  });
-  throwIfAborted(options.signal);
+  const timeout = AbortSignal.timeout(stage.timeoutMs);
+  const signal = stage.signal ? AbortSignal.any([stage.signal, timeout]) : timeout;
+  await host.dial(peerIdFromString(canonicalPeerId), { signal });
+  throwIfAborted(stage.signal);
+  return isConnected();
 }
 
 /**
@@ -360,6 +329,10 @@ export async function connectLibp2pPeer(
   }
 
   throwIfAborted(options.signal);
+  if (options.skipIdentityFallback) {
+    if (lastCandidateError !== undefined) throw lastCandidateError;
+    throw new PeerConnectionUnresolvedError();
+  }
   try {
     await host.dial(
       peerIdFromString(canonicalPeerId),

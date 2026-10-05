@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  connectLibp2pPeerWithResolver,
-  parseLibp2pConnectCandidate,
-  type Libp2pConnectCandidate,
-  type Libp2pConnectHost,
   type OperationContext,
   type PeerResolver,
 } from '@origintrail-official/dkg-core';
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 
 interface CuratorPeerConnectionAgent {
-  readonly node: { libp2p: Libp2pConnectHost };
+  readonly node: { libp2p: { getConnections(): Array<{ remotePeer: { toString(): string } }> } };
   readonly peerResolver: Pick<PeerResolver, 'connect'>;
   readonly log: { warn(ctx: OperationContext, message: string): void };
 }
@@ -39,31 +35,19 @@ async function connectCurator(
   throwIfAborted: (signal: AbortSignal | undefined) => void,
   addressHint?: string,
 ): Promise<boolean> {
-  let initialCandidate: Libp2pConnectCandidate | undefined;
   const verifiedAddress = verifiedCuratorDialAddress(addressHint, curatorPeerId);
-  if (verifiedAddress) {
-    try {
-      initialCandidate = parseLibp2pConnectCandidate(verifiedAddress);
-    } catch {
-      // An obsolete hint cannot prevent cached or resolved connection.
-    }
-  }
-
   try {
-    await connectLibp2pPeerWithResolver(
-      agent.node.libp2p,
-      agent.peerResolver,
-      curatorPeerId,
-      {
-        initialCandidate,
-        signal,
-        initialCandidateTimeoutMs: 5_000,
-        cachedPeerTimeoutMs: 5_000,
+    await agent.peerResolver.connect(curatorPeerId, {
+      signal,
+      recovery: {
+        verifiedInitialAddress: verifiedAddress,
+        initialTimeoutMs: 5_000,
+        cachedTimeoutMs: 5_000,
         resolverTimeoutMs: 15_000,
-        perStepTimeoutMs: 5_000,
-        candidateTimeoutMs: 5_000,
       },
-    );
+      perStepTimeoutMs: 5_000,
+      candidateTimeoutMs: 5_000,
+    });
     throwIfAborted(signal);
     return agent.node.libp2p.getConnections().some((connection) => (
       connection.remotePeer.toString() === curatorPeerId

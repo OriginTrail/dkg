@@ -179,6 +179,13 @@ export interface ConnectOpts extends ResolveOpts {
   candidateTimeoutMs?: number;
   /** Optional diagnostic sink for transport candidate selection. */
   log?: (message: string) => void;
+  /** Optional ordered recovery for a peer with a trusted persisted address. */
+  recovery?: {
+    verifiedInitialAddress?: Address;
+    initialTimeoutMs?: number;
+    cachedTimeoutMs?: number;
+    resolverTimeoutMs?: number;
+  };
 }
 
 export type PeerConnectionOutcome =
@@ -471,23 +478,73 @@ export class PeerResolver {
    * genuine miss from being mistaken for a successful connection.
    */
   async connect(peerId: NodeIdentity, opts: ConnectOpts = {}): Promise<PeerConnectionOutcome> {
-    const addresses = await this.resolve(peerId, opts);
-    if (opts.signal?.aborted) {
-      throw new DOMException('Peer connection aborted', 'AbortError');
+    const network = supportsPeerConnection(this.network) ? this.network : undefined;
+    const recoveryNetwork = network?.tryConnectRecoveryStage;
+    let signal = opts.signal;
+    let usedRecovery = false;
+    if (opts.recovery && network && recoveryNetwork) {
+      if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+      if (this.network.getConnections(peerId).length > 0) {
+        return { status: 'connected', resolvedAddresses: [] };
+      }
+      const tryStage = async (
+        stage: Parameters<NonNullable<PeerConnectionNetwork['tryConnectRecoveryStage']>>[1],
+      ): Promise<boolean> => {
+        try {
+          const succeeded = await recoveryNetwork.call(network, peerId, stage);
+          if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+          return succeeded && this.network.getConnections(peerId).length > 0;
+        } catch {
+          if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+          return false;
+        }
+      };
+      const recovery = opts.recovery;
+      if (recovery.verifiedInitialAddress && await tryStage({
+        kind: 'hint',
+        address: recovery.verifiedInitialAddress,
+        signal: opts.signal,
+        timeoutMs: recovery.initialTimeoutMs ?? 5_000,
+        log: opts.log,
+      })) return { status: 'connected', resolvedAddresses: [] };
+      if (await tryStage({
+        kind: 'cached',
+        signal: opts.signal,
+        timeoutMs: recovery.cachedTimeoutMs ?? 5_000,
+        log: opts.log,
+      })) return { status: 'connected', resolvedAddresses: [] };
+
+      if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
+      usedRecovery = true;
     }
+    if (opts.recovery) {
+      const deadline = AbortSignal.timeout(opts.recovery.resolverTimeoutMs ?? 15_000);
+      signal = opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
+    }
+    const addresses = await this.resolve(peerId, { ...opts, signal });
+    if (signal?.aborted) throw opts.recovery
+      ? signal.reason
+      : new DOMException('Peer connection aborted', 'AbortError');
     try {
-      if (!supportsPeerConnection(this.network)) {
+      if (!network) {
         throw new Error('Network transport does not implement the peer-connection capability');
       }
-      await this.network.connectPeer(peerId, addresses, {
-        signal: opts.signal,
+      await network.connectPeer(peerId, addresses, {
+        signal,
         candidateTimeoutMs: opts.candidateTimeoutMs,
         log: opts.log,
+        ...(usedRecovery ? { skipIdentityFallback: true } : {}),
       });
+      if (opts.recovery) {
+        if (signal?.aborted) throw signal.reason;
+        if (this.network.getConnections(peerId).length === 0) {
+          throw new PeerConnectionUnresolvedError('Peer connection was not observed');
+        }
+      }
       return { status: 'connected', resolvedAddresses: addresses };
     } catch (error) {
       if (
-        !opts.signal?.aborted
+        !signal?.aborted
         && addresses.length === 0
         && error instanceof PeerConnectionUnresolvedError
       ) {

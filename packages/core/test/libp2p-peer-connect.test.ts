@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   connectLibp2pPeer,
-  connectLibp2pPeerWithResolver,
-  parseLibp2pConnectCandidate,
+  tryConnectLibp2pRecoveryStage,
   planLibp2pPeerConnectionAddresses,
 } from '../src/network/libp2p-peer-connect.js';
 
@@ -280,23 +279,120 @@ describe('connectLibp2pPeer', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     expect(calls).toEqual([RELAY_A]);
   });
-});
 
-describe('connectLibp2pPeerWithResolver', () => {
-  it('reuses an observed target connection without dialing', async () => {
+  it('does not repeat the cached identity dial after a recovery stage', async () => {
     const host = {
-      getConnections: () => [{ remotePeer: { toString: () => TARGET } }],
+      getConnections: () => [],
       dial: vi.fn(async () => undefined),
       peerStore: { merge: vi.fn(async () => undefined) },
     };
-    const resolver = { connect: vi.fn(async () => ({ status: 'connected' as const, resolvedAddresses: [] })) };
-
-    await connectLibp2pPeerWithResolver(host, resolver, TARGET);
+    await expect(connectLibp2pPeer(host, TARGET, [], {
+      skipIdentityFallback: true,
+    })).rejects.toMatchObject({ code: 'PEER_CONNECTION_UNRESOLVED' });
     expect(host.dial).not.toHaveBeenCalled();
-    expect(resolver.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe('tryConnectLibp2pRecoveryStage', () => {
+  it('bounds a stalled cached-peer dial by the stage deadline', async () => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), milliseconds);
+      return controller.signal;
+    });
+    try {
+      const host = {
+        getConnections: () => [],
+        dial: vi.fn((_target: unknown, options?: { signal?: AbortSignal }) => new Promise<never>(
+          (_resolve, reject) => {
+            const abort = () => reject(options!.signal!.reason);
+            if (options!.signal!.aborted) abort();
+            else options!.signal!.addEventListener('abort', abort, { once: true });
+          },
+        )),
+        peerStore: { merge: vi.fn(async () => undefined) },
+      };
+      const pending = tryConnectLibp2pRecoveryStage(host, TARGET, {
+        kind: 'cached', timeoutMs: 5_000,
+      });
+      const rejection = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(host.dial).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      await rejection;
+    } finally {
+      timeout.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
-  it('rejects an already-aborted caller even when the peer is connected', async () => {
+  it('uses a peer-bound private hint without a cached fallback', async () => {
+    const hint = `/ip4/127.0.0.1/tcp/9090/p2p/${TARGET}`;
+    let connected = false;
+    const host = {
+      getConnections: () => connected ? [{ remotePeer: { toString: () => TARGET } }] : [],
+      dial: vi.fn(async (target: unknown) => {
+        expect(targetString(target)).toBe(hint);
+        connected = true;
+      }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'hint', address: hint, timeoutMs: 5_000,
+    })).resolves.toBe(true);
+    expect(host.dial).toHaveBeenCalledOnce();
+  });
+
+  it('preconnects a relay for a peer-bound circuit hint', async () => {
+    let connected = false;
+    const dialed: string[] = [];
+    const host = {
+      getConnections: () => connected ? [{ remotePeer: { toString: () => TARGET } }] : [],
+      dial: vi.fn(async (target: unknown) => {
+        dialed.push(targetString(target));
+        if (targetString(target) === CIRCUIT_A) connected = true;
+      }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'hint', address: CIRCUIT_A, timeoutMs: 5_000,
+    })).resolves.toBe(true);
+    expect(dialed).toEqual([RELAY_A, CIRCUIT_A]);
+    expect(host.peerStore.merge).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a wrong-target hint without dialing', async () => {
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn(async () => undefined),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'hint', address: `/ip4/127.0.0.1/tcp/9090/p2p/${WRONG_TARGET}`,
+      timeoutMs: 5_000,
+    })).resolves.toBe(false);
+    expect(host.dial).not.toHaveBeenCalled();
+  });
+
+  it('uses the cached peer ID and requires observing the expected connection', async () => {
+    let connected = false;
+    const host = {
+      getConnections: () => connected ? [{ remotePeer: { toString: () => TARGET } }] : [],
+      dial: vi.fn(async (target: unknown) => {
+        expect(targetString(target)).toBe(TARGET);
+        connected = true;
+      }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'cached', timeoutMs: 5_000,
+    })).resolves.toBe(true);
+    expect(host.dial).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an already-aborted caller even if the peer is connected', async () => {
     const controller = new AbortController();
     controller.abort();
     const host = {
@@ -304,88 +400,34 @@ describe('connectLibp2pPeerWithResolver', () => {
       dial: vi.fn(async () => undefined),
       peerStore: { merge: vi.fn(async () => undefined) },
     };
-    const resolver = { connect: vi.fn(async () => ({ status: 'connected' as const, resolvedAddresses: [] })) };
-
-    await expect(connectLibp2pPeerWithResolver(host, resolver, TARGET, {
-      signal: controller.signal,
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'cached', timeoutMs: 5_000, signal: controller.signal,
     })).rejects.toMatchObject({ name: 'AbortError' });
     expect(host.dial).not.toHaveBeenCalled();
-    expect(resolver.connect).not.toHaveBeenCalled();
   });
 
-  it('uses a private initial candidate before any cached or resolved address', async () => {
-    const hint = `/ip4/127.0.0.1/tcp/9090/p2p/${TARGET}`;
-    let connected = false;
+  it('cancels an in-flight cached dial when its caller aborts', async () => {
+    const controller = new AbortController();
+    let started: () => void = () => undefined;
+    const dialStarted = new Promise<void>((resolve) => { started = resolve; });
     const host = {
-      getConnections: () => connected
-        ? [{ remotePeer: { toString: () => TARGET } }]
-        : [],
-      dial: vi.fn(async (target: unknown) => {
-        expect(targetString(target)).toBe(hint);
-        connected = true;
+      getConnections: () => [],
+      dial: vi.fn((_target: unknown, options?: { signal?: AbortSignal }) => {
+        started();
+        return new Promise<never>((_resolve, reject) => {
+          const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+          if (options?.signal?.aborted) abort();
+          else options?.signal?.addEventListener('abort', abort, { once: true });
+        });
       }),
       peerStore: { merge: vi.fn(async () => undefined) },
     };
-    const resolver = { connect: vi.fn(async () => ({ status: 'connected' as const, resolvedAddresses: [] })) };
-
-    await connectLibp2pPeerWithResolver(host, resolver, TARGET, {
-      initialCandidate: parseLibp2pConnectCandidate(hint),
+    const pending = tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'cached', timeoutMs: 5_000, signal: controller.signal,
     });
-    expect(host.dial).toHaveBeenCalledOnce();
-    expect(resolver.connect).not.toHaveBeenCalled();
-  });
-
-  it('uses the cached peer-ID fast path before resolution', async () => {
-    let connected = false;
-    const host = {
-      getConnections: () => connected
-        ? [{ remotePeer: { toString: () => TARGET } }]
-        : [],
-      dial: vi.fn(async (target: unknown) => {
-        expect(targetString(target)).toBe(TARGET);
-        connected = true;
-      }),
-      peerStore: { merge: vi.fn(async () => undefined) },
-    };
-    const resolver = { connect: vi.fn(async () => ({ status: 'connected' as const, resolvedAddresses: [] })) };
-
-    await connectLibp2pPeerWithResolver(host, resolver, TARGET);
-    expect(host.dial).toHaveBeenCalledOnce();
-    expect(resolver.connect).not.toHaveBeenCalled();
-  });
-
-  it('tries a stale private hint, then cached peer, then resolver through one boundary', async () => {
-    const hint = `/ip4/127.0.0.1/tcp/9090/p2p/${TARGET}`;
-    const attempts: string[] = [];
-    let connected = false;
-    const host = {
-      getConnections: () => connected
-        ? [{ remotePeer: { toString: () => TARGET } }]
-        : [],
-      dial: vi.fn(async (target: unknown) => {
-        attempts.push(targetString(target));
-        throw new Error('stale address');
-      }),
-      peerStore: { merge: vi.fn(async () => undefined) },
-    };
-    const resolver = {
-      connect: vi.fn(async () => {
-        attempts.push('resolver');
-        connected = true;
-        return { status: 'connected' as const, resolvedAddresses: [] };
-      }),
-    };
-
-    await connectLibp2pPeerWithResolver(host, resolver, TARGET, {
-      initialCandidate: parseLibp2pConnectCandidate(hint),
-      initialCandidateTimeoutMs: 5_000,
-      cachedPeerTimeoutMs: 5_000,
-      resolverTimeoutMs: 15_000,
-    });
-
-    expect(attempts).toEqual([hint, TARGET, 'resolver']);
-    expect(resolver.connect).toHaveBeenCalledWith(TARGET, expect.objectContaining({
-      signal: expect.any(AbortSignal),
-    }));
+    const rejection = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await dialStarted;
+    controller.abort();
+    await rejection;
   });
 });

@@ -315,7 +315,7 @@ describe('authoritative private metadata proof', () => {
 describe('refreshMetaFromCurator', () => {
   it('resolves a restarted curator by peer ID without trusting resolver status alone', async () => {
     let resolvedPeerId: string | undefined;
-    const attemptedTargets: string[] = [];
+    let recoveryHint: string | undefined;
     let fetched = false;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
@@ -323,19 +323,13 @@ describe('refreshMetaFromCurator', () => {
       node: {
         libp2p: {
           getConnections: () => [],
-          dial: async (target: { toString(): string }) => {
-            attemptedTargets.push(target.toString());
-            throw new Error('no cached address after restart');
-          },
-          peerStore: {
-            merge: async () => undefined,
-          },
         },
       },
       discovery: { findAgentByPeerId: async () => null },
       peerResolver: {
-        connect: async (peerId: string) => {
+        connect: async (peerId: string, options: { recovery?: { verifiedInitialAddress?: string } }) => {
           resolvedPeerId = peerId;
+          recoveryHint = options.recovery?.verifiedInitialAddress;
           return { status: 'connected' as const };
         },
       },
@@ -354,19 +348,15 @@ describe('refreshMetaFromCurator', () => {
     );
 
     expect(resolvedPeerId).toBe(CURATOR_PEER_ID);
-    expect(attemptedTargets).toEqual([
-      `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`,
-      CURATOR_PEER_ID,
-    ]);
+    expect(recoveryHint).toBe(`/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`);
     expect(refreshed).toBe(false);
     expect(fetched).toBe(false);
   });
 
-  it('cancels a pending cached dial before resolver or metadata fetch', async () => {
+  it('cancels a pending resolver connection before metadata fetch', async () => {
     const controller = new AbortController();
-    const dialSignals: Array<AbortSignal | undefined> = [];
-    let releaseDialStart: () => void = noop;
-    const dialStarted = new Promise<void>((resolve) => { releaseDialStart = resolve; });
+    let releaseResolverStart: () => void = noop;
+    const resolverStarted = new Promise<void>((resolve) => { releaseResolverStart = resolve; });
     let resolverCalls = 0;
     let fetchCalls = 0;
 
@@ -378,24 +368,17 @@ describe('refreshMetaFromCurator', () => {
       node: {
         libp2p: {
           getConnections: () => [],
-          dial: async (_target: unknown, opts?: { signal?: AbortSignal }) => {
-            dialSignals.push(opts?.signal);
-            releaseDialStart();
-            await new Promise<never>((_resolve, reject) => {
-              const abort = () => reject(opts?.signal?.reason);
-              if (opts?.signal?.aborted) abort();
-              else opts?.signal?.addEventListener('abort', abort, { once: true });
-            });
-          },
-          peerStore: {
-            merge: async () => undefined,
-          },
         },
       },
       peerResolver: {
-        connect: async () => {
+        connect: async (_peerId: string, options: { signal?: AbortSignal }) => {
           resolverCalls += 1;
-          return { status: 'unresolved' as const, resolvedAddresses: [] };
+          releaseResolverStart();
+          return new Promise<never>((_resolve, reject) => {
+            const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+            if (options.signal?.aborted) abort();
+            else options.signal?.addEventListener('abort', abort, { once: true });
+          });
         },
       },
       fetchSyncPages: async () => {
@@ -414,18 +397,15 @@ describe('refreshMetaFromCurator', () => {
       { signal: controller.signal },
     );
 
-    await dialStarted;
-    expect(dialSignals).toHaveLength(1);
-    expect(dialSignals[0]?.aborted).toBe(false);
+    await resolverStarted;
     controller.abort();
     await expect(refreshed).rejects.toMatchObject({ name: 'AbortError' });
-    expect(dialSignals[0]?.aborted).toBe(true);
-    expect(resolverCalls).toBe(0);
+    expect(resolverCalls).toBe(1);
     expect(fetchCalls).toBe(0);
   });
 
-  it.each(['direct hint', 'circuit hint', 'cached peer', 'malformed hint', 'shared resolver'])(
-    'accepts an authoritative public snapshot after %s connects to the curator',
+  it.each(['direct hint', 'circuit hint', 'no hint', 'malformed hint'])(
+    'accepts an authoritative public snapshot after the resolver connects with %s',
     async (connectionPath) => {
       const contextGraphId = 'public/authoritative-curator-snapshot';
       const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -450,8 +430,7 @@ describe('refreshMetaFromCurator', () => {
       let staged: Quad[] = [];
       let connected = false;
       let resolverCalls = 0;
-      const dialedTargets: string[] = [];
-      let mergedAddresses: string[] = [];
+      let passedHint: string | undefined;
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
         runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
@@ -461,31 +440,13 @@ describe('refreshMetaFromCurator', () => {
             getConnections: () => connected
               ? [{ remotePeer: { toString: () => CURATOR_PEER_ID } }]
               : [],
-            dial: async (target: { toString(): string }) => {
-              const address = target.toString();
-              dialedTargets.push(address);
-              if (
-                (connectionPath === 'direct hint' && address === directHint)
-                || (connectionPath === 'circuit hint' && address === circuitHint)
-                || (connectionPath === 'cached peer' && address === CURATOR_PEER_ID)
-              ) {
-                connected = true;
-                return;
-              }
-              if (connectionPath === 'circuit hint' && address === relayAddress) return;
-              throw new Error('address unavailable');
-            },
-            peerStore: {
-              merge: async (_peerId: unknown, data: { multiaddrs: Array<{ toString(): string }> }) => {
-                mergedAddresses = data.multiaddrs.map((address) => address.toString());
-              },
-            },
           },
         },
         peerResolver: {
-          connect: async () => {
+          connect: async (_peerId: string, options: { recovery?: { verifiedInitialAddress?: string } }) => {
             resolverCalls += 1;
-            if (connectionPath === 'shared resolver' || connectionPath === 'malformed hint') connected = true;
+            passedHint = options.recovery?.verifiedInitialAddress;
+            connected = true;
             return { status: 'connected' as const, resolvedAddresses: [] };
           },
         },
@@ -519,13 +480,9 @@ describe('refreshMetaFromCurator', () => {
 
       expect(refreshed).toBe(true);
       expect(staged).toHaveLength(2);
-      expect(dialedTargets).toEqual(connectionPath === 'direct hint' ? [directHint]
-        : connectionPath === 'circuit hint' ? [relayAddress, circuitHint]
-          : [CURATOR_PEER_ID]);
-      expect(mergedAddresses).toEqual(connectionPath === 'circuit hint' ? [circuitHint] : []);
-      expect(resolverCalls).toBe(
-        connectionPath === 'shared resolver' || connectionPath === 'malformed hint' ? 1 : 0,
-      );
+      expect(passedHint).toBe(connectionPath === 'direct hint' ? directHint
+        : connectionPath === 'circuit hint' ? circuitHint : undefined);
+      expect(resolverCalls).toBe(1);
     },
   );
 
