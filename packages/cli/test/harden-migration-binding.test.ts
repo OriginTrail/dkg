@@ -23,11 +23,11 @@ describe('captured migration specification', () => {
     const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir: root });
     const verifier = verifierFetch();
     const foreignPath = join(root, 'foreign.jnl');
-    const execution = migration.bind({ docker: runner, fetchImpl: verifier.fn, log: () => {},
+    // Runtime extras can arrive from untyped callers; they are not part of execution dependencies.
+    const runtimeExtras = { containerName: 'foreign', namespace: 'foreign', exportPath: foreignPath,
+      volumeAttemptId: 'foreign', specification: { exportPath: foreignPath } };
+    const execution = migration.bind({ ...runtimeExtras, docker: runner, fetchImpl: verifier.fn, log: () => {},
       freeDiskBytes: async () => 1_000_000,
-      // Runtime extras can arrive from untyped callers; they are not part of execution dependencies.
-      ...{ containerName: 'foreign', namespace: 'foreign', exportPath: foreignPath,
-        volumeAttemptId: 'foreign', specification: { exportPath: foreignPath } },
     });
     expect(execution.context.specification).toBe(migration.specification);
     expect(Object.isFrozen(migration.specification)).toBe(true);
@@ -64,10 +64,11 @@ describe('captured migration specification', () => {
     const { input } = fixture();
     const migration = buildHardenMigration(input);
     const captured: string[][] = [];
+    const runtimeExtras = { volumeAttemptId: 'foreign' };
     const execution = migration.bind({ docker: { async run(args) {
       captured.push([...args]);
       return ok(JSON.stringify([{ Name: VOLUME, Labels: { [HARDEN_VOLUME_ATTEMPT_LABEL]: 'foreign' } }]));
-    } }, fetchImpl: globalThis.fetch, log: () => {}, ...{ volumeAttemptId: 'foreign' } });
+    } }, fetchImpl: globalThis.fetch, log: () => {}, ...runtimeExtras });
     const phase = execution.phases.find(phase => phase.id === 'volume-ownership')!;
     await expect((phase.execute as (...ignored: unknown[]) => Promise<void>)({
       ...execution.context, specification: { ...migration.specification, volumeAttemptId: 'foreign' },
