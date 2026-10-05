@@ -232,10 +232,16 @@ function selectedSharedMemoryLaneActive(agent: any, contextGraphId: string): boo
   return authority?.active === true && authority.lane === 'selected-public';
 }
 
-/** The kill switch can revoke the selected lane while explicitly restoring legacy transfer. */
-function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): boolean {
-  return typeof agent.canUseLegacySharedMemorySyncForContextGraphV1 === 'function'
-    && agent.canUseLegacySharedMemorySyncForContextGraphV1(contextGraphId) === true;
+/** The kill switch or an authenticated private member may use the ordinary root lane. */
+async function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): Promise<boolean> {
+  if (typeof agent.canUseLegacySharedMemorySyncForContextGraphV1 === 'function'
+    && agent.canUseLegacySharedMemorySyncForContextGraphV1(contextGraphId) === true) return true;
+  // The public catalog predicate alone excludes approved private members.
+  // Keep the agent-owned private proof at this worker boundary too: the
+  // selected-public lane cannot recover their root SWM, and a join-derived
+  // acceptance must never authorize an outsider to use the ordinary lane.
+  return typeof agent.rfc64PrivateRootSwmOnLegacyLaneV1 === 'function'
+    && await agent.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
 }
 
 /** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
@@ -964,7 +970,7 @@ class WorkerCatchupRunner implements CatchupRunner {
           // commits the graph's RFC-64 authority in the background while the
           // job is still preparing, and a later peer's call must then run.
           if (!selectedSharedMemoryLaneActive(agent, contextGraphId)) {
-            if (legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+            if (await legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
               return runLegacyFallback();
             }
             return this.selectedLaneNotAttempted(
@@ -993,7 +999,7 @@ class WorkerCatchupRunner implements CatchupRunner {
             // its failure semantics.
             if (!isRfc64SwmRecoveryLeaseRefusal(error)) throw error;
             if (!selectedSharedMemoryLaneActive(agent, contextGraphId)
-              && legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+              && await legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
               return runLegacyFallback();
             }
             return this.selectedLaneNotAttempted(

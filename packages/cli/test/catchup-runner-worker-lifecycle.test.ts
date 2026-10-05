@@ -626,6 +626,27 @@ describe('WorkerCatchupRunner agent bridge', () => {
     ]);
   });
 
+  it('recovers private root SWM only for a locally proven private member', async () => {
+    const privateMember = vi.fn(async (id: string) => id === 'cg-private-member');
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
+      canUseLegacySharedMemorySyncForContextGraphV1: () => false,
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+    });
+    const member = await invokeThroughBridge(agent, 'syncSharedMemory',
+      ['peer-curator', 'cg-private-member', 2000, 'catchup-foreground', true]);
+    expect(member.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
+    expect(calls.shared).toHaveLength(1);
+    expect(calls.selectedShared).toEqual([]);
+
+    const outsider = await invokeThroughBridge(agent, 'syncSharedMemory',
+      ['peer-curator', 'cg-outsider', 2000, 'catchup-foreground', true]);
+    expect(outsider.result).toEqual({ kind: 'catchup-plane-not-attempted', reason: 'selected-lane-refused' });
+    expect(calls.shared).toHaveLength(1);
+    expect(privateMember).toHaveBeenCalledWith('cg-private-member');
+    expect(privateMember).toHaveBeenCalledWith('cg-outsider');
+  });
+
   it('does not fall back to legacy SWM when catalog authority forbids it', async () => {
     const legacyAdmission = vi.fn((_contextGraphId: string) => false);
     const { agent, calls } = bridgeAgent({
