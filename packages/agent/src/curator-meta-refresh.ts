@@ -52,6 +52,8 @@ export interface CuratorMetaRefreshOptions {
    * metadata recovery does not depend on metadata that has not arrived yet.
    */
   trustedCuratorPeerId?: string;
+  /** Last observed address for that peer, used only as a dial hint after restart. */
+  curatorDialAddressHint?: string;
   /** Bypass the normal auth-probe cooldown for an explicit recovery event. */
   force?: boolean;
   /**
@@ -379,6 +381,7 @@ function ensureCuratorConnected(
   curatorPeerId: string,
   signal: AbortSignal | undefined,
   ctx: OperationContext,
+  addressHint?: string,
 ): boolean | Promise<boolean> {
   const connections = agent.node.libp2p.getConnections();
   const isConnected = connections.some((connection) => (
@@ -386,7 +389,7 @@ function ensureCuratorConnected(
   ));
   if (isConnected) return true;
 
-  return dialCurator(agent, curatorPeerId, signal, ctx);
+  return dialCurator(agent, curatorPeerId, signal, ctx, addressHint);
 }
 
 async function dialCurator(
@@ -394,6 +397,7 @@ async function dialCurator(
   curatorPeerId: string,
   signal: AbortSignal | undefined,
   ctx: OperationContext,
+  addressHint?: string,
 ): Promise<boolean> {
   let connections: CuratorConnection[] = [];
   let isConnected = false;
@@ -401,6 +405,18 @@ async function dialCurator(
   try {
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const peerId = peerIdFromString(curatorPeerId);
+    if (addressHint) {
+      try {
+        const rememberedAddress = multiaddr(addressHint);
+        if (rememberedAddress.toString().split('/p2p/').at(-1) === curatorPeerId) {
+          await agent.node.libp2p.peerStore.merge(peerId, {
+            multiaddrs: [rememberedAddress],
+          });
+        }
+      } catch {
+        // An obsolete or malformed local hint cannot prevent normal discovery.
+      }
+    }
     try {
       await agent.node.libp2p.dial(peerId, { signal });
       throwIfCuratorMetaRefreshAborted(signal);
@@ -852,6 +868,7 @@ async function executeCuratorMetaRefresh(
     curatorPeerId,
     options.signal,
     ctx,
+    options.curatorDialAddressHint,
   );
   const connected = typeof connectionResult === 'boolean'
     ? connectionResult

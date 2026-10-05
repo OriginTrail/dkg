@@ -868,6 +868,7 @@ interface PersistedJoinApprovalProjection {
   readonly principalId: string;
   readonly updatedAt: number;
   readonly curatorPeerId?: string;
+  readonly curatorDialAddress?: string;
 }
 
 function projectPersistedJoinApprovals(
@@ -895,6 +896,10 @@ function projectPersistedJoinApprovals(
         curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
           membership.metadata['curatorPeerId'].trim()
           ? membership.metadata['curatorPeerId'].trim()
+          : undefined,
+        curatorDialAddress: typeof membership.metadata?.['curatorDialAddress'] === 'string' &&
+          membership.metadata['curatorDialAddress'].trim()
+          ? membership.metadata['curatorDialAddress'].trim()
           : undefined,
       });
     }
@@ -3472,7 +3477,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               role: 'participant',
               status: 'active',
               source: 'join-approved',
-              metadata: { curatorPeerId: peerId.toString() },
+              metadata: {
+                curatorPeerId: peerId.toString(),
+                // The authenticated notification connection is a durable
+                // transport hint for a restarted member. The peer ID and
+                // private metadata proof remain the authority boundaries.
+                ...(() => {
+                  const address = this.node.libp2p.getConnections()
+                    .find((connection) => connection.remotePeer.toString() === peerId.toString())
+                    ?.remoteAddr?.toString();
+                  return address ? { curatorDialAddress: address } : {};
+                })(),
+              },
             };
             // Commit the restart contract before changing live subscription
             // state. The two stores do not expose a shared transaction, so the
@@ -8907,6 +8923,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async resumePendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
+    curatorDialAddress?: string,
   ): Promise<JoinApprovalMetadataRecoveryOutcome> {
     const ctx = createOperationContext('sync');
     const acceptance = await this.resolveApprovedMemberAcceptance(contextGraphId);
@@ -8914,6 +8931,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
       trustedCuratorPeerId: curatorPeerId,
+      curatorDialAddressHint: curatorDialAddress,
       force: true,
       approvedMember: acceptance,
     }).catch((error) => {
@@ -8979,12 +8997,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async recoverPendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
+    curatorDialAddress?: string,
   ): Promise<void> {
     const stopSignal = this.node.stopSignal;
     for (let attempt = 0; ; attempt += 1) {
       let outcome: JoinApprovalMetadataRecoveryOutcome;
       try {
-        outcome = await this.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+        outcome = await this.resumePendingJoinApprovalMetadata(
+          contextGraphId,
+          curatorPeerId,
+          curatorDialAddress,
+        );
       } catch (error) {
         // A store or network fault that escapes an attempt is as transient as
         // a `retry`. Ending the loop on it would leave the row closed until
@@ -10822,6 +10845,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // snapshot already read by the provenance phase. Load every persisted
       // row (not just rows under the activation cap) so a dormant subscription
       // still has the right signer when an operator activates it explicitly.
+      const approvedCuratorDialAddresses = new Map<string, string>();
       if (persistedMembershipRows !== null) {
         const persistedContextGraphIds = new Set(rows.map((row) => row.id));
         const localAgentAddresses = new Set(
@@ -10836,6 +10860,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
           if (approval.curatorPeerId) {
             this.preferredSyncPeers.set(contextGraphId, approval.curatorPeerId);
+            if (approval.curatorDialAddress) {
+              approvedCuratorDialAddresses.set(contextGraphId, approval.curatorDialAddress);
+            }
           }
         }
       }
@@ -11060,7 +11087,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Restored persisted context-graph subscription "${row.id}" in restricted pending-metadata mode; VM, payload recovery, and SWM remain closed`,
           );
           if (curatorPeerId) {
-            void this.recoverPendingJoinApprovalMetadata(row.id, curatorPeerId).catch((error) => {
+            void this.recoverPendingJoinApprovalMetadata(
+              row.id,
+              curatorPeerId,
+              approvedCuratorDialAddresses.get(row.id),
+            ).catch((error) => {
               this.log.warn(
                 ctx,
                 `Pending join-approval recovery for "${row.id}" stopped safely: ${error instanceof Error ? error.message : String(error)}`,

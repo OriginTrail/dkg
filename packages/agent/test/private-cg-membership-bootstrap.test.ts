@@ -1485,6 +1485,11 @@ describe('private CG membership bootstrap recovery', () => {
       requestGeneration,
       '12D3KooWPrivateBootstrapCurator',
     );
+    const curatorDialAddress = '/ip4/127.0.0.1/tcp/9090/p2p/12D3KooWPrivateBootstrapCurator';
+    vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([{
+      remotePeer: { toString: () => '12D3KooWPrivateBootstrapCurator' },
+      remoteAddr: { toString: () => curatorDialAddress },
+    }] as never);
 
     const responsePromise = joinRequestHandler(agent)(
       encoder.encode(JSON.stringify({
@@ -1513,7 +1518,10 @@ describe('private CG membership bootstrap recovery', () => {
       principalId: approvedAddress,
       status: 'active',
       source: 'join-approved',
-      metadata: { curatorPeerId: '12D3KooWPrivateBootstrapCurator' },
+      metadata: {
+        curatorPeerId: '12D3KooWPrivateBootstrapCurator',
+        curatorDialAddress,
+      },
     }));
     expect((agent as any).subscribedContextGraphs.get(contextGraphId)).toMatchObject({
       subscribed: true,

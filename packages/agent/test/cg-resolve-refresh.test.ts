@@ -316,6 +316,7 @@ describe('authoritative private metadata proof', () => {
 describe('refreshMetaFromCurator', () => {
   it('resolves a restarted curator by peer ID without trusting resolver status alone', async () => {
     let resolvedPeerId: string | undefined;
+    let hintedPeerId: string | undefined;
     let fetched = false;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
@@ -324,7 +325,11 @@ describe('refreshMetaFromCurator', () => {
         libp2p: {
           getConnections: () => [],
           dial: async () => { throw new Error('no cached address after restart'); },
-          peerStore: { merge: async () => undefined },
+          peerStore: {
+            merge: async (peerId: { toString(): string }) => {
+              hintedPeerId = peerId.toString();
+            },
+          },
         },
       },
       discovery: { findAgentByPeerId: async () => null },
@@ -341,10 +346,15 @@ describe('refreshMetaFromCurator', () => {
     const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
       agent as never,
       'unit-test-cg',
-      { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
+      {
+        trustedCuratorPeerId: CURATOR_PEER_ID,
+        curatorDialAddressHint: `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`,
+        force: true,
+      },
     );
 
     expect(resolvedPeerId).toBe(CURATOR_PEER_ID);
+    expect(hintedPeerId).toBe(CURATOR_PEER_ID);
     expect(refreshed).toBe(false);
     expect(fetched).toBe(false);
   });
