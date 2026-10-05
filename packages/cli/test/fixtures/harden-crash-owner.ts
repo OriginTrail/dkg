@@ -10,8 +10,12 @@ await executeHardenMigration({ containerName: CRASH_NAME, namespace: CRASH_NAMES
   docker: { async run(args, options) {
     const result = await runner.run(args, options);
     if (beforeExport ? args[0] === 'volume' && args[1] === 'inspect' : args[0] === 'run' && args[1] === '-d') {
-      process.send?.({ replacementCreated: !beforeExport, ownerPid: process.pid });
-      await new Promise<void>(() => {});
+      // Keep the issued migration alive before announcing the interruption point.
+      const lifetime = setInterval(() => {}, 1000);
+      try {
+        process.send?.({ replacementCreated: !beforeExport, ownerPid: process.pid });
+        await new Promise<void>(() => {});
+      } finally { clearInterval(lifetime); }
     }
     return result;
   } }, fetch: real ? globalThis.fetch : crashVerifier, freeDiskBytes: async () => 1e12, log() {}, readyTimeoutMs: 100, readyIntervalMs: 1,

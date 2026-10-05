@@ -18,12 +18,13 @@ async function interruptedReplacement(beforeExport = false) {
       fileURLToPath(new URL('./fixtures/harden-crash-owner.ts', import.meta.url)), home, beforeExport ? 'before-export' : 'after-replacement'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   children.push(child);
   let diagnostic = ''; child.stderr?.on('data', bytes => { diagnostic += String(bytes); });
-  const exited = new Promise<void>((resolve, reject) => { child.once('error', reject); child.once('exit', () => resolve()); });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => { child.once('error', reject); child.once('exit', (code, signal) => resolve({ code, signal })); });
   await new Promise<void>((resolve, reject) => {
     child.once('message', message => { expect(message).toEqual({ replacementCreated: !beforeExport, ownerPid: child.pid }); resolve(); });
     child.once('exit', () => reject(new Error(`owner exited before replacement: ${diagnostic}`)));
   });
-  child.kill('SIGKILL'); await exited;
+  expect(child.kill('SIGKILL')).toBe(true);
+  expect(await exited).toEqual({ code: null, signal: 'SIGKILL' });
   expect(existsSync(join(home, 'docker-state.json'))).toBe(true);
   const marker = readFileSync(storeHardenLockPath(home), 'utf8');
   expect(JSON.parse(marker).recoveryRequired).toBeUndefined();

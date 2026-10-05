@@ -34,12 +34,13 @@ it('recovers an actual SIGKILL after replacement creation only after journal ver
     child = spawn(process.execPath, ['--import', fileURLToPath(new URL('../../../node_modules/tsx/dist/loader.mjs', import.meta.url)),
       fileURLToPath(new URL('./fixtures/harden-crash-owner.ts', import.meta.url)), root, 'real', JSON.stringify(options)], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
     let diagnostic = ''; child.stderr?.on('data', bytes => { diagnostic += String(bytes); });
-    const stopped = new Promise<void>((resolve, reject) => { child!.once('error', reject); child!.once('exit', () => resolve()); });
+    const stopped = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => { child!.once('error', reject); child!.once('exit', (code, signal) => resolve({ code, signal })); });
     await new Promise<void>((resolve, reject) => {
       child!.once('message', message => { assert.deepEqual(message, { replacementCreated: true, ownerPid: child!.pid }); resolve(); });
       child!.once('exit', () => reject(new Error(`owner exited before creation: ${diagnostic}`)));
     });
-    child.kill('SIGKILL'); await stopped;
+    assert.equal(child.kill('SIGKILL'), true, 'The live issued migration must receive SIGKILL');
+    assert.deepEqual(await stopped, { code: null, signal: 'SIGKILL' });
     await assert.rejects(assertStoreMigrationInactive(home), /Store hardening marker/);
     const invalidIdentity: typeof globalThis.fetch = (...args) => String(args[1]?.body).includes('SELECT')
       ? Promise.resolve(new Response(JSON.stringify({ results: { bindings: [] } }))) : fetch(...args);
