@@ -101,6 +101,7 @@ export default defineConfig({
           'test/context-graph-on-chain-id-helpers.test.ts',
           'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
+          'test/catalog-readiness-replay-integration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.
           'test/pca-confirmation-wire.test.ts',
