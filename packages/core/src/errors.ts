@@ -100,6 +100,28 @@ export function messageIndicatesPublishAuthorNotCustodial(message: unknown): boo
 }
 
 /**
+ * GH#3049 — a root promote, or the SWM staging of an update, is refused while the RFC-64 legacy
+ * SWM boundary retirement holds its fence (the asset's, or the context graph's). The fence is transient: it ends with
+ * the retirement. The refusal carries this code and each consumer decides what it means for it:
+ * the agent's promote callback makes it a retryable promote failure, the publisher's async-lift
+ * classifier records an update refused at staging as `workspace_unavailable` (auto-retry), and
+ * the daemon's promote worker names it in its attempt log. Shared here because it crosses those
+ * packages; the wire value is part of the contract.
+ */
+export const RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE =
+  'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS';
+
+/** Structural and throw-safe: it holds across duplicated module copies and for a hostile `code` getter. */
+export function isRfc64LegacySwmBoundaryRetirementInProgressError(error: unknown): boolean {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return false;
+  try {
+    return Reflect.get(error, 'code') === RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * An error caused by invalid user input or a pre-condition that the user
  * can fix. CLI handlers can show these messages directly without a stack trace.
  */

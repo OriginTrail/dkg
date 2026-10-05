@@ -46,6 +46,7 @@ export default defineConfig({
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
+      "test/promote-durable-root-companion.test.ts",
       "test/promote-swm-pointer-post-commit.test.ts",
       "test/clear-promote-async-facade.test.ts",
       "test/query-min-trust-alias.test.ts",

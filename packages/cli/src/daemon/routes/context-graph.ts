@@ -12,6 +12,7 @@
 // See `packages/cli/scripts/split-handle-request.mjs` for the
 // extraction driver.
 
+import { catchupShuttingDownResponse, catchupAuthorityUnavailableResponse, authorityUnavailableResponse } from './context-graph-catchup-responses.js';
 import {
   createServer,
   type IncomingMessage,
@@ -468,40 +469,6 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
   return jsonResponse(res, 500, { error: message });
 }
 
-/**
- * Refuse to mint a new catch-up job because the daemon is shutting down.
- *
- * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
- * — because that is what this is: the request is fine, the node just cannot
- * take on new work it will never drain. Returned from BOTH mint sites, which
- * is why I7's `result` vocabulary needed a distinct value; a 503 that clamped
- * to `unspecified` would hide the one route outcome shutdown introduces.
- */
-function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: boolean): void {
-  recordCatchupRequest('shutting_down', includeSharedMemory);
-  return jsonResponse(
-    res,
-    503,
-    {
-      error:
-        'Node is shutting down and is no longer accepting catch-up jobs; retry once it is back up.',
-      code: 'CATCHUP_SHUTTING_DOWN',
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '5' },
-  );
-}
-
-/** Fail closed without misreporting a transient authority outage as a denial. */
-function catchupAuthorityUnavailableResponse(
-  res: ServerResponse,
-  includeSharedMemory: boolean,
-): void {
-  recordCatchupRequest('authority_unavailable', includeSharedMemory);
-  return authorityUnavailableResponse(res);
-}
-
 const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
   'finalized-name-absence-unaccepted',
   'chain-name-binding-unavailable',
@@ -519,21 +486,6 @@ const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
   'rfc64-private-read-roster-unavailable',
   'no-read-authority',
 ]);
-
-/** The retryable 503 for an admission read that could not be completed. */
-function authorityUnavailableResponse(res: ServerResponse): void {
-  return jsonResponse(
-    res,
-    503,
-    {
-      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '3' },
-  );
-}
 
 /** How the subscribe route answers an on-chain id that names nothing subscribable. */
 const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
@@ -2091,7 +2043,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     let effectiveSyncMode = lifetimePlan.effectiveSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
-    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+    const readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
@@ -2206,11 +2158,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           existingReadiness.readinessPatch,
         );
       }
-      // The existing-state classifier may have just invalidated stale v1
-      // provenance because authoritative metadata was missing. Carry the
-      // corrected value into the queued catch-up so a later metadata-only or
-      // incomplete response cannot resurrect the pre-reset true bits.
-      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+      // Any invalidation is persisted before queueing; completion reads the
+      // then-current provenance so it cannot resurrect these stale bits.
     }
 
     // First mint site. The guard belongs HERE, above
@@ -2360,9 +2309,9 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             hasConfirmedMeta,
             isPrivate,
             completionAuthority,
-            readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
-              ? readinessBeforeCatchup
-              : readContextGraphReadiness(dashDb, targetContextGraphId),
+            // Automatic catalog recovery can finish while the foreground job
+            // runs. Do not overwrite its newer proof with admission-time bits.
+            readinessBeforeCatchup: readContextGraphReadiness(dashDb, targetContextGraphId),
           });
 
           job.durablePlane = classification.durablePlane;

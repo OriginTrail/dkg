@@ -18,8 +18,12 @@
  * admits candidate rows or activates KA / SWM / VM state.
  */
 
+import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1 } from './rfc64/catalog-operational-targets-v1.js';
+import { evaluateRfc64CatalogCompletionV1 } from './rfc64/catalog-completion-evidence-v1.js';
+export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1, type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
 import {
   SYSTEM_CONTEXT_GRAPHS,
+  DKGEvent,
   ZERO_DIGEST32_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   contextGraphDataGraphUri,
@@ -138,12 +142,12 @@ import {
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
-  RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1,
   loadRfc64OperationalAppliedHeadsV1,
   rfc64CatalogTargetScopeKeyV1,
   type Rfc64OperationalAppliedHeadV1,
 } from './rfc64/catalog-operational-applied-heads-v1.js';
-import { mapWithConcurrency } from './map-with-concurrency.js';
+import { groupRfc64OperationalAppliedHeadsV1, loadRfc64OperationalPromisedRowCountsV1 } from './rfc64/catalog-operational-reads-v1.js';
+import { verifyPrivateCatalogSubscriptionReadinessV1 } from './rfc64/private-catalog-subscription-readiness-v1.js';
 import {
   type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -233,57 +237,6 @@ export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
 const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
   'https://dkg.network/ontology#rfc64RosterVersion';
 const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
-
-function groupRfc64OperationalAppliedHeadsV1(
-  heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
-): ReadonlyMap<string, readonly Readonly<Rfc64OperationalAppliedHeadV1>[]> {
-  const byContextGraph = new Map<string, Readonly<Rfc64OperationalAppliedHeadV1>[]>();
-  for (const head of heads) {
-    const grouped = byContextGraph.get(head.contextGraphId) ?? [];
-    grouped.push(head);
-    byContextGraph.set(head.contextGraphId, grouped);
-  }
-  return byContextGraph;
-}
-
-async function loadRfc64OperationalPromisedRowCountsV1(
-  persistence: Rfc64PersistenceV1,
-  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
-): Promise<ReadonlyMap<string, string | null>> {
-  const uniqueTargets = new Map(targets.map((target) => [
-    rfc64CatalogTargetExactIdentityKeyV1(target),
-    target,
-  ]));
-  const loaded = await mapWithConcurrency(
-    [...uniqueTargets],
-    RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1,
-    async ([identity, target]): Promise<readonly [string, string | null]> => {
-      const stored = await persistence.controlObjects.getVerifiedObject({
-        objectDigest: target.catalogHeadObjectDigest,
-        signatureVariantDigest: target.signatureVariantDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      }).catch(() => null);
-      if (stored === null) return [identity, null] as const;
-      try {
-        assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
-        const payload = stored.envelope.payload;
-        if (
-          stored.envelope.objectDigest !== target.catalogHeadObjectDigest
-          || payload.networkId !== target.networkId
-          || payload.contextGraphId !== target.contextGraphId
-          || payload.subGraphName !== target.subGraphName
-          || payload.authorAddress !== target.authorAddress
-          || payload.era !== target.catalogEra
-          || payload.version !== target.catalogVersion
-        ) return [identity, null] as const;
-        return [identity, payload.totalRows] as const;
-      } catch {
-        return [identity, null] as const;
-      }
-    },
-  );
-  return new Map(loaded);
-}
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
@@ -622,8 +575,6 @@ export const RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1 = Object.freeze([
 ]);
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
-export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
-export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
 
 type Rfc64ActiveRegisteredSubscriptionV1 = ContextGraphSub & Required<
   Pick<ContextGraphSub, 'onChainId' | 'onChainHash'>
@@ -722,378 +673,6 @@ const rfc64CatalogReplayRecoveryRuntimesV1 = new WeakMap<
   Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1>
 >();
 
-interface Rfc64CatalogTrackedTargetV1 {
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-  terminalFailure: boolean;
-}
-
-interface Rfc64CatalogTargetOverflowV1 {
-  active: number;
-  readonly failureWitnesses: Map<string, Rfc64PublicCatalogHeadAnnouncementV1>;
-  /** CG-owned saturation can be released only when that authority generation resets. */
-  readonly saturatedContextGraphs: Set<string>;
-  /** Lost attribution is fail-closed until the whole tracker reaches a reset boundary. */
-  unattributedSaturation: boolean;
-}
-
-interface Rfc64CatalogTargetContextEpochV1 {
-  valid: boolean;
-  activeLeases: number;
-}
-
-interface Rfc64CatalogTargetLeaseStateV1 {
-  active: boolean;
-  readonly contextEpoch: Rfc64CatalogTargetContextEpochV1;
-  readonly overflow: Rfc64CatalogTargetOverflowV1 | null;
-}
-
-export type Rfc64CatalogTargetLeaseV1 = Readonly<{
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-  disposition: 'tracked' | 'covered' | 'context-capacity' | 'global-capacity';
-  /** Opaque exactly-once settlement state owned by the tracker. */
-  state: Rfc64CatalogTargetLeaseStateV1;
-}>;
-
-/** Process-local, bounded operational targets; semantic truth remains the durable inventory. */
-export class Rfc64CatalogTargetTrackerV1 {
-  readonly #byContextGraph =
-    new Map<string, Map<string, Rfc64CatalogTrackedTargetV1>>();
-  readonly #contextGraphOverflows = new Map<string, Rfc64CatalogTargetOverflowV1>();
-  readonly #contextEpochs = new Map<string, Rfc64CatalogTargetContextEpochV1>();
-  #globalOverflow: Rfc64CatalogTargetOverflowV1 | null = null;
-  #size = 0;
-
-  get size(): number {
-    return this.#size;
-  }
-
-  targetsForContextGraph(
-    contextGraphId: string,
-  ): readonly Rfc64PublicCatalogHeadAnnouncementV1[] {
-    return Object.freeze(
-      [...this.#byContextGraph.get(contextGraphId)?.values() ?? []]
-        .map(({ announcement }) => announcement),
-    );
-  }
-
-  hasTerminalFailure(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean {
-    const entry = this.#byContextGraph
-      .get(announcement.contextGraphId)
-      ?.get(rfc64CatalogTargetScopeKeyV1(announcement));
-    return entry !== undefined
-      && rfc64CatalogTargetExactIdentityV1(entry.announcement, announcement)
-      && entry.terminalFailure;
-  }
-
-  capacityExceededForContextGraph(contextGraphId: string): boolean {
-    return this.#globalOverflow !== null
-      || this.#contextGraphOverflows.has(contextGraphId);
-  }
-
-  /** Invalidate every outstanding lease and release all process-local target evidence. */
-  resetAll(): void {
-    for (const contextEpoch of this.#contextEpochs.values()) contextEpoch.valid = false;
-    this.#contextEpochs.clear();
-    this.#byContextGraph.clear();
-    this.#contextGraphOverflows.clear();
-    this.#globalOverflow = null;
-    this.#size = 0;
-  }
-
-  clearContextGraph(contextGraphId: string): number {
-    const byScope = this.#byContextGraph.get(contextGraphId);
-    const contextEpoch = this.#contextEpochs.get(contextGraphId);
-    if (contextEpoch !== undefined) {
-      contextEpoch.valid = false;
-      this.#contextEpochs.delete(contextGraphId);
-    }
-    this.#contextGraphOverflows.delete(contextGraphId);
-    if (this.#globalOverflow !== null) {
-      for (const [identity, witness] of this.#globalOverflow.failureWitnesses) {
-        if (witness.contextGraphId === contextGraphId) {
-          this.#globalOverflow.failureWitnesses.delete(identity);
-        }
-      }
-      this.#globalOverflow.saturatedContextGraphs.delete(contextGraphId);
-      this.#finishOverflowIfResolved(this.#globalOverflow, null);
-    }
-    if (byScope !== undefined) {
-      this.#byContextGraph.delete(contextGraphId);
-      this.#size -= byScope.size;
-    }
-    this.#promoteOverflowWitnesses();
-    return byScope?.size ?? 0;
-  }
-
-  begin(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Rfc64CatalogTargetLeaseV1 {
-    const existingByScope = this.#byContextGraph.get(announcement.contextGraphId);
-    const key = rfc64CatalogTargetScopeKeyV1(announcement);
-    const previous = existingByScope?.get(key);
-    let contextEpoch = this.#contextEpochs.get(announcement.contextGraphId);
-    if (contextEpoch === undefined) {
-      contextEpoch = { valid: true, activeLeases: 0 };
-      this.#contextEpochs.set(announcement.contextGraphId, contextEpoch);
-    }
-    contextEpoch.activeLeases += 1;
-    const lease = (
-      disposition: Rfc64CatalogTargetLeaseV1['disposition'],
-      overflow: Rfc64CatalogTargetOverflowV1 | null = null,
-    ) => Object.freeze({
-      announcement,
-      disposition,
-      state: { active: true, contextEpoch, overflow },
-    });
-    if (
-      previous !== undefined
-      && BigInt(announcement.catalogVersion)
-        < BigInt(previous.announcement.catalogVersion)
-    ) return lease('covered');
-    if (
-      previous === undefined
-      && (existingByScope?.size ?? 0)
-        >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
-    ) {
-      const overflow = this.#beginContextGraphOverflow(announcement.contextGraphId);
-      return lease(overflow.disposition, overflow.overflow);
-    }
-    if (previous === undefined && this.#size >= RFC64_CATALOG_TARGET_MAX_ENTRIES_V1) {
-      this.#globalOverflow ??= this.#createOverflow();
-      this.#globalOverflow.active += 1;
-      return lease('global-capacity', this.#globalOverflow);
-    }
-    let byScope = existingByScope;
-    if (byScope === undefined) {
-      byScope = new Map();
-      this.#byContextGraph.set(announcement.contextGraphId, byScope);
-    }
-    byScope.set(key, { announcement, terminalFailure: false });
-    if (previous === undefined) this.#size += 1;
-    return lease('tracked');
-  }
-
-  reject(
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  ): Rfc64CatalogTargetLeaseV1 {
-    const lease = this.begin(announcement);
-    this.settle(lease, 'dropped');
-    return lease;
-  }
-
-  settle(
-    lease: Rfc64CatalogTargetLeaseV1,
-    outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1,
-  ): void {
-    if (!lease.state.active) return;
-    lease.state.active = false;
-    const { contextEpoch } = lease.state;
-    contextEpoch.activeLeases = Math.max(0, contextEpoch.activeLeases - 1);
-    if (
-      contextEpoch.activeLeases === 0
-      && this.#contextEpochs.get(lease.announcement.contextGraphId) === contextEpoch
-    ) this.#contextEpochs.delete(lease.announcement.contextGraphId);
-    const overflow = lease.state.overflow;
-    if (!contextEpoch.valid) {
-      if (overflow !== null) {
-        overflow.active = Math.max(0, overflow.active - 1);
-        if (this.#globalOverflow === overflow) {
-          this.#finishOverflowIfResolved(overflow, null);
-        }
-      }
-      return;
-    }
-    const resolved = outcome === 'already-applied'
-      || outcome === 'applied'
-      || outcome === 'closed'
-      || outcome === 'staged-only';
-    if (lease.disposition === 'tracked') {
-      if (resolved) this.retire(lease.announcement);
-      else this.#markTerminalFailure(lease.announcement);
-      return;
-    }
-    if (lease.disposition === 'covered') return;
-    if (
-      overflow === null
-      || (
-        lease.disposition === 'context-capacity'
-          ? this.#contextGraphOverflows.get(lease.announcement.contextGraphId) !== overflow
-          : this.#globalOverflow !== overflow
-      )
-    ) return;
-    overflow.active = Math.max(0, overflow.active - 1);
-    const exactIdentity = rfc64CatalogTargetExactIdentityKeyV1(lease.announcement);
-    if (resolved) {
-      overflow.failureWitnesses.delete(exactIdentity);
-    } else if (!overflow.failureWitnesses.has(exactIdentity)) {
-      if (
-        overflow.failureWitnesses.size
-          >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
-      ) this.#markOverflowSaturated(overflow, lease.announcement.contextGraphId);
-      else overflow.failureWitnesses.set(exactIdentity, lease.announcement);
-    }
-    this.#finishOverflowIfResolved(
-      overflow,
-      lease.disposition === 'context-capacity'
-        ? lease.announcement.contextGraphId
-        : null,
-    );
-  }
-
-  retire(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean {
-    const byScope = this.#byContextGraph.get(announcement.contextGraphId);
-    const key = rfc64CatalogTargetScopeKeyV1(announcement);
-    const current = byScope?.get(key);
-    let retired = false;
-    if (
-      current !== undefined
-      && rfc64CatalogTargetExactIdentityV1(current.announcement, announcement)
-    ) {
-      byScope!.delete(key);
-      this.#size -= 1;
-      if (byScope!.size === 0) this.#byContextGraph.delete(announcement.contextGraphId);
-      retired = true;
-    }
-    const exactIdentity = rfc64CatalogTargetExactIdentityKeyV1(announcement);
-    const contextOverflow = this.#contextGraphOverflows.get(announcement.contextGraphId);
-    if (contextOverflow?.failureWitnesses.delete(exactIdentity) === true) {
-      this.#finishOverflowIfResolved(contextOverflow, announcement.contextGraphId);
-      retired = true;
-    }
-    if (this.#globalOverflow?.failureWitnesses.delete(exactIdentity) === true) {
-      this.#finishOverflowIfResolved(this.#globalOverflow, null);
-      retired = true;
-    }
-    this.#promoteOverflowWitnesses();
-    return retired;
-  }
-
-  #markTerminalFailure(announcement: Rfc64PublicCatalogHeadAnnouncementV1): void {
-    const entry = this.#byContextGraph
-      .get(announcement.contextGraphId)
-      ?.get(rfc64CatalogTargetScopeKeyV1(announcement));
-    if (
-      entry !== undefined
-      && rfc64CatalogTargetExactIdentityV1(entry.announcement, announcement)
-    ) entry.terminalFailure = true;
-  }
-
-  #beginContextGraphOverflow(
-    contextGraphId: string,
-  ): Readonly<{
-    disposition: 'context-capacity' | 'global-capacity';
-    overflow: Rfc64CatalogTargetOverflowV1;
-  }> {
-    let overflow = this.#contextGraphOverflows.get(contextGraphId);
-    if (overflow === undefined) {
-      if (
-        this.#contextGraphOverflows.size
-          >= RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1
-      ) {
-        this.#globalOverflow ??= this.#createOverflow();
-        this.#globalOverflow.active += 1;
-        return Object.freeze({
-          disposition: 'global-capacity',
-          overflow: this.#globalOverflow,
-        });
-      }
-      overflow = this.#createOverflow();
-      this.#contextGraphOverflows.set(contextGraphId, overflow);
-    }
-    overflow.active += 1;
-    return Object.freeze({ disposition: 'context-capacity', overflow });
-  }
-
-  #createOverflow(): Rfc64CatalogTargetOverflowV1 {
-    return {
-      active: 0,
-      failureWitnesses: new Map(),
-      saturatedContextGraphs: new Set(),
-      unattributedSaturation: false,
-    };
-  }
-
-  #markOverflowSaturated(
-    overflow: Rfc64CatalogTargetOverflowV1,
-    contextGraphId: string,
-  ): void {
-    if (overflow.saturatedContextGraphs.has(contextGraphId)) return;
-    if (
-      overflow.saturatedContextGraphs.size
-        >= RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1
-    ) {
-      overflow.unattributedSaturation = true;
-      return;
-    }
-    overflow.saturatedContextGraphs.add(contextGraphId);
-  }
-
-  #finishOverflowIfResolved(
-    overflow: Rfc64CatalogTargetOverflowV1,
-    contextGraphId: string | null,
-  ): void {
-    if (overflow.active > 0) return;
-    if (
-      overflow.failureWitnesses.size === 0
-      && overflow.saturatedContextGraphs.size === 0
-      && !overflow.unattributedSaturation
-    ) {
-      if (contextGraphId === null) this.#globalOverflow = null;
-      else this.#contextGraphOverflows.delete(contextGraphId);
-      return;
-    }
-    this.#promoteOverflowWitness(contextGraphId, overflow);
-  }
-
-  #promoteOverflowWitnesses(): void {
-    for (const [contextGraphId, overflow] of this.#contextGraphOverflows) {
-      this.#promoteOverflowWitness(contextGraphId, overflow);
-    }
-    if (this.#globalOverflow !== null) this.#promoteOverflowWitness(null, this.#globalOverflow);
-  }
-
-  #promoteOverflowWitness(
-    contextGraphId: string | null,
-    overflow: Rfc64CatalogTargetOverflowV1,
-  ): void {
-    if (overflow.active > 0) return;
-    for (const [identity, witness] of overflow.failureWitnesses) {
-      const byScope = this.#byContextGraph.get(witness.contextGraphId);
-      const key = rfc64CatalogTargetScopeKeyV1(witness);
-      const current = byScope?.get(key);
-      if (current !== undefined) {
-        if (BigInt(current.announcement.catalogVersion) > BigInt(witness.catalogVersion)) {
-          overflow.failureWitnesses.delete(identity);
-          continue;
-        }
-        current.announcement = witness;
-        current.terminalFailure = true;
-        overflow.failureWitnesses.delete(identity);
-        continue;
-      }
-      if (
-        (byScope?.size ?? 0) >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
-        || this.#size >= RFC64_CATALOG_TARGET_MAX_ENTRIES_V1
-      ) continue;
-      const targetByScope = byScope ?? new Map<string, Rfc64CatalogTrackedTargetV1>();
-      if (byScope === undefined) this.#byContextGraph.set(witness.contextGraphId, targetByScope);
-      targetByScope.set(key, { announcement: witness, terminalFailure: true });
-      this.#size += 1;
-      overflow.failureWitnesses.delete(identity);
-    }
-    if (
-      overflow.failureWitnesses.size === 0
-      && overflow.saturatedContextGraphs.size === 0
-      && !overflow.unattributedSaturation
-    ) {
-      if (contextGraphId === null && this.#globalOverflow === overflow) {
-        this.#globalOverflow = null;
-      } else if (
-        contextGraphId !== null
-        && this.#contextGraphOverflows.get(contextGraphId) === overflow
-      ) this.#contextGraphOverflows.delete(contextGraphId);
-    }
-  }
-}
-
 const rfc64CatalogTargetAnnouncementsV1 =
   new WeakMap<DKGAgent, Rfc64CatalogTargetTrackerV1>();
 
@@ -1153,26 +732,6 @@ function pruneRfc64SupersededCatalogTargetsV1(
   return targets.filter((target) => (
     BigInt(target.catalogVersion) === newestByScope.get(rfc64CatalogTargetScopeKeyV1(target))
   ));
-}
-
-function rfc64CatalogTargetExactIdentityV1(
-  left: Rfc64PublicCatalogHeadAnnouncementV1,
-  right: Rfc64PublicCatalogHeadAnnouncementV1,
-): boolean {
-  return rfc64CatalogTargetExactIdentityKeyV1(left)
-    === rfc64CatalogTargetExactIdentityKeyV1(right);
-}
-
-export function rfc64CatalogTargetExactIdentityKeyV1(
-  target: Rfc64PublicCatalogHeadAnnouncementV1,
-): string {
-  return [
-    rfc64CatalogTargetScopeKeyV1(target),
-    target.catalogVersion,
-    target.policyDigest,
-    target.catalogHeadObjectDigest,
-    target.signatureVariantDigest,
-  ].join('\0');
 }
 
 function recordRfc64CatalogTargetAnnouncementV1(
@@ -1472,92 +1031,6 @@ function rfc64CatalogAuthorityFailureCodeV1(error: unknown): string {
  */
 export function isRfc64UnregisteredOwnerUnresolvedErrorV1(error: unknown): boolean {
   return rfc64CatalogAuthorityFailureCodeV1(error) === 'unregistered-owner-unresolved';
-}
-
-function aggregateRfc64DigestV1(values: readonly string[]): Digest32V1 | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort();
-  if (sorted.length === 1) return sorted[0] as Digest32V1;
-  return ethers.keccak256(ethers.toUtf8Bytes(sorted.join('\n'))) as Digest32V1;
-}
-
-function sumDecimalCountsV1(values: readonly string[]): string {
-  return values.reduce((sum, value) => sum + BigInt(value), 0n).toString(10);
-}
-
-interface Rfc64OperationalRowProjectionV1 {
-  readonly expectedRowCount: string | null;
-  readonly missingRowCount: string | null;
-}
-
-export function projectRfc64OperationalRowCountsV1(
-  heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
-  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
-  promisedRowCounts: ReadonlyMap<string, string | null>,
-): Readonly<Rfc64OperationalRowProjectionV1> {
-  if (heads.length === 0 && targets.length === 0) {
-    return Object.freeze({ expectedRowCount: null, missingRowCount: null });
-  }
-  const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
-  const expectedByScope = new Map(heads.map(({ scopeKey, snapshot }) => [scopeKey, {
-    catalogVersion: snapshot.catalogVersion,
-    catalogHeadObjectDigest: snapshot.currentCatalogHeadDigest,
-    rowCount: snapshot.inventoryRowCount as string | null,
-    target: null as Rfc64PublicCatalogHeadAnnouncementV1 | null,
-  }]));
-  // A fork is a property of the newest version in a scope, not of the order
-  // the targets arrive in: `authoritativeTargets` preserves insertion order and
-  // the promised half arrives in peer-completion order, so deciding as the loop
-  // walks would let the same state report an ambiguous pair or a definite one
-  // depending on which peer answered first. The scope's maximum version is
-  // resolved first, and only a digest disagreement AT that maximum is ambiguous
-  // -- a strictly newer head settles the branch the older fork was on.
-  const ambiguousScopes = new Set<string>();
-  for (const target of targets) {
-    const scopeKey = rfc64CatalogTargetScopeKeyV1(target);
-    const current = expectedByScope.get(scopeKey);
-    const targetVersion = BigInt(target.catalogVersion);
-    if (current === undefined || targetVersion > BigInt(current.catalogVersion)) {
-      expectedByScope.set(scopeKey, {
-        catalogVersion: target.catalogVersion,
-        catalogHeadObjectDigest: target.catalogHeadObjectDigest,
-        rowCount: null,
-        target,
-      });
-      ambiguousScopes.delete(scopeKey);
-    } else if (
-      targetVersion === BigInt(current.catalogVersion)
-      && target.catalogHeadObjectDigest !== current.catalogHeadObjectDigest
-    ) {
-      ambiguousScopes.add(scopeKey);
-    }
-  }
-  if (ambiguousScopes.size > 0) {
-    return Object.freeze({ expectedRowCount: null, missingRowCount: null });
-  }
-
-  let expected = 0n;
-  let missing = 0n;
-  for (const [scopeKey, projected] of expectedByScope) {
-    const targetRowCount = projected.target === null
-      ? projected.rowCount
-      : promisedRowCounts.get(
-          rfc64CatalogTargetExactIdentityKeyV1(projected.target),
-        ) ?? null;
-    if (targetRowCount === null) {
-      return Object.freeze({ expectedRowCount: null, missingRowCount: null });
-    }
-    const expectedForScope = BigInt(targetRowCount);
-    const appliedForScope = BigInt(
-      appliedByScope.get(scopeKey)?.snapshot.inventoryRowCount ?? '0',
-    );
-    expected += expectedForScope;
-    if (expectedForScope > appliedForScope) missing += expectedForScope - appliedForScope;
-  }
-  return Object.freeze({
-    expectedRowCount: expected.toString(10),
-    missingRowCount: missing.toString(10),
-  });
 }
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
@@ -1872,10 +1345,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const currentReplayProgress = accepted === null
         ? null
         : replayRecovery.status(selection.contextGraphId, accepted.policyDigest);
-      const replayActive = replaySnapshotUnstable || currentReplayProgress?.active === true;
-      // Only parity/overflow evidence fails a Context Graph. Providers that
-      // could not be replayed from surface through providerHealth instead.
-      const replayFailed = currentReplayProgress?.failed === true;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
       // The owner is the only possible catalog author only in a private graph
       // whose accepted roster is the owner alone: catalog authorship follows
@@ -1903,66 +1372,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         && heads.every(({ snapshot }) => (
           snapshot.authorAddress === curatedOwnerAddress
         ));
-      // A full pass that reached no provider at all corroborated nothing: with
-      // an empty promised set parity is vacuously satisfied, so applied rows
-      // would otherwise be reported as agreed by every provider. It is not
-      // evidence of missing rows, so it stays distinct from `replayFailed`, and
-      // it can only mislead once something has been applied.
-      const replayUnverified = currentReplayProgress?.unverified === true
-        && heads.length > 0
-        && !localCuratedOwnerHeads;
-      const replayUnsettled = replayActive || replayFailed || replayUnverified;
       const targets = targetsByContextGraph.get(selection.contextGraphId) ?? [];
       const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;
-      const authoritativeTargets = [...new Map([
-        ...targets,
-        ...promisedTargets ?? [],
-      ].map((target) => [rfc64CatalogTargetExactIdentityKeyV1(target), target])).values()];
       const targetCapacityExceeded = targetTracker
         ?.capacityExceededForContextGraph(selection.contextGraphId) ?? false;
-      const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
-      const pendingTargets = targets.filter((target) => {
-        const applied = appliedByScope.get(rfc64CatalogTargetScopeKeyV1(target));
-        return applied === undefined
-          || BigInt(target.catalogVersion) > BigInt(applied.snapshot.catalogVersion)
-          || (
-            target.catalogVersion === applied.snapshot.catalogVersion
-            && target.catalogHeadObjectDigest !== applied.snapshot.currentCatalogHeadDigest
-          );
+      const { replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets,
+        catalogHeadDigest, expectedCatalogHeadDigest, inventoryDigest, rowCount, rowProjection,
+      } = evaluateRfc64CatalogCompletionV1({
+        heads, targets, promisedTargets, promisedRowCounts, replay: currentReplayProgress,
+        replaySnapshotUnstable, targetCapacityExceeded, localCuratedOwnerHeads,
       });
-      const catalogHeadDigest = aggregateRfc64DigestV1(
-        heads.map(({ snapshot }) => snapshot.currentCatalogHeadDigest),
-      );
-      const expectedCatalogHeadDigests = new Map(heads.map(({ scopeKey, snapshot }) => [
-        scopeKey,
-        snapshot.currentCatalogHeadDigest,
-      ]));
-      for (const target of pendingTargets) {
-        expectedCatalogHeadDigests.set(
-          rfc64CatalogTargetScopeKeyV1(target),
-          target.catalogHeadObjectDigest,
-        );
-      }
-      const expectedCatalogHeadDigest = aggregateRfc64DigestV1(
-        [...expectedCatalogHeadDigests.values()],
-      );
-      const inventoryDigest = aggregateRfc64DigestV1(
-        heads.map(({ snapshot }) => snapshot.appliedInventoryDigest),
-      );
-      const rowCount = heads.length === 0
-        ? null
-        : sumDecimalCountsV1(heads.map(({ snapshot }) => snapshot.inventoryRowCount));
-      const rowProjectionUnavailable = targetCapacityExceeded
-        || replayActive
-        || replayUnverified
-        || (replayFailed && promisedTargets === null);
-      const rowProjection = rowProjectionUnavailable
-        ? Object.freeze({ expectedRowCount: null, missingRowCount: null })
-        : projectRfc64OperationalRowCountsV1(
-          heads,
-          authoritativeTargets,
-          promisedRowCounts,
-        );
       const appliedCatalogVersion = heads.length === 0
         ? null
         : heads.reduce((highest, { snapshot }) => (
@@ -2108,6 +1527,37 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         stableReason,
       });
     }));
+  }
+
+  /** Re-prove catalog completion before the daemon's synchronous readiness commit. */
+  async withVerifiedPrivateCatalogSubscriptionReadinessV1(
+    this: DKGAgent, contextGraphId: string, commit: () => void,
+  ): Promise<boolean> {
+    return verifyPrivateCatalogSubscriptionReadinessV1(this, contextGraphId, commit, () => {
+      const progress = rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId);
+      const tracker = rfc64CatalogTargetAnnouncementsV1.get(this);
+      const targets = tracker?.targetsForContextGraph(contextGraphId) ?? [];
+      return {
+        service: this.rfc64PublicCatalogServiceV1,
+        persistence: this.rfc64PersistenceV1,
+        networkId: this.config.rfc64CatalogDeploymentProfile?.networkId ?? this.config.networkIdentity?.chainId,
+        approvedAgent: this.localApprovedAgentByCG.get(contextGraphId),
+        subscription: this.subscribedContextGraphs.get(contextGraphId),
+        plan: this.config.rfc64CatalogExecutionPlan,
+        metadataRevision: this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId),
+        replay: this.rfc64CatalogReplayRecoveryRuntimeV1(),
+        authorityRevision: rfc64CatalogAuthorityRevisionsV1.get(this)?.get(contextGraphId),
+        authorityCurrent: progress?.state === 'accepted' && Date.now() - progress.updatedAtMs
+          <= RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs * RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.freshnessIntervalCount,
+        legacyReadOnlyCount: readRfc64LegacySwmBoundaryCountV1(this, contextGraphId),
+        targets,
+        targetCapacityExceeded: tracker?.capacityExceededForContextGraph(contextGraphId) ?? false,
+        targetFailed: targets.some((target) => tracker!.hasTerminalFailure(target)),
+        targetFence: JSON.stringify(targets.map((target) => [
+          rfc64CatalogTargetExactIdentityKeyV1(target), tracker!.hasTerminalFailure(target),
+        ])),
+      };
+    });
   }
 
   /**
@@ -4046,6 +3496,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         reason: null,
         updatedAtMs: Date.now(),
       });
+      // Restart can restore all applied heads without a receiver completion.
+      // Fresh accepted authority must also wake the live readiness verifier.
+      if (approvedPrivateReplicaAuthority !== null) {
+        this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, { contextGraphId });
+      }
       // A first subscription attempt can race this authority bootstrap and
       // correctly fail closed. Re-enter the idempotent transport reconciler
       // exactly when authority becomes usable (or its generation changes),
@@ -4743,6 +4198,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // through the ambient lane. Exact retirement must not depend on the
           // optional attempt-observer bookkeeping still being present.
           retireRfc64CatalogTargetAnnouncementV1(this, announcement);
+          this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, {
+            contextGraphId: announcement.contextGraphId,
+          });
           const attempt = reconciliationAttempts.get(token);
           if (attempt === undefined) return;
           attempt.succeeded.value = true;
@@ -5368,27 +4826,34 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       contextGraphId,
       policyDigest: accepted.policyDigest,
     } as const;
+    const settle = async (task: Promise<Readonly<{ requested: number; failed: number }>>) => {
+      const result = await task;
+      // Receiver completion precedes the replay owner's parity settlement.
+      // Wake readiness again after that owner releases its active fence.
+      this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, { contextGraphId });
+      return result;
+    };
     switch (request.kind) {
       case 'connected-peers':
-        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
           ...(signal === undefined ? {} : { signal }),
           kind: 'full-connected-peers',
           connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
-        });
+        }));
       case 'pending-recovery':
-        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
           ...(signal === undefined ? {} : { signal }),
           kind: 'pending-recovery',
-        });
+        }));
       case 'connection-demand':
-        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
           ...(signal === undefined ? {} : { signal }),
           kind: 'connection-demand',
           demand: request.replayDemand,
-        });
+        }));
     }
   }
 

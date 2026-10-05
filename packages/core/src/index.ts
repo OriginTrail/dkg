@@ -432,6 +432,8 @@ export {
   AMBIGUOUS_ASSERTION_AUTHOR_CODE,
   ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
   messageIndicatesNoFundedPublisherWallet,
   messageIndicatesPublishAuthorNotCustodial,
   formatPublishAuthorNotCustodialMessage,
