@@ -6,22 +6,95 @@ import {
   assertCanonicalChainId, assertCanonicalDecimalU256, assertCanonicalEvmAddress,
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import { proveRegisteredPrivateEmptyVmV1 } from './rfc64/registered-private-empty-vm-proof-v1.js';
 
 export type RegisteredPrivateEmptyVmReadinessResult<T> =
   | { readonly proven: false }
   | { readonly proven: true; readonly value: T };
 
+export type ContextGraphReadinessAuthorityV1 =
+  | ContextGraphReadAuthorityDecision
+  | { readonly outcome: 'unavailable' };
+
+export interface InspectedContextGraphReadinessV1 {
+  readonly current: boolean;
+  readonly hasConfirmedMeta: boolean | undefined;
+  readonly isPrivate: boolean;
+  readonly authority: ContextGraphReadinessAuthorityV1;
+}
+
 export class RegisteredPrivateEmptyVmMethods {
+  /** Inspect and commit graph readiness under one agent-owned, same-turn fence. */
+  async inspectAndCommitContextGraphReadinessV1<T>(
+    this: DKGAgent,
+    input: {
+      contextGraphId: string;
+      inspectMetadata: boolean;
+      expectedRevision?: string;
+      callerAgentAddress?: string;
+      signal?: AbortSignal;
+    },
+    commit: (inspection: InspectedContextGraphReadinessV1) => T,
+  ): Promise<T> {
+    const { contextGraphId, signal } = input;
+    const readRevision = () => {
+      try {
+        return this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId);
+      } catch {
+        return undefined;
+      }
+    };
+    const revision = input.expectedRevision ?? readRevision();
+    let hasConfirmedMeta = input.inspectMetadata
+      ? await this.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => undefined)
+      : undefined;
+    let isPrivate = false;
+    if (hasConfirmedMeta) {
+      try {
+        isPrivate = await this.isPrivateContextGraph(contextGraphId);
+      } catch {
+        // Unknown policy cannot prove either public readiness or the private
+        // zero-VM exception. Preserve the private fail-closed posture while
+        // withholding the confirmed-metadata fact.
+        hasConfirmedMeta = undefined;
+        isPrivate = true;
+      }
+    }
+    const authority: ContextGraphReadinessAuthorityV1 =
+      await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+        callerAgentAddress: input.callerAgentAddress,
+        allowSubscriptionFallback: false,
+        freshness: 'live',
+        signal,
+      }).catch(() => ({ outcome: 'unavailable' as const }));
+    // The callback is synchronous. No await can separate this final fence from
+    // classification or persistence; a caller cannot turn stale facts into
+    // durable readiness while an authority read is in flight.
+    const current = signal?.aborted !== true
+      && revision !== undefined
+      && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
+      && readRevision() === revision;
+    return commit(current
+      ? { current, hasConfirmedMeta, isPrivate, authority }
+      : {
+          current, hasConfirmedMeta: undefined, isPrivate: false,
+          authority: authority.outcome === 'allowed' ? { outcome: 'unavailable' } : authority,
+        });
+  }
+
   /** A zero-VM proof grants durable readiness only; SWM still needs its own proof. */
   async proveRegisteredPrivateEmptyVmV1<T>(
     this: DKGAgent,
     contextGraphId: string,
     callerAgentAddress: string,
-    commit: () => T,
+    commit: (inspection: InspectedContextGraphReadinessV1) => T,
     signal?: AbortSignal,
   ): Promise<RegisteredPrivateEmptyVmReadinessResult<T>> {
     const unproven = { proven: false } as const;
+    let caller = '';
+    let metadataRevision = '';
+    let beforeOnChainId: bigint | undefined;
     const trace = (stage: string) => {
       if (process.env.DKG_DEBUG_PRIVATE_EMPTY_VM === '1') {
         console.info(`[private-empty-vm] ${stage}`);
@@ -29,12 +102,12 @@ export class RegisteredPrivateEmptyVmMethods {
     };
     try {
       if (signal?.aborted) return unproven;
-      const caller = callerAgentAddress.toLowerCase();
+      caller = callerAgentAddress.toLowerCase();
       if (!ethers.isAddress(caller) ||
         this.subscribedContextGraphs.get(contextGraphId)?.subscribed !== true) {
         trace('not-subscribed'); return unproven;
       }
-      const metadataRevision = this.contextGraphMetaProjection
+      metadataRevision = this.contextGraphMetaProjection
         .readContextGraphAuthorityFactsRevision(contextGraphId);
       const confirmedBefore = await this.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
       const privateBefore = confirmedBefore
@@ -52,6 +125,7 @@ export class RegisteredPrivateEmptyVmMethods {
         || before.onChainId === undefined || before.registration === 'unregistered') {
         trace('authority-not-registered-allowed'); return unproven;
       }
+      beforeOnChainId = before.onChainId;
       const chainConfig = this.config.chainConfig;
       if (chainConfig === undefined || this.chain.getContextGraphAuthoritySnapshot === undefined) {
         trace('chain-capability-absent'); return unproven;
@@ -99,33 +173,30 @@ export class RegisteredPrivateEmptyVmMethods {
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000),
       });
       if (!proven) { trace('finalized-zero-proof-false'); return unproven; }
-      const confirmedAfter = await this.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
-      const privateAfter = confirmedAfter
-        && await this.isPrivateContextGraph(contextGraphId).catch(() => false);
-      // This is the final async authority boundary. No awaited metadata read
-      // may follow it before the synchronous fence and persistence callback.
-      const after = await authority();
-      const stillCurrent = after.outcome === 'allowed' && after.source === 'registered-chain'
-        && after.onChainId === before.onChainId
-        && signal?.aborted !== true
-        && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
-        && privateAfter
-        && this.contextGraphMetaProjection
-          .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision;
-      // No await separates this fence from the caller's synchronous readiness
-      // commit. Metadata replacement and bootstrap invalidation advance the
-      // same graph's projection revision.
-      if (!stillCurrent) {
-        trace('post-proof-authority-changed');
-        return unproven;
-      }
-      trace('proven');
     } catch (error) {
       trace(`proof-error:${error instanceof Error ? error.name : 'unknown'}`);
       return unproven;
     }
-    // The proof read is fail-closed, but the caller owns persistence errors.
-    // Keep this synchronous with the final metadata and authority fence above.
-    return { proven: true, value: commit() };
+    // The inspected callback owns the last live authority read and the same-
+    // turn metadata/subscription fence. Keep it outside the fail-closed proof
+    // catch so caller-owned persistence errors remain visible.
+    return this.inspectAndCommitContextGraphReadinessV1({
+      contextGraphId,
+      inspectMetadata: true,
+      expectedRevision: metadataRevision,
+      callerAgentAddress: caller,
+      signal,
+    }, (inspection) => {
+      const { current, hasConfirmedMeta, isPrivate, authority: after } = inspection;
+      if (!current || !hasConfirmedMeta || !isPrivate
+        || after.outcome !== 'allowed' || after.source !== 'registered-chain'
+        || after.registration === 'unregistered'
+        || after.onChainId !== beforeOnChainId) {
+        trace('post-proof-authority-changed');
+        return unproven;
+      }
+      trace('proven');
+      return { proven: true, value: commit(inspection) };
+    });
   }
 }

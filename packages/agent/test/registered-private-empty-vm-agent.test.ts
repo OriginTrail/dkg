@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DKGAgent } from '../src/dkg-agent.js';
-import { RegisteredPrivateEmptyVmMethods } from '../src/dkg-agent-registered-private-empty-vm.js';
+import type { DKGAgent } from '../src/dkg-agent.js';
+import {
+  RegisteredPrivateEmptyVmMethods,
+  type InspectedContextGraphReadinessV1,
+} from '../src/dkg-agent-registered-private-empty-vm.js';
 
 const mocks = vi.hoisted(() => ({
   proof: vi.fn(),
@@ -34,6 +37,8 @@ function fixture() {
   const agent = {
     subscribedContextGraphs: subscriptions,
     resolveContextGraphSubscriptionBootstrapAuthority: authority,
+    inspectAndCommitContextGraphReadinessV1:
+      RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1,
     config: { chainConfig: {
       rpcUrl: 'http://127.0.0.1:8545', chainId: 'evm:31337',
       hubAddress: `0x${'33'.repeat(20)}`,
@@ -70,11 +75,102 @@ describe('registered private empty-VM agent guard', () => {
     vi.restoreAllMocks();
   });
 
-  it('exposes the graph-scoped metadata revision used by the completion fence', () => {
+  it('downgrades an invalidated inspection before its synchronous callback', async () => {
     const state = fixture();
-    expect(DKGAgent.prototype.getContextGraphAuthorityFactsRevision.call(state.agent, CG)).toBe('0:0');
-    state.invalidateMetadata();
-    expect(DKGAgent.prototype.getContextGraphAuthorityFactsRevision.call(state.agent, CG)).toBe('0:1');
+    state.isPrivate.mockImplementationOnce(async () => {
+      state.invalidateMetadata();
+      return true;
+    });
+    const commit = vi.fn((inspection: InspectedContextGraphReadinessV1) => inspection);
+    const inspected = await RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1
+      .call(state.agent, {
+        contextGraphId: CG, inspectMetadata: true,
+        callerAgentAddress: CALLER,
+      }, commit);
+    expect(inspected).toEqual({
+      current: false, hasConfirmedMeta: undefined, isPrivate: false,
+      authority: { outcome: 'unavailable' },
+    });
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it('downgrades a completion whose subscription is removed during a live authority read', async () => {
+    const state = fixture();
+    state.authority.mockImplementationOnce(async () => {
+      state.subscriptions.get(CG)!.subscribed = false;
+      return { outcome: 'allowed', source: 'registered-chain', onChainId: 3n };
+    });
+    const inspect = vi.fn((facts: InspectedContextGraphReadinessV1) => facts);
+    const result = await RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1
+      .call(state.agent, {
+        contextGraphId: CG, inspectMetadata: true,
+        callerAgentAddress: CALLER,
+      }, inspect);
+    expect(result).toMatchObject({
+      current: false, hasConfirmedMeta: undefined, isPrivate: false,
+      authority: { outcome: 'unavailable' },
+    });
+    expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ freshness: 'live' }));
+  });
+
+  it('downgrades a completion when the final metadata revision cannot be read', async () => {
+    const state = fixture();
+    state.projection.readContextGraphAuthorityFactsRevision = vi.fn()
+      .mockReturnValueOnce('0:0')
+      .mockImplementationOnce(() => { throw new Error('metadata store unavailable'); });
+    const inspect = vi.fn((facts: InspectedContextGraphReadinessV1) => facts);
+    const result = await RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1
+      .call(state.agent, {
+        contextGraphId: CG, inspectMetadata: true,
+        callerAgentAddress: CALLER,
+      }, inspect);
+    expect(result).toMatchObject({
+      current: false, hasConfirmedMeta: undefined, isPrivate: false,
+      authority: { outcome: 'unavailable' },
+    });
+    expect(inspect).toHaveBeenCalledOnce();
+  });
+
+  it('withholds confirmed or allowed facts when inspection dependencies fail', async () => {
+    const cases = [
+      {
+        fail: (state: ReturnType<typeof fixture>) => {
+          vi.mocked(state.agent.hasConfirmedMetaState).mockRejectedValue(new Error('metadata unavailable'));
+        },
+        expected: { hasConfirmedMeta: undefined, isPrivate: false, authority: { outcome: 'allowed' } },
+      },
+      {
+        fail: (state: ReturnType<typeof fixture>) => {
+          state.isPrivate.mockRejectedValue(new Error('policy unavailable'));
+        },
+        expected: { hasConfirmedMeta: undefined, isPrivate: true, authority: { outcome: 'allowed' } },
+      },
+      {
+        fail: (state: ReturnType<typeof fixture>) => {
+          state.authority.mockRejectedValue(new Error('chain unavailable'));
+        },
+        expected: { hasConfirmedMeta: true, isPrivate: true, authority: { outcome: 'unavailable' } },
+      },
+    ];
+    for (const { fail, expected } of cases) {
+      const state = fixture();
+      fail(state);
+      const result = await RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1
+        .call(state.agent, {
+          contextGraphId: CG, inspectMetadata: true,
+          callerAgentAddress: CALLER,
+        }, (facts) => facts);
+      expect(result).toMatchObject({ current: true, ...expected });
+    }
+  });
+
+  it('never commits a zero-VM proof when private-policy inspection fails after it', async () => {
+    const state = fixture();
+    const commit = vi.fn();
+    state.isPrivate.mockResolvedValueOnce(true).mockRejectedValueOnce(new Error('policy unavailable'));
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
+    expect(commit).not.toHaveBeenCalled();
   });
 
   it('rechecks registered chain authority around the pinned proof', async () => {
@@ -94,6 +190,10 @@ describe('registered private empty-VM agent guard', () => {
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
       .call(state.agent, CG, CALLER, commit)).toEqual({ proven: true, value: 'readiness-written' });
     expect(commit).toHaveBeenCalledOnce();
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({
+      current: true, hasConfirmedMeta: true, isPrivate: true,
+      authority: expect.objectContaining({ outcome: 'allowed', source: 'registered-chain' }),
+    }));
   });
 
   it('never asks chain proof for an unsubscribed or non-admitted caller', async () => {
@@ -159,6 +259,13 @@ describe('registered private empty-VM agent guard', () => {
       .mockResolvedValueOnce({ outcome: 'allowed', source: 'registered-chain', onChainId: 3n })
       .mockResolvedValueOnce({ outcome: 'unavailable', source: 'registered-chain', onChainId: 3n });
     expect(await prove(state.agent)).toBe(false);
+    state.authority.mockReset()
+      .mockResolvedValueOnce({ outcome: 'allowed', source: 'registered-chain', onChainId: 3n })
+      .mockResolvedValueOnce({
+        outcome: 'allowed', source: 'registered-chain', onChainId: 3n,
+        registration: 'unregistered',
+      });
+    expect(await prove(state.agent)).toBe(false);
   });
 
   it('fails closed when the finalized read errors', async () => {
@@ -216,6 +323,25 @@ describe('registered private empty-VM agent guard', () => {
     });
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
       .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('does not persist after a newer on-chain removal hidden by a bounded roster', async () => {
+    const state = fixture();
+    const commit = vi.fn();
+    let removedOnChain = false;
+    state.authority.mockImplementation(async (_id, opts?: { freshness?: 'live' | 'bounded' }) => (
+      removedOnChain && opts?.freshness === 'live'
+        ? { outcome: 'denied', source: 'registered-chain', onChainId: 3n }
+        : { outcome: 'allowed', source: 'registered-chain', onChainId: 3n }
+    ));
+    mocks.proof.mockImplementationOnce(async () => {
+      removedOnChain = true;
+      return true;
+    });
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
+    expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ freshness: 'live' }));
     expect(commit).not.toHaveBeenCalled();
   });
 

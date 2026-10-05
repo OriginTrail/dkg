@@ -264,7 +264,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       close: async () => {},
     };
 
-    const agent = {
+    let agent: Record<string, any>;
+    agent = {
       resolveContextGraphSubscriptionBootstrapAuthority: async () => {
         if (catchupCompleted && opts.changeRevisionOnTerminalAuthority) {
           metadataRevision += 1;
@@ -291,7 +292,36 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
       getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
-      getContextGraphAuthorityFactsRevision: () => `0:${metadataRevision + (metadataInvalidated ? 1 : 0)}`,
+      inspectAndCommitContextGraphReadinessV1: async (
+        inspection: {
+          contextGraphId: string;
+          inspectMetadata: boolean;
+          expectedRevision?: string;
+          callerAgentAddress?: string;
+        },
+        commit: (facts: {
+          current: boolean;
+          hasConfirmedMeta: boolean | undefined;
+          isPrivate: boolean;
+          authority: { outcome: string; registration?: 'unregistered' };
+        }) => unknown,
+      ) => {
+        const revision = inspection.expectedRevision ?? metadataRevision + (metadataInvalidated ? 1 : 0);
+        const hasConfirmedMeta = inspection.inspectMetadata
+          ? await agent.hasConfirmedMetaState().catch(() => undefined) as boolean | undefined
+          : undefined;
+        const isPrivate = hasConfirmedMeta
+          ? await agent.isPrivateContextGraph().catch(() => true) as boolean
+          : false;
+        const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority()
+          .catch(() => ({ outcome: 'unavailable' }));
+        const current = state.get(inspection.contextGraphId)?.subscribed === true
+          && revision === metadataRevision + (metadataInvalidated ? 1 : 0);
+        return commit(current
+          ? { current, hasConfirmedMeta, isPrivate, authority }
+          : { current, hasConfirmedMeta: undefined, isPrivate: false,
+              authority: authority.outcome === 'allowed' ? { outcome: 'unavailable' } : authority });
+      },
       subscribeToContextGraph: (
         id: string,
         options?: { syncMode?: 'on-demand' | 'always-on' },
@@ -346,7 +376,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
       proveRegisteredPrivateEmptyVmV1: async (
-        _id: string, _caller: string, commit: () => unknown,
+        _id: string, _caller: string, commit: (facts: Record<string, unknown>) => unknown,
       ) => {
         if (opts.invalidateMetaDuringProof && !metadataInvalidated) {
           metadataInvalidated = true;
@@ -368,9 +398,14 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
           ? opts.finalizedEmptyPrivateVmAfterCatchup ?? opts.finalizedEmptyPrivateVm ?? false
           : opts.finalizedEmptyPrivateVm ?? false;
         proofAttempts.push({ phase, proven });
-        return proven
-          ? { proven: true as const, value: commit() }
-          : { proven: false as const };
+        if (!proven) return { proven: false as const };
+        return agent.inspectAndCommitContextGraphReadinessV1({
+          contextGraphId: _id, inspectMetadata: true,
+          callerAgentAddress: _caller,
+        }, (facts: Record<string, any>) => facts.current && facts.hasConfirmedMeta
+          && facts.isPrivate && facts.authority.outcome === 'allowed'
+          ? { proven: true as const, value: commit(facts) }
+          : { proven: false as const });
       },
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',

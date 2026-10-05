@@ -6,7 +6,6 @@ import {
   classifyContextGraphCatchupReadiness,
   readContextGraphReadiness,
   withContextGraphReadinessMutationLock,
-  type ContextGraphCatchupCompletionAuthority,
   type ContextGraphReadinessStore,
 } from './context-graph-readiness.js';
 import { commitContextGraphReadinessPatches } from './context-graph-readiness-commit.js';
@@ -32,23 +31,20 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
     && input.admissionAuthority.registration !== 'unregistered'
     && callerAgentAddress !== undefined && result.dataSynced === 0;
 
-  const inspectMetadata = async () => {
-    const hasConfirmedMeta = catchupResultHasCleanResponse(result) || privateZeroVmCandidate
-      ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => undefined)
-      : undefined;
-    const isPrivate = hasConfirmedMeta
-      ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
-      : false;
-    return { hasConfirmedMeta, isPrivate };
-  };
   const decide = (
-    metadata: Awaited<ReturnType<typeof inspectMetadata>>,
-    completionAuthority: ContextGraphCatchupCompletionAuthority,
+    inspection: {
+      hasConfirmedMeta: boolean | undefined;
+      isPrivate: boolean;
+      authority: { outcome: 'allowed' | 'denied' | 'unavailable'; registration?: 'unregistered' };
+    },
     finalizedEmptyRegisteredPrivateVm: boolean,
   ) => {
     const classification = classifyContextGraphCatchupReadiness({
       result, includeSharedMemory: input.includeSharedMemory,
-      completionAuthority, ...metadata, finalizedEmptyRegisteredPrivateVm,
+      completionAuthority: inspection.authority,
+      hasConfirmedMeta: inspection.hasConfirmedMeta,
+      isPrivate: inspection.isPrivate,
+      finalizedEmptyRegisteredPrivateVm,
       // Catalog recovery can finish while the foreground catch-up runs.
       readinessBeforeCatchup: readContextGraphReadiness(store, contextGraphId),
     });
@@ -61,46 +57,22 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
   };
 
   if (privateZeroVmCandidate && callerAgentAddress !== undefined) {
-    const metadata = await inspectMetadata();
-    if (metadata.hasConfirmedMeta && metadata.isPrivate) {
-      const proof = await withContextGraphReadinessMutationLock(agent, contextGraphId, () =>
-        agent.proveRegisteredPrivateEmptyVmV1(contextGraphId, callerAgentAddress, () => {
-          // The agent's final chain, membership, metadata, and revision fence
-          // is immediately before this synchronous commit. A valid proof is
-          // itself current registered-private authority for this decision.
-          return decide(
-            { hasConfirmedMeta: true, isPrivate: true },
-            { outcome: 'allowed' },
-            true,
-          );
-        }),
-      );
-      if (proof.proven) return proof.value;
-    }
+    const proof = await withContextGraphReadinessMutationLock(agent, contextGraphId, () =>
+      agent.proveRegisteredPrivateEmptyVmV1(
+        contextGraphId, callerAgentAddress,
+        (inspection) => decide(inspection, true),
+      ),
+    );
+    if (proof.proven) return proof.value;
   }
 
-  return withContextGraphReadinessMutationLock(agent, contextGraphId, async () => {
+  return withContextGraphReadinessMutationLock(agent, contextGraphId, () => {
     // A failed proof may mean revoked membership, not merely a transient read
     // error. Never reuse admission-time authority or metadata in that path.
-    const metadataRevision = agent.getContextGraphAuthorityFactsRevision(contextGraphId);
-    const metadata = await inspectMetadata();
-    const completionAuthority = privateZeroVmCandidate
-      || input.admissionAuthority.registration === 'unregistered'
-      ? await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-          callerAgentAddress, allowSubscriptionFallback: false,
-        }).catch(() => ({ outcome: 'unavailable' as const }))
-      : input.admissionAuthority;
-    // No await separates this fence from the synchronous readiness commit.
-    // If metadata or subscription intent moved while the live authority read
-    // was pending, this pass cannot grant either plane.
-    const current = agent.getContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
-      && agent.getSubscribedContextGraphs().get(contextGraphId)?.subscribed === true;
-    return current
-      ? decide(metadata, completionAuthority, false)
-      : decide(
-          { hasConfirmedMeta: undefined, isPrivate: false },
-          completionAuthority.outcome === 'allowed' ? { outcome: 'unavailable' } : completionAuthority,
-          false,
-        );
+    return agent.inspectAndCommitContextGraphReadinessV1({
+      contextGraphId,
+      inspectMetadata: catchupResultHasCleanResponse(result) || privateZeroVmCandidate,
+      callerAgentAddress,
+    }, (inspection) => decide(inspection, false));
   });
 }

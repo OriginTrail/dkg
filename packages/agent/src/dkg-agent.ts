@@ -1830,11 +1830,6 @@ export class DKGAgent extends DKGAgentBase {
     return this.subscribedContextGraphs;
   }
 
-  /** Synchronous graph-scoped fence for callers that persist readiness after async metadata reads. */
-  getContextGraphAuthorityFactsRevision(contextGraphId: string): string {
-    return this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId);
-  }
-
   /** Returns the latest health snapshot for all known peers. */
   getPeerHealth(): ReadonlyMap<string, PeerHealth> {
     return this.peerHealth;
