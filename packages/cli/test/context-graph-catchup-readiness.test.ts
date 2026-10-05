@@ -662,6 +662,22 @@ describe('context graph catch-up readiness classification', () => {
     });
   });
 
+  it('keeps peer denial ahead of metadata from a clean unrequested plane', () => {
+    const deniedRound = catchupReadinessResult({
+      connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
+      peersTried: 1, peersResponded: 1, denied: true, deniedPeers: 1,
+      cleanPlaneCompletions: {
+        durable: { verifiedDataPeers: 0, emptyPeers: 0 },
+        sharedMemory: { verifiedDataPeers: 0, emptyPeers: 1 },
+      },
+    });
+    expect(classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' }, result: deniedRound,
+      includeSharedMemory: false, hasConfirmedMeta: undefined, isPrivate: true,
+      readinessBeforeCatchup,
+    })).toMatchObject({ jobStatus: 'denied' });
+  });
+
   it.each([
     ['unregistered', { outcome: 'allowed', registration: 'unregistered' }, true, true],
     ['public', { outcome: 'allowed' }, false, true],

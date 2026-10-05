@@ -5,6 +5,7 @@ import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js'
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 
 interface TestAuthorityDecision {
   outcome: 'allowed' | 'denied' | 'unavailable';
@@ -249,6 +250,21 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       : undefined;
     let metadataInvalidated = false;
     let metadataRevision = 0;
+    const readinessInspector: {
+      subscribedContextGraphs: typeof state;
+      contextGraphMetaProjection: {
+        readContextGraphAuthorityFactsRevision: (id: string) => string;
+      };
+      inspectAndCommitContextGraphReadinessV1: DKGAgent['inspectAndCommitContextGraphReadinessV1'];
+    } = {
+      subscribedContextGraphs: state,
+      contextGraphMetaProjection: {
+        readContextGraphAuthorityFactsRevision: (_id) =>
+          String(metadataRevision + (metadataInvalidated ? 1 : 0)),
+      },
+      inspectAndCommitContextGraphReadinessV1:
+        DKGAgent.prototype.inspectAndCommitContextGraphReadinessV1,
+    };
 
     daemonState.catchupRunner = {
       run: async (request) => {
@@ -266,6 +282,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
 
     let agent: Record<string, any>;
     agent = {
+      ...readinessInspector,
       resolveContextGraphSubscriptionBootstrapAuthority: async () => {
         if (catchupCompleted && opts.changeRevisionOnTerminalAuthority) {
           metadataRevision += 1;
@@ -292,36 +309,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
       getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
-      inspectAndCommitContextGraphReadinessV1: async (
-        inspection: {
-          contextGraphId: string;
-          inspectMetadata: boolean;
-          expectedRevision?: string;
-          callerAgentAddress?: string;
-        },
-        commit: (facts: {
-          current: boolean;
-          hasConfirmedMeta: boolean | undefined;
-          isPrivate: boolean;
-          authority: { outcome: string; registration?: 'unregistered' };
-        }) => unknown,
-      ) => {
-        const revision = inspection.expectedRevision ?? metadataRevision + (metadataInvalidated ? 1 : 0);
-        const hasConfirmedMeta = inspection.inspectMetadata
-          ? await agent.hasConfirmedMetaState().catch(() => undefined) as boolean | undefined
-          : undefined;
-        const isPrivate = hasConfirmedMeta
-          ? await agent.isPrivateContextGraph().catch(() => true) as boolean
-          : false;
-        const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority()
-          .catch(() => ({ outcome: 'unavailable' }));
-        const current = state.get(inspection.contextGraphId)?.subscribed === true
-          && revision === metadataRevision + (metadataInvalidated ? 1 : 0);
-        return commit(current
-          ? { current, hasConfirmedMeta, isPrivate, authority }
-          : { current, hasConfirmedMeta: undefined, isPrivate: false,
-              authority: authority.outcome === 'allowed' ? { outcome: 'unavailable' } : authority });
-      },
       subscribeToContextGraph: (
         id: string,
         options?: { syncMode?: 'on-demand' | 'always-on' },

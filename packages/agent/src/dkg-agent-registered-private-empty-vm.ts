@@ -127,7 +127,8 @@ export class RegisteredPrivateEmptyVmMethods {
       }
       beforeOnChainId = before.onChainId;
       const chainConfig = this.config.chainConfig;
-      if (chainConfig === undefined || this.chain.getContextGraphAuthoritySnapshot === undefined) {
+      if (chainConfig === undefined
+        || this.contextGraphAuthorityReaderCapability.status === 'unsupported') {
         trace('chain-capability-absent'); return unproven;
       }
       const endpoints = resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls);
@@ -145,12 +146,18 @@ export class RegisteredPrivateEmptyVmMethods {
       assertCanonicalDecimalU256(onChainContextGraphId);
       assertCanonicalEvmAddress(caller);
       assertCanonicalEvmAddress(hubAddress);
-      const indexed = await this.chain.getContextGraphAuthoritySnapshot(before.onChainId, {
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
-      });
+      // The catalog reader owns capability binding, coordinated admission,
+      // cancellation, and the finalized authority snapshot. Match its target
+      // to the subscription's admitted on-chain identity before using it.
+      const registered = await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId, signal);
+      if (registered === null || registered.expectedOnChainId !== before.onChainId) {
+        trace('indexed-private-authority-absent'); return unproven;
+      }
+      const indexed = registered.snapshot;
       if (indexed.chainId !== chainId
         || indexed.contextGraphId !== onChainContextGraphId
         || indexed.active !== true || indexed.accessPolicy !== 1
+        || indexed.nameHash !== registered.expectedNameHash
         || !ethers.isAddress(indexed.governanceContract)) {
         trace('indexed-private-authority-absent'); return unproven;
       }

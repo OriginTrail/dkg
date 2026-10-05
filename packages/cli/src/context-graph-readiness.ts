@@ -20,6 +20,7 @@ import {
 } from './catchup-proof.js';
 import type { CatchupJobResult } from './catchup-runner.js';
 import { registerContextGraphReadinessEvents } from './context-graph-readiness-events.js';
+import { registeredPrivateEmptyVmEvidence } from './context-graph-independent-vm-evidence.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
   mergeContextGraphPlaneEvidence,
@@ -573,15 +574,15 @@ function classifyCatchupReadiness(
     input.includeSharedMemory,
   );
 
-  const finalizedEmptyPrivateVm = input.finalizedEmptyRegisteredPrivateVm === true && input.isPrivate && registration !== 'unregistered';
   const peerDenied = result.denied && !servedUsableData && !hasRequestedCleanPeerResponse;
   const peerDenial = peerDenied ? {
     jobStatus: 'denied' as const,
     error: result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : 'Sync denied by remote peer',
   } : undefined;
-  if (peerDenial && !finalizedEmptyPrivateVm) return peerDenial;
-
-  if (catchupResultHasCleanResponse(result) || finalizedEmptyPrivateVm) {
+  const independentVm = registeredPrivateEmptyVmEvidence({
+    proven: input.finalizedEmptyRegisteredPrivateVm === true, isPrivate: input.isPrivate, registration,
+  });
+  if ((!peerDenied && catchupResultHasCleanResponse(result)) || independentVm) {
     if (input.hasConfirmedMeta === undefined) {
       return {
         jobStatus: 'unreachable',
@@ -599,14 +600,10 @@ function classifyCatchupReadiness(
       };
     }
 
-    const durableThisRun = finalizedEmptyPrivateVm ? { ready: true, persistable: true }
+    const durableThisRun = independentVm ? { ready: true, persistable: true }
       : catchupPlaneReadinessThisRun({ result, plane: 'durable', isPrivate: input.isPrivate });
     const sharedMemoryThisRun = input.includeSharedMemory
-      ? catchupPlaneReadinessThisRun({
-        result,
-        plane: 'sharedMemory',
-        isPrivate: input.isPrivate,
-      })
+      ? catchupPlaneReadinessThisRun({ result, plane: 'sharedMemory', isPrivate: input.isPrivate })
       : { ready: false, persistable: false };
     const durableReadyThisRun = durableThisRun.ready;
     const sharedMemoryReadyThisRun = sharedMemoryThisRun.ready;
@@ -681,12 +678,10 @@ function classifyCatchupReadiness(
         error = 'Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.';
       }
     }
-    // Peer denial describes the job without erasing independent VM evidence.
-    if (peerDenial) { jobStatus = peerDenial.jobStatus; error = peerDenial.error; }
-
     return {
-      jobStatus,
-      error,
+      // Peer status cannot erase independently verified plane readiness.
+      jobStatus: peerDenial?.jobStatus ?? jobStatus,
+      error: peerDenial?.error ?? error,
       statePatch: {
         synced: persistedPlaneReadiness.writeReady,
         sharedMemorySynced: sharedMemoryVerifiedPersisted,
@@ -712,6 +707,8 @@ function classifyCatchupReadiness(
         : undefined,
     };
   }
+
+  if (peerDenial) return peerDenial;
 
   if (result.peersTried > 0 && (result.peersResponded ?? result.peersSucceeded) === 0) {
     return {

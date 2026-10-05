@@ -1746,7 +1746,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /** Canonical coordinated boundary for one registered authority snapshot. */
-  private async readRfc64RegisteredAuthoritySnapshotV1(
+  async readRfc64RegisteredAuthoritySnapshotV1(
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,

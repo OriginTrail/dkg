@@ -19,6 +19,7 @@ vi.mock('@origintrail-official/dkg-chain', async (importOriginal) => ({
 
 const CG = 'example-private-graph';
 const CALLER = `0x${'11'.repeat(20)}`;
+const NAME_HASH = `0x${'44'.repeat(32)}`;
 
 function fixture() {
   let metadataRevision = '0:0';
@@ -27,8 +28,11 @@ function fixture() {
     outcome: 'allowed', source: 'registered-chain', onChainId: 3n,
   }));
   const chainSnapshot = vi.fn(async () => ({
-    chainId: '31337', contextGraphId: '3', active: true, accessPolicy: 1,
-    governanceContract: `0x${'22'.repeat(20)}`,
+    expectedNameHash: NAME_HASH, expectedOnChainId: 3n,
+    snapshot: {
+      chainId: '31337', contextGraphId: '3', active: true, accessPolicy: 1,
+      governanceContract: `0x${'22'.repeat(20)}`, nameHash: NAME_HASH,
+    },
   }));
   const subscriptions = new Map([[CG, { subscribed: true }]]);
   const projection = {
@@ -39,13 +43,14 @@ function fixture() {
     resolveContextGraphSubscriptionBootstrapAuthority: authority,
     inspectAndCommitContextGraphReadinessV1:
       RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1,
+    readRfc64RegisteredAuthoritySnapshotV1: chainSnapshot,
+    contextGraphAuthorityReaderCapability: { status: 'supported', reader: {} },
     config: { chainConfig: {
       rpcUrl: 'http://127.0.0.1:8545', chainId: 'evm:31337',
       hubAddress: `0x${'33'.repeat(20)}`,
     } },
     chain: {
       getFinalityConfirmations: () => 1,
-      getContextGraphAuthoritySnapshot: chainSnapshot,
     },
     contextGraphMetaProjection: projection,
     hasConfirmedMetaState: vi.fn(async () => true),
@@ -221,14 +226,13 @@ describe('registered private empty-VM agent guard', () => {
     expect(mocks.proof).not.toHaveBeenCalled();
   });
 
-  it('requires the chain authority capability and a valid local chain binding', async () => {
+  it('requires the bound authority capability and valid local chain binding', async () => {
     const state = fixture();
-    const chain = state.agent.chain as unknown as {
-      getContextGraphAuthoritySnapshot?: typeof state.chainSnapshot;
-    };
-    chain.getContextGraphAuthoritySnapshot = undefined;
+    Reflect.set(state.agent, 'contextGraphAuthorityReaderCapability', { status: 'unsupported' });
     expect(await prove(state.agent)).toBe(false);
-    chain.getContextGraphAuthoritySnapshot = state.chainSnapshot;
+    Reflect.set(state.agent, 'contextGraphAuthorityReaderCapability', { status: 'supported', reader: {} });
+    state.chainSnapshot.mockResolvedValueOnce(null as never);
+    expect(await prove(state.agent)).toBe(false);
     const config = state.agent.config.chainConfig as { chainId: string; hubAddress: string };
     config.chainId = 'not-an-evm-chain';
     expect(await prove(state.agent)).toBe(false);
@@ -239,20 +243,42 @@ describe('registered private empty-VM agent guard', () => {
     expect(await prove(state.agent)).toBe(false);
     config.hubAddress = `0x${'00'.repeat(20)}`;
     expect(await prove(state.agent)).toBe(false);
-    expect(state.chainSnapshot).not.toHaveBeenCalled();
+    expect(state.chainSnapshot).toHaveBeenCalledOnce();
     expect(mocks.proof).not.toHaveBeenCalled();
   });
 
   it('rejects an unrelated chain authority or a live authority change', async () => {
     const state = fixture();
     state.chainSnapshot.mockResolvedValueOnce({
-      chainId: '31337', contextGraphId: '3', active: false, accessPolicy: 1,
-      governanceContract: `0x${'22'.repeat(20)}`,
+      expectedNameHash: NAME_HASH, expectedOnChainId: 4n,
+      snapshot: {
+        chainId: '31337', contextGraphId: '3', active: true, accessPolicy: 1,
+        governanceContract: `0x${'22'.repeat(20)}`, nameHash: NAME_HASH,
+      },
     });
     expect(await prove(state.agent)).toBe(false);
     state.chainSnapshot.mockResolvedValueOnce({
-      chainId: '1', contextGraphId: '3', active: true, accessPolicy: 1,
-      governanceContract: `0x${'22'.repeat(20)}`,
+      expectedNameHash: NAME_HASH, expectedOnChainId: 3n,
+      snapshot: {
+        chainId: '31337', contextGraphId: '3', active: true, accessPolicy: 1,
+        governanceContract: `0x${'22'.repeat(20)}`, nameHash: `0x${'55'.repeat(32)}`,
+      },
+    });
+    expect(await prove(state.agent)).toBe(false);
+    state.chainSnapshot.mockResolvedValueOnce({
+      expectedNameHash: NAME_HASH, expectedOnChainId: 3n,
+      snapshot: {
+        chainId: '31337', contextGraphId: '3', active: false, accessPolicy: 1,
+        governanceContract: `0x${'22'.repeat(20)}`, nameHash: NAME_HASH,
+      },
+    });
+    expect(await prove(state.agent)).toBe(false);
+    state.chainSnapshot.mockResolvedValueOnce({
+      expectedNameHash: NAME_HASH, expectedOnChainId: 3n,
+      snapshot: {
+        chainId: '1', contextGraphId: '3', active: true, accessPolicy: 1,
+        governanceContract: `0x${'22'.repeat(20)}`, nameHash: NAME_HASH,
+      },
     });
     expect(await prove(state.agent)).toBe(false);
     state.authority.mockReset()
@@ -396,5 +422,6 @@ describe('registered private empty-VM agent guard', () => {
       .call(state.agent, CG, CALLER, commit, deadline.signal)).toEqual({ proven: false });
     expect(commit).not.toHaveBeenCalled();
     expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ signal: deadline.signal }));
+    expect(state.chainSnapshot).toHaveBeenCalledWith(CG, deadline.signal);
   });
 });
