@@ -15,7 +15,6 @@ import {
   storeHardenLockPath,
 } from './store-runtime-monitor.js';
 import type { daemonState } from './state.js';
-import type { ShutdownPolicy } from './shutdown-policy.js';
 
 type StoreMonitorState = Pick<typeof daemonState, 'storeMonitor'>;
 type StoreConfig = StoreHealthCheckOptions['storeConfig'];
@@ -88,32 +87,12 @@ export function startDaemonStoreMonitor(opts: {
   opts.state.storeMonitor = storeMonitor;
 }
 
-/** Reserve at least three quarters of the resolved deadline for producer/store cleanup. */
-export function storeMonitorShutdownDrainBudget(policy: ShutdownPolicy): number {
-  return Math.floor(policy.hardTimeoutMs / 4);
-}
-
-export async function stopDaemonStoreMonitor(
-  state: StoreMonitorState,
-  budget?: { readonly policy: ShutdownPolicy; readonly log: (message: string) => void },
-): Promise<void> {
+export async function stopDaemonStoreMonitor(state: StoreMonitorState): Promise<void> {
   const monitor = state.storeMonitor;
   if (!monitor) return;
   // close() fences probes/restarts synchronously, but preserves its physical
   // retirement promise. A slow issued Docker restart must not hold all producer
   // teardown behind its independent 120-second command deadline.
-  const retirement = monitor.stop().then(() => {
-    if (state.storeMonitor === monitor) state.storeMonitor = null;
-  });
-  if (!budget) return retirement;
-  const timeoutMs = storeMonitorShutdownDrainBudget(budget.policy);
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([retirement, new Promise<void>(resolve => {
-      timer = setTimeout(() => {
-        budget.log(`[shutdown] store restart still retiring after ${timeoutMs}ms; continuing producer teardown`);
-        resolve();
-      }, timeoutMs);
-    })]);
-  } finally { if (timer) clearTimeout(timer); }
+  await monitor.stop();
+  if (state.storeMonitor === monitor) state.storeMonitor = null;
 }

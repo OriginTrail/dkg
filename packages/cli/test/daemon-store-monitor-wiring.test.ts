@@ -20,7 +20,7 @@
  * the production ones.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFakeDaemonAgent, createFakeDaemonHttpServer } from './_helpers/daemon-boot-doubles.js';
@@ -112,6 +112,14 @@ const { daemonState } = await import('../src/daemon/state.js');
 const { storeHardenLockPath, storeBootRestartTsPath } = await import(
   '../src/daemon/store-runtime-monitor.js'
 );
+const { createStoreRuntimeMonitor } = await vi.importActual<typeof import('../src/daemon/store-runtime-monitor.js')>(
+  '../src/daemon/store-runtime-monitor.js',
+);
+const { checkExternalStoreReachable } = await vi.importActual<typeof import('../src/daemon/store-health-check.js')>(
+  '../src/daemon/store-health-check.js',
+);
+const { HttpRateLimiter } = await import('../src/daemon/http-utils.js');
+const { stopDaemonStoreMonitor } = await import('../src/daemon/store-monitor-wiring.js');
 
 const MANAGED_STORE = {
   backend: 'blazegraph',
@@ -298,41 +306,39 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
    * callbacks nor hold the process open — same trick as
    * daemon-storage-ack-timing-wiring.test.ts.
    */
-  function unrefBootTimers(): void {
+  function unrefBootTimers(): typeof setTimeout {
     const realSetTimeout = globalThis.setTimeout;
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: Parameters<typeof setTimeout>[0], timeout?: number, ...args: any[]) => {
       const handle = realSetTimeout(handler, timeout, ...args);
       if ((timeout ?? 0) > 0) (handle as NodeJS.Timeout).unref?.();
       return handle;
     }) as typeof setTimeout);
+    return realSetTimeout;
   }
 
-  it.each([false, true])('a slow issued restart reserves producer teardown before forced exit (restart held through deadline: %s)', async heldThroughDeadline => {
-    unrefBootTimers();
+  it.each([[false, false], [true, false], [false, true]])('retires one issued restart alongside prompt producer cleanup (held through deadline: %s, cleanup fails: %s)', async (heldThroughDeadline, cleanupFails) => {
+    const scheduleTimeout = unrefBootTimers();
     let finishMonitorStop!: () => void;
     const monitorDrain = new Promise<void>(resolve => { finishMonitorStop = resolve; });
-    const fakeMonitor = {
-      start: vi.fn(),
-      stop: vi.fn(() => monitorDrain),
-      tick: vi.fn(async () => undefined),
-      stats: {
-        probesTotal: 0,
-        failuresTotal: 0,
-        consecutiveFailures: 0,
-        restartsTotal: 0,
-        restartFailuresTotal: 0,
-        lastProbeOkAt: null,
-        lastRestartAt: null,
-        cooldownUntilMs: null,
-        managedContainer: CONTAINER,
-      },
-    };
-    mocks.createStoreRuntimeMonitor.mockReturnValue(fakeMonitor);
+    const restart = vi.fn(async () => { await monitorDrain; return { stdout: '', stderr: '', exitCode: 0 }; });
+    const probe = vi.fn(async () => new Response('dead', { status: 503 }));
+    let monitorClosed!: () => void, producerEntered!: () => void;
+    const closed = new Promise<void>(resolve => { monitorClosed = resolve; });
+    const producerEntry = new Promise<void>(resolve => { producerEntered = resolve; });
+    let monitor!: ReturnType<typeof createStoreRuntimeMonitor>;
+    mocks.createStoreRuntimeMonitor.mockImplementation(options => {
+      monitor = createStoreRuntimeMonitor({ ...options, docker: { run: restart }, fetch: probe, failureThreshold: 1 });
+      vi.spyOn(monitor, 'start');
+      const stop = monitor.stop.bind(monitor);
+      vi.spyOn(monitor, 'stop').mockImplementation(() => { const retirement = stop(); monitorClosed(); return retirement; });
+      return monitor;
+    });
     const fakeAgent = {
       ...createFakeDaemonAgent(),
       // Skip the relay-reservation polling loop and retain the ACK factory shape.
       multiaddrs: ['/ip4/127.0.0.1/tcp/9090/p2p/relay-peer/p2p-circuit/p2p/self-peer'],
       createACKTransportFactory: vi.fn(() => () => ({})),
+      stop: vi.fn(async () => { producerEntered(); }),
     };
     mocks.agentCreate.mockResolvedValue(fakeAgent);
 
@@ -347,10 +353,23 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
     expect(arg.storeConfig).toEqual(MANAGED_STORE);
     // The monitor must watch the SAME lock path the harden executor writes.
     expect(arg.hardenLockPath).toBe(storeHardenLockPath(tempHome!));
-    expect(fakeMonitor.start).toHaveBeenCalledTimes(1);
+    expect(monitor.start).toHaveBeenCalledTimes(1);
     // The long-running daemon state carries the monitor (status route +
     // shutdown path read it from here).
-    expect(daemonState.storeMonitor).toBe(fakeMonitor);
+    expect(daemonState.storeMonitor).toBe(monitor);
+    mocks.checkExternalStoreReachable.mockImplementation(checkExternalStoreReachable);
+    const issuedRestart = monitor.tick();
+    await vi.waitFor(() => expect(restart).toHaveBeenCalledTimes(1));
+    if (cleanupFails) vi.spyOn(HttpRateLimiter.prototype, 'destroy').mockImplementation(() => {
+      producerEntered();
+      throw new Error('independent producer cleanup failed');
+    });
+    const shutdownTimerCallbacks: number[] = [];
+    vi.mocked(globalThis.setTimeout).mockImplementation(((callback: (...args: any[]) => void, timeout?: number, ...args: any[]) => {
+      const handle = scheduleTimeout(() => { shutdownTimerCallbacks.push(timeout ?? 0); callback(...args); }, timeout);
+      handle.unref?.();
+      return handle;
+    }) as typeof setTimeout);
 
     // Shutdown wiring: the SIGTERM handler installed by this boot must stop
     // the monitor and clear the slot.
@@ -365,24 +384,95 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
         expect((err as Error).message).toMatch(/process\.exit/);
       }
     }));
+    let entryWatchdog: NodeJS.Timeout | undefined;
     try {
-      await vi.waitFor(() => expect(fakeMonitor.stop).toHaveBeenCalled());
-      await vi.waitFor(() => expect(fakeAgent.stop).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+      await closed;
+      // The old quarter-budget wait was 1.25s/3.75s. Independent cleanup must
+      // start promptly while the actual Docker command remains held.
+      await Promise.race([producerEntry, new Promise<void>((_resolve, reject) => {
+        entryWatchdog = scheduleTimeout(() => reject(new Error('Producer cleanup waited behind monitor retirement')), 500);
+      })]);
+      clearTimeout(entryWatchdog);
+      expect(fakeAgent.stop).toHaveBeenCalledTimes(cleanupFails ? 0 : 1);
+      expect(shutdownTimerCallbacks).toEqual([]);
+      await monitor.tick();
+      expect(probe).toHaveBeenCalledTimes(1);
       // The already-issued restart still owns retirement; producers can flush
       // before it settles, and graceful completion must continue to await it.
-      expect(daemonState.storeMonitor).toBe(fakeMonitor);
+      expect(daemonState.storeMonitor).toBe(monitor);
       expect(process.exit).not.toHaveBeenCalled();
       if (heldThroughDeadline) {
         await shuttingDown;
         expect(process.exit).toHaveBeenCalledWith(100);
         // Forced exit follows producer flushing even though the physical
         // restart still owes retirement to the monitor's closed owner.
-        expect(daemonState.storeMonitor).toBe(fakeMonitor);
+        expect(daemonState.storeMonitor).toBe(monitor);
       }
-    } finally { finishMonitorStop(); await shuttingDown; await monitorDrain; }
-    expect(fakeAgent.stop).toHaveBeenCalledTimes(1);
-    expect(fakeMonitor.stop).toHaveBeenCalled();
+    } finally {
+      clearTimeout(entryWatchdog);
+      finishMonitorStop();
+      await shuttingDown;
+      await issuedRestart;
+      await vi.mocked(monitor.stop).mock.results[0]?.value;
+      if (cleanupFails) closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
+    }
+    expect(fakeAgent.stop).toHaveBeenCalledTimes(cleanupFails ? 0 : 1);
+    expect(monitor.stop).toHaveBeenCalledTimes(1);
+    expect(restart).toHaveBeenCalledExactlyOnceWith(['restart', '-t', '30', CONTAINER], { timeoutMs: 120_000 });
     expect(daemonState.storeMonitor).toBeNull();
+    if (!heldThroughDeadline) expect(process.exit).toHaveBeenCalledWith(0);
+    if (cleanupFails) expect(await readFile(join(tempHome!, 'daemon.log'), 'utf8'))
+      .toContain('Shutdown cleanup error: independent producer cleanup failed');
+  });
+
+  it('retiring the captured monitor cannot clear a replacement monitor slot', async () => {
+    const original = createStoreRuntimeMonitor({ storeConfig: MANAGED_STORE, log() {} });
+    const replacement = createStoreRuntimeMonitor({ storeConfig: MANAGED_STORE, log() {} });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(original, 'stop').mockReturnValue(held);
+    const state = { storeMonitor: original };
+    const retirement = stopDaemonStoreMonitor(state);
+    expect(original.stop).toHaveBeenCalledTimes(1);
+    state.storeMonitor = replacement;
+    release();
+    await retirement;
+    expect(state.storeMonitor).toBe(replacement);
+    await replacement.stop();
+  });
+
+  it('observes rejected monitor retirement immediately while a producer is still draining', async () => {
+    unrefBootTimers();
+    const monitor = createStoreRuntimeMonitor({ storeConfig: MANAGED_STORE, log() {} });
+    const stop = monitor.stop.bind(monitor);
+    vi.spyOn(monitor, 'stop').mockImplementation(async () => { await stop(); throw new Error('monitor retirement failed'); });
+    mocks.createStoreRuntimeMonitor.mockReturnValue(monitor);
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const producerEntry = new Promise<void>(resolve => { entered = resolve; });
+    const agent = {
+      ...createFakeDaemonAgent(),
+      multiaddrs: ['/ip4/127.0.0.1/tcp/9090/p2p/relay-peer/p2p-circuit/p2p/self-peer'],
+      createACKTransportFactory: vi.fn(() => () => ({})),
+      stop: vi.fn(async () => { entered(); await held; }),
+    };
+    mocks.agentCreate.mockResolvedValue(agent);
+    await runDaemonInner(true, baseConfig({ store: MANAGED_STORE }), Date.now(), resolveShutdownPolicy(undefined));
+    const listeners = (process.listeners('SIGTERM') as NodeJS.SignalsListener[]).filter(listener => !sigtermListeners.includes(listener));
+    const shutdown = Promise.all(listeners.map(async listener => {
+      try { await (listener as (signal: string) => unknown)('SIGTERM'); }
+      catch (error) { expect((error as Error).message).toBe('process.exit:0'); }
+    }));
+    try {
+      await producerEntry;
+      // Let a complete event-loop turn expose any delayed unhandled rejection.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(monitor.stop).toHaveBeenCalledTimes(1);
+      expect(process.exit).not.toHaveBeenCalled();
+    } finally { release(); await shutdown; }
+    expect(process.exit).toHaveBeenCalledWith(0);
+    expect(daemonState.storeMonitor).toBe(monitor);
+    expect(await readFile(join(tempHome!, 'daemon.log'), 'utf8')).toContain('Shutdown cleanup error: monitor retirement failed');
   });
 
   it('DKG_STORE_MONITOR_DISABLED=1 keeps the monitor uninstalled even for a managed store', async () => {

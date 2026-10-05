@@ -3779,11 +3779,14 @@ async function runDaemonInnerWithStartupOwnership(
       );
     };
     const cleanup = (async () => {
+      const monitorRetirement = stopDaemonStoreMonitor(daemonState);
+      // Observe rejection immediately, then join the original promise below.
+      void monitorRetirement.catch(() => undefined);
+      let backingStoresClosed = false;
       try {
         autoUpdate.stop();
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
-        await stopDaemonStoreMonitor(daemonState, { policy: shutdownPolicy, log });
         await runChainDiscoveryScan.close().catch((err: unknown) => {
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });
@@ -3856,17 +3859,17 @@ async function runDaemonInnerWithStartupOwnership(
         // retirement timeout is a dependency quarantine, not an ordinary
         // best-effort cleanup failure: killing Oxigraph/SQLite underneath the
         // still-running writer would defeat the agent's fail-stop boundary.
-        const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
+        backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
           retryAgentStop: () => agent.stop(),
           stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
           closeDashboardDb: () => dashDb.close(),
           log,
         });
-        await stopDaemonStoreMonitor(daemonState);
-        if (backingStoresClosed) log("Stopped.");
       } finally {
-        await cleanupStateFiles();
+        try { await monitorRetirement; }
+        finally { await cleanupStateFiles(); }
       }
+      if (backingStoresClosed) log("Stopped.");
     })().catch((err: any) => {
       log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
     }).finally(async () => {
