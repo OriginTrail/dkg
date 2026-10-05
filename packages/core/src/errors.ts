@@ -101,7 +101,7 @@ export function messageIndicatesPublishAuthorNotCustodial(message: unknown): boo
 
 /**
  * GH#3049 — a root promote, or the SWM staging of an update, is refused while the RFC-64 legacy
- * SWM boundary retirement holds its context graph's fence. The fence is transient: it ends with
+ * SWM boundary retirement holds its fence (the asset's, or the context graph's). The fence is transient: it ends with
  * the retirement. The refusal carries this code and each consumer decides what it means for it:
  * the agent's promote callback makes it a retryable promote failure, the publisher's async-lift
  * classifier records an update refused at staging as `workspace_unavailable` (auto-retry), and

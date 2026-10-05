@@ -81,7 +81,10 @@ interface Rfc64LegacySwmBoundaryStateV1 {
   >;
   entryCount: number;
   mutationTail: Promise<void>;
-  /** Keyed by context graph id (graph-wide retirements) or by {@link rfc64LegacySwmAssetScopeKeyV1} (one asset's). */
+  /**
+   * A preparation registers under its context graph id and under its asset key
+   * ({@link rfc64LegacySwmAssetScopeKeyV1}); a retirement fences one of the two.
+   */
   readonly preparationScopes: Map<string, Rfc64LegacySwmBoundaryPreparationScopeV1>;
 }
 
@@ -509,16 +512,6 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
   });
 }
 
-/**
- * The finalized-VM retirement reads and deletes the markers of ONE asset, so it fences and drains that
- * asset's scope, not the graph's: a share of another asset is neither refused by it nor waited for.
- * '#' is outside the context graph id grammar, so an asset key can never alias a graph key. The receiver
- * lease and the republish retirement keep the graph key.
- */
-function rfc64LegacySwmAssetScopeKeyV1(contextGraphId: string, kaUal: string): string {
-  return `${contextGraphId}#${kaUal}`;
-}
-
 export interface Rfc64RepublishedLegacySwmAssetV1 {
   readonly kaUal: string;
   readonly assertionVersion: string;
@@ -898,6 +891,16 @@ function removeRfc64OutstandingLegacySwmBoundaryEntryV1(
   if (retained.length === 0) byUal.delete(kaUal);
   else byUal.set(kaUal, retained);
   if (byUal.size === 0) state.entriesByContextGraph.delete(contextGraphId);
+}
+
+/**
+ * The finalized-VM retirement reads and deletes the markers of ONE asset, so it fences and drains that
+ * asset's scope, not the graph's: a share of another asset is neither refused by it nor waited for.
+ * '#' is outside the context graph id grammar, so an asset key can never alias a graph key. The receiver
+ * lease and the republish retirement keep the graph key.
+ */
+function rfc64LegacySwmAssetScopeKeyV1(contextGraphId: string, kaUal: string): string {
+  return `${contextGraphId}#${kaUal}`;
 }
 
 function beginRfc64LegacySwmBoundaryPreparationV1(

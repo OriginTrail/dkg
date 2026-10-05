@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * A root promote that meets the RFC-64 legacy SWM retirement fence (another
- * asset's confirmed publish is retiring its marker on the same context graph)
- * is a retryable promote failure, not a terminal one.
+ * A root promote that meets the RFC-64 legacy SWM retirement fence (its own
+ * asset's confirmed publish is retiring its marker, or a graph-wide retirement
+ * such as the receiver lease is running) is a retryable promote failure, not a
+ * terminal one. A share of another asset is not refused by an asset's retirement.
  *
  * The first block drives the agent's REAL promote companion resolver (the
  * production lambda in `DKGAgent.create`, reached through the publisher the

@@ -218,8 +218,9 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     prepareRfc64LateLegacySwmBoundaryV1(
       owner, CONTEXT_GRAPH_ID, UAL_TWO, 'other-asset-during-finalized-vm-retirement', '1',
     ).settle(false);
+    // The same UAL on another context graph is a different asset scope: admitted.
     const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
-      owner, SECOND_CONTEXT_GRAPH_ID, UAL_TWO, 'other-cg-during-finalized-vm-retirement', '1',
+      owner, SECOND_CONTEXT_GRAPH_ID, UAL_ONE, 'other-cg-during-finalized-vm-retirement', '1',
     );
     unrelatedPreparation.settle(false);
 
@@ -239,8 +240,9 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(1);
     expect(await markerSubjects()).toEqual([finalized.subject, inFlight.subject].sort());
+    // The asset's fence is released with its retirement.
     const afterRetirement = prepareRfc64LateLegacySwmBoundaryV1(
-      owner, CONTEXT_GRAPH_ID, UAL_TWO, 'same-cg-after-finalized-vm-retirement', '1',
+      owner, CONTEXT_GRAPH_ID, UAL_ONE, 'same-asset-after-finalized-vm-retirement', '3',
     );
     afterRetirement.settle(false);
 
@@ -274,10 +276,19 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       shared.settle(true);
       return { store, owner };
     }
-    const inTime = (pending: Promise<unknown>) => Promise.race([
-      pending.then(() => true),
-      new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 250); }),
-    ]);
+    /**
+     * Whether `pending` settles within a bounded number of event-loop turns: no wall clock, so a loaded
+     * runner cannot flip it. The retirement and the lease run on in-memory store work, which needs a
+     * handful of turns; a retirement that is waiting on a share needs more than any number of them.
+     */
+    const inTime = async (pending: Promise<unknown>, maxTurns = 200) => {
+      let done = false;
+      void pending.then(() => { done = true; }, () => { done = true; });
+      for (let turn = 0; turn < maxTurns && !done; turn += 1) {
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
+      }
+      return done;
+    };
 
     it('does not wait for the in-flight share of another asset, and does not disturb it', async () => {
       const { owner } = await publishedAssetOne();
@@ -332,6 +343,42 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       const lease = acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, ROOT_SCOPE);
       expect(await inTime(lease)).toBe(true);
       (await lease).release();
+    });
+
+    it('releases both scopes when the outcome of a share is unknown, and keeps its witness', async () => {
+      const { owner } = await publishedAssetOne();
+      // The publisher reports an undecided compound commit as `undefined`: the marker must stay tracked.
+      prepareRfc64LateLegacySwmBoundaryV1(owner, CONTEXT_GRAPH_ID, UAL_ONE, 'undecided-share', '2').settle(undefined);
+
+      expect(await inTime(retireRfc64LegacySwmAfterFinalizedVmV1(owner, CONTEXT_GRAPH_ID, UAL_ONE, '1'))).toBe(true);
+      const lease = acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, ROOT_SCOPE);
+      expect(await inTime(lease)).toBe(true);
+      (await lease).release();
+      // The version-2 witness survived the version-1 retirement (a settle(false) would have removed it).
+      expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+    });
+
+    it('lets the receiver lease and the republish retirement wait for a share of any asset of the graph', async () => {
+      const { owner } = await publishedAssetOne();
+      const inFlightTwo = prepareRfc64LateLegacySwmBoundaryV1(
+        owner, CONTEXT_GRAPH_ID, UAL_TWO, 'in-flight-share-of-two', '1',
+      );
+
+      // Graph-wide sources drain the GRAPH scope, so a share registered on it holds them back.
+      const lease = acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, ROOT_SCOPE);
+      expect(await inTime(lease, 50)).toBe(false);
+      inFlightTwo.settle(false);
+      (await lease).release();
+
+      const inFlightTwoAgain = prepareRfc64LateLegacySwmBoundaryV1(
+        owner, CONTEXT_GRAPH_ID, UAL_TWO, 'in-flight-share-of-two-again', '1',
+      );
+      const republish = markRfc64LegacySwmRepublishedV1(
+        owner, CONTEXT_GRAPH_ID, [{ kaUal: UAL_ONE, assertionVersion: '1' }],
+      );
+      expect(await inTime(republish, 50)).toBe(false);
+      inFlightTwoAgain.settle(false);
+      await republish;
     });
 
     it('keeps the receiver lease and the republish retirement graph-wide: they refuse a different asset too', async () => {
