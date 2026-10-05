@@ -16,6 +16,24 @@ export interface ContextGraphPlaneEvidence {
   persistable: boolean;
 }
 
+export const NO_CONTEXT_GRAPH_PLANE_EVIDENCE: ContextGraphPlaneEvidence = Object.freeze({
+  ready: false, persistable: false,
+});
+export type ContextGraphIndependentPlaneEvidence = Readonly<Partial<Record<
+  'durable' | 'sharedMemory', ContextGraphPlaneEvidence
+>>>;
+
+/** Independent sources can prove one plane without borrowing another plane's evidence. */
+export function composeContextGraphPlaneEvidence(
+  first: ContextGraphPlaneEvidence,
+  second: ContextGraphPlaneEvidence,
+): ContextGraphPlaneEvidence {
+  return {
+    ready: first.ready || second.ready,
+    persistable: first.persistable || second.persistable,
+  };
+}
+
 /** Merge independently proven planes while respecting the persisted version. */
 export function mergeContextGraphPlaneEvidence(
   previous: ContextGraphReadinessProvenance,

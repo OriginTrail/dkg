@@ -31,10 +31,20 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
     && input.admissionAuthority.registration !== 'unregistered'
     && callerAgentAddress !== undefined && result.dataSynced === 0;
 
-  const decide = (inspection: InspectedContextGraphReadinessV1, finalizedEmptyRegisteredPrivateVm: boolean) => {
+  const decide = (inspection: InspectedContextGraphReadinessV1, provenEmptyVm: boolean) => {
+    // The agent's final inspection and proof arrive in the same synchronous
+    // callback. Normalize this source to durable-plane evidence here; the
+    // classifier handles only plane evidence and peer status.
+    const independentPlaneEvidence = provenEmptyVm
+      && inspection.kind === 'current'
+      && inspection.metadata.kind === 'confirmed'
+      && inspection.metadata.accessPolicy === 'private'
+      && inspection.authority.outcome === 'allowed'
+      && inspection.authority.registration !== 'unregistered'
+      ? { durable: { ready: true, persistable: true } } : undefined;
     const classification = classifyContextGraphCatchupReadiness({
       result, includeSharedMemory: input.includeSharedMemory,
-      inspection, finalizedEmptyRegisteredPrivateVm,
+      inspection, independentPlaneEvidence,
       // Catalog recovery can finish while the foreground catch-up runs.
       readinessBeforeCatchup: readContextGraphReadiness(store, contextGraphId),
     });

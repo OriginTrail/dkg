@@ -158,6 +158,7 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
           .readContextGraphAuthorityFactsRevision(contextGraphId),
         readChainConfig: () => this.config.chainConfig,
         hasAuthorityReader: () => this.contextGraphAuthorityReaderCapability.status !== 'unsupported',
+        readAdapterEvmChainId: () => this.chain.getEvmChainId(),
         readResolvedFinalityConfirmations: () => resolveChainFinalityConfirmationsV1(
           this.chain, this.config.chainConfig,
         ),

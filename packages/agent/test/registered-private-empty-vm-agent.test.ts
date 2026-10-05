@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { acquireFinalizedChainRead } from '@origintrail-official/dkg-chain';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import {
   RegisteredPrivateEmptyVmMethods,
@@ -52,6 +53,7 @@ function fixture() {
       hubAddress: `0x${'33'.repeat(20)}`,
     } },
     chain: {
+      getEvmChainId: vi.fn(async () => 31337n),
       getFinalityConfirmations: () => 1,
     },
     contextGraphMetaProjection: projection,
@@ -305,6 +307,17 @@ describe('registered private empty-VM agent guard', () => {
     expect(mocks.proof).not.toHaveBeenCalled();
   });
 
+  it('uses the adapter chain ID when configuration omits it, but rejects a mismatch', async () => {
+    const state = fixture();
+    const config = state.agent.config.chainConfig as { chainId?: string };
+    delete config.chainId;
+    expect(await prove(state.agent)).toBe(true);
+    expect(mocks.proof).toHaveBeenCalledWith(expect.objectContaining({ chainId: '31337' }));
+    config.chainId = 'evm:1';
+    expect(await prove(state.agent)).toBe(false);
+    expect(mocks.proof).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects an unrelated chain authority or a live authority change', async () => {
     const state = fixture();
     state.chainSnapshot.mockResolvedValueOnce({
@@ -372,6 +385,39 @@ describe('registered private empty-VM agent guard', () => {
     const state = fixture();
     mocks.proof.mockRejectedValue(new Error('read unavailable'));
     expect(await prove(state.agent)).toBe(false);
+  });
+
+  it('retries only a genuine finalized-read admission refusal', async () => {
+    const state = fixture();
+    let release!: () => void;
+    const held = acquireFinalizedChainRead(
+      { chainId: '31337', owner: 'rfc64' },
+      () => new Promise<void>((resolve) => { release = resolve; }),
+      () => new Error('unexpected lane refusal'),
+    );
+    await Promise.resolve();
+    try {
+      let refusal: unknown;
+      try {
+        await acquireFinalizedChainRead(
+          { chainId: '31337', owner: 'foreground' },
+          async () => undefined,
+          () => new Error('finalized read busy'),
+        );
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(Error);
+      mocks.proof.mockRejectedValueOnce(refusal);
+      const commit = vi.fn();
+      expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+        .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false, retryable: true });
+      expect(commit).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await held;
+    }
+    expect(await prove(state.agent)).toBe(true);
   });
 
   it('never commits a negative finalized zero-VM proof', async () => {

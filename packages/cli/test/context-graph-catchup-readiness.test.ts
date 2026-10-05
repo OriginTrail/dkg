@@ -634,7 +634,7 @@ describe('context graph catch-up readiness classification', () => {
       result: catchupReadinessResult(),
       includeSharedMemory: true,
 
-      finalizedEmptyRegisteredPrivateVm: true,
+      independentPlaneEvidence: { durable: { ready: true, persistable: true } },
       readinessBeforeCatchup,
     });
     expect(classification).toMatchObject({
@@ -660,7 +660,7 @@ describe('context graph catch-up readiness classification', () => {
     const proven = classifyContextGraphCatchupReadiness({
       inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } }, result: deniedRound,
       includeSharedMemory: true,
-      finalizedEmptyRegisteredPrivateVm: true, readinessBeforeCatchup,
+      independentPlaneEvidence: { durable: { ready: true, persistable: true } }, readinessBeforeCatchup,
     });
     expect(proven).toMatchObject({
       jobStatus: 'denied',
@@ -687,10 +687,9 @@ describe('context graph catch-up readiness classification', () => {
 
   it.each([
     ['unregistered', { outcome: 'allowed', registration: 'unregistered' }, true, true],
-    ['public', { outcome: 'allowed' }, false, true],
     ['metadata absent', { outcome: 'allowed' }, true, false],
     ['authority unavailable', { outcome: 'unavailable' }, true, true],
-  ] as const)('does not transfer the registered-private zero-VM proof to %s', (
+  ] as const)('does not persist an independent durable proof without %s authority', (
     _label, completionAuthority, isPrivate, hasConfirmedMeta,
   ) => {
     const classification = classifyContextGraphCatchupReadiness({
@@ -704,7 +703,7 @@ describe('context graph catch-up readiness classification', () => {
       result: catchupReadinessResult(),
       includeSharedMemory: true,
 
-      finalizedEmptyRegisteredPrivateVm: true,
+      independentPlaneEvidence: { durable: { ready: true, persistable: true } },
       readinessBeforeCatchup,
     });
     expect(classification.readinessPatch?.durableVerified).not.toBe(true);

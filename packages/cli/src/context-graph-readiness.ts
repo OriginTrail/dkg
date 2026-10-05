@@ -21,10 +21,12 @@ import {
 } from './catchup-proof.js';
 import type { CatchupJobResult } from './catchup-runner.js';
 import { registerContextGraphReadinessEvents } from './context-graph-readiness-events.js';
-import { registeredPrivateEmptyVmEvidence } from './context-graph-independent-vm-evidence.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
+  NO_CONTEXT_GRAPH_PLANE_EVIDENCE,
+  composeContextGraphPlaneEvidence,
   reduceContextGraphPlaneEvidence,
+  type ContextGraphIndependentPlaneEvidence,
   type ContextGraphReadinessPatch,
 } from './context-graph-readiness-policy.js';
 export { parseProjectSyncedReadinessPayload, type ProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
@@ -517,7 +519,7 @@ interface ContextGraphCatchupReadinessBaseInput {
   includeSharedMemory: boolean;
   inspection: InspectedContextGraphReadinessV1;
   readinessBeforeCatchup: ContextGraphReadinessProvenance;
-  finalizedEmptyRegisteredPrivateVm?: boolean;
+  independentPlaneEvidence?: ContextGraphIndependentPlaneEvidence;
 }
 
 /**
@@ -583,11 +585,14 @@ function classifyCatchupReadiness(
     jobStatus: 'denied' as const,
     error: result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : 'Sync denied by remote peer',
   } : undefined;
-  const independentVm = registeredPrivateEmptyVmEvidence({
-    proven: input.finalizedEmptyRegisteredPrivateVm === true, isPrivate, registration,
-  });
+  const noEvidence = NO_CONTEXT_GRAPH_PLANE_EVIDENCE;
+  const independentDurable = registration === 'unregistered'
+    ? noEvidence : input.independentPlaneEvidence?.durable ?? noEvidence;
+  const independentSharedMemory = input.independentPlaneEvidence?.sharedMemory ?? noEvidence;
+  const hasIndependentEvidence = independentDurable.ready || independentDurable.persistable
+    || independentSharedMemory.ready || independentSharedMemory.persistable;
   const cleanPeerEvidence = !peerDenied && catchupResultHasCleanResponse(result);
-  if (cleanPeerEvidence || independentVm) {
+  if (cleanPeerEvidence || hasIndependentEvidence) {
     if (metadata.kind === 'unchecked' || metadata.kind === 'unavailable') {
       return {
         jobStatus: 'unreachable',
@@ -605,13 +610,14 @@ function classifyCatchupReadiness(
       };
     }
 
-    const durableThisRun = independentVm ? { ready: true, persistable: true }
-      : cleanPeerEvidence
-        ? catchupPlaneReadinessThisRun({ result, plane: 'durable', isPrivate })
-        : { ready: false, persistable: false };
-    const sharedMemoryThisRun = cleanPeerEvidence && input.includeSharedMemory
+    const peerDurable = cleanPeerEvidence
+      ? catchupPlaneReadinessThisRun({ result, plane: 'durable', isPrivate })
+      : noEvidence;
+    const peerSharedMemory = cleanPeerEvidence && input.includeSharedMemory
       ? catchupPlaneReadinessThisRun({ result, plane: 'sharedMemory', isPrivate })
-      : { ready: false, persistable: false };
+      : noEvidence;
+    const durableThisRun = composeContextGraphPlaneEvidence(peerDurable, independentDurable);
+    const sharedMemoryThisRun = composeContextGraphPlaneEvidence(peerSharedMemory, independentSharedMemory);
     const durableReadyThisRun = durableThisRun.ready;
     const sharedMemoryReadyThisRun = sharedMemoryThisRun.ready;
     const reduced = reduceContextGraphPlaneEvidence(input.readinessBeforeCatchup, {
@@ -675,10 +681,11 @@ function classifyCatchupReadiness(
         error = 'Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.';
       }
     }
+    // Job status describes the peer round; independent plane evidence can
+    // persist readiness without turning a denied peer response into success.
+    const status = peerDenial ?? { jobStatus, error };
     return {
-      // Peer status cannot erase independently verified plane readiness.
-      jobStatus: peerDenial?.jobStatus ?? jobStatus,
-      error: peerDenial?.error ?? error,
+      ...status,
       statePatch: {
         synced: reduced.writeReady,
         sharedMemorySynced: sharedMemoryVerifiedPersisted,

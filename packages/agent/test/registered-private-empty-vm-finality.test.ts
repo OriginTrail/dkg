@@ -26,7 +26,7 @@ const rpc = createLoopbackJsonRpcTestHarness();
 
 afterEach(async () => { await rpc.stopAll(); });
 
-async function proveAtDepth(depthFromAdapter?: number, depthFromConfig?: number) {
+async function proveAtDepth(depthFromAdapter?: number, depthFromConfig?: number, omitChainId = false) {
   const server = await rpc.start((call, response) => {
     switch (call.method) {
       case 'eth_chainId': sendJsonRpcResult(response, call, '0x7a69'); return;
@@ -89,10 +89,14 @@ async function proveAtDepth(depthFromAdapter?: number, depthFromConfig?: number)
     }),
     contextGraphAuthorityReaderCapability: { status: 'supported', reader: {} },
     config: { chainConfig: {
-      rpcUrl: server.url, chainId: 'evm:31337', hubAddress: HUB,
+      rpcUrl: server.url, hubAddress: HUB,
+      ...(omitChainId ? {} : { chainId: 'evm:31337' }),
       ...(depthFromConfig === undefined ? {} : { finalityConfirmations: depthFromConfig }),
     } },
-    chain: depthFromAdapter === undefined ? {} : { getFinalityConfirmations: () => depthFromAdapter },
+    chain: {
+      getEvmChainId: async () => 31337n,
+      ...(depthFromAdapter === undefined ? {} : { getFinalityConfirmations: () => depthFromAdapter }),
+    },
     inspectAndCommitContextGraphReadinessV1:
       RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1,
     inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
@@ -132,5 +136,11 @@ describe('registered private zero-VM readiness finality', () => {
     expect(proofReads.map((call) => call.params[1])).toEqual(
       Array.from({ length: proofReads.length }, () => ({ blockHash: BLOCK_HASH, requireCanonical: true })),
     );
+  });
+
+  it('proves with the adapter chain ID when chainConfig omits chainId', async () => {
+    const { result, commit } = await proveAtDepth(1, undefined, true);
+    expect(result).toMatchObject({ proven: true });
+    expect(commit).toHaveBeenCalledOnce();
   });
 });

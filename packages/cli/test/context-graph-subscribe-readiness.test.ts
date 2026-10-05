@@ -178,13 +178,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     metadataBootstrapWaitFor?: Promise<void>;
     onMetadataBootstrapStarted?: () => void;
     onCatchupRun?: () => void;
-    onEarlyProofAttempt?: () => void;
     catchupRunWaitFor?: Promise<void>;
-    finalizedEmptyPrivateVm?: boolean;
-    finalizedEmptyPrivateVmAfterCatchup?: boolean;
-    invalidateMetaDuringProof?: boolean;
-    throwEarlyReadinessCommitOnce?: boolean;
-    revokeOnTerminalProof?: boolean;
     revokeOnTerminalMetadataInspection?: boolean;
     changeRevisionOnTerminalAuthority?: boolean;
     unsubscribeOnTerminalAuthority?: boolean;
@@ -204,8 +198,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     responseStatus: number;
     job: any;
     runCalls: number;
-    proofAttempts: Array<{ phase: 'early' | 'terminal'; proven: boolean }>;
-    earlyReadinessCommitFailureInjected: boolean;
     metadataBootstrapCalls: number;
     metadataBootstrapProofs: Array<unknown>;
     runSawMetadataBootstrap: boolean;
@@ -232,8 +224,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     let runCalls = 0;
     let catchupCompleted = false;
     let authorityRevoked = false;
-    let earlyReadinessCommitFailureInjected = false;
-    const proofAttempts: Array<{ phase: 'early' | 'terminal'; proven: boolean }> = [];
     let retrying = false;
     let metadataBootstrapCalls = 0;
     const metadataBootstrapProofs: Array<unknown> = [];
@@ -248,7 +238,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
-    let metadataInvalidated = false;
     let metadataRevision = 0;
     const readinessInspector: {
       subscribedContextGraphs: typeof state;
@@ -260,7 +249,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       subscribedContextGraphs: state,
       contextGraphMetaProjection: {
         readContextGraphAuthorityFactsRevision: (_id) =>
-          String(metadataRevision + (metadataInvalidated ? 1 : 0)),
+          String(metadataRevision),
       },
       inspectAndCommitContextGraphReadinessV1:
         DKGAgent.prototype.inspectAndCommitContextGraphReadinessV1,
@@ -328,11 +317,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         return applied;
       },
       markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
-        if (opts.throwEarlyReadinessCommitOnce && patch.synced === true && !catchupCompleted) {
-          opts.throwEarlyReadinessCommitOnce = false;
-          earlyReadinessCommitFailureInjected = true;
-          throw new Error('test readiness write failure');
-        }
         patches.push({ ...patch });
         state.set(id, { ...state.get(id), ...patch });
       },
@@ -353,7 +337,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         if (catchupCompleted && opts.revokeOnTerminalMetadataInspection) {
           authorityRevoked = true;
         }
-        if (metadataInvalidated) return false;
         if (catchupCompleted && opts.metadataInspectionFailsAfterCatchup) {
           throw new Error('transient metadata store failure');
         }
@@ -362,61 +345,14 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
           : opts.hasConfirmedMeta;
       },
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
-      proveRegisteredPrivateEmptyVmV1: async (
-        _id: string, _caller: string, commit: (facts: Record<string, unknown>) => unknown,
-      ) => {
-        if (opts.invalidateMetaDuringProof && !metadataInvalidated) {
-          metadataInvalidated = true;
-          state.set(contextGraphId, {
-            ...state.get(contextGraphId), synced: false,
-            metaSynced: false, pendingMeta: true,
-          });
-          return { proven: false as const };
-        }
-        if (metadataInvalidated) return { proven: false as const };
-        const phase = catchupCompleted ? 'terminal' : 'early';
-        if (phase === 'early') opts.onEarlyProofAttempt?.();
-        if (phase === 'terminal' && opts.revokeOnTerminalProof) {
-          authorityRevoked = true;
-          proofAttempts.push({ phase, proven: false });
-          return { proven: false as const };
-        }
-        const proven = phase === 'terminal'
-          ? opts.finalizedEmptyPrivateVmAfterCatchup ?? opts.finalizedEmptyPrivateVm ?? false
-          : opts.finalizedEmptyPrivateVm ?? false;
-        proofAttempts.push({ phase, proven });
-        if (!proven) return { proven: false as const };
-        return agent.inspectAndCommitContextGraphReadinessV1({
-          contextGraphId: _id, inspectMetadata: true,
-          callerAgentAddress: _caller,
-        }, (facts: Record<string, any>) => facts.kind === 'current'
-          && facts.metadata.kind === 'confirmed'
-          && facts.metadata.accessPolicy === 'private' && facts.authority.outcome === 'allowed'
-          ? { proven: true as const, value: commit(facts) }
-          : { proven: false as const });
-      },
-      inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1: async (
-        input: {
-          contextGraphId: string; inspectMetadata: boolean;
-          attemptPrivateEmptyVm: boolean; callerAgentAddress?: string;
-        },
-        commit: (facts: Record<string, any>, proof: { proven: boolean }) => unknown,
-      ) => {
-        const proof = input.attemptPrivateEmptyVm && input.callerAgentAddress
-          ? await agent.proveRegisteredPrivateEmptyVmV1(
-            input.contextGraphId, input.callerAgentAddress, () => undefined,
-          )
-          : { proven: false };
-        return agent.inspectAndCommitContextGraphReadinessV1({
-          contextGraphId: input.contextGraphId,
-          inspectMetadata: input.inspectMetadata,
-          callerAgentAddress: input.callerAgentAddress,
-        }, (facts: Record<string, any>) => commit(facts, {
-          proven: proof.proven && facts.kind === 'current'
-            && facts.metadata.kind === 'confirmed'
-            && facts.metadata.accessPolicy === 'private' && facts.authority.outcome === 'allowed',
-        }));
-      },
+      // Exercise the production inspection and proof coordinator. This general
+      // fixture has no finalized-proof transport; focused empty-VM scenarios
+      // supply one in context-graph-subscribe-empty-vm.test.ts.
+      proveRegisteredPrivateEmptyVmV1: DKGAgent.prototype.proveRegisteredPrivateEmptyVmV1,
+      inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
+        DKGAgent.prototype.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1,
+      config: { chainConfig: undefined },
+      contextGraphAuthorityReaderCapability: { status: 'unsupported' },
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
       getRfc64SelectedSwmGraphSyncStatus: () => ({
@@ -518,8 +454,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       responseStatus: httpResponse.status,
       job: jobId ? catchupTracker.jobs.get(jobId) : undefined,
       runCalls,
-      proofAttempts,
-      earlyReadinessCommitFailureInjected,
       metadataBootstrapCalls,
       metadataBootstrapProofs,
       runSawMetadataBootstrap,
@@ -547,162 +481,6 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.responsibilityCalls).toEqual([expect.any(String)]);
     expect(result.runSawMetadataBootstrap).toBe(true);
     expect(result.metadataBootstrapCalls).toBe(1);
-  });
-
-  it('opens only first-write VM readiness before an empty private catch-up completes', async () => {
-    let finishCatchup!: () => void;
-    const catchupRunWaitFor = new Promise<void>((resolve) => { finishCatchup = resolve; });
-    try {
-      const result = await subscribe({
-        hasConfirmedMeta: true,
-        isPrivate: true,
-        initial: { subscribed: false, sharedMemorySynced: false },
-        finalizedEmptyPrivateVm: true,
-        catchupRunWaitFor,
-        authorityDecision: {
-          outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
-          metadataBootstrap: 'eligible', onChainId: 7n,
-        },
-      });
-      expect(result.responseStatus).toBe(200);
-      expect(result.job.status).toBe('running');
-      expect(result.state).toMatchObject({
-        subscribed: true, synced: true, metaSynced: true, sharedMemorySynced: false,
-      });
-      expect(result.readiness).toMatchObject({
-        durableVerified: true, sharedMemoryVerified: false,
-      });
-    } finally {
-      finishCatchup();
-    }
-  });
-
-  it('returns the minted catch-up job if best-effort early readiness persistence throws', async () => {
-    let finishCatchup!: () => void;
-    const catchupRunWaitFor = new Promise<void>((resolve) => { finishCatchup = resolve; });
-    try {
-      const result = await subscribe({
-        hasConfirmedMeta: true, isPrivate: true,
-        finalizedEmptyPrivateVm: true,
-        throwEarlyReadinessCommitOnce: true,
-        catchupRunWaitFor,
-        authorityDecision: {
-          outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
-          metadataBootstrap: 'eligible', onChainId: 7n,
-        },
-      });
-      expect(result.responseStatus).toBe(200);
-      expect(result.response.catchup.jobId).toBeTruthy();
-      expect(result.job.status).toBe('running');
-      expect(result.earlyReadinessCommitFailureInjected).toBe(true);
-      expect(result.proofAttempts).toContainEqual({ phase: 'early', proven: true });
-    } finally {
-      finishCatchup();
-    }
-  });
-
-  it('commits a later finalized empty-VM proof after private metadata-only catch-up', async () => {
-    let finishCatchup!: () => void;
-    const catchupRunWaitFor = new Promise<void>((resolve) => { finishCatchup = resolve; });
-    const result = await subscribe({
-      hasConfirmedMeta: true,
-      isPrivate: true,
-      initial: { subscribed: false, sharedMemorySynced: false },
-      finalizedEmptyPrivateVm: false,
-      finalizedEmptyPrivateVmAfterCatchup: true,
-      catchupRunWaitFor,
-      onEarlyProofAttempt: finishCatchup,
-      result: privateSharedMemoryMetaOnlyResult(),
-      authorityDecision: {
-        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
-        metadataBootstrap: 'eligible', onChainId: 7n,
-      },
-    });
-    expect(result.responseStatus).toBe(200);
-    expect(result.job.finishedAt).toBeDefined();
-    expect(result.proofAttempts).toEqual([
-      { phase: 'early', proven: false },
-      { phase: 'terminal', proven: true },
-    ]);
-    expect(result.state).toMatchObject({
-      subscribed: true, synced: true, metaSynced: true,
-      sharedMemorySynced: false,
-    });
-    expect(result.readiness).toMatchObject({
-      durableVerified: true, sharedMemoryVerified: false,
-    });
-  });
-
-  it('clears early VM readiness if membership is revoked during terminal proof', async () => {
-    let finishCatchup!: () => void;
-    const catchupRunWaitFor = new Promise<void>((resolve) => { finishCatchup = resolve; });
-    const result = await subscribe({
-      hasConfirmedMeta: true, isPrivate: true,
-      initial: { subscribed: false, sharedMemorySynced: false },
-      finalizedEmptyPrivateVm: true,
-      revokeOnTerminalProof: true,
-      catchupRunWaitFor,
-      onEarlyProofAttempt: finishCatchup,
-      result: privateSharedMemoryMetaOnlyResult(),
-      authorityDecision: {
-        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
-        metadataBootstrap: 'eligible', onChainId: 7n,
-      },
-    });
-    expect(result.responseStatus).toBe(200);
-    expect(result.job.status).toBe('denied');
-    expect(result.proofAttempts).toEqual([
-      { phase: 'early', proven: true },
-      { phase: 'terminal', proven: false },
-    ]);
-    expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false });
-    expect(result.readiness).toMatchObject({
-      durableVerified: false, sharedMemoryVerified: false,
-    });
-  });
-
-  it('keeps a denied catch-up status while an independent proof opens VM readiness', async () => {
-    const deniedRound = privateSharedMemoryMetaOnlyResult();
-    deniedRound.denied = true;
-    deniedRound.deniedPeers = 1;
-    deniedRound.peersSucceeded = 0;
-    const result = await subscribe({
-      hasConfirmedMeta: true, isPrivate: true,
-      initial: { subscribed: false, sharedMemorySynced: false },
-      finalizedEmptyPrivateVm: true,
-      result: deniedRound,
-      authorityDecision: {
-        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
-        metadataBootstrap: 'eligible', onChainId: 7n,
-      },
-    });
-    expect(result.job.status).toBe('denied');
-    expect(result.state).toMatchObject({ synced: true, sharedMemorySynced: false });
-    expect(result.readiness).toMatchObject({
-      durableVerified: true, sharedMemoryVerified: false,
-    });
-  });
-
-  it('does not restore readiness after metadata invalidates during an empty-VM proof', async () => {
-    const result = await subscribe({
-      hasConfirmedMeta: true,
-      isPrivate: true,
-      initial: { subscribed: false, sharedMemorySynced: false },
-      finalizedEmptyPrivateVm: true,
-      invalidateMetaDuringProof: true,
-      result: privateMetaOnlyResult(),
-      authorityDecision: {
-        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
-        metadataBootstrap: 'eligible', onChainId: 7n,
-      },
-    });
-    expect(result.job.finishedAt).toBeDefined();
-    expect(result.state).toMatchObject({
-      synced: false, metaSynced: false, pendingMeta: true,
-    });
-    expect(result.readiness).toMatchObject({
-      durableVerified: false, sharedMemoryVerified: false,
-    });
   });
 
   it('waits for metadata bootstrap to finish before starting catch-up', async () => {

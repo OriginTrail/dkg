@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import { createStrictCurrentFinalizedEvmSnapshotScopeV1, resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import {
+  createStrictCurrentFinalizedEvmSnapshotScopeV1,
+  isFinalizedChainAdmissionContention,
+  resolveRpcUrls,
+} from '@origintrail-official/dkg-chain';
 import {
   assertCanonicalChainId, assertCanonicalEvmAddress,
 } from '@origintrail-official/dkg-core';
@@ -27,6 +31,7 @@ export interface PrivateEmptyVmAgentBindingsV1 {
     hubAddress: string;
   } | undefined;
   hasAuthorityReader(): boolean;
+  readAdapterEvmChainId(): Promise<bigint>;
   readResolvedFinalityConfirmations(): number | undefined;
 }
 
@@ -76,9 +81,14 @@ export async function attemptRegisteredPrivateEmptyVmV1(
     }
     const endpoints = resolveRpcUrls(chainConfig.rpcUrl ?? '', chainConfig.rpcUrls);
     if (endpoints.length === 0) { tracePrivateEmptyVm('rpc-endpoints-absent'); return UNPROVEN_PRIVATE_EMPTY_VM; }
-    const chainId = chainConfig.chainId?.match(/^evm:(0|[1-9][0-9]*)$/u)?.[1];
-    if (chainId === undefined || !ethers.isAddress(chainConfig.hubAddress)) {
+    const configuredChainId = chainConfig.chainId?.match(/^evm:(0|[1-9][0-9]*)$/u)?.[1];
+    if ((chainConfig.chainId !== undefined && configuredChainId === undefined)
+      || !ethers.isAddress(chainConfig.hubAddress)) {
       tracePrivateEmptyVm('chain-binding-absent'); return UNPROVEN_PRIVATE_EMPTY_VM;
+    }
+    const chainId = (await bindings.readAdapterEvmChainId()).toString();
+    if (configuredChainId !== undefined && configuredChainId !== chainId) {
+      tracePrivateEmptyVm('chain-binding-mismatch'); return UNPROVEN_PRIVATE_EMPTY_VM;
     }
     // Normalize external bindings once. The registry supplies the graph name;
     // it is not restricted to the RFC-64 author-lane grammar.
@@ -118,6 +128,7 @@ export async function attemptRegisteredPrivateEmptyVmV1(
     return { proven: true, metadataRevision, onChainId: before.onChainId };
   } catch (error) {
     tracePrivateEmptyVm(`proof-error:${error instanceof Error ? error.name : 'unknown'}`);
-    return UNPROVEN_PRIVATE_EMPTY_VM;
+    return signal?.aborted || !isFinalizedChainAdmissionContention(error)
+      ? UNPROVEN_PRIVATE_EMPTY_VM : RETRYABLE_PRIVATE_EMPTY_VM;
   }
 }
