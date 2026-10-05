@@ -1,3 +1,5 @@
+import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
+import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -371,10 +373,10 @@ import {
 import {
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
-import {
-  emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
-  mergeFleetSharedMemoryDiagnostics,
+import  {
+  emptySharedMemorySyncResult,
   mergeSamePeerSharedMemoryDiagnostics,
+  mergeFleetSharedMemoryDiagnostics,
   recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
@@ -465,13 +467,11 @@ import {
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
-import {
+import  {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
   resolveNonNegativeIntegerSwitch,
-  resolveBooleanSwitch,
   resolveExactBatchStreamEnabled,
-  resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
@@ -714,7 +714,7 @@ import {
 } from './sync/on-demand-agents-phonebook.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
-import {
+import  {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,
@@ -752,7 +752,6 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
-  type DKGAgentConfig,
   type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
@@ -1951,51 +1950,9 @@ async function authenticateDurableGraphScopedAsset(params: {
   }
 }
 
-function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
-}
-
-function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.syncOnConnectEnabled, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
-}
-
-function durableSyncEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
-}
-
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
  *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
 const CHANGELOG_MAX_SCAN_LIMIT = 2000;
-
-function emptySharedMemorySyncResult(): SharedMemorySyncResult {
-  return createEmptySharedMemorySyncResult();
-}
-
-function mergeSharedMemorySyncResults(
-  a: SharedMemorySyncResult,
-  b: SharedMemorySyncResult,
-): SharedMemorySyncResult {
-  return {
-    ...mergeSamePeerSharedMemoryDiagnostics(a, b),
-  };
-}
-
-function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
-  return {
-    replacedRoots: 0,
-    replacedGraphs: 0,
-    insertedDataQuads: 0,
-    insertedMetaQuads: 0,
-    droppedDataTriples: 0,
-    readySnapshots: 0,
-    totalSnapshots: 0,
-    completed: true,
-  };
-}
 
 type NonBoundedCuratorPeerIdsResolution =
   | {
@@ -2059,6 +2016,10 @@ type StructuralCuratorPeerLookup =
       readonly overflowed?: never;
       readonly nextPageAfterPeerId?: never;
     };
+
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
 
 export class LifecycleSyncMethods extends DKGAgentBase {
   async retireLegacySwmAfterVerifiedVmTwin(
@@ -7782,7 +7743,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             },
           );
         },
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         onResult: (item, result) => {
           if (
             selectedSwmEnabled
@@ -7861,7 +7822,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             selectedSwmPriority: true,
           },
         ),
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         markDeferred: (summary) => ({
           ...summary,
           deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
@@ -7901,7 +7862,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
       });
       const { summary: continuationSummary } = continuationExecution;
-      const finalSummary = mergeSharedMemorySyncResults(
+      const finalSummary = mergeSamePeerSharedMemoryDiagnostics(
         initialSummary,
         continuationSummary,
       );
@@ -8376,7 +8337,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catchup-status endpoint and UI keep working — see
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
     const emptyShared = (): SharedMemorySyncResult =>
-      createEmptySharedMemorySyncResult(1);
+      emptySharedMemorySyncResult(1);
     // Bounded fan-out: at most CATCHUP_MAX_CONCURRENT_PEER_SYNCS peer syncs run
     // at once. The pre-cap unbounded `Promise.all` over every sync-capable peer
     // was the top amplifier of the 2026-07-07 mainnet sync storm — one

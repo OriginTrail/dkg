@@ -244,6 +244,12 @@ jobs:
       - name: Test audit-dial-protocol lexer
         run: node --test scripts/audit-dial-protocol.test.mjs
 
+      - name: Audit source file size
+        run: node scripts/audit-file-size.mjs
+
+      - name: Test source file-size guard
+        run: node --test scripts/audit-file-size.test.mjs
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
