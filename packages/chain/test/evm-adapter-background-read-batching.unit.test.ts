@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MULTICALL3_ADDRESS } from '../src/evm-background-read-batching.js';
-import type { ReadOpts, RpcReadDescriptor } from '../src/rpc-failover-client.js';
+import type { ReadOpts, RpcReadDescriptorInput } from '../src/rpc-failover-client.js';
 import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import { MULTICALL3_RUNTIME_CODE } from './fixtures/multicall3-runtime-code.js';
 
@@ -62,7 +62,7 @@ function makeAdapter() {
     readProvider(label: string, fn: (provider: unknown) => Promise<unknown>): Promise<unknown>;
     rpcFailover: {
       readContract(
-        descriptor: RpcReadDescriptor,
+        descriptor: RpcReadDescriptorInput,
         contract: Contract,
         fn: (contract: unknown) => Promise<unknown>,
         opts?: ReadOpts,
@@ -77,8 +77,11 @@ function makeAdapter() {
     return fn({ getCode: async () => MULTICALL3_RUNTIME_CODE });
   };
   internals.rpcFailover.readContract = async (descriptor, contract, fn, opts) => {
-    requests.push(descriptor.label);
-    policies.set(descriptor.label, opts?.policy);
+    // The client accepts labels for adapter views and explicit descriptors for
+    // batched calls. This transport double records either public input form.
+    const label = typeof descriptor === 'string' ? descriptor : descriptor.label;
+    requests.push(label);
+    policies.set(label, opts?.policy);
     if (contract.target === MULTICALL3_ADDRESS) {
       return fn({
         aggregate3: {

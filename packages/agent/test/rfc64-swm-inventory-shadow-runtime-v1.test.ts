@@ -171,19 +171,19 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
 
   it('aborts admitted lifecycle waits so shutdown can drain promptly', async () => {
     const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    let settled: boolean | undefined;
     let markEntered!: () => void;
     const entered = new Promise<void>((resolve) => { markEntered = resolve; });
 
     expect(runtime.schedule('settling-asset', async () => {
       const signal = runtime.shutdownSignal;
       markEntered();
-      await new Promise<void>((resolve) => {
-        signal.addEventListener('abort', () => resolve(), { once: true });
-      });
+      settled = await runtime.waitForResponsibilitySettlement(8_000, signal);
     })).toBe(true);
     await entered;
 
     await runtime.closeAndDrain();
+    expect(settled).toBe(false);
     expect(runtime.inFlightCount).toBe(0);
   });
 });

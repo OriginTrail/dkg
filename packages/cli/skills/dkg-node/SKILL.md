@@ -432,7 +432,7 @@ The `memory_search` tool is the recommended entry point for free-text memory rec
 
 - `POST /api/query` — SPARQL query. Body parameters:
   - `sparql` (required) — the query string
-  - `contextGraphId` — scope query to one CG (recommended)
+  - `contextGraphId` — scope query to one CG (recommended). A query without it is withheld when a local write lands while it runs: `503` with `code: "UNSCOPED_QUERY_INVALIDATED"`, `retryable: true` and `Retry-After: 1` — retry it, or scope it
   - `view` — `working-memory` | `shared-working-memory` | `verifiable-memory`
   - `agentAddress` — required when `view: "working-memory"` (WM is per-agent)
   - `assertionName` — scope to a specific WM assertion graph

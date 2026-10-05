@@ -7,10 +7,12 @@ import {
   ContextGraphPolicyAuthorizationError,
 } from '@origintrail-official/dkg-agent';
 import {
+  OxigraphStore,
   SparqlHttpResponseError,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
+import { captureUnscopedQueryConsistency } from '../../agent/src/unscoped-query-consistency.js';
 import {
   configureApiQueryPriority,
   createApiQueryRequestLifecycle,
@@ -21,6 +23,7 @@ import {
 import { handleCclRoutes } from '../src/daemon/routes/ccl.js';
 import {
   respondIfStoreUnavailable,
+  respondIfUnscopedQueryInvalidated,
   respondWithDaemonError,
 } from '../src/daemon/http-utils.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -59,6 +62,12 @@ class ResponseStub extends EventEmitter {
     this.writableEnded = true;
     return this;
   }
+}
+
+/** The error a call throws: the cases below feed real agent errors to the daemon mapping. */
+function thrownBy(run: () => unknown): unknown {
+  try { run(); } catch (error) { return error; }
+  throw new Error('expected the call to throw');
 }
 
 function queryRouteContext(
@@ -671,5 +680,76 @@ describe('/api/query request lifecycle', () => {
     }, tracker))).rejects.toBe(unmarked);
 
     expect(res.statusCode).not.toBe(400);
+  });
+
+  it('answers an unscoped query that lost its consistency check with a retryable 503', async () => {
+    // The agent's own error, produced the way a live node produces it: a local
+    // write lands inside the interval the query has to hold unchanged. A
+    // hand-typed copy would keep this green if the agent's marker drifted.
+    const store = new OxigraphStore();
+    let invalidated: unknown;
+    try {
+      const assertUnchanged = captureUnscopedQueryConsistency(store, () => 0);
+      await store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }]);
+      invalidated = thrownBy(assertUnchanged);
+    } finally { await store.close(); }
+
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    // The route has no branch of its own for it: the error reaches the daemon's
+    // top-level mapping, like every other error the route does not classify.
+    await expect(handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw invalidated; }),
+    }, tracker))).rejects.toBe(invalidated);
+    expect(tracker.fail).toHaveBeenCalledTimes(1);
+    expect(tracker.cancel).not.toHaveBeenCalled();
+
+    respondWithDaemonError(res as unknown as ServerResponse, invalidated);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    const answer = JSON.parse(res.body);
+    expect(answer).toEqual({
+      error: 'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+      code: 'UNSCOPED_QUERY_INVALIDATED',
+      retryable: true,
+    });
+    // The daemon's sentence is the agent's: the text of the answer did not
+    // change with its status.
+    expect(answer.error).toBe((invalidated as Error).message);
+  });
+
+  it('gives the same answer to a copy of that error that lost its message at a package boundary', () => {
+    const res = new ResponseStub();
+    // Error.message is non-enumerable, so a spread or serialized copy has none.
+    expect(respondIfUnscopedQueryInvalidated(res as unknown as ServerResponse, {
+      code: 'UNSCOPED_QUERY_INVALIDATED', retryable: true,
+    })).toBe(true);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toEqual({
+      error: 'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+      code: 'UNSCOPED_QUERY_INVALIDATED',
+      retryable: true,
+    });
+  });
+
+  it.each([
+    ['the same code without the retryable mark', { code: 'UNSCOPED_QUERY_INVALIDATED' }],
+    // Retrying cannot give a store the coverage an unscoped query needs.
+    ['a store that can never serve an unscoped query', thrownBy(() => captureUnscopedQueryConsistency({}, () => 0))],
+    ['no error object at all', undefined],
+  ])('does not offer a retry for %s', (_label, error) => {
+    const res = new ResponseStub();
+    expect(respondIfUnscopedQueryInvalidated(res as unknown as ServerResponse, error)).toBe(false);
+    expect(res.headersSent).toBe(false);
   });
 });

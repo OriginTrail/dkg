@@ -1,3 +1,5 @@
+
+import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
@@ -164,7 +166,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
+import {
+  prepareAssertionPromote,
+  translateLegacySwmRetirementFence,
+} from './internal/promote/assertion-promote-precommit.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -761,33 +766,6 @@ function constructConfiguredChainAdapter(
     return { chain, operationalKeys };
   }
   return { chain: new NoChainAdapter(), operationalKeys };
-}
-
-interface ACKReliableMessenger {
-  sendRequestOwned(
-    peerId: string,
-    protocol: string,
-    data: Uint8Array,
-    opts: { timeoutMs: number },
-  ): Promise<{ delivered: boolean; error?: unknown; response?: Uint8Array }>;
-}
-
-function createACKSendP2P(input: {
-  messenger: ACKReliableMessenger;
-  timeoutMs: number;
-}): ACKCollectorDeps['sendP2P'] {
-  return async (peerId: string, protocol: string, data: Uint8Array) => {
-    const sendResult = await input.messenger.sendRequestOwned(peerId, protocol, data, {
-      timeoutMs: input.timeoutMs,
-    });
-    if (!sendResult.delivered) {
-      throw new Error(`substrate send already in flight (transport): ${sendResult.error}`);
-    }
-    if (!sendResult.response) {
-      throw new Error('substrate delivered (transport) without response');
-    }
-    return sendResult.response;
-  };
 }
 
 /**
@@ -1637,16 +1615,19 @@ export class DKGAgent extends DKGAgentBase {
         // witness in the same transaction; exact catalog reconciliation alone
         // retires it later.
         if (resolvedConfig.dataDir === undefined) return;
-        if (agentRef === undefined) {
+        const owner = agentRef;
+        if (owner === undefined) {
           throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
         }
-        return prepareRfc64LateLegacySwmBoundaryV1(
-          agentRef,
+        // A promote that meets a retirement's fence (its asset's, or the graph's) is
+        // retried by the queue; every other refusal here stays a hard failure.
+        return translateLegacySwmRetirementFence(() => prepareRfc64LateLegacySwmBoundaryV1(
+          owner,
           input.contextGraphId,
           input.kaUal,
           input.shareOperationId,
           input.assertionVersion,
-        );
+        ));
       },
       resolveDurableRootMaterializationAtomicCompanion: (input) => {
         if (resolvedConfig.dataDir === undefined) return;

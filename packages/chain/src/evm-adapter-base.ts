@@ -11,6 +11,9 @@
  * the external public API is unchanged.
  */
 
+
+import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
+export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
@@ -39,7 +42,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
@@ -65,7 +68,7 @@ import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
-import {
+import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
   rpcReadDescriptor,
@@ -349,40 +352,6 @@ const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
 export type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
-
-/**
- * B8 — decode the `CostCovered` event from a publish receipt's logs via the
- * PublishingConviction LOGIC ABI (the event is emitted by the logic contract, a
- * different address than KA storage, so the KA-storage receipt loop skips it).
- * Returns the discount detail (cost fields bigint → decimal strings via the
- * daemon's JSON replacer; `epoch` a number) when a publish drew on a Publishing
- * Conviction Account, else `undefined`. `coverPublishingCost` runs once per
- * publish tx, so a (batch) publish emits ONE CostCovered covering the batch's
- * total draw — this returns that single event (the "discount applied" badge is
- * tx-level; a precise per-KA breakdown would be a future enhancement). Exported
- * for unit testing.
- */
-export function decodeConvictionCostCovered(
-  logs: ReadonlyArray<{ topics: ReadonlyArray<string>; data: string }>,
-): OnChainPublishResult['convictionCostCovered'] {
-  const pcaLogic = getPcaLogicInterface();
-  for (const log of logs) {
-    try {
-      const parsed = pcaLogic.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === 'CostCovered') {
-        return {
-          accountId: BigInt(parsed.args.accountId),
-          epoch: Number(parsed.args.epoch),
-          baseCost: BigInt(parsed.args.baseCost),
-          discountedCost: BigInt(parsed.args.discountedCost),
-          drawnFromEpoch: BigInt(parsed.args.drawnFromEpoch),
-          drawnFromTopUp: BigInt(parsed.args.drawnFromTopUp),
-        };
-      }
-    } catch { /* not a PublishingConviction event */ }
-  }
-  return undefined;
-}
 
 function normalizeScanPageSize(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 1

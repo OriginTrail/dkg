@@ -1,5 +1,21 @@
 import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
 
+// A freshly-created private CG can durably accept its first shares before the
+// membership-derived default responsibility and accepted authority converge.
+// Keep the detached observer alive across that bounded lifecycle gap so an
+// otherwise successful share cannot be omitted from the authoritative head.
+const RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1 = Object.freeze([
+  0,
+  100,
+  250,
+  500,
+  1_000,
+  2_000,
+  4_000,
+  8_000,
+] as const);
+
+
 export const RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 = 16;
 export const RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1 = 4_096;
 
@@ -59,6 +75,29 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   /** Aborts lifecycle-only waits when shutdown fences detached observers. */
   get shutdownSignal(): AbortSignal {
     return this.#closeAbort.signal;
+  }
+
+  get responsibilitySettlementRetryDelaysMs(): readonly number[] {
+    return RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1;
+  }
+
+  waitForResponsibilitySettlement(
+    delayMs: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false);
+    if (delayMs === 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(true);
+      }, delayMs);
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   schedule(assetKey: string, observer: () => Promise<void>): boolean {
