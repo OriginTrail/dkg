@@ -858,9 +858,9 @@ import {
   './rfc64/legacy-swm-boundary-v1.js';
 import {
   projectPersistedJoinApprovals,
-  verifiedCuratorDialAddress,
   type ContextGraphMembershipSnapshot,
 } from './join-approval-restart-projection.js';
+import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { multiaddr } from '@multiformats/multiaddr';
 import type { ContextGraphMembershipRecord } from './dkg-agent-types.js';
+import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 
 export type ContextGraphMembershipSnapshot = ReadonlyArray<
   ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
@@ -12,16 +12,6 @@ interface PersistedJoinApprovalProjection {
   readonly updatedAt: number;
   readonly curatorPeerId?: string;
   readonly curatorDialAddress?: string;
-}
-
-export function verifiedCuratorDialAddress(value: unknown, peerId: string): string | undefined {
-  if (typeof value !== 'string' || value.length > 512) return undefined;
-  try {
-    const address = multiaddr(value).toString();
-    return address.endsWith(`/p2p/${peerId}`) ? address : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 export function projectPersistedJoinApprovals(

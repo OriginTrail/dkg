@@ -254,6 +254,7 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 import { multiaddr } from '@multiformats/multiaddr';
+import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
@@ -584,9 +585,11 @@ function curatorJoinDialAddress(agent: DKGAgent): string | undefined {
     ...collectPublishableMultiaddrs(agent.node.multiaddrs),
     ...agent.node.multiaddrs,
   ];
-  return addresses.find((address) => (
-    address.length <= 512 && address.endsWith(`/p2p/${agent.peerId}`)
-  ));
+  for (const address of addresses) {
+    const verifiedAddress = verifiedCuratorDialAddress(address, agent.peerId);
+    if (verifiedAddress) return verifiedAddress;
+  }
+  return undefined;
 }
 
 export class JoinRequestMethods extends DKGAgentBase {

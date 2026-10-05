@@ -8,6 +8,7 @@ import {
   createOperationContext,
   DKG_ONTOLOGY,
   type OperationContext,
+  type PeerResolver,
 } from '@origintrail-official/dkg-core';
 import {
   tryReplaceSubjectAtomically,
@@ -120,19 +121,7 @@ interface CuratorMetaRefreshAgent {
       };
     };
   };
-  readonly discovery: {
-    findAgentByPeerId(peerId: string): Promise<{ relayAddress?: string } | undefined>;
-  };
-  readonly peerResolver?: {
-    connect(
-      peerId: string,
-      options: {
-        signal?: AbortSignal;
-        perStepTimeoutMs?: number;
-        candidateTimeoutMs?: number;
-      },
-    ): Promise<{ status: 'connected' | 'unresolved' }>;
-  };
+  readonly peerResolver: Pick<PeerResolver, 'connect'>;
   readonly store: TripleStore;
   readonly syncCheckpoints: Pick<SyncCheckpointStore, 'delete'>;
   readonly oversizeTombstoneLog: {
