@@ -83,7 +83,7 @@
     "packages/cli/src/context-graph-readiness.ts": 1167,
     "packages/cli/src/daemon/auto-update.ts": 1648,
     "packages/cli/src/daemon/chain-reset-wipe.ts": 975,
-    "packages/cli/src/daemon/http-utils.ts": 2175,
+    "packages/cli/src/daemon/http-utils.ts": 2171,
     "packages/cli/src/daemon/lifecycle.ts": 3935,
     "packages/cli/src/daemon/local-agents.ts": 1181,
     "packages/cli/src/daemon/manifest.ts": 970,

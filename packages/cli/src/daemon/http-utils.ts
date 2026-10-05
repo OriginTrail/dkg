@@ -31,8 +31,10 @@ import {
 import type { DkgConfig } from '../config.js';
 import {
   createReadAuthorityDiagnostics,
+  decodeReadAuthorityAttribution,
   type ContextGraphReadAuthorityAttribution,
 } from './read-authority-diagnostics.js';
+import { unscopedQueryInvalidatedBody } from './unscoped-query-invalidated.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
 import type { CorsAllowlist } from './state.js';
@@ -139,23 +141,6 @@ export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
 const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
 
 /**
- * The attribution a thrown read-authority marker carries. The agent's error is
- * recognised structurally, so each field is read defensively; a missing,
- * non-string or throwing field becomes `unknown` here and nowhere else.
- */
-function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
-  const field = (key: keyof ContextGraphReadAuthorityAttribution): string => {
-    try {
-      const value: unknown = Reflect.get(err as object, key);
-      return typeof value === 'string' ? value : 'unknown';
-    } catch {
-      return 'unknown';
-    }
-  };
-  return { source: field('source'), reason: field('reason'), dependency: field('dependency') };
-}
-
-/**
  * Uniform retryable response for an unresolvable Context Graph read authority,
  * the one renderer every route uses. The graph id, authority source and
  * internal reason stay out of the body; the attribution goes to the daemon log
@@ -196,31 +181,11 @@ export function respondIfContextGraphReadAuthorityUnavailable(
   return true;
 }
 
-/** Structural for the same package-boundary reason as the read-authority code above. */
-export const UNSCOPED_QUERY_INVALIDATED_CODE = 'UNSCOPED_QUERY_INVALIDATED';
-
-/**
- * An unscoped query releases its result only when no local write and no
- * read-authority change landed while it ran. Losing that check says nothing
- * about the request and the same query succeeds once the write has settled, so
- * the caller gets the retryable 503 of the other transient conditions, not a
- * 500. The sentence is the one the agent throws, so the answer's text did not
- * change with its status.
- */
+/** Renders {@link unscopedQueryInvalidatedBody} as its retryable 503. */
 export function respondIfUnscopedQueryInvalidated(res: ServerResponse, err: unknown): boolean {
-  const shaped = err as { code?: unknown; retryable?: unknown } | null | undefined;
-  if (shaped?.code !== UNSCOPED_QUERY_INVALIDATED_CODE || shaped.retryable !== true) return false;
-  jsonResponse(
-    res,
-    503,
-    {
-      error: 'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
-      code: UNSCOPED_QUERY_INVALIDATED_CODE,
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '1' },
-  );
+  const body = unscopedQueryInvalidatedBody(err);
+  if (body === undefined) return false;
+  jsonResponse(res, 503, body, undefined, { 'Retry-After': '1' });
   return true;
 }
 
