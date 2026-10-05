@@ -54,8 +54,9 @@ function fixture() {
 }
 
 async function prove(agent: DKGAgent) {
-  return RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-    .call(agent, CG, CALLER);
+  const result = await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+    .call(agent, CG, CALLER, () => undefined);
+  return result.proven;
 }
 
 describe('registered private empty-VM agent guard', () => {
@@ -85,6 +86,14 @@ describe('registered private empty-VM agent guard', () => {
       contextGraphId: CG, onChainContextGraphId: '3', callerAgentAddress: CALLER,
       chainId: '31337',
     }));
+  });
+
+  it('returns the synchronous persistence callback value only after proof', async () => {
+    const state = fixture();
+    const commit = vi.fn(() => 'readiness-written');
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: true, value: 'readiness-written' });
+    expect(commit).toHaveBeenCalledOnce();
   });
 
   it('never asks chain proof for an unsubscribed or non-admitted caller', async () => {
@@ -163,7 +172,7 @@ describe('registered private empty-VM agent guard', () => {
     const commit = vi.fn();
     mocks.proof.mockResolvedValueOnce(false);
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-      .call(state.agent, CG, CALLER, commit)).toBe(false);
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
     expect(mocks.proof).toHaveBeenCalledTimes(1);
     expect(commit).not.toHaveBeenCalled();
   });
@@ -176,7 +185,7 @@ describe('registered private empty-VM agent guard', () => {
       return true;
     });
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-      .call(state.agent, CG, CALLER, commit)).toBe(false);
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
     expect(commit).not.toHaveBeenCalled();
   });
 
@@ -185,7 +194,7 @@ describe('registered private empty-VM agent guard', () => {
     const commit = vi.fn();
     state.isPrivate.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-      .call(state.agent, CG, CALLER, commit)).toBe(false);
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
     expect(mocks.proof).toHaveBeenCalledTimes(1);
     expect(commit).not.toHaveBeenCalled();
   });
@@ -206,7 +215,7 @@ describe('registered private empty-VM agent guard', () => {
       return true;
     });
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-      .call(state.agent, CG, CALLER, commit)).toBe(false);
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
     expect(commit).not.toHaveBeenCalled();
   });
 
@@ -223,7 +232,7 @@ describe('registered private empty-VM agent guard', () => {
     const revisionAtCommit: string[] = [];
     const commit = vi.fn(() => { revisionAtCommit.push(state.readMetadataRevision()); });
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-      .call(state.agent, CG, CALLER, commit)).toBe(true);
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: true, value: undefined });
     expect(commit).toHaveBeenCalledTimes(1);
     expect(revisionAtCommit).toEqual(['0:0']);
     expect(state.readMetadataRevision()).toBe('0:1');
@@ -258,7 +267,7 @@ describe('registered private empty-VM agent guard', () => {
       return true;
     });
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-      .call(state.agent, CG, CALLER, commit, deadline.signal)).toBe(false);
+      .call(state.agent, CG, CALLER, commit, deadline.signal)).toEqual({ proven: false });
     expect(commit).not.toHaveBeenCalled();
     expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ signal: deadline.signal }));
   });

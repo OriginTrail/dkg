@@ -37,7 +37,7 @@ export async function settlePrivateEmptyVmAtSubscribe(
           trace('not-private'); return false;
         }
         if (signal.aborted) return false;
-        if (!await withProvenEmptyPrivateVmReadiness({
+        const proof = await withProvenEmptyPrivateVmReadiness({
           agent, contextGraphId, callerAgentAddress, signal,
           commit: () => {
             const patches = classifyEmptyPrivateVmReadiness(
@@ -47,7 +47,8 @@ export async function settlePrivateEmptyVmAtSubscribe(
               agent, store: dashboard, contextGraphId, ...patches,
             });
           },
-        })) {
+        });
+        if (!proof.proven) {
           trace('proof-false'); return false;
         }
         trace('vm-ready');

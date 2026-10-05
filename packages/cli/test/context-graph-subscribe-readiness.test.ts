@@ -346,7 +346,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
       proveRegisteredPrivateEmptyVmV1: async (
-        _id: string, _caller: string, commit?: () => void,
+        _id: string, _caller: string, commit: () => unknown,
       ) => {
         if (opts.invalidateMetaDuringProof && !metadataInvalidated) {
           metadataInvalidated = true;
@@ -354,22 +354,23 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
             ...state.get(contextGraphId), synced: false,
             metaSynced: false, pendingMeta: true,
           });
-          return false;
+          return { proven: false as const };
         }
-        if (metadataInvalidated) return false;
+        if (metadataInvalidated) return { proven: false as const };
         const phase = catchupCompleted ? 'terminal' : 'early';
         if (phase === 'early') opts.onEarlyProofAttempt?.();
         if (phase === 'terminal' && opts.revokeOnTerminalProof) {
           authorityRevoked = true;
           proofAttempts.push({ phase, proven: false });
-          return false;
+          return { proven: false as const };
         }
         const proven = phase === 'terminal'
           ? opts.finalizedEmptyPrivateVmAfterCatchup ?? opts.finalizedEmptyPrivateVm ?? false
           : opts.finalizedEmptyPrivateVm ?? false;
         proofAttempts.push({ phase, proven });
-        if (proven) commit?.();
-        return proven;
+        return proven
+          ? { proven: true as const, value: commit() }
+          : { proven: false as const };
       },
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',

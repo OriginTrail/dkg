@@ -8,26 +8,31 @@ import {
 import type { DKGAgent } from './dkg-agent.js';
 import { proveRegisteredPrivateEmptyVmV1 } from './rfc64/registered-private-empty-vm-proof-v1.js';
 
+export type RegisteredPrivateEmptyVmReadinessResult<T> =
+  | { readonly proven: false }
+  | { readonly proven: true; readonly value: T };
+
 export class RegisteredPrivateEmptyVmMethods {
   /** A zero-VM proof grants durable readiness only; SWM still needs its own proof. */
-  async proveRegisteredPrivateEmptyVmV1(
+  async proveRegisteredPrivateEmptyVmV1<T>(
     this: DKGAgent,
     contextGraphId: string,
     callerAgentAddress: string,
-    commit?: () => void,
+    commit: () => T,
     signal?: AbortSignal,
-  ): Promise<boolean> {
+  ): Promise<RegisteredPrivateEmptyVmReadinessResult<T>> {
+    const unproven = { proven: false } as const;
     const trace = (stage: string) => {
       if (process.env.DKG_DEBUG_PRIVATE_EMPTY_VM === '1') {
         console.info(`[private-empty-vm] ${stage}`);
       }
     };
     try {
-      if (signal?.aborted) return false;
+      if (signal?.aborted) return unproven;
       const caller = callerAgentAddress.toLowerCase();
       if (!ethers.isAddress(caller) ||
         this.subscribedContextGraphs.get(contextGraphId)?.subscribed !== true) {
-        trace('not-subscribed'); return false;
+        trace('not-subscribed'); return unproven;
       }
       const metadataRevision = this.contextGraphMetaProjection
         .readContextGraphAuthorityFactsRevision(contextGraphId);
@@ -36,7 +41,7 @@ export class RegisteredPrivateEmptyVmMethods {
         && await this.isPrivateContextGraph(contextGraphId).catch(() => false);
       if (!privateBefore || this.contextGraphMetaProjection
         .readContextGraphAuthorityFactsRevision(contextGraphId) !== metadataRevision) {
-        trace('metadata-not-stable-before-proof'); return false;
+        trace('metadata-not-stable-before-proof'); return unproven;
       }
       const authority = () => this.resolveContextGraphSubscriptionBootstrapAuthority(
         contextGraphId,
@@ -45,17 +50,17 @@ export class RegisteredPrivateEmptyVmMethods {
       const before = await authority();
       if (before.outcome !== 'allowed' || before.source !== 'registered-chain'
         || before.onChainId === undefined || before.registration === 'unregistered') {
-        trace('authority-not-registered-allowed'); return false;
+        trace('authority-not-registered-allowed'); return unproven;
       }
       const chainConfig = this.config.chainConfig;
       if (chainConfig === undefined || this.chain.getContextGraphAuthoritySnapshot === undefined) {
-        trace('chain-capability-absent'); return false;
+        trace('chain-capability-absent'); return unproven;
       }
       const endpoints = resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls);
-      if (endpoints.length === 0) { trace('rpc-endpoints-absent'); return false; }
+      if (endpoints.length === 0) { trace('rpc-endpoints-absent'); return unproven; }
       const chainId = chainConfig.chainId?.match(/^evm:(0|[1-9][0-9]*)$/u)?.[1];
       if (chainId === undefined || !ethers.isAddress(chainConfig.hubAddress)) {
-        trace('chain-binding-absent'); return false;
+        trace('chain-binding-absent'); return unproven;
       }
       // Normalize external bindings once, then narrow to the shared wire
       // scalars. The graph name itself is hashed as supplied by the DKG
@@ -73,7 +78,7 @@ export class RegisteredPrivateEmptyVmMethods {
         || indexed.contextGraphId !== onChainContextGraphId
         || indexed.active !== true || indexed.accessPolicy !== 1
         || !ethers.isAddress(indexed.governanceContract)) {
-        trace('indexed-private-authority-absent'); return false;
+        trace('indexed-private-authority-absent'); return unproven;
       }
       const governanceContractAddress = indexed.governanceContract.toLowerCase();
       assertCanonicalEvmAddress(governanceContractAddress);
@@ -93,7 +98,7 @@ export class RegisteredPrivateEmptyVmMethods {
         }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000),
       });
-      if (!proven) { trace('finalized-zero-proof-false'); return false; }
+      if (!proven) { trace('finalized-zero-proof-false'); return unproven; }
       const confirmedAfter = await this.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
       const privateAfter = confirmedAfter
         && await this.isPrivateContextGraph(contextGraphId).catch(() => false);
@@ -112,16 +117,15 @@ export class RegisteredPrivateEmptyVmMethods {
       // same graph's projection revision.
       if (!stillCurrent) {
         trace('post-proof-authority-changed');
-        return false;
+        return unproven;
       }
       trace('proven');
     } catch (error) {
       trace(`proof-error:${error instanceof Error ? error.name : 'unknown'}`);
-      return false;
+      return unproven;
     }
     // The proof read is fail-closed, but the caller owns persistence errors.
     // Keep this synchronous with the final metadata and authority fence above.
-    commit?.();
-    return true;
+    return { proven: true, value: commit() };
   }
 }

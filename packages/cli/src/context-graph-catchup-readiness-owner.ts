@@ -63,20 +63,19 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
   if (privateZeroVmCandidate && callerAgentAddress !== undefined) {
     const metadata = await inspectMetadata();
     if (metadata.hasConfirmedMeta && metadata.isPrivate) {
-      let provenClassification: ReturnType<typeof decide> | undefined;
-      await withContextGraphReadinessMutationLock(agent, contextGraphId, () =>
+      const proof = await withContextGraphReadinessMutationLock(agent, contextGraphId, () =>
         agent.proveRegisteredPrivateEmptyVmV1(contextGraphId, callerAgentAddress, () => {
           // The agent's final chain, membership, metadata, and revision fence
           // is immediately before this synchronous commit. A valid proof is
           // itself current registered-private authority for this decision.
-          provenClassification = decide(
+          return decide(
             { hasConfirmedMeta: true, isPrivate: true },
             { outcome: 'allowed' },
             true,
           );
         }),
       );
-      if (provenClassification) return provenClassification;
+      if (proof.proven) return proof.value;
     }
   }
 
