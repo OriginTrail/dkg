@@ -27,6 +27,7 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1 } from '../../agent/src/rfc64/legacy-swm-boundary-v1.js';
 import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
@@ -320,6 +321,61 @@ describe('runPromoteJob', () => {
       authorityReason: 'finalized-name-absence-unaccepted',
     });
     expect(JSON.stringify(diagnostic)).not.toContain('private detail');
+    expect(diagnostic).not.toHaveProperty('causeCode');
+  });
+
+  it('names the legacy SWM retirement fence behind a retryable promote, from a closed set', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromoteRetryableFailure(Object.assign(
+          new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
+          { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' },
+        ));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    expect(promoteFailureDiagnostics(logs)[0]).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+      errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      causeCode: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS',
+    });
+    expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
+    // The CLI repeats the agent's code (the agent does not export it here): they must not drift.
+    expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1)
+      .toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
+  });
+
+  it.each([
+    'AKIAIOSFODNN7EXAMPLE',
+    'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+    'rfc64_legacy_swm_boundary_retirement_in_progress',
+  ])('never logs the cause code %s: it is outside the closed set, however token-shaped', async (code) => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), { code }));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    const diagnostic = promoteFailureDiagnostics(logs)[0];
+    expect(diagnostic).toMatchObject({ errorCode: PROMOTE_RETRYABLE_FAILURE_CODE });
+    expect(diagnostic).not.toHaveProperty('causeCode');
+    // The authority marker keeps its own reason field; a stray secret must not appear anywhere.
+    if (code === 'AKIAIOSFODNN7EXAMPLE') expect(logs.join('\n')).not.toContain(code);
   });
 
   it('identifies a metadata-revision retry without logging the context graph id', async () => {
