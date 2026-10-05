@@ -1,3 +1,3 @@
 REGRESSION_RUNTIME GH-2741 v22.23.2
 REGRESSION_OBSERVATION GH-2741 {"fetchedFrom":["12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6"],"outcome":{"material":{"contents":[{"0":60,"1":117,"2":114,"3":110,"4":58,"5":104,"6":105,"7":115,"8":116,"9":111,"10":114,"11":105,"12":99,"13":97,"14":108,"15":62,"16":32,"17":60,"18":117,"19":114,"20":110,"21":58,"22":118,"23":97,"24":108,"25":117,"26":101,"27":62,"28":32,"29":34,"30":112,"31":114,"32":111,"33":111,"34":102,"35":34,"36":32,"37":46}],"privateRoots":[]}}}
-JSON report written to /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/candidate/candidate-report.json
+JSON report written to /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/candidate/candidate-report.json

@@ -1,6 +1,6 @@
 # Observed regression proof results
 
-Both records are **proven by historical source replay**, observed on 4 October 2026. The exact candidate code commit is `6218e803d` (full commit and tree in each receipt). Integration base: `00406e3d4a7230e84a34e046b6fc069ff8d51ff0`.
+Both records are **proven by historical source replay**, refreshed on 5 October 2026 after review. The exact candidate code commit is `3a34d991deaf118e6e951bbafa86dc2171c2138c` (full commit and tree in each receipt). Integration base: `00406e3d4a7230e84a34e046b6fc069ff8d51ff0`.
 
 | Case | Historical source | Red | Corrected candidate |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@ Both records are **proven by historical source replay**, observed on 4 October 2
 pnpm qa:prove-regression --case GH-2782 --bad-ref v10.0.19 --output test-policy/regressions/evidence/GH-2782
 pnpm qa:prove-regression --case GH-2741 --bad-ref v10.0.18 --output test-policy/regressions/evidence/GH-2741
 pnpm qa:check-regressions
-node --test scripts/lib/__tests__/regression-proofs.test.mjs
+pnpm test:regression-proofs
 pnpm test:scripts
 pnpm lint
 ```
@@ -46,7 +46,7 @@ Fresh inventory resolves both files to `tornado-agent`, required cadence. Named 
 
 The actual required GitHub CI jobs passed: [GH-2741, shard 6/10](https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111517782120) and [GH-2782, shard 10/10](https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111517782149). Downloading and parsing each uploaded JUnit report found exactly one matching assertion, passed with no failure/error/skipped element. Both actual runtimes were Node `v22.23.3`. The [compact CI evidence](evidence/required-ci-assertions.json) records artifact links, raw XML hashes, exact testcase identities and matching test-source hashes.
 
-These jobs evaluated PR head `155b9cba50f4cb651114e593a0c06b24289a77ff` in merge commit `810f8e00da64f4980c139ac3c46fb72bc5257fd5`. The [required build job](https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111516808494) also validated both proven records and passed all 449 tooling tests then present. Subsequent changes tighten validation of waived disabled tests, add one tool rejection check and retain this CI evidence; the behavioral tests and all historical proof inputs are unchanged.
+These jobs evaluated PR head `155b9cba50f4cb651114e593a0c06b24289a77ff` in merge commit `810f8e00da64f4980c139ac3c46fb72bc5257fd5`. The [required build job](https://github.com/OriginTrail/dkg/actions/runs/37229741344/job/111516808494) also validated both proven records and passed all 449 tooling tests then present. The behavioral tests are still byte-identical. The review follow-up changes shared proof execution and case identity handling, so both historical receipts were regenerated; fresh Windows launcher CI verification is pending that push.
 
 The [local shared-runner JUnit](evidence/required-agent-unit.xml) and [metadata](evidence/required-agent-unit.json) show both assertions executed and passed, with zero skipped. This command is a **filtered local run through the required profile**, not a full GitHub shard receipt:
 
@@ -57,8 +57,8 @@ node scripts/ci/run-vitest-junit.mjs --lane agent -- --config vitest.unit.config
 | Check | Observed result |
 | --- | --- |
 | Six affected agent files under normal unit config | 240 passed, 0 failed, 0 skipped |
-| Proof-tool negatives, including actual Vitest fixture reports | 15 passed, 0 failed, 0 skipped |
-| Existing repository-script lane after the waiver rejection check | 450 passed, 0 failed, 0 skipped |
+| Proof-tool checks, including actual Vitest fixture reports | 18 passed, 0 failed, 0 skipped |
+| Existing repository-script lane after review fixes | 454 passed, 0 failed, 0 skipped |
 | Lint | exit 0; zero disabled-test additions; no baseline changes |
 | Fresh inventory and registry | 2,249 files, 23 Vitest packages; two proven records |
 | Agent and CLI/dependency builds | passed |
@@ -77,7 +77,7 @@ pnpm -r --filter '@origintrail-official/dkg...' --filter '!@origintrail-official
 
 ## Rejection evidence and limitations
 
-The [focused TAP evidence](evidence/proof-tool-negatives.tap) covers zero selection, a skipped assertion, the wrong failing assertion, import failure, an unrelated failure in the named test, stale test/proof/receipt identity, missing/ambiguous discovery, duplicate case ID, absent owner/file, optional-only routing and disabled/excluded assertions. A registered skipped assertion is rejected even with a valid general disabled-test waiver and an explicitly unproven record. It runs actual Vitest for execution negatives and actually changes copied fixture bytes for stale-evidence rejection. Owned process deadlines and cancellation are also exercised.
+The [focused TAP evidence](evidence/proof-tool-negatives.tap) covers zero selection, a skipped assertion, the wrong failing assertion, import failure, an unrelated failure in the named test, stale test/proof/receipt identity, missing/ambiguous discovery, duplicate case ID, absent owner/file, optional-only routing and disabled/excluded assertions. A registered skipped assertion is rejected even with a valid general disabled-test waiver and an explicitly unproven record. It runs actual Vitest for execution negatives and actually changes copied fixture bytes for stale-evidence rejection. Owned descendant termination on deadlines and cancellation, the actual pinned pnpm launcher, and selected-case versus shared-runner identity changes are also exercised.
 
 The original GH-2782 detector failed before reaching its expected-result assertions. The extracted detector observes the production exception and stalled state, then executes a named invariant assertion; success checks remain intact. GH-2741 already detected its original defect; extraction keeps the real store and strengthens setup and the independent fixed-byte expectation.
 
@@ -86,3 +86,13 @@ An initial proof-tool discovery attempt was inconclusive because macOS returned 
 GH-2741 is classified as defective from repair’s first shipment (v10.0.15); that introducing commit is absent from v10.0.14 and the repair method is absent there. GH-2782’s first affected release remains unknown.
 
 Transport/chain facts remain the documented fixture boundaries. These proofs certify cursor/persistence and repair/real-store orchestration, not a distributed release campaign. The inventory hook uses the existing required build job; it needs no controller pin rotation. PR #3031's staged Node 26 activation is independent.
+
+## Review follow-up (5 October 2026)
+
+All three inline findings were actionable:
+
+- [Windows pnpm launch](https://github.com/OriginTrail/dkg/pull/3037#discussion_r4179487765): the runner uses the pnpm lifecycle's actual CLI entry, launched through Node or directly for standalone pnpm.exe. Argument arrays bypass command-interpreter expansion. Both the advertised proof command and launcher check must be invoked through pnpm on Windows. Actual launch identity is included in each phase.
+- [Case identity coupling](https://github.com/OriginTrail/dkg/pull/3037#discussion_r4179487769): selected definitions now live in independently fingerprinted case modules. Changing one definition invalidates that case only; changing the shared execution inputs invalidates both. Actual copied files are edited in the rejection test.
+- [Scanner source rewrite](https://github.com/OriginTrail/dkg/pull/3037#discussion_r4179487770): the scanner exposes `applyWaivers: false`; regression policy analyzes the original source. Normal waiver handling and rejection of lowercase/uppercase waived skipped assertions remain covered, with original line locations preserved.
+
+The Windows smoke hook is isolated in commit `3a34d991d`. Its `pnpm qa:check-regression-launcher` exercises the actual pinned pnpm launch and owned descendant termination on timeout/cancellation. The same check passed locally on Node v22.23.2/darwin; the Windows result will be recorded after the PR run. No trusted-controller mapping or pin changed.

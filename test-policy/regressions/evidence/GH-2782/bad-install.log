@@ -3,27 +3,17 @@ Lockfile is up to date, resolution step is skipped
 Progress: resolved 1, reused 0, downloaded 0, added 0
 Packages: +1372
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-Progress: resolved 1372, reused 1367, downloaded 0, added 32
-Progress: resolved 1372, reused 1368, downloaded 0, added 116
-Progress: resolved 1372, reused 1368, downloaded 0, added 141
-Progress: resolved 1372, reused 1368, downloaded 0, added 280
-Progress: resolved 1372, reused 1368, downloaded 0, added 378
-Progress: resolved 1372, reused 1368, downloaded 0, added 493
-Progress: resolved 1372, reused 1368, downloaded 0, added 582
-Progress: resolved 1372, reused 1368, downloaded 0, added 662
-Progress: resolved 1372, reused 1368, downloaded 0, added 798
-Progress: resolved 1372, reused 1368, downloaded 0, added 994
-Progress: resolved 1372, reused 1368, downloaded 0, added 1092
-Progress: resolved 1372, reused 1368, downloaded 0, added 1186
-Progress: resolved 1372, reused 1368, downloaded 0, added 1235
-Progress: resolved 1372, reused 1368, downloaded 0, added 1362
+Progress: resolved 1372, reused 1367, downloaded 0, added 47
+Progress: resolved 1372, reused 1368, downloaded 0, added 285
+Progress: resolved 1372, reused 1368, downloaded 0, added 579
+Progress: resolved 1372, reused 1368, downloaded 0, added 925
+Progress: resolved 1372, reused 1368, downloaded 0, added 1207
 Progress: resolved 1372, reused 1368, downloaded 0, added 1369
-Progress: resolved 1372, reused 1368, downloaded 0, added 1370
 Progress: resolved 1372, reused 1368, downloaded 0, added 1371
 Progress: resolved 1372, reused 1368, downloaded 0, added 1372, done
- WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/mcp-dkg/dist/index.js'
- WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/cli/dist/cli.js'
- WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/cli/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/mcp-dkg/dist/index.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/cli/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/cli/dist/cli.js'
 
 devDependencies:
 + @origintrail-official/dkg 10.0.19 <- packages/cli
@@ -46,17 +36,17 @@ devDependencies:
 + vitest 4.0.18
 + yaml 2.9.0
 
- WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/cli/node_modules/@origintrail-official/dkg-mcp/dist/index.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/cli/node_modules/@origintrail-official/dkg-mcp/dist/index.js'
 packages/cli preinstall$ node ./scripts/verify-node-sqlite-runtime.mjs
-packages/cli preinstall: (node:19135) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+packages/cli preinstall: (node:18176) ExperimentalWarning: SQLite is an experimental feature and might change at any time
 packages/cli preinstall: (Use `node --trace-warnings ...` to show where the warning was created)
 packages/cli preinstall: Done
 packages/cli postinstall$ node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort
 packages/cli postinstall: Done
- WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/packages/kafka-plugin/node_modules/@origintrail-official/dkg/dist/cli.js'
- WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-Q3wHX5/bad/node_modules/@origintrail-official/dkg/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/kafka-plugin/node_modules/@origintrail-official/dkg/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/node_modules/@origintrail-official/dkg/dist/cli.js'
 . preinstall$ node packages/cli/scripts/verify-node-sqlite-runtime.mjs
-. preinstall: (node:19221) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+. preinstall: (node:18219) ExperimentalWarning: SQLite is an experimental feature and might change at any time
 . preinstall: (Use `node --trace-warnings ...` to show where the warning was created)
 . preinstall: Done
 ╭ Warning ─────────────────────────────────────────────────────────────────────╮
@@ -67,4 +57,4 @@ packages/cli postinstall: Done
 │   to run scripts.                                                            │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-Done in 20.4s using pnpm v10.28.1
+Done in 9.8s using pnpm v10.28.1

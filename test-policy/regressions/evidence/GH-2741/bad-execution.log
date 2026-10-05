@@ -1,3 +1,3 @@
 REGRESSION_RUNTIME GH-2741 v22.23.2
 REGRESSION_OBSERVATION GH-2741 {"fetchedFrom":[],"outcome":{"error":"Random Sampling exact repair did not recover did:dkg:base:8453/0x0000000000000000000000000000000000001234/7 from zAEZg3q6"}}
-JSON report written to /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-uyP92x/bad/bad-report.json
+JSON report written to /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/bad/bad-report.json

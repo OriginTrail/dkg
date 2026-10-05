@@ -30,7 +30,7 @@
     "status": "proven",
     "method": "historical-replay",
     "receipt": "test-policy/regressions/evidence/GH-2782/receipt.json",
-    "receiptSha256": "1c53f5c4bdf61fcb2b162a67faca4972b15099b3f50cd0a2b887620303864aca"
+    "receiptSha256": "e5cb49451fb1f283b5208cee54d45d8112ac11e9167ccc1e8a521456d3205227"
   },
   "scope": "Real reconcile/cursor/persistence with a partial-fetch ordinal fixture; transport and chain evidence are fixture boundaries."
 }
