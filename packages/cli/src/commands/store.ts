@@ -181,7 +181,7 @@ export function registerStoreCommand(program: Command): void {
       // Show the plan before asking; the executor re-derives state itself.
       const preview = await executeHardenMigration({ ...migrationOptions, dryRun: true });
       console.log(`Container: ${containerName} (port ${preview.hostPort}, heap ${preview.heapMb} MB)`);
-      printPlan(preview.steps ?? []);
+      printPlan(preview.steps);
       if (opts.dryRun) return;
       if (!opts.yes) {
         const ok = await confirm('Proceed with the migration? [y/N] ');
@@ -204,7 +204,7 @@ export function registerStoreCommand(program: Command): void {
         console.log(`Recovered "${result.containerName}" successfully — verified store; daemon startup barrier cleared.`);
       } else if (result.outcome === 'already-hardened') {
         console.log(`"${result.containerName}" was already hardened — nothing changed.`);
-      } else {
+      } else if (result.outcome === 'hardened') {
         console.log(`Hardened "${result.containerName}" successfully.`);
         console.log(`  Journal: ${result.journalBytes} bytes migrated to volume ${blazegraphMigrationVolumeName(result.containerName)}`);
         console.log(`  Export copy kept at: ${result.exportPath}`);

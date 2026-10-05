@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +9,7 @@ import { claimStoreMigrationMarker, readStoreMigrationMarker, releaseStoreMigrat
 
 let home: string;
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'dkg-migration-marker-')); });
-afterEach(() => rmSync(home, { recursive: true, force: true }));
+afterEach(() => { vi.restoreAllMocks(); rmSync(home, { recursive: true, force: true }); });
 const recovery = () => ({ version: 1 as const, recoveryRequired: true as const, pid: process.pid,
   containerName: 'dkg-store', namespace: 'owner', migrationDir: home, hostPort: 9999, exportBytes: 1024 });
 
@@ -76,6 +76,14 @@ describe('shared migration marker protocol at real filesystem boundaries', () =>
     expect(readStoreMigrationMarker(path)).toMatchObject({ kind: 'unreadable', rawText: text, ageMs: expect.any(Number) });
     expect(() => requireStoreMigrationRecoveryMarker(path, recovery())).toThrow(/Invalid migration recovery marker/);
     await expect(assertStoreMigrationInactive(home)).rejects.toThrow(/Store hardening marker/);
+  });
+  it('does not mistake permission/unknown owner failures for an orphan', async () => {
+    const path = storeHardenLockPath(home), evidence = recovery();
+    await claimStoreMigrationMarker(path, 'dkg-store', { ...evidence, volumeAttemptId: '17393d2e-dc1b-42a1-8f5f-822f2f9a0df2' });
+    const bytes = readFileSync(path, 'utf8');
+    vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('permission'), { code: 'EPERM' }); });
+    expect(() => requireStoreMigrationRecoveryMarker(path, evidence)).toThrow(/live or unverifiable/);
+    expect(readFileSync(path, 'utf8')).toBe(bytes);
   });
   it('does not treat an invalid parent path as a missing migration marker', async () => {
     const parent = join(home, 'not-a-directory'); writeFileSync(parent, 'unchanged');

@@ -19,19 +19,14 @@ import {
   buildBlazegraphRunArgs,
 } from '../blazegraph-docker.js';
 import { HARDEN_BACKUP_SUFFIX, type HardenState } from './state.js';
+import { HARDEN_DISK_PREFLIGHT_FACTOR } from './actions.js';
 import * as actions from './actions.js';
 import { requireMissingReplacementVolume, certifyReplacementVolume, HARDEN_VOLUME_ATTEMPT_LABEL, HARDEN_VOLUME_ATTEMPT_PLACEHOLDER } from './volume.js';
 
 /** Where the journal export lands inside the migration dir. */
 export const HARDEN_EXPORT_FILENAME = 'bigdata.jnl';
 
-/**
- * Free-disk multiple required before the export starts. The export copy
- * AND the docker-volume seed copy typically live on the same root
- * filesystem (named volumes are under /var/lib/docker), so the migration
- * transiently needs ~2 journals of space plus slack.
- */
-export const HARDEN_DISK_PREFLIGHT_FACTOR = 2.2;
+export { HARDEN_DISK_PREFLIGHT_FACTOR } from './actions.js';
 
 export interface HardenStep {
   id: string;

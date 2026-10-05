@@ -3,7 +3,15 @@ import { BLAZEGRAPH_JOURNAL_FILE, waitForBlazegraphReady, type DockerRunner } fr
 import { askOk, identityTagPresent } from './verify.js';
 import { classifyBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
 import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_CONTAINER_PORT } from '../blazegraph-docker.js';
-import { HARDEN_DISK_PREFLIGHT_FACTOR, type HardenMigrationSpecification } from './steps.js';
+import type { HardenMigrationSpecification } from './steps.js';
+
+/**
+ * Free-disk multiple required before the export starts. The export copy
+ * AND the docker-volume seed copy typically live on the same root
+ * filesystem (named volumes are under /var/lib/docker), so the migration
+ * transiently needs ~2 journals of space plus slack.
+ */
+export const HARDEN_DISK_PREFLIGHT_FACTOR = 2.2;
 
 /** Execution services have no migration targets; phases capture the specification. */
 export interface HardenExecutionDependencies {

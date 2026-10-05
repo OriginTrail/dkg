@@ -1,13 +1,68 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, it } from 'vitest';
 import { provisionBlazegraphDocker, defaultDockerRunner, blazegraphVolumeName, blazegraphMigrationVolumeName, BLAZEGRAPH_JOURNAL_FILE, BLAZEGRAPH_IMAGE, buildBlazegraphRunArgs, waitForBlazegraphReady } from '../src/daemon/blazegraph-docker.js';
+import { assertStoreMigrationInactive } from '../src/daemon/store-maintenance-gate.js';
 import { executeHardenMigration, planHardenMigration } from '../src/daemon/blazegraph-harden.js';
 
 // test-disable-allow: D1 #2974 -- owner=cli lane=bura-cli expires=2026-10-25 Real Docker journal roundtrip runs explicitly in CLI shard 1.
 describe.skipIf(process.env.BLAZEGRAPH_HARDEN_INTEGRATION_TEST !== '1')('real pinned Docker hardening', () => {
+it('recovers an actual SIGKILL after replacement creation only after journal verification', async () => {
+  const name = `dkg-harden-crash-${process.pid}-${Date.now()}`, namespace = 'crash-owner';
+  const root = await mkdtemp(join(tmpdir(), 'harden-real-kill-')), home = join(root, 'config'), migrationDir = join(root, 'export');
+  const docker = defaultDockerRunner(), volumes = [blazegraphVolumeName(name), blazegraphMigrationVolumeName(name)];
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const legacyDocker = { run: async (args: string[], options?: Parameters<typeof docker.run>[1]) => {
+      if (args[0] === 'run' && args[1] === '-d') {
+        const stripped: string[] = [], removed = new Set(['-e', '--health-cmd', '--health-interval', '--health-timeout', '--health-retries', '--health-start-period']);
+        for (let i = 0; i < args.length; i++) { if (removed.has(args[i]!)) i++; else stripped.push(args[i]!); }
+        args = stripped;
+      }
+      return docker.run(args, options);
+    } };
+    const provisioned = await provisionBlazegraphDocker({ namespace, containerName: name, port: 21000 + process.pid % 1000,
+      docker: legacyDocker, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, pollTimeoutMs: 60000, pollIntervalMs: 500, log: console.log });
+    const data = 'INSERT DATA { GRAPH <urn:dkg:store-meta> { <urn:dkg:store-tag> <urn:dkg:storeTaggedFor> "actual-killed-owner" } GRAPH <urn:crash-data> { <urn:s> <urn:p> "retained" } }';
+    const inserted = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `update=${encodeURIComponent(data)}` });
+    assert.equal(inserted.ok, true, await inserted.text());
+    const options = { containerName: name, namespace, migrationDir, dkgHome: home, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, readyTimeoutMs: 60000, readyIntervalMs: 500 };
+    child = spawn(process.execPath, ['--import', fileURLToPath(new URL('../../../node_modules/tsx/dist/loader.mjs', import.meta.url)),
+      fileURLToPath(new URL('./fixtures/harden-crash-owner.ts', import.meta.url)), root, 'real', JSON.stringify(options)], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    let diagnostic = ''; child.stderr?.on('data', bytes => { diagnostic += String(bytes); });
+    const stopped = new Promise<void>((resolve, reject) => { child!.once('error', reject); child!.once('exit', () => resolve()); });
+    await new Promise<void>((resolve, reject) => {
+      child!.once('message', message => { assert.deepEqual(message, { replacementCreated: true, ownerPid: child!.pid }); resolve(); });
+      child!.once('exit', () => reject(new Error(`owner exited before creation: ${diagnostic}`)));
+    });
+    child.kill('SIGKILL'); await stopped;
+    await assert.rejects(assertStoreMigrationInactive(home), /Store hardening marker/);
+    const invalidIdentity: typeof globalThis.fetch = (...args) => String(args[1]?.body).includes('SELECT')
+      ? Promise.resolve(new Response(JSON.stringify({ results: { bindings: [] } }))) : fetch(...args);
+    await assert.rejects(executeHardenMigration({ ...options, log: console.log, recover: true, fetch: invalidIdentity }), /identity-tag/);
+    await assert.rejects(assertStoreMigrationInactive(home), /Store hardening marker/);
+    const recoveredCalls: string[][] = [];
+    const result = await executeHardenMigration({ ...options, log: console.log, recover: true, docker: { run(args, options) {
+      recoveredCalls.push([...args]); return docker.run(args, options);
+    } } });
+    assert.equal(result.outcome, 'recovered');
+    assert.ok(recoveredCalls.every(args => ['inspect', 'exec', 'volume'].includes(args[0]!)));
+    await assertStoreMigrationInactive(home);
+    const response = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' },
+      body: `query=${encodeURIComponent('SELECT ?value WHERE { GRAPH <urn:crash-data> { <urn:s> <urn:p> ?value } }')}` });
+    assert.equal((await response.json()).results.bindings[0].value.value, 'retained');
+  } finally {
+    if (child?.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    for (const container of [name, `${name}-backup`]) await docker.run(['rm', '-f', container]);
+    for (const volume of volumes) await docker.run(['volume', 'rm', volume]);
+    await rm(root, { recursive: true, force: true });
+  }
+}, 180000);
+
 it.each(['named-volume', 'writable-layer', 'unbounded-logs', 'relative-directory'] as const)('preserves ordinary RDF records in the replacement and original backup using the pinned image (%s)', async (journalSource) => {
 const name = `dkg-harden-test-${process.pid}-${Date.now()}`;
 const namespace = 'harden-roundtrip';

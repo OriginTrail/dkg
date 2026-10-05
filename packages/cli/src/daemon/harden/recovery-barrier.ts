@@ -2,6 +2,7 @@
 import { assertDaemonStoppedForStoreMigration } from '../store-maintenance-gate.js';
 import { fileSize, verifyReplacement, type HardenWorkflowInputs } from './actions.js';
 import type { HardenMigrationResult } from './executor.js';
+import { verifyInterruptedReplacementVolume } from './volume.js';
 import type { HardenStep } from './steps.js';
 import { BLAZEGRAPH_JOURNAL_FILE, BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_CONTAINER_PORT } from '../blazegraph-docker.js';
 import { classifyBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
@@ -24,11 +25,14 @@ export async function preserveHardenRecoveryBarrier(ctx: HardenWorkflowInputs, e
 }
 
 /** Explicit recovery never changes Docker state; only verified service can release writers. */
-export async function recoverHardenMigration(ctx: HardenWorkflowInputs): Promise<HardenMigrationResult> {
+export async function recoverHardenMigration(ctx: HardenWorkflowInputs): Promise<Extract<HardenMigrationResult, { outcome: 'recovered' }>> {
   const evidence = requireStoreMigrationRecoveryMarker(storeHardenLockPath(ctx.specification.dkgHome), ctx.specification);
-  return withStoreMigrationRecoveryLease(evidence, async (): Promise<HardenMigrationResult> => {
+  return withStoreMigrationRecoveryLease(evidence, async (): Promise<Extract<HardenMigrationResult, { outcome: 'recovered' }>> => {
     await assertDaemonStoppedForStoreMigration(ctx.specification.dkgHome);
     if (ctx.specification.state !== 'hardened' && ctx.specification.state !== 'legacy') throw new Error('Restore the backup or replacement before verifying recovery.');
+    if (evidence.volumeAttemptId !== undefined && ctx.specification.state === 'hardened') {
+      await verifyInterruptedReplacementVolume(ctx, evidence.volumeAttemptId);
+    }
     const backup = classifyBlazegraphContainerInspection(await ctx.docker.run(['inspect', ctx.specification.backupName]), ctx.specification.backupName,
       { containerName: ctx.specification.containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT });
     if (backup.kind === 'failed') throw new Error('Cannot verify the migration backup state.');
