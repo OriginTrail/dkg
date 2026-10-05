@@ -5,9 +5,27 @@ import { asGraphWriteRevisionSource } from '@origintrail-official/dkg-storage';
 const unsupported = () => new Error(
   'Unscoped query requires a store with all-writer consistency coverage; specify contextGraphId to scope the query',
 );
-const invalidated = () => new Error(
-  'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
-);
+
+export const UNSCOPED_QUERY_INVALIDATED_CODE = 'UNSCOPED_QUERY_INVALIDATED' as const;
+
+/**
+ * A local write or a read-authority change landed inside the interval an
+ * unscoped query has to hold unchanged, so its result was withheld. The request
+ * is sound and the same query can succeed once that change has settled. The
+ * daemon recognizes the stable code structurally, as it does for the scoped
+ * read-authority marker, so this error stays out of the public agent surface.
+ */
+export class UnscopedQueryInvalidatedError extends Error {
+  readonly code = UNSCOPED_QUERY_INVALIDATED_CODE;
+  readonly retryable = true;
+
+  constructor() {
+    super('Unscoped query dataset or read authority changed; retry the query or specify contextGraphId');
+    this.name = 'UnscopedQueryInvalidatedError';
+  }
+}
+
+const invalidated = () => new UnscopedQueryInvalidatedError();
 
 /**
  * Own result release across one unchanged local dataset/metadata interval.

@@ -45,8 +45,8 @@ describe('daemon admission control (real node, maxInFlightRequests=1)', () => {
   }
 
   // The admission gate's own answer. The retryable 503s the query route itself
-  // can give (store pressure, unavailable read authority) carry a `code`, so
-  // neither can pass for a shed.
+  // can give (store pressure, unavailable read authority, a withheld unscoped
+  // result) carry a `code`, so none of them can pass for a shed.
   const SHED_BODY = JSON.stringify({ error: 'Server busy, retry shortly' });
 
   // Non-exempt endpoint that awaits the store, so concurrent calls overlap and
