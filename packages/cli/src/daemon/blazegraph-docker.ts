@@ -42,7 +42,7 @@ import {
   normalizeBlazegraphNamespace,
   type BlazegraphNamespaceEnsureResult,
 } from '@origintrail-official/dkg-storage';
-import { inspectBlazegraphContainerFacts, parseBlazegraphContainerInspection, type BlazegraphContainerFacts } from './blazegraph-container-inspection.js';
+import { classifyBlazegraphContainerInspection, inspectBlazegraphContainerFacts, type BlazegraphContainerFacts } from './blazegraph-container-inspection.js';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
 const {
@@ -263,9 +263,12 @@ async function inspectContainer(docker: DockerRunner, containerName: string): Pr
     // inspection because stopped containers may have no published bindings.
     portSource: 'published' as const,
   };
-  // An unreadable existing container retains conservative facts.
-  const facts = result.exitCode === 0 ? parseBlazegraphContainerInspection(result.stdout, policy) : null;
-  return { exists: result.exitCode === 0, ...(facts ?? inspectBlazegraphContainerFacts(null, policy)) };
+  const outcome = classifyBlazegraphContainerInspection(result, containerName, policy);
+  if (outcome.kind === 'found') return { exists: true, ...outcome.facts };
+  // Provisioning retains its command-status existence policy. Unreadable successful
+  // output proves no journal policy; migration instead refuses this failed outcome.
+  return { exists: outcome.kind === 'failed' && result.exitCode === 0,
+    ...inspectBlazegraphContainerFacts(null, policy) };
 }
 
 function warnForLegacyContainerConfiguration(

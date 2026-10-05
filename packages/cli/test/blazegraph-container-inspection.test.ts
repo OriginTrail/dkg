@@ -83,10 +83,10 @@ describe('shared Blazegraph inspection facts', () => {
   });
 
   it('refuses invalid inspect roots and preserves explicit rollback mount policy', () => {
-    for (const stdout of ['bad json', '[]', '[null]', '[3]', '[[]]', '{}']) {
+    for (const stdout of ['bad json', '[]', '[null]', '[3]', '[[]]', '{}', '[{}]', '[{"State":{}}]', '[{"State":{"Running":false}},{"State":{"Running":true}}]']) {
       expect(parseBlazegraphContainerInspection(stdout, policy)).toBeNull();
     }
-    const stdout = JSON.stringify([{ Mounts: [{ Destination: '/data', Name: `${name}-hardened-data`, Type: 'bind' }] }]);
+    const stdout = JSON.stringify([{ State: { Running: false }, Mounts: [{ Destination: '/data', Name: `${name}-hardened-data`, Type: 'bind' }] }]);
     expect(parseBlazegraphContainerInspection(stdout, policy)?.journalVolumeName).toBeUndefined();
     expect(parseBlazegraphContainerInspection(stdout, { ...policy,
       journalVolumeNames: [`${name}-hardened-data`], journalMountType: 'any',

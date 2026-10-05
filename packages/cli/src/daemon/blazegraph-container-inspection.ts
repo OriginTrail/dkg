@@ -90,11 +90,10 @@ export function inspectBlazegraphContainerFacts(info: unknown, policy: Blazegrap
     running: record(root?.State)?.Running === true });
 }
 
-/** Decode one Docker inspect response. Invalid top-level data is never a stopped-container proof. */
+/** Historical facts-only view; response validity belongs to the typed outcome decoder. */
 export function parseBlazegraphContainerInspection(stdout: string, policy: BlazegraphInspectionPolicy): BlazegraphContainerFacts | null {
-  const values = containerInspectionValues(stdout);
-  return values && record(values[0]) !== undefined
-    ? inspectBlazegraphContainerFacts(values[0], policy) : null;
+  const outcome = classifyBlazegraphContainerInspection({ stdout, stderr: '', exitCode: 0 }, policy.containerName, policy);
+  return outcome.kind === 'found' ? outcome.facts : null;
 }
 
 function containerInspectionValues(stdout: string): unknown[] | undefined {

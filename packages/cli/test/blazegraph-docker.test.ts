@@ -506,6 +506,23 @@ describe('provisionBlazegraphDocker', () => {
     expect(logs.some((message) => message.includes('will not recreate it automatically'))).toBe(true);
   });
 
+  it.each(['missing-state', 'nonboolean-state', 'multiple-containers'])('does not recreate from invalid %s journal evidence', async shape => {
+    const owned = JSON.parse(dockerInspectStopped().stdout)[0] as Record<string, unknown>;
+    const values = shape === 'multiple-containers' ? [owned, { State: { Running: true } }]
+      : [{ ...owned, State: shape === 'missing-state' ? {} : { Running: 'false' } }];
+    const { runner, calls } = mockDocker({ matchers: [
+      { when: args => args[0] === '--version', respond: dockerVersionOk },
+      { when: args => args[0] === 'inspect', respond: () => ({ stdout: JSON.stringify(values), stderr: '', exitCode: 0 }) },
+      { when: args => args[0] === 'start', respond: () => ({ stdout: '', stderr: 'cannot start', exitCode: 1 }) },
+    ] });
+    const { fn, calls: httpCalls } = mockFetch(() => new Response('ok', { status: 200 }));
+    await expect(provisionBlazegraphDocker({ namespace: 'mynode', docker: runner, fetch: fn,
+      isPortFree: async () => true, log: () => {},
+    })).rejects.toThrow(/journal could not be confirmed in the expected named volume/s);
+    expect(calls.map(args => args[0])).toEqual(['--version', 'inspect', 'start']);
+    expect(httpCalls).toEqual([]);
+  });
+
   it('does not claim a journal policy when docker inspect JSON is malformed', async () => {
     const { runner, calls } = mockDocker({
       matchers: [
