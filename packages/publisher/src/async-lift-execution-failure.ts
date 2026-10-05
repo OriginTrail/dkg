@@ -115,6 +115,12 @@ function classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJo
   // the validated retry lane, where an operator can raise the cap or wait for
   // the base fee to fall. It must never create durable transaction evidence.
   if (structuredCode === 'FEE_CAP_BELOW_BASE_FEE') return 'fee_cap_below_base_fee';
+  // GH#3049 — an update refused at SWM staging by the agent's RFC-64 legacy SWM
+  // retirement fence. It is raised before the write-ahead, so nothing was
+  // signed, and the fence ends on its own: the auto-retry lane, like a transient
+  // workspace read. The literal repeats the agent's code (no import: cycle); an
+  // agent test pins the two together.
+  if (structuredCode === 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS') return 'workspace_unavailable';
   // GH#2273 — multi-valued SWM head: transient local corruption the sync
   // repair heals, NOT a stale intent; the queued request may still be
   // byte-identical to what the head certified at admission.
