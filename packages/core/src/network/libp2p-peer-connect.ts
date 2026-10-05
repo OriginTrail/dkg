@@ -109,6 +109,7 @@ function planLibp2pPeerConnectionCandidates(
   peerId: NodeIdentity,
   resolvedAddresses: readonly Address[],
   configuredRelayTargets: readonly ConfiguredRelayTarget[] = [],
+  allowResolvedPrivateDirect = false,
 ): Libp2pConnectCandidate[] {
   const canonicalPeerId = peerIdFromString(peerId).toString();
   const planned: Libp2pConnectCandidate[] = [];
@@ -123,7 +124,14 @@ function planLibp2pPeerConnectionCandidates(
         && candidate.targetPeerId !== canonicalPeerId
       ) return undefined;
       if (candidate.kind === 'direct' && !isPublicLikeAddress(candidate.address)) {
-        return undefined;
+        if (!allowResolvedPrivateDirect || candidate.targetPeerId !== canonicalPeerId) {
+          return undefined;
+        }
+        // Private routes are dialed only when resolution binds the terminal
+        // target to the requested peer. Unspecified listeners are unusable.
+        parseLibp2pConnectCandidate(rawAddress, { requireTerminalTargetPeerId: true });
+        if (candidate.address.startsWith('/ip4/0.0.0.0/')
+          || candidate.address.startsWith('/ip6/::/')) return undefined;
       }
       if (!seen.has(candidate.address)) {
         seen.add(candidate.address);
@@ -137,7 +145,9 @@ function planLibp2pPeerConnectionCandidates(
 
   for (const address of resolvedAddresses) {
     const candidate = appendCandidate(address);
-    if (candidate?.kind === 'direct') hasPublicDirect = true;
+    if (candidate?.kind === 'direct' && isPublicLikeAddress(candidate.address)) {
+      hasPublicDirect = true;
+    }
   }
 
   if (hasPublicDirect) return planned;
@@ -299,8 +309,10 @@ export async function tryConnectLibp2pRecoveryStage(
 
 /**
  * Canonical libp2p implementation of PeerConnectionNetwork.connectPeer(). Resolver output is
- * attempted in order, with private direct addresses ignored, before one final
- * peer-id fallback. Candidate-local timeouts never masquerade as caller aborts.
+ * attempted in order, with private direct addresses normally left in the peer
+ * store, before one final peer-id fallback. Recovery can explicitly try newly
+ * resolved peer-bound private routes before configured relays. Candidate-local
+ * timeouts never masquerade as caller aborts.
  */
 export async function connectLibp2pPeer(
   host: Libp2pConnectHost,
@@ -322,6 +334,7 @@ export async function connectLibp2pPeer(
     canonicalPeerId,
     resolvedAddresses,
     options.configuredRelayTargets,
+    options.skipIdentityFallback,
   );
 
   let lastCandidateError: unknown;

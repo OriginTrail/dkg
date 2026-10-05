@@ -49,6 +49,31 @@ describe('PeerResolver recovery', () => {
     expect(stages).toEqual(['hint', 'cached', 'resolve', 'connect']);
   });
 
+  it('primes a newly discovered private listener after the cached stage failed', async () => {
+    const privateRoute = `/ip4/192.168.1.20/tcp/9091/p2p/${TARGET_PEER_ID}`;
+    const stages: string[] = [];
+    net.tryConnectRecoveryStage = async (_peerId, stage) => {
+      stages.push(stage.kind);
+      return false;
+    };
+    net.__findPeerImpl = async () => {
+      stages.push('resolve');
+      return [privateRoute];
+    };
+    net.connectPeer = async (peerId, addresses, options) => {
+      stages.push('connect');
+      expect(options?.skipIdentityFallback).toBe(true);
+      expect(addresses).toEqual([privateRoute]);
+      expect(net.__addedAddresses).toContainEqual({ peerId, addrs: [privateRoute] });
+      net.__conns.set(peerId, [{ remoteAddr: { toString: () => privateRoute } }]);
+    };
+    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
+
+    await expect(resolver.connect(TARGET_PEER_ID, { recovery: {} }))
+      .resolves.toEqual({ status: 'connected', resolvedAddresses: [privateRoute] });
+    expect(stages).toEqual(['cached', 'resolve', 'connect']);
+  });
+
   it('reuses an observed connection before any recovery stage', async () => {
     net.__conns.set(PEER_B, [{ remoteAddr: { toString: () => '/ip4/178.104.54.178/tcp/9090' } }]);
     const stages: string[] = [];
@@ -115,6 +140,17 @@ describe('PeerResolver recovery', () => {
     await expect(resolver.connect(PEER_B, { recovery: {} })).resolves.toEqual({
       status: 'unresolved', resolvedAddresses: [],
     });
+  });
+
+  it('rejects a transport success without an observed target after resolution', async () => {
+    const route = `/ip4/192.168.1.20/tcp/9091/p2p/${TARGET_PEER_ID}`;
+    net.tryConnectRecoveryStage = async () => false;
+    net.__findPeerImpl = async () => [route];
+    net.connectPeer = async () => undefined;
+    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
+
+    await expect(resolver.connect(TARGET_PEER_ID, { recovery: {} }))
+      .rejects.toMatchObject({ code: 'PEER_CONNECTION_UNRESOLVED' });
   });
 
   it('falls back to the unchanged canonical path when recovery capability is absent', async () => {

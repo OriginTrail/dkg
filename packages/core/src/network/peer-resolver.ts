@@ -43,6 +43,7 @@ import type {
   PeerConnectionNetwork,
   NodeIdentity,
   Address,
+  PeerConnectOpts,
 } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
 import { startRequestAbortLifecycle } from '../request-abort-lifecycle.js';
@@ -483,12 +484,7 @@ export class PeerResolver {
     if (opts.recovery) {
       return this.connectWithRecovery(peerId, opts, opts.recovery, network);
     }
-    return this.resolveAndConnect(peerId, opts, network, {
-      signal: opts.signal,
-      skipIdentityFallback: false,
-      requireObservedConnection: false,
-      abortReason: 'generic',
-    });
+    return this.resolveAndConnect(peerId, opts, network, opts.signal);
   }
 
   /** The recovery strategy owns its ordered fast paths and final deadline. */
@@ -534,35 +530,36 @@ export class PeerResolver {
     }
     const lifecycle = startRequestAbortLifecycle(recovery.resolverTimeoutMs ?? 15_000, [opts.signal]);
     try {
-      return await this.resolveAndConnect(peerId, opts, network, {
-        signal: lifecycle.signal,
-        skipIdentityFallback: recoveryNetwork !== undefined,
-        requireObservedConnection: true,
-        abortReason: 'signal',
-      });
+      const outcome = await this.resolveAndConnect(
+        peerId, opts, network, lifecycle.signal,
+        recoveryNetwork ? { skipIdentityFallback: true } : {},
+      );
+      if (lifecycle.signal.aborted) throw lifecycle.signal.reason;
+      if (outcome.status === 'connected' && this.network.getConnections(peerId).length === 0) {
+        if (outcome.resolvedAddresses.length === 0) {
+          return { status: 'unresolved', resolvedAddresses: [] };
+        }
+        throw new PeerConnectionUnresolvedError('Peer connection was not observed');
+      }
+      return outcome;
+    } catch (error) {
+      if (lifecycle.signal.aborted) throw lifecycle.signal.reason;
+      throw error;
     } finally {
       lifecycle.release();
     }
   }
 
-  /** Shared resolve-and-dial operation; strategy policy is explicit at entry. */
+  /** Shared resolution, transport call, and unresolved-error mapping. */
   private async resolveAndConnect(
     peerId: NodeIdentity,
     opts: ConnectOpts,
     network: PeerConnectionNetwork | undefined,
-    policy: {
-      signal?: AbortSignal;
-      skipIdentityFallback: boolean;
-      requireObservedConnection: boolean;
-      abortReason: 'signal' | 'generic';
-    },
+    signal?: AbortSignal,
+    transportOptions: Pick<PeerConnectOpts, 'skipIdentityFallback'> = {},
   ): Promise<PeerConnectionOutcome> {
-    const { signal } = policy;
     const addresses = await this.resolve(peerId, { ...opts, signal });
-    const abortError = (): unknown => policy.abortReason === 'signal'
-      ? signal?.reason
-      : new DOMException('Peer connection aborted', 'AbortError');
-    if (signal?.aborted) throw abortError();
+    if (signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
     try {
       if (!network) {
         throw new Error('Network transport does not implement the peer-connection capability');
@@ -571,14 +568,8 @@ export class PeerResolver {
         signal,
         candidateTimeoutMs: opts.candidateTimeoutMs,
         log: opts.log,
-        ...(policy.skipIdentityFallback ? { skipIdentityFallback: true } : {}),
+        ...transportOptions,
       });
-      if (policy.requireObservedConnection) {
-        if (signal?.aborted) throw abortError();
-        if (this.network.getConnections(peerId).length === 0) {
-          throw new PeerConnectionUnresolvedError('Peer connection was not observed');
-        }
-      }
       return { status: 'connected', resolvedAddresses: addresses };
     } catch (error) {
       if (

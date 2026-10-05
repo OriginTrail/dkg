@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { canonicalPeerIdString, parseLibp2pConnectCandidate } from '@origintrail-official/dkg-core';
+import {
+  canonicalPeerIdString,
+  isPublicLikeAddress,
+  parseLibp2pConnectCandidate,
+} from '@origintrail-official/dkg-core';
 
 /** Validate a persisted or received curator address against its expected peer. */
 export function verifiedCuratorDialAddress(value: unknown, peerId: string): string | undefined {
@@ -25,7 +29,8 @@ export function selectCuratorJoinDialAddress(
 ): string | undefined {
   let directLoopback: string | undefined;
   let loopbackCircuit: string | undefined;
-  let remote: string | undefined;
+  let publicAddress: string | undefined;
+  let privateRemote: string | undefined;
   for (const address of addresses) {
     const verified = verifiedCuratorDialAddress(address, peerId);
     if (!verified || verified.startsWith('/ip4/0.0.0.0/') || verified.startsWith('/ip6/::/')) continue;
@@ -38,11 +43,12 @@ export function selectCuratorJoinDialAddress(
       else directLoopback ??= verified;
       continue;
     }
-    remote ??= verified;
+    if (isPublicLikeAddress(verified)) publicAddress ??= verified;
+    else privateRemote ??= verified;
   }
   return options.preferLoopback
-    ? directLoopback ?? loopbackCircuit ?? remote
-    : remote ?? directLoopback ?? loopbackCircuit;
+    ? directLoopback ?? loopbackCircuit ?? publicAddress ?? privateRemote
+    : publicAddress ?? privateRemote ?? directLoopback ?? loopbackCircuit;
 }
 
 /** A direct loopback connection proves the exact requester can use a local listener. */

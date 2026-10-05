@@ -37,6 +37,16 @@ describe('verifiedCuratorDialAddress', () => {
 
 describe('selectCuratorJoinDialAddress', () => {
   const lanAddress = `/ip4/192.168.1.20/tcp/9090/p2p/${PEER_ID}`;
+  const publicAddress = `/ip4/178.104.54.178/tcp/9090/p2p/${PEER_ID}`;
+
+  it('ranks public, LAN, and loopback listeners from one raw list', () => {
+    const listeners = [ADDRESS, lanAddress, publicAddress];
+    expect(selectCuratorJoinDialAddress(listeners, PEER_ID)).toBe(publicAddress);
+    expect(selectCuratorJoinDialAddress(listeners, PEER_ID, { preferLoopback: true }))
+      .toBe(ADDRESS);
+    expect(selectCuratorJoinDialAddress([lanAddress, publicAddress], PEER_ID))
+      .toBe(publicAddress);
+  });
 
   it('prefers a verified LAN listener over an earlier loopback listener', () => {
     expect(selectCuratorJoinDialAddress([ADDRESS, lanAddress], PEER_ID)).toBe(lanAddress);

@@ -141,7 +141,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, type AgentProfileConfig } from './profile.js';
 import {
   computeDelegationDigest,
   computeWorkspaceEncryptionKeysAttestationDigest,
@@ -584,10 +584,7 @@ async function withJoinEncryptionKeyCacheLock<T>(
 }
 
 function curatorJoinDialAddress(agent: DKGAgent, requesterPeerId: string): string | undefined {
-  return selectCuratorJoinDialAddress([
-    ...collectPublishableMultiaddrs(agent.node.multiaddrs),
-    ...agent.node.multiaddrs,
-  ], agent.peerId, {
+  return selectCuratorJoinDialAddress(agent.node.multiaddrs, agent.peerId, {
     preferLoopback: requesterHasDirectLoopbackConnection(
       agent.node.libp2p.getConnections(), requesterPeerId,
     ),

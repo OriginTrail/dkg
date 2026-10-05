@@ -313,6 +313,44 @@ describe('connectLibp2pPeer', () => {
     })).rejects.toMatchObject({ code: 'PEER_CONNECTION_UNRESOLVED' });
     expect(host.dial).not.toHaveBeenCalled();
   });
+
+  it('tries a fresh target-bound private route before configured relays', async () => {
+    const privateRoute = `/ip4/192.168.1.20/tcp/9091/p2p/${TARGET}`;
+    const calls: string[] = [];
+    const host = {
+      getConnections: () => calls.includes(privateRoute)
+        ? [{ remotePeer: { toString: () => TARGET } }]
+        : [],
+      dial: vi.fn(async (target: unknown) => { calls.push(targetString(target)); }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+
+    await connectLibp2pPeer(host, TARGET, [privateRoute], {
+      skipIdentityFallback: true,
+      configuredRelayTargets: [CONFIGURED_RELAYS[0]!],
+    });
+    expect(calls).toEqual([privateRoute]);
+  });
+
+  it('does not retry identity for a targetless, wrong-peer, or nonterminal private route', async () => {
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn(async () => undefined),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    for (const route of [
+      '/ip4/192.168.1.20/tcp/9091',
+      `/ip4/192.168.1.20/tcp/9091/p2p/${WRONG_TARGET}`,
+      `/ip4/192.168.1.20/tcp/9091/p2p/${TARGET}/ws`,
+      `/ip4/0.0.0.0/tcp/9091/p2p/${TARGET}`,
+      `/ip6/::/tcp/9091/p2p/${TARGET}`,
+    ]) {
+      await expect(connectLibp2pPeer(host, TARGET, [route], {
+        skipIdentityFallback: true,
+      })).rejects.toMatchObject({ code: 'PEER_CONNECTION_UNRESOLVED' });
+    }
+    expect(host.dial).not.toHaveBeenCalled();
+  });
 });
 
 describe('tryConnectLibp2pRecoveryStage', () => {
