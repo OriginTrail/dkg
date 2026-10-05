@@ -146,6 +146,12 @@ const MAPPING_ROWS: readonly MappingRow[] = [
   // --- C. structured preconditions decide the code, at either pre-send origin ------------------------
   row('structured: stale publish intent', 'validated', 'validated',
     () => withCode('intent is stale', { code: 'PUBLISH_INTENT_STALE' }), to('validated', 'publish_intent_stale')),
+  // GH#3049 — an update refused at SWM staging by the legacy SWM retirement fence: raised before anything is
+  // signed, and the fence ends on its own, so it is the retryable pre-send code (the agent pins the literal).
+  row('structured: legacy SWM retirement fence at update staging', 'validated', 'validated',
+    () => withCode('RFC-64 legacy SWM boundary retirement is in progress; retry promotion',
+      { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' }),
+    to('validated', 'workspace_unavailable')),
   row('structured: fee cap below base fee', 'validated', 'validated',
     () => withCode('fee cap too low', { code: 'FEE_CAP_BELOW_BASE_FEE' }), to('validated', 'fee_cap_below_base_fee')),
   row('structured: a fee-cap failure from claimed is an invalid (code, origin) pair - rejects, nothing recorded', 'claimed', 'claimed',
@@ -339,6 +345,16 @@ describe('GH#2945 isKnowledgeAssetPublishPreconditionFailure: the pre-send routi
 
   it('routes a structured precondition code with none of those words', () => {
     expect(isKnowledgeAssetPublishPreconditionFailure(withCode('x', { code: 'PUBLISH_INTENT_STALE' }))).toBe(true);
+    expect(isKnowledgeAssetPublishPreconditionFailure(
+      withCode('x', { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' }),
+    )).toBe(true);
+  });
+
+  it('does not route a similar-looking code or the same words without the code', () => {
+    expect(isKnowledgeAssetPublishPreconditionFailure(withCode('x', { code: 'RFC64_LEGACY_SWM_BOUNDARY' }))).toBe(false);
+    expect(isKnowledgeAssetPublishPreconditionFailure(
+      new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
+    )).toBe(false);
   });
 
   it('reads a string throw and a non-Error object with a .message, in any case', () => {

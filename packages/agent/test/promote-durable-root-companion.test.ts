@@ -165,14 +165,17 @@ describe('promote companion under the legacy SWM retirement fence (real agent wi
     companion.settle(false);
   });
 
-  it('leaves the update-staging companion on the plain refusal (it has no retry consumer)', async () => {
+  it('leaves the update-staging companion on the coded refusal: the async VM-publish queue retries it by that code', async () => {
     const { agent, materializationCompanion } = await createAgent(true);
     const inFlight = prepareRfc64LateLegacySwmBoundaryV1(agent, CONTEXT_GRAPH_ID, UAL_A, 'in-flight-share', '1');
     const retirement = retireRfc64LegacySwmAfterFinalizedVmV1(agent, CONTEXT_GRAPH_ID, UAL_A, '1');
 
     const refusal = thrownBy(() => materializationCompanion(UAL_B, 'update-of-b'));
     expect(refusal.message).toContain('retirement is in progress; retry promotion');
-    expect(refusal.code).not.toBe('PROMOTE_RETRYABLE_FAILURE');
+    // Not a promote failure (the share queue's marker), but the fence's own code: the publisher's async lift
+    // classifier registers this literal (async-lift-execution-failure.ts), so it must not drift.
+    expect(refusal.code).toBe(FENCE_CODE);
+    expect(boundary.RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1).toBe(FENCE_CODE);
 
     inFlight.settle(false);
     await retirement;
