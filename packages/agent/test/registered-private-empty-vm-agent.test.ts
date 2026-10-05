@@ -22,7 +22,7 @@ function fixture() {
     outcome: 'allowed', source: 'registered-chain', onChainId: 3n,
   }));
   const chainSnapshot = vi.fn(async () => ({
-    chainId: 'evm:31337', contextGraphId: '3', active: true, accessPolicy: 1,
+    chainId: '31337', contextGraphId: '3', active: true, accessPolicy: 1,
     governanceContract: `0x${'22'.repeat(20)}`,
   }));
   const subscriptions = new Map([[CG, { subscribed: true }]]);
@@ -79,7 +79,12 @@ describe('registered private empty-VM agent guard', () => {
   it('rejects an unrelated chain authority or a live authority change', async () => {
     const state = fixture();
     state.chainSnapshot.mockResolvedValueOnce({
-      chainId: 'evm:31337', contextGraphId: '3', active: false, accessPolicy: 1,
+      chainId: '31337', contextGraphId: '3', active: false, accessPolicy: 1,
+      governanceContract: `0x${'22'.repeat(20)}`,
+    });
+    expect(await prove(state.agent)).toBe(false);
+    state.chainSnapshot.mockResolvedValueOnce({
+      chainId: '1', contextGraphId: '3', active: true, accessPolicy: 1,
       governanceContract: `0x${'22'.repeat(20)}`,
     });
     expect(await prove(state.agent)).toBe(false);

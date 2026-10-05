@@ -46,7 +46,7 @@ export class RegisteredPrivateEmptyVmMethods {
       const indexed = await this.chain.getContextGraphAuthoritySnapshot(before.onChainId, {
         signal: AbortSignal.timeout(20_000),
       });
-      if (indexed.chainId !== chainConfig.chainId
+      if (indexed.chainId !== chainId
         || indexed.contextGraphId !== before.onChainId.toString(10)
         || indexed.active !== true || indexed.accessPolicy !== 1
         || !ethers.isAddress(indexed.governanceContract)) {
