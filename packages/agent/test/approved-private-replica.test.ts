@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY as D,
+  DKGEvent,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
@@ -1903,6 +1904,25 @@ describe('approved private bare-name replica authorization', () => {
     Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
     await expect(fixture.receiver.resolveRfc64CatalogLocalAgentAddressV1(CONTEXT_GRAPH_ID))
       .resolves.toBeNull();
+  });
+
+  it('wakes readiness after fresh approved authority even without a receiver completion', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const emit = vi.spyOn(fixture.receiver.eventBus, 'emit');
+    const refresh = () => fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' },
+    );
+    await refresh();
+    expect(emit).toHaveBeenCalledWith(DKGEvent.PROJECT_SYNCED, {
+      contextGraphId: CONTEXT_GRAPH_ID, dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
+    });
+    emit.mockClear();
+    // A restored head need not advance. An unchanged fresh policy must wake
+    // the verifier too; no readiness is granted by this hint itself.
+    await refresh();
+    expect(emit).toHaveBeenCalledWith(DKGEvent.PROJECT_SYNCED, {
+      contextGraphId: CONTEXT_GRAPH_ID, dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
+    });
   });
 
   it.each(REQUESTER_STATE_CHANGES.flatMap((change) => [
