@@ -45,6 +45,7 @@ import type {
   Address,
 } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
+import { startRequestAbortLifecycle } from '../request-abort-lifecycle.js';
 import type { NetworkStateRegistry } from './network-state-registry.js';
 
 /**
@@ -480,7 +481,6 @@ export class PeerResolver {
   async connect(peerId: NodeIdentity, opts: ConnectOpts = {}): Promise<PeerConnectionOutcome> {
     const network = supportsPeerConnection(this.network) ? this.network : undefined;
     const recoveryNetwork = network?.tryConnectRecoveryStage;
-    let signal = opts.signal;
     let usedRecovery = false;
     if (opts.recovery && network && recoveryNetwork) {
       if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
@@ -517,40 +517,44 @@ export class PeerResolver {
       if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
       usedRecovery = true;
     }
-    if (opts.recovery) {
-      const deadline = AbortSignal.timeout(opts.recovery.resolverTimeoutMs ?? 15_000);
-      signal = opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
-    }
-    const addresses = await this.resolve(peerId, { ...opts, signal });
-    if (signal?.aborted) throw opts.recovery
-      ? signal.reason
-      : new DOMException('Peer connection aborted', 'AbortError');
+    const lifecycle = opts.recovery
+      ? startRequestAbortLifecycle(opts.recovery.resolverTimeoutMs ?? 15_000, [opts.signal])
+      : undefined;
+    const signal = lifecycle?.signal ?? opts.signal;
     try {
-      if (!network) {
-        throw new Error('Network transport does not implement the peer-connection capability');
-      }
-      await network.connectPeer(peerId, addresses, {
-        signal,
-        candidateTimeoutMs: opts.candidateTimeoutMs,
-        log: opts.log,
-        ...(usedRecovery ? { skipIdentityFallback: true } : {}),
-      });
-      if (opts.recovery) {
-        if (signal?.aborted) throw signal.reason;
-        if (this.network.getConnections(peerId).length === 0) {
-          throw new PeerConnectionUnresolvedError('Peer connection was not observed');
+      const addresses = await this.resolve(peerId, { ...opts, signal });
+      if (signal?.aborted) throw opts.recovery
+        ? signal.reason
+        : new DOMException('Peer connection aborted', 'AbortError');
+      try {
+        if (!network) {
+          throw new Error('Network transport does not implement the peer-connection capability');
         }
+        await network.connectPeer(peerId, addresses, {
+          signal,
+          candidateTimeoutMs: opts.candidateTimeoutMs,
+          log: opts.log,
+          ...(usedRecovery ? { skipIdentityFallback: true } : {}),
+        });
+        if (opts.recovery) {
+          if (signal?.aborted) throw signal.reason;
+          if (this.network.getConnections(peerId).length === 0) {
+            throw new PeerConnectionUnresolvedError('Peer connection was not observed');
+          }
+        }
+        return { status: 'connected', resolvedAddresses: addresses };
+      } catch (error) {
+        if (
+          !signal?.aborted
+          && addresses.length === 0
+          && error instanceof PeerConnectionUnresolvedError
+        ) {
+          return { status: 'unresolved', resolvedAddresses: [] };
+        }
+        throw error;
       }
-      return { status: 'connected', resolvedAddresses: addresses };
-    } catch (error) {
-      if (
-        !signal?.aborted
-        && addresses.length === 0
-        && error instanceof PeerConnectionUnresolvedError
-      ) {
-        return { status: 'unresolved', resolvedAddresses: [] };
-      }
-      throw error;
+    } finally {
+      lifecycle?.release();
     }
   }
 }

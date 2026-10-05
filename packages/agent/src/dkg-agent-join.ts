@@ -254,7 +254,10 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 import { multiaddr } from '@multiformats/multiaddr';
-import { selectCuratorJoinDialAddress } from './curator-dial-address.js';
+import {
+  requesterHasDirectLoopbackConnection,
+  selectCuratorJoinDialAddress,
+} from './curator-dial-address.js';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
@@ -580,11 +583,15 @@ async function withJoinEncryptionKeyCacheLock<T>(
   }
 }
 
-function curatorJoinDialAddress(agent: DKGAgent): string | undefined {
+function curatorJoinDialAddress(agent: DKGAgent, requesterPeerId: string): string | undefined {
   return selectCuratorJoinDialAddress([
     ...collectPublishableMultiaddrs(agent.node.multiaddrs),
     ...agent.node.multiaddrs,
-  ], agent.peerId);
+  ], agent.peerId, {
+    preferLoopback: requesterHasDirectLoopbackConnection(
+      agent.node.libp2p.getConnections(), requesterPeerId,
+    ),
+  });
 }
 
 export class JoinRequestMethods extends DKGAgentBase {
@@ -2530,18 +2537,20 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
-    const curatorDialAddress = curatorJoinDialAddress(this);
-    const payload = JSON.stringify({
-      type: 'join-approved',
-      contextGraphId,
-      agentAddress,
-      requestGeneration: resolvedGeneration,
-      ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
-      ...(curatorBinding === null ? {} : {
-        curatorAgentAddress: curatorBinding.agentAddress,
-        curatorAuthorityEra: curatorBinding.authorityEra,
-      }),
-    });
+    const payload = (targetPeerId: string): string => {
+      const curatorDialAddress = curatorJoinDialAddress(this, targetPeerId);
+      return JSON.stringify({
+        type: 'join-approved',
+        contextGraphId,
+        agentAddress,
+        requestGeneration: resolvedGeneration,
+        ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
+        ...(curatorBinding === null ? {} : {
+          curatorAgentAddress: curatorBinding.agentAddress,
+          curatorAuthorityEra: curatorBinding.authorityEra,
+        }),
+      });
+    };
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
       agentAddress,
@@ -2664,18 +2673,20 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
-    const curatorDialAddress = curatorJoinDialAddress(this);
-    const payload = JSON.stringify({
-      type: 'join-approved',
-      contextGraphId,
-      agentAddress,
-      requestGeneration,
-      ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
-      ...(curatorBinding === null ? {} : {
-        curatorAgentAddress: curatorBinding.agentAddress,
-        curatorAuthorityEra: curatorBinding.authorityEra,
-      }),
-    });
+    const payload = (targetPeerId: string): string => {
+      const curatorDialAddress = curatorJoinDialAddress(this, targetPeerId);
+      return JSON.stringify({
+        type: 'join-approved',
+        contextGraphId,
+        agentAddress,
+        requestGeneration,
+        ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
+        ...(curatorBinding === null ? {} : {
+          curatorAgentAddress: curatorBinding.agentAddress,
+          curatorAuthorityEra: curatorBinding.authorityEra,
+        }),
+      });
+    };
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
       agentAddress,
@@ -3112,10 +3123,9 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     agentAddress: string,
     requestGeneration: string,
-    payload: string,
+    payload: string | ((targetPeerId: string) => string),
     label: 'join-approval' | 'join-rejection',
   ): Promise<{ delivered: boolean; peerId: string | null; error: string | null }> {
-    const payloadBytes = new TextEncoder().encode(payload);
     const ctx = createOperationContext('system');
     const addrLower = agentAddress.toLowerCase();
 
@@ -3190,6 +3200,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     }
 
     try {
+      // Resolve the exact recipient before encoding the approval. The outbox
+      // then persists these final bytes unchanged across later retries.
+      const payloadBytes = new TextEncoder().encode(
+        typeof payload === 'function' ? payload(targetPeerId) : payload,
+      );
       // rc.9 PR-10: send via the Universal Messenger substrate. If
       // the substrate can't deliver synchronously it enqueues into
       // the SQLite outbox and retries in the background — this

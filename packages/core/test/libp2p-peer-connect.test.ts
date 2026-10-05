@@ -318,11 +318,6 @@ describe('connectLibp2pPeer', () => {
 describe('tryConnectLibp2pRecoveryStage', () => {
   it('bounds a stalled cached-peer dial by the stage deadline', async () => {
     vi.useFakeTimers();
-    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds) => {
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), milliseconds);
-      return controller.signal;
-    });
     try {
       const host = {
         getConnections: () => [],
@@ -344,9 +339,31 @@ describe('tryConnectLibp2pRecoveryStage', () => {
       await vi.advanceTimersByTimeAsync(1);
       await rejection;
     } finally {
-      timeout.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it('releases the caller abort link after cached dial success and failure', async () => {
+    const caller = new AbortController();
+    const remove = vi.spyOn(caller.signal, 'removeEventListener');
+    let connected = false;
+    const host = {
+      getConnections: () => connected ? [{ remotePeer: { toString: () => TARGET } }] : [],
+      dial: vi.fn(async () => { connected = true; }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'cached', timeoutMs: 5_000, signal: caller.signal,
+    })).resolves.toBe(true);
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+
+    connected = false;
+    remove.mockClear();
+    host.dial.mockImplementation(async () => { throw new Error('dial failed'); });
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'cached', timeoutMs: 5_000, signal: caller.signal,
+    })).rejects.toThrow('dial failed');
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
   it('uses a peer-bound private hint without a cached fallback', async () => {
@@ -463,5 +480,21 @@ describe('tryConnectLibp2pRecoveryStage', () => {
     await dialStarted;
     controller.abort();
     await rejection;
+  });
+
+  it('does not accept a late cached-dial success after the caller aborts', async () => {
+    const controller = new AbortController();
+    let connected = false;
+    const host = {
+      getConnections: () => connected ? [{ remotePeer: { toString: () => TARGET } }] : [],
+      dial: vi.fn(async () => {
+        connected = true;
+        controller.abort(new DOMException('Cancelled by caller', 'AbortError'));
+      }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'cached', timeoutMs: 5_000, signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'AbortError' });
   });
 });

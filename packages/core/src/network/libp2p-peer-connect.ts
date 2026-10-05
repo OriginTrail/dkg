@@ -6,6 +6,7 @@ import type { Address, NodeIdentity, PeerConnectOpts, PeerRecoveryStageOpts } fr
 import { PeerConnectionUnresolvedError } from './network.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 import type { ConfiguredRelayTarget } from './relay-target.js';
+import { startRequestAbortLifecycle } from '../request-abort-lifecycle.js';
 
 export interface Libp2pConnectHost {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -285,11 +286,15 @@ export async function tryConnectLibp2pRecoveryStage(
     return isConnected();
   }
 
-  const timeout = AbortSignal.timeout(stage.timeoutMs);
-  const signal = stage.signal ? AbortSignal.any([stage.signal, timeout]) : timeout;
-  await host.dial(peerIdFromString(canonicalPeerId), { signal });
-  throwIfAborted(stage.signal);
-  return isConnected();
+  const lifecycle = startRequestAbortLifecycle(stage.timeoutMs, [stage.signal]);
+  try {
+    await host.dial(peerIdFromString(canonicalPeerId), { signal: lifecycle.signal });
+    if (lifecycle.signal.aborted) throw lifecycle.signal.reason;
+    throwIfAborted(stage.signal);
+    return isConnected();
+  } finally {
+    lifecycle.release();
+  }
 }
 
 /**

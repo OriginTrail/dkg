@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { multiaddr } from '@multiformats/multiaddr';
-import { selectCuratorJoinDialAddress, verifiedCuratorDialAddress } from '../src/curator-dial-address.js';
+import {
+  requesterHasDirectLoopbackConnection,
+  selectCuratorJoinDialAddress,
+  verifiedCuratorDialAddress,
+} from '../src/curator-dial-address.js';
 
 const PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const OTHER_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
@@ -40,6 +44,42 @@ describe('selectCuratorJoinDialAddress', () => {
 
   it('keeps loopback available for local deployments', () => {
     expect(selectCuratorJoinDialAddress([ADDRESS], PEER_ID)).toBe(ADDRESS);
+  });
+
+  it('selects loopback for the exact requester on a direct local connection', () => {
+    const connections = [{
+      remotePeer: { toString: () => OTHER_PEER_ID },
+      remoteAddr: { toString: () => `/ip4/127.0.0.1/tcp/56789/p2p/${OTHER_PEER_ID}` },
+    }];
+    expect(requesterHasDirectLoopbackConnection(connections, OTHER_PEER_ID)).toBe(true);
+    expect(selectCuratorJoinDialAddress([ADDRESS, lanAddress], PEER_ID, {
+      preferLoopback: requesterHasDirectLoopbackConnection(connections, OTHER_PEER_ID),
+    })).toBe(ADDRESS);
+    expect(requesterHasDirectLoopbackConnection(connections, PEER_ID)).toBe(false);
+    expect(selectCuratorJoinDialAddress([ADDRESS, lanAddress], PEER_ID, {
+      preferLoopback: requesterHasDirectLoopbackConnection(connections, PEER_ID),
+    })).toBe(lanAddress);
+  });
+
+  it('prefers the direct loopback listener over an earlier loopback relay circuit', () => {
+    expect(selectCuratorJoinDialAddress([CIRCUIT, ADDRESS, lanAddress], PEER_ID, {
+      preferLoopback: true,
+    })).toBe(ADDRESS);
+    expect(selectCuratorJoinDialAddress([CIRCUIT, lanAddress], PEER_ID, {
+      preferLoopback: true,
+    })).toBe(CIRCUIT);
+  });
+
+  it('does not treat LAN or relayed connections as a local direct route', () => {
+    for (const remoteAddress of [
+      `/ip4/192.168.1.30/tcp/56789/p2p/${OTHER_PEER_ID}`,
+      `/ip4/127.0.0.1/tcp/56789/p2p/${OTHER_PEER_ID}/p2p-circuit`,
+    ]) {
+      expect(requesterHasDirectLoopbackConnection([{
+        remotePeer: { toString: () => OTHER_PEER_ID },
+        remoteAddr: { toString: () => remoteAddress },
+      }], OTHER_PEER_ID)).toBe(false);
+    }
   });
 
   it('ignores malformed, wrong-peer, and unspecified listeners', () => {

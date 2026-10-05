@@ -17,9 +17,15 @@ export function verifiedCuratorDialAddress(value: unknown, peerId: string): stri
   }
 }
 
-/** Prefer a remotely usable listener, retaining loopback for local devnets. */
-export function selectCuratorJoinDialAddress(addresses: readonly string[], peerId: string): string | undefined {
-  let loopback: string | undefined;
+/** Prefer a remotely usable listener unless the authenticated requester is local. */
+export function selectCuratorJoinDialAddress(
+  addresses: readonly string[],
+  peerId: string,
+  options: { preferLoopback?: boolean } = {},
+): string | undefined {
+  let directLoopback: string | undefined;
+  let loopbackCircuit: string | undefined;
+  let remote: string | undefined;
   for (const address of addresses) {
     const verified = verifiedCuratorDialAddress(address, peerId);
     if (!verified || verified.startsWith('/ip4/0.0.0.0/') || verified.startsWith('/ip6/::/')) continue;
@@ -28,10 +34,29 @@ export function selectCuratorJoinDialAddress(addresses: readonly string[], peerI
       || /^\/ip6\/(?:::1|0:0:0:0:0:0:0:1)\//i.test(verified)
       || /^\/dns(?:4|6|addr)?\/(?:localhost|[^/]+\.localhost)\//i.test(verified)
     ) {
-      loopback ??= verified;
+      if (verified.includes('/p2p-circuit')) loopbackCircuit ??= verified;
+      else directLoopback ??= verified;
       continue;
     }
-    return verified;
+    remote ??= verified;
   }
-  return loopback;
+  return options.preferLoopback
+    ? directLoopback ?? loopbackCircuit ?? remote
+    : remote ?? directLoopback ?? loopbackCircuit;
+}
+
+/** A direct loopback connection proves the exact requester can use a local listener. */
+export function requesterHasDirectLoopbackConnection(
+  connections: readonly { remotePeer: { toString(): string }; remoteAddr?: { toString(): string } }[],
+  requesterPeerId: string | undefined,
+): boolean {
+  if (!requesterPeerId) return false;
+  return connections.some((connection) => {
+    if (connection.remotePeer.toString() !== requesterPeerId) return false;
+    const address = connection.remoteAddr?.toString();
+    return address !== undefined
+      && !address.includes('/p2p-circuit')
+      && (/^\/ip4\/127(?:\.\d{1,3}){3}\//.test(address)
+        || /^\/ip6\/(?:::1|0:0:0:0:0:0:0:1)\//i.test(address));
+  });
 }

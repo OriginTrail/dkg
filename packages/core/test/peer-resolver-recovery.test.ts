@@ -135,11 +135,6 @@ describe('PeerResolver recovery', () => {
 
   it('bounds both resolution and the final dial with the recovery resolver deadline', async () => {
     vi.useFakeTimers();
-    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds) => {
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), milliseconds);
-      return controller.signal;
-    });
     try {
       net.tryConnectRecoveryStage = async () => false;
       net.__findPeerImpl = async () => ['/ip4/178.104.54.178/tcp/9090'];
@@ -162,18 +157,12 @@ describe('PeerResolver recovery', () => {
       await vi.advanceTimersByTimeAsync(1);
       await rejection;
     } finally {
-      timeout.mockRestore();
       vi.useRealTimers();
     }
   });
 
   it('keeps the recovery deadline when the transport has no fast-path capability', async () => {
     vi.useFakeTimers();
-    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds) => {
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), milliseconds);
-      return controller.signal;
-    });
     try {
       net.__findPeerImpl = async (_peerId, options) => new Promise((_resolve, reject) => {
         const abort = () => reject(options!.signal!.reason);
@@ -189,9 +178,29 @@ describe('PeerResolver recovery', () => {
       await rejection;
       expect(net.__connectCalls).toEqual([]);
     } finally {
-      timeout.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it('releases the caller abort link after recovery success and failure', async () => {
+    const caller = new AbortController();
+    const remove = vi.spyOn(caller.signal, 'removeEventListener');
+    net.tryConnectRecoveryStage = async () => false;
+    net.__findPeerImpl = async () => [];
+    net.connectPeer = async (peerId) => {
+      net.__conns.set(peerId, [{ remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/9090' } }]);
+    };
+    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
+    await expect(resolver.connect(PEER_B, { signal: caller.signal, recovery: {} }))
+      .resolves.toMatchObject({ status: 'connected' });
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+
+    net.__conns.clear();
+    remove.mockClear();
+    net.connectPeer = async () => { throw new Error('dial failed'); };
+    await expect(resolver.connect(PEER_B, { signal: caller.signal, recovery: {} }))
+      .rejects.toThrow('dial failed');
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
 });
