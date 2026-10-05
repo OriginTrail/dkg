@@ -404,7 +404,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
     expect(beforeDrain).toEqual({
       schemaVersion: 1,
-      consumerVocabularyVersion: 2,
+      consumerVocabularyVersion: 3,
       processEpoch: 'epoch-fixed',
       capturedAtUtc: '2026-09-20T12:00:00.000Z',
       capturedAtMonotonicMs: 123,
@@ -515,9 +515,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   });
 
   it('retains only the frozen code-owned snapshot consumer vocabulary', () => {
-    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(2);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(3);
     expect(Object.isFrozen(RPC_USAGE_SNAPSHOT_CONSUMERS)).toBe(true);
-    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(177);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(179);
     expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toEqual(
       [...new Set(RPC_USAGE_SNAPSHOT_CONSUMERS)].sort(),
     );

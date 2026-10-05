@@ -15,10 +15,11 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CHANGELOG_GRAPH,
   OxigraphStore,
+  StoreOperationTimeoutError,
   createTripleStore,
   tryReplaceSubjectAtomically,
   type Quad,
@@ -63,12 +64,18 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       largeLiteralStorage: { enabled: true, directory: dir },
     });
     let invalidations = 0;
-    const projectionDirtyCalls: Array<{ quads?: readonly unknown[]; targetGraph?: string }> = [];
+    const projectionDirtyCalls: Array<{
+      quads?: readonly unknown[];
+      targetGraph?: string;
+      targetSubject?: string;
+    }> = [];
     // ...then the agent wrapper on top — this is the publisher's `this.store`.
     const agentStore: TripleStore = createListContextGraphsCacheInvalidatingStore(
       inner,
       () => { invalidations += 1; },
-      (quads, targetGraph) => { projectionDirtyCalls.push({ quads, targetGraph }); },
+      (quads, targetGraph, targetSubject) => {
+        projectionDirtyCalls.push({ quads, targetGraph, targetSubject });
+      },
     );
 
     try {
@@ -104,10 +111,14 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
 
       // Each decorator's side effect fires through the full production stack:
       // - agent wrapper: listGraphs-cache invalidation fires, and the projection
-      //   is dirtied BY THE TARGET GRAPH (not the inserted quads) so a subject
-      //   replace that deletes projection-relevant metadata is still covered (#1863).
+      //   receives the target graph/subject (for deletions) and replacement
+      //   quads (for inserted authority facts), so both halves are covered.
       expect(invalidations).toBeGreaterThan(invalidationsBefore);
-      expect(projectionDirtyCalls.some((c) => c.targetGraph === GRAPH && c.quads === undefined)).toBe(true);
+      expect(projectionDirtyCalls.some((c) => (
+        c.targetGraph === GRAPH
+        && c.targetSubject === JOB
+        && c.quads?.length === 1
+      ))).toBe(true);
       // - ChangelogStore: the mutation was recorded (changelog plane changed).
       expect(await changelogSnapshot(agentStore)).not.toBe(changelogBefore);
       // - GraphSetIndexStore: enumeration includes the non-empty control-plane graph.
@@ -127,7 +138,7 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     }
   });
 
-  it('markDirtyForGraph dirties the CG derived from its meta graph and no-ops for a non-CG graph (#1863)', () => {
+  it('markDirtyForGraph dirties CG graphs and fences opaque non-CG replacements (#1863)', () => {
     const proj = new ContextGraphMetaProjection(new OxigraphStore());
     const entries = (proj as unknown as { entries: Map<string, { invalidationVersion: number }> }).entries;
 
@@ -145,9 +156,103 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     proj.markDirtyForGraph(contextGraphCatalogUri('music'));
     expect(entries.get('music')!.invalidationVersion).toBeGreaterThan(beforeCatalog);
 
-    // A non-CG graph (e.g. the publisher control-plane graph) is a no-op — no
-    // entry created, no whole-cache churn on the hot job-write path.
+    // A non-CG graph does not dirty projection entries, but it still advances
+    // the conservative recipient-authority fence because key resolution scans
+    // every named graph.
+    const beforeControlPlane = proj.readAuthorityFactsRevision;
     proj.markDirtyForGraph('urn:dkg:publisher:control-plane');
     expect(entries.has('urn:dkg:publisher:control-plane')).toBe(false);
+    expect(proj.readAuthorityFactsRevision).toBe(beforeControlPlane + 1);
+  });
+
+  it('invalidates an indeterminate atomic replacement but not a proven pre-dispatch refusal', async () => {
+    const inner = new OxigraphStore();
+    const replaceSubject = vi.fn()
+      .mockRejectedValueOnce(new Error('response lost after commit'))
+      .mockRejectedValueOnce(new StoreOperationTimeoutError({
+        backend: 'test-store',
+        operation: 'replaceSubject',
+        outcome: 'not_started',
+      }));
+    Object.defineProperty(inner, 'replaceSubject', { value: replaceSubject });
+    const invalidate = vi.fn();
+    const markProjectionDirty = vi.fn();
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      invalidate,
+      markProjectionDirty,
+    );
+
+    await expect(wrapped.replaceSubject!(GRAPH, JOB, [
+      quad(JOB, 'urn:dkg:publisher:status', '"committed"'),
+    ])).rejects.toThrow('response lost after commit');
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(markProjectionDirty).toHaveBeenCalledTimes(1);
+
+    await expect(wrapped.replaceSubject!(GRAPH, JOB, [])).rejects.toBeInstanceOf(
+      StoreOperationTimeoutError,
+    );
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(markProjectionDirty).toHaveBeenCalledTimes(1);
+  });
+
+  it('fences both known replacement graphs even when their payloads are empty', async () => {
+    const inner = new OxigraphStore();
+    Object.defineProperty(inner, 'replaceGraphAndSubject', {
+      value: vi.fn(async () => undefined),
+    });
+    const projection = new ContextGraphMetaProjection(inner);
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      () => undefined,
+      (quads, targetGraph) => {
+        if (targetGraph !== undefined) {
+          projection.markDirtyForGraph(targetGraph);
+          if (quads) projection.markDirtyFromQuads(quads);
+        } else if (quads) projection.markDirtyFromQuads(quads);
+        else projection.markAllDirty();
+      },
+    );
+    const before = projection.readAuthorityFactsRevision;
+    const unrelatedBefore = projection.readContextGraphAuthorityFactsRevision('unrelated-private-cg');
+
+    await wrapped.replaceGraphAndSubject!(
+      'urn:dkg:recipient-cache',
+      [],
+      'urn:dkg:recipient-cache-meta',
+      'did:dkg:agent:0x0000000000000000000000000000000000000001',
+      [],
+    );
+
+    expect(projection.readAuthorityFactsRevision).toBe(before + 2);
+    expect(projection.readContextGraphAuthorityFactsRevision('unrelated-private-cg'))
+      .toBe(unrelatedBefore);
+  });
+
+  it('keeps unrelated private proof revisions stable across graph-scoped mutations', async () => {
+    const inner = new OxigraphStore();
+    const projection = new ContextGraphMetaProjection(inner);
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      () => undefined,
+      (quads, targetGraph) => {
+        if (targetGraph !== undefined) projection.markDirtyForGraph(targetGraph);
+        if (quads !== undefined) projection.markDirtyFromQuads(quads);
+        else if (targetGraph === undefined) projection.markAllDirty();
+      },
+    );
+    const contextGraphId = 'unrelated-private-cg';
+    const before = projection.readContextGraphAuthorityFactsRevision(contextGraphId);
+    const row = quad(JOB, 'urn:dkg:publisher:status', '"ready"');
+
+    await wrapped.insert([row]);
+    await wrapped.deleteByPattern({ graph: GRAPH });
+    await wrapped.replaceGraph!(GRAPH, [row]);
+    await wrapped.dropGraph(GRAPH);
+    expect(projection.readContextGraphAuthorityFactsRevision(contextGraphId)).toBe(before);
+
+    await wrapped.replaceGraph!(contextGraphMetaGraphUri(contextGraphId), []);
+    expect(projection.readContextGraphAuthorityFactsRevision(contextGraphId)).not.toBe(before);
+    await wrapped.close();
   });
 });

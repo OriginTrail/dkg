@@ -1188,6 +1188,10 @@ export class ApiClient {
     chainId: string;
     kav10Address: string;
     eip712Digest: string;
+    /** The KA the draft belongs to (absent from a daemon that predates GH#2958). */
+    kaUal?: string;
+    /** The number the draft will be published as: one above the KA's confirmed version (absent from a daemon that predates GH#2958). */
+    assertionVersion?: string;
   }> {
     return this.post(
       `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,

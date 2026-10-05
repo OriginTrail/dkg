@@ -162,11 +162,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
       },
     }) as TripleStore;
     let invalidations = 0;
-    const dirtyQuads: Quad[][] = [];
+    const dirtyMarks: Array<{ quads: Quad[]; targetGraph: string | undefined }> = [];
     const wrapped = createListContextGraphsCacheInvalidatingStore(
       adapter,
       () => { invalidations += 1; },
-      (quads) => { dirtyQuads.push([...(quads ?? [])]); },
+      (quads, targetGraph) => { dirtyMarks.push({ quads: [...(quads ?? [])], targetGraph }); },
     );
     const graphQuads: Quad[] = [{
       subject: 'urn:data:s', predicate: 'urn:data:p', object: '"data"', graph: 'urn:data',
@@ -193,7 +193,13 @@ describe('healStrandedScopedKCs — through the production store decorator stack
       options,
     );
     expect(invalidations).toBe(1);
-    expect(dirtyQuads).toEqual([[...graphQuads, ...metadataQuads]]);
+    // Complete graph-and-subject replacement can delete authority facts that
+    // are absent from the replacement payload, so projection invalidation is
+    // keyed by the two replaced targets rather than by the inserted quads.
+    expect(dirtyMarks).toEqual([
+      { quads: [], targetGraph: 'urn:data' },
+      { quads: [], targetGraph: 'urn:meta' },
+    ]);
 
     await wrapped.close();
   });
@@ -247,7 +253,7 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     await wrapped.close();
   });
 
-  it('forwards no-count deletes and invalidates caches only after success', async () => {
+  it('forwards no-count deletes and invalidates after success or an indeterminate failure', async () => {
     const failure = new Error('injected no-count delete failure');
     let rejectDelete = false;
     const countedDelete = vi.fn(async () => 1);
@@ -280,8 +286,10 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
     rejectDelete = true;
     await expect(wrapped.deleteByPatternWithoutCount?.(pattern, options)).rejects.toBe(failure);
-    expect(invalidations).toBe(1);
-    expect(projectionInvalidations).toBe(1);
+    // The adapter may have committed before losing its response. Untagged
+    // failures are indeterminate and must invalidate conservatively.
+    expect(invalidations).toBe(2);
+    expect(projectionInvalidations).toBe(2);
     await wrapped.close();
   });
 

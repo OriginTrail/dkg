@@ -18,6 +18,7 @@ export default defineConfig({
       'packages/agent',
       'packages/cli',
       'packages/mcp-dkg',
+      'packages/node-store',
       'packages/node-ui',
       'packages/network-sim',
       'packages/graph-viz',

@@ -46,10 +46,12 @@ export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
     JAVA_WRITE_UTF_MAX_BYTES,
   ),
 );
-/** Additive wire capability understood by upgraded durable-sync responders. */
+/** Additive wire capability understood by upgraded sync responders. */
 export const SYNC_BYTE_BUDGET_PAGE_MODE = 'byte-budget-v1' as const;
-/** Maximum rows a responder may materialize for one byte-budgeted durable page. */
+/** Maximum rows a responder may materialize for one byte-budgeted sync page. */
 export const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;
+/** Exact DATA uses page-only store reads; never buffer a whole assertion. */
+export const SYNC_BYTE_BUDGET_EXACT_MAX_ROWS = 512;
 /**
  * Conservative first request for a previously unseen peer/path.
  *

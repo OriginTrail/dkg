@@ -18,6 +18,9 @@
  * That is pure ordering — it only decides which endpoint each loop TRIES FIRST;
  * it never signs, never gates a broadcast, never re-orders the tx-safety
  * guards, and every loop still falls through to the full endpoint set. The
+ * read loop keeps one more piece of ordering state beside it, of the same
+ * kind: which endpoint refused which read (`EndpointReadRefusals`, see
+ * endpoint-read-refusals.ts), so that read starts at the others. The
  * module never references the adapter; it is constructed with two required
  * capabilities and one optional per-endpoint transport preflight:
  *   1. `getEndpoints()` — a LIVE thunk over the RPC endpoints, each a
@@ -60,6 +63,9 @@ import {
   rpcHost,
 } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
+import { EndpointReadRefusals } from './endpoint-read-refusals.js';
+import { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
+export { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
 import {
   ChainRpcTransportError,
   RpcEndpointsExhaustedError,
@@ -73,9 +79,6 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import {
-  RPC_READ_STALL_TIMEOUT_MS,
-  RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS,
-  RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
@@ -93,32 +96,6 @@ export interface RpcEndpoint {
   provider: JsonRpcProvider;
   rpcUrl: string;
 }
-
-/**
- * Named per-attempt timeout policy for a failover read: callers pick an intent,
- * not a millisecond value. The exact cap each policy yields is in
- * {@link resolveCapMs}.
- *   - `pointRead`           — a single `eth_call` / point provider read.
- *   - `wideLogScan`         — a multi-thousand-block `eth_getLogs` scan.
- *   - `durablePagedLogScan` — a checkpointed scan whose physical requests
- *     carry their own deadlines, so the complete projection is uncapped.
- *   - `watchdogPointRead`   — a background point read that must not wedge a
- *     one-RPC node.
- *   - `watchdogWideLogScan` — a background log scan that must not wedge a
- *     one-RPC node.
- *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
- *     stall selection (capped on EVERY attempt, including single-RPC).
- *   - `securityGatePointRead` — a live authorization read whose multi-RPC
- *     attempts must fail over inside the caller's 2.5s fail-closed deadline.
- */
-export type ReadPolicy =
-  | 'pointRead'
-  | 'wideLogScan'
-  | 'durablePagedLogScan'
-  | 'watchdogPointRead'
-  | 'watchdogWideLogScan'
-  | 'failOpenFundingRead'
-  | 'securityGatePointRead';
 
 /**
  * The human-facing label and the low-cardinality telemetry owner for one RPC
@@ -144,6 +121,18 @@ export function createRpcReadDescriptor(
     throw new TypeError('RPC read consumer must be a non-empty string or null');
   }
   return Object.freeze({ label, consumer });
+}
+
+/**
+ * Bind an adapter read's human label and telemetry owner together.
+ *
+ * Kept as a module helper so it does not become part of the concrete adapter's
+ * prototype API (the mock-adapter parity test intentionally enumerates that
+ * surface).
+ */
+export function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
+  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
+  return createRpcReadDescriptor(label, consumer);
 }
 
 export type RpcReadDescriptorInput = string | RpcReadDescriptor;
@@ -282,39 +271,15 @@ export function isContractViewRetryable(err: unknown): boolean {
   return isRpcEndpointFailoverEligible(err) && errorCode(err) !== 'BAD_DATA';
 }
 
-/**
- * The timeout-policy matrix — the per-attempt cap each named policy yields:
- *
- *   | policy              | multi-RPC cap            | single-RPC cap          |
- *   |---------------------|--------------------------|-------------------------|
- *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         |
- *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
- *   | durablePagedLogScan | uncapped                 | uncapped                |
- *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
- *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
- *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
- *   | securityGatePointRead | SECURITY_GATE (1s)     | uncapped                |
- *
- * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
- * to; #894). The watchdog policies are for background reads that must clear
- * their scheduler gate even on one-RPC nodes, without imposing a poll-level
- * deadline over a multi-RPC failover sequence.
- */
-export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
-  if (policy === 'durablePagedLogScan') return undefined;
-  if (policy === 'failOpenFundingRead' || policy === 'watchdogPointRead') {
-    return RPC_READ_STALL_TIMEOUT_MS;
-  }
-  if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
-  if (providerCount <= 1) return undefined;
-  if (policy === 'securityGatePointRead') return RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS;
-  return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
-}
-
 export class RpcFailoverClient {
-  /** Transport-ordering preference state machine — the ONLY mutable state this
-   *  module owns (see SAFETY BOUNDARY + endpoint-stickiness.ts). */
+  /** Transport-ordering preference state machine (see SAFETY BOUNDARY +
+   *  endpoint-stickiness.ts). With `readRefusals` below, the only mutable state
+   *  this module owns, and both only order the endpoints of a pass. */
   private readonly stickiness: EndpointStickiness;
+  /** Which endpoint refused which read (see endpoint-read-refusals.ts). */
+  private readonly readRefusals: EndpointReadRefusals;
+  /** The stickiness kill switch: off means every pass uses the configured order. */
+  private readonly endpointOrderingEnabled: () => boolean;
   /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
   private readonly validateEndpoint?: ValidateEndpointFn;
   private readonly readThrottleRetries: number;
@@ -344,6 +309,8 @@ export class RpcFailoverClient {
       isEnabled,
       onEstablished: (url) => notePreferredEndpoint('rpc failover', url),
     });
+    this.readRefusals = new EndpointReadRefusals({ now: stickiness?.now ?? Date.now });
+    this.endpointOrderingEnabled = isEnabled;
   }
 
   /**
@@ -619,7 +586,7 @@ export class RpcFailoverClient {
             console.warn(
               `[chain] ${label}: buffered gas estimation failed; falling back to ` +
               `ethers' unbuffered estimate (no OOG headroom applied): ` +
-              `${estErr instanceof Error ? estErr.message : String(estErr)}`,
+              `${hostOnlyRpcText(estErr instanceof Error ? estErr.message : String(estErr))}`,
             );
           }
         }
@@ -644,16 +611,17 @@ export class RpcFailoverClient {
       }
     }
     if (lastRetryable) noteRpcExhaustion(`${label} preparation`, canonical.map((e) => e.rpcUrl));
-    // Single provider → carry the code on a new error but keep the message
-    // byte-identical (no second endpoint, so the raw message reads cleaner and
-    // any message-inspecting caller keeps seeing it). Multiple providers → the
-    // HOST-ONLY aggregate (never full URLs — a configured rpcUrl may carry an API
-    // key and this message reaches HTTP clients via response paths that echo
-    // err.message, e.g. the create+publish 207 tail).
+    // Single provider → carry the code on a new error with the provider's own
+    // text (no second endpoint to name, so the message reads cleaner). Multiple
+    // providers → a host list plus that text. EITHER WAY the text passes through
+    // `hostOnlyRpcText`: ethers embeds the request URL in an HTTP-level error and
+    // a configured rpcUrl may carry an API key, while this message reaches HTTP
+    // clients (e.g. the create+publish 207 tail), logs and the publisher's
+    // persisted failure records. The original error stays reachable as `cause`.
     const message = canonical.length <= 1
-      ? errorMessage(lastRetryable)
+      ? hostOnlyRpcText(errorMessage(lastRetryable))
       : `${label} transaction preparation failed on all configured RPC endpoints ` +
-        `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
+        `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${hostOnlyRpcText(errorMessage(lastRetryable))}`;
     // Populate+sign exhausted every endpoint. This is the PREPARE phase
     // (populateTransaction / eth_estimateGas), NOT the broadcast — label it
     // eth_estimateGas so it doesn't collide with the genuine
@@ -727,7 +695,7 @@ export class RpcFailoverClient {
                   // outcome at the HTTP boundary.
                   throw new ChainRpcTransportError(
                     'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
-                    errorMessage(err),
+                    hostOnlyRpcText(errorMessage(err)),
                     { cause: err, txHash },
                   );
                 }
@@ -752,7 +720,7 @@ export class RpcFailoverClient {
           // the HTTP boundary, not a generic 500 — an exhaustion after a provider
           // populated/signed would otherwise surface code-less.
           throw new RpcEndpointsExhaustedError(
-            `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
+            `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${hostOnlyRpcText(errorMessage(lastRetryable))}`,
             { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash },
           );
         } finally {
@@ -827,7 +795,7 @@ export class RpcFailoverClient {
             });
             throw new ChainRpcTransportError(
               'RPC_RECEIPT_LOOKUP_FAILED',
-              `Receipt lookup for transaction ${txHash} failed on all configured RPC endpoints: ${errorMessage(cause)}`,
+              `Receipt lookup for transaction ${txHash} failed on all configured RPC endpoints: ${hostOnlyRpcText(errorMessage(cause))}`,
               { cause, txHash },
             );
           }
@@ -868,7 +836,16 @@ export class RpcFailoverClient {
     // binding its endpoint + outcome recorders. Same members, possibly reordered —
     // so the cap/exhaustion contract stays canonical while only the try-order changes.
     const canonical = this.getEndpoints();
-    const attempts = this.stickiness.attempts(canonical, options.intent);
+    // A read that an endpoint has refused by policy starts at the others; the
+    // refusing endpoint stays in the pass, last. `readRefusals` builds the pass
+    // from the stickiness order and owns what each outcome is recorded as. A
+    // tip-sensitive read keeps the configured order, as it does under
+    // stickiness, and so does every read when ordering is switched off.
+    const attempts = this.readRefusals.attempts(
+      label,
+      this.stickiness.attempts(canonical, options.intent),
+      options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
+    );
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let lastRetryable: unknown;
     let allEndpointsThrottled = true;
@@ -934,7 +911,7 @@ export class RpcFailoverClient {
           const hint = errorRetryAfterMs(err);
           if (hint !== undefined) retryAfterMs = Math.max(retryAfterMs ?? 0, hint);
         }
-        attempt.recordFailure(); // de-prefer a failed backend
+        attempt.recordFailure(err); // de-prefer a failed backend; remember a refusal
         const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
         if (!isLast && canTryNext) {
           noteRpcFailover(label, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);

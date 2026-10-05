@@ -5,9 +5,12 @@ name: Knip (dead-code baseline)
 # otherwise adds an always-green check to every change. Once the baseline is
 # clean, replace the schedule with a required regression gate.
 #
-# Config lives in knip.json at the repo root. Known false-positives (e.g.
-# Solidity-only deps that knip can't parse) belong in knip.json's
-# `ignoreDependencies`, not here.
+# Config lives in .github/knip.json and is passed with --config: knip only
+# discovers a config by itself in the repo root, and with none it reports
+# against its defaults instead of failing. The globs in the config stay
+# relative to the repo root (the working directory), not to .github/. Known
+# false-positives (e.g. Solidity-only deps that knip can't parse) belong in
+# that file's `ignoreDependencies`, not here.
 
 on:
   schedule:
@@ -42,7 +45,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run knip (warn-only)
+        # --config       : the config is not in the repo root, so name it
         # --no-exit-code : never fail the job (warn-only while we burn
         #                  down the baseline)
         # --reporter     : compact, deterministic output, easy to diff
-        run: pnpm exec knip --no-exit-code --reporter compact
+        run: pnpm exec knip --config .github/knip.json --no-exit-code --reporter compact

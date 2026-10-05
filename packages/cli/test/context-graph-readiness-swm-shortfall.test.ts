@@ -179,6 +179,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
     result.diagnostics.sharedMemory.continuationPasses = 2;
 
     const classification = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' },
       result,
       includeSharedMemory: true,
       hasConfirmedMeta: true,

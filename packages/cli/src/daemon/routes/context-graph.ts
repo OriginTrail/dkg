@@ -502,6 +502,24 @@ function catchupAuthorityUnavailableResponse(
   return authorityUnavailableResponse(res);
 }
 
+const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
+  'finalized-name-absence-unaccepted',
+  'chain-name-binding-unavailable',
+  'registered-authority-error',
+  'authority-circuit-open',
+  'local-chain-binding-unavailable',
+  'local-existence-unavailable',
+  'chain-access-policy-unavailable',
+  'chain-access-policy-timeout',
+  'chain-access-policy-unknown',
+  'chain-participant-authority-unavailable',
+  'chain-participant-authority-unsupported',
+  'chain-participant-authority-invalid',
+  'remote-local-authority-unaccepted',
+  'rfc64-private-read-roster-unavailable',
+  'no-read-authority',
+]);
+
 /** The retryable 503 for an admission read that could not be completed. */
 function authorityUnavailableResponse(res: ServerResponse): void {
   return jsonResponse(
@@ -2007,6 +2025,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     if (readAuthority.outcome === 'unavailable') {
+      // The public response remains generic, but the operator needs the typed
+      // authority dependency to distinguish a missing seed from a chain read
+      // outage. Never log the graph name or caller identity here.
+      const reason = SUBSCRIBE_AUTHORITY_LOG_REASONS.has(readAuthority.reason)
+        ? readAuthority.reason : 'other';
+      console.warn(`[context-graph-subscribe] authority unavailable: reason=${reason}`
+        + ` dependency=${readAuthority.dependency}`);
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     // A private graph named by its on-chain id: one decision, with one answer
@@ -2108,6 +2133,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         readiness: readinessBeforeCatchup,
         includeSharedMemory: shouldSyncSharedMemory,
         hasConfirmedMeta: hasConfirmedExistingMeta,
+        registration: readAuthority.registration,
       });
       if (existingReadiness.alreadyReady && !forceCatchup) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
@@ -2141,6 +2167,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             contextGraphId,
             includeWorkspace: shouldSyncSharedMemory,
             status: "done",
+            durablePlane: readAuthority.registration === 'unregistered' ? 'not-applicable' : 'required',
             queuedAt: Date.now(),
             startedAt: Date.now(),
             finishedAt: Date.now(),
@@ -2313,21 +2340,32 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         } else {
           const inspectReadiness = catchupResultHasCleanResponse(result);
           const hasConfirmedMeta = inspectReadiness
-            ? await agent.hasConfirmedMetaState(targetContextGraphId).catch(() => false)
-            : false;
+            ? await agent.hasConfirmedMetaState(targetContextGraphId).catch(() => undefined)
+            : undefined;
           const isPrivate = hasConfirmedMeta
             ? await agent.isPrivateContextGraph(targetContextGraphId).catch(() => true)
             : false;
+          // A catch-up can outlive its admission's absence proof or member
+          // delegation. Re-derive unregistered applicability at completion;
+          // registration, revocation, and outages must not reuse an old N/A.
+          const completionAuthority = readAuthority.registration === 'unregistered'
+            ? await agent.resolveContextGraphSubscriptionBootstrapAuthority(targetContextGraphId, {
+              callerAgentAddress: callerAddr,
+              allowSubscriptionFallback: false,
+            }).catch(() => ({ outcome: 'unavailable' as const, registration: undefined }))
+            : readAuthority;
           const classification = classifyContextGraphCatchupReadiness({
             result,
             includeSharedMemory: shouldSyncSharedMemory,
             hasConfirmedMeta,
             isPrivate,
+            completionAuthority,
             readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
               ? readinessBeforeCatchup
               : readContextGraphReadiness(dashDb, targetContextGraphId),
           });
 
+          job.durablePlane = classification.durablePlane;
           job.status = classification.jobStatus;
           job.error = classification.error;
           if (classification.readinessPatch) {

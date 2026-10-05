@@ -41,6 +41,7 @@ import {
   assertContextGraphIdV1, assertNetworkIdV1,
   type ContextGraphIdV1, type NetworkIdV1,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  validateContextGraphId,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -234,7 +235,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -387,6 +388,7 @@ import {
   ContextGraphReadAuthorityUnavailableError,
   contextGraphReadAuthorityDependencyOf,
   resolveContextGraphReadAuthorityDecision,
+  resolveContextGraphReadAuthorityResolution,
   unavailableContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -561,6 +563,25 @@ export class QueryMethods extends DKGAgentBase {
         }),
       );
       if (scopedReadAuthority.outcome === 'unavailable') {
+        // An exact finalized name absence or a transient authority-circuit
+        // failure cannot expose data when this node has no local declaration,
+        // subscription, or graph. Return an empty scoped result without
+        // touching the store's graph partitions. A replica that has local
+        // data or join intent remains on the retryable authority path.
+        // The id comes straight from the caller: a malformed one never gets
+        // this answer, so the reply cannot depend on the existence check.
+        if (
+          (
+            scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
+            || scopedReadAuthority.reason === 'authority-circuit-open'
+          )
+          && validateContextGraphId(scopedContextGraphId).valid
+          && !this.subscribedContextGraphs.has(scopedContextGraphId)
+          && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
+          && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
+        ) {
+          return emptyQueryResultForKind(sparql);
+        }
         throw new ContextGraphReadAuthorityUnavailableError(
           opts.contextGraphId,
           scopedReadAuthority,
@@ -747,12 +768,20 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
       /** Read-only gates may consume the finalized snapshot; defaults to `live-current`. */
       authorityReadMode?: ContextGraphAuthorityReadMode;
+      /**
+       * Receives the decision the answer is taken from, for a caller that has
+       * to tell a denial from an authority source that could not answer.
+       */
+      onReadAuthorityDecision?: (decision: ContextGraphReadAuthorityDecision) => void;
     } = {},
   ): Promise<boolean> {
-    return (await withRpcUsageSite(
+    const { onReadAuthorityDecision, ...readOpts } = opts;
+    const decision = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.canRead,
-      () => this.resolveContextGraphReadAuthority(contextGraphId, opts),
-    )).outcome === 'allowed';
+      () => this.resolveContextGraphReadAuthority(contextGraphId, readOpts),
+    );
+    onReadAuthorityDecision?.(decision);
+    return decision.outcome === 'allowed';
   }
 
   /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */
@@ -849,21 +878,25 @@ export class QueryMethods extends DKGAgentBase {
         async (signal) => {
           const boundedOpts = { ...opts, signal };
           const resolve = async () => {
-            const authority = await resolveContextGraphReadAuthorityDecision(
-              QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
-                this,
-                contextGraphId,
-                boundedOpts,
-                {
-                  registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-                  authorityReadMode: 'live-current',
-                  hasAcceptedRfc64PublicPolicy:
-                    this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
-                      ? true
-                      : undefined,
-                },
-              ),
+            const input = QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+              this,
+              contextGraphId,
+              boundedOpts,
+              {
+                registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+                authorityReadMode: 'live-current',
+                hasAcceptedRfc64PublicPolicy:
+                  this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                    ? true
+                    : undefined,
+              },
             );
+            // Carry applicability from the SAME canonical registration read
+            // that authorizes this caller. A nullable id or local RDF marker
+            // cannot substitute for it. Do not persist this absence: the next
+            // admission/catch-up completion must resolve it afresh.
+            const resolution = await resolveContextGraphReadAuthorityResolution(input);
+            const authority = resolution.decision;
             // A remote graph can be visible before its new chain binding is
             // indexed and before its local definition arrives. During that
             // interval the legacy fallback can mistake absent local policy
@@ -886,13 +919,35 @@ export class QueryMethods extends DKGAgentBase {
                 'local-state',
               );
             }
-            return authority;
+            return authority.outcome === 'allowed' && resolution.registration !== undefined
+              ? { ...authority, registration: resolution.registration }
+              : authority;
           };
           const initial = await resolve();
           if (
             initial.outcome !== 'unavailable'
             || initial.reason !== 'finalized-name-absence-unaccepted'
           ) return initial;
+          // A private join carries a mutable requester generation. If its
+          // source-qualified proof failed this admission attempt, do not
+          // replace that answer with a later catalog refresh that could read
+          // a different generation. The next request rechecks the join, while
+          // the independent authority refresh loop may accept its stable
+          // catalog generation in the meantime.
+          //
+          // Join intent alone does not say the graph is private: signing a
+          // join request records it for public graphs too, and before any
+          // metadata arrives. Only a graph whose own `_meta` declares it
+          // private is governed by the join proof. Any other graph keeps the
+          // signed-seed path below, or a public join could never bootstrap.
+          if (this.localApprovedAgentByCG?.has(contextGraphId)) {
+            const declaredPrivate = await this.getOwnCgMetaFacts(contextGraphId, { signal }).then(
+              (ownMeta) => ownMeta.accessPolicy?.trim().toLowerCase() === 'private',
+              // Unreadable metadata cannot rule the join proof out.
+              () => true,
+            );
+            if (declaredPrivate) return initial;
+          }
 
           // The finalized index proved exact absence, but a replica cannot
           // consume that fact until it authenticates the owner-signed policy
@@ -1040,8 +1095,14 @@ export class QueryMethods extends DKGAgentBase {
             ...(opts.durableSubscriptionBinding === undefined
               ? {}
               : { durableSubscriptionBinding: opts.durableSubscriptionBinding }),
+            // A policy accepted from a join approval must not answer for
+            // the approval itself: without the allowance the registry runs
+            // the join proof on every read, so an expired delegation or a
+            // replaced request keeps failing closed.
             allowAcceptedRfc64FinalizedAbsence:
-              this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
+              this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true
+              && this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) !== true,
+            allowApprovedPrivateReplicaFinalizedAbsence: true,
             authorityReadMode,
             // READ authorization, and therefore correctable by the next read.
             // A roster this node has not caught up on denies a member who was
@@ -1120,6 +1181,10 @@ export class QueryMethods extends DKGAgentBase {
         );
         if (current !== null) {
           if (current.policy.accessPolicy !== 1) return undefined;
+          // A join-derived roster never authorizes a read on its own.
+          if (this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) === true) {
+            return undefined;
+          }
           if (current.roster === null) return null;
           return Object.freeze(
             current.roster.members.map(({ agentAddress }) => agentAddress),

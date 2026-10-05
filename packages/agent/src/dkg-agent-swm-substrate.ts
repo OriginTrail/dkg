@@ -239,7 +239,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import {
   createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
   reconcileFinalizedSwmTwinFromCatalogProjection,
@@ -465,6 +465,33 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // through here too. The request is O(1) and does its checks detached.
     this.requestOnDemandAgentsPhonebook(contextGraphId, 'subscribe');
     return subscription;
+  }
+
+  /** Apply the process-local remainder of the startup subscription plan. */
+  applyStartupContextGraphGossipPlan(this: DKGAgent): number {
+    const session = this.gossipSession;
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    let restored = 0;
+    for (const [contextGraphId, intent] of session.startupLiveIntents) {
+      const subscription = this.subscribedContextGraphs.get(contextGraphId);
+      if (!session.active || subscription?.subscribed !== true || subscription.pendingMeta
+        || systemContextGraphs.has(contextGraphId) || session.gossipRegistered.has(contextGraphId)) continue;
+      try {
+        this.subscribeToContextGraph(contextGraphId, {
+          trackSyncScope: false,
+          persist: false,
+          syncMode: intent.syncMode,
+        });
+        restored += 1;
+      } catch (err) {
+        this.log.warn(
+          createOperationContext('system'),
+          `Failed to re-arm gossip for "${contextGraphId}" after restart: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    session.startupLiveIntents.clear();
+    return restored;
   }
 
   /**
@@ -860,6 +887,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
+    const session = this.gossipSession;
+    const live = session.live();
+    if (live === null) return;
     // Retired name-hash id: skip. It shares the wire topic and host-mode key
     // with the cleartext row, and a topic-wide unsubscribe here would drop
     // that row's handler (see supersedingContextGraphIdFor).
@@ -871,9 +901,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       );
       return;
     }
-    // Reconcile is the membership boundary; rebuild this CG's policy view
-    // before deciding whether to keep or drop the SWM subscription.
-    this.contextGraphMetaProjection.markDirty(contextGraphId);
+    // Reconcile is the membership boundary: decide on a rebuilt policy view.
+    // It writes no authority fact, so the authority revisions stay as they are.
+    this.contextGraphMetaProjection.requireFreshRead(contextGraphId);
     // OT-RFC-38 / LU-6 Phase B — subscribe on the wire-form (hash) topic.
     // Members compute the hash from their local cleartext id via
     // {@link gossipWireIdFor}; cores hosting CGs they never joined
@@ -882,7 +912,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // identity for them.
     const wireCgId = this.gossipWireIdFor(contextGraphId);
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
-    const isRegistered = this.sharedMemoryGossipRegistered.has(contextGraphId);
+    const isRegistered = session.sharedMemoryGossipRegistered.has(contextGraphId);
     const ctx = createOperationContext('system');
     if (!this.rfc64LegacySwmMemberTransportAllowedForContextGraph(contextGraphId)) {
       // This is the member-mode transport boundary. An unsubscribed selected
@@ -892,12 +922,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // GossipSubManager.unsubscribe() is topic-wide, so clear both member
         // and host bookkeeping before returning. A future live subscription
         // may explicitly restore the scope-filtered member handler.
-        this.gossip.unsubscribe(swmTopic);
-        this.sharedMemoryGossipRegistered.delete(contextGraphId);
+        live.manager.unsubscribe(swmTopic);
+        session.sharedMemoryGossipRegistered.delete(contextGraphId);
         const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-        this.swmHostModeSubscribed.delete(hostKey);
-        this.swmHostModeCurated.delete(hostKey);
-        this.swmHostModeHandlers.delete(hostKey);
+        session.swmHostModeSubscribed.delete(hostKey);
+        session.swmHostModeCurated.delete(hostKey);
+        session.swmHostModeHandlers.delete(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
       } else {
         // Remove a host-only handler surgically when no member handler owns the
@@ -906,7 +936,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       }
       return;
     }
-    if (!(await this.canUseSharedMemoryForContextGraph(contextGraphId))) {
+    const canUseSharedMemory = await this.canUseSharedMemoryForContextGraph(contextGraphId);
+    if (!session.active || this.gossipSession !== session) return;
+    if (!canUseSharedMemory) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
         // not just the member-mode one. If this core was already
@@ -938,17 +970,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // final on-disk state always matches the final in-memory
         // intent — no possible interleave where the "false" lands
         // after a later "true" and re-subscribes on next boot.
-        this.gossip.unsubscribe(swmTopic);
-        this.sharedMemoryGossipRegistered.delete(contextGraphId);
+        live.manager.unsubscribe(swmTopic);
+        session.sharedMemoryGossipRegistered.delete(contextGraphId);
         // Host-mode maps are canonical-keyed (wire-form hash); delete
         // by canonical id so this cleanup hits the entry regardless
         // of which discovery path wired it. Without this, the
         // immediate `reconcileSwmHostModeSubscription()` call below
         // would see a stale entry and early-return.
         const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-        this.swmHostModeSubscribed.delete(hostKey);
-        this.swmHostModeCurated.delete(hostKey);
-        this.swmHostModeHandlers.delete(hostKey);
+        session.swmHostModeSubscribed.delete(hostKey);
+        session.swmHostModeCurated.delete(hostKey);
+        session.swmHostModeHandlers.delete(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
         this.log.warn(ctx, `SWM gossip unsubscribed for "${contextGraphId}": local node is no longer authorized`);
       } else {
@@ -973,9 +1005,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // process every envelope (apply + opaque append).
     this.unwireSwmHostModeHandler(contextGraphId);
 
-    this.sharedMemoryGossipRegistered.add(contextGraphId);
-    this.gossip.subscribe(swmTopic);
-    this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
+    session.sharedMemoryGossipRegistered.add(contextGraphId);
+    live.manager.subscribe(swmTopic);
+    live.manager.onMessage(swmTopic, async (_topic, data, from) => {
+      if (!session.active) return;
       const wh = this.getOrCreateSharedMemoryHandler();
       const outcome = await wh.handle(data, from);
       // Emit SwmShareAck on gossip-applied shares so the
@@ -1272,7 +1305,28 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
-        contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
+        contextGraphMetaOracle: async (cgId: string) => {
+          // The approved-private proof authorizes this receiver only. Another
+          // member can be revoked after the metadata snapshot but before that
+          // proof finishes without invalidating the receiver's proof. Retry
+          // one changed snapshot so the ordinary revoke race does not drop an
+          // otherwise valid envelope, then fail closed under continued churn.
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+            const meta = await this.getCgMeta(cgId);
+            const allowedPeers =
+              await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
+            if (
+              this.contextGraphMetaProjection.readAuthorityFactsRevision
+                === metadataRevision
+            ) {
+              return allowedPeers === undefined ? meta : { ...meta, allowedPeers };
+            }
+          }
+          throw new Error(
+            `Context graph "${cgId}" metadata authority kept changing while resolving its SWM gate`,
+          );
+        },
         // Same predicate the SENDER uses to decide plaintext vs encrypted SWM
         // (`resolveWorkspaceRecipientsGated`), so both sides of the wire stay
         // on one authority. Without it the receiver judged from local
@@ -1492,7 +1546,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   getOrCreateCGMemberEnumerator(this: DKGAgent): CGMemberEnumerator {
     if (!this.cgMemberEnumerator) {
       this.cgMemberEnumerator = createCGMemberEnumerator({
-        getContextGraphAllowedPeers: (cgId) => this.getContextGraphAllowedPeers(cgId),
+        getContextGraphAllowedPeers: (cgId) =>
+          this.resolveSwmAllowedPeersForCurrentAuthority(cgId),
         getContextGraphAllowedAgentPeers: (cgId) => this.resolvePrivateSwmAgentPeerRoster(cgId),
         isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
@@ -2063,8 +2118,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
           workspaceWriteLocks: this.writeLocks,
-          retireConfirmedGraphScopedSwmTwinIfOrphaned:
-            createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+          retireConfirmedGraphScopedSwmTwinIfOrphaned: (() => {
+            const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
               store: this.store,
               writeLocks: this.writeLocks,
               retire: async (candidate, ctx) => {
@@ -2083,7 +2138,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
                 );
               },
               onTornHeadRemoved: (message, ctx) => this.log.warn(ctx, message),
-            }),
+            });
+            return async (candidate, ctx) => {
+              await retireOrphaned(candidate, ctx);
+              await this.retireLegacySwmAfterVerifiedVmTwin({
+                contextGraphId: candidate.contextGraphId,
+                kaUal: candidate.ual,
+                assertionVersion: candidate.assertionVersion,
+                subGraphName: candidate.subGraphName,
+              });
+            };
+          })(),
           reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
             const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({
               store: this.store,
@@ -2092,6 +2157,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
               retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
             });
             if (retirement === 'retired') {
+              await this.retireLegacySwmAfterVerifiedVmTwin({
+                contextGraphId: evidence.contextGraphId,
+                kaUal: evidence.kaUal,
+                assertionVersion: evidence.assertionVersion,
+                subGraphName: evidence.subGraphName,
+              });
               this.invalidateListContextGraphsCache();
               this.log.info(
                 ctx,

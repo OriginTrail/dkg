@@ -44,6 +44,7 @@ import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
   classifyRpcRetryDisposition,
+  rethrowInterruptedInitialization,
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   resolveRpcUrls,
@@ -58,7 +59,6 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
 import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -66,8 +66,8 @@ import {
 import {
   RpcFailoverClient,
   createRpcReadDescriptor,
+  rpcReadDescriptor,
   type ReadOpts,
-  type RpcReadDescriptor,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
@@ -76,6 +76,7 @@ import {
   withRpcUsageConsumer,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import {
@@ -107,6 +108,7 @@ import { ContextGraphRegistryRepairCoordinator } from
   './context-graph-registry-repair-coordinator.js';
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
+import { BackgroundContractReadBatching } from './evm-background-read-batching.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type {
@@ -147,24 +149,6 @@ type SerializedSignerWriteContext = {
   /** Refresh the lane-health clock after a meaningful write-stage boundary. */
   markProgress: () => void;
 };
-
-/**
- * Bind an adapter read's human label and telemetry owner together.
- *
- * Kept as a module helper so it does not become part of the concrete adapter's
- * prototype API (the mock-adapter parity test intentionally enumerates that
- * surface).
- */
-function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
-  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
-  return createRpcReadDescriptor(label, consumer);
-}
-
-function rethrowInterruptedInitialization(error: unknown): void {
-  activeRpcRequestAbortSignal()?.throwIfAborted();
-  // Local refusal is not proof that an optional contract is absent.
-  if (isRpcRequestGovernorQueueFullError(error)) throw error;
-}
 
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
@@ -690,6 +674,8 @@ export class EVMChainAdapterBase {
    * the adapter and never owns tx-safety state.
    */
   protected readonly rpcFailover: RpcFailoverClient;
+  /** Background views coalesced into one Multicall3 request (see `evm-background-read-batching.ts`). */
+  protected readonly backgroundReadBatching: BackgroundContractReadBatching;
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
@@ -1483,6 +1469,12 @@ export class EVMChainAdapterBase {
         stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
       },
     );
+    this.backgroundReadBatching = new BackgroundContractReadBatching({
+      readContract: (descriptor, contract, fn, opts) => this.rpcFailover.readContract(descriptor, contract, fn, opts),
+      readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
+      // Resolved here at the config boundary, live per read, like the stickiness switch.
+      isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',
+    });
     this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
       config.chainEventLogStore,
       (error) => {
@@ -1801,12 +1793,16 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(
+    const direct = (): Promise<T> => this.rpcFailover.readContract(
       rpcReadDescriptor(label, opts),
       contract,
       (c) => c[method](...args),
       opts,
     );
+    // A background read of a batchable view leaves with the others waiting
+    // for the request budget. Anything else is issued as it always was.
+    return this.backgroundReadBatching.tryRead<T>({ contract, label, method, args, opts, direct })
+      ?? direct();
   }
 
   /** Canonical KAS update-context ABI read shared by storage and publish mixins. */
@@ -1944,7 +1940,7 @@ export class EVMChainAdapterBase {
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
-        (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
+        (lastError ? ` (last RPC error: ${hostOnlyRpcText(errorMessage(lastError))})` : ''),
     });
   }
 
@@ -2150,9 +2146,12 @@ export class EVMChainAdapterBase {
         await onBroadcast?.({ txHash: preBroadcastTxHash, nonce });
         ctx.markProgress();
       } catch (hookErr) {
-        throw new Error(
+        // Same message as ever, with the hook's own error kept as `cause` (GH#2940): a caller
+        // that needs to know WHY its durable write-ahead failed must not have to parse text.
+        throw new ChainWriteAheadHookError(
           `chain:writeahead hook failed before ${label} broadcast: ` +
           `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+          hookErr,
         );
       }
       // The nonce-critical lane ends when an endpoint accepts these exact
@@ -3210,7 +3209,7 @@ export class EVMChainAdapterBase {
       // its original shape.
       if (classifyRpcRetryDisposition(err) === 'failover') {
         throw new RpcEndpointsExhaustedError(
-          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
+          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${hostOnlyRpcText(errorMessage(err))}`,
           { cause: err, rpcUrls: this.rpcUrls },
         );
       }
@@ -3980,7 +3979,7 @@ export class EVMChainAdapterBase {
     }
     throw new Error(
       `${operationLabel}: eth_getCode for ${contractLabel} ${address} at block ${block} ` +
-        `failed after 3 attempts: ${errorMessage(lastErr)}`,
+        `failed after 3 attempts: ${hostOnlyRpcText(errorMessage(lastErr))}`,
       { cause: lastErr },
     );
   }

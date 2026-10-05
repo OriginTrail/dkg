@@ -27,10 +27,8 @@
 import type { RequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
-  isPayloadTooLargeError,
   jsonResponse,
   oversizedRdfLiteralResponseBody,
-  payloadTooLargeResponseBody,
   readBody,
   safeParseJson,
   validateEntities,
@@ -78,16 +76,12 @@ import {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
   PromoteJobConflictError,
-  PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
   isKnowledgeAssetWorkspaceHeadCorruptError,
 } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   validateAssertionName,
   contextGraphAssertionUri,
-  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
-  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
-  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
 } from "@origintrail-official/dkg-core";
 import {
   formatFinalizedPublishOptionError,
@@ -96,6 +90,14 @@ import {
 } from "../../finalized-publish-options.js";
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 import { authenticatedAgentAddress } from '../../auth.js';
+
+import {
+  respondAssertionError,
+  respondPromoteRecoveryError,
+  respondAmbiguousAssertionAuthor,
+  respondAuthorSelectionError,
+  respondPublicationPricingPolicyError,
+} from './knowledge-assets-error-mapping.js';
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -173,178 +175,7 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
   "schemeVersion",
 ] as const;
 
-/**
- * GH#1778 — shared 409 mapping for the ambiguous-author VM-publish error, used
- * by both `vm/publish` and `vm/publish-async` so the `{ code, error, candidates }`
- * response shape cannot drift between the two routes. Returns `true` (and writes
- * the response) when it handled the error, `false` otherwise.
- */
-function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): boolean {
-  if (e?.code !== AMBIGUOUS_ASSERTION_AUTHOR_CODE) return false;
-  jsonResponse(res, 409, {
-    code: AMBIGUOUS_ASSERTION_AUTHOR_CODE,
-    error: e.message ?? String(e),
-    candidates: e.candidates ?? [],
-  });
-  return true;
-}
 
-/**
- * GH#1786 — author-selection outcomes that are permanent, caller-actionable
- * state rather than server faults. Unmapped they would fall through to a generic
- * 500 on both publish lanes; they are answered here, and are matched BEFORE the
- * precondition / message-keyed branches so a future reword of either message
- * cannot be captured by those looser predicates.
- *
- *  - `ASSERTION_AUTHOR_NOT_RESIDENT`: the selected author has no finalized
- *    assertion at this coordinate. Echoes the resident `candidates` so the client
- *    can retry without a second round-trip.
- *  - `PUBLISH_AUTHOR_NOT_CUSTODIAL`: the selected author's KA needs an UPDATE,
- *    which the node cannot re-sign without that author's custodial key.
- */
-function respondAuthorSelectionError(res: RequestContext["res"], e: any): boolean {
-  if (
-    e?.code !== ASSERTION_AUTHOR_NOT_RESIDENT_CODE
-    && e?.code !== PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
-  ) {
-    return false;
-  }
-  jsonResponse(res, 409, {
-    code: e.code,
-    error: e.message ?? String(e),
-    ...(e.candidates ? { candidates: e.candidates } : {}),
-  });
-  return true;
-}
-
-function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any): boolean {
-  if (e?.code !== PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE) return false;
-  jsonResponse(res, 409, {
-    code: e.code,
-    error: e.message ?? String(e),
-  });
-  return true;
-}
-
-interface PromoteRecoveryContext {
-  contextGraphId: string;
-  name: string;
-  phase: string;
-  subGraphName?: string;
-}
-
-function respondPromoteRecoveryError(
-  res: RequestContext["res"],
-  e: any,
-  context?: PromoteRecoveryContext,
-): boolean {
-  if (e?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') return false;
-  process.stderr.write(`[DKG-Daemon] ${JSON.stringify({
-    event: 'knowledge_asset_recovery_required',
-    code: e.code,
-    ...context,
-  })}\n`);
-  jsonResponse(res, 409, {
-    code: e.code,
-    error: sanitizeRpcMessage(e.message ?? String(e)),
-    retryAction: 'resume_existing_knowledge_asset',
-    retryPhase: 'swm-share',
-    ...(context ? {
-      contextGraphId: context.contextGraphId,
-      retryKnowledgeAssetName: context.name,
-      ...(context.subGraphName ? { subGraphName: context.subGraphName } : {}),
-    } : {}),
-  });
-  return true;
-}
-
-/**
- * Map caller preconditions on WM/SWM operations to actionable 4xx responses.
- * VM publishing keeps its own mapping so chain failures remain server errors.
- */
-function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
-  if (respondPromoteRecoveryError(res, e, context)) return;
-  if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
-    jsonResponse(res, 409, { code: e.code, error: e.message });
-    return;
-  }
-  if (e?.code === "OVERSIZED_RDF_LITERAL") {
-    jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
-    return;
-  }
-  if (isPayloadTooLargeError(e)) {
-    jsonResponse(res, 413, payloadTooLargeResponseBody(e));
-    return;
-  }
-  if (respondIfStoreUnavailable(res, e)) return;
-  if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
-    jsonResponse(res, 409, {
-      error: e.message,
-      code: "ASSERTION_NOT_PERSISTED",
-      contextGraphId: e.contextGraphId,
-      assertionGraph: e.assertionGraph,
-      expectedTripleCount: e.expectedTripleCount,
-    });
-    return;
-  }
-  // Strict curator-ack gate (OT-RFC-49 curator-leader) on the WM→SWM promote
-  // (swm/share). The curator (authoritative replica) did not confirm, so the
-  // promote was aborted with WM left intact — surface a distinct, actionable
-  // status instead of a 500. The client is TOLD, never silently led to success.
-  if (e?.code === "CURATOR_UNCONFIRMED") {
-    jsonResponse(res, 503, {
-      error: e.message,
-      code: "CURATOR_UNCONFIRMED",
-      curatorDelivery: "unconfirmed",
-      contextGraphId: e.contextGraphId,
-    });
-    return;
-  }
-  if (e?.code === "CURATOR_REJECTED") {
-    jsonResponse(res, 409, {
-      error: e.message,
-      code: "CURATOR_REJECTED",
-      curatorDelivery: "rejected",
-      contextGraphId: e.contextGraphId,
-    });
-    return;
-  }
-  // GH#1759 — the draft has no sealable content (no quads at all, or only
-  // reserved-namespace subjects that are filtered out before SWM). That is a
-  // client precondition the caller can fix by writing a quad, not a server
-  // fault, so it gets the same actionable 409 the rest of this route family
-  // uses rather than an opaque 500. Code-keyed, so the mapping does not drift
-  // when the engine's wording changes.
-  if (e?.code === "ASSERTION_EMPTY") {
-    jsonResponse(res, 409, {
-      error: e.message,
-      code: "ASSERTION_EMPTY",
-    });
-    return;
-  }
-  // KA-number-floor reconcile couldn't reach the chain (e.g. a rate-limited RPC
-  // 429'd the one-time-per-author read) -> retryable 503, not 500.
-  if (respondIfReconcileUnavailable(res, e)) return;
-  // Transient chain-RPC transport failure (all endpoints exhausted / receipt
-  // lookup failed / timeout) -> retryable 503/504, keyed on err.code so a
-  // genuine on-chain revert (no transport code) still falls through to the
-  // 4xx/500 mapping below. Code-keyed check precedes the message-keyed 400
-  // branch so an exhaustion message that happens to contain "not found"
-  // (e.g. "header not found") is not mis-mapped to a 400.
-  if (respondIfChainRpcTransportError(res, e)) return;
-  const msg = e?.message ?? String(e);
-  if (
-    e?.name === "ReservedNamespaceError" ||
-    msg.includes("not found") ||
-    msg.includes("Invalid") ||
-    msg.includes("Unsafe") ||
-    msg.includes("reserved namespace")
-  ) {
-    jsonResponse(res, 400, { error: msg });
-    return;
-  }
-  jsonResponse(res, 500, { error: msg });
-}
 
 function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
@@ -1155,6 +986,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // attribution on the atomic create+finalize path, mirroring the dedicated
         // wm/finalize route's response.
         result.authorAddress = seal.authorAddress;
+        if (seal.assertionVersion !== undefined) result.assertionVersion = seal.assertionVersion;
+        if (seal.kaUal !== undefined) result.kaUal = seal.kaUal;
         result.status = "wm-sealed";
         emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
       }
@@ -1481,6 +1314,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           chainId: seal.chainId?.toString?.(),
           kav10Address: seal.kav10Address,
           eip712Digest: seal.eip712Digest,
+          // GH#2958 — the number this draft will be published as, and the KA it belongs to
+          // (the same fields the vm/publish-async 202 reports once the share has closed).
+          ...(seal.assertionVersion !== undefined ? { assertionVersion: seal.assertionVersion } : {}),
+          ...(seal.kaUal !== undefined ? { kaUal: seal.kaUal } : {}),
         });
       }
       if (verb === "discard") {
@@ -1769,6 +1606,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
+            // GH#2942 - WHY this job is held (what its record lacks, or whether this node can act on
+            // it), in the vocabulary `retryState.blocker` uses. Additive: the prose above and
+            // `retryable` keep their meaning, and a thrower with no blocker simply omits the key.
+            ...(err.blocker ? { blocker: err.blocker } : {}),
           });
         }
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
@@ -1906,6 +1747,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (respondPublicationPricingPolicyError(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;
+        // GH#2958 — the finalized version is not the next publishable one (the async lane maps
+        // the same code at enqueue). Raised by update() before anything was staged or sent, so
+        // 409 is safe; a 500 would invite a blind retry of a deterministic precondition.
+        if (e?.code === "PUBLISH_INTENT_STALE") {
+          return jsonResponse(res, 409, { code: "PUBLISH_INTENT_STALE", error: msg });
+        }
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }

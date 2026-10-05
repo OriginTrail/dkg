@@ -66,7 +66,6 @@ const execFileAsync = promisify(execFile);
 import {
   buildEvmDeploymentId,
   MockChainAdapter,
-  mergeRpcUsageWindows,
   snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -82,7 +81,7 @@ import {
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
@@ -104,18 +103,6 @@ import {
   shutdownTelemetry,
   flushTelemetry,
   LlmClient,
-  SqliteMessageIdempotencyStore,
-  SqliteProtocolOutboxStore,
-  SqliteSyncCheckpointStore,
-  SqliteChangelogCursorStore,
-  SqliteChangelogEraGuard,
-  SqliteChainEventCursorStore,
-  SqliteChainEventLogStore,
-  SqliteContextGraphAuthorityIndexStore,
-  SqliteContextGraphAuthorityHistoryStore,
-  SqliteContextGraphRegistryScanCursorStore,
-  SqliteContextGraphStorageDiscoveryStore,
-  SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
 import {
@@ -204,13 +191,13 @@ import {
   createTelemetryRuntime,
 } from './telemetry-runtime.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
-import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { createDaemonRpcTelemetrySource, startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
+import { handleSharedMemoryTtlSettingsRequest } from './shared-memory-ttl-route.js';
+import { nodeUiTokenForRequest } from './node-ui-access.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
-import {
-  decodeVmReconcileNegativeRow,
-  encodeVmReconcileNegativeRow,
-} from './vm-reconcile-negative-store-adapter.js';
+import { createProtocolStores } from './protocol-persistence.js';
+
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
@@ -221,7 +208,7 @@ import {
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
-import { authenticateHttpRequest, loadTokens } from '../auth.js';
+import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -326,7 +313,6 @@ import {
 } from './shutdown-wait.js';
 import {
   resolveNameToPeerId,
-  jsonResponse,
   safeDecodeURIComponent,
   safeParseJson,
   validateOptionalSubGraphName,
@@ -334,12 +320,10 @@ import {
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
-  SMALL_BODY_BYTES,
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
   buildImportFileResponse,
   unregisteredSubGraphError,
-  readBody,
   readBodyBuffer,
   buildCorsAllowlist,
   resolveCorsOrigin,
@@ -1833,12 +1817,6 @@ async function runDaemonInnerWithStartupOwnership(
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
   const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
-  const publicSnapshotStore = createPublicSnapshotStore(
-    dkgDir(),
-    { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
-    snapshotPageIndexStore,
-    log,
-  );
   const chainCursorScope = chainBase?.type === 'mock'
     ? (chainBase.chainId ?? 'mock:31337')
     : chainBase?.hubAddress
@@ -1880,67 +1858,17 @@ async function runDaemonInnerWithStartupOwnership(
     }
   }
 
-  // Universal Messenger substrate stores (rc.9 PR-2). Wired into the
-  // DKGAgent's Messenger so any caller that opts into
-  // `messenger.sendReliable` gets durable receiver-side idempotency
-  // + sender-side outbox retries against the shared DashboardDB.
-  // No caller exercises this path until PR-3 (chat + skill migration);
-  // wiring early keeps Milestone A trivially deployable + soak-testable.
-  const messengerIdempotencyStore = new SqliteMessageIdempotencyStore(dashDb);
-  const messengerOutboxStore = new SqliteProtocolOutboxStore(dashDb, {
-    maxAgeMs: DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
-    backoffFor: (attempts) => {
-      const idx = Math.min(
-        Math.max(attempts - 1, 0),
-        DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS.length - 1,
-      );
-      return DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[idx];
-    },
+  // Protocol persistence: the Universal Messenger substrate stores, sync and
+  // changelog cursors, chain cursors, the chain-event log, authority stores and
+  // the KA-number sequence. They live in `@origintrail-official/dkg-node-store`
+  // and are composed over the shared DashboardDB handle in `protocol-persistence.ts`.
+  const protocolStores = createProtocolStores(dashDb, {
+    chainCursorScope,
+    changelogEnabled: Boolean(config.store?.changelog),
   });
-  const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
-  const changelogCursorStore = new SqliteChangelogCursorStore(dashDb);
-  // OT-RFC-59 §6 P0: the durable era guard MUST back the changelog when enabled —
-  // it lives in node-ui.db (survives a `store.nq` RDF restore) so a restore/rollback
-  // rotates the era and forces peers to full-resync instead of silently skipping.
-  const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
-  const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
-  const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
-  // Historical Context Graph discovery: ContextGraphStorage enumeration cursor
-  // plus the chain facts below it, scoped like the event cursors so a node home
-  // reused across networks never replays another deployment's catalog.
-  const contextGraphStorageDiscoveryStore = new SqliteContextGraphStorageDiscoveryStore(
-    dashDb,
-    { scope: chainCursorScope },
-  );
-  // DashboardDB is process-owned local state under the same integrity boundary
-  // as the node identity/configuration. Authority generations cannot be proven
-  // from a watermark hash alone, so this composition-root admission is
-  // deliberately explicit rather than inferred from a structural store type.
-  const localContextGraphAuthorityHistoryStore =
-    new SqliteContextGraphAuthorityHistoryStore(dashDb);
-  const localContextGraphAuthorityIndexStore =
-    new SqliteContextGraphAuthorityIndexStore(dashDb);
-  // THE node's one chain log. Handed to the agent's chain adapter ONLY: that
-  // adapter builds the tick, starts it, and publishes the binding every other
-  // eligible reader consults. Per-wallet publisher adapters receive only a
-  // late-bound binding getter below — never this store — because a second store
-  // would be a second scanner, which is what this log exists to delete.
-  const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
-
-  // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
-  // Durable per-author KA-number sequence backing the off-chain
-  // `KaNumberAllocator`. Constructed here (alongside the other durable
-  // substrate stores) so the V20 `ka_numbers` table is opened and its
-  // sequence is co-located with the rest of the node's persistent state.
-  //
-  // OT-RFC-43 Option 1: the publisher allocates a deterministic packed
-  // reservedKaId per V10 mint (DKGPublisher.ensureReservedKaId) and lazily
-  // reconciles each author's floor against the chain's highest minted number on
-  // first use (chain.getMaxKaNumberForAuthor), satisfying the RFC §4.5 cold-start
-  // guard. (A blocking startup reconciliation sweep + the ongoing
-  // KnowledgeAssetCreated poller→reconcile wiring remain a hardening follow-up.)
-  const kaNumberStore = new SqliteKaNumberStore(dashDb);
-  const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
+  // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core): the
+  // off-chain allocator over the durable per-author KA-number sequence.
+  const kaNumberAllocator = new KaNumberAllocator(protocolStores.kaNumberStore);
 
   // Mint managed authority only after the complete agent config has been
   // assembled. Passing the start-up result through an ordinary object literal
@@ -1949,7 +1877,7 @@ async function runDaemonInnerWithStartupOwnership(
     runtimeStore,
     managedStore: managed?.storeConfig,
     changelogEnabled: Boolean(config.store?.changelog),
-    changelogEraGuard,
+    changelogEraGuard: protocolStores.changelogEraGuard,
   });
 
   const agentConfig: DKGAgentConfig = {
@@ -2006,7 +1934,10 @@ async function runDaemonInnerWithStartupOwnership(
     storeConfig: agentStoreConfig,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
-    publicSnapshotStore,
+    publicSnapshotStoreFactory: store => createPublicSnapshotStore(
+      dkgDir(), { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
+      { pageIndexStore: snapshotPageIndexStore, log, store },
+    ),
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     syncReconcilerEnabled: config.syncReconcilerEnabled,
     vmReconcilerEnabled: config.vmReconcilerEnabled,
@@ -2050,14 +1981,14 @@ async function runDaemonInnerWithStartupOwnership(
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
     storageAckTiming,
-    syncCheckpointStore,
-    changelogCursorStore,
-    chainEventCursorStore,
-    contextGraphRegistryScanCursorStore,
-    contextGraphStorageDiscoveryStore,
-    localContextGraphAuthorityHistoryStore,
-    localContextGraphAuthorityIndexStore,
-    chainEventLogStore,
+    syncCheckpointStore: protocolStores.syncCheckpointStore,
+    changelogCursorStore: protocolStores.changelogCursorStore,
+    chainEventCursorStore: protocolStores.chainEventCursorStore,
+    contextGraphRegistryScanCursorStore: protocolStores.contextGraphRegistryScanCursorStore,
+    contextGraphStorageDiscoveryStore: protocolStores.contextGraphStorageDiscoveryStore,
+    localContextGraphAuthorityHistoryStore: protocolStores.localContextGraphAuthorityHistoryStore,
+    localContextGraphAuthorityIndexStore: protocolStores.localContextGraphAuthorityIndexStore,
+    chainEventLogStore: protocolStores.chainEventLogStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2106,25 +2037,6 @@ async function runDaemonInnerWithStartupOwnership(
       },
       delete: async (contextGraphId) => {
         dashDb.deleteContextGraphSubscription(contextGraphId);
-      },
-      loadVmReconcileNegative: async (cacheKey) => {
-        const row = dashDb.getVmReconcileNegative(cacheKey);
-        if (!row) return null;
-        const decoded = decodeVmReconcileNegativeRow(row);
-        if (!decoded) {
-          dashDb.deleteVmReconcileNegative(cacheKey);
-          return null;
-        }
-        return decoded;
-      },
-      saveVmReconcileNegative: async (record) => {
-        dashDb.upsertVmReconcileNegative(encodeVmReconcileNegativeRow(record, Date.now()));
-      },
-      deleteVmReconcileNegative: async (cacheKey) => {
-        dashDb.deleteVmReconcileNegative(cacheKey);
-      },
-      deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
-        dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
       },
     },
     selectedVmReconcileCursorStore: {
@@ -2243,8 +2155,8 @@ async function runDaemonInnerWithStartupOwnership(
     },
     messengerOutboxDrain: config.messengerOutboxDrain,
     messengerStores: {
-      idempotencyStore: messengerIdempotencyStore,
-      outboxStore: messengerOutboxStore,
+      idempotencyStore: protocolStores.messengerStores.idempotencyStore,
+      outboxStore: protocolStores.messengerStores.outboxStore,
     },
     // Phase F — persist chain-driven VM reconciliation telemetry so the
     // /ui/observability Replication tab can aggregate it. Best-effort: a
@@ -2279,6 +2191,7 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const agent = await DKGAgent.create(agentConfig);
+  const publicSnapshotStore = agent.publicSnapshotStore;
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   const publisherStartupController = new AbortController();
@@ -3111,16 +3024,11 @@ async function runDaemonInnerWithStartupOwnership(
   // override only rpcUrl).
   const rpcUsageLogger = new Logger("chain-rpc");
   const rpcUsageTelemetry = startRpcUsageTelemetry({
-    source: {
-      drainRpcUsage: () => mergeRpcUsageWindows(
-        agent.drainRpcUsage(),
-        publisherState.runtime?.drainRpcUsage(),
-        daemonRpcRuntime?.drainRouteRpcUsage(),
-      ),
-      ...(rpcRequestGovernor === undefined
-        ? {}
-        : { drainRpcRequestGovernor: () => rpcRequestGovernor.drainWindow() }),
-    },
+    source: createDaemonRpcTelemetrySource([
+      () => agent.drainRpcUsage(),
+      () => publisherState.runtime?.drainRpcUsage(),
+      () => daemonRpcRuntime?.drainRouteRpcUsage(),
+    ], rpcRequestGovernor),
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
     chainId: chainBase?.chainId ?? config.chain?.chainId,
   });
@@ -3697,53 +3605,24 @@ async function runDaemonInnerWithStartupOwnership(
       }
 
       // Shared memory (workspace) TTL settings — V10 and legacy routes
-      if (
-        req.method === "GET" &&
-        (reqUrl.pathname === "/api/settings/shared-memory-ttl" ||
-          reqUrl.pathname === "/api/settings/workspace-ttl")
-      ) {
-        const ttlMs =
-          resolveSharedMemoryTtlMs(config) ?? 30 * 24 * 60 * 60 * 1000;
-        return jsonResponse(res, 200, {
-          ttlMs,
-          ttlDays: Math.round(ttlMs / (24 * 60 * 60 * 1000)),
-        });
-      }
-      if (
-        req.method === "PUT" &&
-        (reqUrl.pathname === "/api/settings/shared-memory-ttl" ||
-          reqUrl.pathname === "/api/settings/workspace-ttl")
-      ) {
-        try {
-          const bodyStr = await readBody(req, SMALL_BODY_BYTES);
-          const { ttlDays } = JSON.parse(bodyStr ?? "{}") as {
-            ttlDays?: number;
-          };
-          if (
-            typeof ttlDays !== "number" ||
-            !Number.isFinite(ttlDays) ||
-            ttlDays < 0
-          ) {
-            return jsonResponse(res, 400, {
-              error: "ttlDays must be a finite non-negative number",
-            });
-          }
-          const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
-          config.sharedMemoryTtlMs = ttlMs;
-          config.workspaceTtlMs = ttlMs;
-          agent.setSharedMemoryTtlMs(ttlMs);
-          await saveConfig(config);
-          return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
-        } catch (err: any) {
-          if (err instanceof PayloadTooLargeError) throw err;
-          return jsonResponse(res, 500, {
-            error: err.message ?? "Failed to update shared memory TTL",
-          });
-        }
-      }
+      if (await handleSharedMemoryTtlSettingsRequest({
+        req,
+        res,
+        pathname: reqUrl.pathname,
+        authentication,
+        config,
+        setSharedMemoryTtlMs: (ttlMs) => agent.setSharedMemoryTtlMs(ttlMs),
+        saveConfig,
+      })) return;
 
-      // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
-      const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
+      // Node UI routes (metrics, operations, logs, saved queries, chat, static UI).
+      // The dashboard shell is served with the node-operator token only for a
+      // trusted local request (loopback socket and loopback Host).
+      const uiToken = nodeUiTokenForRequest(req, {
+        authEnabled,
+        validTokens,
+        resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+      });
       // Only inject the relay-stats provider when this node is actually
       // running a relay server. Without this gate, edge nodes always
       // hit the `relayStatsProvider != null` branch in `api.ts` and
@@ -3765,7 +3644,7 @@ async function runDaemonInnerWithStartupOwnership(
       // handler (below) so it only fires after rate-limit, admission, and auth
       // have accepted the request — a rejected/unauthenticated request cannot
       // open the store-metrics gate.
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, uiToken, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark(), canAdministerNode(authentication));
       if (handled) return;
 
       await handleRequest({

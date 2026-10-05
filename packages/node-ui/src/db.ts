@@ -1,36 +1,32 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import {
-  RESPONSE_CACHE_BYTES,
-  type IdempotencyCheckResult,
-  type KaNumberStore,
-  type MessageDirection,
-  type MessageIdempotencyStore,
   type ContextGraphJoinPolicyRecord,
   parseContextGraphJoinPolicyRecord,
-  DEFAULT_SYNC_CHECKPOINT_TTL_MS,
-  isValidSyncCheckpointEntry,
-  transitionSyncCheckpointManifestOffset,
-  transitionSyncCheckpointOffset,
-  transitionSyncCheckpointResponderSession,
-  withoutSyncCheckpointResponderSession,
-  type DurableManifestDigest,
-  type DurableManifestPrefixDigest,
-  type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
 import {
   RoutineLogRetention,
   installRoutineLogRetentionSchema,
 } from './routine-log-retention.js';
+// Protocol persistence (outbox, sync checkpoints, changelog cursors, KA
+// numbers, message idempotency, chain log and cursors) moved to
+// `@origintrail-official/dkg-node-store`. `DashboardDB` still opens
+// `node-ui.db` and still owns every table and migration below, so the stores
+// stay re-exported here and existing importers of this module keep working.
 export {
   SqliteChainEventCursorStore,
+  SqliteChangelogCursorStore,
+  SqliteChangelogEraGuard,
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteContextGraphStorageDiscoveryStore,
-} from './chain-cursor-stores.js';
-
-export { SqliteProtocolOutboxStore, type SqliteProtocolOutboxStoreOptions } from './protocol-outbox-store.js';
+  SqliteKaNumberStore,
+  SqliteMessageIdempotencyStore,
+  SqliteProtocolOutboxStore,
+  SqliteSyncCheckpointStore,
+  type SqliteProtocolOutboxStoreOptions,
+} from '@origintrail-official/dkg-node-store';
 
 export const SCHEMA_VERSION = 38;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
@@ -1325,6 +1321,8 @@ export class DashboardDB {
     // idempotent and keeps the audit bound fail-closed on every open.
     ensureJoinPolicyAuditCapTrigger();
 
+    // Historical V29 schema is retained for compatibility. Its rows are no
+    // longer read, written or pruned by VM reconcile (GH#2990).
     if (version < 29) {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS vm_reconcile_negative_cache (
@@ -1470,7 +1468,6 @@ export class DashboardDB {
     // Reconcile negatives are accelerators, never historical records. Once the
     // retry window elapses they must not survive indefinitely or accumulate one
     // row per previously-seen KA across restarts.
-    this.db.prepare(`DELETE FROM vm_reconcile_negative_cache WHERE next_retry_at < ?`).run(Date.now());
     // Universal Messenger idempotency table. Shorter TTL than the
     // operator retention: no realistic dedup window extends beyond
     // a day. The protocol_outbox table is intentionally not pruned
@@ -2084,47 +2081,6 @@ export class DashboardDB {
 
   private contextGraphJoinPolicyKey(contextGraphId: string): string {
     return `contextGraphJoinPolicy:${contextGraphId}`;
-  }
-
-  upsertVmReconcileNegative(record: VmReconcileNegativeRow): void {
-    this.stmt('upsertVmReconcileNegative', `
-      INSERT INTO vm_reconcile_negative_cache (
-        cache_key, context_graph_id, failures, next_retry_at, swm_gen,
-        candidate_namespaces, peer_topology_key, updated_at
-      ) VALUES (
-        @cache_key, @context_graph_id, @failures, @next_retry_at, @swm_gen,
-        @candidate_namespaces, @peer_topology_key, @updated_at
-      )
-      ON CONFLICT(cache_key) DO UPDATE SET
-        context_graph_id = excluded.context_graph_id,
-        failures = excluded.failures,
-        next_retry_at = excluded.next_retry_at,
-        swm_gen = excluded.swm_gen,
-        candidate_namespaces = excluded.candidate_namespaces,
-        peer_topology_key = excluded.peer_topology_key,
-        updated_at = excluded.updated_at
-    `).run(record);
-  }
-
-  getVmReconcileNegative(cacheKey: string): VmReconcileNegativeRow | undefined {
-    return this.stmt(
-      'getVmReconcileNegative',
-      'SELECT * FROM vm_reconcile_negative_cache WHERE cache_key = ?',
-    ).get(cacheKey) as VmReconcileNegativeRow | undefined;
-  }
-
-  deleteVmReconcileNegative(cacheKey: string): void {
-    this.stmt(
-      'deleteVmReconcileNegative',
-      'DELETE FROM vm_reconcile_negative_cache WHERE cache_key = ?',
-    ).run(cacheKey);
-  }
-
-  deleteVmReconcileNegativesForContextGraph(contextGraphId: string): void {
-    this.stmt(
-      'deleteVmReconcileNegativesForContextGraph',
-      'DELETE FROM vm_reconcile_negative_cache WHERE context_graph_id = ?',
-    ).run(contextGraphId);
   }
 
   upsertSelectedVmReconcileCursor(record: SelectedVmReconcileCursorRow): void {
@@ -3519,461 +3475,6 @@ export class DashboardDB {
   }
 }
 
-// --- Sync requester checkpoints (issue #1138 A3) ---
-
-export class SqliteSyncCheckpointStore {
-  private readonly db: Database.Database;
-  private readonly clock: () => number;
-  private readonly ttlMs: number;
-
-  constructor(
-    dashboard: DashboardDB,
-    options: { clock?: () => number; ttlMs?: number } = {},
-  ) {
-    this.db = dashboard.db;
-    this.clock = options.clock ?? (() => Date.now());
-    this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
-  }
-
-  private readRow(key: string): SyncCheckpointEntry | undefined {
-    const row = this.db.prepare(
-      `SELECT offset, updated_at, expires_at,
-              responder_session_id, responder_session_expires_at, responder_session_offset,
-              manifest_digest, manifest_prefix_digest, terminal
-         FROM sync_checkpoints WHERE key = ?`,
-    ).get(key) as {
-      offset: number;
-      updated_at: number;
-      expires_at: number;
-      responder_session_id: string | null;
-      responder_session_expires_at: number | null;
-      responder_session_offset: number | null;
-      manifest_digest: DurableManifestDigest | null;
-      manifest_prefix_digest: DurableManifestPrefixDigest | null;
-      terminal: number;
-    } | undefined;
-    if (!row) return undefined;
-    return {
-      offset: row.offset,
-      updatedAtMs: row.updated_at,
-      expiresAtMs: row.expires_at,
-      ...(row.terminal === 1 ? { terminal: true } : {}),
-      ...(row.manifest_digest ? { manifestDigest: row.manifest_digest } : {}),
-      ...(row.manifest_prefix_digest
-        ? { manifestPrefixDigest: row.manifest_prefix_digest }
-        : {}),
-      // Preserve each nullable session column independently so the shared
-      // validator can distinguish an absent session from a torn/malformed
-      // persisted session. Collapsing a partial row to no session fields would
-      // turn corrupt durable state into an apparently valid ordinary offset.
-      ...(row.responder_session_id !== null
-        ? { responderSessionId: row.responder_session_id }
-        : {}),
-      ...(row.responder_session_expires_at !== null
-        ? { responderSessionExpiresAtMs: row.responder_session_expires_at }
-        : {}),
-      ...(row.responder_session_offset !== null
-        ? { responderSessionOffset: row.responder_session_offset }
-        : {}),
-    };
-  }
-
-  get(key: string, now = this.clock()): SyncCheckpointEntry | undefined {
-    const entry = this.readRow(key);
-    if (!entry) return undefined;
-    if (!isValidSyncCheckpointEntry(entry) || entry.expiresAtMs < now) {
-      this.delete(key);
-      return undefined;
-    }
-    if (
-      entry.responderSessionId
-      && (entry.responderSessionExpiresAtMs ?? 0) <= now
-    ) {
-      const withoutExpiredSession = withoutSyncCheckpointResponderSession(entry);
-      this.writeEntry(key, withoutExpiredSession);
-      return withoutExpiredSession;
-    }
-    return entry;
-  }
-
-  private writeEntry(key: string, entry: SyncCheckpointEntry): void {
-    this.db.prepare(`
-      INSERT INTO sync_checkpoints (
-        key, offset, updated_at, expires_at,
-        responder_session_id, responder_session_expires_at, responder_session_offset,
-        manifest_digest, manifest_prefix_digest, terminal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET
-        offset = excluded.offset,
-        updated_at = excluded.updated_at,
-        expires_at = excluded.expires_at,
-        responder_session_id = excluded.responder_session_id,
-        responder_session_expires_at = excluded.responder_session_expires_at,
-        responder_session_offset = excluded.responder_session_offset,
-        manifest_digest = excluded.manifest_digest,
-        manifest_prefix_digest = excluded.manifest_prefix_digest,
-        terminal = excluded.terminal
-    `).run(
-      key,
-      entry.offset,
-      entry.updatedAtMs,
-      entry.expiresAtMs,
-      entry.responderSessionId ?? null,
-      entry.responderSessionExpiresAtMs ?? null,
-      entry.responderSessionOffset ?? null,
-      entry.manifestDigest ?? null,
-      entry.manifestPrefixDigest ?? null,
-      entry.terminal ? 1 : 0,
-    );
-  }
-
-  set(
-    key: string,
-    value: number,
-    nowMs = this.clock(),
-    responderSessionOffset?: number,
-  ): void {
-    const transition = this.db.transaction(() => {
-      this.writeEntry(key, transitionSyncCheckpointOffset({
-        key,
-        existing: this.get(key, nowMs),
-        value,
-        nowMs,
-        ttlMs: this.ttlMs,
-        responderSessionOffset,
-      }));
-    });
-    transition();
-  }
-
-  setManifestBoundOffset(
-    key: string,
-    value: number,
-    manifestDigest: DurableManifestDigest,
-    nowMs = this.clock(),
-    manifestPrefixDigest?: DurableManifestPrefixDigest,
-    terminal = false,
-    responderSessionOffset?: number,
-  ): void {
-    const transition = this.db.transaction(() => {
-      this.writeEntry(key, transitionSyncCheckpointManifestOffset({
-        key,
-        existing: this.get(key, nowMs),
-        value,
-        manifestDigest,
-        nowMs,
-        ttlMs: this.ttlMs,
-        manifestPrefixDigest,
-        terminal,
-        responderSessionOffset,
-      }));
-    });
-    transition();
-  }
-
-  setResponderSession(
-    key: string,
-    sessionId: string,
-    expiresAtMs: number,
-    nowMs = this.clock(),
-    manifestDigest?: DurableManifestDigest,
-    manifestPrefixDigest?: DurableManifestPrefixDigest,
-    responderSessionOffset?: number,
-  ): void {
-    if (expiresAtMs <= nowMs) {
-      this.clearResponderSession(key);
-      return;
-    }
-    const transition = this.db.transaction(() => {
-      this.writeEntry(key, transitionSyncCheckpointResponderSession({
-        key,
-        existing: this.get(key, nowMs),
-        sessionId,
-        expiresAtMs,
-        nowMs,
-        ttlMs: this.ttlMs,
-        manifestDigest,
-        manifestPrefixDigest,
-        responderSessionOffset,
-      }));
-    });
-    transition();
-  }
-
-  clearResponderSession(key: string): void {
-    const transition = this.db.transaction(() => {
-      const existing = this.readRow(key);
-      if (existing) this.writeEntry(key, withoutSyncCheckpointResponderSession(existing));
-    });
-    transition();
-  }
-
-  delete(key: string): void {
-    this.db.prepare(`DELETE FROM sync_checkpoints WHERE key = ?`).run(key);
-  }
-
-  pruneExpired(nowMs = this.clock()): number {
-    return this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(nowMs).changes;
-  }
-}
-
-/**
- * OT-RFC-59 SC5 durable changelog cursor store (duck-compatible with the agent's
- * ChangelogCursorStore). Keyed by (peer_id, context_graph_id); stores the last
- * APPLIED (era, seq) from that responder. Like `ka_numbers` / `protocol_outbox`
- * this state is durable: it is NEVER added to `prune()` — a TTL would defeat the
- * O(delta) cross-restart catch-up the changelog lane exists for.
- */
-export class SqliteChangelogCursorStore {
-  private readonly db: Database.Database;
-  private readonly clock: () => number;
-
-  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
-    this.db = dashboard.db;
-    this.clock = options.clock ?? (() => Date.now());
-  }
-
-  get(peerId: string, contextGraphId: string): { era: string; seq: number; updatedAtMs: number } | undefined {
-    const row = this.db.prepare(
-      `SELECT era, seq, updated_at FROM changelog_cursors WHERE peer_id = ? AND context_graph_id = ?`,
-    ).get(peerId, contextGraphId) as { era: string; seq: number; updated_at: number } | undefined;
-    if (!row) return undefined;
-    return { era: row.era, seq: row.seq, updatedAtMs: row.updated_at };
-  }
-
-  set(peerId: string, contextGraphId: string, era: string, seq: number, nowMs = this.clock()): void {
-    if (!Number.isSafeInteger(seq) || seq < 0) {
-      throw new Error(`Invalid changelog cursor seq for ${peerId}/${contextGraphId}: ${seq}`);
-    }
-    this.db.prepare(`
-      INSERT INTO changelog_cursors (peer_id, context_graph_id, era, seq, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(peer_id, context_graph_id) DO UPDATE SET
-        era = excluded.era,
-        seq = excluded.seq,
-        updated_at = excluded.updated_at
-    `).run(peerId, contextGraphId, era, seq, nowMs);
-  }
-}
-
-/**
- * OT-RFC-59 §6 P0 durable era guard (duck-compatible with storage's
- * ChangelogEraGuard). Persists the single (era, high_seq) high-water in
- * node-ui.db — which a `store.nq` RDF-store restore does NOT roll back — so the
- * write-side ChangelogStore can detect a restore/rollback (seq regressed under
- * the same era) and rotate the era, forcing peers to full-resync instead of
- * silently skipping. `save` is called after every committed seq, so it must be a
- * single fast upsert.
- */
-export class SqliteChangelogEraGuard {
-  private readonly db: Database.Database;
-  private readonly clock: () => number;
-
-  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
-    this.db = dashboard.db;
-    this.clock = options.clock ?? (() => Date.now());
-  }
-
-  async load(): Promise<{ era: string; highSeq: number } | null> {
-    const row = this.db.prepare(
-      `SELECT era, high_seq FROM changelog_era WHERE id = 1`,
-    ).get() as { era: string; high_seq: number } | undefined;
-    return row ? { era: row.era, highSeq: row.high_seq } : null;
-  }
-
-  async save(era: string, highSeq: number): Promise<void> {
-    if (!Number.isSafeInteger(highSeq) || highSeq < 0) {
-      throw new Error(`Invalid changelog era high_seq: ${highSeq}`);
-    }
-    this.db.prepare(`
-      INSERT INTO changelog_era (id, era, high_seq, updated_at)
-      VALUES (1, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        era = excluded.era,
-        high_seq = excluded.high_seq,
-        updated_at = excluded.updated_at
-    `).run(era, highSeq, this.clock());
-  }
-}
-
-// --- Universal Messenger substrate stores (rc.9 plan PR-1) ---
-
-/**
- * SQLite-backed `MessageIdempotencyStore` against the V12
- * `message_idempotency` table in `DashboardDB`. Receiver-side dedup
- * cache + sender-side "did we deliver this" cache, keyed by
- * `(peer, protocol, message_id, direction)`.
- *
- * Constructed against an already-opened `DashboardDB` so all DKG
- * persistence shares a single SQLite file (one WAL, one fsync, one
- * pragma surface). Doesn't open the DB itself — the daemon's
- * `lifecycle.ts` owns DB lifecycle and hands one in here in PR-2.
- *
- * Response caching policy lives in `RESPONSE_CACHE_BYTES` (256 KiB
- * fixed limit, exported from `@origintrail-official/dkg-core`).
- * Responses up to the limit are stored inline in `response_blob`;
- * larger responses store `response_blob = NULL` with the actual
- * size in `response_size` (mark-only). Duplicate receives whose
- * original was mark-only surface as `RESPONSE_GONE` to the sender
- * — see `RESPONSE_GONE_MARKER` for the canonical signal string.
- */
-export class SqliteMessageIdempotencyStore implements MessageIdempotencyStore {
-  private readonly db: Database.Database;
-  private readonly clock: () => number;
-
-  /** @param clock injectable for deterministic tests. Defaults to `Date.now`. */
-  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
-    this.db = dashboard.db;
-    this.clock = options.clock ?? (() => Date.now());
-  }
-
-  check(
-    peer: string,
-    protocol: string,
-    messageId: string,
-    direction: MessageDirection,
-  ): IdempotencyCheckResult {
-    const row = this.db
-      .prepare(
-        `SELECT response_blob FROM message_idempotency
-         WHERE peer_id = ? AND protocol = ? AND message_id = ? AND direction = ?`,
-      )
-      .get(peer, protocol, messageId, direction) as
-      | { response_blob: Buffer | null }
-      | undefined;
-    if (!row) return { seen: false };
-    // better-sqlite3 returns Node Buffer for BLOB columns; copy into a
-    // Uint8Array so callers cannot mutate the cached DB snapshot.
-    if (row.response_blob === null) return { seen: true };
-    return {
-      seen: true,
-      cachedResponse: new Uint8Array(row.response_blob),
-    };
-  }
-
-  record(
-    peer: string,
-    protocol: string,
-    messageId: string,
-    direction: MessageDirection,
-    response?: Uint8Array,
-  ): void {
-    const responseSize = response?.length ?? 0;
-    // Mark-only when over the cache limit. Stores NULL blob + the
-    // actual size, so a future duplicate receive can surface
-    // `RESPONSE_GONE`. The 256 KiB cutoff is the rc.9 plan's locked
-    // design decision — no per-protocol/per-call knob.
-    const blob =
-      response !== undefined && response.length <= RESPONSE_CACHE_BYTES
-        ? Buffer.from(response)
-        : null;
-    // Targeted ON CONFLICT — never the broader INSERT OR IGNORE which
-    // would silently swallow unrelated constraint violations (the
-    // Codex #534 lesson). Idempotent re-record on the same key is a
-    // no-op; any other constraint violation surfaces as a thrown
-    // SqliteError so the substrate's bug doesn't disguise itself as
-    // a normal duplicate.
-    this.db
-      .prepare(
-        `INSERT INTO message_idempotency
-           (peer_id, protocol, message_id, direction, response_blob, response_size, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (peer_id, protocol, message_id, direction) DO NOTHING`,
-      )
-      .run(peer, protocol, messageId, direction, blob, responseSize, this.clock());
-  }
-
-  pruneOlderThan(tsMs: number): number {
-    const result = this.db
-      .prepare(`DELETE FROM message_idempotency WHERE ts < ?`)
-      .run(tsMs);
-    return result.changes;
-  }
-}
-
-/**
- * SQLite-backed `KaNumberStore` against the V20 `ka_numbers` table.
- * Per-author durable KA-number allocator for OT-RFC-43 Option-1
- * deterministic KA identity (B2 allocator core, OFF-CHAIN only).
- *
- * Keyed by the attested author address (stored lowercase). Every
- * method is a single prepared statement; the read-and-increment in
- * `allocate` is atomic via `INSERT … ON CONFLICT DO UPDATE …
- * RETURNING`, so concurrent allocations under the same author never
- * collide on a number (the same atomic-single-statement contract the
- * other Sqlite*Store classes rely on — there is no `.transaction()`
- * in this module).
- *
- * **Counter width (codex PR #976 F6):** every value crossing the
- * `KaNumberStore` interface is a `bigint`. `better-sqlite3` returns
- * INTEGER columns as JS `number` by default — which silently truncates
- * once a counter passes `Number.MAX_SAFE_INTEGER (2^53 - 1)`. Each
- * statement here opts into `.safeIntegers(true)`, returning `bigint`
- * directly so `allocate()`, `peekNext()` and `observed + 1n` stay
- * exact across the full SQLite signed INTEGER range (`2^63 - 1`). The
- * RFC's worst-case load ("1000 alloc/s × 1M years ≈ 2^55") sits well
- * past the `2^53` precision cliff and far under the `2^63` hard
- * ceiling; if a single author ever does approach `2^63`, SQLite raises
- * an INTEGER overflow on the next increment — a fail-loud surface
- * that's strictly preferable to a silent kaId-collision risk.
- *
- * Like `protocol_outbox`, this state is durable: it is NEVER added to
- * `prune()`. Reclaiming a number could re-mint a kaId already used
- * on-chain under that author.
- */
-export class SqliteKaNumberStore implements KaNumberStore {
-  private readonly db: Database.Database;
-
-  constructor(dashboard: DashboardDB) {
-    this.db = dashboard.db;
-  }
-
-  allocate(authorAddress: string): bigint {
-    const author = authorAddress.toLowerCase();
-    // Atomic read-and-increment. `next_number` is the value to hand
-    // out; we increment it and RETURN the value just consumed
-    // (`next_number - 1` after the update), so the first call for an
-    // author returns 0n. On first insert `next_number` starts at 1, so
-    // `1 - 1 = 0` is returned there too — uniform either way.
-    // `safeIntegers(true)` opts INTO bigint returns so the counter is
-    // exact past `Number.MAX_SAFE_INTEGER` (codex PR #976 F6).
-    const row = this.db
-      .prepare(
-        `INSERT INTO ka_numbers (author_address, next_number)
-         VALUES (?, 1)
-         ON CONFLICT(author_address) DO UPDATE SET next_number = next_number + 1
-         RETURNING next_number - 1 AS number`,
-      )
-      .safeIntegers(true)
-      .get(author) as { number: bigint };
-    return row.number;
-  }
-
-  reconcileFloor(authorAddress: string, nextNumberFloor: bigint): void {
-    const author = authorAddress.toLowerCase();
-    // Raise `next_number` to at least the floor, never lowering it.
-    // `excluded.next_number` is the proposed floor from the VALUES row.
-    // `better-sqlite3` accepts bigint statement parameters natively.
-    this.db
-      .prepare(
-        `INSERT INTO ka_numbers (author_address, next_number)
-         VALUES (?, ?)
-         ON CONFLICT(author_address) DO UPDATE SET
-           next_number = MAX(next_number, excluded.next_number)`,
-      )
-      .run(author, nextNumberFloor);
-  }
-
-  peekNext(authorAddress: string): bigint {
-    const author = authorAddress.toLowerCase();
-    const row = this.db
-      .prepare(`SELECT next_number FROM ka_numbers WHERE author_address = ?`)
-      .safeIntegers(true)
-      .get(author) as { next_number: bigint } | undefined;
-    return row?.next_number ?? 0n;
-  }
-}
-
 // --- Row types ---
 
 export interface MetricSnapshotRow {
@@ -4191,17 +3692,6 @@ export interface ContextGraphReadinessProvenance {
   durableVerified: boolean;
   sharedMemoryVerified: boolean;
   updatedAt: number;
-}
-
-export interface VmReconcileNegativeRow {
-  cache_key: string;
-  context_graph_id: string;
-  failures: number;
-  next_retry_at: number;
-  swm_gen: string;
-  candidate_namespaces: string;
-  peer_topology_key: string;
-  updated_at: number;
 }
 
 export interface SelectedVmReconcileCursorRow {
