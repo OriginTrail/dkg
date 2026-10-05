@@ -6,6 +6,7 @@ import type { Address, NodeIdentity, PeerConnectOpts } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 import type { ConfiguredRelayTarget } from './relay-target.js';
+import type { ConnectOpts, PeerResolver } from './peer-resolver.js';
 
 export interface Libp2pConnectHost {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -248,6 +249,70 @@ export async function connectLibp2pCandidate(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export interface Libp2pInitialConnectOpts extends ConnectOpts {
+  /** A caller-validated address to try before cached and resolved addresses. */
+  initialCandidate?: Libp2pConnectCandidate;
+  initialCandidateTimeoutMs?: number;
+  cachedPeerTimeoutMs?: number;
+  resolverTimeoutMs?: number;
+}
+
+/**
+ * One libp2p connection boundary for a trusted initial candidate, a cached
+ * peer-ID fast path, and the shared resolver. The candidate path deliberately
+ * accepts private listener addresses; callers must validate its peer binding.
+ */
+export async function connectLibp2pPeerWithResolver(
+  host: Libp2pConnectHost,
+  resolver: Pick<PeerResolver, 'connect'>,
+  peerId: NodeIdentity,
+  options: Libp2pInitialConnectOpts = {},
+): Promise<void> {
+  throwIfAborted(options.signal);
+  const canonicalPeerId = peerIdFromString(peerId).toString();
+  const isConnected = (): boolean => host.getConnections().some(
+    (connection) => connection.remotePeer.toString() === canonicalPeerId,
+  );
+  if (isConnected()) return;
+
+  if (options.initialCandidate) {
+    try {
+      await connectLibp2pCandidate(host, options.initialCandidate, {
+        expectedPeerId: canonicalPeerId,
+        signal: options.signal,
+        timeoutMs: options.initialCandidateTimeoutMs ?? DEFAULT_CANDIDATE_TIMEOUT_MS,
+        log: options.log,
+      });
+      throwIfAborted(options.signal);
+      if (isConnected()) return;
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+    }
+  }
+
+  try {
+    const timeout = AbortSignal.timeout(options.cachedPeerTimeoutMs ?? 5_000);
+    const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+    await host.dial(peerIdFromString(canonicalPeerId), { signal });
+    throwIfAborted(options.signal);
+    if (isConnected()) return;
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+  }
+
+  throwIfAborted(options.signal);
+  const timeout = AbortSignal.timeout(options.resolverTimeoutMs ?? 15_000);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  await resolver.connect(canonicalPeerId, {
+    signal,
+    skipDht: options.skipDht,
+    perStepTimeoutMs: options.perStepTimeoutMs,
+    candidateTimeoutMs: options.candidateTimeoutMs,
+    log: options.log,
+  });
+  throwIfAborted(options.signal);
 }
 
 /**

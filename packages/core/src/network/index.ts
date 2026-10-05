@@ -31,11 +31,13 @@ export type {
 export { PeerResolver } from './peer-resolver.js';
 export {
   connectLibp2pCandidate,
+  connectLibp2pPeerWithResolver,
   planLibp2pPeerConnectionAddresses,
   parseLibp2pConnectCandidate,
   Libp2pConnectCandidateParseError,
   type Libp2pConnectCandidate,
   type Libp2pConnectHost,
+  type Libp2pInitialConnectOpts,
   type Libp2pPeerConnectOpts,
 } from './libp2p-peer-connect.js';
 export type { ConfiguredRelayTarget } from './relay-target.js';
