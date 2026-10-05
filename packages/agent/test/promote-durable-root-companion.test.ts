@@ -18,13 +18,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
+} from '@origintrail-official/dkg-core';
 import { createPromoteRetryableFailure, getPromoteFailureDisposition } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/index.js';
 import * as precommit from '../src/internal/promote/assertion-promote-precommit.js';
-import * as boundary from '../src/rfc64/legacy-swm-boundary-v1.js';
 import {
   initializeRfc64LegacySwmBoundaryV1,
   prepareRfc64LateLegacySwmBoundaryV1,
@@ -175,7 +178,7 @@ describe('promote companion under the legacy SWM retirement fence (real agent wi
     // Not a promote failure (the share queue's marker), but the fence's own code: the publisher's async lift
     // classifier registers this literal (async-lift-execution-failure.ts), so it must not drift.
     expect(refusal.code).toBe(FENCE_CODE);
-    expect(boundary.RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1).toBe(FENCE_CODE);
+    expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE).toBe(FENCE_CODE);
 
     inFlight.settle(false);
     await retirement;
@@ -199,7 +202,7 @@ describe('translateLegacySwmRetirementFence', () => {
     const refusal = thrownBy(() => precommit.translateLegacySwmRetirementFence(() => { throw original; }));
     expect(refusal.code).toBe('PROMOTE_RETRYABLE_FAILURE');
     expect(refusal.cause).toBe(original);
-    expect(boundary.isRfc64LegacySwmBoundaryRetirementInProgressV1(original)).toBe(true);
+    expect(isRfc64LegacySwmBoundaryRetirementInProgressError(original)).toBe(true);
   });
 
   it('returns what the prepare returns', () => {
@@ -223,6 +226,6 @@ describe('translateLegacySwmRetirementFence', () => {
       seen = error;
     }
     expect(seen).toBe(thrown);
-    expect(boundary.isRfc64LegacySwmBoundaryRetirementInProgressV1(thrown)).toBe(false);
+    expect(isRfc64LegacySwmBoundaryRetirementInProgressError(thrown)).toBe(false);
   });
 });

@@ -13,6 +13,7 @@ import  {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
   type AuthorCatalogScopeV1,
   type ContextGraphIdV1,
   type PositiveDecimalU64V1,
@@ -401,24 +402,6 @@ export async function acquireRfc64LegacySwmBoundaryReceiverLeaseV1(
 }
 
 /**
- * Code of the refusal a root promote gets while a retirement holds its graph's
- * fence. The fence is transient, so a caller that can retry recognises it by
- * this code, never by the message.
- */
-export const RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1 =
-  'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' as const;
-
-/** Structural, so it holds across duplicated module copies and never throws. */
-export function isRfc64LegacySwmBoundaryRetirementInProgressV1(error: unknown): boolean {
-  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return false;
-  try {
-    return Reflect.get(error, 'code') === RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Prepare the exact negative-completeness marker that the publisher commits
  * atomically with a root SWM graph while explicit legacy authority or the
  * global kill switch owns delivery. Hydrating process-local state first is
@@ -450,7 +433,7 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
   ) {
     throw Object.assign(
       new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
-      { code: RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1 },
+      { code: RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE },
     );
   }
   const entry = Object.freeze({

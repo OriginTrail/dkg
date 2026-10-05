@@ -27,7 +27,7 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
-import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1 } from '../../agent/src/rfc64/legacy-swm-boundary-v1.js';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
@@ -349,8 +349,8 @@ describe('runPromoteJob', () => {
       causeCode: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS',
     });
     expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
-    // The CLI repeats the agent's code (the agent does not export it here): they must not drift.
-    expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE_V1)
+    // The allowlist is built from the shared contract code, so the wire value is what gets named.
+    expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE)
       .toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
   });
 

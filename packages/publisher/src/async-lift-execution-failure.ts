@@ -2,6 +2,7 @@ import {
   getChainWriteAheadHookCause,
   isTransientRpcTransportFailureWithoutTransaction,
 } from '@origintrail-official/dkg-chain';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import { isRpcPreconditionError } from './ack-errors.js';
 import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
 import { isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure } from './async-lift-publish-result.js';
@@ -116,11 +117,10 @@ function classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJo
   // the base fee to fall. It must never create durable transaction evidence.
   if (structuredCode === 'FEE_CAP_BELOW_BASE_FEE') return 'fee_cap_below_base_fee';
   // GH#3049 — an update refused at SWM staging by the agent's RFC-64 legacy SWM
-  // retirement fence. It is raised before the write-ahead, so nothing was
-  // signed, and the fence ends on its own: the auto-retry lane, like a transient
-  // workspace read. The literal repeats the agent's code (no import: cycle); an
-  // agent test pins the two together.
-  if (structuredCode === 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS') return 'workspace_unavailable';
+  // retirement fence (the code is the shared contract in dkg-core). It is raised
+  // before the write-ahead, so nothing was signed, and the fence ends on its own:
+  // the auto-retry lane, like a transient workspace read.
+  if (structuredCode === RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE) return 'workspace_unavailable';
   // GH#2273 — multi-valued SWM head: transient local corruption the sync
   // repair heals, NOT a stale intent; the queued request may still be
   // byte-identical to what the head certified at admission.

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
+} from '@origintrail-official/dkg-core';
 import {
   createPromoteRetryableFailure,
   type PublisherAssertionPromoteOptions,
@@ -10,7 +13,6 @@ import {
   isContextGraphAuthorityUnavailableMarker,
   isRetryableContextGraphAuthorityUnavailableReason,
 } from '../context-graph-authority/context-graph-authority.js';
-import { isRfc64LegacySwmBoundaryRetirementInProgressV1 } from '../../rfc64/legacy-swm-boundary-v1.js';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 type GossipSigner = Awaited<
@@ -79,7 +81,7 @@ export function translateLegacySwmRetirementFence<T>(prepare: () => T): T {
   try {
     return prepare();
   } catch (error) {
-    if (isRfc64LegacySwmBoundaryRetirementInProgressV1(error)) {
+    if (isRfc64LegacySwmBoundaryRetirementInProgressError(error)) {
       throw createPromoteRetryableFailure(error);
     }
     throw error;
