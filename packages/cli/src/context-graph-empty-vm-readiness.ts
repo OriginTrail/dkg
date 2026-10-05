@@ -14,9 +14,9 @@ const trace = (stage: string) => {
 
 /**
  * The first write follows subscribe, while a foreground catch-up can still be
- * fetching an empty graph. Wait briefly for authenticated local metadata, then
- * commit only the independently proven empty durable plane. The chain and
- * membership proof is the final await before the readiness commit.
+ * fetching an empty graph. The agent owns metadata, privacy, chain, and
+ * membership prerequisites; this caller only retries its transient outcome
+ * within the subscribe deadline. The proof's final fence owns the commit.
  */
 export async function settlePrivateEmptyVmAtSubscribe(
   agent: DKGAgent,
@@ -33,42 +33,31 @@ export async function settlePrivateEmptyVmAtSubscribe(
   const settle = async (): Promise<boolean> => {
     let retryDelayMs = 250;
     while (!signal.aborted) {
-      const hasConfirmedMeta = await agent.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
-      if (signal.aborted) return false;
-      if (hasConfirmedMeta) {
-        trace('meta-confirmed');
-        if (!await agent.isPrivateContextGraph(contextGraphId).catch(() => false)) {
-          trace('not-private'); return false;
+      const proof = await withProvenEmptyPrivateVmReadiness({
+        agent, contextGraphId, callerAgentAddress, signal,
+        commit: () => {
+          const patches = classifyEmptyPrivateVmReadiness(
+            readContextGraphReadiness(dashboard, contextGraphId),
+          );
+          commitContextGraphReadinessPatches({
+            agent, store: dashboard, contextGraphId, ...patches,
+          });
+        },
+      });
+      if (!proof.proven) {
+        if (!proof.retryable || signal.aborted) {
+          trace('proof-false'); return false;
         }
-        if (signal.aborted) return false;
-        const proof = await withProvenEmptyPrivateVmReadiness({
-          agent, contextGraphId, callerAgentAddress, signal,
-          commit: () => {
-            const patches = classifyEmptyPrivateVmReadiness(
-              readContextGraphReadiness(dashboard, contextGraphId),
-            );
-            commitContextGraphReadinessPatches({
-              agent, store: dashboard, contextGraphId, ...patches,
-            });
-          },
-        });
-        if (!proof.proven) {
-          if (!proof.retryable || signal.aborted) {
-            trace('proof-false'); return false;
-          }
-          // A curator metadata refresh or temporary authority outage can
-          // invalidate an otherwise valid proof while a fresh join settles.
-          // Re-run the entire proof within this subscribe deadline; the agent
-          // still fences the final authority and synchronous readiness write.
-          trace('proof-retry');
-          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-          retryDelayMs = Math.min(retryDelayMs * 2, 1_000);
-          continue;
-        }
-        trace('vm-ready');
-        return true;
+        // A curator metadata refresh or temporary authority outage can
+        // invalidate an otherwise valid proof while a fresh join settles.
+        // Re-run the agent-owned proof within this subscribe deadline.
+        trace('proof-retry');
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        retryDelayMs = Math.min(retryDelayMs * 2, 1_000);
+        continue;
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      trace('vm-ready');
+      return true;
     }
     return false;
   };

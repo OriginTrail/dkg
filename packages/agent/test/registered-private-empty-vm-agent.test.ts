@@ -324,6 +324,22 @@ describe('registered private empty-VM agent guard', () => {
       },
     });
     expect(await prove(state.agent)).toBe(false);
+    state.chainSnapshot.mockResolvedValueOnce({
+      expectedNameHash: NAME_HASH, expectedOnChainId: 3n,
+      snapshot: {
+        chainId: '31337', contextGraphId: '4', active: true, accessPolicy: 1,
+        governanceContract: `0x${'22'.repeat(20)}`, nameHash: NAME_HASH,
+      },
+    });
+    expect(await prove(state.agent)).toBe(false);
+    state.chainSnapshot.mockResolvedValueOnce({
+      expectedNameHash: NAME_HASH, expectedOnChainId: 3n,
+      snapshot: {
+        chainId: '31337', contextGraphId: '3', active: true, accessPolicy: 0,
+        governanceContract: `0x${'22'.repeat(20)}`, nameHash: NAME_HASH,
+      },
+    });
+    expect(await prove(state.agent)).toBe(false);
     state.authority.mockReset()
       .mockResolvedValueOnce({ outcome: 'allowed', source: 'registered-chain', onChainId: 3n })
       .mockResolvedValueOnce({ outcome: 'unavailable', source: 'registered-chain', onChainId: 3n });

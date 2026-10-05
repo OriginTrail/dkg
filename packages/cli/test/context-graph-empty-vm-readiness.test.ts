@@ -8,49 +8,46 @@ import { withContextGraphReadinessMutationLock } from '../src/context-graph-read
 afterEach(() => vi.restoreAllMocks());
 
 describe('private empty-VM subscribe settlement', () => {
-  it('does not start metadata polling when the deadline is already aborted', async () => {
+  it('does not start an agent proof when the deadline is already aborted', async () => {
     const deadline = new AbortController();
     deadline.abort();
     vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
-    const agent = { hasConfirmedMetaState: vi.fn() } as unknown as DKGAgent;
+    const agent = { proveRegisteredPrivateEmptyVmV1: vi.fn() } as unknown as DKGAgent;
     expect(await settlePrivateEmptyVmAtSubscribe(
       agent, {} as DashboardDB, 'graph',
       { source: 'registered-chain', reason: 'chain-participant' },
       `0x${'11'.repeat(20)}`,
     )).toBe(false);
-    expect(agent.hasConfirmedMetaState).not.toHaveBeenCalled();
+    expect(agent.proveRegisteredPrivateEmptyVmV1).not.toHaveBeenCalled();
   });
 
-  it('does not start a private read when metadata polling finishes after the deadline', async () => {
-    const deadline = new AbortController();
-    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
-    let releaseMeta!: (value: boolean) => void;
-    const pendingMeta = new Promise<boolean>((resolve) => { releaseMeta = resolve; });
+  it('delegates metadata and private-policy prerequisites to the agent proof', async () => {
+    const metadataRead = vi.fn();
     const privateRead = vi.fn();
+    const proof = vi.fn(async () => ({ proven: false as const }));
     const agent = {
-      hasConfirmedMetaState: () => pendingMeta,
+      hasConfirmedMetaState: metadataRead,
       isPrivateContextGraph: privateRead,
+      proveRegisteredPrivateEmptyVmV1: proof,
     } as unknown as DKGAgent;
-    const settlement = settlePrivateEmptyVmAtSubscribe(
+    expect(await settlePrivateEmptyVmAtSubscribe(
       agent, {} as DashboardDB, 'graph',
       { source: 'registered-chain', reason: 'chain-participant' },
       `0x${'11'.repeat(20)}`,
-    );
-    deadline.abort();
-    await expect(settlement).resolves.toBe(false);
-    releaseMeta(true);
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    )).toBe(false);
+    expect(proof).toHaveBeenCalledOnce();
+    expect(metadataRead).not.toHaveBeenCalled();
     expect(privateRead).not.toHaveBeenCalled();
   });
 
-  it('skips chain-public admission without polling metadata', async () => {
-    const agent = { hasConfirmedMetaState: vi.fn() } as unknown as DKGAgent;
+  it('skips chain-public admission without starting a private proof', async () => {
+    const agent = { proveRegisteredPrivateEmptyVmV1: vi.fn() } as unknown as DKGAgent;
     expect(await settlePrivateEmptyVmAtSubscribe(
       agent, {} as DashboardDB, 'graph',
       { source: 'registered-chain', reason: 'chain-public' },
       `0x${'11'.repeat(20)}`,
     )).toBe(false);
-    expect(agent.hasConfirmedMetaState).not.toHaveBeenCalled();
+    expect(agent.proveRegisteredPrivateEmptyVmV1).not.toHaveBeenCalled();
   });
 
   it('retries a metadata-transition proof and commits only the later fenced success', async () => {
@@ -207,12 +204,8 @@ describe('private empty-VM subscribe settlement', () => {
     const ownerHeld = new Promise<void>((resolve) => { releaseOwner = resolve; });
     let ownerStarted!: () => void;
     const started = new Promise<void>((resolve) => { ownerStarted = resolve; });
-    let privateReadStarted!: () => void;
-    const privateRead = new Promise<void>((resolve) => { privateReadStarted = resolve; });
     const proof = vi.fn(async () => ({ proven: false as const }));
     const agent = {
-      hasConfirmedMetaState: async () => true,
-      isPrivateContextGraph: async () => { privateReadStarted(); return true; },
       proveRegisteredPrivateEmptyVmV1: proof,
     } as unknown as DKGAgent;
     const owner = withContextGraphReadinessMutationLock(agent, 'graph', async () => {
@@ -226,9 +219,7 @@ describe('private empty-VM subscribe settlement', () => {
       `0x${'11'.repeat(20)}`,
     );
     try {
-      // A macrotask after the private-metadata read lets the settlement
-      // enqueue behind the held owner before the deadline fires.
-      await privateRead;
+      // Give the proof caller a turn to queue behind the held owner.
       await new Promise<void>((resolve) => setImmediate(resolve));
       deadline.abort();
       await expect(settlement).resolves.toBe(false);

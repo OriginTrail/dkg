@@ -3,9 +3,10 @@
 import { ethers } from 'ethers';
 import { createStrictCurrentFinalizedEvmSnapshotScopeV1, resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import {
-  assertCanonicalChainId, assertCanonicalDecimalU256, assertCanonicalEvmAddress,
+  assertCanonicalChainId, assertCanonicalEvmAddress,
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from './dkg-agent.js';
+import { finalizedContextGraphSnapshotMismatchV1 } from './internal/context-graph-authority/finalized-context-graph-binding.js';
 import { proveRegisteredPrivateEmptyVmV1 } from './rfc64/registered-private-empty-vm-proof-v1.js';
 
 export type RegisteredPrivateEmptyVmAttemptV1 =
@@ -82,10 +83,8 @@ export async function attemptRegisteredPrivateEmptyVmV1(
     }
     // Normalize external bindings once. The registry supplies the graph name;
     // it is not restricted to the RFC-64 author-lane grammar.
-    const onChainContextGraphId = before.onChainId.toString(10);
     const hubAddress = chainConfig.hubAddress.toLowerCase();
     assertCanonicalChainId(chainId);
-    assertCanonicalDecimalU256(onChainContextGraphId);
     assertCanonicalEvmAddress(caller);
     assertCanonicalEvmAddress(hubAddress);
     const registered = await agent.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId, signal);
@@ -94,22 +93,21 @@ export async function attemptRegisteredPrivateEmptyVmV1(
     }
     const indexed = registered.snapshot;
     if (indexed.chainId !== chainId
-      || indexed.contextGraphId !== onChainContextGraphId
-      || indexed.active !== true || indexed.accessPolicy !== 1
-      || indexed.nameHash !== registered.expectedNameHash
-      || !ethers.isAddress(indexed.governanceContract)) {
+      || indexed.accessPolicy !== 1
+      || finalizedContextGraphSnapshotMismatchV1(indexed, {
+        onChainId: registered.expectedOnChainId,
+        nameHash: registered.expectedNameHash,
+      }) !== undefined) {
       tracePrivateEmptyVm('indexed-private-authority-absent'); return UNPROVEN_PRIVATE_EMPTY_VM;
     }
-    const governanceContractAddress = indexed.governanceContract.toLowerCase();
-    assertCanonicalEvmAddress(governanceContractAddress);
     const depth = bindings.readFinalityConfirmations() ?? chainConfig.finalityConfirmations;
     const proven = await proveRegisteredPrivateEmptyVmV1({
       contextGraphId,
-      onChainContextGraphId,
+      onChainContextGraphId: indexed.contextGraphId,
       callerAgentAddress: caller,
       chainId,
       hubAddress,
-      governanceContractAddress,
+      governanceContractAddress: indexed.governanceContract,
       snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
         chainId, endpoints,
         ...(depth === undefined ? {} : { finalityConfirmations: depth }),
