@@ -13,6 +13,7 @@ import  {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
   type AuthorCatalogScopeV1,
   type ContextGraphIdV1,
   type PositiveDecimalU64V1,
@@ -430,7 +431,10 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
     currentPreparationScope !== undefined
     && currentPreparationScope.retirementPending > 0
   ) {
-    throw new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion');
+    throw Object.assign(
+      new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
+      { code: RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE },
+    );
   }
   const entry = Object.freeze({
     version: 1,

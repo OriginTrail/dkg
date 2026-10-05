@@ -166,7 +166,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
+import {
+  prepareAssertionPromote,
+  translateLegacySwmRetirementFence,
+} from './internal/promote/assertion-promote-precommit.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -1612,16 +1615,19 @@ export class DKGAgent extends DKGAgentBase {
         // witness in the same transaction; exact catalog reconciliation alone
         // retires it later.
         if (resolvedConfig.dataDir === undefined) return;
-        if (agentRef === undefined) {
+        const owner = agentRef;
+        if (owner === undefined) {
           throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
         }
-        return prepareRfc64LateLegacySwmBoundaryV1(
-          agentRef,
+        // A promote that meets a retirement's per-graph fence is retried by the
+        // queue; every other refusal here stays a hard failure.
+        return translateLegacySwmRetirementFence(() => prepareRfc64LateLegacySwmBoundaryV1(
+          owner,
           input.contextGraphId,
           input.kaUal,
           input.shareOperationId,
           input.assertionVersion,
-        );
+        ));
       },
       resolveDurableRootMaterializationAtomicCompanion: (input) => {
         if (resolvedConfig.dataDir === undefined) return;

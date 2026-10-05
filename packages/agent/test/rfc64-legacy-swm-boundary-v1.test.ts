@@ -209,9 +209,9 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     // share settles would retire evidence for a root that is about to commit.
     expect(absenceChecks).not.toHaveBeenCalled();
     expect(outcome).toBeUndefined();
-    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+    expectFenceRejection(() => prepareRfc64LateLegacySwmBoundaryV1(
       owner, CONTEXT_GRAPH_ID, UAL_TWO, 'same-cg-during-finalized-vm-retirement', '1',
-    )).toThrow('retirement is in progress');
+    ));
     const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
       owner, SECOND_CONTEXT_GRAPH_ID, UAL_TWO, 'other-cg-during-finalized-vm-retirement', '1',
     );
@@ -500,13 +500,13 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       owner,
       ROOT_SCOPE,
     );
-    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+    expectFenceRejection(() => prepareRfc64LateLegacySwmBoundaryV1(
       owner,
       CONTEXT_GRAPH_ID,
       UAL_ONE,
       'same-cg-during-receiver-lease',
       '1',
-    )).toThrow('retirement is in progress');
+    ));
 
     const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
       owner,
@@ -611,13 +611,13 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       CONTEXT_GRAPH_ID,
       [{ kaUal: UAL_ONE, assertionVersion: '1' }],
     );
-    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+    expectFenceRejection(() => prepareRfc64LateLegacySwmBoundaryV1(
       owner,
       CONTEXT_GRAPH_ID,
       UAL_ONE,
       'same-ual-generation-three',
       '3',
-    )).toThrow('retirement is in progress');
+    ));
     const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
       owner,
       SECOND_CONTEXT_GRAPH_ID,
@@ -657,13 +657,16 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
   });
 
   it('fails closed when persistent boundary state was not initialized', () => {
-    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+    const refusal = thrownBy(() => prepareRfc64LateLegacySwmBoundaryV1(
       {},
       CONTEXT_GRAPH_ID,
       UAL_ONE,
       'missing-persistence',
       '1',
-    )).toThrow('boundary persistence is unavailable');
+    ));
+    expect((refusal as Error).message).toContain('boundary persistence is unavailable');
+    // Only the retirement fence is a retryable refusal: its code must not leak onto the others.
+    expect(Reflect.get(refusal as object, 'code')).toBeUndefined();
   });
 
   it('rolls back only a newly prepared process-local witness on a known non-commit', async () => {
@@ -925,6 +928,25 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(headQueries[0]).toContain('GRAPH ?metaGraph');
   });
 });
+
+/** The closed-set code a promote caller uses to tell the retirement fence from a hard refusal. */
+const FENCE_CODE = 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS';
+
+function thrownBy(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('expected the call to throw');
+}
+
+function expectFenceRejection(run: () => unknown): void {
+  const refusal = thrownBy(run);
+  expect(refusal).toBeInstanceOf(Error);
+  expect((refusal as Error).message).toContain('retirement is in progress; retry promotion');
+  expect(Reflect.get(refusal as object, 'code')).toBe(FENCE_CODE);
+}
 
 async function secureTempRoot(roots: string[]): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'dkg-rfc64-legacy-boundary-'));

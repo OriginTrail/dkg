@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
+} from '@origintrail-official/dkg-core';
 import {
   createPromoteRetryableFailure,
   type PublisherAssertionPromoteOptions,
@@ -62,6 +65,23 @@ async function resolvePromoteAuthority<T>(resolve: () => Promise<T>): Promise<T>
     return await resolve();
   } catch (error) {
     if (isRetryableAuthorityUnavailable(error)) {
+      throw createPromoteRetryableFailure(error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * The same translation for the root promote's boundary companion, which the
+ * publisher prepares synchronously. Only the retirement fence is transient:
+ * every other refusal from the prepare (unavailable persistence, the head
+ * limit, invalid input) is a hard failure and passes through unchanged.
+ */
+export function translateLegacySwmRetirementFence<T>(prepare: () => T): T {
+  try {
+    return prepare();
+  } catch (error) {
+    if (isRfc64LegacySwmBoundaryRetirementInProgressError(error)) {
       throw createPromoteRetryableFailure(error);
     }
     throw error;
