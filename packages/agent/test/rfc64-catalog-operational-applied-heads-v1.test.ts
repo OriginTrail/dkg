@@ -13,7 +13,9 @@ import {
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { DKGAgent } from '../src/dkg-agent.js';
+import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 
 import { mapWithConcurrency } from '../src/map-with-concurrency.js';
 import {
@@ -599,5 +601,127 @@ describe('RFC-64 operational applied heads', () => {
     fixture.relist();
     expect(await loadRfc64OperationalAppliedHeadsV1(fixture.storage)).toBe(recovered);
     expect(fixture.reads).toHaveLength(reads);
+  });
+});
+
+describe('approved private catalog readiness handoff', () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  function fixture() {
+    const cg = 'approved-private-ready';
+    const head = signedHead(catalogScope(cg), '1');
+    const storage = createStorageFixture([head]);
+    let metadataRevision = 0;
+    let accepted = { policy: { accessPolicy: 1, era: '0', source: { kind: 'owner-signed-unregistered' } }, roster: { members: [{ agentAddress: AUTHOR }, { agentAddress: OTHER_AUTHOR }] }, policyDigest: DELEGATION_DIGEST };
+    const service = { started: true, acceptedPolicySnapshot: () => accepted };
+    const replay = { revision: 0 };
+    const subscription = { subscribed: true, onChainId: undefined as string | undefined };
+    const requester = { status: 'approved', requestGeneration: 'request-1', curatorPeerId: 'curator-peer', curatorAgentAddress: AUTHOR, curatorAuthorityEra: '0' };
+    const status = {
+      contextGraphId: cg, effectiveMode: 'catalog', phase: 'complete', authorityState: 'accepted',
+      authorityFreshness: 'current', policyDigest: DELEGATION_DIGEST, accessPolicy: 1,
+      catalogServiceStarted: true, stableReason: null, legacyReadOnlyCount: 0, authorHeadCount: 1,
+      missingRowCount: '0', appliedRowCount: '1', expectedRowCount: '1',
+      expectedCatalogHeadDigest: head.objectDigest, appliedCatalogHeadDigest: head.objectDigest,
+      expectedInventoryDigest: APPLIED_INVENTORY_DIGEST, appliedInventoryDigest: APPLIED_INVENTORY_DIGEST,
+    };
+    const agent = {
+      peerId: 'receiver-peer',
+      config: { networkIdentity: { chainId: NETWORK_ID }, rfc64CatalogExecutionPlan: {} },
+      rfc64PublicCatalogServiceV1: service, rfc64PersistenceV1: storage.storage,
+      localApprovedAgentByCG: new Map([[cg, OTHER_AUTHOR]]),
+      subscribedContextGraphs: new Map([[cg, subscription]]),
+      contextGraphMetaProjection: { readContextGraphAuthorityFactsRevision: () => metadataRevision },
+      isRfc64JoinDerivedAcceptedAuthorityV1: vi.fn(() => true),
+      isRfc64CatalogTransportAuthorityActiveV1: vi.fn(() => true),
+      resolveContextGraphSubscriptionBootstrapAuthority: vi.fn(async () => ({ outcome: 'allowed', registration: 'unregistered' })),
+      rfc64CatalogReplayRecoveryRuntimeV1: () => replay,
+      listLocalAgents: vi.fn(() => [{ agentAddress: OTHER_AUTHOR }]),
+      readRequesterJoinRequestState: vi.fn(async () => requester),
+      getOwnCgMetaFacts: async () => ({ accessPolicy: 'private', curators: [`did:dkg:agent:${AUTHOR}`], creators: ['did:dkg:agent:curator-peer'], allowedPeers: ['receiver-peer'] }),
+      readLocalContextGraphRegistrationStatus: async () => 'unregistered',
+      store: { query: vi.fn(async () => ({ type: 'bindings', bindings: [{}] as Record<string, string>[] })) },
+      listSubGraphs: vi.fn(async () => [] as unknown[]),
+      readRfc64CatalogOperationalStatusV1: vi.fn(async () => [status]),
+    };
+    const commit = vi.fn();
+    const run = () => Rfc64CatalogMethods.prototype.withVerifiedPrivateCatalogSubscriptionReadinessV1.call(agent as unknown as DKGAgent, cg, commit);
+    return { agent, cg, head, storage, status, service, replay, subscription, requester, commit, run,
+      moveMetadata: () => { metadataRevision += 1; },
+      rotatePolicy: () => { accepted = { ...accepted }; },
+    };
+  }
+
+  it('commits only after live absence, join proof and exact durable catalog parity', async () => {
+    const f = fixture();
+    await expect(f.run()).resolves.toBe(true);
+    expect(f.commit).toHaveBeenCalledOnce();
+    expect(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledWith(f.cg, {
+      callerAgentAddress: OTHER_AUTHOR, allowSubscriptionFallback: false,
+    });
+    expect(f.storage.reads).toEqual([f.head.objectDigest]);
+  });
+
+  it.each([
+    ['not subscribed', (f: ReturnType<typeof fixture>) => { f.subscription.subscribed = false; }],
+    ['service stopped', (f: ReturnType<typeof fixture>) => { f.service.started = false; }],
+    ['not join-derived', (f: ReturnType<typeof fixture>) => { f.agent.isRfc64JoinDerivedAcceptedAuthorityV1.mockReturnValue(false); }],
+    ['no approved identity', (f: ReturnType<typeof fixture>) => { f.agent.localApprovedAgentByCG.clear(); }],
+    ['authority unavailable', (f: ReturnType<typeof fixture>) => { f.agent.resolveContextGraphSubscriptionBootstrapAuthority.mockResolvedValue({ outcome: 'unavailable', registration: undefined } as never); }],
+    ['now registered', (f: ReturnType<typeof fixture>) => { f.agent.resolveContextGraphSubscriptionBootstrapAuthority.mockResolvedValue({ outcome: 'allowed', registration: undefined } as never); }],
+    ['member proof absent', (f: ReturnType<typeof fixture>) => { f.agent.store.query.mockResolvedValue({ type: 'bindings', bindings: [] }); }],
+    ['named legacy scope', (f: ReturnType<typeof fixture>) => { f.agent.listSubGraphs.mockResolvedValue([{}]); }],
+    ['unreadable applied head', (f: ReturnType<typeof fixture>) => { f.storage.fault(f.head.objectDigest, 'missing'); }],
+    ['head from another network', (f: ReturnType<typeof fixture>) => { f.agent.config.networkIdentity.chainId = 'another-network'; }],
+    ['head from an old era', (f: ReturnType<typeof fixture>) => { f.service.acceptedPolicySnapshot().policy.era = '1'; }],
+    ['head author outside the accepted roster', (f: ReturnType<typeof fixture>) => { f.service.acceptedPolicySnapshot().roster.members = [{ agentAddress: OTHER_AUTHOR }]; }],
+  ])('rejects %s', async (_label, change) => {
+    const f = fixture(); change(f);
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { effectiveMode: 'shadow' }, { phase: 'applying' }, { authorityState: 'resolving' },
+    { authorityFreshness: 'unknown' }, { policyDigest: APPLIED_INVENTORY_DIGEST }, { accessPolicy: 0 },
+    { catalogServiceStarted: false }, { stableReason: 'catalog-replay-incomplete' },
+    { legacyReadOnlyCount: 1 }, { authorHeadCount: 0 }, { missingRowCount: '1' },
+    { appliedRowCount: '0', expectedRowCount: '0' }, { appliedRowCount: null },
+    { expectedRowCount: '2' }, { expectedCatalogHeadDigest: null },
+    { appliedCatalogHeadDigest: DELEGATION_DIGEST }, { expectedInventoryDigest: null },
+    { appliedInventoryDigest: DELEGATION_DIGEST },
+  ])('never promotes incomplete/stale projection %j', async (patch) => {
+    const f = fixture(); Object.assign(f.status, patch);
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['metadata', (f: ReturnType<typeof fixture>) => f.moveMetadata()],
+    ['policy', (f: ReturnType<typeof fixture>) => f.rotatePolicy()],
+    ['replay', (f: ReturnType<typeof fixture>) => { f.replay.revision += 1; }],
+    ['inventory', (f: ReturnType<typeof fixture>) => { f.storage.setInventory([]); }],
+    ['unsubscribe', (f: ReturnType<typeof fixture>) => { f.subscription.subscribed = false; }],
+    ['registration', (f: ReturnType<typeof fixture>) => { f.subscription.onChainId = '7'; }],
+    ['request generation', (f: ReturnType<typeof fixture>) => { f.requester.requestGeneration = 'request-2'; }],
+    ['approval rejection', (f: ReturnType<typeof fixture>) => { f.requester.status = 'rejected'; }],
+    ['local agent removal', (f: ReturnType<typeof fixture>) => { f.agent.listLocalAgents.mockReturnValue([]); }],
+    ['transport authority', (f: ReturnType<typeof fixture>) => { f.agent.isRfc64CatalogTransportAuthorityActiveV1.mockReturnValue(false); }],
+    ['shutdown', (f: ReturnType<typeof fixture>) => { f.service.started = false; }],
+    ['rollout', (f: ReturnType<typeof fixture>) => { f.agent.config.rfc64CatalogExecutionPlan = {}; }],
+  ])('fences %s moving during the asynchronous reads', async (_label, move) => {
+    const f = fixture();
+    f.agent.readRfc64CatalogOperationalStatusV1.mockImplementation(async () => { move(f); return [f.status]; });
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
+  });
+
+  it('rechecks delegation expiry after catalog reads', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const f = fixture();
+    f.agent.store.query.mockResolvedValue({ type: 'bindings', bindings: [{ delegationExpiresAt: '11000' }] });
+    f.agent.readRfc64CatalogOperationalStatusV1.mockImplementation(async () => { vi.setSystemTime(11_000); return [f.status]; });
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
   });
 });

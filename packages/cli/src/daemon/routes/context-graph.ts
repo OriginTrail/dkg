@@ -2312,9 +2312,9 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             hasConfirmedMeta,
             isPrivate,
             completionAuthority,
-            readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
-              ? readinessBeforeCatchup
-              : readContextGraphReadiness(dashDb, targetContextGraphId),
+            // Automatic catalog recovery can finish while the foreground job
+            // runs. Do not overwrite its newer proof with admission-time bits.
+            readinessBeforeCatchup: readContextGraphReadiness(dashDb, targetContextGraphId),
           });
 
           job.durablePlane = classification.durablePlane;

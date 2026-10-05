@@ -74,6 +74,48 @@ function fixture(options: {
 }
 
 describe('legacy context-graph readiness provenance migration', () => {
+  it('persists a freshly verified catalog handoff as SWM proof without manufacturing VM proof', async () => {
+    const f = fixture({ confirmedMeta: true, subscription: { subscribed: true, synced: false, sharedMemorySynced: false } });
+    const emit = vi.fn();
+    Object.assign(f.agent, {
+      eventBus: { emit },
+      withVerifiedPrivateCatalogSubscriptionReadinessV1: vi.fn(async (_id: string, commit: () => void) => { commit(); return true; }),
+    });
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent, store: f.store, contextGraphId: f.contextGraphId,
+      dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
+    })).resolves.toBe(true);
+    expect(f.getProvenance()).toMatchObject({ version: 1, durableVerified: false, sharedMemoryVerified: true });
+    expect(f.subscriptions.get(f.contextGraphId)).toMatchObject({ synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false });
+    expect(emit).toHaveBeenCalledWith('project:synced', { contextGraphId: f.contextGraphId, dataSynced: 0, sharedMemorySynced: 0 });
+  });
+
+  it('does not treat a catalog completion hint as proof', async () => {
+    const f = fixture({ confirmedMeta: true, subscription: { subscribed: true, synced: false, sharedMemorySynced: false } });
+    Object.assign(f.agent, { withVerifiedPrivateCatalogSubscriptionReadinessV1: vi.fn(async () => false) });
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent, store: f.store, contextGraphId: f.contextGraphId,
+      dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
+    })).resolves.toBe(false);
+    expect(f.getProvenance()).toBeNull();
+    expect(f.markContextGraphSubscriptionState).not.toHaveBeenCalled();
+  });
+
+  it('requires the live catalog verifier instead of accepting a hint on an older agent', async () => {
+    const f = fixture({ confirmedMeta: true });
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent, store: f.store, contextGraphId: f.contextGraphId,
+      dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
+    })).resolves.toBe(false);
+    expect(f.getProvenance()).toBeNull();
+  });
+
+  it('rejects malformed catalog wake-up payloads', () => {
+    expect(parseProjectSyncedReadinessPayload({ contextGraphId: 'private', dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: 'true' })).toBeNull();
+    expect(parseProjectSyncedReadinessPayload({ contextGraphId: 'private', dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true }))
+      .toEqual({ contextGraphId: 'private', dataSynced: 0, sharedMemorySynced: 0, verifiedPrivateOnlyResponses: 0, catalogCompletionHint: true });
+  });
+
   it('normalizes a legacy PROJECT_SYNCED payload without private-only evidence', () => {
     expect(parseProjectSyncedReadinessPayload({
       contextGraphId: 'legacy-project-synced',

@@ -858,8 +858,30 @@ export async function persistProjectSyncedReadiness(input: {
   dataSynced: number;
   sharedMemorySynced: number;
   verifiedPrivateOnlyResponses?: number;
+  catalogCompletionHint?: boolean;
 }): Promise<boolean> {
   const contextGraphId = input.contextGraphId.trim();
+  if (input.catalogCompletionHint === true) {
+    if (!contextGraphId || typeof input.store.setContextGraphReadinessProvenance !== 'function'
+      || typeof input.agent.withVerifiedPrivateCatalogSubscriptionReadinessV1 !== 'function') return false;
+    return withContextGraphReadinessMutationLock(input.agent, contextGraphId, () =>
+      input.agent.withVerifiedPrivateCatalogSubscriptionReadinessV1(contextGraphId, () => {
+        const previous = readContextGraphReadiness(input.store, contextGraphId);
+        writeContextGraphReadiness(input.store, contextGraphId, {
+          durableVerified: previous.version >= CONTEXT_GRAPH_READINESS_VERSION && previous.durableVerified,
+          sharedMemoryVerified: true,
+        });
+        input.agent.markContextGraphSubscriptionState(contextGraphId, {
+          synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false,
+        });
+        // The wake-up could precede verification. Notify UI consumers only
+        // after both persistence owners committed; zero counts invent no data.
+        input.agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
+          contextGraphId, dataSynced: 0, sharedMemorySynced: 0,
+        });
+      }),
+    );
+  }
   const verifiedPrivateOnlyResponses = input.verifiedPrivateOnlyResponses ?? 0;
   const durableCompleted = (Number.isFinite(input.dataSynced) && input.dataSynced > 0) || (
     Number.isFinite(verifiedPrivateOnlyResponses)
@@ -897,6 +919,7 @@ export interface ProjectSyncedReadinessPayload {
   dataSynced: number;
   sharedMemorySynced: number;
   verifiedPrivateOnlyResponses: number;
+  catalogCompletionHint?: boolean;
 }
 
 export function parseProjectSyncedReadinessPayload(
@@ -910,6 +933,7 @@ export function parseProjectSyncedReadinessPayload(
     !Number.isFinite(candidate.dataSynced) ||
     typeof candidate.sharedMemorySynced !== 'number' ||
     !Number.isFinite(candidate.sharedMemorySynced) ||
+    (candidate.catalogCompletionHint !== undefined && typeof candidate.catalogCompletionHint !== 'boolean') ||
     (
       candidate.verifiedPrivateOnlyResponses !== undefined
       && (
@@ -925,6 +949,7 @@ export function parseProjectSyncedReadinessPayload(
     dataSynced: candidate.dataSynced,
     sharedMemorySynced: candidate.sharedMemorySynced,
     verifiedPrivateOnlyResponses: candidate.verifiedPrivateOnlyResponses ?? 0,
+    ...(candidate.catalogCompletionHint === true ? { catalogCompletionHint: true } : {}),
   };
 }
 
