@@ -1619,8 +1619,8 @@ export class DKGAgent extends DKGAgentBase {
         if (owner === undefined) {
           throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
         }
-        // A promote that meets a retirement's per-graph fence is retried by the
-        // queue; every other refusal here stays a hard failure.
+        // A promote that meets a retirement's fence (its asset's, or the graph's) is
+        // retried by the queue; every other refusal here stays a hard failure.
         return translateLegacySwmRetirementFence(() => prepareRfc64LateLegacySwmBoundaryV1(
           owner,
           input.contextGraphId,

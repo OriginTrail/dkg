@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * A root promote that meets the RFC-64 legacy SWM retirement fence (another
- * asset's confirmed publish is retiring its marker on the same context graph)
- * is a retryable promote failure, not a terminal one.
+ * A root promote that meets the RFC-64 legacy SWM retirement fence (its own
+ * asset's confirmed publish is retiring its marker, or a graph-wide retirement
+ * such as the receiver lease is running) is a retryable promote failure, not a
+ * terminal one. A share of another asset is not refused by an asset's retirement.
  *
  * The first block drives the agent's REAL promote companion resolver (the
  * production lambda in `DKGAgent.create`, reached through the publisher the
@@ -21,6 +22,7 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
   isRfc64LegacySwmBoundaryRetirementInProgressError,
+  type AuthorCatalogScopeV1,
 } from '@origintrail-official/dkg-core';
 import { createPromoteRetryableFailure, getPromoteFailureDisposition } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -29,6 +31,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import * as precommit from '../src/internal/promote/assertion-promote-precommit.js';
 import {
+  acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
   initializeRfc64LegacySwmBoundaryV1,
   prepareRfc64LateLegacySwmBoundaryV1,
   readRfc64LegacySwmBoundaryCountV1,
@@ -39,6 +42,17 @@ const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/promote-fen
 const AGENT_ADDRESS = '0x1111111111111111111111111111111111111111';
 const UAL_A = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/1';
 const UAL_B = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/2';
+const ROOT_SCOPE = Object.freeze({
+  networkId: 'otp:20430',
+  contextGraphId: CONTEXT_GRAPH_ID,
+  governanceChainId: null,
+  governanceContractAddress: null,
+  ownershipTransitionDigest: null,
+  subGraphName: null,
+  authorAddress: AGENT_ADDRESS,
+  era: '0',
+  bucketCount: '1',
+}) as AuthorCatalogScopeV1;
 const FENCE_CODE = 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS';
 const FENCE_MESSAGE = 'RFC-64 legacy SWM boundary retirement is in progress; retry promotion';
 
@@ -106,12 +120,12 @@ function thrownBy(run: () => unknown): any {
 describe('promote companion under the legacy SWM retirement fence (real agent wiring)', () => {
   it('turns the fence into a retryable promote failure the worker retries, then lets the retry through', async () => {
     const { agent, promoteCompanion } = await createAgent(true);
-    // Asset A's retirement waits for an in-flight share of the same graph, so the fence is up.
+    // Asset A's retirement waits for an in-flight share of the same asset, so A's fence is up.
     const inFlight = prepareRfc64LateLegacySwmBoundaryV1(agent, CONTEXT_GRAPH_ID, UAL_A, 'in-flight-share', '1');
     const retirement = retireRfc64LegacySwmAfterFinalizedVmV1(agent, CONTEXT_GRAPH_ID, UAL_A, '1');
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(1);
 
-    const refusal = thrownBy(() => promoteCompanion(UAL_B, 'share-of-b'));
+    const refusal = thrownBy(() => promoteCompanion(UAL_A, 'second-share-of-a'));
 
     // The canary failure is the plain message with no code; the fix is a typed retryable failure.
     expect(refusal.message).not.toContain('retry promotion');
@@ -126,11 +140,28 @@ describe('promote companion under the legacy SWM retirement fence (real agent wi
     // The rejected attempt registered nothing: only A's entry is outstanding.
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(1);
 
+    // A different asset of the same graph is not refused by A's retirement (GH#3052).
+    const other = promoteCompanion(UAL_B, 'share-of-b');
+    expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(2);
+    other.settle(false);
+
     inFlight.settle(false);
     await expect(retirement).resolves.toBe(false);
-    const companion = promoteCompanion(UAL_B, 'share-of-b');
+    const companion = promoteCompanion(UAL_A, 'second-share-of-a');
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(1);
     companion.settle(false);
+  });
+
+  it('a graph-wide source (the receiver lease) is translated for any asset of the graph', async () => {
+    const { agent, promoteCompanion } = await createAgent(true);
+    const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(agent, ROOT_SCOPE);
+
+    const refusal = thrownBy(() => promoteCompanion(UAL_B, 'share-of-b'));
+    expect(refusal.code).toBe('PROMOTE_RETRYABLE_FAILURE');
+    expect(refusal.cause.code).toBe(FENCE_CODE);
+
+    lease.release();
+    promoteCompanion(UAL_B, 'share-of-b').settle(false);
   });
 
   it('retries into a finished retirement: the marker is retired, then the new share is tracked', async () => {
@@ -155,15 +186,21 @@ describe('promote companion under the legacy SWM retirement fence (real agent wi
     const retirement = retireRfc64LegacySwmAfterFinalizedVmV1(agent, CONTEXT_GRAPH_ID, UAL_A, '1');
     await insideAbsenceCheck;
 
-    const refusal = thrownBy(() => promoteCompanion(UAL_B, 'share-of-b'));
+    // The retiring asset is refused while its retirement holds the fence; another asset is admitted.
+    const refusal = thrownBy(() => promoteCompanion(UAL_A, 'second-share-of-a'));
     expect(refusal.code).toBe('PROMOTE_RETRYABLE_FAILURE');
     expect(refusal.cause.code).toBe(FENCE_CODE);
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(1);
+    const other = promoteCompanion(UAL_B, 'share-of-b');
+    expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(2);
 
     release();
     await expect(retirement).resolves.toBe(true);
+    // A's marker is retired; B's prepared share is still tracked until it settles.
+    expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(1);
+    other.settle(false);
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(0);
-    const companion = promoteCompanion(UAL_B, 'share-of-b');
+    const companion = promoteCompanion(UAL_A, 'second-share-of-a');
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(1);
     companion.settle(false);
   });
@@ -173,7 +210,7 @@ describe('promote companion under the legacy SWM retirement fence (real agent wi
     const inFlight = prepareRfc64LateLegacySwmBoundaryV1(agent, CONTEXT_GRAPH_ID, UAL_A, 'in-flight-share', '1');
     const retirement = retireRfc64LegacySwmAfterFinalizedVmV1(agent, CONTEXT_GRAPH_ID, UAL_A, '1');
 
-    const refusal = thrownBy(() => materializationCompanion(UAL_B, 'update-of-b'));
+    const refusal = thrownBy(() => materializationCompanion(UAL_A, 'update-of-a'));
     expect(refusal.message).toContain('retirement is in progress; retry promotion');
     // Not a promote failure (the share queue's marker), but the fence's own code: the publisher's async lift
     // classifier registers this literal (async-lift-execution-failure.ts), so it must not drift.
