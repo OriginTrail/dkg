@@ -6,6 +6,9 @@ import type { CatchupJobResult } from './catchup-runner.js';
 import { catchupResultHasCleanResponse, readContextGraphReadiness, writeContextGraphReadiness } from './context-graph-readiness.js';
 
 type RegisteredAuthority = { source: string; registration?: 'unregistered' };
+const trace = (stage: string) => {
+  if (process.env.DKG_DEBUG_PRIVATE_EMPTY_VM === '1') console.info(`[private-empty-vm] subscribe-${stage}`);
+};
 
 /**
  * The first write follows subscribe, while a foreground catch-up can still be
@@ -22,11 +25,17 @@ export async function settlePrivateEmptyVmAtSubscribe(
 ): Promise<boolean> {
   if (authority.source !== 'registered-chain' || authority.registration === 'unregistered'
     || callerAgentAddress === undefined) return false;
+  trace('candidate');
   const deadline = Date.now() + 8_000;
   while (Date.now() < deadline) {
     if (await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
-      if (!await agent.isPrivateContextGraph(contextGraphId).catch(() => false)) return false;
-      if (!await agent.proveRegisteredPrivateEmptyVmV1(contextGraphId, callerAgentAddress)) return false;
+      trace('meta-confirmed');
+      if (!await agent.isPrivateContextGraph(contextGraphId).catch(() => false)) {
+        trace('not-private'); return false;
+      }
+      if (!await agent.proveRegisteredPrivateEmptyVmV1(contextGraphId, callerAgentAddress)) {
+        trace('proof-false'); return false;
+      }
       const current = readContextGraphReadiness(dashboard, contextGraphId);
       writeContextGraphReadiness(dashboard, contextGraphId, {
         durableVerified: true,
@@ -35,10 +44,12 @@ export async function settlePrivateEmptyVmAtSubscribe(
       agent.markContextGraphSubscriptionState(contextGraphId, {
         synced: true, metaSynced: true, pendingMeta: false,
       });
+      trace('vm-ready');
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  trace('meta-timeout');
   return false;
 }
 

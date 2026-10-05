@@ -13,24 +13,35 @@ export class RegisteredPrivateEmptyVmMethods {
     contextGraphId: string,
     callerAgentAddress: string,
   ): Promise<boolean> {
+    const trace = (stage: string) => {
+      if (process.env.DKG_DEBUG_PRIVATE_EMPTY_VM === '1') {
+        console.info(`[private-empty-vm] ${stage}`);
+      }
+    };
     try {
       const caller = callerAgentAddress.toLowerCase();
       if (!ethers.isAddress(caller) ||
-        this.subscribedContextGraphs.get(contextGraphId)?.subscribed !== true) return false;
+        this.subscribedContextGraphs.get(contextGraphId)?.subscribed !== true) {
+        trace('not-subscribed'); return false;
+      }
       const authority = () => this.resolveContextGraphSubscriptionBootstrapAuthority(
         contextGraphId,
         { callerAgentAddress: caller, allowSubscriptionFallback: false },
       );
       const before = await authority();
       if (before.outcome !== 'allowed' || before.source !== 'registered-chain'
-        || before.onChainId === undefined || before.registration === 'unregistered') return false;
+        || before.onChainId === undefined || before.registration === 'unregistered') {
+        trace('authority-not-registered-allowed'); return false;
+      }
       const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
       const chainConfig = this.config.chainConfig;
-      if (accepted?.policy.accessPolicy !== 1 || chainConfig === undefined) return false;
+      if (accepted?.policy.accessPolicy !== 1 || chainConfig === undefined) {
+        trace('accepted-private-policy-or-chain-config-absent'); return false;
+      }
       const endpoints = resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls);
-      if (endpoints.length === 0) return false;
+      if (endpoints.length === 0) { trace('rpc-endpoints-absent'); return false; }
       const chainId = accepted.policy.governanceChainId;
-      if (chainId === null) return false;
+      if (chainId === null) { trace('governance-chain-absent'); return false; }
       const depth = this.chain.getFinalityConfirmations?.()
         ?? chainConfig.finalityConfirmations;
       const proven = await proveRegisteredPrivateEmptyVmV1({
@@ -45,14 +56,17 @@ export class RegisteredPrivateEmptyVmMethods {
         }),
         signal: AbortSignal.timeout(45_000),
       });
-      if (!proven) return false;
+      if (!proven) { trace('finalized-zero-proof-false'); return false; }
       const after = await authority();
       const current = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
-      return after.outcome === 'allowed' && after.source === 'registered-chain'
+      const stillCurrent = after.outcome === 'allowed' && after.source === 'registered-chain'
         && after.onChainId === before.onChainId
         && current?.policy === accepted.policy && current.roster === accepted.roster
         && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
-    } catch {
+      trace(stillCurrent ? 'proven' : 'post-proof-authority-changed');
+      return stillCurrent;
+    } catch (error) {
+      trace(`proof-error:${error instanceof Error ? error.name : 'unknown'}`);
       return false;
     }
   }

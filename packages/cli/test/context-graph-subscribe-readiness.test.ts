@@ -177,6 +177,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     metadataBootstrapWaitFor?: Promise<void>;
     onMetadataBootstrapStarted?: () => void;
     onCatchupRun?: () => void;
+    catchupRunWaitFor?: Promise<void>;
+    finalizedEmptyPrivateVm?: boolean;
     authorityDecision?: TestAuthorityDecision;
     authorityAfterCatchup?: TestAuthorityDecision;
     recoverAuthorityForRetry?: boolean;
@@ -236,6 +238,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       run: async (request) => {
         runCalls += 1;
         opts.onCatchupRun?.();
+        await opts.catchupRunWaitFor;
         if (opts.readinessDuringCatchup) readiness = { ...opts.readinessDuringCatchup, updatedAt: Date.now() };
         runSawMetadataBootstrap = metadataBootstrapCompleted;
         runRequests.push(request);
@@ -305,6 +308,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
           : opts.hasConfirmedMeta;
       },
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
+      proveRegisteredPrivateEmptyVmV1: async () => opts.finalizedEmptyPrivateVm ?? false,
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
       getRfc64SelectedSwmGraphSyncStatus: () => ({
@@ -433,6 +437,34 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.responsibilityCalls).toEqual([expect.any(String)]);
     expect(result.runSawMetadataBootstrap).toBe(true);
     expect(result.metadataBootstrapCalls).toBe(1);
+  });
+
+  it('opens only first-write VM readiness before an empty private catch-up completes', async () => {
+    let finishCatchup!: () => void;
+    const catchupRunWaitFor = new Promise<void>((resolve) => { finishCatchup = resolve; });
+    try {
+      const result = await subscribe({
+        hasConfirmedMeta: true,
+        isPrivate: true,
+        initial: { subscribed: false, sharedMemorySynced: false },
+        finalizedEmptyPrivateVm: true,
+        catchupRunWaitFor,
+        authorityDecision: {
+          outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+          metadataBootstrap: 'eligible', onChainId: 7n,
+        },
+      });
+      expect(result.responseStatus).toBe(200);
+      expect(result.job.status).toBe('running');
+      expect(result.state).toMatchObject({
+        subscribed: true, synced: true, metaSynced: true, sharedMemorySynced: false,
+      });
+      expect(result.readiness).toMatchObject({
+        durableVerified: true, sharedMemoryVerified: false,
+      });
+    } finally {
+      finishCatchup();
+    }
   });
 
   it('waits for metadata bootstrap to finish before starting catch-up', async () => {
