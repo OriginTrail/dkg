@@ -134,7 +134,7 @@ import {
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
-import { inspectPrivateEmptyVmCatchup } from '../../context-graph-empty-vm-readiness.js';
+import { inspectPrivateEmptyVmCatchup, settlePrivateEmptyVmAtSubscribe } from '../../context-graph-empty-vm-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -2381,6 +2381,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       );
     });
 
+    await settlePrivateEmptyVmAtSubscribe(agent, dashDb, contextGraphId, readAuthority, callerAddr);
     recordCatchupRequest('queued', shouldSyncSharedMemory);
     return jsonResponse(res, 200, withResolutionNotes({
       subscribed: contextGraphId,
