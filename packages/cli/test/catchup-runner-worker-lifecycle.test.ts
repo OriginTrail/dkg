@@ -630,7 +630,9 @@ describe('WorkerCatchupRunner agent bridge', () => {
     const privateMember = vi.fn(async (id: string) => id === 'cg-private-member');
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
-      canUseLegacySharedMemorySyncForContextGraphV1: () => false,
+      rfc64LegacySwmGossipAllowedForContextGraph: () => false,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
       rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
     });
     const member = await invokeThroughBridge(agent, 'syncSharedMemory',

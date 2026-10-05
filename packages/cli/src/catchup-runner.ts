@@ -232,10 +232,10 @@ function selectedSharedMemoryLaneActive(agent: any, contextGraphId: string): boo
   return authority?.active === true && authority.lane === 'selected-public';
 }
 
-/** The kill switch or an authenticated private member may use the ordinary root lane. */
+/** Delegate ordinary SWM admission to the agent's complete lane decision. */
 async function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): Promise<boolean> {
-  return agent.canUseLegacySharedMemorySyncForContextGraphV1?.(contextGraphId) === true
-    || await agent.rfc64PrivateRootSwmOnLegacyLaneV1?.(contextGraphId) === true;
+  return typeof agent.canUseLegacySharedMemorySyncForContextGraphV1 === 'function'
+    && await agent.canUseLegacySharedMemorySyncForContextGraphV1(contextGraphId) === true;
 }
 
 /** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
