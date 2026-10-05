@@ -3,19 +3,14 @@
 import {
   connectLibp2pCandidate,
   parseLibp2pConnectCandidate,
+  type Libp2pConnectHost,
   type OperationContext,
   type PeerResolver,
 } from '@origintrail-official/dkg-core';
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 
 interface CuratorPeerConnectionAgent {
-  readonly node: {
-    libp2p: {
-      getConnections(): Array<{ remotePeer: { toString(): string } }>;
-      dial(target: unknown, options?: { signal?: AbortSignal }): Promise<unknown>;
-      peerStore: { merge(target: unknown, data: { multiaddrs: unknown[] }): Promise<unknown> };
-    };
-  };
+  readonly node: { libp2p: Libp2pConnectHost };
   readonly peerResolver: Pick<PeerResolver, 'connect'>;
   readonly log: { warn(ctx: OperationContext, message: string): void };
 }

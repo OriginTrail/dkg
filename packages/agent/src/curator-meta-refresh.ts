@@ -8,6 +8,7 @@ import {
   createOperationContext,
   DKG_ONTOLOGY,
   type OperationContext,
+  type Libp2pConnectHost,
   type PeerResolver,
 } from '@origintrail-official/dkg-core';
 import {
@@ -100,10 +101,6 @@ export interface CuratorMetaRefreshOptions {
   expectedCuratorAddress?: string;
 }
 
-interface CuratorConnection {
-  remotePeer: { toString(): string };
-}
-
 interface CuratorBoundSubscription {
   onChainId?: string;
   onChainHash?: string;
@@ -112,15 +109,7 @@ interface CuratorBoundSubscription {
 interface CuratorMetaRefreshAgent {
   readonly peerId: string;
   readonly metaRefreshTimestamps: Map<string, number>;
-  readonly node: {
-    libp2p: {
-      getConnections(): CuratorConnection[];
-      dial(target: unknown, options?: { signal?: AbortSignal }): Promise<unknown>;
-      peerStore: {
-        merge(target: unknown, data: { multiaddrs: unknown[] }): Promise<unknown>;
-      };
-    };
-  };
+  readonly node: { libp2p: Libp2pConnectHost };
   readonly peerResolver: Pick<PeerResolver, 'connect'>;
   readonly store: TripleStore;
   readonly syncCheckpoints: Pick<SyncCheckpointStore, 'delete'>;

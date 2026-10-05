@@ -362,10 +362,13 @@ describe('refreshMetaFromCurator', () => {
     expect(fetched).toBe(false);
   });
 
-  it('passes caller cancellation to direct dialing and shared resolution', async () => {
+  it('cancels a pending cached dial before resolver or metadata fetch', async () => {
     const controller = new AbortController();
     const dialSignals: Array<AbortSignal | undefined> = [];
-    let resolverSignal: AbortSignal | undefined;
+    let releaseDialStart: () => void = noop;
+    const dialStarted = new Promise<void>((resolve) => { releaseDialStart = resolve; });
+    let resolverCalls = 0;
+    let fetchCalls = 0;
 
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
@@ -377,7 +380,12 @@ describe('refreshMetaFromCurator', () => {
           getConnections: () => [],
           dial: async (_target: unknown, opts?: { signal?: AbortSignal }) => {
             dialSignals.push(opts?.signal);
-            throw new Error('direct dial unavailable');
+            releaseDialStart();
+            await new Promise<never>((_resolve, reject) => {
+              const abort = () => reject(opts?.signal?.reason);
+              if (opts?.signal?.aborted) abort();
+              else opts?.signal?.addEventListener('abort', abort, { once: true });
+            });
           },
           peerStore: {
             merge: async () => undefined,
@@ -385,13 +393,14 @@ describe('refreshMetaFromCurator', () => {
         },
       },
       peerResolver: {
-        connect: async (_peerId: string, opts: { signal?: AbortSignal }) => {
-          resolverSignal = opts.signal;
+        connect: async () => {
+          resolverCalls += 1;
           return { status: 'unresolved' as const, resolvedAddresses: [] };
         },
       },
       fetchSyncPages: async () => {
-        throw new Error('should not fetch without a connected curator');
+        fetchCalls += 1;
+        throw new Error('should not fetch after cancellation');
       },
       log: {
         warn: () => undefined,
@@ -399,19 +408,20 @@ describe('refreshMetaFromCurator', () => {
       },
     };
 
-    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+    const refreshed = ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
       agent as never,
       'unit-test-cg',
       { signal: controller.signal },
     );
 
-    expect(refreshed).toBe(false);
+    await dialStarted;
     expect(dialSignals).toHaveLength(1);
     expect(dialSignals[0]?.aborted).toBe(false);
-    expect(resolverSignal?.aborted).toBe(false);
     controller.abort();
+    await expect(refreshed).rejects.toMatchObject({ name: 'AbortError' });
     expect(dialSignals[0]?.aborted).toBe(true);
-    expect(resolverSignal?.aborted).toBe(true);
+    expect(resolverCalls).toBe(0);
+    expect(fetchCalls).toBe(0);
   });
 
   it.each(['direct hint', 'circuit hint', 'cached peer', 'malformed hint', 'shared resolver'])(
