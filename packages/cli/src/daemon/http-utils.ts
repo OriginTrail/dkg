@@ -196,34 +196,6 @@ export function respondIfContextGraphReadAuthorityUnavailable(
   return true;
 }
 
-/** Structural for the same package-boundary reason as the read-authority code above. */
-export const UNSCOPED_QUERY_INVALIDATED_CODE = 'UNSCOPED_QUERY_INVALIDATED';
-
-/**
- * An unscoped query releases its result only when no local write and no
- * read-authority change landed while it ran. Losing that check says nothing
- * about the request and the same query succeeds once the write has settled, so
- * the caller gets the retryable 503 of the other transient conditions, not a
- * 500. The sentence is the one the agent throws, so the answer's text did not
- * change with its status.
- */
-export function respondIfUnscopedQueryInvalidated(res: ServerResponse, err: unknown): boolean {
-  const shaped = err as { code?: unknown; retryable?: unknown } | null | undefined;
-  if (shaped?.code !== UNSCOPED_QUERY_INVALIDATED_CODE || shaped.retryable !== true) return false;
-  jsonResponse(
-    res,
-    503,
-    {
-      error: 'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
-      code: UNSCOPED_QUERY_INVALIDATED_CODE,
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '1' },
-  );
-  return true;
-}
-
 export function respondIfStoreUnavailable(
   res: ServerResponse,
   err: unknown,
@@ -310,9 +282,6 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     // server bug: any route that RE-THROWS gets the same uniform 503 the
     // `/api/query` boundary returns instead of a 500 that also echoes the
     // internal authority source/reason in its message.
-  } else if (respondIfUnscopedQueryInvalidated(res, err)) {
-    // An unscoped read that lost its consistency check to a concurrent local
-    // write is transient; `/api/query` rethrows it to this handler.
   } else if (respondIfChainRpcTransportError(res, err)) {
     // Transient transport exhaustion (RPC_ENDPOINTS_EXHAUSTED /
     // RPC_RECEIPT_LOOKUP_FAILED → 503, TIMEOUT → 504) is retryable — a route
