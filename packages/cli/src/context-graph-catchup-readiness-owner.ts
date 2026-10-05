@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent, InspectedContextGraphReadinessV1 } from '@origintrail-official/dkg-agent';
 import {
   catchupResultHasCleanResponse,
   classifyContextGraphCatchupReadiness,
@@ -31,23 +31,27 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
     && input.admissionAuthority.registration !== 'unregistered'
     && callerAgentAddress !== undefined && result.dataSynced === 0;
 
-  const decide = (
-    inspection: {
-      hasConfirmedMeta: boolean | undefined;
-      isPrivate: boolean;
-      authority: { outcome: 'allowed' | 'denied' | 'unavailable'; registration?: 'unregistered' };
-    },
-    finalizedEmptyRegisteredPrivateVm: boolean,
-  ) => {
-    const classification = classifyContextGraphCatchupReadiness({
-      result, includeSharedMemory: input.includeSharedMemory,
-      completionAuthority: inspection.authority,
-      hasConfirmedMeta: inspection.hasConfirmedMeta,
-      isPrivate: inspection.isPrivate,
-      finalizedEmptyRegisteredPrivateVm,
-      // Catalog recovery can finish while the foreground catch-up runs.
-      readinessBeforeCatchup: readContextGraphReadiness(store, contextGraphId),
-    });
+  const decide = (inspection: InspectedContextGraphReadinessV1, finalizedEmptyRegisteredPrivateVm: boolean) => {
+    const classification = inspection.kind === 'invalidated'
+      ? {
+          durablePlane: inspection.authority.outcome === 'allowed'
+            && inspection.authority.registration === 'unregistered'
+            ? 'not-applicable' as const : 'required' as const,
+          jobStatus: inspection.authority.outcome === 'denied' ? 'denied' as const : 'unreachable' as const,
+          error: inspection.authority.outcome === 'denied'
+            ? 'Context-graph authority denied access at catch-up completion.'
+            : 'Context-graph readiness inspection was invalidated before completion. Retry after metadata stabilizes.',
+          statePatch: { synced: false, sharedMemorySynced: false },
+          readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+        }
+      : classifyContextGraphCatchupReadiness({
+          result, includeSharedMemory: input.includeSharedMemory,
+          completionAuthority: inspection.authority,
+          metadata: inspection.metadata,
+          finalizedEmptyRegisteredPrivateVm,
+          // Catalog recovery can finish while the foreground catch-up runs.
+          readinessBeforeCatchup: readContextGraphReadiness(store, contextGraphId),
+        });
     commitContextGraphReadinessPatches({
       agent, store, contextGraphId,
       statePatch: classification.statePatch,

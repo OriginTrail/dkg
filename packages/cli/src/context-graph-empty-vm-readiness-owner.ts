@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent, SynchronousReadinessCommitResult } from '@origintrail-official/dkg-agent';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import type { ContextGraphReadinessProvenance } from '@origintrail-official/dkg-node-ui';
 import { withContextGraphReadinessMutationLock, type ContextGraphSubscriptionStatePatch } from './context-graph-readiness.js';
@@ -35,7 +35,7 @@ export async function withProvenEmptyPrivateVmReadiness<T>(input: {
   agent: DKGAgent;
   contextGraphId: string;
   callerAgentAddress: string;
-  commit: () => T;
+  commit: () => SynchronousReadinessCommitResult<T>;
   signal: AbortSignal;
 }): Promise<FencedProof<T>> {
   // Also bound time spent waiting behind an earlier readiness mutation. The

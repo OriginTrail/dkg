@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { DKGAgent } from './dkg-agent.js';
+import { DKGAgentBase } from './dkg-agent-base.js';
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import {
   attemptRegisteredPrivateEmptyVmV1,
@@ -18,12 +19,25 @@ export type ContextGraphReadinessAuthorityV1 =
   | ContextGraphReadAuthorityDecision
   | { readonly outcome: 'unavailable' };
 
-export interface InspectedContextGraphReadinessV1 {
-  readonly current: boolean;
-  readonly hasConfirmedMeta: boolean | undefined;
-  readonly isPrivate: boolean;
-  readonly authority: ContextGraphReadinessAuthorityV1;
-}
+/** The same-turn commit cannot return work that persists after its final fence. */
+export type SynchronousReadinessCommitResult<T> = T extends PromiseLike<unknown> ? never : T;
+
+export type ContextGraphReadinessMetadataV1 =
+  | { readonly kind: 'unchecked' }
+  | { readonly kind: 'unavailable' }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'confirmed'; readonly accessPolicy: 'public' | 'private' };
+
+export type InspectedContextGraphReadinessV1 =
+  | {
+      readonly kind: 'current';
+      readonly metadata: ContextGraphReadinessMetadataV1;
+      readonly authority: ContextGraphReadinessAuthorityV1;
+    }
+  | {
+      readonly kind: 'invalidated';
+      readonly authority: ContextGraphReadinessAuthorityV1;
+    };
 
 function finalizePrivateEmptyVmEvidence(
   attempt: RegisteredPrivateEmptyVmAttemptV1,
@@ -39,17 +53,17 @@ function finalizePrivateEmptyVmEvidence(
     }
     return attempt;
   }
-  const { current, hasConfirmedMeta, isPrivate, authority } = inspection;
-  if (!current) {
+  if (inspection.kind === 'invalidated') {
     tracePrivateEmptyVm('post-proof-metadata-changed');
     return signal?.aborted || !isSubscribed()
       ? UNPROVEN_PRIVATE_EMPTY_VM : RETRYABLE_PRIVATE_EMPTY_VM;
   }
+  const { metadata, authority } = inspection;
   if (authority.outcome === 'unavailable') {
     tracePrivateEmptyVm('post-proof-authority-unavailable');
     return RETRYABLE_PRIVATE_EMPTY_VM;
   }
-  if (!hasConfirmedMeta || !isPrivate
+  if (metadata.kind !== 'confirmed' || metadata.accessPolicy !== 'private'
     || authority.outcome !== 'allowed' || authority.source !== 'registered-chain'
     || authority.registration === 'unregistered'
     || authority.onChainId !== attempt.onChainId) {
@@ -60,7 +74,7 @@ function finalizePrivateEmptyVmEvidence(
   return { proven: true };
 }
 
-export class RegisteredPrivateEmptyVmMethods {
+export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
   /** Inspect and commit graph readiness under one agent-owned, same-turn fence. */
   async inspectAndCommitContextGraphReadinessV1<T>(
     this: DKGAgent,
@@ -71,7 +85,7 @@ export class RegisteredPrivateEmptyVmMethods {
       callerAgentAddress?: string;
       signal?: AbortSignal;
     },
-    commit: (inspection: InspectedContextGraphReadinessV1) => T,
+    commit: (inspection: InspectedContextGraphReadinessV1) => SynchronousReadinessCommitResult<T>,
   ): Promise<T> {
     const { contextGraphId, signal } = input;
     const readRevision = () => {
@@ -82,19 +96,23 @@ export class RegisteredPrivateEmptyVmMethods {
       }
     };
     const revision = input.expectedRevision ?? readRevision();
-    let hasConfirmedMeta = input.inspectMetadata
-      ? await this.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => undefined)
-      : undefined;
-    let isPrivate = false;
-    if (hasConfirmedMeta) {
-      try {
-        isPrivate = await this.isPrivateContextGraph(contextGraphId);
-      } catch {
-        // Unknown policy cannot prove either public readiness or the private
-        // zero-VM exception. Preserve the private fail-closed posture while
-        // withholding the confirmed-metadata fact.
-        hasConfirmedMeta = undefined;
-        isPrivate = true;
+    let metadata: ContextGraphReadinessMetadataV1 = { kind: 'unchecked' };
+    if (input.inspectMetadata) {
+      const hasConfirmedMeta = await this.hasConfirmedMetaState(contextGraphId, { signal })
+        .catch(() => undefined);
+      if (hasConfirmedMeta === undefined) metadata = { kind: 'unavailable' };
+      else if (!hasConfirmedMeta) metadata = { kind: 'absent' };
+      else {
+        try {
+          metadata = {
+            kind: 'confirmed',
+            accessPolicy: await this.isPrivateContextGraph(contextGraphId) ? 'private' : 'public',
+          };
+        } catch {
+          // Unknown policy proves neither public readiness nor the private
+          // zero-VM exception.
+          metadata = { kind: 'unavailable' };
+        }
       }
     }
     const authority: ContextGraphReadinessAuthorityV1 =
@@ -112,11 +130,8 @@ export class RegisteredPrivateEmptyVmMethods {
       && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
       && readRevision() === revision;
     return commit(current
-      ? { current, hasConfirmedMeta, isPrivate, authority }
-      : {
-          current, hasConfirmedMeta: undefined, isPrivate: false,
-          authority: authority.outcome === 'allowed' ? { outcome: 'unavailable' } : authority,
-        });
+      ? { kind: 'current', metadata, authority }
+      : { kind: 'invalidated', authority });
   }
 
   /** One final agent-owned inspection for optional chain evidence and peer classification. */
@@ -132,7 +147,7 @@ export class RegisteredPrivateEmptyVmMethods {
     commit: (
       inspection: InspectedContextGraphReadinessV1,
       proof: { readonly proven: false; readonly retryable?: boolean } | { readonly proven: true },
-    ) => T,
+    ) => SynchronousReadinessCommitResult<T>,
   ): Promise<T> {
     const { contextGraphId, callerAgentAddress, signal } = input;
     const attempt = input.attemptPrivateEmptyVm && callerAgentAddress !== undefined
@@ -169,7 +184,7 @@ export class RegisteredPrivateEmptyVmMethods {
     this: DKGAgent,
     contextGraphId: string,
     callerAgentAddress: string,
-    commit: (inspection: InspectedContextGraphReadinessV1) => T,
+    commit: (inspection: InspectedContextGraphReadinessV1) => SynchronousReadinessCommitResult<T>,
     signal?: AbortSignal,
   ): Promise<RegisteredPrivateEmptyVmReadinessResult<T>> {
     return this.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1({

@@ -389,8 +389,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         return agent.inspectAndCommitContextGraphReadinessV1({
           contextGraphId: _id, inspectMetadata: true,
           callerAgentAddress: _caller,
-        }, (facts: Record<string, any>) => facts.current && facts.hasConfirmedMeta
-          && facts.isPrivate && facts.authority.outcome === 'allowed'
+        }, (facts: Record<string, any>) => facts.kind === 'current'
+          && facts.metadata.kind === 'confirmed'
+          && facts.metadata.accessPolicy === 'private' && facts.authority.outcome === 'allowed'
           ? { proven: true as const, value: commit(facts) }
           : { proven: false as const });
       },
@@ -411,8 +412,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
           inspectMetadata: input.inspectMetadata,
           callerAgentAddress: input.callerAgentAddress,
         }, (facts: Record<string, any>) => commit(facts, {
-          proven: proof.proven && facts.current && facts.hasConfirmedMeta
-            && facts.isPrivate && facts.authority.outcome === 'allowed',
+          proven: proof.proven && facts.kind === 'current'
+            && facts.metadata.kind === 'confirmed'
+            && facts.metadata.accessPolicy === 'private' && facts.authority.outcome === 'allowed',
         }));
       },
       resolveAgentByToken: () => undefined,
@@ -1486,6 +1488,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       changeRevisionOnTerminalAuthority: true,
     });
     expect(result.job.status).toBe('unreachable');
+    expect(result.job.durablePlane).toBe('not-applicable');
     expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
     expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false });
   });

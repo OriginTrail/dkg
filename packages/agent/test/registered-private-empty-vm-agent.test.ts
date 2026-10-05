@@ -95,8 +95,8 @@ describe('registered private empty-VM agent guard', () => {
         callerAgentAddress: CALLER,
       }, commit);
     expect(inspected).toEqual({
-      current: false, hasConfirmedMeta: undefined, isPrivate: false,
-      authority: { outcome: 'unavailable' },
+      kind: 'invalidated',
+      authority: { outcome: 'allowed', source: 'registered-chain', onChainId: 3n },
     });
     expect(commit).toHaveBeenCalledOnce();
   });
@@ -114,8 +114,8 @@ describe('registered private empty-VM agent guard', () => {
         callerAgentAddress: CALLER,
       }, inspect);
     expect(result).toMatchObject({
-      current: false, hasConfirmedMeta: undefined, isPrivate: false,
-      authority: { outcome: 'unavailable' },
+      kind: 'invalidated',
+      authority: { outcome: 'allowed', source: 'registered-chain', onChainId: 3n },
     });
     expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ freshness: 'live' }));
   });
@@ -132,8 +132,8 @@ describe('registered private empty-VM agent guard', () => {
         callerAgentAddress: CALLER,
       }, inspect);
     expect(result).toMatchObject({
-      current: false, hasConfirmedMeta: undefined, isPrivate: false,
-      authority: { outcome: 'unavailable' },
+      kind: 'invalidated',
+      authority: { outcome: 'allowed', source: 'registered-chain', onChainId: 3n },
     });
     expect(inspect).toHaveBeenCalledOnce();
   });
@@ -144,19 +144,22 @@ describe('registered private empty-VM agent guard', () => {
         fail: (state: ReturnType<typeof fixture>) => {
           vi.mocked(state.agent.hasConfirmedMetaState).mockRejectedValue(new Error('metadata unavailable'));
         },
-        expected: { hasConfirmedMeta: undefined, isPrivate: false, authority: { outcome: 'allowed' } },
+        expected: { metadata: { kind: 'unavailable' }, authority: { outcome: 'allowed' } },
       },
       {
         fail: (state: ReturnType<typeof fixture>) => {
           state.isPrivate.mockRejectedValue(new Error('policy unavailable'));
         },
-        expected: { hasConfirmedMeta: undefined, isPrivate: true, authority: { outcome: 'allowed' } },
+        expected: { metadata: { kind: 'unavailable' }, authority: { outcome: 'allowed' } },
       },
       {
         fail: (state: ReturnType<typeof fixture>) => {
           state.authority.mockRejectedValue(new Error('chain unavailable'));
         },
-        expected: { hasConfirmedMeta: true, isPrivate: true, authority: { outcome: 'unavailable' } },
+        expected: {
+          metadata: { kind: 'confirmed', accessPolicy: 'private' },
+          authority: { outcome: 'unavailable' },
+        },
       },
     ];
     for (const { fail, expected } of cases) {
@@ -167,8 +170,20 @@ describe('registered private empty-VM agent guard', () => {
           contextGraphId: CG, inspectMetadata: true,
           callerAgentAddress: CALLER,
         }, (facts) => facts);
-      expect(result).toMatchObject({ current: true, ...expected });
+      expect(result).toMatchObject({ kind: 'current', ...expected });
     }
+  });
+
+  it('distinguishes confirmed metadata absence from an unavailable policy', async () => {
+    const state = fixture();
+    vi.mocked(state.agent.hasConfirmedMetaState).mockResolvedValueOnce(false);
+    const inspected = await RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1
+      .call(state.agent, {
+        contextGraphId: CG, inspectMetadata: true,
+        callerAgentAddress: CALLER,
+      }, (facts) => facts);
+    expect(inspected).toMatchObject({ kind: 'current', metadata: { kind: 'absent' } });
+    expect(state.isPrivate).not.toHaveBeenCalled();
   });
 
   it('never commits a zero-VM proof when private-policy inspection fails after it', async () => {
@@ -198,7 +213,7 @@ describe('registered private empty-VM agent guard', () => {
       .call(state.agent, CG, CALLER, commit)).toEqual({ proven: true, value: 'readiness-written' });
     expect(commit).toHaveBeenCalledOnce();
     expect(commit).toHaveBeenCalledWith(expect.objectContaining({
-      current: true, hasConfirmedMeta: true, isPrivate: true,
+      kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' },
       authority: expect.objectContaining({ outcome: 'allowed', source: 'registered-chain' }),
     }));
   });
@@ -387,7 +402,7 @@ describe('registered private empty-VM agent guard', () => {
     expect(state.authority).toHaveBeenCalledTimes(2);
     expect(result).toEqual({
       inspection: expect.objectContaining({
-        current: true, authority: { outcome: 'denied' },
+        kind: 'current', authority: { outcome: 'denied' },
       }),
       proof: { proven: false },
     });

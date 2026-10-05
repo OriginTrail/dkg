@@ -276,12 +276,18 @@ async function createHarness(opts: HarnessOptions = {}) {
     inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1: async (
       input: { contextGraphId: string; callerAgentAddress?: string },
       commit: (facts: Record<string, unknown>, proof: { proven: false }) => unknown,
-    ) => commit({
-      current: subscriptions.get(input.contextGraphId)?.subscribed === true,
-      hasConfirmedMeta: opts.hasConfirmedMeta ?? true,
-      isPrivate: opts.isPrivate ?? false,
-      authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
-    }, { proven: false }),
+    ) => commit(subscriptions.get(input.contextGraphId)?.subscribed === true
+      ? {
+          kind: 'current',
+          metadata: opts.hasConfirmedMeta === false
+            ? { kind: 'absent' }
+            : { kind: 'confirmed', accessPolicy: opts.isPrivate ? 'private' : 'public' },
+          authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
+        }
+      : {
+          kind: 'invalidated',
+          authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
+        }, { proven: false }),
     resolveAgentByToken: () => undefined,
     getDefaultAgentAddress: () =>
       opts.callerAddress ?? '0x0000000000000000000000000000000000000001',

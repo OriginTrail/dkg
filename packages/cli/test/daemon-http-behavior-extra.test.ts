@@ -1093,7 +1093,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
             _input: unknown,
             commit: (facts: Record<string, unknown>, proof: { proven: false }) => unknown,
           ) => commit({
-            current: true, hasConfirmedMeta: false, isPrivate: false,
+            kind: 'current', metadata: { kind: 'absent' },
             authority: { outcome: 'allowed', source: 'legacy-local' },
           }, { proven: false }),
           resolveAgentByToken: () => undefined,
