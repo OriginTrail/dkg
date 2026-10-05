@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "testedPrHeadCommit": "88f2c47c065ab1516b6cee3a2558cdfb34629554",
+  "runUrl": "https://github.com/OriginTrail/dkg/actions/runs/37290687985",
+  "nodeMajorConfigured": 22,
+  "pnpmVersionAsserted": "10.28.1",
+  "checksExecuted": [
+    "actual pinned pnpm launch",
+    "owned descendant stopped on timeout",
+    "owned descendant stopped on cancellation"
+  ],
+  "checkInputs": {
+    "scripts/qa-check-regression-launcher.mjs": "749834f8abb5b2b66920ce38128265cc7e6584c7688b1139f279a7008ba7358d",
+    "scripts/lib/regressions/launcher-checks.mjs": "4378f571deeaba76000dabca4b0e6324f0a95ecc74e10902418c5c0c10307860",
+    "scripts/lib/regressions/proof.mjs": "5567e5896badcf2bf467de183e236010c5aeac1518d3460968d20a29c462f33a"
+  },
+  "verification": "Both required Windows steps completed successfully; full workflow completion is separate.",
+  "jobs": [
+    {
+      "name": "inventory-windows / SQLite lifecycle (Windows, object-stores)",
+      "jobUrl": "https://github.com/OriginTrail/dkg/actions/runs/37290687985/job/111700181997",
+      "jobStatusAtObservation": "in_progress",
+      "step": {
+        "name": "Check regression proof launcher and process cleanup",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 6,
+        "started_at": "2026-10-05T09:33:39Z",
+        "completed_at": "2026-10-05T09:33:43Z"
+      }
+    },
+    {
+      "name": "inventory-windows / SQLite lifecycle (Windows, inventory)",
+      "jobUrl": "https://github.com/OriginTrail/dkg/actions/runs/37290687985/job/111700182071",
+      "jobStatusAtObservation": "in_progress",
+      "step": {
+        "name": "Check regression proof launcher and process cleanup",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 6,
+        "started_at": "2026-10-05T09:33:43Z",
+        "completed_at": "2026-10-05T09:33:47Z"
+      }
+    }
+  ]
+}
