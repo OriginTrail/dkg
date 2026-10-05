@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { multiaddr } from '@multiformats/multiaddr';
-import type { OperationContext, PeerResolver } from '@origintrail-official/dkg-core';
+import {
+  connectLibp2pCandidate,
+  parseLibp2pConnectCandidate,
+  type OperationContext,
+  type PeerResolver,
+} from '@origintrail-official/dkg-core';
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 
 interface CuratorPeerConnectionAgent {
@@ -47,27 +51,38 @@ async function dialCurator(
   try {
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const peerId = peerIdFromString(curatorPeerId);
-    if (addressHint) {
+    const verifiedAddress = verifiedCuratorDialAddress(addressHint, curatorPeerId);
+    if (verifiedAddress) {
       try {
-        const verifiedAddress = verifiedCuratorDialAddress(addressHint, curatorPeerId);
-        if (verifiedAddress) {
-          await agent.node.libp2p.peerStore.merge(peerId, {
-            multiaddrs: [multiaddr(verifiedAddress)],
-          });
-        }
+        await connectLibp2pCandidate(
+          agent.node.libp2p,
+          parseLibp2pConnectCandidate(verifiedAddress),
+          { expectedPeerId: curatorPeerId, signal, timeoutMs: 5_000 },
+        );
+        throwIfAborted(signal);
+        connections = agent.node.libp2p.getConnections();
+        isConnected = connections.some((connection) => (
+          connection.remotePeer.toString() === curatorPeerId
+        ));
       } catch {
-        // An obsolete or malformed local hint cannot prevent normal discovery.
+        throwIfAborted(signal);
+        // A stale hint cannot prevent cached-address or resolver recovery.
       }
     }
-    try {
-      await agent.node.libp2p.dial(peerId, { signal });
-      throwIfAborted(signal);
-      connections = agent.node.libp2p.getConnections();
-      isConnected = connections.some((connection) => (
-        connection.remotePeer.toString() === curatorPeerId
-      ));
-    } catch {
-      // A regular dial may not have a usable direct address; resolution is next.
+    if (!isConnected) {
+      try {
+        const timeout = AbortSignal.timeout(5_000);
+        const dialSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+        await agent.node.libp2p.dial(peerId, { signal: dialSignal });
+        throwIfAborted(signal);
+        connections = agent.node.libp2p.getConnections();
+        isConnected = connections.some((connection) => (
+          connection.remotePeer.toString() === curatorPeerId
+        ));
+      } catch {
+        throwIfAborted(signal);
+        // A cached peer-ID dial may lack a usable address; resolution is next.
+      }
     }
 
     if (!isConnected) {

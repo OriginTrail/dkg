@@ -315,7 +315,7 @@ describe('authoritative private metadata proof', () => {
 describe('refreshMetaFromCurator', () => {
   it('resolves a restarted curator by peer ID without trusting resolver status alone', async () => {
     let resolvedPeerId: string | undefined;
-    let hintedPeerId: string | undefined;
+    const attemptedTargets: string[] = [];
     let fetched = false;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
@@ -323,11 +323,12 @@ describe('refreshMetaFromCurator', () => {
       node: {
         libp2p: {
           getConnections: () => [],
-          dial: async () => { throw new Error('no cached address after restart'); },
+          dial: async (target: { toString(): string }) => {
+            attemptedTargets.push(target.toString());
+            throw new Error('no cached address after restart');
+          },
           peerStore: {
-            merge: async (peerId: { toString(): string }) => {
-              hintedPeerId = peerId.toString();
-            },
+            merge: async () => undefined,
           },
         },
       },
@@ -353,7 +354,10 @@ describe('refreshMetaFromCurator', () => {
     );
 
     expect(resolvedPeerId).toBe(CURATOR_PEER_ID);
-    expect(hintedPeerId).toBe(CURATOR_PEER_ID);
+    expect(attemptedTargets).toEqual([
+      `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`,
+      CURATOR_PEER_ID,
+    ]);
     expect(refreshed).toBe(false);
     expect(fetched).toBe(false);
   });
@@ -402,19 +406,26 @@ describe('refreshMetaFromCurator', () => {
     );
 
     expect(refreshed).toBe(false);
-    expect(dialSignals).toEqual([controller.signal]);
+    expect(dialSignals).toHaveLength(1);
+    expect(dialSignals[0]?.aborted).toBe(false);
     expect(resolverSignal?.aborted).toBe(false);
     controller.abort();
+    expect(dialSignals[0]?.aborted).toBe(true);
     expect(resolverSignal?.aborted).toBe(true);
   });
 
-  it.each(['remembered hint', 'shared resolver'])(
+  it.each(['direct hint', 'circuit hint', 'cached peer', 'malformed hint', 'shared resolver'])(
     'accepts an authoritative public snapshot after %s connects to the curator',
     async (connectionPath) => {
       const contextGraphId = 'public/authoritative-curator-snapshot';
       const metaGraph = contextGraphMetaGraphUri(contextGraphId);
       const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-      const addressHint = `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`;
+      const directHint = `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`;
+      const relayAddress = '/ip4/127.0.0.1/tcp/9091/p2p/12D3KooWNmCF7BxTYPjtTkTi3xHY4qHdRogqY2PxHrLpm8MFTWxq';
+      const circuitHint = `${relayAddress}/p2p-circuit/p2p/${CURATOR_PEER_ID}`;
+      const addressHint = connectionPath === 'direct hint' ? directHint
+        : connectionPath === 'circuit hint' ? circuitHint
+          : connectionPath === 'malformed hint' ? 'invalid address' : undefined;
       const snapshot: Quad[] = [{
         subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.RDF_TYPE,
@@ -429,7 +440,7 @@ describe('refreshMetaFromCurator', () => {
       let staged: Quad[] = [];
       let connected = false;
       let resolverCalls = 0;
-      let directDials = 0;
+      const dialedTargets: string[] = [];
       let mergedAddresses: string[] = [];
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
@@ -440,13 +451,19 @@ describe('refreshMetaFromCurator', () => {
             getConnections: () => connected
               ? [{ remotePeer: { toString: () => CURATOR_PEER_ID } }]
               : [],
-            dial: async () => {
-              directDials += 1;
-              if (connectionPath === 'remembered hint' && mergedAddresses.includes(addressHint)) {
+            dial: async (target: { toString(): string }) => {
+              const address = target.toString();
+              dialedTargets.push(address);
+              if (
+                (connectionPath === 'direct hint' && address === directHint)
+                || (connectionPath === 'circuit hint' && address === circuitHint)
+                || (connectionPath === 'cached peer' && address === CURATOR_PEER_ID)
+              ) {
                 connected = true;
                 return;
               }
-              throw new Error('cached address unavailable');
+              if (connectionPath === 'circuit hint' && address === relayAddress) return;
+              throw new Error('address unavailable');
             },
             peerStore: {
               merge: async (_peerId: unknown, data: { multiaddrs: Array<{ toString(): string }> }) => {
@@ -458,7 +475,7 @@ describe('refreshMetaFromCurator', () => {
         peerResolver: {
           connect: async () => {
             resolverCalls += 1;
-            if (connectionPath === 'shared resolver') connected = true;
+            if (connectionPath === 'shared resolver' || connectionPath === 'malformed hint') connected = true;
             return { status: 'connected' as const, resolvedAddresses: [] };
           },
         },
@@ -486,15 +503,19 @@ describe('refreshMetaFromCurator', () => {
         {
           trustedCuratorPeerId: CURATOR_PEER_ID,
           force: true,
-          ...(connectionPath === 'remembered hint' ? { curatorDialAddressHint: addressHint } : {}),
+          ...(addressHint === undefined ? {} : { curatorDialAddressHint: addressHint }),
         },
       );
 
       expect(refreshed).toBe(true);
       expect(staged).toHaveLength(2);
-      expect(directDials).toBe(1);
-      expect(mergedAddresses).toEqual(connectionPath === 'remembered hint' ? [addressHint] : []);
-      expect(resolverCalls).toBe(connectionPath === 'shared resolver' ? 1 : 0);
+      expect(dialedTargets).toEqual(connectionPath === 'direct hint' ? [directHint]
+        : connectionPath === 'circuit hint' ? [relayAddress, circuitHint]
+          : [CURATOR_PEER_ID]);
+      expect(mergedAddresses).toEqual(connectionPath === 'circuit hint' ? [circuitHint] : []);
+      expect(resolverCalls).toBe(
+        connectionPath === 'shared resolver' || connectionPath === 'malformed hint' ? 1 : 0,
+      );
     },
   );
 

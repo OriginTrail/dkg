@@ -1938,7 +1938,8 @@ describe('private read authorization uses the on-chain participant roster', () =
 
   it('keeps restarted join approvals metadata-only until ordinary read authority is proven', async () => {
     const contextGraphId = 'restart-pending-join-approval';
-    const curatorPeerId = '12D3KooWRestartPendingCurator';
+    const curatorPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const restoredDialAddress = `/ip4/127.0.0.1/tcp/9090/p2p/${curatorPeerId}`;
     agent = await DKGAgent.create({
       name: 'PendingJoinApprovalRecovery',
       chainAdapter: new MockChainAdapter(),
@@ -1988,7 +1989,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     const catchUp = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
 
     // A failed fetch can succeed later (#2832).
-    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId, restoredDialAddress))
       .resolves.toBe('retry');
     expect(readAuthority).not.toHaveBeenCalled();
     expect(refreshFlags).not.toHaveBeenCalled();
@@ -1996,10 +1997,11 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(persistMembership).not.toHaveBeenCalled();
     expect(catchUp).not.toHaveBeenCalled();
 
-    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId, restoredDialAddress))
       .resolves.toBe('completed');
     expect(refreshMeta).toHaveBeenLastCalledWith(contextGraphId, expect.objectContaining({
       trustedCuratorPeerId: curatorPeerId,
+      curatorDialAddressHint: restoredDialAddress,
       force: true,
       approvedMember: acceptance,
     }));
