@@ -472,7 +472,9 @@ describe('runDaemonInner store recovery/monitor wiring', () => {
     } finally { release(); await shutdown; }
     expect(process.exit).toHaveBeenCalledWith(0);
     expect(daemonState.storeMonitor).toBe(monitor);
-    expect(await readFile(join(tempHome!, 'daemon.log'), 'utf8')).toContain('Shutdown cleanup error: monitor retirement failed');
+    const log = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+    expect(log).toContain('Shutdown cleanup error: monitor retirement failed');
+    expect(log).not.toContain('[warn] Unhandled rejection: Error: monitor retirement failed');
   });
 
   it('DKG_STORE_MONITOR_DISABLED=1 keeps the monitor uninstalled even for a managed store', async () => {
