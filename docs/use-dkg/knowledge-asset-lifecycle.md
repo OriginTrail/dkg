@@ -75,7 +75,7 @@ The same answer also covers a share that arrives while the node retires the lega
 
 After this answer nothing is lost and the content is unchanged, but the request was not a no-op. The share seals the draft before it shares, so the asset is now at least `wm-sealed` (see `dkg ka history`), and whatever the share had already recorded is reused by the next attempt. Do not write to the asset or recreate it: share it again. Publish only after the share has succeeded.
 
-The daemon log names what was unavailable: the event `knowledge_asset_share_prerequisite_unavailable` carries the share `step` and, when known, a `causeCode` and `causeReason`. An async share (`dkg ka share-async`) that meets the same failure is retried by the queue as `failed_retrying`; its first retry is due about a minute later, and sharing the same asset again meanwhile answers `409` with the existing job (`dkg ka cancel-share-job` frees it to submit again). The worker log event `async_promote_attempt_failed` carries the same `causeCode`. A one-shot create with `--share` keeps what it created: when only its share step fails this way, it answers `207` with the sealed asset and the share error under `errors`; finish with `dkg ka share <name>`.
+The daemon log names what was unavailable: the event `knowledge_asset_share_prerequisite_unavailable` carries the share `step` and, when known, a `causeCode` and `causeReason`. An async share (`dkg ka share-async`) that meets the same failure is retried by the queue as `failed_retrying`; its first retry is due about a minute later, and sharing the same asset again meanwhile answers `409` with the existing job, which you follow with `dkg ka share-job`; only a `queued` job can be cancelled, so a retrying one is left to finish. The worker log event `async_promote_attempt_failed` carries the same `causeCode`. A one-shot create with `--share` keeps what it created: when only its share step fails this way, it answers `207` with the sealed asset and the share error under `errors`; finish with `dkg ka share <name>`.
 
 ## Async share recovery
 
@@ -100,7 +100,7 @@ If the share committed but the node then failed to record its `swmCurrentAsserti
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
 | `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n>]` | List async share jobs |
 | `dkg ka share-job <job-id>` | Show one async share job |
-| `dkg ka cancel-share-job <job-id>` | Cancel a queued/retrying share job |
+| `dkg ka cancel-share-job <job-id>` | Cancel a queued share job (a retrying one cannot be cancelled) |
 | `dkg ka recover-share-job <job-id>` | Recover a failed share job |
 | `dkg ka publish <name> -c <cg>` | Synchronously publish finalized, fully shared SWM to VM |
 | `dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]` | Enqueue VM publish |
