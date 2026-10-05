@@ -81,6 +81,7 @@ interface Rfc64LegacySwmBoundaryStateV1 {
   >;
   entryCount: number;
   mutationTail: Promise<void>;
+  /** Keyed by context graph id (graph-wide retirements) or by {@link rfc64LegacySwmAssetScopeKeyV1} (one asset's). */
   readonly preparationScopes: Map<string, Rfc64LegacySwmBoundaryPreparationScopeV1>;
 }
 
@@ -426,10 +427,10 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
   const kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
   assertSwmAuthorInventoryShareOperationIdV1(shareOperationId);
   const assertionVersion = assertPositiveDecimalU64V1(assertionVersionInput);
-  const currentPreparationScope = state.preparationScopes.get(contextGraphId);
+  const assetScopeKey = rfc64LegacySwmAssetScopeKeyV1(contextGraphId, kaUal);
   if (
-    currentPreparationScope !== undefined
-    && currentPreparationScope.retirementPending > 0
+    (state.preparationScopes.get(contextGraphId)?.retirementPending ?? 0) > 0
+    || (state.preparationScopes.get(assetScopeKey)?.retirementPending ?? 0) > 0
   ) {
     throw Object.assign(
       new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
@@ -462,9 +463,15 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
     );
     state.entryCount += 1;
   }
+  // Both scopes are registered only after every throwing statement above, so a refused or failed
+  // prepare can never leave a preparation behind that a retirement would wait on forever.
   const preparationScope = beginRfc64LegacySwmBoundaryPreparationV1(
     state,
     contextGraphId,
+  );
+  const assetPreparationScope = beginRfc64LegacySwmBoundaryPreparationV1(
+    state,
+    assetScopeKey,
   );
   let settled = false;
   return Object.freeze({
@@ -484,14 +491,32 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
           );
         }
       } finally {
-        settleRfc64LegacySwmBoundaryPreparationV1(
-          state,
-          contextGraphId,
-          preparationScope,
-        );
+        try {
+          settleRfc64LegacySwmBoundaryPreparationV1(
+            state,
+            contextGraphId,
+            preparationScope,
+          );
+        } finally {
+          settleRfc64LegacySwmBoundaryPreparationV1(
+            state,
+            assetScopeKey,
+            assetPreparationScope,
+          );
+        }
       }
     },
   });
+}
+
+/**
+ * The finalized-VM retirement reads and deletes the markers of ONE asset, so it fences and drains that
+ * asset's scope, not the graph's: a share of another asset is neither refused by it nor waited for.
+ * '#' is outside the context graph id grammar, so an asset key can never alias a graph key. The receiver
+ * lease and the republish retirement keep the graph key.
+ */
+function rfc64LegacySwmAssetScopeKeyV1(contextGraphId: string, kaUal: string): string {
+  return `${contextGraphId}#${kaUal}`;
 }
 
 export interface Rfc64RepublishedLegacySwmAssetV1 {
@@ -552,7 +577,10 @@ export async function markRfc64LegacySwmRepublishedV1(
  * prove byte-identical VM/SWM content and finish SWM cleanup. Recheck the
  * physical graph and head under the legacy preparation fence before retiring
  * its marker: a concurrent new share must either finish first and remain
- * visible here, or retry after this retirement with a new marker.
+ * visible here, or retry after this retirement with a new marker. The fence
+ * and the drain are the ASSET's: this reads and deletes only that asset's
+ * graph, head and markers, so shares of other assets of the graph are
+ * neither refused nor waited for.
  */
 export async function retireRfc64LegacySwmAfterFinalizedVmV1(
   owner: object,
@@ -567,7 +595,8 @@ export async function retireRfc64LegacySwmAfterFinalizedVmV1(
   assertContextGraphIdV1(contextGraphId, 'RFC-64 finalized VM legacy boundary contextGraphId');
   const kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
   const assertionVersion = assertPositiveDecimalU64V1(assertionVersionInput);
-  const preparationScope = beginRfc64LegacySwmBoundaryRetirementV1(state, contextGraphId);
+  const assetScopeKey = rfc64LegacySwmAssetScopeKeyV1(contextGraphId, kaUal);
+  const preparationScope = beginRfc64LegacySwmBoundaryRetirementV1(state, assetScopeKey);
   try {
     return await mutateRfc64LegacySwmBoundaryV1(state, async () => {
       await preparationScope.preparationsDrained;
@@ -599,7 +628,7 @@ export async function retireRfc64LegacySwmAfterFinalizedVmV1(
       return true;
     });
   } finally {
-    endRfc64LegacySwmBoundaryRetirementV1(state, contextGraphId, preparationScope);
+    endRfc64LegacySwmBoundaryRetirementV1(state, assetScopeKey, preparationScope);
   }
 }
 
@@ -873,11 +902,11 @@ function removeRfc64OutstandingLegacySwmBoundaryEntryV1(
 
 function beginRfc64LegacySwmBoundaryPreparationV1(
   state: Rfc64LegacySwmBoundaryStateV1,
-  contextGraphId: string,
+  scopeKey: string,
 ): Rfc64LegacySwmBoundaryPreparationScopeV1 {
   const scope = getRfc64LegacySwmBoundaryPreparationScopeV1(
     state,
-    contextGraphId,
+    scopeKey,
   );
   if (scope.activePreparations === 0) {
     scope.preparationsDrained = new Promise<void>((resolve) => {
@@ -890,7 +919,7 @@ function beginRfc64LegacySwmBoundaryPreparationV1(
 
 function settleRfc64LegacySwmBoundaryPreparationV1(
   state: Rfc64LegacySwmBoundaryStateV1,
-  contextGraphId: string,
+  scopeKey: string,
   scope: Rfc64LegacySwmBoundaryPreparationScopeV1,
 ): void {
   if (scope.activePreparations < 1) {
@@ -901,16 +930,16 @@ function settleRfc64LegacySwmBoundaryPreparationV1(
   const resolve = scope.resolvePreparationsDrained;
   scope.resolvePreparationsDrained = undefined;
   resolve?.();
-  cleanRfc64LegacySwmBoundaryPreparationScopeV1(state, contextGraphId, scope);
+  cleanRfc64LegacySwmBoundaryPreparationScopeV1(state, scopeKey, scope);
 }
 
 function beginRfc64LegacySwmBoundaryRetirementV1(
   state: Rfc64LegacySwmBoundaryStateV1,
-  contextGraphId: string,
+  scopeKey: string,
 ): Rfc64LegacySwmBoundaryPreparationScopeV1 {
   const scope = getRfc64LegacySwmBoundaryPreparationScopeV1(
     state,
-    contextGraphId,
+    scopeKey,
   );
   scope.retirementPending += 1;
   return scope;
@@ -918,19 +947,19 @@ function beginRfc64LegacySwmBoundaryRetirementV1(
 
 function endRfc64LegacySwmBoundaryRetirementV1(
   state: Rfc64LegacySwmBoundaryStateV1,
-  contextGraphId: string,
+  scopeKey: string,
   scope: Rfc64LegacySwmBoundaryPreparationScopeV1,
 ): void {
   if (scope.retirementPending === 0) return;
   scope.retirementPending -= 1;
-  cleanRfc64LegacySwmBoundaryPreparationScopeV1(state, contextGraphId, scope);
+  cleanRfc64LegacySwmBoundaryPreparationScopeV1(state, scopeKey, scope);
 }
 
 function getRfc64LegacySwmBoundaryPreparationScopeV1(
   state: Rfc64LegacySwmBoundaryStateV1,
-  contextGraphId: string,
+  scopeKey: string,
 ): Rfc64LegacySwmBoundaryPreparationScopeV1 {
-  const existing = state.preparationScopes.get(contextGraphId);
+  const existing = state.preparationScopes.get(scopeKey);
   if (existing !== undefined) return existing;
   const created: Rfc64LegacySwmBoundaryPreparationScopeV1 = {
     activePreparations: 0,
@@ -938,21 +967,21 @@ function getRfc64LegacySwmBoundaryPreparationScopeV1(
     resolvePreparationsDrained: undefined,
     retirementPending: 0,
   };
-  state.preparationScopes.set(contextGraphId, created);
+  state.preparationScopes.set(scopeKey, created);
   return created;
 }
 
 function cleanRfc64LegacySwmBoundaryPreparationScopeV1(
   state: Rfc64LegacySwmBoundaryStateV1,
-  contextGraphId: string,
+  scopeKey: string,
   scope: Rfc64LegacySwmBoundaryPreparationScopeV1,
 ): void {
   if (
     scope.activePreparations === 0
     && scope.retirementPending === 0
-    && state.preparationScopes.get(contextGraphId) === scope
+    && state.preparationScopes.get(scopeKey) === scope
   ) {
-    state.preparationScopes.delete(contextGraphId);
+    state.preparationScopes.delete(scopeKey);
   }
 }
 
