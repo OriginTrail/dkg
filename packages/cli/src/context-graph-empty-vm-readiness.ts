@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import { readContextGraphReadiness } from './context-graph-readiness.js';
 import { classifyEmptyPrivateVmReadiness, withProvenEmptyPrivateVmReadiness } from './context-graph-empty-vm-readiness-owner.js';
@@ -31,7 +32,9 @@ export async function settlePrivateEmptyVmAtSubscribe(
   const signal = AbortSignal.timeout(8_000);
   const settle = async (): Promise<boolean> => {
     while (!signal.aborted) {
-      if (await agent.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false)) {
+      const hasConfirmedMeta = await agent.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
+      if (signal.aborted) return false;
+      if (hasConfirmedMeta) {
         trace('meta-confirmed');
         if (!await agent.isPrivateContextGraph(contextGraphId).catch(() => false)) {
           trace('not-private'); return false;
@@ -59,12 +62,8 @@ export async function settlePrivateEmptyVmAtSubscribe(
     return false;
   };
   // The agent also sees the same signal and rejects a late proof before its
-  // synchronous commit. The race bounds this HTTP request even if a backend
-  // ignores cancellation while finishing a read-only operation.
-  const completed = await Promise.race([
-    settle(),
-    new Promise<false>((resolve) => signal.addEventListener('abort', () => resolve(false), { once: true })),
-  ]);
+  // synchronous commit. Bound this HTTP request if a backend ignores cancellation.
+  const completed = await resolveWithinAbort(() => settle(), signal);
   if (completed) return true;
   trace('meta-timeout');
   return false;
