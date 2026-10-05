@@ -1089,6 +1089,13 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
             throw new Error('timeout-only catchup must not mark subscription synced');
           },
           reconcileRfc64CatalogResponsibilityV1: async () => undefined,
+          inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1: async (
+            _input: unknown,
+            commit: (facts: Record<string, unknown>, proof: { proven: false }) => unknown,
+          ) => commit({
+            current: true, hasConfirmedMeta: false, isPrivate: false,
+            authority: { outcome: 'allowed', source: 'legacy-local' },
+          }, { proven: false }),
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };

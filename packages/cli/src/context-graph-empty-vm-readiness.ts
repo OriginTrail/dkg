@@ -31,6 +31,7 @@ export async function settlePrivateEmptyVmAtSubscribe(
   trace('candidate');
   const signal = AbortSignal.timeout(8_000);
   const settle = async (): Promise<boolean> => {
+    let retryDelayMs = 250;
     while (!signal.aborted) {
       const hasConfirmedMeta = await agent.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
       if (signal.aborted) return false;
@@ -52,7 +53,17 @@ export async function settlePrivateEmptyVmAtSubscribe(
           },
         });
         if (!proof.proven) {
-          trace('proof-false'); return false;
+          if (!proof.retryable || signal.aborted) {
+            trace('proof-false'); return false;
+          }
+          // A curator metadata refresh or temporary authority outage can
+          // invalidate an otherwise valid proof while a fresh join settles.
+          // Re-run the entire proof within this subscribe deadline; the agent
+          // still fences the final authority and synchronous readiness write.
+          trace('proof-retry');
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          retryDelayMs = Math.min(retryDelayMs * 2, 1_000);
+          continue;
         }
         trace('vm-ready');
         return true;
@@ -65,6 +76,6 @@ export async function settlePrivateEmptyVmAtSubscribe(
   // synchronous commit. Bound this HTTP request if a backend ignores cancellation.
   const completed = await resolveWithinAbort(() => settle(), signal);
   if (completed) return true;
-  trace('meta-timeout');
+  trace(signal.aborted ? 'meta-timeout' : 'settlement-incomplete');
   return false;
 }

@@ -23,7 +23,7 @@ import { registerContextGraphReadinessEvents } from './context-graph-readiness-e
 import { registeredPrivateEmptyVmEvidence } from './context-graph-independent-vm-evidence.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
-  mergeContextGraphPlaneEvidence,
+  reduceContextGraphPlaneEvidence,
   type ContextGraphReadinessPatch,
 } from './context-graph-readiness-policy.js';
 export { parseProjectSyncedReadinessPayload, type ProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
@@ -582,7 +582,8 @@ function classifyCatchupReadiness(
   const independentVm = registeredPrivateEmptyVmEvidence({
     proven: input.finalizedEmptyRegisteredPrivateVm === true, isPrivate: input.isPrivate, registration,
   });
-  if ((!peerDenied && catchupResultHasCleanResponse(result)) || independentVm) {
+  const cleanPeerEvidence = !peerDenied && catchupResultHasCleanResponse(result);
+  if (cleanPeerEvidence || independentVm) {
     if (input.hasConfirmedMeta === undefined) {
       return {
         jobStatus: 'unreachable',
@@ -601,26 +602,24 @@ function classifyCatchupReadiness(
     }
 
     const durableThisRun = independentVm ? { ready: true, persistable: true }
-      : catchupPlaneReadinessThisRun({ result, plane: 'durable', isPrivate: input.isPrivate });
-    const sharedMemoryThisRun = input.includeSharedMemory
+      : cleanPeerEvidence
+        ? catchupPlaneReadinessThisRun({ result, plane: 'durable', isPrivate: input.isPrivate })
+        : { ready: false, persistable: false };
+    const sharedMemoryThisRun = cleanPeerEvidence && input.includeSharedMemory
       ? catchupPlaneReadinessThisRun({ result, plane: 'sharedMemory', isPrivate: input.isPrivate })
       : { ready: false, persistable: false };
     const durableReadyThisRun = durableThisRun.ready;
     const sharedMemoryReadyThisRun = sharedMemoryThisRun.ready;
-    const thisRun = mergeContextGraphPlaneEvidence(input.readinessBeforeCatchup, {
-      durableVerified: durableReadyThisRun,
-      sharedMemoryVerified: sharedMemoryReadyThisRun,
+    const reduced = reduceContextGraphPlaneEvidence(input.readinessBeforeCatchup, {
+      durable: durableThisRun,
+      sharedMemory: sharedMemoryThisRun,
     });
-    const { durableVerified, sharedMemoryVerified } = thisRun;
+    const { durableVerified, sharedMemoryVerified } = reduced.observed;
     // What this run is allowed to FREEZE, as opposed to what it reports. These
     // diverge only for a unanimous-empty verdict, which stays re-derived per run
     // so that a wrong empty verdict cannot become permanent.
-    const persisted = mergeContextGraphPlaneEvidence(input.readinessBeforeCatchup, {
-      durableVerified: durableThisRun.persistable,
-      sharedMemoryVerified: sharedMemoryThisRun.persistable,
-    });
-    const durableVerifiedPersisted = persisted.durableVerified;
-    const sharedMemoryVerifiedPersisted = persisted.sharedMemoryVerified;
+    const durableVerifiedPersisted = reduced.persisted.durableVerified;
+    const sharedMemoryVerifiedPersisted = reduced.persisted.sharedMemoryVerified;
     // `subscription.synced` is a SECOND persisted readiness bit, living outside
     // the provenance store and consumed by callers that never see this job's
     // result — `contextGraphRowIsWritable` treats `subscribed && synced` as
@@ -629,12 +628,6 @@ function classifyCatchupReadiness(
     // it derives `synced` from the persisted provenance and patches the row
     // back into line, so letting them diverge here would be corrected away on
     // the next pass anyway — after a window in which the graph looked writable.
-    const persistedPlaneReadiness = contextGraphPlaneReadinessVerdict({
-      durableVerified: durableVerifiedPersisted,
-      sharedMemoryVerified: sharedMemoryVerifiedPersisted,
-      includeSharedMemory: input.includeSharedMemory,
-      registration,
-    });
     // Both paths use current authoritative applicability. Exempting an
     // unregistered graph never manufactures durableVerified provenance.
     const planeReadiness = contextGraphPlaneReadinessVerdict({
@@ -683,7 +676,7 @@ function classifyCatchupReadiness(
       jobStatus: peerDenial?.jobStatus ?? jobStatus,
       error: peerDenial?.error ?? error,
       statePatch: {
-        synced: persistedPlaneReadiness.writeReady,
+        synced: reduced.writeReady,
         sharedMemorySynced: sharedMemoryVerifiedPersisted,
         metaSynced: true,
         pendingMeta: false,

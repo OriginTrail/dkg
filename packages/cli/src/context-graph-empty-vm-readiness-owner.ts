@@ -4,23 +4,26 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import type { ContextGraphReadinessProvenance } from '@origintrail-official/dkg-node-ui';
 import { withContextGraphReadinessMutationLock, type ContextGraphSubscriptionStatePatch } from './context-graph-readiness.js';
-import { mergeContextGraphPlaneEvidence, type ContextGraphReadinessPatch } from './context-graph-readiness-policy.js';
+import { reduceContextGraphPlaneEvidence, type ContextGraphReadinessPatch } from './context-graph-readiness-policy.js';
 
-type FencedProof<T> = { readonly proven: false } | { readonly proven: true; readonly value: T };
+type FencedProof<T> =
+  | { readonly proven: false; readonly retryable?: boolean }
+  | { readonly proven: true; readonly value: T };
 const UNPROVEN = { proven: false } as const;
 
 /** A finalized zero-VM proof grants durable readiness only, never SWM. */
 export function classifyEmptyPrivateVmReadiness(
   previous: ContextGraphReadinessProvenance,
 ): { statePatch: ContextGraphSubscriptionStatePatch; readinessPatch: ContextGraphReadinessPatch } {
-  const readinessPatch = mergeContextGraphPlaneEvidence(previous, {
-    durableVerified: true, sharedMemoryVerified: false,
+  const reduced = reduceContextGraphPlaneEvidence(previous, {
+    durable: { ready: true, persistable: true },
+    sharedMemory: { ready: false, persistable: false },
   });
   return {
-    readinessPatch,
+    readinessPatch: reduced.persisted,
     statePatch: {
-      synced: true,
-      sharedMemorySynced: readinessPatch.sharedMemoryVerified,
+      synced: reduced.writeReady,
+      sharedMemorySynced: reduced.persisted.sharedMemoryVerified,
       metaSynced: true,
       pendingMeta: false,
     },

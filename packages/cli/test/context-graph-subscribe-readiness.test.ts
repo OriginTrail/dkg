@@ -394,6 +394,27 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
           ? { proven: true as const, value: commit(facts) }
           : { proven: false as const });
       },
+      inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1: async (
+        input: {
+          contextGraphId: string; inspectMetadata: boolean;
+          attemptPrivateEmptyVm: boolean; callerAgentAddress?: string;
+        },
+        commit: (facts: Record<string, any>, proof: { proven: boolean }) => unknown,
+      ) => {
+        const proof = input.attemptPrivateEmptyVm && input.callerAgentAddress
+          ? await agent.proveRegisteredPrivateEmptyVmV1(
+            input.contextGraphId, input.callerAgentAddress, () => undefined,
+          )
+          : { proven: false };
+        return agent.inspectAndCommitContextGraphReadinessV1({
+          contextGraphId: input.contextGraphId,
+          inspectMetadata: input.inspectMetadata,
+          callerAgentAddress: input.callerAgentAddress,
+        }, (facts: Record<string, any>) => commit(facts, {
+          proven: proof.proven && facts.current && facts.hasConfirmedMeta
+            && facts.isPrivate && facts.authority.outcome === 'allowed',
+        }));
+      },
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
       getRfc64SelectedSwmGraphSyncStatus: () => ({

@@ -56,23 +56,15 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
     return classification;
   };
 
-  if (privateZeroVmCandidate && callerAgentAddress !== undefined) {
-    const proof = await withContextGraphReadinessMutationLock(agent, contextGraphId, () =>
-      agent.proveRegisteredPrivateEmptyVmV1(
-        contextGraphId, callerAgentAddress,
-        (inspection) => decide(inspection, true),
-      ),
-    );
-    if (proof.proven) return proof.value;
-  }
-
   return withContextGraphReadinessMutationLock(agent, contextGraphId, () => {
-    // A failed proof may mean revoked membership, not merely a transient read
-    // error. Never reuse admission-time authority or metadata in that path.
-    return agent.inspectAndCommitContextGraphReadinessV1({
+    // The agent owns one final live inspection for both proof outcomes. A
+    // failed proof cannot reuse admission-time authority, and no await can
+    // separate the final fence from classification or persistence.
+    return agent.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1({
       contextGraphId,
       inspectMetadata: catchupResultHasCleanResponse(result) || privateZeroVmCandidate,
+      attemptPrivateEmptyVm: privateZeroVmCandidate,
       callerAgentAddress,
-    }, (inspection) => decide(inspection, false));
+    }, (inspection, proof) => decide(inspection, proof.proven));
   });
 }

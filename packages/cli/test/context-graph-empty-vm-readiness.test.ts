@@ -53,6 +53,74 @@ describe('private empty-VM subscribe settlement', () => {
     expect(agent.hasConfirmedMetaState).not.toHaveBeenCalled();
   });
 
+  it('retries a metadata-transition proof and commits only the later fenced success', async () => {
+    const writeReadiness = vi.fn();
+    const markSubscription = vi.fn();
+    const proof = vi.fn(async (_id: string, _caller: string, commit: () => void) => {
+      if (proof.mock.calls.length === 1) return { proven: false as const, retryable: true as const };
+      commit();
+      return { proven: true as const, value: undefined };
+    });
+    const agent = {
+      hasConfirmedMetaState: async () => true,
+      isPrivateContextGraph: async () => true,
+      proveRegisteredPrivateEmptyVmV1: proof,
+      markContextGraphSubscriptionState: markSubscription,
+    } as unknown as DKGAgent;
+    const dashboard = { setContextGraphReadinessProvenance: writeReadiness } as unknown as DashboardDB;
+
+    expect(await settlePrivateEmptyVmAtSubscribe(
+      agent, dashboard, 'graph',
+      { source: 'registered-chain', reason: 'chain-participant' },
+      `0x${'11'.repeat(20)}`,
+    )).toBe(true);
+    expect(proof).toHaveBeenCalledTimes(2);
+    expect(writeReadiness).toHaveBeenCalledWith('graph', expect.objectContaining({
+      durableVerified: true, sharedMemoryVerified: false,
+    }));
+    expect(markSubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a terminal private-authority denial', async () => {
+    const proof = vi.fn(async () => ({ proven: false as const }));
+    const agent = {
+      hasConfirmedMetaState: async () => true,
+      isPrivateContextGraph: async () => true,
+      proveRegisteredPrivateEmptyVmV1: proof,
+    } as unknown as DKGAgent;
+    expect(await settlePrivateEmptyVmAtSubscribe(
+      agent, {} as DashboardDB, 'graph',
+      { source: 'registered-chain', reason: 'chain-participant' },
+      `0x${'11'.repeat(20)}`,
+    )).toBe(false);
+    expect(proof).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not commit when authority is denied after a metadata retry', async () => {
+    const writeReadiness = vi.fn();
+    const markSubscription = vi.fn();
+    const proof = vi.fn(async () => (
+      proof.mock.calls.length === 1
+        ? { proven: false as const, retryable: true as const }
+        : { proven: false as const }
+    ));
+    const agent = {
+      hasConfirmedMetaState: async () => true,
+      isPrivateContextGraph: async () => true,
+      proveRegisteredPrivateEmptyVmV1: proof,
+      markContextGraphSubscriptionState: markSubscription,
+    } as unknown as DKGAgent;
+    const dashboard = { setContextGraphReadinessProvenance: writeReadiness } as unknown as DashboardDB;
+    expect(await settlePrivateEmptyVmAtSubscribe(
+      agent, dashboard, 'graph',
+      { source: 'registered-chain', reason: 'chain-participant' },
+      `0x${'11'.repeat(20)}`,
+    )).toBe(false);
+    expect(proof).toHaveBeenCalledTimes(2);
+    expect(writeReadiness).not.toHaveBeenCalled();
+    expect(markSubscription).not.toHaveBeenCalled();
+  });
+
   it('returns at its deadline even when a proof backend has not settled', async () => {
     const deadline = new AbortController();
     vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);

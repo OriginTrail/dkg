@@ -43,6 +43,8 @@ function fixture() {
     resolveContextGraphSubscriptionBootstrapAuthority: authority,
     inspectAndCommitContextGraphReadinessV1:
       RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1,
+    inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
+      RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1,
     readRfc64RegisteredAuthoritySnapshotV1: chainSnapshot,
     contextGraphAuthorityReaderCapability: { status: 'supported', reader: {} },
     config: { chainConfig: {
@@ -209,8 +211,45 @@ describe('registered private empty-VM agent guard', () => {
     state.authority.mockResolvedValueOnce({
       outcome: 'denied', source: 'registered-chain', onChainId: 3n,
     });
-    expect(await prove(state.agent)).toBe(false);
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, () => undefined)).toEqual({ proven: false });
     expect(mocks.proof).not.toHaveBeenCalled();
+  });
+
+  it('retries an unconfirmed metadata read without treating it as authorization', async () => {
+    const state = fixture();
+    vi.mocked(state.agent.hasConfirmedMetaState).mockResolvedValueOnce(false);
+    const commit = vi.fn();
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false, retryable: true });
+    expect(state.authority).toHaveBeenCalledOnce();
+    expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ freshness: 'live' }));
+    expect(mocks.proof).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('treats a final live denial as terminal even after transient metadata', async () => {
+    const state = fixture();
+    vi.mocked(state.agent.hasConfirmedMetaState).mockResolvedValueOnce(false);
+    state.authority.mockResolvedValueOnce({ outcome: 'denied' });
+    const commit = vi.fn();
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
+    expect(state.authority).toHaveBeenCalledOnce();
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('retries unavailable authority but never a definitive denial', async () => {
+    const state = fixture();
+    const commit = vi.fn();
+    state.authority.mockResolvedValueOnce({ outcome: 'unavailable' });
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false, retryable: true });
+    state.authority.mockResolvedValueOnce({ outcome: 'denied' });
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
+    expect(mocks.proof).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
   });
 
   it('does not prove a graph whose metadata is public or changes during inspection', async () => {
@@ -221,9 +260,13 @@ describe('registered private empty-VM agent guard', () => {
       state.invalidateMetadata();
       return true;
     });
-    expect(await prove(state.agent)).toBe(false);
-    expect(state.authority).not.toHaveBeenCalled();
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, () => undefined))
+      .toEqual({ proven: false, retryable: true });
+    expect(state.authority).toHaveBeenCalledTimes(2);
+    expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ freshness: 'live' }));
     expect(mocks.proof).not.toHaveBeenCalled();
+    expect(await prove(state.agent)).toBe(true);
   });
 
   it('requires the bound authority capability and valid local chain binding', async () => {
@@ -310,6 +353,30 @@ describe('registered private empty-VM agent guard', () => {
     expect(commit).not.toHaveBeenCalled();
   });
 
+  it('delivers a failed proof and final live denial to one fenced completion callback', async () => {
+    const state = fixture();
+    const commit = vi.fn((inspection: InspectedContextGraphReadinessV1, proof: { proven: boolean }) => ({
+      inspection, proof,
+    }));
+    mocks.proof.mockResolvedValueOnce(false);
+    state.authority.mockResolvedValueOnce({
+      outcome: 'allowed', source: 'registered-chain', onChainId: 3n,
+    }).mockResolvedValueOnce({ outcome: 'denied' });
+    const result = await RegisteredPrivateEmptyVmMethods.prototype
+      .inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1.call(state.agent, {
+        contextGraphId: CG, inspectMetadata: true, attemptPrivateEmptyVm: true,
+        callerAgentAddress: CALLER,
+      }, commit);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(state.authority).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      inspection: expect.objectContaining({
+        current: true, authority: { outcome: 'denied' },
+      }),
+      proof: { proven: false },
+    });
+  });
+
   it('does not commit readiness if metadata is invalidated during chain proof', async () => {
     const state = fixture();
     const commit = vi.fn();
@@ -318,7 +385,7 @@ describe('registered private empty-VM agent guard', () => {
       return true;
     });
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false });
+      .call(state.agent, CG, CALLER, commit)).toEqual({ proven: false, retryable: true });
     expect(commit).not.toHaveBeenCalled();
   });
 

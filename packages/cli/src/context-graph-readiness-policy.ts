@@ -9,6 +9,13 @@ export interface ContextGraphReadinessPatch {
   sharedMemoryVerified: boolean;
 }
 
+export interface ContextGraphPlaneEvidence {
+  /** Counts toward this bounded job's observed completion. */
+  ready: boolean;
+  /** Strong enough to become sticky subscription readiness. */
+  persistable: boolean;
+}
+
 /** Merge independently proven planes while respecting the persisted version. */
 export function mergeContextGraphPlaneEvidence(
   previous: ContextGraphReadinessProvenance,
@@ -18,5 +25,32 @@ export function mergeContextGraphPlaneEvidence(
   return {
     durableVerified: evidence.durableVerified || (verified && previous.durableVerified),
     sharedMemoryVerified: evidence.sharedMemoryVerified || (verified && previous.sharedMemoryVerified),
+  };
+}
+
+/** Combine independent plane proofs without importing a peer job result. */
+export function reduceContextGraphPlaneEvidence(
+  previous: ContextGraphReadinessProvenance,
+  evidence: Readonly<{
+    durable: ContextGraphPlaneEvidence;
+    sharedMemory: ContextGraphPlaneEvidence;
+  }>,
+): Readonly<{
+  observed: ContextGraphReadinessPatch;
+  persisted: ContextGraphReadinessPatch;
+  writeReady: boolean;
+}> {
+  const observed = mergeContextGraphPlaneEvidence(previous, {
+    durableVerified: evidence.durable.ready,
+    sharedMemoryVerified: evidence.sharedMemory.ready,
+  });
+  const persisted = mergeContextGraphPlaneEvidence(previous, {
+    durableVerified: evidence.durable.persistable,
+    sharedMemoryVerified: evidence.sharedMemory.persistable,
+  });
+  return {
+    observed,
+    persisted,
+    writeReady: persisted.durableVerified || persisted.sharedMemoryVerified,
   };
 }
