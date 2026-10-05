@@ -50,9 +50,15 @@ function targetPeerId(components: readonly Component[], start = 0): string | und
     .at(-1);
 }
 
-export function parseLibp2pConnectCandidate(raw: string): Libp2pConnectCandidate {
+export function parseLibp2pConnectCandidate(
+  raw: string,
+  options: { requireTerminalTargetPeerId?: boolean } = {},
+): Libp2pConnectCandidate {
   const parsed = multiaddr(raw);
   const components = parsed.getComponents();
+  if (options.requireTerminalTargetPeerId && components.at(-1)?.name !== 'p2p') {
+    throw new Libp2pConnectCandidateParseError('Multiaddr must end with a target peer id');
+  }
   const circuitIndex = components.findIndex((component) => component.name === 'p2p-circuit');
   if (circuitIndex === -1) {
     const rawTarget = targetPeerId(components);
@@ -265,7 +271,9 @@ export async function tryConnectLibp2pRecoveryStage(
 
   if (stage.kind === 'hint') {
     if (!stage.address) return false;
-    const candidate = parseLibp2pConnectCandidate(stage.address);
+    const candidate = parseLibp2pConnectCandidate(stage.address, {
+      requireTerminalTargetPeerId: true,
+    });
     // A recovery hint may be private, but must bind to the exact requested peer.
     if (candidate.targetPeerId !== canonicalPeerId) return false;
     await connectLibp2pCandidate(host, candidate, {

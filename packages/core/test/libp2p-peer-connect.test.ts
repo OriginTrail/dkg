@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   connectLibp2pPeer,
+  parseLibp2pConnectCandidate,
   tryConnectLibp2pRecoveryStage,
   planLibp2pPeerConnectionAddresses,
 } from '../src/network/libp2p-peer-connect.js';
@@ -32,6 +33,27 @@ const CONFIGURED_RELAYS = [
     addresses: [`/ip4/178.104.54.32/tcp/9090/p2p/${RELAY_E_PEER}`],
   },
 ];
+
+describe('parseLibp2pConnectCandidate terminal peer policy', () => {
+  it('accepts peer-bound private direct and circuit hints', () => {
+    const direct = `/ip4/127.0.0.1/tcp/9090/p2p/${TARGET}`;
+    expect(parseLibp2pConnectCandidate(direct, { requireTerminalTargetPeerId: true }))
+      .toMatchObject({ kind: 'direct', address: direct, targetPeerId: TARGET });
+    expect(parseLibp2pConnectCandidate(CIRCUIT_A, { requireTerminalTargetPeerId: true }))
+      .toMatchObject({ kind: 'circuit', address: CIRCUIT_A, targetPeerId: TARGET });
+  });
+
+  it('rejects missing and nonterminal peer bindings for recovery hints', () => {
+    const nonterminal = `/ip4/127.0.0.1/tcp/9090/p2p/${TARGET}/ws`;
+    expect(() => parseLibp2pConnectCandidate(
+      TARGETLESS_DIRECT, { requireTerminalTargetPeerId: true },
+    )).toThrow('must end with a target peer id');
+    expect(() => parseLibp2pConnectCandidate(
+      nonterminal, { requireTerminalTargetPeerId: true },
+    )).toThrow('must end with a target peer id');
+    expect(parseLibp2pConnectCandidate(nonterminal).targetPeerId).toBe(TARGET);
+  });
+});
 
 function targetString(target: unknown): string {
   return (target as { toString(): string }).toString();
@@ -373,6 +395,18 @@ describe('tryConnectLibp2pRecoveryStage', () => {
       kind: 'hint', address: `/ip4/127.0.0.1/tcp/9090/p2p/${WRONG_TARGET}`,
       timeoutMs: 5_000,
     })).resolves.toBe(false);
+    expect(host.dial).not.toHaveBeenCalled();
+  });
+
+  it('rejects a nonterminal hint before transport dialing', async () => {
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn(async () => undefined),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    await expect(tryConnectLibp2pRecoveryStage(host, TARGET, {
+      kind: 'hint', address: `${CIRCUIT_A}/ws`, timeoutMs: 5_000,
+    })).rejects.toThrow('must end with a target peer id');
     expect(host.dial).not.toHaveBeenCalled();
   });
 
