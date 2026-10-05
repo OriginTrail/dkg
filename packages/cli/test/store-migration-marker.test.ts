@@ -84,9 +84,10 @@ describe('shared migration marker protocol at real filesystem boundaries', () =>
     await expect(assertStoreMigrationInactive(parent)).rejects.toThrow(/Store hardening marker/);
     expect(readFileSync(parent, 'utf8')).toBe('unchanged');
   });
-  it('keeps filesystem uncertainty distinct from absent or ageable protocol evidence', async () => {
+  it('retains observed filesystem age even when the marker payload is unreadable', async () => {
     const path = storeHardenLockPath(home); mkdirSync(path);
-    expect(readStoreMigrationMarker(path)).toEqual({ kind: 'unreadable', path, ageMs: null });
+    expect(readStoreMigrationMarker(path)).toMatchObject({ kind: 'unreadable', path, ageMs: expect.any(Number) });
+    expect(() => requireStoreMigrationRecoveryMarker(path, recovery())).toThrow(/Invalid migration recovery marker/);
     await expect(assertStoreMigrationInactive(home)).rejects.toThrow(/Store hardening marker/);
   });
 });

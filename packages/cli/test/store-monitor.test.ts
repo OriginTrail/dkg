@@ -12,6 +12,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import {
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   rmSync,
   utimesSync,
@@ -328,9 +329,10 @@ describe('createStoreRuntimeMonitor', () => {
       expect(restartCalls(dockerCalls)).toHaveLength(1);
     });
 
-    it.each(['recovery', 'malformed'])('preserves monitor freshness while startup still fences an old %s marker', async kind => {
+    it.each(['recovery', 'malformed', 'directory'])('preserves monitor freshness while startup still fences an old %s marker', async kind => {
       const lockPath = storeHardenLockPath(dir);
-      writeFileSync(lockPath, kind === 'malformed' ? '{bad' : JSON.stringify({ version: 1, recoveryRequired: true, pid: 123,
+      if (kind === 'directory') mkdirSync(lockPath);
+      else writeFileSync(lockPath, kind === 'malformed' ? '{bad' : JSON.stringify({ version: 1, recoveryRequired: true, pid: 123,
         containerName: 'dkg-store', namespace: 'owner', migrationDir: dir, hostPort: 9999, exportBytes: 1024 }));
       const old = (Date.now() - 7 * 60 * 60 * 1000) / 1000;
       utimesSync(lockPath, old, old);
@@ -339,6 +341,24 @@ describe('createStoreRuntimeMonitor', () => {
       expect(restartCalls(dockerCalls)).toHaveLength(1);
       expect(logs.some(message => message.includes('harden-lock-stale'))).toBe(true);
       await expect(assertStoreMigrationInactive(dir)).rejects.toThrow(/Store hardening marker/);
+      if (kind === 'directory') {
+        const { runner, calls } = mockDocker(), healthy = switchableFetch(); healthy.state.ok = true;
+        await expect(attemptManagedStoreBootRecovery({ storeConfig: STORE_CONFIG, managedContainerName: CONTAINER,
+          docker: runner, fetch: healthy.fn, log: () => {}, hardenLockPath: lockPath })).resolves.toBe(true);
+        expect(restartCalls(calls)).toHaveLength(1);
+      }
+    });
+
+    it('keeps unknown marker age fail-safe for runtime and boot recovery', async () => {
+      const parent = join(dir, 'not-a-directory'); writeFileSync(parent, 'unchanged');
+      const lockPath = storeHardenLockPath(parent), { monitor, dockerCalls } = makeMonitor({ hardenLockPath: lockPath });
+      for (let i = 0; i < 12; i++) await monitor.tick();
+      expect(restartCalls(dockerCalls)).toHaveLength(0);
+      const { runner, calls } = mockDocker(), healthy = switchableFetch(); healthy.state.ok = true;
+      await expect(attemptManagedStoreBootRecovery({ storeConfig: STORE_CONFIG, managedContainerName: CONTAINER,
+        docker: runner, fetch: healthy.fn, log: () => {}, hardenLockPath: lockPath })).resolves.toBe(true);
+      expect(restartCalls(calls)).toHaveLength(0);
+      await expect(assertStoreMigrationInactive(parent)).rejects.toThrow(/Store hardening marker/);
     });
 
     it('ignores a stale lock left by a crashed harden (> 6h old) and restarts', async () => {

@@ -48,7 +48,7 @@ export function readStoreMigrationMarker(path: string): StoreMigrationMarker {
   }
   let rawText: string;
   try { rawText = readFileSync(path, 'utf8'); }
-  catch { return { kind: 'unreadable', path, ageMs: null }; }
+  catch { return { kind: 'unreadable', path, ageMs }; }
   let value: unknown;
   try { value = JSON.parse(rawText); } catch { return { kind: 'unreadable', path, rawText, ageMs }; }
   if (!object(value) || !positive(value.pid)) return { kind: 'unreadable', path, rawText, ageMs };
