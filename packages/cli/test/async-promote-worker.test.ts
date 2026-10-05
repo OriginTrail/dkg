@@ -40,6 +40,7 @@ import {
   type AsyncPromoteWorkerFixture,
 } from './_helpers/async-promote-worker-fixture.js';
 import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
+import { promoteJobToView } from '../src/daemon/routes/promote-job-view.js';
 
 const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
@@ -353,10 +354,104 @@ describe('runPromoteJob', () => {
       .toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
   });
 
+  describe('a promote refused by the legacy SWM retirement fence', () => {
+    const fenceFailure = () => createPromoteRetryableFailure(Object.assign(
+      new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
+      { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' },
+    ));
+
+    it('is retried by the queue and completes on the second attempt with the same request', async () => {
+      await queue.enqueue(makeRequest({ assertionName: 'fenced-share' }));
+      const seen: PromoteRequest[] = [];
+      const attempt = async (refuse: boolean) => {
+        const claimed = await queue.claimNext('worker-test');
+        if (!claimed) throw new Error('nothing to claim');
+        const result = await runPromoteJob({
+          job: claimed,
+          queue,
+          workerId: 'worker-test',
+          runPromote: async (request, markPromoteStarted) => {
+            seen.push(request);
+            await markPromoteStarted();
+            if (refuse) throw fenceFailure();
+            return { promotedCount: 1 };
+          },
+          now: fixture.clock.now,
+          heartbeatIntervalMs: 0,
+          log: (message) => logs.push(message),
+        });
+        return { claimed, result };
+      };
+
+      const first = await attempt(true);
+      expect(first.result).toMatchObject({
+        outcome: 'failed_retrying',
+        error: { classification: 'transient', retryable: true },
+      });
+      expect(await queue.getStatus(first.claimed.jobId)).toMatchObject({
+        state: 'failed_retrying',
+        attempt: { count: 1 },
+      });
+
+      fixture.clock.advance(120_000);
+      const second = await attempt(false);
+      expect(second.result.outcome).toBe('succeeded');
+      expect(second.claimed.jobId).toBe(first.claimed.jobId);
+      expect(await queue.getStatus(first.claimed.jobId)).toMatchObject({
+        state: 'succeeded',
+        attempt: { count: 2 },
+      });
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toEqual(seen[0]);
+    });
+
+    it('ends failed yet still retryable when the fence outlasts every attempt; recover requeues it', async () => {
+      await queue.enqueue(makeRequest({ assertionName: 'fenced-forever' }));
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const claimed = await queue.claimNext('worker-test');
+        expect(claimed).not.toBeNull();
+        await runPromoteJob({
+          job: claimed!,
+          queue,
+          workerId: 'worker-test',
+          runPromote: async (_request, markPromoteStarted) => {
+            await markPromoteStarted();
+            throw fenceFailure();
+          },
+          now: fixture.clock.now,
+          heartbeatIntervalMs: 0,
+          log: (message) => logs.push(message),
+        });
+        fixture.clock.advance(10 * 60_000);
+      }
+      const [job] = await queue.list({});
+      expect(job).toMatchObject({ state: 'failed', attempt: { count: 3 } });
+      expect(promoteJobToView(job)).toMatchObject({
+        state: 'failed',
+        attempts: 3,
+        maxAttempts: 3,
+        lastError: {
+          code: 'transient',
+          retryable: true,
+          diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE',
+          message: 'A promote prerequisite is temporarily unavailable',
+        },
+      });
+      // It is not a post-commit failure, so the recovery sweep leaves it for the operator.
+      await expect(queue.recoverPostCommitFailures()).resolves.toEqual([]);
+      await queue.recover(job.jobId);
+      expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'queued' });
+    });
+  });
+
   it.each([
     'AKIAIOSFODNN7EXAMPLE',
     'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
     'rfc64_legacy_swm_boundary_retirement_in_progress',
+    'constructor',
+    '__proto__',
+    'toString',
+    'hasOwnProperty',
   ])('never logs the cause code %s: it is outside the closed set, however token-shaped', async (code) => {
     const job = await enqueueAndClaim();
     await runPromoteJob({

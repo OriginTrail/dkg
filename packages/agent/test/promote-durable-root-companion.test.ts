@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { getPromoteFailureDisposition } from '@origintrail-official/dkg-publisher';
+import { createPromoteRetryableFailure, getPromoteFailureDisposition } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -209,6 +209,9 @@ describe('translateLegacySwmRetirementFence', () => {
     ['another coded refusal', Object.assign(new Error('x'), { code: 'SOMETHING_ELSE' })],
     ['a non-error value', 'retirement is in progress'],
     ['an object whose code getter throws', new Proxy({}, { get() { throw new Error('hostile getter'); } })],
+    ['a refusal that is already a typed retryable promote failure', createPromoteRetryableFailure(new Error('x'))],
+    ['a refusal whose code is an Object.prototype key', Object.assign(new Error('x'), { code: 'constructor' })],
+    ['a refusal whose code is __proto__', Object.assign(new Error('x'), { code: '__proto__' })],
   ])('passes %s through untouched', (_name, thrown) => {
     let seen: unknown;
     try {
