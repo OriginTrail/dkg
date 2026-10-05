@@ -60,14 +60,10 @@ import {
   activeRpcRequestContext,
   withDetachedRpcRequestContext,
   withOwnedRpcRequestContext,
-  withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
-import {
-  RpcEndpointsExhaustedError,
-} from './chain-rpc-transport-error.js';
+import { hostOnlyRpcText } from './rpc-failover-log.js';
 import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
@@ -87,8 +83,8 @@ import { formatProviderContext } from './evm-adapter-types.js';
 import {
   AbortableKeyedSingleFlight,
   ReadThroughTtlCache,
-  SingleFlightInvalidatedError,
 } from './keyed-ttl-single-flight-cache.js';
+import { SharedAdapterInitialization, initializationBinder } from './evm-adapter-shared-init.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
@@ -777,28 +773,13 @@ export class EVMChainAdapterBase {
 
   protected initialized = false;
 
-  /**
-   * The initialization every caller that finds the adapter uninitialized waits
-   * for, instead of repeating its Hub reads. A caller leaves it under its own
-   * cancellation; a reset of the bindings, or the adapter's destruction, ends
-   * it for everyone.
-   */
-  private readonly initFlight = new AbortableKeyedSingleFlight<'init', void>();
-
-  /**
-   * The progress observers of the callers waiting for the initialization that
-   * is running, one entry for each caller so that a caller that leaves takes
-   * only its own. A caller hears of the run's progress for as long as it
-   * waits and is not cancelled: one that bounds inactivity keeps seeing a run
-   * that advances.
-   */
-  private readonly initObservers = new Set<{
-    readonly notify: () => void;
-    readonly signal: AbortSignal | undefined;
-  }>();
-
-  /** Set by `destroy()`: the adapter is not initialized again. */
-  private destroyed = false;
+  /** The one initialization that callers of an uninitialized adapter share. */
+  private readonly sharedInit = new SharedAdapterInitialization({
+    rpcUrls: () => this.rpcUrls,
+    isInitialized: () => this.initialized,
+    markInitialized: () => { this.initialized = true; },
+    initContracts: (startsRequestClass) => this.initContracts(startsRequestClass),
+  });
 
   /** Monotonic fence for physical Hub binding generations, including ABA. */
   protected hubBindingGeneration = 0;
@@ -3188,107 +3169,21 @@ export class EVMChainAdapterBase {
       || err.message.includes('AddressDoesNotExist');
   }
 
-  protected async init(): Promise<void> {
-    while (!this.initialized) {
-      if (this.destroyed) throw new Error('chain adapter was destroyed and is not initialized again');
-      const starter = activeRpcRequestContext();
-      const observer = starter.onProgress === undefined
-        ? undefined
-        : { notify: starter.onProgress, signal: starter.signal };
-      if (observer !== undefined) this.initObservers.add(observer);
-      try {
-        await this.initFlight.run(
-          'init',
-          // The run belongs to the adapter and to nobody waiting for it: it
-          // has its own signal and no caller's usage attribution, and it
-          // reports progress to whoever is waiting at the time. It is
-          // admitted in the foreground class, so no waiter is held at the
-          // background rate, with the admission priority of the caller that
-          // starts it, which is what that caller's own initialization had.
-          // The starter also decides what it always did: the request class
-          // of the long-running work initialization starts.
-          (signal) => withDetachedRpcRequestContext('foreground', () => withRpcRequestContext(
-            {
-              signal,
-              onProgress: () => this.notifyInitObservers(),
-              ...(starter.admissionPriority === undefined
-                ? {}
-                : { admissionPriority: starter.admissionPriority }),
-            },
-            () => this.runInit(starter.requestClass),
-          )),
-          starter.signal,
-          () => { this.initialized = true; },
-          'chain adapter initialization has no active waiters',
-        );
-      } catch (error) {
-        // A reset ended the run this caller was waiting for. The next run
-        // resolves the bindings as the Hub has them now.
-        if (error instanceof SingleFlightInvalidatedError && error.retryable) continue;
-        throw error;
-      } finally {
-        if (observer !== undefined) this.initObservers.delete(observer);
-      }
-    }
+  protected init(): Promise<void> {
+    return this.sharedInit.ensure();
   }
 
-  private notifyInitObservers(): void {
-    for (const observer of this.initObservers) {
-      // As for a request of its own: a cancelled caller hears nothing more.
-      if (observer.signal?.aborted) continue;
-      try { observer.notify(); } catch { /* an observer cannot change the run */ }
-    }
-  }
-
-  private async runInit(startsRequestClass: RpcRequestClass): Promise<void> {
-    try {
-      await this.initContracts(startsRequestClass);
-    } catch (err) {
-      // A run that was ended reports why it was ended, not what its
-      // interrupted read made of that.
-      activeRpcRequestAbortSignal()?.throwIfAborted();
-      // `init()` sits on the critical path of every chain write
-      // (`createOnChainContextGraph`, publish, verify, …). If the Hub lookups
-      // fail because the configured RPC endpoint(s) are exhausted (perpetual
-      // 429 / unreachable), surface the same `RPC_ENDPOINTS_EXHAUSTED` contract
-      // the tx-send path uses, so callers (e.g. `/api/context-graph/register`
-      // → `classifyRegisterContextGraphError`) map it to a bounded 503 instead
-      // of a generic 500 — and never hang waiting on it (#894 follow-up). A
-      // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
-      // its original shape.
-      if (classifyRpcRetryDisposition(err) === 'failover') {
-        throw new RpcEndpointsExhaustedError(
-          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${hostOnlyRpcText(errorMessage(err))}`,
-          { cause: err, rpcUrls: this.rpcUrls },
-        );
-      }
-      throw err;
-    }
-  }
-
-  /**
-   * Make the next caller initialize again. An initialization that is running
-   * resolved some of its bindings before this reset, so it is ended: its
-   * reads are cancelled, it binds and starts nothing more, and the callers
-   * waiting for it wait for the next one.
-   */
+  /** Make the next caller initialize again, and end an initialization that is out. */
   private rearmInit(): void {
     this.initialized = false;
-    this.initFlight.invalidate('init', 'chain adapter bindings were reset', { retryable: true });
+    this.sharedInit.rearm();
   }
 
-  protected async initContracts(
-    startsRequestClass: RpcRequestClass = activeRpcRequestContext().requestClass,
-  ): Promise<void> {
-    // Every binding this routine writes goes through `bind` (the
-    // random-sampling pair, further down, has a guard of its own). An
-    // initialization that was ended binds nothing more, whatever a read it
-    // had out still answers: the bindings belong to the run that follows it.
-    const signal = activeRpcRequestAbortSignal();
-    const bind = <K extends keyof ContractCache>(key: K, binding: ContractCache[K]): void => {
-      signal?.throwIfAborted();
-      this.contracts[key] = binding;
-    };
+  protected async initContracts(startsRequestClass: RpcRequestClass = activeRpcRequestContext().requestClass): Promise<void> {
+    // Every binding this routine writes goes through `bind`, so an ended
+    // initialization binds nothing more (the random-sampling pair, further
+    // down, has a guard of its own).
+    const bind = initializationBinder(this.contracts);
     bind('identity', await this.resolveContract('Identity'));
     bind('profile', await this.resolveContract('Profile'));
     bind('parametersStorage', await this.resolveContract('ParametersStorage'));
@@ -3390,13 +3285,11 @@ export class EVMChainAdapterBase {
     // address array, and started WITHOUT an await so a cold backfill can never
     // delay a chain write. Only the adapter the composition root gave a store
     // does anything at all here.
-    // An initialization that was ended while the bindings above were read
-    // starts nothing.
+    // An initialization that was ended meanwhile starts nothing.
     activeRpcRequestAbortSignal()?.throwIfAborted();
     // Both starts spawn detached work. Its context must belong to the adapter,
     // not to whichever transient caller happened to initialize it first: the
-    // work keeps that caller's request class, as it always has, and nothing
-    // else of it or of the initialization that runs here.
+    // work keeps that caller's request class and nothing else of it.
     await withDetachedRpcRequestContext(startsRequestClass, async () => {
       this.startChainIndexRuntime();
       await this.startHubRotationListener();
@@ -5279,8 +5172,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
-    this.destroyed = true;
-    this.initFlight.invalidateAll('chain adapter destroyed');
+    this.sharedInit.destroy();
     this.hubBindingGeneration += 1;
     this.knowledgeAssetStorageBindingGeneration += 1;
     this.hubRotationPoller.stop();

@@ -265,7 +265,7 @@ describe('adapter initialization is shared by the callers that need it', () => {
 
     leaving.abort(new Error('caller cancelled'));
     // What the run does when one of its requests has succeeded.
-    adapter.notifyInitObservers();
+    adapter.sharedInit.reportProgress();
     expect(onProgress).toHaveBeenCalledTimes(1);
 
     await expect(leaver).rejects.toThrow('caller cancelled');
@@ -279,17 +279,17 @@ describe('adapter initialization is shared by the callers that need it', () => {
     const held = holdNext('Profile');
     const silent = adapter.init();
     await held.reached;
-    expect(adapter.initObservers.size).toBe(0);
+    expect(adapter.sharedInit.observerCount).toBe(0);
 
     const onProgress = vi.fn();
     const observed = withRpcRequestContext({ onProgress }, () => adapter.init());
     await Promise.resolve();
-    expect(adapter.initObservers.size).toBe(1);
+    expect(adapter.sharedInit.observerCount).toBe(1);
     held.release();
     await Promise.all([silent, observed]);
 
     // Nothing is kept of a caller once its wait is over.
-    expect(adapter.initObservers.size).toBe(0);
+    expect(adapter.sharedInit.observerCount).toBe(0);
   });
 
   it('keeps the admission priority of the caller that starts it', async () => {

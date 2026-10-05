@@ -180,12 +180,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'readHubContractAddress',
   'init',
   'initContracts',          // TS-private: init() body extracted so RPC-exhaustion can be wrapped as RPC_ENDPOINTS_EXHAUSTED
-  // TS-private: the body of the one initialization concurrent callers share,
-  // and its re-arming on a Hub rotation. The mock has no Hub bindings to
-  // initialize.
-  'runInit',
+  // TS-private: re-arms the initialization concurrent callers share, on a
+  // Hub rotation. The mock has no Hub bindings to initialize.
   'rearmInit',
-  'notifyInitObservers',
   'requireV9',
   'getBlockTimestamp',
   'getFinalizedBlockTimestamp',
