@@ -2,7 +2,7 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.0.21] - 2026-10-04
+## [10.0.21] - 2026-10-05
 
 A release about getting data onto a node faster and keeping busy nodes
 responsive. A cold node can recover the Verifiable Memory of a registered
@@ -90,6 +90,18 @@ release adds one published package, `@origintrail-official/dkg-node-store`.
   do not depend on it. These timings were measured before #3036, which
   retries an incomplete private catalog within a short budget; they were not
   measured again.
+- **A publish or share to a private graph can answer a retryable error on a
+  busy node** (#3044): before a write to a private graph the node resolves
+  the recipients, and it accepts them only if its authority facts stayed
+  unchanged meanwhile, in three attempts. With several writers at work on
+  one node the attempts can run out although nothing about the graph
+  changed. A synchronous `vm/publish` then answers 500 with "private
+  authority changed while recipient keys were resolving", and a synchronous
+  `swm/share` answers its retryable 503. With one client at a time it did
+  not occur in 20 publishes on a devnet; with three clients creating,
+  sharing and publishing at once on one node, 4 of 38 publishes failed, and
+  one retry cleared three of them. Send the same request again, or publish
+  through `vm/publish-async`, whose jobs retry this by themselves.
 - **Two peers that connect while both are still starting do not sync with each
   other until they reconnect** (#2854): a node learns a peer's protocols when
   the connection opens. Two nodes that both connected before either
