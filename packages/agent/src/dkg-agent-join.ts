@@ -579,6 +579,16 @@ async function withJoinEncryptionKeyCacheLock<T>(
   }
 }
 
+function curatorJoinDialAddress(agent: DKGAgent): string | undefined {
+  const addresses = [
+    ...collectPublishableMultiaddrs(agent.node.multiaddrs),
+    ...agent.node.multiaddrs,
+  ];
+  return addresses.find((address) => (
+    address.length <= 512 && address.endsWith(`/p2p/${agent.peerId}`)
+  ));
+}
+
 export class JoinRequestMethods extends DKGAgentBase {
   async flushJoinApprovalDurably(this: DKGAgent): Promise<void> {
     // Local/debounced stores expose flush; remote transactional adapters make
@@ -2522,11 +2532,13 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
+    const curatorDialAddress = curatorJoinDialAddress(this);
     const payload = JSON.stringify({
       type: 'join-approved',
       contextGraphId,
       agentAddress,
       requestGeneration: resolvedGeneration,
+      ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
       ...(curatorBinding === null ? {} : {
         curatorAgentAddress: curatorBinding.agentAddress,
         curatorAuthorityEra: curatorBinding.authorityEra,
@@ -2654,11 +2666,13 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
+    const curatorDialAddress = curatorJoinDialAddress(this);
     const payload = JSON.stringify({
       type: 'join-approved',
       contextGraphId,
       agentAddress,
       requestGeneration,
+      ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
       ...(curatorBinding === null ? {} : {
         curatorAgentAddress: curatorBinding.agentAddress,
         curatorAuthorityEra: curatorBinding.authorityEra,

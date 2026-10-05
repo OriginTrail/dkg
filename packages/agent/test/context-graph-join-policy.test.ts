@@ -287,6 +287,11 @@ describe('context graph open enrollment policy', () => {
 
   it('replays catalog authority only after the approved requester receives its join notice', async () => {
     const { agent, owner } = await boot();
+    const curatorDialAddress = `/ip4/127.0.0.1/tcp/9090/p2p/${agent.peerId}`;
+    Object.defineProperty(agent.node, 'multiaddrs', {
+      value: [curatorDialAddress],
+      configurable: true,
+    });
     vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1')
       .mockReturnValue({ track2Enabled: true } as any);
     vi.spyOn(agent, 'readRfc64CurrentCuratorAuthorityBindingV1').mockResolvedValue(null);
@@ -300,6 +305,8 @@ describe('context graph open enrollment policy', () => {
 
     await agent.notifyJoinApproval('private-join-replay', owner.agentAddress, 'generation');
     expect(deliver).toHaveBeenCalledOnce();
+    expect(JSON.parse(deliver.mock.calls[0]![3] as string).curatorDialAddress)
+      .toBe(curatorDialAddress);
     expect(refresh).toHaveBeenCalledOnce();
     expect(replay).toHaveBeenCalledWith(
       'private-join-replay', owner.agentAddress, 'approved-peer',

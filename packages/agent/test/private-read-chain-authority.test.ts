@@ -2201,10 +2201,20 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   });
 
-  it('keeps a restarted approval with no local metadata out of every data lane', async () => {
+  it.each([
+    ['valid listener', 'valid', true],
+    ['legacy approval without a hint', undefined, false],
+    ['malformed hint', 'not-a-multiaddr', false],
+    ['different peer hint', 'wrong-peer', false],
+  ] as const)('keeps a restarted approval with no local metadata out of every data lane (%s)',
+    async (_case, hint, acceptedHint) => {
     const contextGraphId = 'restart-approval-no-metadata';
-    const curatorPeerId = '12D3KooWRestartNoMetadataCurator';
+    const curatorPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
     const curatorDialAddress = `/ip4/127.0.0.1/tcp/9090/p2p/${curatorPeerId}`;
+    const storedHint = hint === 'valid' ? curatorDialAddress
+      : hint === 'wrong-peer'
+        ? '/ip4/127.0.0.1/tcp/9090/p2p/12D3KooWNmCF7BxTYPjtTkTi3xHY4qHdRogqY2PxHrLpm8MFTWxq'
+        : hint;
     let localAgentAddress = MEMBER;
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -2230,7 +2240,7 @@ describe('private read authorization uses the on-chain participant roster', () =
           role: 'participant',
           status: 'active' as const,
           source: 'join-approved',
-          metadata: { curatorPeerId, curatorDialAddress },
+          metadata: { curatorPeerId, ...(storedHint === undefined ? {} : { curatorDialAddress: storedHint }) },
           updatedAt: 1,
         }],
         upsert: async () => undefined,
@@ -2248,7 +2258,11 @@ describe('private read authorization uses the on-chain participant roster', () =
     await agent.rehydrateContextGraphsFromDurableState();
 
     expect(subscribe).not.toHaveBeenCalled();
-    expect(resume).toHaveBeenCalledWith(contextGraphId, curatorPeerId, curatorDialAddress);
+    expect(resume).toHaveBeenCalledWith(
+      contextGraphId,
+      curatorPeerId,
+      acceptedHint ? curatorDialAddress : undefined,
+    );
     expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
       subscribed: true,
       synced: false,

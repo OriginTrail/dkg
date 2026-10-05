@@ -1479,16 +1479,17 @@ describe('private CG membership bootstrap recovery', () => {
     const immediateSync = vi.fn(async () => {});
     (agent as any).runImmediatePostApprovalSync = immediateSync;
     const requestGeneration = `0x${'1'.repeat(64)}`;
+    const curatorPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
     await agent.setRequesterJoinRequestPending(
       contextGraphId,
       approvedAddress!,
       requestGeneration,
-      '12D3KooWPrivateBootstrapCurator',
+      curatorPeerId,
     );
-    const curatorDialAddress = '/ip4/127.0.0.1/tcp/9090/p2p/12D3KooWPrivateBootstrapCurator';
+    const curatorDialAddress = `/ip4/127.0.0.1/tcp/9090/p2p/${curatorPeerId}`;
     vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([{
-      remotePeer: { toString: () => '12D3KooWPrivateBootstrapCurator' },
-      remoteAddr: { toString: () => curatorDialAddress },
+      remotePeer: { toString: () => curatorPeerId },
+      remoteAddr: { toString: () => `/ip4/127.0.0.1/tcp/52633/p2p/${curatorPeerId}` },
     }] as never);
 
     const responsePromise = joinRequestHandler(agent)(
@@ -1497,8 +1498,9 @@ describe('private CG membership bootstrap recovery', () => {
         contextGraphId,
         agentAddress: approvedAddress,
         requestGeneration,
+        curatorDialAddress,
       })),
-      '12D3KooWPrivateBootstrapCurator',
+      curatorPeerId,
     );
 
     await approvalWriteStarted;
@@ -1519,7 +1521,7 @@ describe('private CG membership bootstrap recovery', () => {
       status: 'active',
       source: 'join-approved',
       metadata: {
-        curatorPeerId: '12D3KooWPrivateBootstrapCurator',
+        curatorPeerId,
         curatorDialAddress,
       },
     }));
@@ -1539,7 +1541,7 @@ describe('private CG membership bootstrap recovery', () => {
     });
     expect(immediateSync).toHaveBeenCalledWith(
       contextGraphId,
-      '12D3KooWPrivateBootstrapCurator',
+      curatorPeerId,
     );
   });
 

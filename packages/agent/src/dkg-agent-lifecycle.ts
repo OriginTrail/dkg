@@ -871,6 +871,16 @@ interface PersistedJoinApprovalProjection {
   readonly curatorDialAddress?: string;
 }
 
+function verifiedCuratorDialAddress(value: unknown, peerId: string): string | undefined {
+  if (typeof value !== 'string' || value.length > 512) return undefined;
+  try {
+    const address = multiaddr(value).toString();
+    return address.endsWith(`/p2p/${peerId}`) ? address : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function projectPersistedJoinApprovals(
   persistedMembershipRows: ContextGraphMembershipSnapshot,
   persistedContextGraphIds: ReadonlySet<string>,
@@ -890,16 +900,16 @@ function projectPersistedJoinApprovals(
     }
     const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
     if (!existing || membership.updatedAt > existing.updatedAt) {
+      const curatorPeerId = typeof membership.metadata?.['curatorPeerId'] === 'string' &&
+        membership.metadata['curatorPeerId'].trim()
+        ? membership.metadata['curatorPeerId'].trim()
+        : undefined;
       newestApprovalByContextGraph.set(membership.contextGraphId, {
         principalId,
         updatedAt: membership.updatedAt,
-        curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
-          membership.metadata['curatorPeerId'].trim()
-          ? membership.metadata['curatorPeerId'].trim()
-          : undefined,
-        curatorDialAddress: typeof membership.metadata?.['curatorDialAddress'] === 'string' &&
-          membership.metadata['curatorDialAddress'].trim()
-          ? membership.metadata['curatorDialAddress'].trim()
+        curatorPeerId,
+        curatorDialAddress: curatorPeerId
+          ? verifiedCuratorDialAddress(membership.metadata?.['curatorDialAddress'], curatorPeerId)
           : undefined,
       });
     }
@@ -3479,13 +3489,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               source: 'join-approved',
               metadata: {
                 curatorPeerId: peerId.toString(),
-                // The authenticated notification connection is a durable
-                // transport hint for a restarted member. The peer ID and
-                // private metadata proof remain the authority boundaries.
+                // The approved sender's own listener address is a durable
+                // transport hint. An inbound remoteAddr can be an ephemeral
+                // source port, so it is never persisted for restart dialing.
                 ...(() => {
-                  const address = this.node.libp2p.getConnections()
-                    .find((connection) => connection.remotePeer.toString() === peerId.toString())
-                    ?.remoteAddr?.toString();
+                  const address = verifiedCuratorDialAddress(
+                    payload.curatorDialAddress,
+                    peerId.toString(),
+                  );
                   return address ? { curatorDialAddress: address } : {};
                 })(),
               },
