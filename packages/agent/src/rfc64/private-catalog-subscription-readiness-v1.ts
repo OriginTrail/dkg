@@ -66,9 +66,13 @@ export async function verifyPrivateCatalogSubscriptionReadinessV1(
   if (promisedTargets === null || promisedTargets.length === 0) return false;
   const current = () => {
     const live = readState();
+    const liveAccepted = service.acceptedPolicySnapshot(networkId as NetworkIdV1, contextGraphId as ContextGraphIdV1);
+    // Registry lookup wraps each result afresh. The immutable policy/roster
+    // references, not that wrapper, identify its accepted generation.
     if (live.service !== service || !service.started || live.persistence !== persistence
       || live.networkId !== networkId || live.plan !== plan
-      || service.acceptedPolicySnapshot(networkId as NetworkIdV1, contextGraphId as ContextGraphIdV1) !== accepted) return false;
+      || liveAccepted?.policy !== accepted.policy || liveAccepted.roster !== accepted.roster
+      || liveAccepted.policyDigest !== accepted.policyDigest) return false;
     if (live.approvedAgent !== approvedAgent
       || !agent.listLocalAgents().some(({ agentAddress }) => agentAddress.toLowerCase() === approvedAgent.toLowerCase())
       || !agent.isRfc64JoinDerivedAcceptedAuthorityV1(contextGraphId)
@@ -81,7 +85,8 @@ export async function verifyPrivateCatalogSubscriptionReadinessV1(
   };
   const proof = await resolveApprovedPrivateReplicaAuthority(agent, contextGraphId, approvedAgent,
     () => readState().approvedAgent === approvedAgent, () => readState().metadataRevision === metadataRevision);
-  if (proof?.kind !== 'unregistered-private-replica' || !current()) return false;
+  if (proof?.kind !== 'unregistered-private-replica'
+    || proof.authority.ownerAddress !== accepted.policy.source.ownerAddress || !current()) return false;
   if ((await agent.listSubGraphs(contextGraphId)).length > 0) return false;
 
   const scopeIsEligible = (scope: Readonly<AuthorCatalogScopeV1>) => scope.networkId === networkId
@@ -96,9 +101,7 @@ export async function verifyPrivateCatalogSubscriptionReadinessV1(
     persistence.inventory.readAppliedCatalogHeadsSnapshotV1().heads.filter((head) => scopes.has(head.catalogScopeDigest)),
   );
   const inventory = readInventory();
-  const heads = await loadRfc64OperationalAppliedHeadsV1({
-    inventory: { readAppliedCatalogHeadsSnapshotV1: () => inventory }, controlObjects: persistence.controlObjects,
-  });
+  const heads = await loadRfc64OperationalAppliedHeadsV1(persistence, inventory);
   if (heads.length !== inventory.heads.length || heads.some((head) => !scopeIsEligible(head.scope))) return false;
   const completion = evaluateRfc64CatalogCompletionV1({
     heads, targets: admitted.targets, promisedTargets,

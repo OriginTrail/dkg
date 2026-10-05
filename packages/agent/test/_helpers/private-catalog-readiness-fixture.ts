@@ -74,9 +74,17 @@ export async function privateCatalogReadinessFixture(options: { restored?: boole
     inventory: { readAppliedCatalogHeadsSnapshotV1: () => inventory },
     controlObjects: { getVerifiedObjectByDigest, getVerifiedObject: getVerifiedObjectByDigest },
   };
-  let accepted = { policy: { accessPolicy: 1, era: '0', source: { kind: 'owner-signed-unregistered' } },
+  let accepted = { policy: { accessPolicy: 1, era: '0', source: { kind: 'owner-signed-unregistered', ownerAddress: OWNER } },
     roster: { members: [{ agentAddress: OWNER }, { agentAddress: MEMBER }] }, policyDigest: POLICY };
-  const service = { started: true, acceptedPolicySnapshot: () => accepted };
+  const freeze = (value: object): void => {
+    Object.values(value).forEach((child) => { if (child !== null && typeof child === 'object') freeze(child); });
+    Object.freeze(value);
+  };
+  freeze(accepted);
+  const updateAccepted = (change: (value: typeof accepted) => void) => {
+    accepted = structuredClone(accepted); change(accepted); freeze(accepted);
+  };
+  const service = { started: true, acceptedPolicySnapshot: () => Object.freeze({ ...accepted }) };
   const requester = { status: 'approved', requestGeneration: 'request-1', curatorPeerId: 'curator-peer',
     curatorAgentAddress: OWNER, curatorAuthorityEra: '0' };
   const subscription = { subscribed: true, onChainId: undefined as string | undefined };
@@ -129,6 +137,7 @@ export async function privateCatalogReadinessFixture(options: { restored?: boole
     readInventory: () => inventory,
     setProviderTargets: (targets: Rfc64PublicCatalogHeadAnnouncementV1[]) => { providerTargets = targets; },
     restartReplay: () => { state.replay = createReplay(); },
-    rotatePolicy: () => { accepted = { ...accepted }; },
+    updateAccepted,
+    rotatePolicy: () => updateAccepted(() => undefined),
   };
 }

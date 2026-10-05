@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NoChainAdapter, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
+import { NoChainAdapter, verifyControlEnvelopeIssuerSignatureV1, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY as D,
   DKGEvent,
@@ -34,6 +34,7 @@ import {
   generateSwmSenderChainKey,
   generateSwmSenderEpochId,
   generateWorkspaceRecipientEncryptionKey,
+  type SignedAuthorCatalogHeadEnvelopeV1,
   type SwmSenderKeyPackageMsg,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -46,6 +47,21 @@ import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.
 import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-private-replica.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
+import { readinessApplied, readinessHead, readinessTarget } from './_helpers/private-catalog-readiness-fixture.js';
+import type { Rfc64PublicCatalogServiceOptionsV1 } from '../src/rfc64/public-catalog-service-v1.js';
+import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
+
+// Retain the production service and registry. Capture only its receiver port
+// so tests can deliver a verified admission at an exact awaited boundary.
+const catalogServiceCapture = vi.hoisted(() => ({ options: null as Rfc64PublicCatalogServiceOptionsV1 | null }));
+vi.mock('../src/rfc64/public-catalog-service-v1.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/rfc64/public-catalog-service-v1.js')>();
+  return { ...actual, Rfc64PublicCatalogServiceV1: class extends actual.Rfc64PublicCatalogServiceV1 {
+    constructor(options: Rfc64PublicCatalogServiceOptionsV1) {
+      super(options); catalogServiceCapture.options = options;
+    }
+  } };
+});
 
 // Lets one test act at the await boundary of a successful join proof: after
 // the proof's own final checks, and before its caller resumes.
@@ -1930,6 +1946,68 @@ describe('approved private bare-name replica authorization', () => {
     expect(emit).toHaveBeenCalledWith(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, {
       contextGraphId: CONTEXT_GRAPH_ID,
     });
+  });
+
+  async function productionCatalogHandoffFixture() {
+    const f = await approvedBareNameReplicaFixture({ selfSovereignMember: true });
+    const { receiver } = f;
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+    await receiver.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' });
+    const service = Reflect.get(receiver, 'rfc64PublicCatalogServiceV1');
+    const accepted = service.acceptedPolicySnapshot(RFC64_ROLLOUT_DEPLOYMENT.networkId, CONTEXT_GRAPH_ID);
+    const second = service.acceptedPolicySnapshot(RFC64_ROLLOUT_DEPLOYMENT.networkId, CONTEXT_GRAPH_ID);
+    expect(accepted).not.toBeNull();
+    expect(second).not.toBe(accepted);
+    expect(second.policy).toBe(accepted.policy);
+    expect(second.roster).toBe(accepted.roster);
+    expect(receiver.isRfc64CatalogTransportAuthorityActiveV1(CONTEXT_GRAPH_ID)).toBe(true);
+    const persistence = Reflect.get(receiver, 'rfc64PersistenceV1') as Rfc64PersistenceV1;
+    const wallet = new ethers.Wallet(`0x${'42'.repeat(32)}`);
+    const signedTarget = async (version: string) => {
+      const unsignedHead = readinessHead({ networkId: RFC64_ROLLOUT_DEPLOYMENT.networkId,
+        contextGraphId: CONTEXT_GRAPH_ID as never, authorAddress: f.memberAddress as never, version });
+      const head = { ...unsignedHead, signature: await wallet.signMessage(ethers.getBytes(unsignedHead.objectDigest)) } as SignedAuthorCatalogHeadEnvelopeV1;
+      const staged = await persistence.controlObjects.stageVerifiedObjects([{
+        envelope: head, issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(head),
+      }]);
+      return { head, target: { ...readinessTarget(head), policyDigest: accepted.policyDigest,
+        signatureVariantDigest: staged.objects[0].signatureVariantDigest } };
+    };
+    const { head, target } = await signedTarget('1');
+    const next = await signedTarget('2');
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      ...readinessApplied(head), expectedCurrentCatalogHeadDigest: null,
+    });
+    vi.spyOn(service, 'requestCatalogHeadReplay').mockResolvedValue({ heads: [target] });
+    vi.spyOn(Reflect.get(receiver, 'node').libp2p, 'getPeers').mockReturnValue([CURATOR_PEER]);
+    await receiver.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID);
+    const commit = vi.fn();
+    return { ...f, service, persistence, target, commit,
+      run: () => receiver.withVerifiedPrivateCatalogSubscriptionReadinessV1(CONTEXT_GRAPH_ID, commit),
+      admitTarget: () => catalogServiceCapture.options!.receiver!.onVerifiedCurrentHeadTargetLifecycleEvent!({
+        kind: 'admission-result', result: 'accepted', targetToken: 999,
+        announcement: next.target,
+      }),
+    };
+  }
+
+  it('commits through the production state reader and real policy registry', async () => {
+    const f = await productionCatalogHandoffFixture();
+    await expect(f.run()).resolves.toBe(true);
+    expect(f.commit).toHaveBeenCalledOnce();
+  });
+
+  it('fences an actual receiver target admitted during the production handoff', async () => {
+    const f = await productionCatalogHandoffFixture();
+    await expect(f.run()).resolves.toBe(true);
+    f.commit.mockClear();
+    const original = f.receiver.listSubGraphs.bind(f.receiver);
+    vi.spyOn(f.receiver, 'listSubGraphs').mockImplementationOnce(async (...args) => {
+      const result = await original(...args); f.admitTarget(); return result;
+    });
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
   });
 
   it.each(REQUESTER_STATE_CHANGES.flatMap((change) => [

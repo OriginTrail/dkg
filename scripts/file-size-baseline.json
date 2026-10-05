@@ -89,7 +89,7 @@
     "packages/cli/src/daemon/manifest.ts": 970,
     "packages/cli/src/daemon/openclaw.ts": 1531,
     "packages/cli/src/daemon/routes/agent-chat.ts": 1202,
-    "packages/cli/src/daemon/routes/context-graph.ts": 2598,
+    "packages/cli/src/daemon/routes/context-graph.ts": 2595,
     "packages/cli/src/daemon/routes/hermes.ts": 893,
     "packages/cli/src/daemon/routes/knowledge-assets-import.ts": 2280,
     "packages/cli/src/daemon/routes/knowledge-assets.ts": 1938,

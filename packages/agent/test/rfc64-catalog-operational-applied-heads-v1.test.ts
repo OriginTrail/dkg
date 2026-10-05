@@ -283,6 +283,29 @@ const HEAD_D3 = signedHead(catalogScope(`${AUTHOR}/delta`), '3');
 const ALL_OBJECTS = [HEAD_A1, HEAD_A2, HEAD_B1, HEAD_C1];
 
 describe('RFC-64 operational applied heads', () => {
+  it('loads an explicit scope snapshot under the stable storage cache identity', async () => {
+    const fixture = createStorageFixture([HEAD_A1, HEAD_B1]);
+    fixture.fault(HEAD_B1.objectDigest, 'closed');
+    fixture.failListing(new Error('the caller already captured its scoped inventory'));
+    const snapshot = createAppliedCatalogHeadsSnapshotV1([appliedSnapshot(HEAD_A1)]);
+
+    const first = await loadRfc64OperationalAppliedHeadsV1(fixture.storage, snapshot);
+    expect(first.map((head) => head.snapshot.currentCatalogHeadDigest)).toEqual([HEAD_A1.objectDigest]);
+    expect(await loadRfc64OperationalAppliedHeadsV1(fixture.storage, snapshot)).toBe(first);
+    expect(fixture.reads).toEqual([HEAD_A1.objectDigest]);
+    expect(fixture.snapshotReads).toBe(0);
+
+    fixture.store(HEAD_A2);
+    const next = createAppliedCatalogHeadsSnapshotV1([appliedSnapshot(HEAD_A2)]);
+    fixture.fault(HEAD_A2.objectDigest, 'missing');
+    expect(await loadRfc64OperationalAppliedHeadsV1(fixture.storage, next)).toEqual([]);
+    fixture.fault(HEAD_A2.objectDigest, null);
+    const recovered = await loadRfc64OperationalAppliedHeadsV1(fixture.storage, next);
+    expect(recovered.map((head) => head.snapshot.currentCatalogHeadDigest)).toEqual([HEAD_A2.objectDigest]);
+    expect(fixture.reads).toEqual([HEAD_A1.objectDigest, HEAD_A2.objectDigest, HEAD_A2.objectDigest]);
+    expect(fixture.snapshotReads).toBe(0);
+  });
+
   it('reads and verifies each head once while the inventory is unchanged', async () => {
     const fixture = createStorageFixture([HEAD_A1, HEAD_B1, HEAD_C1]);
 

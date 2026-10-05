@@ -2043,7 +2043,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     let effectiveSyncMode = lifetimePlan.effectiveSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
-    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+    const readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
@@ -2158,11 +2158,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           existingReadiness.readinessPatch,
         );
       }
-      // The existing-state classifier may have just invalidated stale v1
-      // provenance because authoritative metadata was missing. Carry the
-      // corrected value into the queued catch-up so a later metadata-only or
-      // incomplete response cannot resurrect the pre-reset true bits.
-      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+      // Any invalidation is persisted before queueing; completion reads the
+      // then-current provenance so it cannot resurrect these stale bits.
     }
 
     // First mint site. The guard belongs HERE, above
