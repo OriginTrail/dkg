@@ -61,7 +61,7 @@ jobs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
       node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts }}
-      chain_rpc_node26: ${{ steps.plan.outputs.chain_rpc_node26 || 'true' }}
+      chain_rpc_node26: ${{ steps.plan.outputs.chain_rpc_node26 }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -91,14 +91,11 @@ jobs:
       # This immutable controller is the authority for test selection. A
       # policy update intentionally uses a new reviewed commit SHA; never use
       # the merge candidate or a mutable branch here.
-      # Rotation shims:
-      # - jobs.changes.outputs.chain_rpc_node26 fallback
-      # Remove the fallback when rotating to the reviewed Node 26 controller.
       - name: Checkout trusted CI controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: dfb3460719c13d592e2bb4d7d3c29fe55567fbe3
+          ref: 8af04a376332c17527ce0f7dffaac8432ba1a9b3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -1591,7 +1588,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: dfb3460719c13d592e2bb4d7d3c29fe55567fbe3
+          ref: 8af04a376332c17527ce0f7dffaac8432ba1a9b3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |

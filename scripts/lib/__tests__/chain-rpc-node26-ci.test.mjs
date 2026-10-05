@@ -8,6 +8,7 @@ import { parse } from 'yaml';
 import { githubOutputsForPlan, planCi } from '../ci-delta.mjs';
 import { NODE26_REQUIRED_ASSERTIONS, validateNode26Evidence, validatePrimaryResults } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
+import { fetchPinnedController } from '../../ci/fetch-trusted-controller.mjs';
 import { EXPECTED_NODE26_ASSERTIONS, REPO_ROOT, TRUSTED_CI_CONTROLLER_SHA, change, gateNeeds, node26Evidence, pullRequestPlan, succeeded } from './ci-plan-fixtures.mjs';
 import { workspaceClosure } from './ci-execution-graph.mjs';
 
@@ -16,6 +17,16 @@ const workflow = parse(read('.github/workflows/ci.yml'));
 const selectedPlan = pullRequestPlan([change('packages/chain/src/rpc-http1-dispatcher.ts')]);
 const goodNeeds = () => gateNeeds(succeeded(Object.keys(gateNeeds())));
 const errorsFor = (needs, plan = selectedPlan) => validatePrimaryResults({ eventName: 'pull_request', plan, needs });
+
+// Historical rollout fixtures stay fixed when the active controller rotates.
+const legacyController = 'dfb3460719c13d592e2bb4d7d3c29fe55567fbe3';
+const stagedImplementation = '8af04a376332c17527ce0f7dffaac8432ba1a9b3';
+function ensureHistoricalRevision(ref) {
+  if (spawnSync('git', ['-C', REPO_ROOT, 'cat-file', '-e', `${ref}^{commit}`], { stdio: 'ignore' }).status === 0) return;
+  // A rotated pin's shallow provenance window need not contain the old policy.
+  // Fetch only the immutable historical fixture, without changing pin/history rules.
+  fetchPinnedController({ ref, run: (command, args, options) => execFileSync(command, args, { ...options, cwd: REPO_ROOT }) });
+}
 
 // Fixtures deliberately synthesize outcomes. Actual runtime evidence comes from
 // run-chain-rpc-node26.mjs; passing these tests alone does not activate the pin.
@@ -129,6 +140,7 @@ test('every independent Node 26 obligation rejects missing, failed, skipped or d
 });
 
 function controllerCopy(t, ref) {
+  if (ref) ensureHistoricalRevision(ref);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-node26-controller-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   for (const file of CONTROLLER_POLICY_FILES) {
@@ -157,8 +169,10 @@ test('a deliberately failed required assertion makes the candidate aggregate CLI
 });
 
 test('rollout supplies the workflow before rotating: old/new controllers accept their compatible plans', (t) => {
-  const oldRoot = controllerCopy(t, TRUSTED_CI_CONTROLLER_SHA);
+  const oldRoot = controllerCopy(t, legacyController);
   const newRoot = controllerCopy(t);
+  ensureHistoricalRevision(stagedImplementation);
+  const stagedWorkflow = parse(execFileSync('git', ['-C', REPO_ROOT, 'show', `${stagedImplementation}:.github/workflows/ci.yml`], { encoding: 'utf8' }));
   for (const eventName of ['pull_request', 'merge_group', 'workflow_dispatch']) {
     const changes = path.join(oldRoot, 'changes.z');
     const output = path.join(oldRoot, 'github-output');
@@ -170,7 +184,7 @@ test('rollout supplies the workflow before rotating: old/new controllers accept 
     assert.equal(oldPlan.lanes.chain_rpc_node26, undefined);
     // Actions sees no old output; the staged workflow's fallback runs it.
     assert.doesNotMatch(fs.readFileSync(output, 'utf8'), /^chain_rpc_node26=/m);
-    assert.equal(workflow.jobs.changes.outputs.chain_rpc_node26, "${{ steps.plan.outputs.chain_rpc_node26 || 'true' }}");
+    assert.equal(stagedWorkflow.jobs.changes.outputs.chain_rpc_node26, "${{ steps.plan.outputs.chain_rpc_node26 || 'true' }}");
     const needs = goodNeeds();
     assert.equal(gate(oldRoot, oldPlan, needs, eventName).status, 0);
     needs['chain-rpc-node26'].result = 'failure';
@@ -184,12 +198,59 @@ test('rollout supplies the workflow before rotating: old/new controllers accept 
   const oldWorkflowNeeds = goodNeeds();
   delete oldWorkflowNeeds['chain-rpc-node26'];
   assert.equal(gate(newRoot, newPlan, oldWorkflowNeeds, 'merge_group').status, 1, 'never rotate before the workflow supplies the job');
-  // Preview the separately reviewed activation without changing the real pin.
+  assert.equal(workflow.jobs.changes.outputs.chain_rpc_node26, '${{ steps.plan.outputs.chain_rpc_node26 }}');
+  // A future rotation still moves every trusted reference together.
   const files = ['.github/workflows/ci.yml', '.github/workflows/evm-integration.yml'];
   const previewRef = 'a'.repeat(40);
   const previews = files.map((sourceName) => ({ sourceName, source: read(sourceName).replaceAll(TRUSTED_CI_CONTROLLER_SHA, previewRef) }));
   assert.equal(validateTrustedControllerPins(previews).ref, previewRef);
-  t.diagnostic(`Staged pin remains ${TRUSTED_CI_CONTROLLER_SHA}; skipped/missing enforcement starts only after reviewed protected-history rotation.`);
+  t.diagnostic(`Historical workflow ${stagedImplementation} supplied the lane before rotation from ${legacyController}; configured pin is ${TRUSTED_CI_CONTROLLER_SHA}.`);
+});
+
+test('the configured protected-history controller enforces selection and actual assertion evidence', (t) => {
+  const root = controllerCopy(t, TRUSTED_CI_CONTROLLER_SHA);
+  const pinnedPlan = (eventName, file = 'CHANGELOG.md') => {
+    const changes = path.join(root, 'changes.z');
+    fs.writeFileSync(changes, Buffer.from(`M\0${file}\0`));
+    const result = spawnSync(process.execPath, [path.join(root, 'scripts/ci/plan-ci.mjs'), '--event', eventName, '--changes-z', changes], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  for (const file of ['packages/chain/src/rpc-http1-dispatcher.ts', 'packages/chain/test/helpers/local-tls.ts', 'pnpm-lock.yaml', '.nvmrc']) {
+    assert.equal(pinnedPlan('pull_request', file).lanes.chain_rpc_node26, true, file);
+  }
+  for (const event of ['merge_group', 'push', 'schedule', 'workflow_dispatch']) {
+    const plan = pinnedPlan(event);
+    assert.equal(plan.lanes.chain_rpc_node26, true, event);
+    assert.equal(gate(root, plan, goodNeeds(), event).status, 0);
+  }
+  const relevant = pinnedPlan('pull_request', 'packages/chain/src/rpc-http1-dispatcher.ts');
+  for (const status of ['failure', 'cancelled', 'skipped', 'missing']) {
+    const needs = goodNeeds();
+    if (status === 'missing') delete needs['chain-rpc-node26'];
+    else needs['chain-rpc-node26'].result = status;
+    assert.equal(gate(root, relevant, needs).status, 1, status);
+  }
+  for (const evidence of [
+    { ...node26Evidence(), node: '22.23.2', undici: '6.23.0' },
+    { ...node26Evidence(), assertions: [] },
+    ...EXPECTED_NODE26_ASSERTIONS.map((name) => ({ ...node26Evidence(), assertions: node26Evidence().assertions.filter((assertion) => assertion.name !== name) })),
+    ...EXPECTED_NODE26_ASSERTIONS.map((name) => ({ ...node26Evidence(), assertions: node26Evidence().assertions.map((assertion) => ({ ...assertion, status: assertion.name === name ? 'pending' : 'passed' })) })),
+  ]) {
+    const needs = goodNeeds();
+    needs['chain-rpc-node26'].outputs.evidence = JSON.stringify(evidence);
+    assert.equal(gate(root, relevant, needs).status, 1, JSON.stringify(evidence));
+  }
+  for (const file of ['CHANGELOG.md', 'packages/network-sim/src/index.ts']) {
+    const plan = pinnedPlan('pull_request', file);
+    assert.equal(plan.lanes.chain_rpc_node26, false, file);
+    const needs = goodNeeds();
+    needs['chain-rpc-node26'] = { result: 'skipped' };
+    assert.equal(gate(root, plan, needs).status, 0);
+    delete plan.lanes.chain_rpc_node26;
+    assert.equal(gate(root, plan, needs).status, 1, 'unselected requires an explicit validated false flag');
+  }
+  t.diagnostic(`Executed selection and negative evidence checks through actual pinned controller ${TRUSTED_CI_CONTROLLER_SHA}.`);
 });
 
 test('one reusable implementation serves primary CI and manual candidate diagnosis', () => {
