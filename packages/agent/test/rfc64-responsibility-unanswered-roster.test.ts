@@ -33,7 +33,8 @@ const RECHECK_MS = 25;
 
 const { startAgent, cleanup } = createRfc64RolloutAgentHarness();
 
-type RegisteredAuthorityRead = () => RegisteredContextGraphAuthority;
+type RegisteredAuthorityRead = () =>
+  RegisteredContextGraphAuthority | Promise<RegisteredContextGraphAuthority>;
 const roster = (...participantAgents: string[]): RegisteredAuthorityRead => () => ({
   kind: 'private', onChainId: BigInt(ON_CHAIN_ID), participantAgents,
 });
@@ -167,6 +168,31 @@ describe('catalog responsibility whose roster read gets no answer', () => {
     await new Promise((resolve) => setTimeout(resolve, 4 * RECHECK_MS));
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     expect(rosterReads).toHaveBeenCalledTimes(3);
+  });
+
+  it('commits nothing from a pass that a later pass overtook while its roster was read', async () => {
+    let answerHeld!: (authority: RegisteredContextGraphAuthority) => void;
+    const held: RegisteredAuthorityRead = () => new Promise((resolve) => { answerHeld = resolve; });
+    const host = await memberEdge('overtaken', [roster(AUTHOR, MEMBER), held, roster(AUTHOR, MEMBER)]);
+    const { edge, contextGraphId, rosterReads } = host;
+
+    const overtaken = edge.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
+    await expect.poll(() => rosterReads.mock.calls.length).toBe(2);
+    // A later pass reads the roster and ends first.
+    await expect(edge.reconcileRfc64CatalogResponsibilityV1(contextGraphId))
+      .resolves.toMatchObject({ active: true, responsibilityReason: 'private-membership' });
+    expect(rosterReads).toHaveBeenCalledTimes(3);
+
+    // The earlier pass now learns of a roster without this member. It is no
+    // longer the graph's current pass: it changes nothing and reports the
+    // responsibility as it stands.
+    answerHeld(roster(AUTHOR)() as RegisteredContextGraphAuthority);
+    await expect(overtaken).resolves.toMatchObject({
+      active: true, responsibilityReason: 'private-membership',
+    });
+    expect(host.responsibility()).toMatchObject({
+      active: true, responsibilityReason: 'private-membership',
+    });
   });
 
   it('withdraws the responsibility once the roster answers without this member', async () => {

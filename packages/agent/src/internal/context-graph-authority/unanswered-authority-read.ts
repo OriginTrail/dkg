@@ -88,6 +88,18 @@ export function reportUnansweredReadAuthorityDecision(
   report(contextGraphId, `${decision.source}/${decision.reason}/${decision.dependency}`);
 }
 
+/**
+ * `decision`, reported first if it is "no answer from the chain". For a caller
+ * that reduces the decision to a boolean.
+ */
+export function observedReadAuthorityDecision<D extends ContextGraphReadAuthorityDecision>(
+  contextGraphId: string,
+  decision: D,
+): D {
+  reportUnansweredReadAuthorityDecision(contextGraphId, decision);
+  return decision;
+}
+
 /** Report a registered authority that is "no answer from the chain". */
 export function reportUnansweredRegisteredAuthority(
   contextGraphId: string,
@@ -99,4 +111,18 @@ export function reportUnansweredRegisteredAuthority(
     || registeredContextGraphAuthorityUnavailableDependency(authority) !== 'chain'
   ) return;
   report(contextGraphId, `registered-authority/${authority.reason}/chain`);
+}
+
+/**
+ * "No roster", for a caller whose registered authority gave none. The
+ * authority is reported first if it is "no answer from the chain", so that a
+ * caller that must not take that for "no roster" learns which of the two it
+ * was.
+ */
+export function noRosterFrom(
+  contextGraphId: string,
+  authority: RegisteredContextGraphAuthority,
+): null {
+  reportUnansweredRegisteredAuthority(contextGraphId, authority);
+  return null;
 }

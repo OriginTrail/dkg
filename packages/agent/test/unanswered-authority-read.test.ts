@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { ContextGraphReadAuthorityDecision } from '../src/context-graph-read-authority.js';
 import {
   isUnansweredChainReadAuthorityDecision,
+  noRosterFrom,
+  observedReadAuthorityDecision,
   reportUnansweredReadAuthorityDecision,
   reportUnansweredRegisteredAuthority,
   UnansweredAuthorityObservation,
@@ -156,5 +158,32 @@ describe('reportUnansweredRegisteredAuthority', () => {
     ],
   ])('does not report %s', async (_name, authority) => {
     await expect(observe(authority)).resolves.toBeUndefined();
+  });
+});
+
+describe('the forms a check uses where it hands its result on', () => {
+  it('hands a decision back unchanged and reports it when the chain gave no answer', async () => {
+    const observation = new UnansweredAuthorityObservation(GRAPH);
+    const unanswered = unavailable('chain-access-policy-timeout');
+    const refused = settled('denied');
+    await observation.run(async () => {
+      expect(observedReadAuthorityDecision(GRAPH, refused)).toBe(refused);
+      expect(observation.unanswered).toBeUndefined();
+      expect(observedReadAuthorityDecision(GRAPH, unanswered)).toBe(unanswered);
+    });
+    expect(observation.unanswered).toBe('registered-chain/chain-access-policy-timeout/chain');
+  });
+
+  it('gives no roster, and reports the authority when the chain gave no answer', async () => {
+    const observation = new UnansweredAuthorityObservation(GRAPH);
+    await observation.run(async () => {
+      expect(noRosterFrom(GRAPH, { kind: 'public', onChainId: 1n })).toBeNull();
+      expect(observation.unanswered).toBeUndefined();
+      expect(noRosterFrom(GRAPH, {
+        kind: 'unavailable', reason: 'chain-participant-authority-unavailable',
+      })).toBeNull();
+    });
+    expect(observation.unanswered)
+      .toBe('registered-authority/chain-participant-authority-unavailable/chain');
   });
 });
