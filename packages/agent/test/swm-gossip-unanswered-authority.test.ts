@@ -298,6 +298,55 @@ describe('shared-memory gossip reconcile whose authority check gets no answer', 
     }
   });
 
+  it('does not ask again, or subscribe, a graph whose subscription was withdrawn before its turn', async () => {
+    const host = await subscribedHost([publicGraph, notAdmitted, publicGraph]);
+    const { authorityReads, manager, h } = host;
+    useFakeClock();
+    try {
+      await host.reconcile();
+      await host.reconcile();
+      expect(host.subscribed()).toBe(true);
+      expect(host.waiting()).toBe(1);
+
+      h.agent.unsubscribeFromContextGraph(localCgId, { persist: false });
+      expect(host.subscribed()).toBe(false);
+      manager.subscribe.mockClear();
+
+      // The chain would now answer that the graph is public. Nobody asks.
+      await vi.advanceTimersByTimeAsync(10 * RECHECK_MS);
+      await host.settled();
+      expect(authorityReads).toHaveBeenCalledTimes(2);
+      expect(manager.subscribe).not.toHaveBeenCalled();
+      expect(host.subscribed()).toBe(false);
+      expect(host.waiting()).toBe(0);
+    } finally {
+      await host.close();
+    }
+  });
+
+  it('asks again a graph it was reconciling without a member subscription', async () => {
+    const host = await subscribedHost([notAdmitted, publicGraph]);
+    const { authorityReads, internals } = host;
+    // What a reconcile looks like for a graph this node holds no member
+    // subscription for: there is no intent that could be withdrawn.
+    internals.subscribedContextGraphs.set(localCgId, {
+      ...internals.subscribedContextGraphs.get(localCgId),
+      subscribed: false,
+    });
+    useFakeClock();
+    try {
+      await host.reconcile();
+      expect(host.waiting()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
+      await host.settled();
+      expect(authorityReads).toHaveBeenCalledTimes(2);
+      expect(host.waiting()).toBe(0);
+    } finally {
+      await host.close();
+    }
+  });
+
   it('asks nothing after its gossip session is retired', async () => {
     const host = await subscribedHost([publicGraph, notAdmitted, publicGraph]);
     const { authorityReads, internals } = host;

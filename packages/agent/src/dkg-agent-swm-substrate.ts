@@ -951,10 +951,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       // a refusal: a subscription this node holds stays, one it does not hold
       // is not made, and the graph is asked again without waiting for the
       // next event that would reconcile it.
-      const unansweredChecks = sharedMemoryAuthorityRecheckOf(session).defer(
-        contextGraphId,
-        () => this.queueSharedMemoryGossipSubscription(contextGraphId),
-      );
+      const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
+      const unansweredChecks = sharedMemoryAuthorityRecheckOf(session).defer(contextGraphId, () => {
+        // The repeat stands in for this pass. A member subscription that was
+        // withdrawn in the meantime has nothing left to decide.
+        if (subscribed && this.subscribedContextGraphs.get(contextGraphId)?.subscribed !== true) return;
+        this.queueSharedMemoryGossipSubscription(contextGraphId);
+      });
       this.log[unansweredChecks <= 1 ? 'info' : 'debug'](ctx, describeUnansweredAuthorityCheck({
         subject: `SWM gossip subscription for "${contextGraphId}"`,
         waitingFor: 'read authority',
