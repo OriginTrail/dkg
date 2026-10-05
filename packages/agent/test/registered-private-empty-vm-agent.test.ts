@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { RegisteredPrivateEmptyVmMethods } from '../src/dkg-agent-registered-private-empty-vm.js';
 
@@ -19,6 +19,7 @@ const CALLER = `0x${'11'.repeat(20)}`;
 
 function fixture() {
   let metadataRevision = '0:0';
+  const isPrivate = vi.fn(async () => true);
   const authority = vi.fn(async () => ({
     outcome: 'allowed', source: 'registered-chain', onChainId: 3n,
   }));
@@ -42,10 +43,10 @@ function fixture() {
       readContextGraphAuthorityFactsRevision: () => metadataRevision,
     },
     hasConfirmedMetaState: vi.fn(async () => true),
-    isPrivateContextGraph: vi.fn(async () => true),
+    isPrivateContextGraph: isPrivate,
   } as unknown as DKGAgent;
   return {
-    authority, chainSnapshot, subscriptions, agent,
+    authority, chainSnapshot, subscriptions, agent, isPrivate,
     invalidateMetadata: () => { metadataRevision = '0:1'; },
   };
 }
@@ -60,6 +61,10 @@ describe('registered private empty-VM agent guard', () => {
     vi.resetAllMocks();
     mocks.snapshot.mockReturnValue(async () => true);
     mocks.proof.mockResolvedValue(true);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   it('rechecks registered chain authority around the pinned proof', async () => {
@@ -82,6 +87,37 @@ describe('registered private empty-VM agent guard', () => {
       outcome: 'denied', source: 'registered-chain', onChainId: 3n,
     });
     expect(await prove(state.agent)).toBe(false);
+    expect(mocks.proof).not.toHaveBeenCalled();
+  });
+
+  it('does not prove a graph whose metadata is public or changes during inspection', async () => {
+    const state = fixture();
+    state.isPrivate.mockResolvedValueOnce(false);
+    expect(await prove(state.agent)).toBe(false);
+    state.isPrivate.mockImplementationOnce(async () => {
+      state.invalidateMetadata();
+      return true;
+    });
+    expect(await prove(state.agent)).toBe(false);
+    expect(state.authority).not.toHaveBeenCalled();
+    expect(mocks.proof).not.toHaveBeenCalled();
+  });
+
+  it('requires the chain authority capability and a valid local chain binding', async () => {
+    const state = fixture();
+    const chain = state.agent.chain as unknown as {
+      getContextGraphAuthoritySnapshot?: typeof state.chainSnapshot;
+    };
+    chain.getContextGraphAuthoritySnapshot = undefined;
+    expect(await prove(state.agent)).toBe(false);
+    chain.getContextGraphAuthoritySnapshot = state.chainSnapshot;
+    const config = state.agent.config.chainConfig as { chainId: string; hubAddress: string };
+    config.chainId = 'not-an-evm-chain';
+    expect(await prove(state.agent)).toBe(false);
+    config.chainId = 'evm:31337';
+    config.hubAddress = 'not-an-address';
+    expect(await prove(state.agent)).toBe(false);
+    expect(state.chainSnapshot).not.toHaveBeenCalled();
     expect(mocks.proof).not.toHaveBeenCalled();
   });
 
@@ -121,12 +157,42 @@ describe('registered private empty-VM agent guard', () => {
     expect(commit).not.toHaveBeenCalled();
   });
 
+  it('does not commit when the graph becomes public after the finalized proof', async () => {
+    const state = fixture();
+    const commit = vi.fn();
+    state.isPrivate.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toBe(false);
+    expect(mocks.proof).toHaveBeenCalledTimes(1);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
   it('commits synchronously after the final metadata fence', async () => {
     const state = fixture();
     const commit = vi.fn(state.invalidateMetadata);
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
       .call(state.agent, CG, CALLER, commit)).toBe(true);
     expect(commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a caller-owned persistence failure visible after a valid proof', async () => {
+    const state = fixture();
+    const failure = new Error('readiness persistence unavailable');
+    const commit = vi.fn(() => { throw failure; });
+    await expect(RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).rejects.toBe(failure);
+    expect(mocks.proof).toHaveBeenCalledTimes(1);
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the optional diagnostic trace generic when admission fails', async () => {
+    const state = fixture();
+    state.subscriptions.get(CG)!.subscribed = false;
+    vi.stubEnv('DKG_DEBUG_PRIVATE_EMPTY_VM', '1');
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    expect(await prove(state.agent)).toBe(false);
+    expect(log).toHaveBeenCalledWith('[private-empty-vm] not-subscribed');
+    expect(mocks.proof).not.toHaveBeenCalled();
   });
 
   it('does not commit a proof that completes after the caller deadline', async () => {

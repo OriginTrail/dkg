@@ -133,8 +133,8 @@ import {
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
-import { classifyAndCommitEmptyPrivateVmCatchup } from '../../context-graph-empty-vm-readiness-owner.js';
-import { inspectPrivateEmptyVmCatchup, settlePrivateEmptyVmAtSubscribe } from '../../context-graph-empty-vm-readiness.js';
+import { classifyAndCommitContextGraphCatchup } from '../../context-graph-catchup-readiness-owner.js';
+import { settlePrivateEmptyVmAtSubscribe } from '../../context-graph-empty-vm-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -2287,22 +2287,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${targetContextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
         } else {
-          const { hasConfirmedMeta, isPrivate, privateEmptyVmCandidate } =
-            await inspectPrivateEmptyVmCatchup(agent, targetContextGraphId, result, readAuthority, callerAddr);
-          // A catch-up can outlive its admission's absence proof or member
-          // delegation. Re-derive unregistered applicability at completion;
-          // registration, revocation, and outages must not reuse an old N/A.
-          const completionAuthority = readAuthority.registration === 'unregistered'
-            ? await agent.resolveContextGraphSubscriptionBootstrapAuthority(targetContextGraphId, {
-              callerAgentAddress: callerAddr,
-              allowSubscriptionFallback: false,
-            }).catch(() => ({ outcome: 'unavailable' as const, registration: undefined }))
-            : readAuthority;
-          const classification = await classifyAndCommitEmptyPrivateVmCatchup({
+          const classification = await classifyAndCommitContextGraphCatchup({
             agent, store: dashDb, contextGraphId: targetContextGraphId,
             callerAgentAddress: callerAddr,
             result, includeSharedMemory: shouldSyncSharedMemory,
-            completionAuthority, hasConfirmedMeta, isPrivate, privateEmptyVmCandidate,
+            admissionAuthority: readAuthority,
           });
 
           job.durablePlane = classification.durablePlane;

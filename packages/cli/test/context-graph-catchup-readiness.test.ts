@@ -637,6 +637,31 @@ describe('context graph catch-up readiness classification', () => {
     });
   });
 
+  it('keeps peer denial while persisting an independent finalized empty-VM proof', () => {
+    const deniedRound = catchupReadinessResult({
+      connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
+      peersTried: 1, peersResponded: 1, denied: true, deniedPeers: 1,
+    });
+    const unproven = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' }, result: deniedRound,
+      includeSharedMemory: true, hasConfirmedMeta: true, isPrivate: true,
+      readinessBeforeCatchup,
+    });
+    expect(unproven).toMatchObject({ jobStatus: 'denied' });
+    expect(unproven.readinessPatch?.durableVerified).not.toBe(true);
+
+    const proven = classifyContextGraphCatchupReadiness({
+      completionAuthority: { outcome: 'allowed' }, result: deniedRound,
+      includeSharedMemory: true, hasConfirmedMeta: true, isPrivate: true,
+      finalizedEmptyRegisteredPrivateVm: true, readinessBeforeCatchup,
+    });
+    expect(proven).toMatchObject({
+      jobStatus: 'denied',
+      statePatch: { synced: true, sharedMemorySynced: false },
+      readinessPatch: { durableVerified: true, sharedMemoryVerified: false },
+    });
+  });
+
   it.each([
     ['unregistered', { outcome: 'allowed', registration: 'unregistered' }, true, true],
     ['public', { outcome: 'allowed' }, false, true],

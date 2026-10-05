@@ -573,16 +573,14 @@ function classifyCatchupReadiness(
     input.includeSharedMemory,
   );
 
-  if (result.denied && !servedUsableData && !hasRequestedCleanPeerResponse) {
-    return {
-      jobStatus: 'denied',
-      error: result.deniedPeers > 1
-        ? `Sync denied by ${result.deniedPeers} remote peers`
-        : 'Sync denied by remote peer',
-    };
-  }
-
   const finalizedEmptyPrivateVm = input.finalizedEmptyRegisteredPrivateVm === true && input.isPrivate && registration !== 'unregistered';
+  const peerDenied = result.denied && !servedUsableData && !hasRequestedCleanPeerResponse;
+  const peerDenial = peerDenied ? {
+    jobStatus: 'denied' as const,
+    error: result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : 'Sync denied by remote peer',
+  } : undefined;
+  if (peerDenial && !finalizedEmptyPrivateVm) return peerDenial;
+
   if (catchupResultHasCleanResponse(result) || finalizedEmptyPrivateVm) {
     if (input.hasConfirmedMeta === undefined) {
       return {
@@ -683,6 +681,8 @@ function classifyCatchupReadiness(
         error = 'Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.';
       }
     }
+    // Peer denial describes the job without erasing independent VM evidence.
+    if (peerDenial) { jobStatus = peerDenial.jobStatus; error = peerDenial.error; }
 
     return {
       jobStatus,

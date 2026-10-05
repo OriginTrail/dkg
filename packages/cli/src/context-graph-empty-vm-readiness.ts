@@ -2,9 +2,9 @@
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
-import type { CatchupJobResult } from './catchup-runner.js';
-import { catchupResultHasCleanResponse } from './context-graph-readiness.js';
-import { withProvenEmptyPrivateVmReadiness } from './context-graph-empty-vm-readiness-owner.js';
+import { readContextGraphReadiness } from './context-graph-readiness.js';
+import { classifyEmptyPrivateVmReadiness, withProvenEmptyPrivateVmReadiness } from './context-graph-empty-vm-readiness-owner.js';
+import { commitContextGraphReadinessPatches } from './context-graph-readiness-commit.js';
 
 type RegisteredAuthority = { source: string; reason?: string; registration?: 'unregistered' };
 const trace = (stage: string) => {
@@ -38,7 +38,15 @@ export async function settlePrivateEmptyVmAtSubscribe(
         }
         if (signal.aborted) return false;
         if (!await withProvenEmptyPrivateVmReadiness({
-          agent, store: dashboard, contextGraphId, callerAgentAddress, signal,
+          agent, contextGraphId, callerAgentAddress, signal,
+          commit: () => {
+            const patches = classifyEmptyPrivateVmReadiness(
+              readContextGraphReadiness(dashboard, contextGraphId),
+            );
+            commitContextGraphReadinessPatches({
+              agent, store: dashboard, contextGraphId, ...patches,
+            });
+          },
         })) {
           trace('proof-false'); return false;
         }
@@ -59,33 +67,4 @@ export async function settlePrivateEmptyVmAtSubscribe(
   if (completed) return true;
   trace('meta-timeout');
   return false;
-}
-
-/** Inspect local metadata; the readiness owner commits any later proof. */
-export async function inspectPrivateEmptyVmCatchup(
-  agent: DKGAgent,
-  contextGraphId: string,
-  result: CatchupJobResult,
-  authority: RegisteredAuthority,
-  callerAgentAddress?: string,
-): Promise<{
-  hasConfirmedMeta: boolean | undefined;
-  isPrivate: boolean;
-  privateEmptyVmCandidate: boolean;
-}> {
-  const candidate = authority.source === 'registered-chain'
-    && authority.reason === 'chain-participant'
-    && authority.registration !== 'unregistered'
-    && callerAgentAddress !== undefined && result.dataSynced === 0;
-  const hasConfirmedMeta = catchupResultHasCleanResponse(result) || candidate
-    ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => undefined)
-    : undefined;
-  const isPrivate = hasConfirmedMeta
-    ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
-    : false;
-  return {
-    hasConfirmedMeta,
-    isPrivate,
-    privateEmptyVmCandidate: candidate && isPrivate && hasConfirmedMeta === true,
-  };
 }

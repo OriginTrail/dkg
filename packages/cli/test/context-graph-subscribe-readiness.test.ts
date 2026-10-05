@@ -177,11 +177,13 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     metadataBootstrapWaitFor?: Promise<void>;
     onMetadataBootstrapStarted?: () => void;
     onCatchupRun?: () => void;
+    onEarlyProofAttempt?: () => void;
     catchupRunWaitFor?: Promise<void>;
     finalizedEmptyPrivateVm?: boolean;
     finalizedEmptyPrivateVmAfterCatchup?: boolean;
     invalidateMetaDuringProof?: boolean;
     throwEarlyReadinessCommitOnce?: boolean;
+    revokeOnTerminalProof?: boolean;
     authorityDecision?: TestAuthorityDecision;
     authorityAfterCatchup?: TestAuthorityDecision;
     recoverAuthorityForRetry?: boolean;
@@ -198,6 +200,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     responseStatus: number;
     job: any;
     runCalls: number;
+    proofAttempts: Array<{ phase: 'early' | 'terminal'; proven: boolean }>;
+    earlyReadinessCommitFailureInjected: boolean;
     metadataBootstrapCalls: number;
     metadataBootstrapProofs: Array<unknown>;
     runSawMetadataBootstrap: boolean;
@@ -222,6 +226,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       latestByContextGraph: new Map<string, string>(),
     };
     let runCalls = 0;
+    let catchupCompleted = false;
+    let authorityRevoked = false;
+    let earlyReadinessCommitFailureInjected = false;
+    const proofAttempts: Array<{ phase: 'early' | 'terminal'; proven: boolean }> = [];
     let retrying = false;
     let metadataBootstrapCalls = 0;
     const metadataBootstrapProofs: Array<unknown> = [];
@@ -246,6 +254,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         if (opts.readinessDuringCatchup) readiness = { ...opts.readinessDuringCatchup, updatedAt: Date.now() };
         runSawMetadataBootstrap = metadataBootstrapCompleted;
         runRequests.push(request);
+        catchupCompleted = true;
         return opts.result ?? cleanEmptyResult();
       },
       close: async () => {},
@@ -253,13 +262,16 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
 
     const agent = {
       resolveContextGraphSubscriptionBootstrapAuthority: async () => (
-        retrying
+        authorityRevoked
+          ? { outcome: 'denied' as const, source: 'registered-chain' as const,
+            reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden' as const }
+          : retrying
           // Model the legacy-local admission guard after the transient store
           // outage recovers. A wrongly persisted pendingMeta poisons retries.
           ? state.get(contextGraphId)?.pendingMeta === true
             ? { outcome: 'unavailable', source: 'legacy-local', reason: 'pending-authoritative-metadata', metadataBootstrap: 'eligible' }
             : opts.authorityDecision
-          : runCalls > 0 ? opts.authorityAfterCatchup ?? opts.authorityDecision : opts.authorityDecision
+          : catchupCompleted ? opts.authorityAfterCatchup ?? opts.authorityDecision : opts.authorityDecision
       ) ?? ({
         outcome: 'allowed' as const,
         source: 'legacy-local' as const,
@@ -287,8 +299,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         return applied;
       },
       markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
-        if (opts.throwEarlyReadinessCommitOnce && patch.synced === true && runCalls === 0) {
+        if (opts.throwEarlyReadinessCommitOnce && patch.synced === true && !catchupCompleted) {
           opts.throwEarlyReadinessCommitOnce = false;
+          earlyReadinessCommitFailureInjected = true;
           throw new Error('test readiness write failure');
         }
         patches.push({ ...patch });
@@ -309,10 +322,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
       hasConfirmedMetaState: async () => {
         if (metadataInvalidated) return false;
-        if (runCalls > 0 && opts.metadataInspectionFailsAfterCatchup) {
+        if (catchupCompleted && opts.metadataInspectionFailsAfterCatchup) {
           throw new Error('transient metadata store failure');
         }
-        return runCalls > 0
+        return catchupCompleted
           ? opts.hasConfirmedMetaAfterCatchup ?? opts.hasConfirmedMeta
           : opts.hasConfirmedMeta;
       },
@@ -329,9 +342,17 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
           return false;
         }
         if (metadataInvalidated) return false;
-        const proven = runCalls > 0
+        const phase = catchupCompleted ? 'terminal' : 'early';
+        if (phase === 'early') opts.onEarlyProofAttempt?.();
+        if (phase === 'terminal' && opts.revokeOnTerminalProof) {
+          authorityRevoked = true;
+          proofAttempts.push({ phase, proven: false });
+          return false;
+        }
+        const proven = phase === 'terminal'
           ? opts.finalizedEmptyPrivateVmAfterCatchup ?? opts.finalizedEmptyPrivateVm ?? false
           : opts.finalizedEmptyPrivateVm ?? false;
+        proofAttempts.push({ phase, proven });
         if (proven) commit?.();
         return proven;
       },
@@ -436,6 +457,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       responseStatus: httpResponse.status,
       job: jobId ? catchupTracker.jobs.get(jobId) : undefined,
       runCalls,
+      proofAttempts,
+      earlyReadinessCommitFailureInjected,
       metadataBootstrapCalls,
       metadataBootstrapProofs,
       runSawMetadataBootstrap,
@@ -510,18 +533,24 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       expect(result.responseStatus).toBe(200);
       expect(result.response.catchup.jobId).toBeTruthy();
       expect(result.job.status).toBe('running');
+      expect(result.earlyReadinessCommitFailureInjected).toBe(true);
+      expect(result.proofAttempts).toContainEqual({ phase: 'early', proven: true });
     } finally {
       finishCatchup();
     }
   });
 
   it('commits a later finalized empty-VM proof after private metadata-only catch-up', async () => {
+    let finishCatchup!: () => void;
+    const catchupRunWaitFor = new Promise<void>((resolve) => { finishCatchup = resolve; });
     const result = await subscribe({
       hasConfirmedMeta: true,
       isPrivate: true,
       initial: { subscribed: false, sharedMemorySynced: false },
       finalizedEmptyPrivateVm: false,
       finalizedEmptyPrivateVmAfterCatchup: true,
+      catchupRunWaitFor,
+      onEarlyProofAttempt: finishCatchup,
       result: privateSharedMemoryMetaOnlyResult(),
       authorityDecision: {
         outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
@@ -530,10 +559,64 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
     expect(result.responseStatus).toBe(200);
     expect(result.job.finishedAt).toBeDefined();
+    expect(result.proofAttempts).toEqual([
+      { phase: 'early', proven: false },
+      { phase: 'terminal', proven: true },
+    ]);
     expect(result.state).toMatchObject({
       subscribed: true, synced: true, metaSynced: true,
       sharedMemorySynced: false,
     });
+    expect(result.readiness).toMatchObject({
+      durableVerified: true, sharedMemoryVerified: false,
+    });
+  });
+
+  it('clears early VM readiness if membership is revoked during terminal proof', async () => {
+    let finishCatchup!: () => void;
+    const catchupRunWaitFor = new Promise<void>((resolve) => { finishCatchup = resolve; });
+    const result = await subscribe({
+      hasConfirmedMeta: true, isPrivate: true,
+      initial: { subscribed: false, sharedMemorySynced: false },
+      finalizedEmptyPrivateVm: true,
+      revokeOnTerminalProof: true,
+      catchupRunWaitFor,
+      onEarlyProofAttempt: finishCatchup,
+      result: privateSharedMemoryMetaOnlyResult(),
+      authorityDecision: {
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+        metadataBootstrap: 'eligible', onChainId: 7n,
+      },
+    });
+    expect(result.responseStatus).toBe(200);
+    expect(result.job.status).toBe('denied');
+    expect(result.proofAttempts).toEqual([
+      { phase: 'early', proven: true },
+      { phase: 'terminal', proven: false },
+    ]);
+    expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false });
+    expect(result.readiness).toMatchObject({
+      durableVerified: false, sharedMemoryVerified: false,
+    });
+  });
+
+  it('keeps a denied catch-up status while an independent proof opens VM readiness', async () => {
+    const deniedRound = privateSharedMemoryMetaOnlyResult();
+    deniedRound.denied = true;
+    deniedRound.deniedPeers = 1;
+    deniedRound.peersSucceeded = 0;
+    const result = await subscribe({
+      hasConfirmedMeta: true, isPrivate: true,
+      initial: { subscribed: false, sharedMemorySynced: false },
+      finalizedEmptyPrivateVm: true,
+      result: deniedRound,
+      authorityDecision: {
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+        metadataBootstrap: 'eligible', onChainId: 7n,
+      },
+    });
+    expect(result.job.status).toBe('denied');
+    expect(result.state).toMatchObject({ synced: true, sharedMemorySynced: false });
     expect(result.readiness).toMatchObject({
       durableVerified: true, sharedMemoryVerified: false,
     });

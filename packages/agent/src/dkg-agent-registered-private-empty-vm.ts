@@ -95,12 +95,18 @@ export class RegisteredPrivateEmptyVmMethods {
       // No await separates this fence from the caller's synchronous readiness
       // commit. Metadata replacement and bootstrap invalidation advance the
       // same graph's projection revision.
-      if (stillCurrent) commit?.();
-      trace(stillCurrent ? 'proven' : 'post-proof-authority-changed');
-      return stillCurrent;
+      if (!stillCurrent) {
+        trace('post-proof-authority-changed');
+        return false;
+      }
+      trace('proven');
     } catch (error) {
       trace(`proof-error:${error instanceof Error ? error.name : 'unknown'}`);
       return false;
     }
+    // The proof read is fail-closed, but the caller owns persistence errors.
+    // Keep this synchronous with the final metadata and authority fence above.
+    commit?.();
+    return true;
   }
 }
