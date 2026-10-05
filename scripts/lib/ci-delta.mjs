@@ -33,6 +33,8 @@ export { EVM_SCOPES, WORKSPACE_OWNING_EVM_SCOPES, WORKSPACE_OWNING_LANES, WORKSP
 // - `implies`: lanes whose jobs run whenever this lane's does; every plan
 //   records them, so the gate requires those jobs too.
 const LANES = Object.freeze({
+  // Source-only transport tests install and run independently of the Node 22 build.
+  chain_rpc_node26: { job: 'chain-rpc-node26', selfBuilding: true },
   tornado_core: { job: 'tornado-core', nodeTestArtifacts: true },
   tornado_blazegraph: { job: 'tornado-blazegraph' },
   tornado_publisher: { job: 'tornado-publisher', nodeTestArtifacts: true },
