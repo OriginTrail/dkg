@@ -9,6 +9,7 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MEMBER_ROSTER_OBJECT_TYPE_V1,
   MemoryLayer,
+  DKGEvent,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
@@ -5786,6 +5787,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       startNativeAgent('author'),
       startNativeAgent('receiver'),
     ]);
+    const readinessRequests = vi.fn();
+    const syncCompletions = vi.fn();
+    receiver.eventBus.on(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, readinessRequests);
+    receiver.eventBus.on(DKGEvent.PROJECT_SYNCED, syncCompletions);
     const receiverPolicy = receiver.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -5811,6 +5816,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(delivery.announcedPeers).toEqual([receiver.peerId]);
     expect(delivery.failedPeers).toEqual([]);
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    expect(readinessRequests).toHaveBeenCalledWith({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(syncCompletions).not.toHaveBeenCalled();
 
     const scopeDigest = catalogScopeDigest();
     expect(receiver.readRfc64AppliedCatalogHeadV1({

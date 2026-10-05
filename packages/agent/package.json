@@ -51,6 +51,7 @@
     "./dist/rfc64/catalog-replay-snapshot-runtime-v1.js": null,
     "./dist/rfc64/catalog-operational-applied-heads-v1.js": null,
     "./dist/rfc64/catalog-operational-reads-v1.js": null,
+    "./dist/rfc64/catalog-completion-evidence-v1.js": null,
     "./dist/rfc64/private-catalog-subscription-readiness-v1.js": null,
     "./dist/rfc64/catalog-runtime-v1.js": null,
     "./dist/rfc64/background-work-dispatcher-v1.js": null,

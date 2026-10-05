@@ -18,7 +18,8 @@
  * admits candidate rows or activates KA / SWM / VM state.
  */
 
-import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, aggregateRfc64DigestV1, sumDecimalCountsV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
+import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1 } from './rfc64/catalog-operational-targets-v1.js';
+import { evaluateRfc64CatalogCompletionV1 } from './rfc64/catalog-completion-evidence-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1, type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
 import {
   SYSTEM_CONTEXT_GRAPHS,
@@ -1339,10 +1340,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const currentReplayProgress = accepted === null
         ? null
         : replayRecovery.status(selection.contextGraphId, accepted.policyDigest);
-      const replayActive = replaySnapshotUnstable || currentReplayProgress?.active === true;
-      // Only parity/overflow evidence fails a Context Graph. Providers that
-      // could not be replayed from surface through providerHealth instead.
-      const replayFailed = currentReplayProgress?.failed === true;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
       // The owner is the only possible catalog author only in a private graph
       // whose accepted roster is the owner alone: catalog authorship follows
@@ -1370,66 +1367,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         && heads.every(({ snapshot }) => (
           snapshot.authorAddress === curatedOwnerAddress
         ));
-      // A full pass that reached no provider at all corroborated nothing: with
-      // an empty promised set parity is vacuously satisfied, so applied rows
-      // would otherwise be reported as agreed by every provider. It is not
-      // evidence of missing rows, so it stays distinct from `replayFailed`, and
-      // it can only mislead once something has been applied.
-      const replayUnverified = currentReplayProgress?.unverified === true
-        && heads.length > 0
-        && !localCuratedOwnerHeads;
-      const replayUnsettled = replayActive || replayFailed || replayUnverified;
       const targets = targetsByContextGraph.get(selection.contextGraphId) ?? [];
       const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;
-      const authoritativeTargets = [...new Map([
-        ...targets,
-        ...promisedTargets ?? [],
-      ].map((target) => [rfc64CatalogTargetExactIdentityKeyV1(target), target])).values()];
       const targetCapacityExceeded = targetTracker
         ?.capacityExceededForContextGraph(selection.contextGraphId) ?? false;
-      const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
-      const pendingTargets = targets.filter((target) => {
-        const applied = appliedByScope.get(rfc64CatalogTargetScopeKeyV1(target));
-        return applied === undefined
-          || BigInt(target.catalogVersion) > BigInt(applied.snapshot.catalogVersion)
-          || (
-            target.catalogVersion === applied.snapshot.catalogVersion
-            && target.catalogHeadObjectDigest !== applied.snapshot.currentCatalogHeadDigest
-          );
+      const { replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets,
+        catalogHeadDigest, expectedCatalogHeadDigest, inventoryDigest, rowCount, rowProjection,
+      } = evaluateRfc64CatalogCompletionV1({
+        heads, targets, promisedTargets, promisedRowCounts, replay: currentReplayProgress,
+        replaySnapshotUnstable, targetCapacityExceeded, localCuratedOwnerHeads,
       });
-      const catalogHeadDigest = aggregateRfc64DigestV1(
-        heads.map(({ snapshot }) => snapshot.currentCatalogHeadDigest),
-      );
-      const expectedCatalogHeadDigests = new Map(heads.map(({ scopeKey, snapshot }) => [
-        scopeKey,
-        snapshot.currentCatalogHeadDigest,
-      ]));
-      for (const target of pendingTargets) {
-        expectedCatalogHeadDigests.set(
-          rfc64CatalogTargetScopeKeyV1(target),
-          target.catalogHeadObjectDigest,
-        );
-      }
-      const expectedCatalogHeadDigest = aggregateRfc64DigestV1(
-        [...expectedCatalogHeadDigests.values()],
-      );
-      const inventoryDigest = aggregateRfc64DigestV1(
-        heads.map(({ snapshot }) => snapshot.appliedInventoryDigest),
-      );
-      const rowCount = heads.length === 0
-        ? null
-        : sumDecimalCountsV1(heads.map(({ snapshot }) => snapshot.inventoryRowCount));
-      const rowProjectionUnavailable = targetCapacityExceeded
-        || replayActive
-        || replayUnverified
-        || (replayFailed && promisedTargets === null);
-      const rowProjection = rowProjectionUnavailable
-        ? Object.freeze({ expectedRowCount: null, missingRowCount: null })
-        : projectRfc64OperationalRowCountsV1(
-          heads,
-          authoritativeTargets,
-          promisedRowCounts,
-        );
       const appliedCatalogVersion = heads.length === 0
         ? null
         : heads.reduce((highest, { snapshot }) => (
@@ -1581,26 +1528,31 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async withVerifiedPrivateCatalogSubscriptionReadinessV1(
     this: DKGAgent, contextGraphId: string, commit: () => void,
   ): Promise<boolean> {
-    return verifyPrivateCatalogSubscriptionReadinessV1(this, contextGraphId, commit, () => ({
-      service: this.rfc64PublicCatalogServiceV1,
-      persistence: this.rfc64PersistenceV1,
-      networkId: this.config.rfc64CatalogDeploymentProfile?.networkId ?? this.config.networkIdentity?.chainId,
-      approvedAgent: this.localApprovedAgentByCG.get(contextGraphId),
-      subscription: this.subscribedContextGraphs.get(contextGraphId),
-      plan: this.config.rfc64CatalogExecutionPlan,
-      metadataRevision: this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId),
-      replay: this.rfc64CatalogReplayRecoveryRuntimeV1(),
-      authorityRevision: rfc64CatalogAuthorityRevisionsV1.get(this)?.get(contextGraphId),
-      targetFence: (() => {
-        const tracker = rfc64CatalogTargetAnnouncementsV1.get(this);
-        return JSON.stringify([
-          tracker?.capacityExceededForContextGraph(contextGraphId) ?? false,
-          (tracker?.targetsForContextGraph(contextGraphId) ?? []).map((target) => [
-            rfc64CatalogTargetExactIdentityKeyV1(target), tracker!.hasTerminalFailure(target),
-          ]),
-        ]);
-      })(),
-    }));
+    return verifyPrivateCatalogSubscriptionReadinessV1(this, contextGraphId, commit, () => {
+      const progress = rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId);
+      const tracker = rfc64CatalogTargetAnnouncementsV1.get(this);
+      const targets = tracker?.targetsForContextGraph(contextGraphId) ?? [];
+      return {
+        service: this.rfc64PublicCatalogServiceV1,
+        persistence: this.rfc64PersistenceV1,
+        networkId: this.config.rfc64CatalogDeploymentProfile?.networkId ?? this.config.networkIdentity?.chainId,
+        approvedAgent: this.localApprovedAgentByCG.get(contextGraphId),
+        subscription: this.subscribedContextGraphs.get(contextGraphId),
+        plan: this.config.rfc64CatalogExecutionPlan,
+        metadataRevision: this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId),
+        replay: this.rfc64CatalogReplayRecoveryRuntimeV1(),
+        authorityRevision: rfc64CatalogAuthorityRevisionsV1.get(this)?.get(contextGraphId),
+        authorityCurrent: progress?.state === 'accepted' && Date.now() - progress.updatedAtMs
+          <= RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs * RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.freshnessIntervalCount,
+        legacyReadOnlyCount: readRfc64LegacySwmBoundaryCountV1(this, contextGraphId),
+        targets,
+        targetCapacityExceeded: tracker?.capacityExceededForContextGraph(contextGraphId) ?? false,
+        targetFailed: targets.some((target) => tracker!.hasTerminalFailure(target)),
+        targetFence: JSON.stringify(targets.map((target) => [
+          rfc64CatalogTargetExactIdentityKeyV1(target), tracker!.hasTerminalFailure(target),
+        ])),
+      };
+    });
   }
 
   /**
@@ -3503,9 +3455,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // Restart can restore all applied heads without a receiver completion.
       // Fresh accepted authority must also wake the live readiness verifier.
       if (approvedPrivateReplicaAuthority !== null) {
-        this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
-          contextGraphId, dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
-        });
+        this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, { contextGraphId });
       }
       // A first subscription attempt can race this authority bootstrap and
       // correctly fail closed. Re-enter the idempotent transport reconciler
@@ -4204,11 +4154,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // through the ambient lane. Exact retirement must not depend on the
           // optional attempt-observer bookkeeping still being present.
           retireRfc64CatalogTargetAnnouncementV1(this, announcement);
-          this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
+          this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, {
             contextGraphId: announcement.contextGraphId,
-            dataSynced: 0,
-            sharedMemorySynced: 0,
-            catalogCompletionHint: true,
           });
           const attempt = reconciliationAttempts.get(token);
           if (attempt === undefined) return;
@@ -4839,9 +4786,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const result = await task;
       // Receiver completion precedes the replay owner's parity settlement.
       // Wake readiness again after that owner releases its active fence.
-      this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
-        contextGraphId, dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
-      });
+      this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, { contextGraphId });
       return result;
     };
     switch (request.kind) {

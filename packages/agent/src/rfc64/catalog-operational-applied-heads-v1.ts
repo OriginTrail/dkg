@@ -2,6 +2,8 @@
 
 import {
   assertSignedAuthorCatalogHeadEnvelopeV1,
+  deriveAuthorCatalogScopeFromHeadV1,
+  type AuthorCatalogScopeV1,
   type Digest32V1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -22,6 +24,7 @@ export interface Rfc64OperationalAppliedHeadV1 {
   readonly issuedAt: TimestampMsV1;
   readonly contextGraphId: string;
   readonly scopeKey: string;
+  readonly scope: Readonly<AuthorCatalogScopeV1>;
 }
 
 /** The persistence surface the operational applied-head view reads. */
@@ -91,6 +94,7 @@ async function readRfc64OperationalAppliedHeadProjectionV1(
   return Object.freeze({
     issuedAt: payload.issuedAt,
     contextGraphId: payload.contextGraphId,
+    scope: Object.freeze(deriveAuthorCatalogScopeFromHeadV1(payload)),
     scopeKey: rfc64CatalogTargetScopeKeyV1({
       networkId: payload.networkId,
       contextGraphId: payload.contextGraphId,

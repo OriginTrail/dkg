@@ -5,7 +5,6 @@ export interface ProjectSyncedReadinessPayload {
   dataSynced: number;
   sharedMemorySynced: number;
   verifiedPrivateOnlyResponses: number;
-  catalogCompletionHint?: boolean;
 }
 
 export function parseProjectSyncedReadinessPayload(
@@ -19,7 +18,6 @@ export function parseProjectSyncedReadinessPayload(
     !Number.isFinite(candidate.dataSynced) ||
     typeof candidate.sharedMemorySynced !== 'number' ||
     !Number.isFinite(candidate.sharedMemorySynced) ||
-    (candidate.catalogCompletionHint !== undefined && typeof candidate.catalogCompletionHint !== 'boolean') ||
     (
       candidate.verifiedPrivateOnlyResponses !== undefined
       && (
@@ -35,7 +33,5 @@ export function parseProjectSyncedReadinessPayload(
     dataSynced: candidate.dataSynced,
     sharedMemorySynced: candidate.sharedMemorySynced,
     verifiedPrivateOnlyResponses: candidate.verifiedPrivateOnlyResponses ?? 0,
-    ...(candidate.catalogCompletionHint === true ? { catalogCompletionHint: true } : {}),
   };
 }
-

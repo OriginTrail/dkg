@@ -1909,19 +1909,26 @@ describe('approved private bare-name replica authorization', () => {
   it('wakes readiness after fresh approved authority even without a receiver completion', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     const emit = vi.spyOn(fixture.receiver.eventBus, 'emit');
+    const commit = vi.fn();
+    await expect(fixture.receiver.withVerifiedPrivateCatalogSubscriptionReadinessV1(CONTEXT_GRAPH_ID, commit))
+      .resolves.toBe(false);
     const refresh = () => fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
       CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' },
     );
     await refresh();
-    expect(emit).toHaveBeenCalledWith(DKGEvent.PROJECT_SYNCED, {
-      contextGraphId: CONTEXT_GRAPH_ID, dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
+    expect(emit).toHaveBeenCalledWith(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, {
+      contextGraphId: CONTEXT_GRAPH_ID,
     });
+    await expect(fixture.receiver.withVerifiedPrivateCatalogSubscriptionReadinessV1(CONTEXT_GRAPH_ID, commit))
+      .resolves.toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith(DKGEvent.PROJECT_SYNCED, expect.anything());
     emit.mockClear();
     // A restored head need not advance. An unchanged fresh policy must wake
     // the verifier too; no readiness is granted by this hint itself.
     await refresh();
-    expect(emit).toHaveBeenCalledWith(DKGEvent.PROJECT_SYNCED, {
-      contextGraphId: CONTEXT_GRAPH_ID, dataSynced: 0, sharedMemorySynced: 0, catalogCompletionHint: true,
+    expect(emit).toHaveBeenCalledWith(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, {
+      contextGraphId: CONTEXT_GRAPH_ID,
     });
   });
 

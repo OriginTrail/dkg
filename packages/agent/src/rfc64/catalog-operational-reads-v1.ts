@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertSignedAuthorCatalogHeadEnvelopeV1 } from '@origintrail-official/dkg-core';
+import { assertSignedAuthorCatalogHeadEnvelopeV1, deriveAuthorCatalogScopeFromHeadV1, type AuthorCatalogScopeV1 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 import { RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1, type Rfc64OperationalAppliedHeadV1 } from './catalog-operational-applied-heads-v1.js';
@@ -24,6 +24,20 @@ export async function loadRfc64OperationalPromisedRowCountsV1(
   persistence: Rfc64PersistenceV1,
   targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
 ): Promise<ReadonlyMap<string, string | null>> {
+  const heads = await loadRfc64OperationalPromisedHeadsV1(persistence, targets);
+  return new Map([...heads].map(([identity, head]) => [identity, head?.totalRows ?? null]));
+}
+
+export interface Rfc64VerifiedPromisedHeadV1 {
+  readonly scope: Readonly<AuthorCatalogScopeV1>;
+  readonly totalRows: string;
+}
+
+/** Keep the authenticated scope with the row promise; lookup keys are not domain facts. */
+export async function loadRfc64OperationalPromisedHeadsV1(
+  persistence: Rfc64PersistenceV1,
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+): Promise<ReadonlyMap<string, Readonly<Rfc64VerifiedPromisedHeadV1> | null>> {
   const uniqueTargets = new Map(targets.map((target) => [
     rfc64CatalogTargetExactIdentityKeyV1(target),
     target,
@@ -31,7 +45,7 @@ export async function loadRfc64OperationalPromisedRowCountsV1(
   const loaded = await mapWithConcurrency(
     [...uniqueTargets],
     RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1,
-    async ([identity, target]): Promise<readonly [string, string | null]> => {
+    async ([identity, target]): Promise<readonly [string, Readonly<Rfc64VerifiedPromisedHeadV1> | null]> => {
       const stored = await persistence.controlObjects.getVerifiedObject({
         objectDigest: target.catalogHeadObjectDigest,
         signatureVariantDigest: target.signatureVariantDigest,
@@ -50,7 +64,10 @@ export async function loadRfc64OperationalPromisedRowCountsV1(
           || payload.era !== target.catalogEra
           || payload.version !== target.catalogVersion
         ) return [identity, null] as const;
-        return [identity, payload.totalRows] as const;
+        return [identity, Object.freeze({
+          scope: Object.freeze(deriveAuthorCatalogScopeFromHeadV1(payload)),
+          totalRows: payload.totalRows,
+        })] as const;
       } catch {
         return [identity, null] as const;
       }
@@ -58,4 +75,3 @@ export async function loadRfc64OperationalPromisedRowCountsV1(
   );
   return new Map(loaded);
 }
-

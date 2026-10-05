@@ -19,7 +19,7 @@ import {
   type CatchupPlaneCompletionEvidence,
 } from './catchup-proof.js';
 import type { CatchupJobResult } from './catchup-runner.js';
-import { parseProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
+import { registerContextGraphReadinessEvents } from './context-graph-readiness-events.js';
 export { parseProjectSyncedReadinessPayload, type ProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
 
 export { catchupPlaneCompletedWithoutFailure } from './catchup-proof.js';
@@ -847,12 +847,33 @@ export async function reconcileConfiguredContextGraphMetadata(input: {
   });
 }
 
-/**
- * Persist readiness proven by the agent's automatic post-approval catch-up.
- * PROJECT_SYNCED is also used as a UI event, so fail closed unless it carries
- * actual inserted data or a cryptographically verified private-only response,
- * and the graph's authoritative metadata is present.
- */
+/** A wake-up requests verification; only its committed result is a sync event. */
+export async function persistCatalogReadiness(input: {
+  agent: DKGAgent;
+  store: Partial<ContextGraphReadinessStore>;
+  contextGraphId: string;
+}): Promise<boolean> {
+  const contextGraphId = input.contextGraphId.trim();
+  if (!contextGraphId || typeof input.store.setContextGraphReadinessProvenance !== 'function'
+    || typeof input.agent.withVerifiedPrivateCatalogSubscriptionReadinessV1 !== 'function') return false;
+  return withContextGraphReadinessMutationLock(input.agent, contextGraphId, () =>
+    input.agent.withVerifiedPrivateCatalogSubscriptionReadinessV1(contextGraphId, () => {
+      const previous = readContextGraphReadiness(input.store, contextGraphId);
+      writeContextGraphReadiness(input.store, contextGraphId, {
+        durableVerified: previous.version >= CONTEXT_GRAPH_READINESS_VERSION && previous.durableVerified,
+        sharedMemoryVerified: true,
+      });
+      input.agent.markContextGraphSubscriptionState(contextGraphId, {
+        synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false,
+      });
+      input.agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
+        contextGraphId, dataSynced: 0, sharedMemorySynced: 0,
+      });
+    }),
+  );
+}
+
+/** Persist ordinary sync completion only with data and confirmed metadata. */
 export async function persistProjectSyncedReadiness(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
@@ -860,30 +881,8 @@ export async function persistProjectSyncedReadiness(input: {
   dataSynced: number;
   sharedMemorySynced: number;
   verifiedPrivateOnlyResponses?: number;
-  catalogCompletionHint?: boolean;
 }): Promise<boolean> {
   const contextGraphId = input.contextGraphId.trim();
-  if (input.catalogCompletionHint === true) {
-    if (!contextGraphId || typeof input.store.setContextGraphReadinessProvenance !== 'function'
-      || typeof input.agent.withVerifiedPrivateCatalogSubscriptionReadinessV1 !== 'function') return false;
-    return withContextGraphReadinessMutationLock(input.agent, contextGraphId, () =>
-      input.agent.withVerifiedPrivateCatalogSubscriptionReadinessV1(contextGraphId, () => {
-        const previous = readContextGraphReadiness(input.store, contextGraphId);
-        writeContextGraphReadiness(input.store, contextGraphId, {
-          durableVerified: previous.version >= CONTEXT_GRAPH_READINESS_VERSION && previous.durableVerified,
-          sharedMemoryVerified: true,
-        });
-        input.agent.markContextGraphSubscriptionState(contextGraphId, {
-          synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false,
-        });
-        // The wake-up could precede verification. Notify UI consumers only
-        // after both persistence owners committed; zero counts invent no data.
-        input.agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
-          contextGraphId, dataSynced: 0, sharedMemorySynced: 0,
-        });
-      }),
-    );
-  }
   const verifiedPrivateOnlyResponses = input.verifiedPrivateOnlyResponses ?? 0;
   const durableCompleted = (Number.isFinite(input.dataSynced) && input.dataSynced > 0) || (
     Number.isFinite(verifiedPrivateOnlyResponses)
@@ -921,18 +920,11 @@ export function registerProjectSyncedReadinessPersistence(input: {
   store: Partial<ContextGraphReadinessStore>;
   log: (message: string) => void;
 }): void {
-  input.agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: unknown) => {
-    const payload = parseProjectSyncedReadinessPayload(data);
-    if (!payload) return;
-    void persistProjectSyncedReadiness({
-      agent: input.agent,
-      store: input.store,
-      ...payload,
-    }).catch((err) => {
-      input.log(
-        `[warn] Failed to persist PROJECT_SYNCED readiness: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+  registerContextGraphReadinessEvents({
+    eventBus: input.agent.eventBus,
+    log: input.log,
+    verifyCatalog: (contextGraphId) => persistCatalogReadiness({ ...input, contextGraphId }),
+    persistProject: (payload) => persistProjectSyncedReadiness({ ...input, ...payload }),
   });
 }
 
