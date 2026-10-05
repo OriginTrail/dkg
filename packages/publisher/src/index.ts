@@ -77,6 +77,7 @@ export {
   type KnowledgeAssetWorkspaceSnapshotLocator,
 } from './workspace-resolution.js';
 export {
+  isWorkspacePublisherClockEligible,
   publisherWorkspaceOperationSemanticsKey,
   canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,
@@ -517,6 +518,9 @@ export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, 
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
-export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
+export { withKeyedLocks, swmKaWriteLockKey, swmEntityWriteLockKey, assertionLifecycleWriteLockKey } from './keyed-lock.js';
+export { withWorkspaceOperationWriteLock } from './workspace-operation-write-lock.js';
 
 export { withSnapshotScope, snapshotOperation, WorkspaceSnapshotScope, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
+
+export { withDraftArtifactReferences, withDraftArtifactCollection, readDraftArtifactReferences, draftOperationReferenceKey, draftPrivateReferenceKey, markDraftOperationRetired } from './draft-artifact-retention.js';

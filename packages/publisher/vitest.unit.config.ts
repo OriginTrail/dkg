@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/workspace-draft-replacement.test.ts',
       'test/wm-lifecycle-integrity.test.ts',
       'test/sealed-create-retry.test.ts',
       'test/workspace-snapshot-source.test.ts',
@@ -10,11 +11,14 @@ export default defineConfig({
       'test/graph-publish-envelope.test.ts',
       'test/confirmed-metadata-parser.test.ts',
       'test/workspace-metadata-subjects.test.ts',
+      'test/workspace-operation-evidence.test.ts',
+      'test/workspace-operation-write-lock.test.ts',
       'test/entity-share-metadata.test.ts',
       'test/ka-update-submit-failure.test.ts',
       'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',
       'test/dkg-publisher-compat.test.ts',
+      'test/draft-artifact-retention.test.ts',
       'test/shared-memory-publish-boundary.test.ts',
       'test/swm-public-gated-plaintext-accept.test.ts',
       'test/storage-ack-roster-and-verify-mofn-extra.test.ts',
@@ -101,6 +105,7 @@ export default defineConfig({
       'test/published-snapshot-cleanup.test.ts',
       'test/workspace-snapshot-validation.test.ts',
       'test/workspace-head-cardinality.test.ts',
+      'test/workspace-authenticated-replay.test.ts',
       'test/knowledge-asset-swm-staging.test.ts',
       'test/durable-root-atomic-companion.test.ts',
     ],

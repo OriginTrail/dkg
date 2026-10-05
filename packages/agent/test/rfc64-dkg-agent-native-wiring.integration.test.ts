@@ -51,13 +51,14 @@ import {
   writeSwmMaterializationWitness,
   type Quad,
 } from '@origintrail-official/dkg-storage';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
   workspacePublicQuadsDigest,
+  type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -70,6 +71,7 @@ import {
 } from '../src/index.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
+import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
@@ -96,6 +98,7 @@ import {
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import { createAppliedCatalogHeadsSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
+import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
 import {
@@ -293,6 +296,7 @@ interface NativeAgentStartOptionsV1 {
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
   readonly sharedMemoryTtlMs?: number;
+  readonly sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
   readonly networkIdentityChainId?: NetworkIdV1;
   readonly syncContextGraphs?: readonly string[];
   readonly contextGraphMembershipStore?: ContextGraphMembershipStore;
@@ -317,6 +321,8 @@ async function startNativeAgentWithOptions(
     activation,
     persistentStorePath,
     sharedMemoryTtlMs,
+    // Keep tiny integration snapshots independent of host free space.
+    sharedMemoryPublicSnapshotStorage = { gc: { hardReserveBytes: 0, triggerFreeBytes: 1, targetFreeBytes: 2 } },
     beforeStart,
     syncContextGraphs,
     contextGraphMembershipStore,
@@ -338,6 +344,7 @@ async function startNativeAgentWithOptions(
     nodeRole: 'edge',
     store: new OxigraphStore(persistentStorePath),
     ...(sharedMemoryTtlMs === undefined ? {} : { sharedMemoryTtlMs }),
+    ...(sharedMemoryPublicSnapshotStorage === undefined ? {} : { sharedMemoryPublicSnapshotStorage }),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     vmReconcilerEnabled: false,
@@ -420,6 +427,7 @@ interface SeedSignedSwmWorkspaceParamsV1 {
   readonly allowedPeers?: readonly string[];
   readonly publicQuads?: readonly Quad[];
   readonly assertionVersion?: CanonicalGraphScopedAuthorSealV1['assertionVersion'];
+  readonly assertionFinalizedAt?: string;
   readonly networkId?: NetworkIdV1;
   readonly publisherPeerId?: string;
 }
@@ -434,12 +442,11 @@ async function seedSignedSwmWorkspaceV1(
 }>> {
   const publicQuads = params.publicQuads ?? PROJECTION_QUADS;
   const baseSeal = await authorSeal(params.kaNumber, publicQuads, params.networkId);
-  const canonicalSeal = params.assertionVersion === undefined
-    ? baseSeal
-    : Object.freeze({
-      ...baseSeal,
-      assertionVersion: params.assertionVersion,
-    }) as CanonicalGraphScopedAuthorSealV1;
+  const canonicalSeal = Object.freeze({
+    ...baseSeal,
+    ...(params.assertionVersion === undefined ? {} : { assertionVersion: params.assertionVersion }),
+    ...(params.assertionFinalizedAt === undefined ? {} : { assertionFinalizedAt: params.assertionFinalizedAt }),
+  }) as CanonicalGraphScopedAuthorSealV1;
   assertCanonicalGraphScopedAuthorSealV1(canonicalSeal);
   const seal = assertionSealFromCanonical(canonicalSeal);
   const assertionUri = contextGraphAssertionUri(
@@ -4961,6 +4968,385 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     ));
   }, 60_000);
 
+  it.each(['small', 'over-4-MiB'] as const)(
+    'converges catalog projection after a real %s shared draft is reopened and re-shared',
+    async (size) => {
+      const receiver = await startNativeAgentWithOptions({
+        name: `reshared-${size}-receiver`, networkIdentityChainId: NETWORK_ID,
+      });
+      receiver.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+      });
+      const author = await startNativeAgentWithOptions({
+        name: `reshared-${size}-author`, networkIdentityChainId: NETWORK_ID,
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+        sharedMemoryPublicSnapshotStorage: { gc: { hardReserveBytes: 0, triggerFreeBytes: 1, targetFreeBytes: 2 } },
+        catalogActivation: selectedPublicCatalogActivationV1(receiver.peerId),
+        beforeStart: (agent) => {
+          const chain = (agent as unknown as { chain: ChainAdapter }).chain;
+          (agent as unknown as { kaNumberAllocator: ReturnType<typeof makeTestKaNumberAllocator> })
+            .kaNumberAllocator = makeTestKaNumberAllocator();
+          Object.defineProperty(chain, 'chainId', { value: NETWORK_ID });
+          Object.assign(chain, {
+            getEvmChainId: async () => BigInt(NATIVE_DEPLOYMENT.assertedAtChainId),
+            getKnowledgeAssetsLifecycleAddress: async () => KAV10,
+            getMaxKaNumberForAuthor: async () => 0n,
+          });
+          stubUnpublishedCatalogState(agent);
+          vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+        },
+      });
+      await connectBothWays(author, receiver);
+      await author.createContextGraph({
+        id: CONTEXT_GRAPH_ID, name: 'Reopened public draft', callerAgentAddress: AUTHOR,
+      });
+      await author.whenRfc64CatalogResponsibilitiesIdleV1();
+      const name = `reshared-${size}`;
+      await author.assertion.create(CONTEXT_GRAPH_ID, name);
+      const content: Quad[] = size === 'small' ? [...PROJECTION_QUADS] : Array.from(
+        { length: 220 }, (_, index) => ({
+          subject: `https://example.org/document/paragraph-${index}`,
+          predicate: 'https://schema.org/text', object: `"${'b'.repeat(22_000)}"`, graph: '',
+        }),
+      );
+      if (size === 'over-4-MiB') expect(
+        encodeCanonicalCgSharedPublicRootProjectionV1(content).byteLength,
+      ).toBeGreaterThan(4 * 1024 * 1024);
+      await author.assertion.write(CONTEXT_GRAPH_ID, name, content);
+      const signOptions = {
+        authorAgentAddress: AUTHOR,
+        authorSignTypedData: async (typedData: import('@origintrail-official/dkg-core').AuthorAttestationTypedData) => {
+          const signature = ethers.Signature.from(await AUTHOR_WALLET.signTypedData(
+            typedData.domain, typedData.types, typedData.message,
+          ));
+          return { r: ethers.getBytes(signature.r), vs: ethers.getBytes(signature.yParityAndS) };
+        },
+      };
+      const promote = async () => {
+        if (size === 'small') return author.assertion.promote(CONTEXT_GRAPH_ID, name, { accessPolicy: 'public' });
+        // Ordinary SWM gossip retains its 4 MiB limit. Exercise larger native
+        // catalog content through the real durable publisher and agent hook,
+        // without asking the gossip lane to frame the oversized payload.
+        const lifecycleAgentAddress = author.getDefaultAgentAddress()!;
+        const promoted = await author.publisher.assertionPromote(CONTEXT_GRAPH_ID, name, lifecycleAgentAddress, {
+          accessPolicy: 'public',
+        });
+        expect(promoted.promotedAllRoots).toBe(true);
+        await author.afterDurableSwmPromotionV1({
+          contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: name,
+          lifecycleAgentAddress, shareOperationId: promoted.shareOperationId ?? null,
+          ctx: createOperationContext('share'),
+        });
+        return { sealed: true, publishReady: !!promoted.shareOperationId };
+      };
+      const abandoned = await author.assertion.finalize(CONTEXT_GRAPH_ID, name, signOptions);
+      await expect(promote())
+        .resolves.toMatchObject({ sealed: true, publishReady: true });
+      await author.awaitInFlightRfc64SwmInventoryObserversV1();
+      await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+      const oldHead = author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      });
+      expect(oldHead).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+      // Wait for the real announced-head fetch and activation. V8 coverage of
+      // the large projection can exceed a separate 20-second polling budget;
+      // the whole scenario keeps its existing 120-second deadline.
+      await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+      expect(receiver.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest).toBe(oldHead?.currentCatalogHeadDigest);
+
+      await author.assertion.pullFrom(CONTEXT_GRAPH_ID, name, 'swm', { onConflict: 'replace' });
+      await author.assertion.write(CONTEXT_GRAPH_ID, name, [{
+        subject: 'https://example.org/reopened', predicate: 'https://schema.org/name',
+        object: '"C"', graph: '',
+      }]);
+      const replacement = await author.assertion.finalize(CONTEXT_GRAPH_ID, name, signOptions);
+      expect(replacement.kaUal).toBe(abandoned.kaUal);
+      expect(replacement.assertionVersion).toBe(abandoned.assertionVersion);
+      expect(ethers.hexlify(replacement.merkleRoot)).not.toBe(ethers.hexlify(abandoned.merkleRoot));
+      await expect(promote())
+        .resolves.toMatchObject({ sealed: true, publishReady: true });
+      await author.awaitInFlightRfc64SwmInventoryObserversV1();
+      await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+      expect(author.readRfc64SwmCatalogProjectionSupervisorStatusV1()).toMatchObject({
+        repairs: [{ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR, outcome: 'reconciled',
+          inventoryRowCount: '1', consecutiveFailures: 0, lastError: null }],
+      });
+      const newHead = author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      });
+      expect(newHead).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
+      expect(newHead?.appliedInventoryDigest).not.toBe(oldHead?.appliedInventoryDigest);
+      await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+      expect(receiver.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest).toBe(newHead?.currentCatalogHeadDigest);
+      const graph = contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory,
+        AUTHOR, Number(replacement.kaUal.split('/').at(-1)));
+      await expect(receiver.store.query(`SELECT ?name WHERE { GRAPH <${graph}> {
+        <https://example.org/reopened> <https://schema.org/name> ?name
+      } }`)).resolves.toMatchObject({ bindings: [{ name: '"C"' }] });
+    },
+    120_000,
+  );
+
+  it.each(['upsert', 'exact-set'] as const)(
+    'marks a %s target mutation as staged in shadow mode',
+    async (mode) => {
+      const author = await startNativeAgentWithOptions({
+        name: `shadow-target-mutation-${mode}`,
+        catalogActivation: {
+          deploymentProfile: NATIVE_DEPLOYMENT,
+          rollout: { contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' } },
+          bootstrap: {
+            acceptedPolicies: [{
+              policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(buildOpenOwnerContextGraphPolicyV1({
+                networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+              })),
+              targets: [],
+            }],
+          },
+        },
+      });
+      author.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+      });
+      const common = draftCatalogMutationParams();
+      const asset = await draftCatalogAsset('2', '2026-07-19T12:34:56.789Z', 'B');
+      const result = mode === 'upsert'
+        ? await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({ ...common, asset })
+        : await author.reconcileRfc64PublicRootCatalogExactSetV1({ ...common, assets: [asset] });
+      const staged = 'currentCatalogHeadDigest' in result ? result : result.appliedHead;
+      expect(staged).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+      const inventory = (author as unknown as { rfc64PersistenceV1: Rfc64PersistenceV1 })
+        .rfc64PersistenceV1.inventory;
+      expect(inventory.isStagedCatalogHeadV1(
+        catalogScopeDigest(), AUTHOR, staged!.currentCatalogHeadDigest,
+      )).toBe(true);
+    },
+    60_000,
+  );
+
+  it.each(['upsert', 'exact-set'] as const)(
+    'replaces an abandoned same-number catalog seal through %s and rejects old replay',
+    async (mode) => {
+      const author = await startNativeAgent(`draft-replacement-${mode}`);
+      const receiver = await startNativeAgent(`draft-replacement-receiver-${mode}`);
+      for (const agent of [author, receiver]) agent.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+      });
+      await connectBothWays(author, receiver);
+      const common = { ...draftCatalogMutationParams(), peers: [receiver.peerId] };
+      const abandoned = await draftCatalogAsset('2', '2026-07-19T12:34:56.789Z', 'B');
+      const replacement = await draftCatalogAsset('2', '2026-07-19T12:34:56.790Z', 'C');
+      stubUnpublishedCatalogState(author);
+      const original = await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...common, asset: abandoned,
+      });
+      await vi.waitFor(() => expect(receiver.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest).toBe(original.currentCatalogHeadDigest), { timeout: 20_000, interval: 100 });
+      const replace = (asset: typeof replacement) => mode === 'upsert'
+        ? author.upsertConfirmedRfc64PublicRootCatalogAssetV1({ ...common, asset })
+        : author.reconcileRfc64PublicRootCatalogExactSetV1({ ...common, assets: [asset] });
+      await expect(replace(replacement)).resolves.toMatchObject(mode === 'upsert'
+        ? { catalogVersion: '3', inventoryRowCount: '1' }
+        : { successorsApplied: 2, appliedHead: { catalogVersion: '3', inventoryRowCount: '1' } });
+      const replaced = author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      });
+      expect(replaced?.appliedInventoryDigest).not.toBe(original.appliedInventoryDigest);
+      await vi.waitFor(() => expect(receiver.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest).toBe(replaced?.currentCatalogHeadDigest), { timeout: 20_000, interval: 100 });
+      const evidence = receiver.readRfc64PublicCatalogSynchronizationEvidenceV1(replaced!.currentCatalogHeadDigest);
+      expect(evidence).toMatchObject({ appliedHeadStatus: 'applied', inventoryRowCount: 1 });
+      expect(evidence?.inventoryDigest).toBe(replaced?.appliedInventoryDigest);
+      const replacementGraph = contextGraphLayerUri(
+        CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory, AUTHOR, 74,
+      );
+      const projected = await receiver.store.query(`SELECT ?name WHERE {
+        GRAPH <${replacementGraph}> { <https://example.org/alice> <https://schema.org/name> ?name }
+      }`);
+      expect(projected).toMatchObject({ bindings: [{ name: '"C"' }] });
+      await expect(replace(abandoned)).rejects.toThrow(/not a newer|older|finaliz/u);
+      const sameTime = await draftCatalogAsset('2', '2026-07-19T12:34:56.790Z', 'D');
+      await expect(replace(sameTime)).rejects.toThrow(/not a newer|older|finaliz/u);
+      await expect(replace({
+        ...replacement, assertionCoordinate: 'renamed-draft' as never,
+        seal: { ...replacement.seal, assertionVersion: '3' as never },
+      })).rejects.toThrow(/same coordinate/u);
+      expect(author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })).toEqual(replaced);
+    },
+    60_000,
+  );
+
+  it.each(['upsert', 'exact-set'] as const)(
+    'replaces a burned higher draft number through %s only beyond coherent published state',
+    async (mode) => {
+      const author = await startNativeAgent(`burned-draft-${mode}`);
+      author.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+      });
+      const common = draftCatalogMutationParams();
+      const abandoned = await draftCatalogAsset('3', '2026-07-19T12:34:56.789Z', 'B');
+      const replacement = await draftCatalogAsset('2', '2026-07-19T12:34:56.790Z', 'C');
+      const original = await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...common, asset: abandoned,
+      });
+      const chain = catalogProofChain(author);
+      const snapshot = {
+        knowledgeAssetId: BigInt(replacement.seal.reservedKaId), rootCount: 1n,
+        latestRoot: replacement.seal.assertionMerkleRoot,
+        latestAuthor: AUTHOR, latestPublisher: AUTHOR, blockNumber: 100,
+        blockHash: `0x${'ab'.repeat(32)}`, knowledgeAssetStorageAddress: KAV10,
+        knowledgeAssetStorageGeneration: 1,
+      };
+      const read = vi.fn(async () => snapshot);
+      chain.readKnowledgeAssetVersionSnapshot = read;
+      chain.knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
+      const replace = () => mode === 'upsert'
+        ? author.upsertConfirmedRfc64PublicRootCatalogAssetV1({ ...common, asset: replacement })
+        : author.reconcileRfc64PublicRootCatalogExactSetV1({ ...common, assets: [replacement] });
+      await expect(replace()).resolves.toMatchObject(mode === 'upsert'
+        ? { catalogVersion: '3', inventoryRowCount: '1' }
+        : { successorsApplied: 2, appliedHead: { catalogVersion: '3', inventoryRowCount: '1' } });
+      expect(read).toHaveBeenCalledWith(BigInt(replacement.seal.reservedKaId), expect.anything());
+      const replaced = author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      });
+      expect(replaced?.appliedInventoryDigest).not.toBe(original.appliedInventoryDigest);
+      // B's larger number must not make its older author-issued seal current again.
+      await expect(author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...common, asset: abandoned,
+      })).rejects.toThrow(/not a newer|older|finaliz/u);
+      expect(author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })).toEqual(replaced);
+    },
+    60_000,
+  );
+
+  it.each([
+    ['upsert', '3'], ['exact-set', '3'], ['upsert', '2'], ['exact-set', '2'],
+  ] as const)(
+    'retains the catalog head if a draft becomes published while %s signing is pending (previous version %s)',
+    async (mode, previousVersion) => {
+      const author = await startNativeAgent(`burned-proof-race-${mode}`);
+      author.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+      });
+      const common = draftCatalogMutationParams();
+      const abandoned = await draftCatalogAsset(previousVersion, '2026-07-19T12:34:56.789Z', 'B');
+      const replacement = await draftCatalogAsset('2', '2026-07-19T12:34:56.790Z', 'C');
+      const original = await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...common, asset: abandoned,
+      });
+      const chain = catalogProofChain(author);
+      let published = false;
+      const read = vi.fn(async () => ({
+        knowledgeAssetId: BigInt(replacement.seal.reservedKaId), rootCount: published ? 2n : 1n,
+        latestRoot: replacement.seal.assertionMerkleRoot, latestAuthor: AUTHOR,
+        latestPublisher: AUTHOR, blockNumber: published ? 101 : 100,
+      }));
+      chain.readKnowledgeAssetVersionSnapshot = read;
+      chain.knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
+      const publish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
+      vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1').mockImplementation(async (params) => {
+        const staged = await publish(params);
+        published = true;
+        return staged;
+      });
+      const replace = () => mode === 'upsert'
+        ? author.upsertConfirmedRfc64PublicRootCatalogAssetV1({ ...common, asset: replacement })
+        : author.reconcileRfc64PublicRootCatalogExactSetV1({ ...common, assets: [replacement] });
+      await expect(replace()).rejects.toThrow(/both numbers exceed the published version/u);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })).toEqual(original);
+    },
+    60_000,
+  );
+
+  it.each(['upsert', 'exact-set'] as const)(
+    'retains the ordered catalog row when a %s replacement insertion cannot be staged',
+    async (mode) => {
+      const author = await startNativeAgent(`draft-stage-failure-${mode}`);
+      author.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+      });
+      const common = draftCatalogMutationParams();
+      const abandoned = await draftCatalogAsset('2', '2026-07-19T12:34:56.789Z', 'B');
+      const replacement = await draftCatalogAsset('2', '2026-07-19T12:34:56.790Z', 'C');
+      stubUnpublishedCatalogState(author);
+      const original = await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...common, asset: abandoned,
+      });
+      const publish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
+      const staging = vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1')
+        .mockImplementationOnce(publish)
+        .mockRejectedValueOnce(new Error('replacement insertion staging failed'));
+      const replace = () => mode === 'upsert'
+        ? author.upsertConfirmedRfc64PublicRootCatalogAssetV1({ ...common, asset: replacement })
+        : author.reconcileRfc64PublicRootCatalogExactSetV1({ ...common, assets: [replacement] });
+      await expect(replace()).rejects.toThrow('replacement insertion staging failed');
+      expect(author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })).toEqual(original);
+      staging.mockRestore();
+      await expect(replace()).resolves.toMatchObject(mode === 'upsert'
+        ? { catalogVersion: '3', inventoryRowCount: '1' }
+        : { successorsApplied: 2, appliedHead: { catalogVersion: '3', inventoryRowCount: '1' } });
+      await expect(author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...common, asset: abandoned,
+      })).rejects.toThrow(/older|not a newer/u);
+    },
+    60_000,
+  );
+
+  it.each([
+    ['lower', '3', 'unavailable'], ['lower', '3', 'published'], ['lower', '3', 'stale-anchor'],
+    ['equal', '2', 'unavailable'], ['equal', '2', 'published'], ['equal', '2', 'stale-anchor'],
+  ] as const)(
+    'keeps a %s draft out of the catalog (previous version %s) when chain proof is %s',
+    async (_order, previousVersion, proof) => {
+      const author = await startNativeAgent(`burned-proof-${proof}`);
+      author.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR,
+      });
+      const common = draftCatalogMutationParams();
+      const abandoned = await draftCatalogAsset(previousVersion, '2026-07-19T12:34:56.789Z', 'B');
+      const replacement = await draftCatalogAsset('2', '2026-07-19T12:34:56.790Z', 'C');
+      const original = await author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...common, asset: abandoned,
+      });
+      const chain = catalogProofChain(author);
+      chain.readKnowledgeAssetVersionSnapshot = vi.fn(async () => proof === 'unavailable'
+        ? null : {
+          knowledgeAssetId: BigInt(replacement.seal.reservedKaId),
+          rootCount: proof === 'published' ? 2n : 1n,
+          latestRoot: replacement.seal.assertionMerkleRoot,
+          latestAuthor: AUTHOR, latestPublisher: AUTHOR, blockNumber: 100,
+          blockHash: `0x${'ab'.repeat(32)}`, knowledgeAssetStorageAddress: KAV10,
+          knowledgeAssetStorageGeneration: 1,
+        });
+      chain.knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => proof !== 'stale-anchor');
+      await expect(author.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...common, asset: replacement,
+      })).rejects.toThrow(/published|proof|snapshot/u);
+      expect(chain.readKnowledgeAssetVersionSnapshot).toHaveBeenCalledOnce();
+      expect(chain.knowledgeAssetVersionSnapshotIsCurrent).toHaveBeenCalledTimes(proof === 'stale-anchor' ? 1 : 0);
+      expect(author.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR,
+      })).toEqual(original);
+    },
+    60_000,
+  );
+
   it('reconciles deterministic multi-step add, replacement, removal, and replay targets', async () => {
     const author = await startNativeAgent('r1-1-exact-reconcile-author');
     author.acceptOpenContextGraphPolicyV1({
@@ -5099,6 +5485,105 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   }, 60_000);
 
+  it.each([
+    ['equal', '2', true], ['lower', '3', true],
+    ['equal', '2', false], ['lower', '3', false],
+  ] as const)(
+    'rechecks a %s draft under real inventory-exclusive commit ownership (previous %s, confirmation advances %s)',
+    async (_order, previousVersion, confirmationAdvances) => {
+      const author = await startNativeAgentWithOptions({
+        name: 'catalog-commit-confirmation-fence',
+        autoPublish: { peers: [], catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1 },
+      });
+      vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+      author.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+      const seed = {
+        contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: 'commit-fenced-draft',
+        kaNumber: 75n, accessPolicy: 'public' as const,
+      };
+      await seedSignedSwmWorkspaceV1(author, {
+        ...seed, shareOperationId: 'commit-fence-B', assertionVersion: previousVersion,
+        assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
+      });
+      await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+        contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seed.assertionCoordinate,
+        lifecycleAgentAddress: AUTHOR, shareOperationId: 'commit-fence-B',
+      })).resolves.toMatchObject({ status: 'applied' });
+      const reconcileParams = { contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR };
+      const original = (await author.reconcileRfc64PublicCatalogFromSwmInventoryV1(reconcileParams))!.appliedHead;
+      expect(original).not.toBeNull();
+      const replacement = await seedSignedSwmWorkspaceV1(author, {
+        ...seed, shareOperationId: 'commit-fence-C', assertionVersion: '2',
+        assertionFinalizedAt: '2026-07-19T12:34:56.790Z',
+        publicQuads: PROJECTION_QUADS.map(quad => ({ ...quad, object: quad.predicate === 'https://schema.org/name' ? '"C"' : quad.object })),
+      });
+      await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+        contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seed.assertionCoordinate,
+        lifecycleAgentAddress: AUTHOR, shareOperationId: 'commit-fence-C',
+      })).resolves.toMatchObject({ status: 'applied' });
+      const chain = catalogProofChain(author);
+      let published = false;
+      const read = vi.fn(async () => ({
+        knowledgeAssetId: BigInt(replacement.canonicalSeal.reservedKaId), rootCount: published ? 2n : 1n,
+        latestRoot: replacement.canonicalSeal.assertionMerkleRoot,
+        latestAuthor: AUTHOR, latestPublisher: AUTHOR, blockNumber: 100,
+        blockHash: `0x${'ab'.repeat(32)}`, knowledgeAssetStorageAddress: KAV10,
+        knowledgeAssetStorageGeneration: 1,
+      }));
+      chain.readKnowledgeAssetVersionSnapshot = read;
+      chain.knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
+      const runtime = rfc64SwmInventoryShadowRuntimeV1(author);
+      const { bucketCount: _bucketCount, ...inventoryScope } = draftCatalogMutationParams().scope;
+      const inventoryScopeKey = `${computeSwmAuthorInventoryScopeDigestV1(inventoryScope)}\n${AUTHOR}`;
+      let releaseOwner!: () => void;
+      let markQueued!: () => void;
+      const ownerGate = new Promise<void>(resolve => { releaseOwner = resolve; });
+      const queued = new Promise<void>(resolve => { markQueued = resolve; });
+      const runExclusive = runtime.runScopeExclusive.bind(runtime);
+      let held = false;
+      vi.spyOn(runtime, 'runScopeExclusive').mockImplementation((key, operation, signal) => {
+        if (held) { expect(key).toBe(inventoryScopeKey); markQueued(); }
+        return runExclusive(key, operation, signal);
+      });
+      const publish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
+      let owner: Promise<void> | undefined;
+      vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1').mockImplementation(async params => {
+        const successor = await publish(params);
+        if (params.assets.some(asset => asset.seal.assertionMerkleRoot === replacement.canonicalSeal.assertionMerkleRoot)) {
+          let markHeld!: () => void;
+          const ownerHeld = new Promise<void>(resolve => { markHeld = resolve; });
+          owner = runExclusive(inventoryScopeKey, async () => { held = true; markHeld(); await ownerGate; });
+          await ownerHeld;
+        }
+        return successor;
+      });
+      const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+      const outcome = author.reconcileRfc64PublicCatalogFromSwmInventoryV1(reconcileParams)
+        .then(value => ({ value, error: null }), error => ({ value: null, error }));
+      try {
+        await Promise.race([queued, outcome.then(result => { throw result.error ?? new Error('catalog finished before commit ownership was gated'); })]);
+        const readsBeforeOwnership = read.mock.calls.length;
+        expect(readsBeforeOwnership).toBeGreaterThan(0);
+        published = confirmationAdvances;
+        releaseOwner();
+        const result = await outcome;
+        await owner;
+        if (confirmationAdvances) {
+          expect(result.error).toBeInstanceOf(Error);
+          expect(read.mock.calls.length).toBeGreaterThan(readsBeforeOwnership);
+          expect(result.error.message).toMatch(/published|proof/u);
+          expect(author.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: catalogScopeDigest(), authorAddress: AUTHOR })).toEqual(original);
+          expect(announce).not.toHaveBeenCalled();
+        } else {
+          expect(result.error).toBeNull();
+          expect(result.value).toMatchObject({ status: 'advanced', targetAssetCount: 1 });
+          expect(result.value?.appliedHead?.currentCatalogHeadDigest).not.toBe(original?.currentCatalogHeadDigest);
+          expect(announce).toHaveBeenCalledOnce();
+        }
+      } finally { releaseOwner(); await outcome; await owner; }
+    }, 60_000,
+  );
+
   it('commits an already-signed SWM successor when its source becomes stale', async () => {
     const author = await startNativeAgent('r1-3-commit-freshness-author');
     author.acceptOpenContextGraphPolicyV1({
@@ -5110,6 +5595,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       assertionCoordinate: 'r1-3-commit-freshness' as never,
       projectionBytes: PROJECTION,
       seal: await authorSeal(73n),
+    });
+    const followUpAsset = Object.freeze({
+      assertionCoordinate: 'r1-3-commit-freshness-follow-up' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(74n),
     });
     const originalPublish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
     let markSuccessorStaged!: () => void;
@@ -5144,14 +5634,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         bucketCount: '1',
       },
       author: AUTHOR_WALLET,
-      assets: [asset],
+      assets: [asset, followUpAsset],
       deployment: NATIVE_DEPLOYMENT,
       peers: [],
       catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       targetPolicy: 'exact-replacement',
       commitAppliedHeadIfInventoryCurrent: async (commit) => {
-        const appliedHead = commit();
+        const appliedHead = await commit();
         return Object.freeze({
           appliedHead,
           sourceCurrent: currentInventoryHead === expectedInventoryHead,
@@ -5164,7 +5654,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await expect(reconciliation).resolves.toMatchObject({
       status: 'advanced',
       sourceCurrent: false,
-      appliedHead: { currentCatalogHeadDigest: staleHeadDigest },
+      successorsApplied: 1,
+      targetAssetCount: 2,
+      appliedHead: { currentCatalogHeadDigest: staleHeadDigest, inventoryRowCount: '1' },
     });
     expect(staleHeadDigest).not.toBeNull();
     expect(author.readRfc64AppliedCatalogHeadV1({
@@ -9461,6 +9953,50 @@ describe('RFC-64 M0 recovery scenarios', () => {
     scenarioIt(spec.title, spec.handler, spec.timeout);
   }
 });
+
+/** Bind explicit catalog proof fixtures to the same chain as their signed seals. */
+function catalogProofChain(agent: DKGAgent): ChainAdapter {
+  const chain = (agent as unknown as { chain: ChainAdapter }).chain;
+  expect(chain.chainType).toBe('evm');
+  Object.defineProperty(chain, 'chainId', { value: NETWORK_ID });
+  return chain;
+}
+
+function stubUnpublishedCatalogState(agent: DKGAgent) {
+  const chain = catalogProofChain(agent);
+  chain.readKnowledgeAssetVersionSnapshot = vi.fn(async (kaId) => ({
+    knowledgeAssetId: kaId, rootCount: 0n, latestRoot: ethers.ZeroHash,
+    latestAuthor: ethers.ZeroAddress, latestPublisher: ethers.ZeroAddress, blockNumber: 100,
+  }));
+  chain.knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
+}
+
+function draftCatalogMutationParams() {
+  return {
+    scope: {
+      networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null, governanceContractAddress: null,
+      ownershipTransitionDigest: null, subGraphName: null, authorAddress: AUTHOR,
+      era: '0', bucketCount: '1',
+    } as const,
+    author: AUTHOR_WALLET, deployment: NATIVE_DEPLOYMENT, peers: [],
+    catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+    catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+  };
+}
+
+async function draftCatalogAsset(version: string, finalizedAt: string, label: string) {
+  const publicQuads = PROJECTION_QUADS.map((quad) => ({
+    ...quad, object: quad.predicate === 'https://schema.org/name' ? `"${label}"` : quad.object,
+  }));
+  const original = await authorSeal(74n, publicQuads, NETWORK_ID, version);
+  const seal = { ...original, assertionFinalizedAt: finalizedAt } as CanonicalGraphScopedAuthorSealV1;
+  assertCanonicalGraphScopedAuthorSealV1(seal);
+  return {
+    assertionCoordinate: 'reopened-draft' as never,
+    projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(publicQuads), seal,
+  };
+}
 
 async function authorSeal(
   kaNumber: bigint,

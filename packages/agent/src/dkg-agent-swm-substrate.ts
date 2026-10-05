@@ -9,6 +9,8 @@
  * composed class.
  */
 
+
+import { isLocalPrivateMember } from './internal/local-private-member.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -389,6 +391,7 @@ import {
   deserializeSwmSenderReceiveState,
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
+import { readConfirmedDraftVersion } from './internal/draft/confirmed-draft-version.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -408,40 +411,6 @@ export interface ContextGraphSubscribeOptions {
   syncMode?: 'on-demand' | 'always-on';
   /** Authoritative numeric slot established by the admission owner. */
   onChainId?: string;
-}
-
-/** A context graph member identity: a bare agent address or its `did:dkg:agent:` DID. */
-function memberAgentAddress(value: string): string | undefined {
-  const match = /^(?:did:dkg:agent:)?(0x[0-9a-fA-F]{40})$/.exec(value.trim());
-  return match?.[1]?.toLowerCase();
-}
-
-/**
- * Whether `meta` declares an explicit private policy (#865) and lists one of
- * `localAgents` among its allowed agents, participants, curators or creators,
- * and not among its revoked agents.
- */
-function isLocalPrivateMember(
-  meta: {
-    readonly accessPolicy?: string;
-    readonly allowedAgents: readonly string[];
-    readonly participantAgents: readonly string[];
-    readonly curators: readonly string[];
-    readonly creators: readonly string[];
-    readonly revokedAgents: readonly string[];
-  },
-  localAgents: readonly (string | undefined)[],
-): boolean {
-  if (meta.accessPolicy?.trim().toLowerCase() !== 'private') return false;
-  const revoked = new Set(meta.revokedAgents.map(memberAgentAddress));
-  const members = new Set(
-    [...meta.allowedAgents, ...meta.participantAgents, ...meta.curators, ...meta.creators]
-      .map(memberAgentAddress)
-      .filter((member) => member !== undefined && !revoked.has(member)),
-  );
-  return localAgents.some((local) => (
-    local !== undefined && members.has(memberAgentAddress(local))
-  ));
 }
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -1327,13 +1296,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             `Context graph "${cgId}" metadata authority kept changing while resolving its SWM gate`,
           );
         },
-        // Same predicate the SENDER uses to decide plaintext vs encrypted SWM
-        // (`resolveWorkspaceRecipientsGated`), so both sides of the wire stay
-        // on one authority. Without it the receiver judged from local
-        // allowedAgent/participantAgent triples and permanently dropped the
-        // plaintext writes the sender is supposed to send on a public CG —
-        // silently breaking member->curator SWM shares on every public/curated
-        // context graph, registered or owner-signed unregistered (#2827).
+        // Match sender access authority: public CGs allow plaintext reads while
+        // their participant gate still controls write authority (#2827).
         publicAccessPolicyOracle: (cgId: string) =>
           withRpcUsageSite(
             CG_AUTH_RPC_SITES.swmPublicOracle,
@@ -1349,6 +1313,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           this.rfc64LegacySwmApplyAllowedForScope(cgId, subGraphName)
           || (subGraphName === null && await this.rfc64PrivateRootSwmOnLegacyLaneV1(cgId))
         ),
+        readConfirmedKnowledgeAssetVersion: kaUal => readConfirmedDraftVersion(this.chain, kaUal),
+        pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
         resolveDurableRootAtomicCompanion: (input) => {
           if (this.config.dataDir === undefined) return;
           return prepareRfc64LateLegacySwmBoundaryV1(

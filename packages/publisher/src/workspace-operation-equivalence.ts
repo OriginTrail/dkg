@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { STORAGE_ACK_OPERATION_ID_PREFIX } from './storage-ack-ledger.js';
 import type {
   GraphKnowledgeAssetAccessEnvelope,
 } from '@origintrail-official/dkg-core';
@@ -59,6 +60,30 @@ export function canonicalPublisherWorkspaceOperationSemantics(
 export interface WorkspaceOperationProvenance {
   readonly shareOperationId: string;
   readonly publishedAtMs?: number;
+  /** Optional for the exposed compatibility shape; internal decoding normalizes it. */
+  readonly publisherChronologyAuthenticated?: boolean;
+}
+
+/** Decoded internal provenance always records the authentication decision. */
+export type NormalizedWorkspaceOperationProvenance = WorkspaceOperationProvenance & Readonly<{
+  publisherChronologyAuthenticated: boolean;
+}>;
+
+/** A publisher identity and finite clock are eligible regardless of local authentication. */
+export function isWorkspacePublisherClockEligible(
+  provenance: Pick<WorkspaceOperationProvenance, 'shareOperationId' | 'publishedAtMs'>,
+): boolean {
+  return !provenance.shareOperationId.startsWith(STORAGE_ACK_OPERATION_ID_PREFIX)
+    && Number.isFinite(provenance.publishedAtMs);
+}
+
+/** Normalize the legacy exposed alias shape once before chronology policy. */
+export function normalizeWorkspaceOperationProvenance(alias: Readonly<{
+  shareOperationId: string; publishedAt?: string | number; publisherChronologyAuthenticated?: boolean;
+}>): NormalizedWorkspaceOperationProvenance {
+  return { shareOperationId: alias.shareOperationId,
+    publishedAtMs: alias.publishedAt === undefined ? undefined : Number(alias.publishedAt),
+    publisherChronologyAuthenticated: alias.publisherChronologyAuthenticated ?? true };
 }
 
 export interface WorkspaceOperationModel<TSemantics> {

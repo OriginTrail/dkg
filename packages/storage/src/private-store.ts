@@ -5,6 +5,7 @@ import {
   canonicalKnowledgeAssetGraphIdentitySuffix,
   escapeSparqlLiteral,
   isSafeIri,
+  sparqlString,
   type GraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
 import {
@@ -14,6 +15,7 @@ import {
   type Quad,
 } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
+import { readSealedKnowledgeAssetPrivateGraph, type SealedKnowledgeAssetPrivateCommitment, type SealedKnowledgeAssetPrivateReadOptions } from './sealed-private-read.js';
 import {
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
@@ -277,6 +279,41 @@ export class PrivateContentStore {
     );
   }
 
+  knowledgeAssetPrivateCommitmentGraphUri(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    commitmentId: string,
+    subGraphName?: string,
+  ): string {
+    if (!/^(?:0x)?[0-9a-fA-F]{64}$/.test(commitmentId)) {
+      throw new Error('Private KA commitment must be a 32-byte hexadecimal Merkle root');
+    }
+    const commitment = commitmentId.replace(/^0x/, '').toLowerCase();
+    return `${this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName)}/commitments/${commitment}`;
+  }
+
+  /** Archive already seal-validated bytes without changing the latest version partition. */
+  async archiveKnowledgeAssetPrivateTriples(
+    contextGraphId: string,
+    scope: GraphKnowledgeAssetScope,
+    quads: readonly Quad[],
+    commitmentId: string,
+    subGraphName?: string,
+  ): Promise<string> {
+    for (const quad of quads) assertSafePrivateQuad(quad);
+    const archive = this.knowledgeAssetPrivateCommitmentGraphUri(contextGraphId, scope, commitmentId, subGraphName);
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    await this.withGraphWriteLock(graphUri, () => this.replacePrivateCommitmentArchive(archive, quads));
+    return archive;
+  }
+
+  private async replacePrivateCommitmentArchive(archive: string, quads: readonly Quad[]): Promise<void> {
+    if (!await tryReplaceGraphAtomically(this.store, archive, quads.map(quad => ({ ...quad, graph: archive })))) {
+      throw Object.assign(new Error('Triple store cannot atomically archive graph-scoped private content'),
+        { code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED' });
+    }
+  }
+
   /**
    * Atomically replace the complete private triple set of one graph-scoped KA.
    * No marker triples are mixed into this graph: its contents are exactly the
@@ -287,10 +324,15 @@ export class PrivateContentStore {
     scope: GraphKnowledgeAssetScope,
     quads: readonly Quad[],
     subGraphName?: string,
+    commitmentId?: string,
   ): Promise<string> {
     for (const quad of quads) assertSafePrivateQuad(quad);
     const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
     await this.withGraphWriteLock(graphUri, async () => {
+      if (commitmentId !== undefined && quads.length > 0) {
+        const archive = this.knowledgeAssetPrivateCommitmentGraphUri(contextGraphId, scope, commitmentId, subGraphName);
+        await this.replacePrivateCommitmentArchive(archive, quads);
+      }
       const replaced = await tryReplaceGraphAtomically(
         this.store,
         graphUri,
@@ -329,14 +371,36 @@ export class PrivateContentStore {
     });
   }
 
+  /** Read the immutable payload selected by an authenticated seal, including public-only seals. */
+  getSealedKnowledgeAssetPrivateTriples(contextGraphId: string, scope: GraphKnowledgeAssetScope,
+    seal: SealedKnowledgeAssetPrivateCommitment, subGraphName?: string,
+    options?: SealedKnowledgeAssetPrivateReadOptions): Promise<Quad[]> {
+    return readSealedKnowledgeAssetPrivateGraph(this.store, seal, {
+      version: () => this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName),
+      commitment: root => this.knowledgeAssetPrivateCommitmentGraphUri(contextGraphId, scope, root, subGraphName),
+    }, options);
+  }
+
   async deleteKnowledgeAssetPrivateTriples(
     contextGraphId: string,
     scope: GraphKnowledgeAssetScope,
     subGraphName?: string,
   ): Promise<void> {
-    await this.store.dropGraph(
-      this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName),
-    );
+    const graphUri = this.knowledgeAssetPrivateGraphUri(contextGraphId, scope, subGraphName);
+    await this.withGraphWriteLock(graphUri, async () => {
+      // Explicit deletion retires all commitments of this version. Ordinary
+      // replacement deliberately retains them for older authenticated seals.
+      const prefix = `${graphUri}/commitments/`;
+      for (;;) {
+        const result = await this.store.query(`SELECT ?graph WHERE { GRAPH ?graph {}
+          FILTER(STRSTARTS(STR(?graph), ${sparqlString(prefix)}))
+        } ORDER BY ?graph LIMIT 32`, { source: 'storage.private.deleteVersionArchives' });
+        if (result.type !== 'bindings') throw new Error('Private commitment archive discovery is unavailable');
+        if (result.bindings.length === 0) break;
+        for (const row of result.bindings) await this.store.dropGraph(assertSafeIri(row['graph']!));
+      }
+      await this.store.dropGraph(graphUri);
+    });
   }
 
   private privateKey(contextGraphId: string, subGraphName?: string): string {

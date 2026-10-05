@@ -9,7 +9,10 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+
+import { planKnowledgeAssetVmPublication, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+import { randomUUID } from 'node:crypto';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -122,11 +125,21 @@ import {
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
-import {
-  DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
-  VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
+import  {
+  DKGPublisher,
+  PublishHandler,
+  SharedMemoryHandler,
+  UpdateHandler,
+  ChainEventPoller,
+  AccessHandler,
+  AccessClient,
+  PublishJournal,
+  StaleWriteError,
+  ACKCollector,
+  StorageACKHandler,
+  VerifyCollector,
+  VerifyProposalHandler,
+  buildVerificationMetadata,
   computeTripleHashV10 as computeTripleHash,
   computeFlatKCRootV10 as computeFlatKCRoot,
   computePrivateRootV10 as computePrivateRoot,
@@ -148,15 +161,25 @@ import {
   TripleStoreAsyncPromoteQueue,
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
-  type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteJob, type PromoteListFilter,
+  type AsyncPromoteQueue,
+  type AsyncPromoteQueueConfig,
+  type PromoteJob,
+  type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
-  type PublishOptions, type UpdateOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  // OT-RFC-43 A2 — per-layer pointer + KA-id predicates and stamp helpers.
-  KA_ID_PRED, RESERVED_UAL_PRED,
-  WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
+  type PublishOptions,
+  type UpdateOptions,
+  type PublishResult,
+  type PhaseCallback,
+  type KAMetadata,
+  type CASCondition,
+  KA_ID_PRED,
+  RESERVED_UAL_PRED,
+  WM_CURRENT_ASSERTION_PRED,
+  SWM_CURRENT_ASSERTION_PRED,
+  VM_CURRENT_ASSERTION_PRED,
   type CollectedACK,
-  type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest,
+  type LiftRequestAuthorSeal,
+  type KnowledgeAssetVmPublishRequest,
   type AsyncKnowledgeAssetVmPublishPreflightResult,
   type AsyncKnowledgeAssetVmPublishRecoveryInput,
   type WorkspaceAgentRecipient,
@@ -165,7 +188,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
-  assertPublicationPricingPolicyApplicable,
   type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
@@ -303,6 +325,8 @@ import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyPublishedNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
+import { resolveFinalizedDraftVersion } from './internal/draft/finalize-draft-version.js';
+import { withDraftArtifactReferences, withKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -459,113 +483,6 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { createLocalContextGraphOriginMembershipRecord } from
   './local-context-graph-provenance.js';
-
-type KnowledgeAssetVmPublicationOperationPlan =
-  | {
-      readonly kind: 'initial';
-      readonly pricingPolicy: PublishOptions['pricingPolicy'];
-    }
-  | {
-      readonly kind: 'update';
-      readonly vmCurrentAssertion: string;
-    };
-
-/** One operation discriminator shared by admission, sync, and queued execution. */
-function planKnowledgeAssetVmPublication(input: {
-  readonly vmCurrentAssertion?: string;
-  readonly pricingPolicy?: PublishOptions['pricingPolicy'];
-}): KnowledgeAssetVmPublicationOperationPlan {
-  if (input.vmCurrentAssertion) {
-    assertPublicationPricingPolicyApplicable(input.pricingPolicy, { kind: 'update' });
-    return { kind: 'update', vmCurrentAssertion: input.vmCurrentAssertion };
-  }
-  assertPublicationPricingPolicyApplicable(input.pricingPolicy, {
-    kind: 'initial',
-    graphScoped: true,
-  });
-  return { kind: 'initial', pricingPolicy: input.pricingPolicy };
-}
-
-/** Rebuild the immutable graph-scoped seal carried by one queued VM request. */
-function assertionSealFromQueuedKnowledgeAssetVmPublishRequest(
-  request: KnowledgeAssetVmPublishRequest,
-): AssertionSeal {
-  // Both execution boundaries validate the immutable graph-scoped envelope
-  // before calling this shared reconstruction helper.
-  const graphScope = createGraphKnowledgeAssetScope(
-    request.kaUal!,
-    request.assertionVersion!,
-  );
-  return {
-    merkleRoot: ethers.getBytes(request.seal.merkleRoot),
-    authorAddress: ethers.getAddress(request.seal.authorAddress),
-    authorAttestationR: ethers.getBytes(request.seal.signature.r),
-    authorAttestationVS: ethers.getBytes(request.seal.signature.vs),
-    authorSchemeVersion: request.seal.schemeVersion,
-    chainId: BigInt(request.sealChainId),
-    kav10Address: ethers.getAddress(request.sealKav10Address),
-    finalizedAtIso: request.sealFinalizedAtIso,
-    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-    kaUal: graphScope.ual,
-    assertionVersion: graphScope.assertionVersion,
-    publicTripleCount: request.publicTripleCount!,
-    ...(request.privateMerkleRoot
-      ? { privateMerkleRoot: ethers.getBytes(request.privateMerkleRoot) }
-      : {}),
-    privateTripleCount: request.privateTripleCount!,
-    rootEntities: [],
-    ...(request.seal.reservedKaId !== undefined
-      ? { reservedKaId: BigInt(request.seal.reservedKaId) }
-      : {}),
-  };
-}
-
-export type KnowledgeAssetVmPublishRequestWithoutIntentKey = Omit<
-  KnowledgeAssetVmPublishRequest,
-  'intentKey'
->;
-
-/** Canonical immutable projection of the persisted queued-publish request. */
-export function createKnowledgeAssetVmPublishIntentKey(
-  request: KnowledgeAssetVmPublishRequestWithoutIntentKey,
-): string {
-  const canonicalIntent = {
-    contextGraphId: request.contextGraphId,
-    name: request.name,
-    agentAddress: request.agentAddress ?? null,
-    subGraphName: request.subGraphName ?? null,
-    shareOperationId: request.shareOperationId,
-    roots: request.roots,
-    contentScopeVersion: request.contentScopeVersion ?? null,
-    kaUal: request.kaUal ?? null,
-    assertionVersion: request.assertionVersion ?? null,
-    publicTripleCount: request.publicTripleCount ?? null,
-    privateMerkleRoot: request.privateMerkleRoot?.toLowerCase() ?? null,
-    privateTripleCount: request.privateTripleCount ?? null,
-    accessPolicy: request.accessPolicy ?? null,
-    allowedPeers: request.allowedPeers ?? [],
-    entityProofs: request.entityProofs ?? null,
-    sealMerkleRoot: request.sealMerkleRoot.toLowerCase(),
-    seal: request.seal,
-    sealChainId: request.sealChainId,
-    sealKav10Address: request.sealKav10Address,
-    sealFinalizedAtIso: request.sealFinalizedAtIso,
-    wmCurrentAssertion: request.wmCurrentAssertion ?? null,
-    swmCurrentAssertion: request.swmCurrentAssertion ?? null,
-    vmCurrentAssertion: request.vmCurrentAssertion ?? null,
-    kaNumber: request.kaNumber ?? null,
-    reservedUal: request.reservedUal ?? null,
-    publishEpochs: request.publishEpochs ?? null,
-    // Keep the pre-feature canonical JSON unchanged when the policy is omitted.
-    ...(request.pricingPolicy !== undefined
-      ? { pricingPolicy: request.pricingPolicy }
-      : {}),
-    clearSharedMemoryAfter: request.clearSharedMemoryAfter ?? null,
-    publisherNodeIdentityIdOverride:
-      request.publisherNodeIdentityIdOverride ?? null,
-  };
-  return `sha256:${createHash('sha256').update(JSON.stringify(canonicalIntent)).digest('hex')}`;
-}
 
 /**
  * #1116 (round 11) — stable code tagged on the `assertionFinalize` throws that are
@@ -974,6 +891,38 @@ function normalizeWorkspaceGossipPublishInput(
     return createResolveCurrentWorkspaceGossipPayload(input);
   }
   return parseEncodedWorkspaceGossipPayload(input);
+}
+
+/** Public signing and scope options for guarded assertion finalization. */
+export interface AssertionFinalizeOptions {
+  subGraphName?: string;
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+  authorSignTypedData?: (
+    typedData: AuthorAttestationTypedData,
+  ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  schemeVersion?: number;
+}
+
+/** The sealed assertion and exact lifecycle identity returned by finalization. */
+export interface AssertionFinalizeResult {
+  assertionUri: string;
+  merkleRoot: Uint8Array;
+  authorAddress: string;
+  /** Internal lifecycle identity used by seal-in-SWM migration. */
+  reservedKaId: bigint;
+  /** Internal exact payload boundary used by seal-in-SWM migration. */
+  rootEntities: string[];
+  contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
+  kaUal: string;
+  assertionVersion: string;
+  publicTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount: number;
+  schemeVersion: number;
+  chainId: bigint;
+  kav10Address: string;
+  eip712Digest: string;
 }
 
 export class PublishMethods extends DKGAgentBase {
@@ -2275,6 +2224,7 @@ export class PublishMethods extends DKGAgentBase {
         updateScope,
         canonicalParts.privateQuads,
         opts?.subGraphName,
+        canonicalPrivateMerkleRoot ? ethers.hexlify(canonicalPrivateMerkleRoot) : undefined,
       );
     }
     // Stage a direct update, or validate the existing queued snapshot, before
@@ -2812,10 +2762,9 @@ export class PublishMethods extends DKGAgentBase {
    * and write seal triples to the CG `_meta` graph keyed by the
    * assertion URI.
    *
-   * Implementation lives on the class (not inside the `assertion` getter
-   * closure) so that the substantial business logic — keystore lookup,
-   * EIP-712 binding, idempotency check, seal write — is independently
-   * testable and visible in stack traces.
+   * The module-local implementation is reached only while this entry point
+   * owns the draft-artifact references and assertion lifecycle lock. Keystore
+   * lookup, EIP-712 binding, idempotency and seal writes stay within both guards.
    *
    * See `assertion.finalize` (the public-facing wrapper) for usage docs.
    */
@@ -2823,851 +2772,11 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    opts?: {
-      subGraphName?: string;
-      authorAgentAddress?: string;
-      preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-      authorSignTypedData?: (
-        typedData: AuthorAttestationTypedData,
-      ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
-      schemeVersion?: number;
-    },
-  ): Promise<{
-    assertionUri: string;
-    merkleRoot: Uint8Array;
-    authorAddress: string;
-    /** Internal lifecycle identity used by seal-in-SWM migration. */
-    reservedKaId: bigint;
-    /** Internal exact payload boundary used by seal-in-SWM migration. */
-    rootEntities: string[];
-    contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
-    kaUal: string;
-    assertionVersion: string;
-    publicTripleCount: number;
-    privateMerkleRoot?: Uint8Array;
-    privateTripleCount: number;
-    schemeVersion: number;
-    chainId: bigint;
-    kav10Address: string;
-    eip712Digest: string;
-  }> {
-    if (
-      opts?.preSignedAuthorAttestation != null
-      && (opts.authorAgentAddress != null || opts.authorSignTypedData != null)
-    ) {
-      throw new Error(
-        'assertionFinalize: preSignedAuthorAttestation is mutually exclusive with authorAgentAddress / authorSignTypedData',
-      );
-    }
-    if (opts?.authorSignTypedData != null && opts.authorAgentAddress == null) {
-      throw new Error('assertionFinalize: authorSignTypedData requires authorAgentAddress');
-    }
-
-    // 1. Resolve URIs.
-    const assertionUri = contextGraphAssertionUri(
-      contextGraphId,
-      agentAddress,
-      name,
-      opts?.subGraphName,
-    );
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const lifecycleUri = assertionLifecycleUri(
-      contextGraphId,
-      agentAddress,
-      name,
-      opts?.subGraphName,
-    );
-    const sourceWmGraphUri = await this.publisher.wmGraphUri(
-      contextGraphId,
-      agentAddress,
-      name,
-      opts?.subGraphName,
-    );
-    const xsdInteger = '<http://www.w3.org/2001/XMLSchema#integer>';
-    const stampFinalizedLifecycle = async (
-      assertionVersion: string | bigint,
-      finalizedMerkleRoot: Uint8Array,
-    ): Promise<void> => {
-      // Keep the v2 mutation gate present throughout recovery. The assertion
-      // version may need replacement, but a failure after its delete is safe:
-      // the durable seal is written first and an idempotent finalize retry
-      // repairs this row before returning.
-      await deleteByPatternWithoutCount(this.store, {
-        graph: metaGraph,
-        subject: lifecycleUri,
-        predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
-      });
-      await this.store.insert([
-        {
-          subject: lifecycleUri,
-          predicate: ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION,
-          object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^${xsdInteger}`,
-          graph: metaGraph,
-        },
-        {
-          subject: lifecycleUri,
-          predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
-          object: `"${assertionVersion}"^^${xsdInteger}`,
-          graph: metaGraph,
-        },
-      ]);
-      const merkleHexBare = ethers.hexlify(finalizedMerkleRoot).slice(2);
-      await this._stampPointerIfDivergedFromVm(
-        lifecycleUri,
-        WM_CURRENT_ASSERTION_PRED,
-        merkleHexBare,
-        metaGraph,
-      );
-    };
-
-    // Read any durable seal before loading the private partition. A completed
-    // finalize removes the mutable private draft, so an idempotent retry must
-    // recover that partition from the immutable `(UAL, assertionVersion)` graph.
-    const existingMetaResult = await this.store.query(
-      `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
-      { source: 'agent.assertionFinalize.existingSeal' },
-    );
-    const existingMetaQuads =
-      existingMetaResult.type === 'quads' ? existingMetaResult.quads : [];
-    let existingSeal: AssertionSeal | undefined;
-    try {
-      existingSeal = parseAssertionSealQuads(existingMetaQuads, assertionUri);
-    } catch (err) {
-      throw new Error(
-        `assertionFinalize: existing _meta seal for <${assertionUri}> is corrupt: ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-    }
-    const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
-
-    // 2. Pull the assertion's quads. Refuse to finalize an empty
-    //    assertion — there's nothing to commit. The public DCAT catalog entry
-    //    for a private CG is injected ONLY AFTER this validation (below), so a
-    //    catalog-only assertion (zero user-authored quads) is correctly
-    //    rejected here rather than slipping through on the catalog quad alone.
-    const rawQuads = await this.publisher.assertionQuery(
-      contextGraphId,
-      name,
-      agentAddress,
-      opts?.subGraphName,
-    );
-    let rawPrivateQuads = await this.publisher.assertionQueryPrivate(
-      contextGraphId,
-      name,
-      agentAddress,
-      opts?.subGraphName,
-    );
-    if (
-      rawPrivateQuads.length === 0
-      && existingSeal?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
-      && existingSeal.kaUal !== undefined
-      && existingSeal.assertionVersion !== undefined
-      && (existingSeal.privateTripleCount ?? 0) > 0
-    ) {
-      rawPrivateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
-        contextGraphId,
-        createGraphKnowledgeAssetScope(existingSeal.kaUal, existingSeal.assertionVersion),
-        opts?.subGraphName,
-      );
-    }
-    if (rawQuads.length === 0 && rawPrivateQuads.length === 0) {
-      throw Object.assign(
-        new Error(
-          `Cannot finalize assertion <${assertionUri}>: it has no quads. ` +
-            `Write at least one quad with /api/knowledge-assets/${name}/wm/write before finalizing.`,
-        ),
-        { code: ASSERTION_EMPTY_CODE },
-      );
-    }
-
-    // 2b. Apply the same `isReservedSubject` filter that
-    //     `assertionPromote` runs at promote time. WM-only bookkeeping
-    //     rows in the `urn:dkg:file:` / `urn:dkg:extraction:` namespaces
-    //     (file descriptors, ExtractionProvenance blocks — see
-    //     `19_MARKDOWN_CONTENT_TYPE.md §10.2`) are stripped before the
-    //     assertion crosses the SWM boundary, so the seal MUST hash
-    //     the post-strip set or it commits to a root the publish path
-    //     can never recompute. (Round 4 review §8 — "assertionFinalize
-    //     hashes WM-only urn:dkg:file: rows".)
-    const userQuads = rawQuads.filter((q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
-    const userPrivateQuads = rawPrivateQuads.filter(
-      (q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q),
-    );
-    if (userQuads.length === 0 && userPrivateQuads.length === 0) {
-      throw Object.assign(
-        new Error(
-          `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
-            `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
-            `which is filtered out before SWM. Add at least one user-authored ` +
-            `public or private quad on a non-reserved subject before finalizing.`,
-        ),
-        { code: ASSERTION_EMPTY_CODE },
-      );
-    }
-
-    // Finalization is the first irreversible boundary: canonicalization below
-    // intentionally reduces the submitted RDF dataset to its atomic triple set.
-    // Reject payload-level named graphs before that reduction, otherwise equal
-    // SPOs in different graphs could collapse and the later promote guard would
-    // only see the already-flattened canonical WM graph. Check both partitions;
-    // private draft quads preserve their graph terms too.
-    assertNoKnowledgeAssetPayloadNamedGraphs(userQuads, userPrivateQuads);
-
-    // The V2 seal commits exactly the canonical submitted RDF. Private-CG
-    // catalog proof material is generated later at the publish boundary and
-    // committed through the independent catalogRoot/catalogLeafCount fields;
-    // it must never enter WM, this seal, or the per-KA graph.
-    const quads = [...userQuads];
-
-    // 3. Canonicalize the COMPLETE RDF set once at KA scope. Subjects are data,
-    // not partitions: 1,000 distinct subjects still produce one asset, one
-    // Merkle tree, and (downstream) one graph operation. The linear skolemizer
-    // also permits a valid all-blank-node component, which the root-based model
-    // could not represent.
-    const normalizedParts = await skolemizeKnowledgeAssetParts(quads, userPrivateQuads, {
-      // The first finalize sees user data already checked at assertionWrite;
-      // an interrupted retry can see our own canonical WM target. Accept only
-      // exact c14nN terms here, never arbitrary names in the reserved prefix.
-      allowCanonicalSkolemTerms: true,
-    });
-    const normalizedKnowledgeAssetQuads = normalizedParts.publicQuads;
-    const normalizedPrivateKnowledgeAssetQuads = normalizedParts.privateQuads;
-    const privateMerkleRoot = computePrivateRoot(normalizedPrivateKnowledgeAssetQuads);
-    const privateTripleCount = normalizedPrivateKnowledgeAssetQuads.length;
-    const merkleRoot = computeFlatKCRoot(
-      normalizedKnowledgeAssetQuads,
-      privateMerkleRoot ? [privateMerkleRoot] : [],
-    );
-    const publicTripleCount = normalizedKnowledgeAssetQuads.length;
-    const callerExpectedMerkleRoot = opts?.preSignedAuthorAttestation?.expectedMerkleRoot;
-    if (
-      callerExpectedMerkleRoot !== undefined
-      && (
-        callerExpectedMerkleRoot.length !== merkleRoot.length
-        || !callerExpectedMerkleRoot.every((byte, index) => byte === merkleRoot[index])
-      )
-    ) {
-      throw new Error(
-        `assertionFinalize: preSignedAuthorAttestation expectedMerkleRoot mismatch — ` +
-          `caller=${ethers.hexlify(callerExpectedMerkleRoot)}, ` +
-          `canonical=${ethers.hexlify(merkleRoot)}.`,
-      );
-    }
-
-    // 4. Idempotency: if a seal already exists for this assertion,
-    //    return it as-is when the merkleRoot matches. Mismatch means
-    //    the assertion was mutated since the previous finalize —
-    //    refuse to overwrite silently.
-    if (existingSeal) {
-      if (existingSeal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-        throw new LegacyKnowledgeAssetReadOnlyError();
-      }
-      if (
-        !existingSeal.kaUal ||
-        !existingSeal.assertionVersion ||
-        existingSeal.publicTripleCount === undefined ||
-        existingSeal.privateTripleCount === undefined
-      ) {
-        throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
-      }
-      const existingPrivateRoot = existingSeal.privateMerkleRoot;
-      const privateRootMatches =
-        existingPrivateRoot === undefined
-          ? privateMerkleRoot === undefined
-          : privateMerkleRoot !== undefined
-            && existingPrivateRoot.length === privateMerkleRoot.length
-            && existingPrivateRoot.every((byte, index) => byte === privateMerkleRoot[index]);
-      if (
-        existingSeal.publicTripleCount !== publicTripleCount
-        || existingSeal.privateTripleCount !== privateTripleCount
-        || !privateRootMatches
-      ) {
-        throw new Error(
-          `assertionFinalize: assertion <${assertionUri}> private/public partition differs from its existing seal`,
-        );
-      }
-      if (
-        existingSeal.merkleRoot.length !== merkleRoot.length ||
-        !existingSeal.merkleRoot.every((b, i) => b === merkleRoot[i])
-      ) {
-        throw new Error(
-          `assertionFinalize: assertion <${assertionUri}> is already finalized with a ` +
-            `different merkleRoot (existing=${ethers.hexlify(existingSeal.merkleRoot)}, ` +
-            `current=${ethers.hexlify(merkleRoot)}). In-place mutation of a finalized assertion ` +
-            `breaks the author signature and is rejected. To edit already-shared/published ` +
-            `content, start a sanctioned edit loop with POST /api/knowledge-assets/{name}/wm/pull-from ` +
-            `(which re-opens a fresh draft and clears the stale seal), or discard and re-create the assertion.`,
-        );
-      }
-      // Seal exists and matches — return the existing record. The rebuilt digest
-      // must bind the SAME reservedKaId the original signature committed to
-      // (§F2): prefer the value persisted on the seal; for a seal that predates
-      // the binding, repack from the lifecycle-URN kaId stamp.
-      let reReservedKaId = existingSeal.reservedKaId;
-      if (reReservedKaId === undefined) {
-        const reKaIdRes = await this.store.query(
-          `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName)}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
-          { source: 'agent.assertionFinalize.reservedKaId' },
-        );
-        const reNum =
-          reKaIdRes.type === 'bindings' && reKaIdRes.bindings[0]?.['n'] !== undefined
-            ? BigInt(String(reKaIdRes.bindings[0]['n']).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim())
-            : 0n;
-        reReservedKaId = (BigInt(ethers.getAddress(existingSeal.authorAddress)) << 96n) | reNum;
-      }
-      const typedData = buildAuthorAttestationTypedData({
-        chainId: existingSeal.chainId,
-        kav10Address: existingSeal.kav10Address,
-        merkleRoot: existingSeal.merkleRoot,
-        authorAddress: existingSeal.authorAddress,
-        reservedKaId: reReservedKaId,
-        schemeVersion: existingSeal.authorSchemeVersion,
-      });
-      // A prior attempt may have stopped after the target swap, after the seal,
-      // or before source cleanup. Re-materialize and repair in that order so an
-      // idempotent finalize always converges to one exact canonical WM graph.
-      const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
-        contextGraphId,
-        existingSeal.kaUal,
-        existingSeal.assertionVersion,
-        normalizedKnowledgeAssetQuads,
-        opts?.subGraphName,
-      );
-      const existingScope = createGraphKnowledgeAssetScope(
-        existingSeal.kaUal,
-        existingSeal.assertionVersion,
-      );
-      await privateStore.replaceKnowledgeAssetPrivateTriples(
-        contextGraphId,
-        existingScope,
-        normalizedPrivateKnowledgeAssetQuads,
-        opts?.subGraphName,
-      );
-      await stampFinalizedLifecycle(
-        existingSeal.assertionVersion,
-        existingSeal.merkleRoot,
-      );
-      await this.publisher.cleanupCanonicalWorkingMemorySources(
-        contextGraphId,
-        name,
-        agentAddress,
-        canonicalWmGraphUri,
-        [sourceWmGraphUri],
-        opts?.subGraphName,
-      );
-      await privateStore.deleteKnowledgeAssetPrivateDraft(
-        contextGraphId,
-        agentAddress,
-        name,
-        opts?.subGraphName,
-      );
-      return {
-        assertionUri,
-        merkleRoot: existingSeal.merkleRoot,
-        authorAddress: existingSeal.authorAddress,
-        reservedKaId: reReservedKaId,
-        rootEntities: [],
-        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-        kaUal: existingSeal.kaUal,
-        assertionVersion: existingSeal.assertionVersion,
-        publicTripleCount: existingSeal.publicTripleCount,
-        ...(existingSeal.privateMerkleRoot !== undefined
-          ? { privateMerkleRoot: existingSeal.privateMerkleRoot }
-          : {}),
-        privateTripleCount: existingSeal.privateTripleCount,
-        schemeVersion: existingSeal.authorSchemeVersion,
-        chainId: existingSeal.chainId,
-        kav10Address: existingSeal.kav10Address,
-        eip712Digest: ethers.TypedDataEncoder.hash(
-          typedData.domain,
-          typedData.types,
-          typedData.message,
-        ),
-      };
-    }
-
-    // 5. Resolve chain identity. Finalize commits to a specific
-    //    `(chainId, kav10Address)` pair — both must be available.
-    if (
-      typeof this.chain.getEvmChainId !== 'function' ||
-      typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function'
-    ) {
-      // #1116 (round 11) — CAPABILITY GAP (non-V10 chain adapter). Tagged with a
-      // stable code so seal-before-share can distinguish a recoverable capability
-      // gap (→ UNSEALED_SHARE_BLOCKED) from a validation
-      // error (which must propagate). See SEAL_CAPABILITY_GAP_CODE.
-      throw Object.assign(
-        new Error(
-          'assertionFinalize requires a V10-capable chain adapter that exposes ' +
-            'getEvmChainId() and getKnowledgeAssetsLifecycleAddress(); the current adapter does not.',
-        ),
-        { code: SEAL_CAPABILITY_GAP_CODE },
-      );
-    }
-    const chainId = await this.chain.getEvmChainId();
-    const kav10Address = await this.chain.getKnowledgeAssetsLifecycleAddress();
-
-    // 6. (removed, #1116) The seal is now context-graph-independent: the
-    //    EIP-712 AuthorAttestation no longer binds the on-chain CG id, so
-    //    finalize works on an UNREGISTERED CG and performs no chain write /
-    //    registration. CG binding happens at publish time (the contract's
-    //    PublishParams.contextGraphId + the separate ACK digest).
-
-    // 7. Resolve author. preSigned > custodial agent > publisher fallback.
-    const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
-    let authorAddress: string;
-    let signerPrivateKey: string | undefined;
-    let preSigned: PreSignedAuthorAttestation | undefined;
-    if (opts?.preSignedAuthorAttestation != null) {
-      preSigned = opts.preSignedAuthorAttestation;
-      authorAddress = preSigned.address;
-    } else if (opts?.authorSignTypedData != null) {
-      // Self-sovereign callback: the daemon builds the exact typed data after
-      // canonicalization and allocation, while the caller retains its key.
-      authorAddress = ethers.getAddress(opts.authorAgentAddress!);
-    } else if (opts?.authorAgentAddress != null) {
-      const mode = this.getLocalAgentMode(opts.authorAgentAddress);
-      if (mode === undefined) {
-        throw new Error(
-          `assertionFinalize: authorAgentAddress ${opts.authorAgentAddress} is not a registered local agent on this node`,
-        );
-      }
-      if (mode === 'self-sovereign') {
-        throw new Error(
-          `assertionFinalize: agent ${opts.authorAgentAddress} is registered as self-sovereign — ` +
-            `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
-        );
-      }
-      signerPrivateKey = this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
-      if (!signerPrivateKey) {
-        // #1116 (round 11) — CAPABILITY GAP (no local signing key for this agent).
-        throw Object.assign(
-          new Error(
-            `assertionFinalize: custodial agent ${opts.authorAgentAddress} has no private key on file`,
-          ),
-          { code: SEAL_CAPABILITY_GAP_CODE },
-        );
-      }
-      authorAddress = opts.authorAgentAddress;
-    } else {
-      // Publisher-wallet fallback: use the daemon's own publisher EOA
-      // as the author. This preserves Phase 4 mode (a) — node admin
-      // signs on its own behalf when no agent attribution is supplied.
-      const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
-      if (!fallbackAddress) {
-        // #1116 (round 11) — CAPABILITY GAP (no publisher signer configured).
-        throw Object.assign(
-          new Error(
-            'assertionFinalize: no agent override supplied and no publisher signer is available. ' +
-              'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher private key on the daemon.',
-          ),
-          { code: SEAL_CAPABILITY_GAP_CODE },
-        );
-      }
-      authorAddress = fallbackAddress;
-    }
-
-    // ── OT-RFC-43 §F2 — resolve the reserved kaId BEFORE signing ──
-    // The AuthorAttestation digest now binds reservedKaId, so the packed id must
-    // be known before buildAuthorAttestationTypedData. This is the SINGLE
-    // allocation point (publishFromFinalizedAssertion REUSES it). Rules:
-    //   • preSigned author → honour the slot they signed over (no allocation);
-    //   • update of a previously-stamped name → reuse the stable existing number;
-    //   • fresh create with an allocator → reconcile-once then allocate ONE number;
-    //   • no allocator → 0n (non-Option-1; the on-chain namespace check rejects).
-    const lifecycleScopeResult = await this.store.query(
-      `SELECT ?scope ?version ?vm WHERE { GRAPH <${metaGraph}> {
-        OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION}> ?scope }
-        OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?version }
-        OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
-      } } LIMIT 1`,
-      { source: 'agent.assertionFinalize.lifecycleScope' },
-    );
-    const lifecycleScopeRow = lifecycleScopeResult.type === 'bindings'
-      ? lifecycleScopeResult.bindings[0]
-      : undefined;
-    const stripLifecycleLiteral = (value: unknown): string | undefined => {
-      if (value === undefined) return undefined;
-      return String(value).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim();
-    };
-    const persistedScopeVersion = stripLifecycleLiteral(lifecycleScopeRow?.['scope']);
-    const persistedAssertionVersion = stripLifecycleLiteral(lifecycleScopeRow?.['version']);
-    const hasConfirmedVm = lifecycleScopeRow?.['vm'] !== undefined;
-    if (persistedScopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
-    let assertionVersion = 1n;
-    if (hasConfirmedVm) {
-      if (persistedAssertionVersion === undefined) {
-        throw new Error(
-          `Graph-scoped lifecycle <${lifecycleUri}> is missing its assertion version`,
-        );
-      }
-      assertionVersion = BigInt(persistedAssertionVersion) + 1n;
-    } else if (persistedAssertionVersion !== undefined) {
-      assertionVersion = BigInt(persistedAssertionVersion);
-    }
-    const existingKaIdRes = await this.store.query(
-      `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
-      { source: 'agent.assertionFinalize.existingKaId' },
-    );
-    const hasExistingKaId =
-      existingKaIdRes.type === 'bindings' && existingKaIdRes.bindings.length > 0;
-    const packReservedKaId = (addr: string, num: bigint): bigint =>
-      (BigInt(ethers.getAddress(addr)) << 96n) | num;
-    const parseStampedNumber = (raw: unknown): bigint =>
-      BigInt(String(raw).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim());
-    let reservedKaId: bigint;
-    // freshNumber is set ONLY when a NEW number must be stamped on the lifecycle
-    // URN (fresh create, or a preSigned author whose slot isn't yet stamped).
-    let freshNumber: bigint | undefined;
-    if (preSigned) {
-      if (hasExistingKaId) {
-        // The lifecycle already owns a stable slot. A re-finalize / update must
-        // commit to THAT id, not whatever the caller signed over — otherwise the
-        // persisted seal + on-chain mint (publishFromFinalizedAssertion reuses the
-        // stamped `dkg:kaId`) would name a different KA than `_meta` points at.
-        // The signature binds reservedKaId (§F2), so a caller who signed a
-        // different number is rejected rather than silently re-slotted.
-        const stampedKaId = packReservedKaId(
-          authorAddress,
-          parseStampedNumber(existingKaIdRes.bindings[0]['n']),
-        );
-        if (preSigned.reservedKaId !== stampedKaId) {
-          throw new Error(
-            `assertionFinalize: preSignedAuthorAttestation reservedKaId mismatch — ` +
-              `caller signed over ${preSigned.reservedKaId} but lifecycle "${name}" is already ` +
-              `stamped at kaId ${stampedKaId}. A re-finalize/update must attest the existing ` +
-              `stable slot (OT-RFC-43 §F2).`,
-          );
-        }
-        reservedKaId = stampedKaId;
-        freshNumber = undefined;
-      } else {
-        // Fresh slot: the caller-signed id MUST live in the author's own
-        // namespace (high 160 bits == author). Otherwise we'd persist a local
-        // seal + `_meta` for an id the on-chain mint later rejects with
-        // KaIdNamespaceMismatch — sealed locally, unpublishable. Reject here.
-        if ((preSigned.reservedKaId >> 96n) !== BigInt(ethers.getAddress(authorAddress))) {
-          throw new Error(
-            `assertionFinalize: preSignedAuthorAttestation reservedKaId namespace mismatch — ` +
-              `id ${preSigned.reservedKaId} is not in author ${ethers.getAddress(authorAddress)}'s ` +
-              `namespace. The packed kaId must be (uint160(author) << 96) | number (OT-RFC-43 §F2).`,
-          );
-        }
-        reservedKaId = preSigned.reservedKaId;
-        freshNumber = reservedKaId & ((1n << 96n) - 1n);
-      }
-    } else if (hasExistingKaId) {
-      // The lifecycle already owns a stable slot. The stamped `dkg:kaId` number
-      // was allocated in the ORIGINAL author's namespace — its packed id is
-      // (uint160(originalAuthor) << 96) | number, recorded authoritatively in the
-      // co-stamped `dkg:reservedUal` (did:dkg:<chainId>/<authorAddrLower>/<number>).
-      // Repacking the SAME number with a CHANGED authorAddress would name a
-      // different KA than `_meta`/the lifecycle points at, and the on-chain mint
-      // (publishFromFinalizedAssertion reuses the stamped `dkg:kaId`) would reject
-      // it with KaIdNamespaceMismatch — sealed locally, unpublishable. Preserve the
-      // original author bits and reject author changes on an already-stamped name
-      // (OT-RFC-43 §F2).
-      const stampedNumber = parseStampedNumber(existingKaIdRes.bindings[0]['n']);
-      const reservedUalRes = await this.store.query(
-        `SELECT ?u WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?u } } LIMIT 1`,
-        { source: 'agent.assertionFinalize.reservedUal' },
-      );
-      const stampedReservedUal =
-        reservedUalRes.type === 'bindings' && reservedUalRes.bindings[0]?.['u'] !== undefined
-          ? String(reservedUalRes.bindings[0]['u']).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim()
-          : undefined;
-      // did:dkg:<chainId>/<addrLower>/<number> — the second path segment is the
-      // original author. A pre-binding seal may lack `dkg:reservedUal`; only then
-      // do we fall back to the current author (no recorded original to preserve).
-      const originalAuthor = stampedReservedUal?.split('/')[1];
-      if (originalAuthor !== undefined) {
-        if (ethers.getAddress(originalAuthor) !== ethers.getAddress(authorAddress)) {
-          throw new Error(
-            `assertionFinalize: cannot change authorship of already-stamped lifecycle "${name}" — ` +
-              `the stable kaId number ${stampedNumber} was reserved in author ` +
-              `${ethers.getAddress(originalAuthor)}'s namespace, but this finalize attributes the ` +
-              `assertion to ${ethers.getAddress(authorAddress)}. Repacking the number under a new ` +
-              `author would target a different KA than the lifecycle (and on-chain mint) points at ` +
-              `and be rejected on mint with KaIdNamespaceMismatch. Discard and re-create under the ` +
-              `new author to allocate a fresh slot, or finalize as the original author (OT-RFC-43 §F2).`,
-          );
-        }
-        // Author unchanged — pack with the preserved original author bits.
-        reservedKaId = packReservedKaId(originalAuthor, stampedNumber);
-      } else {
-        reservedKaId = packReservedKaId(authorAddress, stampedNumber);
-      }
-    } else if (this.kaNumberAllocator) {
-      const key = authorAddress.toLowerCase();
-      if (!this.reconciledKaAuthors.has(key)) {
-        let chainMax = -1n;
-        if (typeof this.chain.getMaxKaNumberForAuthor === 'function') {
-          try {
-            // Retry transient RPC failures (429/timeout/5xx) on the floor read
-            // so a rate-limited public RPC doesn't hard-fail finalize.
-            chainMax = await readMaxKaNumberWithRetry(this.chain.getMaxKaNumberForAuthor.bind(this.chain), authorAddress);
-          } catch (err) {
-            // #1116 (round 11) — CAPABILITY GAP (the chain read to reconcile the
-            // KA-number floor failed — a transient/RPC capability problem, not bad input).
-            // PR #1319 review: tag the transient/deterministic verdict so the daemon
-            // HTTP layer (respondIfReconcileUnavailable) only 503s a genuinely
-            // retryable failure — a deterministic revert falls through to its normal mapping.
-            throw Object.assign(
-              new Error(
-                `OT-RFC-43 A2: failed to reconcile KA-number floor for author ${authorAddress} at finalize: ` +
-                  (err instanceof Error ? err.message : String(err)),
-              ),
-              { code: SEAL_CAPABILITY_GAP_CODE, retryable: isTransientChainError(err) },
-            );
-          }
-        }
-        if (chainMax >= 0n) {
-          // Pass the bigint straight through (PR #976 F6) — `Number()` would lose precision past 2^53.
-          this.kaNumberAllocator.reconcile(authorAddress, chainMax);
-        }
-        this.kaNumberAllocator.markReconciled();
-        this.reconciledKaAuthors.add(key);
-      }
-      freshNumber = BigInt(this.kaNumberAllocator.allocate(authorAddress).number);
-      reservedKaId = packReservedKaId(authorAddress, freshNumber);
-    } else {
-      // OT-RFC-43 §F2 — no pre-signed slot, no previously-stamped kaId, and no
-      // kaNumberAllocator configured on this daemon. We cannot mint a valid
-      // reserved kaId: the packed id must be (uint160(author) << 96) | number,
-      // so a 0n placeholder is NOT in author ${authorAddress}'s namespace and the
-      // on-chain mint rejects it with KaIdNamespaceMismatch — the seal would be
-      // signed and persisted but permanently unpublishable. Fail fast rather than
-      // bind an unusable placeholder into the AuthorAttestation digest.
-      // #1116 (round 11) — CAPABILITY GAP (no kaNumberAllocator configured on this
-      // daemon — a node-config capability gap, resolvable by configuring one or
-      // supplying a preSigned slot; not a bad-input/validation error).
-      throw Object.assign(
-        new Error(
-          `assertionFinalize: cannot reserve a kaId for author ${authorAddress} — ` +
-            `no preSignedAuthorAttestation (which would carry its own slot) and no ` +
-            `kaNumberAllocator is configured on this daemon (OT-RFC-43 §F2). The packed ` +
-            `kaId must be (uint160(author) << 96) | number; a 0n placeholder is rejected ` +
-            `on-chain (KaIdNamespaceMismatch), leaving the seal unpublishable. Configure a ` +
-            `KaNumberAllocator on the agent (daemon lifecycle) or supply a ` +
-            `preSignedAuthorAttestation whose reservedKaId lives in the author's namespace.`,
-        ),
-        { code: SEAL_CAPABILITY_GAP_CODE },
-      );
-    }
-
-    // GH#2958 — a draft of a PUBLISHED KA is numbered from the confirmed record `update()` will
-    // validate, not from the lifecycle counter. That counter is "last FINALIZED": it only ever
-    // grows, so every finalized update that is abandoned before it is published (superseded,
-    // discarded, replaced by pull-from) would push the next draft one number too high, past
-    // what `update()`, the publisher and the chain accept, and the KA could never be updated
-    // again. An abandoned draft instead shares its number with its successor, as an
-    // unpublished mint already does. The lifecycle counter above stays the fallback for a
-    // record that cannot answer. The number is not signed (the attestation binds merkleRoot,
-    // author, reservedKaId and scheme), so deriving it here changes no signature.
-    if (hasConfirmedVm) {
-      assertionVersion = await this._nextUpdateVersionOrUndefined(
-        reservedKaId,
-        contextGraphId,
-        opts?.subGraphName,
-      ) ?? assertionVersion;
-    }
-
-    // 8. Build EIP-712 typed data (binds reservedKaId — OT-RFC-43 §F2).
-    const typedData = buildAuthorAttestationTypedData({
-      chainId,
-      kav10Address,
-      merkleRoot,
-      authorAddress,
-      reservedKaId,
-      schemeVersion,
-    });
-    const eip712Digest = ethers.TypedDataEncoder.hash(
-      typedData.domain,
-      typedData.types,
-      typedData.message,
-    );
-
-    // 9. Produce the compact signature (r, vs).
-    let r: Uint8Array;
-    let vs: Uint8Array;
-    if (preSigned) {
-      const sig = ethers.Signature.from({
-        r: ethers.hexlify(preSigned.signature.r),
-        yParityAndS: ethers.hexlify(preSigned.signature.vs),
-      });
-      // Off-chain seal-integrity preflight: only EOAs can be verified
-      // by ECDSA recover-and-compare. For smart-contract authors
-      // (incl. EIP-7702-delegated EOAs), the on-chain
-      // `_verifyAuthorAttestation` dispatches to
-      // `IERC1271.isValidSignature` and is the authoritative check —
-      // the off-chain ECDSA recover would (correctly) report a
-      // mismatch since 1271 wallets typically sign through an owner
-      // EOA that's distinct from the wallet contract address. Skip the
-      // off-chain check for contract authors so the seal-build pipeline
-      // doesn't reject 1271 publishes that the chain would accept.
-      const isContractAuthor =
-        typeof this.chain.hasContractCode === 'function'
-          ? await this.chain.hasContractCode(authorAddress)
-          : false;
-      if (!isContractAuthor) {
-        const recovered = ethers.recoverAddress(eip712Digest, sig);
-        if (recovered.toLowerCase() !== authorAddress.toLowerCase()) {
-          throw new Error(
-            `assertionFinalize: preSignedAuthorAttestation signer mismatch — ` +
-              `signature recovers ${recovered} but address claims ${authorAddress}.`,
-          );
-        }
-      }
-      r = preSigned.signature.r;
-      vs = preSigned.signature.vs;
-    } else if (opts?.authorSignTypedData != null) {
-      const compact = await opts.authorSignTypedData(typedData);
-      const sig = ethers.Signature.from({
-        r: ethers.hexlify(compact.r),
-        yParityAndS: ethers.hexlify(compact.vs),
-      });
-      const isContractAuthor =
-        typeof this.chain.hasContractCode === 'function'
-          ? await this.chain.hasContractCode(authorAddress)
-          : false;
-      if (!isContractAuthor) {
-        const recovered = ethers.recoverAddress(eip712Digest, sig);
-        if (recovered.toLowerCase() !== authorAddress.toLowerCase()) {
-          throw new Error(
-            `assertionFinalize: authorSignTypedData signer mismatch — ` +
-              `signature recovers ${recovered} but address claims ${authorAddress}.`,
-          );
-        }
-      }
-      r = ethers.getBytes(sig.r);
-      vs = ethers.getBytes(sig.yParityAndS);
-    } else if (signerPrivateKey) {
-      const wallet = new ethers.Wallet(
-        signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
-      );
-      const sigHex = await wallet.signTypedData(
-        typedData.domain,
-        typedData.types,
-        typedData.message,
-      );
-      const sig = ethers.Signature.from(sigHex);
-      r = ethers.getBytes(sig.r);
-      vs = ethers.getBytes(sig.yParityAndS);
-    } else {
-      // Publisher fallback: ask the publisher to sign with its own
-      // wallet. Returns the compact (r, vs) form.
-      const compact = await this.publisher.signAuthorAttestationAsPublisher(typedData);
-      r = compact.r;
-      vs = compact.vs;
-    }
-
-    // 10. Persist the seal as `_meta` triples.
-    const finalizedAtIso = new Date().toISOString();
-    const kaNumber = reservedKaId & ((1n << 96n) - 1n);
-    const kaUal = `did:dkg:${this.chain.chainId}/${authorAddress.toLowerCase()}/${kaNumber}`;
-    const sealQuads = buildAssertionSealQuads({
-      assertionUri,
-      metaGraph,
-      merkleRoot,
-      authorAddress,
-      authorAttestationR: r,
-      authorAttestationVS: vs,
-      authorSchemeVersion: schemeVersion,
-      chainId,
-      kav10Address,
-      reservedKaId,
-      finalizedAtIso,
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal,
-      assertionVersion,
-      publicTripleCount,
-      privateMerkleRoot,
-      privateTripleCount,
-    });
-
-    // ── OT-RFC-43 A2 — stamp the per-author kaId + reservedUal + WM pointer ──
-    // The number was resolved/allocated ABOVE (single allocation, before the
-    // EIP-712 sign — OT-RFC-43 §F2). Here we only PERSIST it:
-    //   dkg:kaId          = number (xsd:integer)
-    //   dkg:reservedUal   = did:dkg:<chainId>/<agentAddrLower>/<number>
-    //   dkg:wmCurrentAssertion = the seal merkle hex (bare, no 0x)
-    // publishFromFinalizedAssertion READS dkg:kaId off `_meta` and threads it
-    // down so the publisher REUSES it. freshNumber is set only for a fresh create
-    // (or a not-yet-stamped preSigned slot); an update of a previously-stamped
-    // name keeps its STABLE kaId — no re-stamp.
-    if (freshNumber !== undefined) {
-      sealQuads.push({
-        subject: lifecycleUri,
-        predicate: KA_ID_PRED,
-        object: `"${freshNumber}"^^${xsdInteger}`,
-        graph: metaGraph,
-      });
-      sealQuads.push({
-        subject: lifecycleUri,
-        predicate: RESERVED_UAL_PRED,
-        object: `"${kaUal}"`,
-        graph: metaGraph,
-      });
-    }
-
-    // Crash-safe commit order:
-    //   1. atomically materialize the complete canonical target;
-    //   2. persist the seal (and a fresh identity, when needed);
-    //   3. repair lifecycle pointers/version;
-    //   4. remove obsolete source graphs.
-    // Any interruption leaves either the original source or the canonical
-    // target plus enough durable seal data for the idempotent branch above to
-    // finish the transition on retry.
-    const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
-      contextGraphId,
-      kaUal,
-      assertionVersion,
-      normalizedKnowledgeAssetQuads,
-      opts?.subGraphName,
-    );
-    const canonicalScope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
-    await privateStore.replaceKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      canonicalScope,
-      normalizedPrivateKnowledgeAssetQuads,
-      opts?.subGraphName,
-    );
-    await this.store.insert(sealQuads);
-    await stampFinalizedLifecycle(assertionVersion, merkleRoot);
-    await this.publisher.cleanupCanonicalWorkingMemorySources(
-      contextGraphId,
-      name,
-      agentAddress,
-      canonicalWmGraphUri,
-      [sourceWmGraphUri],
-      opts?.subGraphName,
-    );
-    await privateStore.deleteKnowledgeAssetPrivateDraft(
-      contextGraphId,
-      agentAddress,
-      name,
-      opts?.subGraphName,
-    );
-
-    return {
-      assertionUri,
-      merkleRoot,
-      authorAddress,
-      reservedKaId,
-      rootEntities: [],
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal,
-      assertionVersion: assertionVersion.toString(),
-      publicTripleCount,
-      ...(privateMerkleRoot !== undefined ? { privateMerkleRoot } : {}),
-      privateTripleCount,
-      schemeVersion,
-      chainId,
-      kav10Address,
-      eip712Digest,
-    };
+    opts?: AssertionFinalizeOptions,
+  ): Promise<AssertionFinalizeResult> {
+    return withDraftArtifactReferences(this.store, () => withKeyedLocks(this.publisher.writeLocks, [
+      assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, opts?.subGraphName),
+    ], () => finalizeAssertionUnlocked.call(this, contextGraphId, name, agentAddress, opts)));
   }
 
   /**
@@ -6124,9 +5233,10 @@ export class PublishMethods extends DKGAgentBase {
       sharedMemoryScope,
     );
     const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
-    const scopedPrivateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      graphScope,
+    if (seal.privateTripleCount === undefined) throw new Error('Graph-scoped assertion seal has no private triple count');
+    const scopedPrivateQuads = await privateStore.getSealedKnowledgeAssetPrivateTriples(
+      contextGraphId, graphScope,
+      { privateTripleCount: seal.privateTripleCount, privateMerkleRoot: seal.privateMerkleRoot },
       opts?.subGraphName,
     );
     if (scopedSwmQuads.length === 0 && scopedPrivateQuads.length === 0) {
@@ -7229,4 +6339,813 @@ export class PublishMethods extends DKGAgentBase {
     return identityId;
   }
 
+}
+
+/** Finalization implementation; only the guarded public entry point can call it. */
+async function finalizeAssertionUnlocked(this: DKGAgent,
+  contextGraphId: string,
+  name: string,
+  agentAddress: string,
+  opts?: AssertionFinalizeOptions,
+): Promise<AssertionFinalizeResult> {
+  if (
+    opts?.preSignedAuthorAttestation != null
+    && (opts.authorAgentAddress != null || opts.authorSignTypedData != null)
+  ) {
+    throw new Error(
+      'assertionFinalize: preSignedAuthorAttestation is mutually exclusive with authorAgentAddress / authorSignTypedData',
+    );
+  }
+  if (opts?.authorSignTypedData != null && opts.authorAgentAddress == null) {
+    throw new Error('assertionFinalize: authorSignTypedData requires authorAgentAddress');
+  }
+
+  // 1. Resolve URIs.
+  const assertionUri = contextGraphAssertionUri(
+    contextGraphId,
+    agentAddress,
+    name,
+    opts?.subGraphName,
+  );
+  const metaGraph = contextGraphMetaUri(contextGraphId);
+  const lifecycleUri = assertionLifecycleUri(
+    contextGraphId,
+    agentAddress,
+    name,
+    opts?.subGraphName,
+  );
+  const sourceWmGraphUri = await this.publisher.wmGraphUri(
+    contextGraphId,
+    agentAddress,
+    name,
+    opts?.subGraphName,
+  );
+  const xsdInteger = '<http://www.w3.org/2001/XMLSchema#integer>';
+  const stampFinalizedLifecycle = async (
+    assertionVersion: string | bigint,
+    finalizedMerkleRoot: Uint8Array,
+  ): Promise<void> => {
+    // Keep the v2 mutation gate present throughout recovery. The assertion
+    // version may need replacement, but a failure after its delete is safe:
+    // the durable seal is written first and an idempotent finalize retry
+    // repairs this row before returning.
+    await deleteByPatternWithoutCount(this.store, {
+      graph: metaGraph,
+      subject: lifecycleUri,
+      predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+    });
+    await this.store.insert([
+      {
+        subject: lifecycleUri,
+        predicate: ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION,
+        object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^${xsdInteger}`,
+        graph: metaGraph,
+      },
+      {
+        subject: lifecycleUri,
+        predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+        object: `"${assertionVersion}"^^${xsdInteger}`,
+        graph: metaGraph,
+      },
+    ]);
+    const merkleHexBare = ethers.hexlify(finalizedMerkleRoot).slice(2);
+    await this._stampPointerIfDivergedFromVm(
+      lifecycleUri,
+      WM_CURRENT_ASSERTION_PRED,
+      merkleHexBare,
+      metaGraph,
+    );
+  };
+
+  // Read any durable seal before loading the private partition. A completed
+  // finalize removes the mutable private draft, so an idempotent retry must
+  // recover that partition from its archived private commitment.
+  const existingMetaResult = await this.store.query(
+    `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+    { source: 'agent.assertionFinalize.existingSeal' },
+  );
+  const existingMetaQuads =
+    existingMetaResult.type === 'quads' ? existingMetaResult.quads : [];
+  let existingSeal: AssertionSeal | undefined;
+  try {
+    existingSeal = parseAssertionSealQuads(existingMetaQuads, assertionUri);
+  } catch (err) {
+    throw new Error(
+      `assertionFinalize: existing _meta seal for <${assertionUri}> is corrupt: ` +
+        (err instanceof Error ? err.message : String(err)),
+    );
+  }
+  const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
+
+  // 2. Pull the assertion's quads. Refuse to finalize an empty
+  //    assertion — there's nothing to commit. The public DCAT catalog entry
+  //    for a private CG is injected ONLY AFTER this validation (below), so a
+  //    catalog-only assertion (zero user-authored quads) is correctly
+  //    rejected here rather than slipping through on the catalog quad alone.
+  const rawQuads = await this.publisher.assertionQuery(
+    contextGraphId,
+    name,
+    agentAddress,
+    opts?.subGraphName,
+  );
+  let rawPrivateQuads = await this.publisher.assertionQueryPrivate(
+    contextGraphId,
+    name,
+    agentAddress,
+    opts?.subGraphName,
+  );
+  if (
+    rawPrivateQuads.length === 0
+    && existingSeal?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+    && existingSeal.kaUal !== undefined
+    && existingSeal.assertionVersion !== undefined
+    && (existingSeal.privateTripleCount ?? 0) > 0
+  ) {
+    rawPrivateQuads = await privateStore.getSealedKnowledgeAssetPrivateTriples(
+      contextGraphId,
+      createGraphKnowledgeAssetScope(existingSeal.kaUal, existingSeal.assertionVersion),
+      { privateTripleCount: existingSeal.privateTripleCount ?? 0, privateMerkleRoot: existingSeal.privateMerkleRoot },
+      opts?.subGraphName,
+    );
+  }
+  if (rawQuads.length === 0 && rawPrivateQuads.length === 0) {
+    throw Object.assign(
+      new Error(
+        `Cannot finalize assertion <${assertionUri}>: it has no quads. ` +
+          `Write at least one quad with /api/knowledge-assets/${name}/wm/write before finalizing.`,
+      ),
+      { code: ASSERTION_EMPTY_CODE },
+    );
+  }
+
+  // 2b. Apply the same `isReservedSubject` filter that
+  //     `assertionPromote` runs at promote time. WM-only bookkeeping
+  //     rows in the `urn:dkg:file:` / `urn:dkg:extraction:` namespaces
+  //     (file descriptors, ExtractionProvenance blocks — see
+  //     `19_MARKDOWN_CONTENT_TYPE.md §10.2`) are stripped before the
+  //     assertion crosses the SWM boundary, so the seal MUST hash
+  //     the post-strip set or it commits to a root the publish path
+  //     can never recompute. (Round 4 review §8 — "assertionFinalize
+  //     hashes WM-only urn:dkg:file: rows".)
+  const userQuads = rawQuads.filter((q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
+  const userPrivateQuads = rawPrivateQuads.filter(
+    (q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q),
+  );
+  if (userQuads.length === 0 && userPrivateQuads.length === 0) {
+    throw Object.assign(
+      new Error(
+        `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
+          `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
+          `which is filtered out before SWM. Add at least one user-authored ` +
+          `public or private quad on a non-reserved subject before finalizing.`,
+      ),
+      { code: ASSERTION_EMPTY_CODE },
+    );
+  }
+
+  // Finalization is the first irreversible boundary: canonicalization below
+  // intentionally reduces the submitted RDF dataset to its atomic triple set.
+  // Reject payload-level named graphs before that reduction, otherwise equal
+  // SPOs in different graphs could collapse and the later promote guard would
+  // only see the already-flattened canonical WM graph. Check both partitions;
+  // private draft quads preserve their graph terms too.
+  assertNoKnowledgeAssetPayloadNamedGraphs(userQuads, userPrivateQuads);
+
+  // The V2 seal commits exactly the canonical submitted RDF. Private-CG
+  // catalog proof material is generated later at the publish boundary and
+  // committed through the independent catalogRoot/catalogLeafCount fields;
+  // it must never enter WM, this seal, or the per-KA graph.
+  const quads = [...userQuads];
+
+  // 3. Canonicalize the COMPLETE RDF set once at KA scope. Subjects are data,
+  // not partitions: 1,000 distinct subjects still produce one asset, one
+  // Merkle tree, and (downstream) one graph operation. The linear skolemizer
+  // also permits a valid all-blank-node component, which the root-based model
+  // could not represent.
+  const normalizedParts = await skolemizeKnowledgeAssetParts(quads, userPrivateQuads, {
+    // The first finalize sees user data already checked at assertionWrite;
+    // an interrupted retry can see our own canonical WM target. Accept only
+    // exact c14nN terms here, never arbitrary names in the reserved prefix.
+    allowCanonicalSkolemTerms: true,
+  });
+  const normalizedKnowledgeAssetQuads = normalizedParts.publicQuads;
+  const normalizedPrivateKnowledgeAssetQuads = normalizedParts.privateQuads;
+  const privateMerkleRoot = computePrivateRoot(normalizedPrivateKnowledgeAssetQuads);
+  const privateTripleCount = normalizedPrivateKnowledgeAssetQuads.length;
+  const merkleRoot = computeFlatKCRoot(
+    normalizedKnowledgeAssetQuads,
+    privateMerkleRoot ? [privateMerkleRoot] : [],
+  );
+  const publicTripleCount = normalizedKnowledgeAssetQuads.length;
+  const callerExpectedMerkleRoot = opts?.preSignedAuthorAttestation?.expectedMerkleRoot;
+  if (
+    callerExpectedMerkleRoot !== undefined
+    && (
+      callerExpectedMerkleRoot.length !== merkleRoot.length
+      || !callerExpectedMerkleRoot.every((byte, index) => byte === merkleRoot[index])
+    )
+  ) {
+    throw new Error(
+      `assertionFinalize: preSignedAuthorAttestation expectedMerkleRoot mismatch — ` +
+        `caller=${ethers.hexlify(callerExpectedMerkleRoot)}, ` +
+        `canonical=${ethers.hexlify(merkleRoot)}.`,
+    );
+  }
+
+  // 4. Idempotency: if a seal already exists for this assertion,
+  //    return it as-is when the merkleRoot matches. Mismatch means
+  //    the assertion was mutated since the previous finalize —
+  //    refuse to overwrite silently.
+  if (existingSeal) {
+    if (existingSeal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    if (
+      !existingSeal.kaUal ||
+      !existingSeal.assertionVersion ||
+      existingSeal.publicTripleCount === undefined ||
+      existingSeal.privateTripleCount === undefined
+    ) {
+      throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
+    }
+    const existingPrivateRoot = existingSeal.privateMerkleRoot;
+    const privateRootMatches =
+      existingPrivateRoot === undefined
+        ? privateMerkleRoot === undefined
+        : privateMerkleRoot !== undefined
+          && existingPrivateRoot.length === privateMerkleRoot.length
+          && existingPrivateRoot.every((byte, index) => byte === privateMerkleRoot[index]);
+    if (
+      existingSeal.publicTripleCount !== publicTripleCount
+      || existingSeal.privateTripleCount !== privateTripleCount
+      || !privateRootMatches
+    ) {
+      throw new Error(
+        `assertionFinalize: assertion <${assertionUri}> private/public partition differs from its existing seal`,
+      );
+    }
+    if (
+      existingSeal.merkleRoot.length !== merkleRoot.length ||
+      !existingSeal.merkleRoot.every((b, i) => b === merkleRoot[i])
+    ) {
+      throw new Error(
+        `assertionFinalize: assertion <${assertionUri}> is already finalized with a ` +
+          `different merkleRoot (existing=${ethers.hexlify(existingSeal.merkleRoot)}, ` +
+          `current=${ethers.hexlify(merkleRoot)}). In-place mutation of a finalized assertion ` +
+          `breaks the author signature and is rejected. To edit already-shared/published ` +
+          `content, start a sanctioned edit loop with POST /api/knowledge-assets/{name}/wm/pull-from ` +
+          `(which re-opens a fresh draft and clears the stale seal), or discard and re-create the assertion.`,
+      );
+    }
+    // Seal exists and matches — return the existing record. The rebuilt digest
+    // must bind the SAME reservedKaId the original signature committed to
+    // (§F2): prefer the value persisted on the seal; for a seal that predates
+    // the binding, repack from the lifecycle-URN kaId stamp.
+    let reReservedKaId = existingSeal.reservedKaId;
+    if (reReservedKaId === undefined) {
+      const reKaIdRes = await this.store.query(
+        `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName)}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
+        { source: 'agent.assertionFinalize.reservedKaId' },
+      );
+      const reNum =
+        reKaIdRes.type === 'bindings' && reKaIdRes.bindings[0]?.['n'] !== undefined
+          ? BigInt(String(reKaIdRes.bindings[0]['n']).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim())
+          : 0n;
+      reReservedKaId = (BigInt(ethers.getAddress(existingSeal.authorAddress)) << 96n) | reNum;
+    }
+    const typedData = buildAuthorAttestationTypedData({
+      chainId: existingSeal.chainId,
+      kav10Address: existingSeal.kav10Address,
+      merkleRoot: existingSeal.merkleRoot,
+      authorAddress: existingSeal.authorAddress,
+      reservedKaId: reReservedKaId,
+      schemeVersion: existingSeal.authorSchemeVersion,
+    });
+    // A prior attempt may have stopped after the target swap, after the seal,
+    // or before source cleanup. Re-materialize and repair in that order so an
+    // idempotent finalize always converges to one exact canonical WM graph.
+    const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
+      contextGraphId,
+      existingSeal.kaUal,
+      existingSeal.assertionVersion,
+      normalizedKnowledgeAssetQuads,
+      opts?.subGraphName,
+    );
+    const existingScope = createGraphKnowledgeAssetScope(
+      existingSeal.kaUal,
+      existingSeal.assertionVersion,
+    );
+    await privateStore.replaceKnowledgeAssetPrivateTriples(
+      contextGraphId,
+      existingScope,
+      normalizedPrivateKnowledgeAssetQuads,
+      opts?.subGraphName,
+      existingSeal.privateMerkleRoot ? ethers.hexlify(existingSeal.privateMerkleRoot) : undefined,
+    );
+    await stampFinalizedLifecycle(
+      existingSeal.assertionVersion,
+      existingSeal.merkleRoot,
+    );
+    await this.publisher.cleanupCanonicalWorkingMemorySources(
+      contextGraphId,
+      name,
+      agentAddress,
+      canonicalWmGraphUri,
+      [sourceWmGraphUri],
+      opts?.subGraphName,
+    );
+    await privateStore.deleteKnowledgeAssetPrivateDraft(
+      contextGraphId,
+      agentAddress,
+      name,
+      opts?.subGraphName,
+    );
+    return {
+      assertionUri,
+      merkleRoot: existingSeal.merkleRoot,
+      authorAddress: existingSeal.authorAddress,
+      reservedKaId: reReservedKaId,
+      rootEntities: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: existingSeal.kaUal,
+      assertionVersion: existingSeal.assertionVersion,
+      publicTripleCount: existingSeal.publicTripleCount,
+      ...(existingSeal.privateMerkleRoot !== undefined
+        ? { privateMerkleRoot: existingSeal.privateMerkleRoot }
+        : {}),
+      privateTripleCount: existingSeal.privateTripleCount,
+      schemeVersion: existingSeal.authorSchemeVersion,
+      chainId: existingSeal.chainId,
+      kav10Address: existingSeal.kav10Address,
+      eip712Digest: ethers.TypedDataEncoder.hash(
+        typedData.domain,
+        typedData.types,
+        typedData.message,
+      ),
+    };
+  }
+
+  // 5. Resolve chain identity. Finalize commits to a specific
+  //    `(chainId, kav10Address)` pair — both must be available.
+  if (
+    typeof this.chain.getEvmChainId !== 'function' ||
+    typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function'
+  ) {
+    // #1116 (round 11) — CAPABILITY GAP (non-V10 chain adapter). Tagged with a
+    // stable code so seal-before-share can distinguish a recoverable capability
+    // gap (→ UNSEALED_SHARE_BLOCKED) from a validation
+    // error (which must propagate). See SEAL_CAPABILITY_GAP_CODE.
+    throw Object.assign(
+      new Error(
+        'assertionFinalize requires a V10-capable chain adapter that exposes ' +
+          'getEvmChainId() and getKnowledgeAssetsLifecycleAddress(); the current adapter does not.',
+      ),
+      { code: SEAL_CAPABILITY_GAP_CODE },
+    );
+  }
+  const chainId = await this.chain.getEvmChainId();
+  const kav10Address = await this.chain.getKnowledgeAssetsLifecycleAddress();
+
+  // 6. (removed, #1116) The seal is now context-graph-independent: the
+  //    EIP-712 AuthorAttestation no longer binds the on-chain CG id, so
+  //    finalize works on an UNREGISTERED CG and performs no chain write /
+  //    registration. CG binding happens at publish time (the contract's
+  //    PublishParams.contextGraphId + the separate ACK digest).
+
+  // 7. Resolve author. preSigned > custodial agent > publisher fallback.
+  const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+  let authorAddress: string;
+  let signerPrivateKey: string | undefined;
+  let preSigned: PreSignedAuthorAttestation | undefined;
+  if (opts?.preSignedAuthorAttestation != null) {
+    preSigned = opts.preSignedAuthorAttestation;
+    authorAddress = preSigned.address;
+  } else if (opts?.authorSignTypedData != null) {
+    // Self-sovereign callback: the daemon builds the exact typed data after
+    // canonicalization and allocation, while the caller retains its key.
+    authorAddress = ethers.getAddress(opts.authorAgentAddress!);
+  } else if (opts?.authorAgentAddress != null) {
+    const mode = this.getLocalAgentMode(opts.authorAgentAddress);
+    if (mode === undefined) {
+      throw new Error(
+        `assertionFinalize: authorAgentAddress ${opts.authorAgentAddress} is not a registered local agent on this node`,
+      );
+    }
+    if (mode === 'self-sovereign') {
+      throw new Error(
+        `assertionFinalize: agent ${opts.authorAgentAddress} is registered as self-sovereign — ` +
+          `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
+      );
+    }
+    signerPrivateKey = this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
+    if (!signerPrivateKey) {
+      // #1116 (round 11) — CAPABILITY GAP (no local signing key for this agent).
+      throw Object.assign(
+        new Error(
+          `assertionFinalize: custodial agent ${opts.authorAgentAddress} has no private key on file`,
+        ),
+        { code: SEAL_CAPABILITY_GAP_CODE },
+      );
+    }
+    authorAddress = opts.authorAgentAddress;
+  } else {
+    // Publisher-wallet fallback: use the daemon's own publisher EOA
+    // as the author. This preserves Phase 4 mode (a) — node admin
+    // signs on its own behalf when no agent attribution is supplied.
+    const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
+    if (!fallbackAddress) {
+      // #1116 (round 11) — CAPABILITY GAP (no publisher signer configured).
+      throw Object.assign(
+        new Error(
+          'assertionFinalize: no agent override supplied and no publisher signer is available. ' +
+            'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher private key on the daemon.',
+        ),
+        { code: SEAL_CAPABILITY_GAP_CODE },
+      );
+    }
+    authorAddress = fallbackAddress;
+  }
+
+  // ── OT-RFC-43 §F2 — resolve the reserved kaId BEFORE signing ──
+  // The AuthorAttestation digest now binds reservedKaId, so the packed id must
+  // be known before buildAuthorAttestationTypedData. This is the SINGLE
+  // allocation point (publishFromFinalizedAssertion REUSES it). Rules:
+  //   • preSigned author → honour the slot they signed over (no allocation);
+  //   • update of a previously-stamped name → reuse the stable existing number;
+  //   • fresh create with an allocator → reconcile-once then allocate ONE number;
+  //   • no allocator → 0n (non-Option-1; the on-chain namespace check rejects).
+  const lifecycleScopeResult = await this.store.query(
+    `SELECT ?scope ?version ?vm WHERE { GRAPH <${metaGraph}> {
+      OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION}> ?scope }
+      OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?version }
+      OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
+    } } LIMIT 1`,
+    { source: 'agent.assertionFinalize.lifecycleScope' },
+  );
+  const lifecycleScopeRow = lifecycleScopeResult.type === 'bindings'
+    ? lifecycleScopeResult.bindings[0]
+    : undefined;
+  const stripLifecycleLiteral = (value: unknown): string | undefined => {
+    if (value === undefined) return undefined;
+    return String(value).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim();
+  };
+  const persistedScopeVersion = stripLifecycleLiteral(lifecycleScopeRow?.['scope']);
+  const persistedAssertionVersion = stripLifecycleLiteral(lifecycleScopeRow?.['version']);
+  const hasConfirmedVm = lifecycleScopeRow?.['vm'] !== undefined;
+  if (persistedScopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
+    throw new LegacyKnowledgeAssetReadOnlyError();
+  }
+  const existingKaIdRes = await this.store.query(
+    `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
+    { source: 'agent.assertionFinalize.existingKaId' },
+  );
+  const hasExistingKaId =
+    existingKaIdRes.type === 'bindings' && existingKaIdRes.bindings.length > 0;
+  const packReservedKaId = (addr: string, num: bigint): bigint =>
+    (BigInt(ethers.getAddress(addr)) << 96n) | num;
+  const parseStampedNumber = (raw: unknown): bigint =>
+    BigInt(String(raw).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim());
+  let reservedKaId: bigint;
+  // freshNumber is set ONLY when a NEW number must be stamped on the lifecycle
+  // URN (fresh create, or a preSigned author whose slot isn't yet stamped).
+  let freshNumber: bigint | undefined;
+  if (preSigned) {
+    if (hasExistingKaId) {
+      // The lifecycle already owns a stable slot. A re-finalize / update must
+      // commit to THAT id, not whatever the caller signed over — otherwise the
+      // persisted seal + on-chain mint (publishFromFinalizedAssertion reuses the
+      // stamped `dkg:kaId`) would name a different KA than `_meta` points at.
+      // The signature binds reservedKaId (§F2), so a caller who signed a
+      // different number is rejected rather than silently re-slotted.
+      const stampedKaId = packReservedKaId(
+        authorAddress,
+        parseStampedNumber(existingKaIdRes.bindings[0]['n']),
+      );
+      if (preSigned.reservedKaId !== stampedKaId) {
+        throw new Error(
+          `assertionFinalize: preSignedAuthorAttestation reservedKaId mismatch — ` +
+            `caller signed over ${preSigned.reservedKaId} but lifecycle "${name}" is already ` +
+            `stamped at kaId ${stampedKaId}. A re-finalize/update must attest the existing ` +
+            `stable slot (OT-RFC-43 §F2).`,
+        );
+      }
+      reservedKaId = stampedKaId;
+      freshNumber = undefined;
+    } else {
+      // Fresh slot: the caller-signed id MUST live in the author's own
+      // namespace (high 160 bits == author). Otherwise we'd persist a local
+      // seal + `_meta` for an id the on-chain mint later rejects with
+      // KaIdNamespaceMismatch — sealed locally, unpublishable. Reject here.
+      if ((preSigned.reservedKaId >> 96n) !== BigInt(ethers.getAddress(authorAddress))) {
+        throw new Error(
+          `assertionFinalize: preSignedAuthorAttestation reservedKaId namespace mismatch — ` +
+            `id ${preSigned.reservedKaId} is not in author ${ethers.getAddress(authorAddress)}'s ` +
+            `namespace. The packed kaId must be (uint160(author) << 96) | number (OT-RFC-43 §F2).`,
+        );
+      }
+      reservedKaId = preSigned.reservedKaId;
+      freshNumber = reservedKaId & ((1n << 96n) - 1n);
+    }
+  } else if (hasExistingKaId) {
+    // The lifecycle already owns a stable slot. The stamped `dkg:kaId` number
+    // was allocated in the ORIGINAL author's namespace — its packed id is
+    // (uint160(originalAuthor) << 96) | number, recorded authoritatively in the
+    // co-stamped `dkg:reservedUal` (did:dkg:<chainId>/<authorAddrLower>/<number>).
+    // Repacking the SAME number with a CHANGED authorAddress would name a
+    // different KA than `_meta`/the lifecycle points at, and the on-chain mint
+    // (publishFromFinalizedAssertion reuses the stamped `dkg:kaId`) would reject
+    // it with KaIdNamespaceMismatch — sealed locally, unpublishable. Preserve the
+    // original author bits and reject author changes on an already-stamped name
+    // (OT-RFC-43 §F2).
+    const stampedNumber = parseStampedNumber(existingKaIdRes.bindings[0]['n']);
+    const reservedUalRes = await this.store.query(
+      `SELECT ?u WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?u } } LIMIT 1`,
+      { source: 'agent.assertionFinalize.reservedUal' },
+    );
+    const stampedReservedUal =
+      reservedUalRes.type === 'bindings' && reservedUalRes.bindings[0]?.['u'] !== undefined
+        ? String(reservedUalRes.bindings[0]['u']).replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim()
+        : undefined;
+    // did:dkg:<chainId>/<addrLower>/<number> — the second path segment is the
+    // original author. A pre-binding seal may lack `dkg:reservedUal`; only then
+    // do we fall back to the current author (no recorded original to preserve).
+    const originalAuthor = stampedReservedUal?.split('/')[1];
+    if (originalAuthor !== undefined) {
+      if (ethers.getAddress(originalAuthor) !== ethers.getAddress(authorAddress)) {
+        throw new Error(
+          `assertionFinalize: cannot change authorship of already-stamped lifecycle "${name}" — ` +
+            `the stable kaId number ${stampedNumber} was reserved in author ` +
+            `${ethers.getAddress(originalAuthor)}'s namespace, but this finalize attributes the ` +
+            `assertion to ${ethers.getAddress(authorAddress)}. Repacking the number under a new ` +
+            `author would target a different KA than the lifecycle (and on-chain mint) points at ` +
+            `and be rejected on mint with KaIdNamespaceMismatch. Discard and re-create under the ` +
+            `new author to allocate a fresh slot, or finalize as the original author (OT-RFC-43 §F2).`,
+        );
+      }
+      // Author unchanged — pack with the preserved original author bits.
+      reservedKaId = packReservedKaId(originalAuthor, stampedNumber);
+    } else {
+      reservedKaId = packReservedKaId(authorAddress, stampedNumber);
+    }
+  } else if (this.kaNumberAllocator) {
+    const key = authorAddress.toLowerCase();
+    if (!this.reconciledKaAuthors.has(key)) {
+      let chainMax = -1n;
+      if (typeof this.chain.getMaxKaNumberForAuthor === 'function') {
+        try {
+          // Retry transient RPC failures (429/timeout/5xx) on the floor read
+          // so a rate-limited public RPC doesn't hard-fail finalize.
+          chainMax = await readMaxKaNumberWithRetry(this.chain.getMaxKaNumberForAuthor.bind(this.chain), authorAddress);
+        } catch (err) {
+          // #1116 (round 11) — CAPABILITY GAP (the chain read to reconcile the
+          // KA-number floor failed — a transient/RPC capability problem, not bad input).
+          // PR #1319 review: tag the transient/deterministic verdict so the daemon
+          // HTTP layer (respondIfReconcileUnavailable) only 503s a genuinely
+          // retryable failure — a deterministic revert falls through to its normal mapping.
+          throw Object.assign(
+            new Error(
+              `OT-RFC-43 A2: failed to reconcile KA-number floor for author ${authorAddress} at finalize: ` +
+                (err instanceof Error ? err.message : String(err)),
+            ),
+            { code: SEAL_CAPABILITY_GAP_CODE, retryable: isTransientChainError(err) },
+          );
+        }
+      }
+      if (chainMax >= 0n) {
+        // Pass the bigint straight through (PR #976 F6) — `Number()` would lose precision past 2^53.
+        this.kaNumberAllocator.reconcile(authorAddress, chainMax);
+      }
+      this.kaNumberAllocator.markReconciled();
+      this.reconciledKaAuthors.add(key);
+    }
+    freshNumber = BigInt(this.kaNumberAllocator.allocate(authorAddress).number);
+    reservedKaId = packReservedKaId(authorAddress, freshNumber);
+  } else {
+    // OT-RFC-43 §F2 — no pre-signed slot, no previously-stamped kaId, and no
+    // kaNumberAllocator configured on this daemon. We cannot mint a valid
+    // reserved kaId: the packed id must be (uint160(author) << 96) | number,
+    // so a 0n placeholder is NOT in author ${authorAddress}'s namespace and the
+    // on-chain mint rejects it with KaIdNamespaceMismatch — the seal would be
+    // signed and persisted but permanently unpublishable. Fail fast rather than
+    // bind an unusable placeholder into the AuthorAttestation digest.
+    // #1116 (round 11) — CAPABILITY GAP (no kaNumberAllocator configured on this
+    // daemon — a node-config capability gap, resolvable by configuring one or
+    // supplying a preSigned slot; not a bad-input/validation error).
+    throw Object.assign(
+      new Error(
+        `assertionFinalize: cannot reserve a kaId for author ${authorAddress} — ` +
+          `no preSignedAuthorAttestation (which would carry its own slot) and no ` +
+          `kaNumberAllocator is configured on this daemon (OT-RFC-43 §F2). The packed ` +
+          `kaId must be (uint160(author) << 96) | number; a 0n placeholder is rejected ` +
+          `on-chain (KaIdNamespaceMismatch), leaving the seal unpublishable. Configure a ` +
+          `KaNumberAllocator on the agent (daemon lifecycle) or supply a ` +
+          `preSignedAuthorAttestation whose reservedKaId lives in the author's namespace.`,
+      ),
+      { code: SEAL_CAPABILITY_GAP_CODE },
+    );
+  }
+
+  const assertionVersion = await resolveFinalizedDraftVersion({
+    chain: this.chain,
+    kaUal: `did:dkg:${this.chain.chainId}/${authorAddress.toLowerCase()}/${reservedKaId & ((1n << 96n) - 1n)}`,
+    persistedVersion: persistedAssertionVersion,
+    vmPointerPresent: hasConfirmedVm,
+    readLocalNextVersion: () => this._nextUpdateVersionOrUndefined(reservedKaId, contextGraphId, opts?.subGraphName),
+  });
+
+  // 8. Build EIP-712 typed data (binds reservedKaId — OT-RFC-43 §F2).
+  const typedData = buildAuthorAttestationTypedData({
+    chainId,
+    kav10Address,
+    merkleRoot,
+    authorAddress,
+    reservedKaId,
+    schemeVersion,
+  });
+  const eip712Digest = ethers.TypedDataEncoder.hash(
+    typedData.domain,
+    typedData.types,
+    typedData.message,
+  );
+
+  // 9. Produce the compact signature (r, vs).
+  let r: Uint8Array;
+  let vs: Uint8Array;
+  if (preSigned) {
+    const sig = ethers.Signature.from({
+      r: ethers.hexlify(preSigned.signature.r),
+      yParityAndS: ethers.hexlify(preSigned.signature.vs),
+    });
+    // Off-chain seal-integrity preflight: only EOAs can be verified
+    // by ECDSA recover-and-compare. For smart-contract authors
+    // (incl. EIP-7702-delegated EOAs), the on-chain
+    // `_verifyAuthorAttestation` dispatches to
+    // `IERC1271.isValidSignature` and is the authoritative check —
+    // the off-chain ECDSA recover would (correctly) report a
+    // mismatch since 1271 wallets typically sign through an owner
+    // EOA that's distinct from the wallet contract address. Skip the
+    // off-chain check for contract authors so the seal-build pipeline
+    // doesn't reject 1271 publishes that the chain would accept.
+    const isContractAuthor =
+      typeof this.chain.hasContractCode === 'function'
+        ? await this.chain.hasContractCode(authorAddress)
+        : false;
+    if (!isContractAuthor) {
+      const recovered = ethers.recoverAddress(eip712Digest, sig);
+      if (recovered.toLowerCase() !== authorAddress.toLowerCase()) {
+        throw new Error(
+          `assertionFinalize: preSignedAuthorAttestation signer mismatch — ` +
+            `signature recovers ${recovered} but address claims ${authorAddress}.`,
+        );
+      }
+    }
+    r = preSigned.signature.r;
+    vs = preSigned.signature.vs;
+  } else if (opts?.authorSignTypedData != null) {
+    const compact = await opts.authorSignTypedData(typedData);
+    const sig = ethers.Signature.from({
+      r: ethers.hexlify(compact.r),
+      yParityAndS: ethers.hexlify(compact.vs),
+    });
+    const isContractAuthor =
+      typeof this.chain.hasContractCode === 'function'
+        ? await this.chain.hasContractCode(authorAddress)
+        : false;
+    if (!isContractAuthor) {
+      const recovered = ethers.recoverAddress(eip712Digest, sig);
+      if (recovered.toLowerCase() !== authorAddress.toLowerCase()) {
+        throw new Error(
+          `assertionFinalize: authorSignTypedData signer mismatch — ` +
+            `signature recovers ${recovered} but address claims ${authorAddress}.`,
+        );
+      }
+    }
+    r = ethers.getBytes(sig.r);
+    vs = ethers.getBytes(sig.yParityAndS);
+  } else if (signerPrivateKey) {
+    const wallet = new ethers.Wallet(
+      signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
+    );
+    const sigHex = await wallet.signTypedData(
+      typedData.domain,
+      typedData.types,
+      typedData.message,
+    );
+    const sig = ethers.Signature.from(sigHex);
+    r = ethers.getBytes(sig.r);
+    vs = ethers.getBytes(sig.yParityAndS);
+  } else {
+    // Publisher fallback: ask the publisher to sign with its own
+    // wallet. Returns the compact (r, vs) form.
+    const compact = await this.publisher.signAuthorAttestationAsPublisher(typedData);
+    r = compact.r;
+    vs = compact.vs;
+  }
+
+  // 10. Persist the seal as `_meta` triples.
+  const finalizedAtIso = new Date().toISOString();
+  const kaNumber = reservedKaId & ((1n << 96n) - 1n);
+  const kaUal = `did:dkg:${this.chain.chainId}/${authorAddress.toLowerCase()}/${kaNumber}`;
+  const sealQuads = buildAssertionSealQuads({
+    assertionUri,
+    metaGraph,
+    merkleRoot,
+    authorAddress,
+    authorAttestationR: r,
+    authorAttestationVS: vs,
+    authorSchemeVersion: schemeVersion,
+    chainId,
+    kav10Address,
+    reservedKaId,
+    finalizedAtIso,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal,
+    assertionVersion,
+    publicTripleCount,
+    privateMerkleRoot,
+    privateTripleCount,
+  });
+
+  // ── OT-RFC-43 A2 — stamp the per-author kaId + reservedUal + WM pointer ──
+  // The number was resolved/allocated ABOVE (single allocation, before the
+  // EIP-712 sign — OT-RFC-43 §F2). Here we only PERSIST it:
+  //   dkg:kaId          = number (xsd:integer)
+  //   dkg:reservedUal   = did:dkg:<chainId>/<agentAddrLower>/<number>
+  //   dkg:wmCurrentAssertion = the seal merkle hex (bare, no 0x)
+  // publishFromFinalizedAssertion READS dkg:kaId off `_meta` and threads it
+  // down so the publisher REUSES it. freshNumber is set only for a fresh create
+  // (or a not-yet-stamped preSigned slot); an update of a previously-stamped
+  // name keeps its STABLE kaId — no re-stamp.
+  if (freshNumber !== undefined) {
+    sealQuads.push({
+      subject: lifecycleUri,
+      predicate: KA_ID_PRED,
+      object: `"${freshNumber}"^^${xsdInteger}`,
+      graph: metaGraph,
+    });
+    sealQuads.push({
+      subject: lifecycleUri,
+      predicate: RESERVED_UAL_PRED,
+      object: `"${kaUal}"`,
+      graph: metaGraph,
+    });
+  }
+
+  // Crash-safe commit order:
+  //   1. atomically materialize the complete canonical target;
+  //   2. persist the seal (and a fresh identity, when needed);
+  //   3. repair lifecycle pointers/version;
+  //   4. remove obsolete source graphs.
+  // Any interruption leaves either the original source or the canonical
+  // target plus enough durable seal data for the idempotent branch above to
+  // finish the transition on retry.
+  const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
+    contextGraphId,
+    kaUal,
+    assertionVersion,
+    normalizedKnowledgeAssetQuads,
+    opts?.subGraphName,
+  );
+  const canonicalScope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
+  await privateStore.replaceKnowledgeAssetPrivateTriples(
+    contextGraphId,
+    canonicalScope,
+    normalizedPrivateKnowledgeAssetQuads,
+    opts?.subGraphName,
+    privateMerkleRoot ? ethers.hexlify(privateMerkleRoot) : undefined,
+  );
+  await this.store.insert(sealQuads);
+  await stampFinalizedLifecycle(assertionVersion, merkleRoot);
+  await this.publisher.cleanupCanonicalWorkingMemorySources(
+    contextGraphId,
+    name,
+    agentAddress,
+    canonicalWmGraphUri,
+    [sourceWmGraphUri],
+    opts?.subGraphName,
+  );
+  await privateStore.deleteKnowledgeAssetPrivateDraft(
+    contextGraphId,
+    agentAddress,
+    name,
+    opts?.subGraphName,
+  );
+
+  return {
+    assertionUri,
+    merkleRoot,
+    authorAddress,
+    reservedKaId,
+    rootEntities: [],
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal,
+    assertionVersion: assertionVersion.toString(),
+    publicTripleCount,
+    ...(privateMerkleRoot !== undefined ? { privateMerkleRoot } : {}),
+    privateTripleCount,
+    schemeVersion,
+    chainId,
+    kav10Address,
+    eip712Digest,
+  };
 }

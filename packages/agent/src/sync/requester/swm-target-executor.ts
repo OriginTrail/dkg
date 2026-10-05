@@ -54,6 +54,8 @@ export interface SwmTargetExecutorPortsV1 {
   /** Defaults to ten minutes for callers composed before this port existed. */
   readonly privateRecoveryBudgetMs?: number;
   readonly store: TripleStore;
+  readonly readConfirmedKnowledgeAssetVersion?: (kaUal: string) => Promise<bigint | null>;
+  readonly pendingAckTxWindowMs?: number;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly listSubGraphs: (
     contextGraphId: string,
@@ -146,7 +148,10 @@ export class SwmTargetExecutorV1 {
     this.#snapshotMaterializer = createSharedMemorySnapshotMaterializer({
       store: ports.store,
       writeLocks: ports.writeLocks,
+      readConfirmedKnowledgeAssetVersion: ports.readConfirmedKnowledgeAssetVersion,
+      pendingAckTxWindowMs: ports.pendingAckTxWindowMs,
       invalidateListContextGraphsCache: ports.invalidateListContextGraphsCache,
+      metadataIngestObserver: { recordDrops: ports.recordDrops, markMetaProjectionDirty: ports.markMetaProjectionDirty },
     });
     this.#recoveryMutation = ports.recoveryMutation;
   }
@@ -193,9 +198,6 @@ export class SwmTargetExecutorV1 {
           roots,
           metaGraphs,
         ),
-      replaceMetaForGraphAssets: (assets) => (
-        this.#snapshotMaterializer.replaceMetaForGraphAssets(assets)
-      ),
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
       setCheckpoint: this.#ports.setCheckpoint,
       deleteCheckpoint: this.#ports.deleteCheckpoint,

@@ -179,7 +179,19 @@ describe('SWM recovery lease revocation', () => {
     // Revocation prevents the next recovery phase, but cannot strand the
     // already-admitted graph swap without its matching metadata.
     expect(await store.countQuads(assertionGraph)).toBe(payload.length);
-    expect(await store.countQuads(WS_META)).toBe(sourceMeta.length);
+    const metadataQuery = `SELECT ?s ?p ?o WHERE { GRAPH <${WS_META}> { ?s ?p ?o } }`;
+    const expectedStore = new OxigraphStore();
+    stores.push(expectedStore);
+    await expectedStore.insert(sourceMeta);
+    const expectedMeta = await expectedStore.query(metadataQuery);
+    const committedMeta = await store.query(metadataQuery);
+    expect(expectedMeta.type).toBe('bindings');
+    expect(committedMeta.type).toBe('bindings');
+    if (expectedMeta.type === 'bindings' && committedMeta.type === 'bindings') {
+      // The provider's exact metadata accompanies the admitted content commit.
+      expect(committedMeta.bindings.map(row => JSON.stringify(row)).sort())
+        .toEqual(expectedMeta.bindings.map(row => JSON.stringify(row)).sort());
+    }
     const recovered = await store.query(
       `SELECT ?o WHERE { GRAPH <${assertionGraph}> { <urn:rootless:atomic> <${STATUS}> ?o } }`,
     );

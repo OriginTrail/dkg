@@ -1461,15 +1461,37 @@ describe('SharedMemoryHandler', () => {
       kaUal: firstRequest.kaUal ?? '',
     })).rejects.toThrow(/missing canonical publishedAt/u);
 
-    const msg2 = encodeRootlessWorkspaceRequest({
+    expect(legacyHeadWithoutPublishedAt?.operationAliases).toEqual([
+      expect.objectContaining({ shareOperationId: 'ws-own-1', publisherChronologyAuthenticated: false }),
+    ]);
+    const reusedVersion = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
       publisherPeerId: peerId,
       shareOperationId: 'ws-own-2',
-      assertionVersion: '2',
+      assertionVersion: '1',
       timestampMs: secondPublishedAt,
     });
-    await handler.handle(msg2, peerId);
+    // Reusing a draft number still fails closed without trusted predecessor
+    // chronology. A claimed higher clock cannot supply the missing evidence.
+    await expect(handler.handle(reusedVersion, peerId)).resolves.toMatchObject({
+      applied: false,
+      retryable: true,
+      reason: expect.stringContaining('DRAFT_REPLACEMENT_PROOF_UNAVAILABLE'),
+    });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).resolves.toEqual(legacyHeadWithoutPublishedAt);
+
+    // Verified live progress from the same transport owner may advance the
+    // assertion number without trusting the old unavailable/provider clock.
+    const msg2 = encodeRootlessWorkspaceRequest({
+      ...decodeWorkspacePublishRequest(reusedVersion), assertionVersion: '2',
+    });
+    await expect(handler.handle(msg2, peerId)).resolves.toMatchObject({ applied: true });
 
     const afterSecond = await resolveKnowledgeAssetWorkspaceHead({
       store,
@@ -1482,6 +1504,8 @@ describe('SharedMemoryHandler', () => {
       publisherPeerId: peerId,
       publishedAt: secondPublishedAt.toString(),
     });
+    expect(afterSecond?.operationAliases).toHaveLength(1);
+    expect(afterSecond?.operationAliases[0]?.publisherChronologyAuthenticated).not.toBe(false);
   });
 });
 

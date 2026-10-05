@@ -1,3 +1,7 @@
+import { collectAbandonedDraftArtifacts } from './internal/draft/draft-artifact-gc.js';
+import { expireSharedMemoryScope } from './internal/swm-expiry/swm-operation-expiry.js';
+import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
+import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -50,9 +54,8 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral,
   QuietRetryableHandlerError,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
@@ -134,9 +137,6 @@ import {
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import {
-  storageAckNotRetainedFilters,
-} from './storage-ack-retention.js';
-import {
   EVMChainAdapter,
   NoChainAdapter,
   buildKnowledgeAssetUal,
@@ -177,9 +177,6 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig,
-  STORAGE_ACK_LEDGER_GRAPH,
-  swmKaWriteLockKey,
-  withKeyedLocks,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -371,10 +368,10 @@ import {
 import {
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
-import {
-  emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
-  mergeFleetSharedMemoryDiagnostics,
+import  {
+  emptySharedMemorySyncResult,
   mergeSamePeerSharedMemoryDiagnostics,
+  mergeFleetSharedMemoryDiagnostics,
   recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
@@ -465,13 +462,11 @@ import {
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
-import {
+import  {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
   resolveNonNegativeIntegerSwitch,
-  resolveBooleanSwitch,
   resolveExactBatchStreamEnabled,
-  resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
@@ -714,7 +709,7 @@ import {
 } from './sync/on-demand-agents-phonebook.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
-import {
+import  {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,
@@ -752,7 +747,6 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
-  type DKGAgentConfig,
   type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
@@ -1951,51 +1945,9 @@ async function authenticateDurableGraphScopedAsset(params: {
   }
 }
 
-function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
-}
-
-function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.syncOnConnectEnabled, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
-}
-
-function durableSyncEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
-}
-
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
  *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
 const CHANGELOG_MAX_SCAN_LIMIT = 2000;
-
-function emptySharedMemorySyncResult(): SharedMemorySyncResult {
-  return createEmptySharedMemorySyncResult();
-}
-
-function mergeSharedMemorySyncResults(
-  a: SharedMemorySyncResult,
-  b: SharedMemorySyncResult,
-): SharedMemorySyncResult {
-  return {
-    ...mergeSamePeerSharedMemoryDiagnostics(a, b),
-  };
-}
-
-function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
-  return {
-    replacedRoots: 0,
-    replacedGraphs: 0,
-    insertedDataQuads: 0,
-    insertedMetaQuads: 0,
-    droppedDataTriples: 0,
-    readySnapshots: 0,
-    totalSnapshots: 0,
-    completed: true,
-  };
-}
 
 type NonBoundedCuratorPeerIdsResolution =
   | {
@@ -2059,6 +2011,10 @@ type StructuralCuratorPeerLookup =
       readonly overflowed?: never;
       readonly nextPageAfterPeerId?: never;
     };
+
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
 
 export class LifecycleSyncMethods extends DKGAgentBase {
   async retireLegacySwmAfterVerifiedVmTwin(
@@ -7782,7 +7738,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             },
           );
         },
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         onResult: (item, result) => {
           if (
             selectedSwmEnabled
@@ -7861,7 +7817,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             selectedSwmPriority: true,
           },
         ),
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         markDeferred: (summary) => ({
           ...summary,
           deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
@@ -7901,7 +7857,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
       });
       const { summary: continuationSummary } = continuationExecution;
-      const finalSummary = mergeSharedMemorySyncResults(
+      const finalSummary = mergeSamePeerSharedMemoryDiagnostics(
         initialSummary,
         continuationSummary,
       );
@@ -8376,7 +8332,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catchup-status endpoint and UI keep working — see
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
     const emptyShared = (): SharedMemorySyncResult =>
-      createEmptySharedMemorySyncResult(1);
+      emptySharedMemorySyncResult(1);
     // Bounded fan-out: at most CATCHUP_MAX_CONCURRENT_PEER_SYNCS peer syncs run
     // at once. The pre-cap unbounded `Promise.all` over every sync-capable peer
     // was the top amplifier of the 2026-07-07 mainnet sync storm — one
@@ -11550,7 +11506,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       const ctx = createOperationContext('share');
       const now = Date.now();
-      const cutoff = new Date(now - ttl).toISOString();
       // StorageACK copies this core signed and still owes to VM outlive the
       // TTL (see storage-ack-retention.ts).
       const storageAckRetentionCutoff = new Date(
@@ -11572,211 +11527,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ])];
 
         for (const pid of contextGraphs) {
+          await collectAbandonedDraftArtifacts({ store: this.store, chain: this.chain, writeLocks: this.writeLocks, contextGraphId: pid, now, pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS });
           let graphDeleted = 0;
           let expiredOpsCount = 0;
 
-          // Graph-scoped V2 operations and heads for sub-graph shares live in
-          // per-subgraph `…/{subGraph}/_shared_memory_meta` graphs (see
-          // GraphManager.sharedMemoryMetaUri), not only in the root
-          // `…/_shared_memory_meta` bucket — expire every meta graph.
+          // Include the root and sub-graph SWM metadata buckets.
           const wsMetaGraphs = await listSharedMemoryMetaGraphs(this.store, pid);
 
-          // Graph-scoped KAs are confirmed in the root `_meta`, sub-graphs included.
-          const rootMetaGraph = contextGraphMetaUri(pid);
-          for (const wsMetaGraph of wsMetaGraphs) {
-            // Each meta graph describes exactly one SWM data bucket:
-            // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
-            const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
-            // The per-KA write lock the StorageACK handler and gossip apply
-            // take is keyed by namespace, sub-graph and UAL.
-            const namespacePrefix = `did:dkg:context-graph:${pid}/`;
-            const metaRest = wsMetaGraph.startsWith(namespacePrefix)
-              ? wsMetaGraph.slice(namespacePrefix.length)
-              : '_shared_memory_meta';
-            const wsSubGraphName = metaRest === '_shared_memory_meta'
-              ? undefined
-              : metaRest.slice(0, -'/_shared_memory_meta'.length);
-            const storageAckNotRetained = (
-              binding: string,
-              opVar: string,
-              tsVar: string,
-              suffix: string,
-            ): string => storageAckNotRetainedFilters({
-              rootMetaGraph,
-              metaGraph: wsMetaGraph,
-              binding,
-              opVar,
-              tsVar,
-              retentionCutoffIso: storageAckRetentionCutoff,
-              suffix,
-              ledgerReady,
+          for (const metaGraph of wsMetaGraphs) {
+            const prefix = `did:dkg:context-graph:${pid}/`;
+            const suffix = metaGraph.slice(prefix.length);
+            const subGraphName = suffix === '_shared_memory_meta' ? undefined : suffix.slice(0, -'/_shared_memory_meta'.length);
+            const expired = await expireSharedMemoryScope({
+              store: this.store, writeLocks: this.writeLocks, contextGraphId: pid, subGraphName,
+              now, ttlMs: ttl, retentionCutoffIso: storageAckRetentionCutoff, ledgerReady,
+              batchSize: DKGAgentBase.SWM_CLEANUP_BATCH_SIZE,
             });
-
-            let wsGraphs: string[] | undefined;
-            let ownershipKeys: string[] | undefined;
-            for (;;) {
-              // Retained StorageACK copies are excluded inside the query, not
-              // skipped in the loop: skipped rows would come back in every
-              // batch and stall the no-progress guard below.
-              const expiredOps = await this.store.query(
-                `SELECT DISTINCT ?op WHERE {
-                GRAPH <${wsMetaGraph}> {
-                  ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-                  ?op <http://dkg.io/ontology/publishedAt> ?ts .
-                  FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-                }
-                ${storageAckNotRetained('', '?op', '?ts', 'Expired')}
-              } LIMIT ${DKGAgentBase.SWM_CLEANUP_BATCH_SIZE}`,
-                { source: 'agent.swmCleanup.expiredOperations' },
-              );
-
-              if (expiredOps.type !== 'bindings' || expiredOps.bindings.length === 0) break;
-              expiredOpsCount += expiredOps.bindings.length;
-              wsGraphs ??= await listGraphFamily(this.store, wsGraph);
-              ownershipKeys ??= wsGraphs
-                .map((g) => sharedMemoryOwnershipKeyFromGraph(pid, g))
-                .filter((key): key is string => Boolean(key));
-              let metadataDeleted = 0;
-
-              for (const row of expiredOps.bindings) {
-                const opUri = row['op'];
-                if (!opUri) continue;
-
-                const rootEntitiesResult = await this.store.query(
-                  `SELECT ?re WHERE {
-                  GRAPH <${wsMetaGraph}> {
-                    <${opUri}> <http://dkg.io/ontology/rootEntity> ?re .
-                  }
-                }`,
-                  { source: 'agent.swmCleanup.operationRoots' },
-                );
-
-                const rootEntities: string[] = [];
-                if (rootEntitiesResult.type === 'bindings') {
-                  for (const r of rootEntitiesResult.bindings) {
-                    if (r['re']) rootEntities.push(r['re']);
-                  }
-                }
-
-                // Uniform layout: span the per-KA …/_shared_memory/{addr}/{number} graphs + bucket.
-                for (const re of rootEntities) {
-                  for (const g of wsGraphs ?? []) {
-                    // Exact root only; then skolemized descendants only (prefix would over-delete e.g. urn:foo vs urn:foobar)
-                    const exactDeleted = await this.store.deleteByPattern({ graph: g, subject: re });
-                    graphDeleted += exactDeleted;
-                    const childPrefix = `${re}/.well-known/genid/`;
-                    const childDeleted = await this.store.deleteBySubjectPrefix(g, childPrefix);
-                    graphDeleted += childDeleted;
-                  }
-                }
-
-                // Graph-scoped V2 operations (dkg:contentScopeVersion=2) have no
-                // rootEntity rows, so the legacy sweep above no-ops for them and
-                // the generic op-subject delete below would strand the rest of the
-                // KA: the per-KA SWM assertion graph, the `${kaUal}#dkg-swm-head`
-                // subject and the operation's public snapshot graph. Discard them
-                // here. The snapshot graph always dies with its operation; the
-                // head and assertion graph die only when the head still points at
-                // THIS operation — when a newer operation owns the head they carry
-                // live data, and a surviving head whose operation rows are gone
-                // reads as CORRUPT in resolveKnowledgeAssetWorkspaceHead.
-                const v2Meta = await this.store.query(
-                  `SELECT ?scopeVersion ?kaUal ?snapshotGraph WHERE {
-                  GRAPH <${wsMetaGraph}> {
-                    <${opUri}> <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
-                    OPTIONAL { <${opUri}> <http://dkg.io/ontology/kaUal> ?kaUal }
-                    OPTIONAL { <${opUri}> <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
-                  }
-                } LIMIT 1`,
-                  { source: 'agent.swmCleanup.graphScopedMetadata' },
-                );
-                const v2Row = v2Meta.type === 'bindings' ? v2Meta.bindings[0] : undefined;
-                const scopeVersion = v2Row?.['scopeVersion'] === undefined ? NaN : Number(stripLiteral(v2Row['scopeVersion']));
-                if (scopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
-                  const kaUal = v2Row?.['kaUal'];
-                  const headSubject = kaUal ? `${kaUal}#dkg-swm-head` : '';
-                  // Checked and torn down under the per-KA write lock, so an
-                  // ACK or share that repoints the head in between is never
-                  // deleted with the expired operation.
-                  if (kaUal && headSubject && isSafeIri(headSubject)) graphDeleted += await withKeyedLocks(
-                    this.writeLocks,
-                    [swmKaWriteLockKey(pid, wsSubGraphName, kaUal)],
-                    async (): Promise<number> => {
-                    let tornDown = 0;
-                    // The head is owned by exactly one operation. Join on the
-                    // dkg:shareOperationId literal (both rows are written by the
-                    // same `lit()` serializer) so this op's expiry only tears the
-                    // head down when the head still references it — and never
-                    // while it is also the head of a retained StorageACK copy.
-                    const headOwned = await this.store.query(
-                      `SELECT ?assertionGraph WHERE {
-                      GRAPH <${wsMetaGraph}> {
-                        <${opUri}> <http://dkg.io/ontology/shareOperationId> ?opId .
-                        <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?opId .
-                        OPTIONAL { <${headSubject}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
-                      }
-                      ${storageAckNotRetained(`GRAPH <${wsMetaGraph}> {
-                          <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?aliasOpId .
-                          ?aliasOp <http://dkg.io/ontology/shareOperationId> ?aliasOpId ;
-                            <http://dkg.io/ontology/publishedAt> ?aliasTs .
-                          FILTER(?aliasOp != <${opUri}>)
-                        }`, '?aliasOp', '?aliasTs', 'Alias')}
-                    } LIMIT 1`,
-                      { source: 'agent.swmCleanup.currentHeadOwner' },
-                    );
-                    if (headOwned.type === 'bindings' && headOwned.bindings.length > 0) {
-                      // Whole KA expired: drop the per-KA SWM assertion graph and
-                      // the current-head subject with the operation.
-                      const assertionGraph = headOwned.bindings[0]?.['assertionGraph'];
-                      if (assertionGraph && isSafeIri(assertionGraph)) {
-                        tornDown += await this.store.deleteByPattern({ graph: assertionGraph });
-                        await this.store.dropGraph(assertionGraph);
-                      }
-                      tornDown += await this.store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
-                    }
-                    return tornDown;
-                  });
-                  const snapshotGraph = v2Row?.['snapshotGraph'];
-                  if (snapshotGraph && isSafeIri(snapshotGraph)) {
-                    graphDeleted += await this.store.deleteByPattern({ graph: snapshotGraph });
-                    await this.store.dropGraph(snapshotGraph);
-                  }
-                }
-
-                // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)
-                const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
-                graphDeleted += metaDeleted;
-                metadataDeleted += metaDeleted;
-                // The copy is gone, so is this core's signed-ACK record of it.
-                await this.store.deleteByPattern({ graph: STORAGE_ACK_LEDGER_GRAPH, subject: opUri });
-
-                for (const re of rootEntities) {
-                  const ownerDeleted = await this.store.deleteByPattern({
-                    graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
-                  });
-                  graphDeleted += ownerDeleted;
-                }
-
-                // Evict every per-subgraph ownership key for the expired roots.
-                // SWM data now spans the root workspace graph plus the per-KA /
-                // subgraph `…/_shared_memory/{addr}/{number}` graphs. Ownership
-                // keys are resolved once per metadata graph per cleanup run.
-                for (const ownershipKey of ownershipKeys ?? []) {
-                  const ownedSet = this.workspaceOwnedEntities.get(ownershipKey);
-                  if (!ownedSet) continue;
-                  for (const re of rootEntities) {
-                    ownedSet.delete(re);
-                  }
-                }
-              }
-              if (metadataDeleted === 0) {
-                this.log.warn(
-                  ctx,
-                  `SWM cleanup for "${wsMetaGraph}" made no metadata-deletion progress; stopping this batch loop`,
-                );
-                break;
-              }
-            }
+            graphDeleted += expired.deletedTriples;
+            expiredOpsCount += expired.expiredOperations;
+            const key = sharedMemoryOwnershipKeyFromGraph(pid, metaGraph.slice(0, -'_meta'.length));
+            if (key) for (const entity of expired.retiredEntities) this.workspaceOwnedEntities.get(key)?.delete(entity);
           }
 
           totalDeleted += graphDeleted;
@@ -11798,14 +11568,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
   }
 
-}
-
-async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
-  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
-  if (await store.hasGraph(rootGraph)) {
-    graphs.unshift(rootGraph);
-  }
-  return graphs;
 }
 
 async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {

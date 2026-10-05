@@ -20,7 +20,7 @@ import {
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
-import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
+import { swmKaWriteLockKey, swmEntityWriteLockKey, withKeyedLocks, assertionLifecycleWriteLockKey } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
@@ -1783,23 +1783,6 @@ export class DKGPublisher implements Publisher {
     return withKeyedLocks(this.writeLocks, keys, fn);
   }
 
-  private assertionLifecycleWriteLockKey(
-    contextGraphId: string,
-    name: string,
-    agentAddress: string,
-    subGraphName?: string,
-  ): string {
-    const normalizedAgentAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
-      ? agentAddress.toLowerCase()
-      : agentAddress;
-    return `assertion-lifecycle:${JSON.stringify([
-      contextGraphId,
-      subGraphName ?? '',
-      normalizedAgentAddress,
-      name,
-    ])}`;
-  }
-
   private withAssertionLifecycleWriteLock<T>(
     contextGraphId: string,
     name: string,
@@ -1808,7 +1791,7 @@ export class DKGPublisher implements Publisher {
     fn: () => Promise<T>,
   ): Promise<T> {
     return this.withWriteLocks([
-      this.assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName),
+      assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName),
     ], fn);
   }
 
@@ -1831,8 +1814,7 @@ export class DKGPublisher implements Publisher {
     rejectUserAuthoredProtocolMetadata(quads);
     rejectOversizedRdfLiterals(quads, 'share.quads');
     const subjects = [...new Set(quads.map(q => q.subject))];
-    const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-    const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
+    const lockKeys = subjects.map(s => swmEntityWriteLockKey(contextGraphId, options.subGraphName, s));
     return this.withWriteLocks(lockKeys, () => this._shareImpl(contextGraphId, quads, options));
   }
 
@@ -2146,8 +2128,7 @@ export class DKGPublisher implements Publisher {
 
     const conditionSubjects = options.conditions.map(c => c.subject);
     const quadSubjects = [...new Set(quads.map(q => q.subject))];
-    const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => `${lockPrefix}\0${s}`);
+    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => swmEntityWriteLockKey(contextGraphId, options.subGraphName, s));
 
     return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(contextGraphId, quads, options));
   }
@@ -2369,9 +2350,9 @@ export class DKGPublisher implements Publisher {
       loadOptions,
     );
     const privateQuads = graphPublish
-      ? await this.privateStore.getKnowledgeAssetPrivateTriples(
-          contextGraphId,
-          graphPublish.scope,
+      ? await this.privateStore.getSealedKnowledgeAssetPrivateTriples(
+          contextGraphId, graphPublish.scope,
+          { privateTripleCount: graphPublish.privateTripleCount, privateMerkleRoot: graphPublish.expectedPrivateMerkleRoot },
           options?.subGraphName,
         )
       : [];
@@ -3037,36 +3018,10 @@ export class DKGPublisher implements Publisher {
       : options.targetGraphUri ?? this.graphManager.dataGraphUri(contextGraphId);
     const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
 
-    // RC11 / PR2: defer the public-data insert into the root data graph
-    // until AFTER on-chain confirmation (or until the publisher's chain
-    // branch is intentionally skipped because there is no chain to
-    // confirm against — NoChainAdapter / non-V10 / no on-chain CG id).
-    // Inserting pre-chain caused the "tentative VM" leak where
-    // /api/query would surface quads from a publish that the chain
-    // later rejected as if they were verifiable memory. See the chain
-    // success branch + the `publisherContextGraphId/chainV10Ready`
-    // skip branches below — each writes `normalizedQuads` exactly once,
-    // never on the chain-failure catch path.
-    //
-    // Private-store insert stays here. The private store is namespaced
-    // outside the VM-visible data graph and access is gated by
-    // `AccessHandler`'s per-entity policy check, so it does not
-    // contribute to the VM leakage surface this PR closes. Keeping it
-    // pre-chain also keeps the private store's contents lined up with
-    // the precomputed `privateMerkleRoot` the publisher just committed
-    // to ACK / chain digests — moving it past the chain-success branch
-    // would risk a race where the publisher returns 'confirmed' before
-    // its own private store has the data.
-    // GH #1078 — persist the finalized private slices. DEFERRED to the terminal
-    // branches (post-chain-confirmation, or the intentional-local finalize) and
-    // NEVER run on the chain-failure path. Because `storePrivateTriples(…,
-    // commitmentId)` now SUPERSEDES a root's prior private slice when the
-    // commitment differs, running it pre-chain would let a failed/rejected
-    // re-publish delete the private data of the still-current KA while the chain
-    // still points at the old version. Gating it on confirmation keeps the
-    // private store consistent with the committed `privateMerkleRoot`, and
-    // invoking it BEFORE the publish returns 'confirmed' preserves the
-    // no-"confirmed-before-data" guarantee the pre-chain insert used to give.
+    // Public VM and the latest private partition follow confirmed publication
+    // (or an intentional local-only finalize). Failed chain writes preserve the
+    // previously confirmed payload. Keep sealed private commitments separately
+    // so a replacement unpublished draft cannot destroy an earlier shared copy.
     const persistFinalizedPrivateSlices = async (): Promise<void> => {
       if (graphPublish) {
         await this.privateStore.replaceKnowledgeAssetPrivateTriples(
@@ -3074,6 +3029,7 @@ export class DKGPublisher implements Publisher {
           graphPublish.scope,
           canonicalPrivateQuads,
           options.subGraphName,
+          privateRoots[0] ? ethers.hexlify(privateRoots[0]) : undefined,
         );
         return;
       }
@@ -5087,6 +5043,7 @@ export class DKGPublisher implements Publisher {
             graphUpdate.scope,
             canonicalPrivateQuads,
             options.subGraphName,
+            updatePrivateRoots[0] ? ethers.hexlify(updatePrivateRoots[0]) : undefined,
           );
           // 🔴 PR #1712 review (3586192289): the converge below replaces the
           // KA's entire access row set, so passing raw update options here let
@@ -5539,10 +5496,10 @@ export class DKGPublisher implements Publisher {
           && BigInt(graphUpdate.scope.assertionVersion)
             !== digestFields.preUpdateMerkleRootCount + 1n
         ) {
-          throw new Error(
+          throw Object.assign(new Error(
             `Graph-scoped update assertionVersion ${graphUpdate.scope.assertionVersion} must equal ` +
               `preUpdateMerkleRootCount + 1 (${digestFields.preUpdateMerkleRootCount + 1n})`,
-          );
+          ), { code: 'KA_UPDATE_VERSION_MISMATCH' });
         }
         boundUpdateTokenAmount = digestFields.newTokenAmount;
         v10UpdateACKs = await v10UpdateACKProvider({
@@ -6658,8 +6615,10 @@ export class DKGPublisher implements Publisher {
       agentAddress,
       subGraphName,
     );
-    for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
-      await this.deleteStoreByPatternWithoutCount({ graph: recoveryGraph, subject: recoverySubject, predicate });
+    for (const subject of [recoverySubject, `${recoverySubject}/wm`]) {
+      for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
+        await this.deleteStoreByPatternWithoutCount({ graph: recoveryGraph, subject, predicate });
+      }
     }
   }
 
@@ -6677,13 +6636,14 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
+    recoveryLayer?: 'wm',
   ): string {
     return `${contextGraphAssertionUri(
       contextGraphId,
       agentAddress,
       name,
       subGraphName,
-    )}/_recovery_seal`;
+    )}/_recovery_seal${recoveryLayer === 'wm' ? '/wm' : ''}`;
   }
 
   private async activeAssertionSealSubjects(
@@ -6769,7 +6729,7 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
-  ): Promise<Array<{ seal: AssertionSeal; subject: string; quads: Quad[] }>> {
+  ): Promise<Array<{ seal: AssertionSeal; subject: string; quads: Quad[]; active: boolean }>> {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
     const recoverySubject = this.assertionRecoverySealSubject(
@@ -6778,14 +6738,15 @@ export class DKGPublisher implements Publisher {
       agentAddress,
       subGraphName,
     );
-    const candidates: Array<{ subject: string; graph: string }> = [
+    const candidates: Array<{ subject: string; graph: string; active: boolean }> = [
       ...(await this.activeAssertionSealSubjects(contextGraphId, name, agentAddress, subGraphName))
-        .map((subject) => ({ subject, graph: metaGraph })),
-      { subject: recoverySubject, graph: recoveryGraph },
+        .map((subject) => ({ subject, graph: metaGraph, active: true })),
+      { subject: recoverySubject, graph: recoveryGraph, active: false },
+      { subject: `${recoverySubject}/wm`, graph: recoveryGraph, active: false },
     ];
-    const loaded: Array<{ seal: AssertionSeal; subject: string; quads: Quad[] }> = [];
+    const loaded: Array<{ seal: AssertionSeal; subject: string; quads: Quad[]; active: boolean }> = [];
     const seen = new Set<string>();
-    for (const { subject, graph } of candidates) {
+    for (const { subject, graph, active } of candidates) {
       const key = `${graph}\0${subject}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -6797,7 +6758,7 @@ export class DKGPublisher implements Publisher {
       const quads = result.type === 'quads' ? result.quads : [];
       try {
         const seal = parseAssertionSealQuads(quads, subject);
-        if (seal) loaded.push({ seal, subject, quads });
+        if (seal) loaded.push({ seal, subject, quads, active });
       } catch {
         // A complete recovery archive may coexist with a torn active-seal
         // deletion after a crash. Ignore only the unusable candidate; the
@@ -6814,6 +6775,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     loaded: { seal: AssertionSeal; subject: string; quads: Quad[] },
     subGraphName?: string,
+    recoveryLayer?: 'wm',
   ): Promise<Quad[]> {
     const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
     const recoverySubject = this.assertionRecoverySealSubject(
@@ -6821,6 +6783,7 @@ export class DKGPublisher implements Publisher {
       name,
       agentAddress,
       subGraphName,
+      recoveryLayer,
     );
     const sealPredicates = new Set<string>(Object.values(ASSERTION_SEAL_PREDICATES));
     const recoveryQuads = loaded.quads
@@ -8170,7 +8133,7 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * Re-open one sealed rootless KA from its exact SWM or VM graph.
+   * Re-open one sealed rootless KA from its exact WM, SWM or VM graph.
    *
    * V2 never reconstructs content from root/member rows or scans a shared
    * bucket. The seal's (UAL, assertionVersion) tuple resolves one physical
@@ -8182,13 +8145,13 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    sourceLayer: 'swm' | 'vm',
+    sourceLayer: 'wm' | 'swm' | 'vm',
     opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
   ): Promise<{
     seeded: number;
     seededPublic: number;
     seededPrivate: number;
-    fromLayer: 'swm' | 'vm';
+    fromLayer: 'wm' | 'swm' | 'vm';
     contentScopeVersion: number;
     kaUal: string;
     assertionVersion: string;
@@ -8213,13 +8176,13 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    sourceLayer: 'swm' | 'vm',
+    sourceLayer: 'wm' | 'swm' | 'vm',
     opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
   ): Promise<{
     seeded: number;
     seededPublic: number;
     seededPrivate: number;
-    fromLayer: 'swm' | 'vm';
+    fromLayer: 'wm' | 'swm' | 'vm';
     contentScopeVersion: number;
     kaUal: string;
     assertionVersion: string;
@@ -8278,18 +8241,17 @@ export class DKGPublisher implements Publisher {
         const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
         const sourceGraph = knowledgeAssetLayerGraphUri(
           contextGraphId,
-          sourceLayer === 'swm'
-            ? MemoryLayer.SharedWorkingMemory
-            : MemoryLayer.VerifiableMemory,
+          sourceLayer === 'wm' ? MemoryLayer.WorkingMemory
+            : sourceLayer === 'swm' ? MemoryLayer.SharedWorkingMemory : MemoryLayer.VerifiableMemory,
           scope,
           subGraphName,
         );
         const sourcePublicQuads = (await this.assertionScopedQuads(sourceGraph)).filter(
           (quad) => !isSwmMerkleExcludedQuad(quad),
         );
-        const sourcePrivateQuads = await this.privateStore.getKnowledgeAssetPrivateTriples(
-          contextGraphId,
-          scope,
+        const sourcePrivateQuads = await this.privateStore.getSealedKnowledgeAssetPrivateTriples(
+          contextGraphId, scope,
+          { privateTripleCount: seal.privateTripleCount, privateMerkleRoot: seal.privateMerkleRoot },
           subGraphName,
         );
         if (sourcePublicQuads.length === 0 && sourcePrivateQuads.length === 0) {
@@ -8342,11 +8304,21 @@ export class DKGPublisher implements Publisher {
       subGraphName,
     );
     const hasDraft = publicDraftExists || privateDraft.length > 0;
-    if (hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
+    const reopeningSealedWm = sourceLayer === 'wm' && selectedSeal.active;
+    if (!reopeningSealedWm && hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
       throw Object.assign(
         new Error(`A WM draft already exists for "${name}" in context graph "${contextGraphId}"; pass onConflict:"replace" to overwrite it.`),
         { code: 'WM_DRAFT_CONFLICT' },
       );
+    }
+
+    // Pre-upgrade drafts have only a mutable version partition. Preserve the
+    // exact validated private bytes before an edit can reuse that version;
+    // backfilling an archive must never roll back the latest private partition.
+    const privateCommitment = selectedSeal.seal.privateMerkleRoot;
+    if (privateCommitment !== undefined && validated.normalizedPrivateQuads.length > 0) {
+      await this.privateStore.archiveKnowledgeAssetPrivateTriples(contextGraphId, selectedScope,
+        validated.normalizedPrivateQuads, ethers.hexlify(privateCommitment), subGraphName);
     }
 
     // Archive the verified recovery commitment before unlocking the active
@@ -8359,6 +8331,7 @@ export class DKGPublisher implements Publisher {
       agentAddress,
       selectedSeal,
       subGraphName,
+      sourceLayer === 'wm' ? 'wm' : undefined,
     );
     await this.clearActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
 
@@ -8496,9 +8469,9 @@ export class DKGPublisher implements Publisher {
     const contentScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
     const immutablePrivateQuads = await tagPromoteStep(
       'knowledgeAssetPrivateQuads',
-      () => this.privateStore.getKnowledgeAssetPrivateTriples(
-        contextGraphId,
-        contentScope,
+      () => this.privateStore.getSealedKnowledgeAssetPrivateTriples(
+        contextGraphId, contentScope,
+        { privateTripleCount: seal.privateTripleCount!, privateMerkleRoot: seal.privateMerkleRoot },
         opts?.subGraphName,
       ),
     );

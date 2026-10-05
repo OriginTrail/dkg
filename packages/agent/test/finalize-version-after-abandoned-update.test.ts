@@ -1,3 +1,4 @@
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 /**
  * GH#2958 — a finalized-but-never-published update must not burn the version number of the
  * next draft. `update()` (and the publisher, StorageACK handler, peers and the chain behind it)
@@ -9,7 +10,7 @@
  * and a hand-seeded "A is published and confirmed" state (the same rows a real confirmed publish
  * leaves). The end-to-end proof on a real chain is in e2e-memory-layers.test.ts.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   AUTHOR_SCHEME_VERSION_V1,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -25,12 +26,14 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import { DKGPublisher, SharedMemoryHandler, TripleStoreAsyncLiftPublisher, computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { stubAgent } from './_helpers/foreign-author-resolution-fixtures.js';
+import { collectAbandonedDraftArtifacts } from '../src/internal/draft/draft-artifact-gc.js';
+import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 const CG = 'finalize-version-gap';
 const NAME = 'abandoned-update';
@@ -65,6 +68,7 @@ function int(value: bigint | number): string {
 
 async function makeAgent(store: OxigraphStore) {
   const chain = {
+    chainType: 'evm' as const,
     chainId: CHAIN_ID,
     getEvmChainId: async () => EVM_CHAIN_ID,
     getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
@@ -448,10 +452,8 @@ describe('GH#2958 enqueue refuses a seal that is not confirmed + 1 (typed, befor
   });
 });
 
-// A reused number is also the key of the private partition (`.../assertions/{version}`), so a
-// replacement draft replaces the private payload sealed under it. Pinned here, with the limit
-// that follows from it, so a change to that layout (tracked in #2964) has to update this on purpose.
-describe('GH#2958 a replacement draft reuses its number and therefore its private partition (tracked in #2964)', () => {
+// A reused draft number retains each private payload under its sealed commitment (#2964).
+describe('GH#2964 a replacement draft retains the previous sealed private payload', () => {
   const secret = (label: string) => q('urn:abandoned:asset', 'urn:secret', `"${label}"`);
 
   /** B (public + private) finalized and shared at number 2, then re-opened from SWM and edited into C. */
@@ -489,11 +491,204 @@ describe('GH#2958 a replacement draft reuses its number and therefore its privat
     )).toEqual([]);
   });
 
-  it('LIMIT: finalizing the replacement without sharing it replaces the shared draft\'s private payload; re-opening that draft fails closed', async () => {
+  it('reopens shared B with its own private content after unshared C reuses its number', async () => {
     const { agent } = await sharedPrivateDraftThenEditedReplacement();
     expect((await finalize(agent)).assertionVersion).toBe('2');
-    // Nothing is corrupted or published wrongly - but B's private content is no longer recoverable.
-    await expect(agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' }))
-      .rejects.toThrow(/private triple-count mismatch/);
+    await expect(agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' })).resolves.toMatchObject({ seededPrivate: 1 });
+    const restored = await agent.publisher.assertionQueryPrivate(CG, NAME, AUTHOR);
+    expect(restored.map((quad: Quad) => quad.object)).toEqual(['"private B"']);
+  });});
+
+
+describe('GH#2964 reused unpublished draft numbers', () => {
+  it('a remote curator accepts the replacement before local commit, then refuses the older share', async () => {
+    const store = new OxigraphStore();
+    const remote = new OxigraphStore();
+    const agent = await makeAgent(store);
+    const peer = '12D3KooWReplacementAuthor';
+    const curator = new SharedMemoryHandler(remote, new TypedEventBus(), { readConfirmedKnowledgeAssetVersion: async () => 0n });
+    const sent: Uint8Array[] = [];
+    const confirmBeforeCommit = async (message: Uint8Array) => {
+      sent.push(Uint8Array.from(message));
+      const outcome = await curator.handle(message, peer);
+      return { applied: outcome.applied, rejected: !outcome.applied && !outcome.retryable };
+    };
+    try {
+      await agent.assertion.create(CG, NAME);
+      await draft(agent, 'B');
+      const b = await finalize(agent);
+      await agent.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: peer, confirmBeforeCommit });
+      await agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' });
+      await draft(agent, 'C');
+      const c = await finalize(agent);
+      expect(c.assertionVersion).toBe(b.assertionVersion);
+      expect(c.merkleRoot).not.toEqual(b.merkleRoot);
+      await agent.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: peer, confirmBeforeCommit });
+      expect(sent).toHaveLength(2);
+      expect((await curator.handle(sent[0]!, peer)).applied).toBe(false);
+      const scope = createGraphKnowledgeAssetScope(c.kaUal, c.assertionVersion);
+      const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
+      const projected = await remote.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+      expect(projected.type).toBe('quads');
+      if (projected.type === 'quads') expect(projected.quads.some(quad => quad.object === '"C"')).toBe(true);
+    } finally { await store.close(); await remote.close(); }
+  });
+
+  it('reopening the shared B draft preserves private B after unshared C reuses the number', async () => {
+    const store = new OxigraphStore();
+    const agent = await makeAgent(store);
+    try {
+      await agent.assertion.create(CG, NAME);
+      await draft(agent, 'B');
+      await agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, [q('urn:private:B', 'urn:secret', '"private B"')]);
+      const b = await finalize(agent);
+      await agent.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: '12D3KooWPrivateAuthor' });
+      await agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' });
+      await agent.publisher.assertionDiscard(CG, NAME, AUTHOR);
+      await agent.assertion.create(CG, NAME);
+      await draft(agent, 'C');
+      await agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, [q('urn:private:C', 'urn:secret', '"private C"')]);
+      const c = await finalize(agent);
+      expect(c.assertionVersion).toBe(b.assertionVersion);
+      await agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' });
+      const restored = await agent.publisher.assertionQueryPrivate(CG, NAME, AUTHOR);
+      expect(restored).toEqual([expect.objectContaining({ subject: 'urn:private:B', object: '"private B"' })]);
+    } finally { await store.close(); }
+  });
+});
+
+
+describe('GH#2964 finalize proof and lifecycle serialization', () => {
+  it('numbers an update from confirmed metadata when the VM pointer stamp is absent', async () => {
+    const { agent, store } = await publishedKa();
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AUTHOR, NAME), predicate: `${DKG}vmCurrentAssertion` });
+    const seal = await editAndFinalize(agent, 'B');
+    expect(seal.assertionVersion).toBe('2');
+    expect((await agent.assertion.history(CG, NAME))?.assertionVersion).toBe('2');
+  });
+
+  it('uses a coherent chain count even when local pointer and VM metadata stamps are absent', async () => {
+    const { agent, store, sealA } = await publishedKa({ record: false });
+    await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AUTHOR, NAME), predicate: `${DKG}vmCurrentAssertion` });
+    agent.chain.readKnowledgeAssetVersionSnapshot = async () => ({ rootCount: 4n, latestAuthor: AUTHOR, knowledgeAssetId: sealA.reservedKaId });
+    expect((await editAndFinalize(agent, 'B')).assertionVersion).toBe('5');
+  });
+
+  it('refuses unavailable coherent chain evidence without signing or modifying the draft', async () => {
+    const { agent, sealA } = await publishedKa();
+    await agent.assertion.pullFrom(CG, NAME, 'vm', { onConflict: 'replace' });
+    await draft(agent, 'B');
+    agent.chain.readKnowledgeAssetVersionSnapshot = async () => ({ rootCount: 1n, latestAuthor: AUTHOR, knowledgeAssetId: sealA.reservedKaId });
+    agent.chain.knowledgeAssetVersionSnapshotIsCurrent = async () => false;
+    const sign = vi.fn(signTypedData);
+    await expect(finalize(agent, undefined, { authorSignTypedData: sign })).rejects.toMatchObject({ code: 'KA_FINALIZE_VERSION_PROOF_UNAVAILABLE' });
+    expect(sign).not.toHaveBeenCalled();
+    expect(await agent.publisher.assertionQuery(CG, NAME, AUTHOR)).toHaveLength(2);
+  });
+
+  it('holds the lifecycle lock through signing so a concurrent WM write cannot change the seal payload', async () => {
+    const store = new OxigraphStore();
+    const agent = await makeAgent(store);
+    await agent.assertion.create(CG, NAME);
+    await draft(agent, 'A');
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const signing = new Promise<void>(resolve => { entered = resolve; });
+    const finalization = finalize(agent, undefined, { authorSignTypedData: async (typedData: any) => { entered(); await blocked; return signTypedData(typedData); } });
+    await signing;
+    let writeFinished = false;
+    const writing = draft(agent, 'racing').then(() => { writeFinished = true; }, error => { writeFinished = true; throw error; });
+    void writing.catch(() => {});
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const finishedBeforeRelease = writeFinished;
+    release();
+    const seal = await finalization;
+    expect(finishedBeforeRelease).toBe(false);
+    await expect(writing).rejects.toMatchObject({ code: 'KA_ASSERTION_ALREADY_FINALIZED' });
+    expect(seal.merkleRoot).toEqual(computeFlatKCRootV10(content('A'), []));
+    expect(await agent.publisher.assertionQuery(CG, NAME, AUTHOR)).toHaveLength(1);
+  });
+  it('allows unrelated finalization and admission during a paused signer while collection remains excluded', async () => {
+    const store = new OxigraphStore(); const agent = await makeAgent(store);
+    const otherCg = 'unrelated-finalization'; const otherName = 'independent-B';
+    await agent.assertion.create(CG, NAME); await draft(agent, 'A');
+    await agent.assertion.create(otherCg, otherName);
+    await agent.assertion.write(otherCg, otherName, content('B'));
+    let release!: () => void; let entered!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const signing = new Promise<void>(resolve => { entered = resolve; });
+    const finalizingA = finalize(agent, undefined, { authorSignTypedData: async (typedData: any) => { entered(); await blocked; return signTypedData(typedData); } });
+    await signing;
+    let collected = false; let finalizedB = false; let admittedB = false;
+    const collecting = collectAbandonedDraftArtifacts({ store, chain: agent.chain, writeLocks: agent.publisher.writeLocks, contextGraphId: CG, now: Date.now(), pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS }).then(() => { collected = true; });
+    const finalizingB = agent.assertion.finalize(otherCg, otherName, { authorAgentAddress: AUTHOR, authorSignTypedData: signTypedData }).then(() => { finalizedB = true; });
+    const queue = new TripleStoreAsyncLiftPublisher(store);
+    const admittingB = queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: otherCg, name: otherName })).then(() => { admittedB = true; });
+    let progressed = false; let collectedBeforeRelease = false;
+    try {
+      progressed = await vi.waitFor(() => expect(finalizedB && admittedB).toBe(true), { timeout: 1_000, interval: 10 }).then(() => true, () => false);
+      collectedBeforeRelease = collected;
+    } finally { release(); await Promise.all([finalizingA, finalizingB, admittingB, collecting]); await store.close(); }
+    expect(progressed).toBe(true);
+    expect(collectedBeforeRelease).toBe(false);
+    expect(collected).toBe(true);
+  });
+});
+
+describe('GH#2964 exact private payload recovery across reused draft numbers', () => {
+  it('reopens a zero-private shared B after private C reuses its number without sharing', async () => {
+    const store = new OxigraphStore();
+    const agent = await makeAgent(store);
+    try {
+      await agent.assertion.create(CG, NAME);
+      await draft(agent, 'B-public');
+      const b = await finalize(agent);
+      await agent.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: '12D3KooWPrivateAuthor' });
+      await agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' });
+      await agent.publisher.assertionDiscard(CG, NAME, AUTHOR);
+      await agent.assertion.create(CG, NAME);
+      await draft(agent, 'C-public');
+      await agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, [q('urn:private:C', 'urn:secret', '"private C"')]);
+      const c = await finalize(agent);
+      expect(c.assertionVersion).toBe(b.assertionVersion);
+      const reopened = await agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' });
+      expect(reopened.seededPrivate).toBe(0);
+      expect(await agent.publisher.assertionQueryPrivate(CG, NAME, AUTHOR)).toEqual([]);
+      expect(await agent.publisher.assertionQuery(CG, NAME, AUTHOR)).toEqual([
+        expect.objectContaining({ object: '"B-public"' }),
+      ]);
+    } finally { await store.close(); }
+  });
+
+  it('backfills a pre-upgrade B private commitment before C overwrites the version graph', async () => {
+    const store = new OxigraphStore();
+    const agent = await makeAgent(store);
+    try {
+      await agent.assertion.create(CG, NAME);
+      await draft(agent, 'B-public');
+      await agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, [q('urn:private:B', 'urn:secret', '"private B"')]);
+      const b = await finalize(agent);
+      await agent.publisher.assertionPromote(CG, NAME, AUTHOR, { publisherPeerId: '12D3KooWPrivateAuthor' });
+      const privateStore = new PrivateContentStore(store, new GraphManager(store));
+      const scope = createGraphKnowledgeAssetScope(b.kaUal, b.assertionVersion);
+      const commitment = ethers.hexlify(Reflect.get(b, 'privateMerkleRoot'));
+      const archive = privateStore.knowledgeAssetPrivateCommitmentGraphUri(CG, scope, commitment);
+      await store.dropGraph(archive); // Pre-upgrade writes had only the version graph.
+      expect(await store.countQuads(archive)).toBe(0);
+      await agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' });
+      await agent.publisher.assertionDiscard(CG, NAME, AUTHOR);
+      await agent.assertion.create(CG, NAME);
+      await draft(agent, 'C-public');
+      await agent.publisher.assertionWritePrivate(CG, NAME, AUTHOR, [q('urn:private:C', 'urn:secret', '"private C"')]);
+      const c = await finalize(agent);
+      expect(c.assertionVersion).toBe(b.assertionVersion);
+      const reopened = await agent.assertion.pullFrom(CG, NAME, 'swm', { onConflict: 'replace' });
+      expect(reopened.seededPrivate).toBe(1);
+      expect(await agent.publisher.assertionQueryPrivate(CG, NAME, AUTHOR)).toEqual([
+        expect.objectContaining({ subject: 'urn:private:B', object: '"private B"' }),
+      ]);
+      expect(await store.countQuads(archive)).toBe(1);
+    } finally { await store.close(); }
   });
 });

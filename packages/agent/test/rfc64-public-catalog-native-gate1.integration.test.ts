@@ -524,14 +524,23 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     );
     const synchronization = fixture.synchronize(fixture.announcement, receiver);
     await leaseAcquired;
-    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
-      owner,
-      CONTEXT_GRAPH_ID,
-      UAL,
-      'concurrent-newer-root',
-      '2',
-    )).toThrow(/retirement is in progress/);
-    allowLeaseReturn();
+    try {
+      expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+        owner,
+        CONTEXT_GRAPH_ID,
+        UAL,
+        'concurrent-newer-root',
+        '2',
+      )).toThrow(expect.objectContaining({
+        name: 'PromoteRetryableFailureError',
+        code: 'PROMOTE_RETRYABLE_FAILURE',
+        cause: expect.objectContaining({
+          message: 'RFC-64 legacy SWM boundary retirement is in progress; retry promotion',
+        }),
+      }));
+    } finally {
+      allowLeaseReturn();
+    }
 
     await expect(synchronization).resolves.toMatchObject({ appliedHeadStatus: 'applied' });
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
@@ -698,14 +707,23 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     );
     const bootstrap = fixture.bootstrap(fixture.genesisAnnouncement, receiver);
     await postHeadEntered;
-    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
-      owner,
-      CONTEXT_GRAPH_ID,
-      UAL,
-      'concurrent-empty-genesis-root',
-      '1',
-    )).toThrow(/retirement is in progress/);
-    allowPostHead();
+    try {
+      expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+        owner,
+        CONTEXT_GRAPH_ID,
+        UAL,
+        'concurrent-empty-genesis-root',
+        '1',
+      )).toThrow(expect.objectContaining({
+        name: 'PromoteRetryableFailureError',
+        code: 'PROMOTE_RETRYABLE_FAILURE',
+        cause: expect.objectContaining({
+          message: 'RFC-64 legacy SWM boundary retirement is in progress; retry promotion',
+        }),
+      }));
+    } finally {
+      allowPostHead();
+    }
 
     await expect(bootstrap).resolves.toMatchObject({
       inventoryRowCount: 0,

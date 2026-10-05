@@ -1,3 +1,6 @@
+import { readConfirmedDraftVersion } from './internal/draft/confirmed-draft-version.js';
+
+import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
@@ -527,6 +530,7 @@ import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,
 } from './dkg-agent-publish.js';
+export type { AssertionFinalizeOptions, AssertionFinalizeResult } from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
@@ -591,14 +595,7 @@ export type {
   ImportedArtifactByteStore,
 };
 
-/**
- * OT-RFC-43 A2 (decision 5) — the `agent.assertion.history()` return shape:
- * the core `AssertionDescriptor` plus the three per-layer pointers, the
- * §10.5.4 derived status, and the finalize-stamped KA identity. The pointers
- * are merkle-root hex (bare, no 0x); divergence between them (e.g.
- * `wmCurrentAssertion !== vmCurrentAssertion`) is the observable signal that a
- * layer is ahead of another.
- */
+/** Assertion history includes each memory layer's root and the finalized KA identity. */
 export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   /** Merkle hex of the assertion currently sealed in WM (bare, no 0x). */
   wmCurrentAssertion?: string;
@@ -612,6 +609,8 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   status: KaStatus;
   /** The per-author KA NUMBER (low 96 bits) stamped at finalize, as a string. */
   kaNumber?: string;
+  /** The current finalized assertion number, independent of the stable KA number. */
+  assertionVersion?: string;
   /** did:dkg:<chainId>/<agentAddrLower>/<number> reserved at finalize. */
   reservedUal?: string;
   /**
@@ -763,33 +762,6 @@ function constructConfiguredChainAdapter(
   return { chain: new NoChainAdapter(), operationalKeys };
 }
 
-interface ACKReliableMessenger {
-  sendRequestOwned(
-    peerId: string,
-    protocol: string,
-    data: Uint8Array,
-    opts: { timeoutMs: number },
-  ): Promise<{ delivered: boolean; error?: unknown; response?: Uint8Array }>;
-}
-
-function createACKSendP2P(input: {
-  messenger: ACKReliableMessenger;
-  timeoutMs: number;
-}): ACKCollectorDeps['sendP2P'] {
-  return async (peerId: string, protocol: string, data: Uint8Array) => {
-    const sendResult = await input.messenger.sendRequestOwned(peerId, protocol, data, {
-      timeoutMs: input.timeoutMs,
-    });
-    if (!sendResult.delivered) {
-      throw new Error(`substrate send already in flight (transport): ${sendResult.error}`);
-    }
-    if (!sendResult.response) {
-      throw new Error('substrate delivered (transport) without response');
-    }
-    return sendResult.response;
-  };
-}
-
 /**
  * High-level facade that ties together all DKG agent capabilities:
  * identity, networking, publishing, querying, discovery, and messaging.
@@ -931,6 +903,8 @@ export class DKGAgent extends DKGAgentBase {
         )
       ),
       publicSnapshotStore: this.publicSnapshotStore,
+      readConfirmedKnowledgeAssetVersion: kaUal => readConfirmedDraftVersion(this.chain, kaUal),
+      pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
       ordinaryRootSnapshotApplyAllowed: (contextGraphId) => (
         this.rfc64LegacySwmApplyAllowedForScope(contextGraphId, null)
       ),
@@ -3983,17 +3957,17 @@ export class DKGAgent extends DKGAgentBase {
         const queryAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionQueryPrivate(contextGraphId, name, queryAgentAddress, opts?.subGraphName);
       },
-      /** Re-open a sealed rootless KA from its exact SWM/VM graph. */
+      /** Re-open a sealed rootless KA from its exact WM/SWM/VM graph. */
       async pullFrom(
         contextGraphId: string,
         name: string,
-        sourceLayer: 'swm' | 'vm',
+        sourceLayer: 'wm' | 'swm' | 'vm',
         opts?: { subGraphName?: string; agentAddress?: string; onConflict?: 'reject' | 'replace' },
       ): Promise<{
         seeded: number;
         seededPublic: number;
         seededPrivate: number;
-        fromLayer: 'swm' | 'vm';
+        fromLayer: 'wm' | 'swm' | 'vm';
         contentScopeVersion: number;
         kaUal: string;
         assertionVersion: string;
@@ -4257,7 +4231,7 @@ export class DKGAgent extends DKGAgentBase {
             opts?.subGraphName,
           );
           const entityResult = await agent.store.query(
-            `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal ?contentScopeVersion WHERE {
+            `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal ?contentScopeVersion ?assertionVersion WHERE {
               GRAPH <${metaGraph}> {
                 <${candidateLifecycleUri}> <${DKG_NS}state> ?state .
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
@@ -4270,6 +4244,7 @@ export class DKGAgent extends DKGAgentBase {
                 OPTIONAL { <${candidateLifecycleUri}> <${RESERVED_UAL_PRED}> ?reservedUal }
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}publishedUal> ?publishedUal }
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}contentScopeVersion> ?contentScopeVersion }
+                OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}assertionVersion> ?assertionVersion }
               }
             } LIMIT 1`,
             { source: 'agent.history.lifecycleState' },
@@ -4421,6 +4396,7 @@ export class DKGAgent extends DKGAgentBase {
           currentShareOperationId,
           status: deriveStatus(pointers),
           kaNumber: kaNumberStr,
+          assertionVersion: strip(row['assertionVersion']),
           reservedUal,
           publishedUal,
         };

@@ -1,3 +1,4 @@
+import { healthyRecoveredAliasRows } from '../src/internal/swm-recovery/swm-draft-order.js';
 import { mkdtemp, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,6 +45,7 @@ import {
   knowledgeAssetLayerGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { canonicalQuadKey } from '../src/sync/requester/quad-key.js';
 import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import {
   generateKnowledgeAssetShareMetadata,
@@ -60,7 +62,8 @@ import {
   type SharedMemoryMetadataFetcher,
   type SharedMemorySnapshotWalkContinuation,
 } from '../src/sync/requester/shared-memory-sync.js';
-import type { SharedMemorySnapshotMaterializer, StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
+import type { PreparedSwmRecoveryDescriptor } from '../src/internal/swm-recovery/swm-recovered-provenance.js';
+import type { SharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import type { RecoveryExecutionGuard } from
   '../src/sync/requester/recovery-execution-guard.js';
 
@@ -131,7 +134,7 @@ function fixture(subGraphName?: string, publisherPeerId = 'peer-source') {
 interface HarnessOverrides {
   deadline?: number;
   snapshotStore?: WorkspacePublicSnapshotStore;
-  storedHead?: () => StoredWorkspaceHeadState;
+  storedHead?: () => { version: string | null; needsRepair: boolean; shareOperationId: string | null };
   contentPresent?: () => boolean;
   replaceImpl?: (graphUri: string, quads: Quad[]) => Promise<void>;
   onLockRequested?: () => void;
@@ -219,10 +222,18 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
+        prepareRecoveredDescriptor: async descriptor => {
+          const state = overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
+          const storedHead: PreparedSwmRecoveryDescriptor['storedHead'] = state.version === null ? { status: 'missing' } : state.needsRepair
+            ? { status: 'corrupt', error: new Error('fixture corruption') } as PreparedSwmRecoveryDescriptor['storedHead']
+            : { status: 'resolved', head: { assertionVersion: state.version, operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as PreparedSwmRecoveryDescriptor['storedHead'];
+          return { ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead };
+        },
+        filterBulkMetadata: async (rows, withheld = []) => { const keys = new Set(withheld.map(canonicalQuadKey)); return rows.filter(row => !keys.has(canonicalQuadKey(row))); },
         // Private-lane mutations are outside this public orchestration fixture.
         readExactMaterializedGraph: async () => { throw new Error('unexpected private recovery'); },
         replaceGraphWithAtomicCompanion: async () => { throw new Error('unexpected private recovery'); },
-        preserveStoredIdentityForSkippedAsset: async () => { throw new Error('unexpected private recovery'); },
+
         replaceMetaForGraphAssets: async () => { throw new Error('unexpected private recovery'); },
         withKaWriteLock: async (contextGraphId, subGraphName, kaUal, fn) => {
           events.push('lock-requested');
@@ -241,31 +252,36 @@ function harness(overrides: HarnessOverrides = {}) {
           events.push('content-checked');
           return overrides.contentPresent?.() ?? false;
         },
-        readStoredHead: async () => {
+        draftMayReplace: async (_cg, descriptor) => {
           events.push('version-read');
-          return overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
+          const version = overrides.storedHead?.().version;
+          if (version == null) return true;
+          try { return BigInt(version) <= BigInt(descriptor.assertionVersion); } catch { return false; }
         },
+
         replaceGraph: async (graphUri, quads) => {
           events.push('replaced');
           if (overrides.replaceImpl) return overrides.replaceImpl(graphUri, quads);
           replaced.push({ graphUri, quads });
         },
-        replaceHeadMetadata: async (contextGraphId, descriptor) => {
-          events.push('head-swapped');
-          headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
-        },
-        // GH#2273 — this fake proves ORDERING, not store state; identity
-        // preservation never fires here (no stored foreign id), so the
-        // decision hook reports "descriptor wins" and the rewrite hook only
-        // records that it ran.
-        selectRepairIdentity: async () => {
+        commitRecoveredMetadata: async (contextGraphId, descriptor) => {
           events.push('repair-identity-selected');
-          return overrides.selectRepairIdentity?.() ?? null;
-        },
-        repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
-          events.push('head-repaired-preserving-identity');
-          headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
-          void winnerShareOperationId;
+          const selected = overrides.selectRepairIdentity?.() ?? (overrides.storedHead?.().version === '1' && overrides.contentPresent?.() && !overrides.storedHead?.().needsRepair ? { winnerShareOperationId: 'snapshot-materialization-op', withholdRows: [] } : null);
+          let rows = descriptor.metadataQuads;
+          if (selected && descriptor.storedHead.status === 'resolved') {
+            rows = healthyRecoveredAliasRows(contextGraphId, descriptor)!;
+          } else {
+            events.push(selected ? 'head-repaired-preserving-identity' : 'head-swapped');
+            headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+            if (selected) {
+              const withheld = new Set(selected.withholdRows.map(canonicalQuadKey));
+              rows = rows.filter(row => !withheld.has(canonicalQuadKey(row)));
+            }
+          }
+          if (rows.length > 0) {
+            await overrides.onStoreInsert?.(); events.push('meta-inserted'); inserted.push([...rows]);
+          }
+          return { insertedMetaQuads: rows.length, withholdRows: descriptor.metadataQuads };
         },
       },
       reconcileFinalizedTwin: async () => {
@@ -419,7 +435,7 @@ describe('public SWM snapshot materialization', () => {
   it('does not recreate SWM head metadata after retiring an already-materialized twin', async () => {
     const h = harness({
       contentPresent: () => true,
-      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }),
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: 'snapshot-materialization-op' }),
       reconcileDisposition: 'suppress-metadata',
     });
     const summary = await h.run();

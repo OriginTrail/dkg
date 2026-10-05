@@ -222,6 +222,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     for (const { ref } of manifest) retained.markResolved(ref);
 
     let canAdmit = true;
+    let insideCommit = false;
     const isGraphAssetMaterialized = vi.fn(async () => {
       canAdmit = false;
       return true;
@@ -250,25 +251,24 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         putSnapshot: async () => { throw new Error('No snapshot write expected'); },
       },
       snapshotMaterializer: {
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
+        filterBulkMetadata: async rows => rows,
+        selectRepairIdentity: async () => null,
+        commitRecoveredMetadata: async (_cg, descriptor) => ({ insertedMetaQuads: descriptor.metadataQuads.length, withholdRows: descriptor.metadataQuads }),
         withKaWriteLock: async (
           _contextGraphId: string,
           _subGraphName: string | undefined,
           _kaUal: string,
           fn: () => Promise<unknown>,
-        ) => fn(),
-        readStoredHead: async () => ({
-          version: null,
-          shareOperationId: null,
-          shareOperationIds: [],
-          needsRepair: false,
-        }),
-        isGraphAssetMaterialized,
-        preserveStoredIdentityForSkippedAsset: async () => ({ outcome: 'replace' }),
+        ) => { insideCommit = true; try { return await fn(); } finally { insideCommit = false; } },
+        draftMayReplace: async () => true,
+
+        isGraphAssetMaterialized: () => insideCommit ? Promise.resolve(true) : isGraphAssetMaterialized(),
+
       } as unknown as SharedMemorySnapshotMaterializer,
       snapshotWalkProgress: () => retained,
       store,
       replaceMetaForRoots: async () => undefined,
-      replaceMetaForGraphAssets: async () => undefined,
       ensureContextGraph: async () => undefined,
       setCheckpoint: () => undefined,
       deleteCheckpoint: () => undefined,

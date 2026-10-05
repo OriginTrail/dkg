@@ -58,7 +58,7 @@ dkg ka publish notes -c my-project
 
 If a finalized update carries a different number (it was sealed by an older node, or the published version moved on in the meantime) the node refuses it before anything is staged or sent — `409 PUBLISH_INTENT_STALE`, naming the two numbers — instead of failing later as a retryable publish error. Recover with `dkg ka pull-from <name> -c <cg> --layer swm` (`--layer vm` when the published version moved on; then re-apply your edits), `finalize`, `share`, and publish again. An async publish job that already failed for the KA keeps owning it until it is cleared (`dkg publisher clear failed`, or `POST /api/publisher/clear-job` for one job); retry skips a job whose budget is spent.
 
-A core that already ACK-signed the abandoned draft declines its replacement transiently for a few minutes (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default); retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Working Memory until the update is published. Finalizing a replacement draft also replaces the private payload sealed under the same number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Working Memory once its replacement is finalized.
+A core that already ACK-signed the abandoned draft declines its replacement transiently during `DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS` (5 minutes by default); retry after that window. Upgraded peers accept a newer authenticated share at the same unpublished number, and a recovered burned draft may move to a lower number when a coherent chain view proves both drafts are unpublished. Older shares cannot regress the replacement. Private payloads are retained by sealed commitment, so an earlier shared draft remains reopenable after a replacement is finalized. Peers running older receiver code retain the previous draft behavior until upgraded.
 
 ## Synchronous share failures
 
@@ -108,3 +108,10 @@ If the share committed but the node then failed to record its `swmCurrentAsserti
 | `dkg ka history <name> -c <cg>` | Read lifecycle descriptor |
 
 `dkg assertion ...` remains as compatibility for older document import/query/promote flows. New docs and agents should prefer `dkg ka ...`.
+
+
+A finalized draft that has not been shared can be reopened with `dkg ka pull-from notes --layer wm -c my-project`. The daemon verifies the complete sealed public/private payload before clearing the active seal; a damaged source remains unchanged. Finalization holds the KA lifecycle lock through signing, and derives its assertion number from coherent chain or confirmed VM evidence rather than requiring the best-effort VM pointer. History exposes `assertionVersion` separately from the stable `kaNumber`.
+
+Deterministic missing-target, invalid-target, ownership, legacy-read-only and stale-version errors end queued jobs as pre-send failures. Transient RPC/store failures retain their existing retry lanes; a persisted transaction always retains its recovery evidence. Duplicate-job HTTP409 responses include `ASYNC_LIFT_JOB_CONFLICT` and the existing job ID.
+
+Abandoned draft maintenance runs in bounded batches. It retires superseded public operation snapshots after the pending ACK window, preserving current or equivalent heads, signed ACK copies, lifecycle references, and every persisted publish job until explicit clear. Private collection only removes unreferenced versions above the coherently confirmed next draft; historical, current, and next versions remain available. Incomplete queue coverage suspends both this maintenance and the older TTL sweep. Queue admission and retirement share a reference fence, so a late publish request for a retired operation returns `PUBLISH_INTENT_STALE` without creating a stranded job.

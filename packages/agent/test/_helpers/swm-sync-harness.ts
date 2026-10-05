@@ -32,6 +32,7 @@ interface SwmSyncHarnessBaseOptions {
   readonly ctx: OperationContext;
   readonly contextGraphId: string;
   readonly store: TripleStore;
+  readonly readConfirmedKnowledgeAssetVersion?: (kaUal: string) => Promise<bigint | null>;
   readonly cachedSnapshots?: ReadonlyMap<string, readonly Quad[]>;
   readonly remotePeerId?: string;
   readonly fetchPage?: (
@@ -65,6 +66,7 @@ export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
   const materializer = options.materialization === 'disabled' ? undefined
     : createSharedMemorySnapshotMaterializer({
       store: options.store,
+      readConfirmedKnowledgeAssetVersion: options.readConfirmedKnowledgeAssetVersion,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });

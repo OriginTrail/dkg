@@ -92,6 +92,27 @@ describe('RFC-64 exact-set bounded planner v1', () => {
     expect(exact).toEqual([refreshedInventory]);
   });
 
+  it.each([['1', 2], ['2', 2], ['3', 1], ['4', 1]] as const)(
+    'plans version %s replacement with %s explicitly ordered successors', async (version, count) => {
+      const existing = await plannerAsset(1n, '2');
+      const retained = await plannerAsset(2n);
+      const replacement = Object.freeze({
+        ...await plannerAsset(1n, version),
+        projectionBytes: new Uint8Array([99]),
+      }) as Asset;
+      const mutation = planNextRfc64CatalogExactSetV1(
+        [existing, retained], [replacement, retained],
+      );
+      expect(mutation).toHaveLength(count);
+      if (count === 2) {
+        expect(mutation[0]).toEqual([retained]);
+        expect(mutation[1]).toEqual([replacement, retained]);
+      } else {
+        expect(mutation[0]).toEqual(version === '3' ? [replacement, retained] : [retained]);
+      }
+    },
+  );
+
   it('frees one current-only slot before inserting into a full 1,024-row set', async () => {
     const current = await Promise.all(Array.from(
       { length: MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 },
@@ -102,13 +123,17 @@ describe('RFC-64 exact-set bounded planner v1', () => {
       (_value, index) => plannerAsset(BigInt(index)),
     ));
 
-    const freed = planNextRfc64CatalogExactSetV1(current, target);
+    const removal = planNextRfc64CatalogExactSetV1(current, target);
+    expect(removal).toHaveLength(1);
+    const freed = removal[0];
     expect(freed).toHaveLength(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 - 1);
     expect(freed.some(
       (asset) => asset.seal.reservedKaId === current.at(-1)?.seal.reservedKaId,
     )).toBe(false);
 
-    const inserted = planNextRfc64CatalogExactSetV1(freed, target);
+    const addition = planNextRfc64CatalogExactSetV1(freed, target);
+    expect(addition).toHaveLength(1);
+    const inserted = addition[0];
     expect(inserted).toHaveLength(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);
     expect(inserted[0]?.seal.reservedKaId).toBe(target[0]?.seal.reservedKaId);
     expect(Math.max(freed.length, inserted.length)).toBe(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);

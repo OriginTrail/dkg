@@ -43,6 +43,9 @@ export default defineConfig({
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
+      "test/coherent-draft-chain-evidence.test.ts",
+      "test/draft-artifact-ack-window.test.ts",
+      "test/draft-artifact-gc.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
@@ -198,8 +201,12 @@ export default defineConfig({
       "test/rootless-durable-skips-legacy-partition.test.ts",
       "test/rootless-lifecycle-graph.test.ts",
       "test/swm-recovery-apply.test.ts",
+      "test/swm-recovery-completed-asset.test.ts",
+      "test/swm-metadata-commit.test.ts",
+      "test/swm-draft-replacement-chronology.test.ts",
       "test/swm-recovery.test.ts",
       "test/swm-recovery-identity-preservation.test.ts",
+      "test/swm-recovery-corrupt-head.test.ts",
       // #2083: the discoverable suffix keeps runtime/type adoption in sync.
       "test/shared-memory-sync-ownership.typechecked.test.ts",
       "test/dkg-agent-snapshot-store-injection.test.ts",
@@ -303,6 +310,7 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-sender-key-stale-target.test.ts",
+      "test/swm-sender-key-pending-by-agent.test.ts",
       "test/swm-sender-key-peer-routes.test.ts",
       // #2827 — SWM authority and plaintext decisions for a joined member of a
       // public, unregistered context graph.

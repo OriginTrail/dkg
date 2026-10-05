@@ -8,6 +8,7 @@ import {
   workspaceKnowledgeAssetOperationSnapshotGraph as knowledgeAssetSnapshotGraph,
 } from '@origintrail-official/dkg-core';
 import {
+  isWorkspacePublisherClockEligible,
   canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,
   workspacePublicQuadsDigest,
@@ -111,6 +112,8 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly assertionGraph: string;
   /** Deterministic newest alias used as the logical head identity. */
   readonly shareOperationId: string;
+  /** Provider chronology is a claim until local evidence preparation. */
+  readonly providerPublisherOperation?: Readonly<{ id: string; timestampMs: number }>;
   /** Equivalent operation and immutable locator selected for materialization. */
   readonly snapshotSource: Readonly<{
     shareOperationId: string;
@@ -126,7 +129,7 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly privateMerkleRoot?: string;
   readonly publisherPeerId: string;
   readonly subGraphName?: string;
-  /** Only the active head and its referenced operation, for snapshot fetch. */
+  /** Active head and materialization operations. */
   readonly metadataQuads: readonly Quad[];
 }
 
@@ -161,11 +164,7 @@ export function discoverSwmRecoverySubGraphNames(params: {
   return [...names].sort();
 }
 
-/**
- * Parse and validate the active graph-scoped SWM heads in a complete recovery
- * metadata snapshot. Every accepted descriptor is bound to one deterministic
- * UAL/version graph and one same-graph WorkspaceOperation commitment.
- */
+/** Validate exact graph heads and their same-graph operation commitments. */
 export function parseGraphScopedSwmRecoveryDescriptors(params: {
   readonly contextGraphId: string;
   readonly metaQuads: readonly Quad[];
@@ -229,7 +228,6 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     const {
       shareOperationId,
       operationSubject,
-      operationRows,
       semantics,
       snapshotSource,
       equivalentOperationSubjects,
@@ -258,20 +256,17 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
       publisherPeerId: semantics.publisherIdentity,
       ...(subGraphName ? { subGraphName } : {}),
+      ...(operation.publisherOperation === undefined ? {} : {
+        providerPublisherOperation: {
+          id: operation.publisherOperation.provenance.shareOperationId,
+          timestampMs: operation.publisherOperation.provenance.publishedAtMs,
+        },
+      }),
       metadataQuads: [
-        ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
-        // EVERY lexical form of the selected id, not just the one selected
-        // row: RDF 1.1 admits the same value as a plain and an
-        // xsd:string-typed literal, and downstream withhold plans are built
-        // from these rows BYTE-keyed — a variant left out here passes the
-        // value-based insert canonicalization and re-stacks the losing id
-        // beside a just-preserved head.
-        ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
-          && stripLiteral(row.object).trim() === shareOperationId),
-        ...operationRows,
-        ...(snapshotSource.operationSubject === operationSubject
-          ? []
-          : snapshotSource.operationRows),
+        ...headRows,
+        // Every validated alias is settled under the KA lock. Unselected
+        // provider operation rows must not escape into a later bulk union.
+        ...equivalentOperationSubjects.flatMap(subject => byGraphAndSubject.get(`${metaGraph}\u0000${subject}`) ?? []),
       ],
     });
   }
@@ -310,11 +305,7 @@ export function canonicalGraphScopedSnapshotManifestQuads(
   ));
 }
 
-/**
- * Collapse only the current-head pointer rows covered by parsed descriptors.
- * Superseded operation subjects may remain as immutable history, but a head
- * itself must name exactly one operation or LIMIT-1 readers become arbitrary.
- */
+/** Keep the selected identity and its validated publisher chronology alias. */
 export function canonicalizeGraphScopedSwmHeadRows(params: {
   readonly metaQuads: readonly Quad[];
   readonly descriptors: readonly GraphScopedSwmRecoveryDescriptor[];
@@ -322,13 +313,13 @@ export function canonicalizeGraphScopedSwmHeadRows(params: {
   const selectedByHead = new Map(
     params.descriptors.map((descriptor) => [
       `${descriptor.metaGraph}\u0000${descriptor.headSubject}`,
-      descriptor.shareOperationId,
+      new Set([descriptor.shareOperationId, descriptor.providerPublisherOperation?.id]),
     ]),
   );
   return params.metaQuads.filter((row) => {
     if (row.predicate !== SHARE_OPERATION_ID) return true;
     const selected = selectedByHead.get(`${row.graph}\u0000${row.subject}`);
-    return selected === undefined || stripLiteral(row.object).trim() === selected;
+    return selected === undefined || selected.has(stripLiteral(row.object).trim());
   });
 }
 
@@ -504,14 +495,22 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
   });
 }
 
-interface RecoveryOperationCandidate extends WorkspaceOperationModel<RecoveryWorkspaceOperationSemantics> {
+export interface RecoveryOperationCandidate extends WorkspaceOperationModel<RecoveryWorkspaceOperationSemantics> {
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
   readonly snapshotLocator: RecoverySnapshotLocator;
+  readonly identityKey: string | null;
+  readonly provenance: Readonly<{ shareOperationId: string; publishedAtMs: number; publisherChronologyAuthenticated: boolean }>;
+}
+
+/** Publisher clock eligibility is independent of the local authentication fence. */
+export function isPublisherOperationCandidate(candidate: RecoveryOperationCandidate): boolean {
+  return isWorkspacePublisherClockEligible(candidate.provenance);
 }
 
 interface ResolvedHeadOperation {
+  readonly publisherOperation?: RecoveryOperationCandidate;
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
@@ -571,13 +570,20 @@ function recoverySnapshotLocator(params: {
   };
 }
 
-/**
- * Storage-ACK persistence and originator persistence can legitimately produce
- * two operation ids for the same exact assertion. Accept that residue only
- * when every recovery-relevant operation row is byte-equivalent (apart from
- * operation id and timestamp), then choose the newest operation
- * deterministically. Any content or policy disagreement remains fail-closed.
- */
+/** Decode the same candidate model for provider parsing and prepared local evidence. */
+export function decodeRecoveryOperationCandidate(params: Parameters<typeof validateOperationRows>[0]): RecoveryOperationCandidate {
+  const semantics = validateOperationRows(params);
+  const publishedAtMs = Date.parse(stripLiteral(requireSingle(params.rows, PUBLISHED_AT, 'publishedAt')));
+  if (!Number.isFinite(publishedAtMs)) throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid publishedAt`);
+  return {
+    semantics, provenance: { shareOperationId: params.shareOperationId, publishedAtMs, publisherChronologyAuthenticated: false },
+    shareOperationId: params.shareOperationId, operationSubject: params.operationSubject,
+    operationRows: params.rows, identityKey: operationIdentityKey(params.rows),
+    snapshotLocator: recoverySnapshotLocator({ ...params, publicQuadsDigest: semantics.publicQuadsDigest }),
+  };
+}
+
+/** Resolve equivalent originator/ACK aliases; disagreements remain fail-closed. */
 function resolveEquivalentHeadOperation(params: {
   readonly headRows: readonly Quad[];
   readonly byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>;
@@ -605,42 +611,9 @@ function resolveEquivalentHeadOperation(params: {
     const operationRows = params.byGraphAndSubject.get(
       `${params.metaGraph}\u0000${operationSubject}`,
     ) ?? [];
-    const semantics = validateOperationRows({
-      rows: operationRows,
-      contextGraphId: params.contextGraphId,
-      metaGraph: params.metaGraph,
-      operationSubject,
-      shareOperationId,
-      kaUal: params.kaUal,
-      assertionVersion: params.assertionVersion,
-      subGraphName: params.subGraphName,
-    });
-    const publishedAt = stripLiteral(requireSingle(operationRows, PUBLISHED_AT, 'publishedAt'));
-    const publishedAtMs = Date.parse(publishedAt);
-    if (!Number.isFinite(publishedAtMs)) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
-    }
-    const headShareOperationRow = params.headRows
-      .filter((row) => row.predicate === SHARE_OPERATION_ID)
-      .find((row) => stripLiteral(row.object).trim() === shareOperationId);
-    if (!headShareOperationRow) {
-      throw new Error(`Graph-scoped SWM head ${params.headSubject} is missing shareOperationId`);
-    }
-    return {
-      semantics,
-      provenance: { shareOperationId, publishedAtMs },
-      shareOperationId,
-      operationSubject,
-      operationRows,
-      snapshotLocator: recoverySnapshotLocator({
-        rows: operationRows,
-        contextGraphId: params.contextGraphId,
-        operationSubject,
-        shareOperationId,
-        ...(params.subGraphName === undefined ? {} : { subGraphName: params.subGraphName }),
-        publicQuadsDigest: semantics.publicQuadsDigest,
-      }),
-    };
+    return decodeRecoveryOperationCandidate({ rows: operationRows, contextGraphId: params.contextGraphId,
+      metaGraph: params.metaGraph, operationSubject, shareOperationId, kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion, subGraphName: params.subGraphName });
   });
 
   const orderedCandidates = selectEquivalentWorkspaceOperation(
@@ -665,7 +638,9 @@ function resolveEquivalentHeadOperation(params: {
       && selected.snapshotLocator.provenance === 'persisted-ref'
       ? selected
       : persistedRefSource ?? selected);
+  const publisherOperation = orderedCandidates.find(isPublisherOperationCandidate);
   return {
+    ...(publisherOperation === undefined ? {} : { publisherOperation }),
     shareOperationId: selected.provenance.shareOperationId,
     operationSubject: selected.operationSubject,
     operationRows: selected.operationRows,

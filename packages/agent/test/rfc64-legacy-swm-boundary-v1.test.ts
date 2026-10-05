@@ -211,7 +211,10 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(outcome).toBeUndefined();
     expect(() => prepareRfc64LateLegacySwmBoundaryV1(
       owner, CONTEXT_GRAPH_ID, UAL_TWO, 'same-cg-during-finalized-vm-retirement', '1',
-    )).toThrow('retirement is in progress');
+    )).toThrow(expect.objectContaining({
+      code: 'PROMOTE_RETRYABLE_FAILURE',
+      cause: expect.objectContaining({ message: expect.stringContaining('retirement is in progress') }),
+    }));
     const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
       owner, SECOND_CONTEXT_GRAPH_ID, UAL_TWO, 'other-cg-during-finalized-vm-retirement', '1',
     );
@@ -506,7 +509,10 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       UAL_ONE,
       'same-cg-during-receiver-lease',
       '1',
-    )).toThrow('retirement is in progress');
+    )).toThrow(expect.objectContaining({
+      code: 'PROMOTE_RETRYABLE_FAILURE',
+      cause: expect.objectContaining({ message: expect.stringContaining('retirement is in progress') }),
+    }));
 
     const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
       owner,
@@ -617,7 +623,10 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       UAL_ONE,
       'same-ual-generation-three',
       '3',
-    )).toThrow('retirement is in progress');
+    )).toThrow(expect.objectContaining({
+      code: 'PROMOTE_RETRYABLE_FAILURE',
+      cause: expect.objectContaining({ message: expect.stringContaining('retirement is in progress') }),
+    }));
     const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
       owner,
       SECOND_CONTEXT_GRAPH_ID,

@@ -287,6 +287,12 @@ export {
   PrivateContentStore,
   type KnowledgeAssetPrivateReadOptions,
 } from './private-store.js';
+export {
+  decodeKnowledgeAssetPrivateArtifact,
+  knowledgeAssetPrivateArtifactOwnerCandidates,
+  readKnowledgeAssetPrivateArtifactsPage,
+  type KnowledgeAssetPrivateArtifact,
+} from './private-artifacts.js';
 export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';
 // #2079 — node-local memo of an already-verified SWM assertion graph. Read only
 // AFTER a count gate has matched; see the module doc for why the count cannot
@@ -304,3 +310,4 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+export type { SealedKnowledgeAssetPrivateCommitment, SealedKnowledgeAssetPrivateReadOptions } from './sealed-private-read.js';

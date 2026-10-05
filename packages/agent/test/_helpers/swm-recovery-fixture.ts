@@ -56,9 +56,6 @@ export function completeRecoveryApplyDeps(
     writeLocks,
     snapshotMaterializer,
     replaceMetaForRoots: async () => undefined,
-    replaceMetaForGraphAssets: (assets: Parameters<
-      typeof snapshotMaterializer.replaceMetaForGraphAssets
-    >[0]) => snapshotMaterializer.replaceMetaForGraphAssets(assets),
     ensureOwnedMap: (key: string) => {
       let owned = ownership.get(key);
       if (owned === undefined) {

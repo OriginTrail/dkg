@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
@@ -178,8 +178,8 @@ describe('workspace operation semantic model', () => {
 
   it('excludes operation id and timestamp provenance from equivalence', () => {
     expect(selectEquivalentWorkspaceOperation([
-      { semantics, provenance: { shareOperationId: 'originator', publishedAtMs: 1 } },
-      { semantics, provenance: { shareOperationId: 'storage-ack', publishedAtMs: 2 } },
+      { semantics, provenance: { shareOperationId: 'originator', publishedAtMs: 1, publisherChronologyAuthenticated: true } },
+      { semantics, provenance: { shareOperationId: 'storage-ack', publishedAtMs: 2, publisherChronologyAuthenticated: true } },
     ], publisherWorkspaceOperationSemanticsKey).map(({ provenance }) => provenance.shareOperationId))
       .toEqual(['storage-ack', 'originator']);
   });
@@ -282,6 +282,13 @@ describe('tryResolveKnowledgeAssetWorkspaceHead typed boundary', () => {
 });
 
 describe('graph-scoped SWM head shareOperationId cardinality', () => {
+  it.each(['parent/child', '_private', 'internal space'])('rejects invalid subgraph scope %s before acquiring head or authentication rows', async subGraphName => {
+    const h = makeHarness(); const query = vi.spyOn(h.store, 'query');
+    try {
+      await expect(resolveKnowledgeAssetWorkspaceHead({ store: h.store, graphManager: h.graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL, subGraphName })).rejects.toThrow('invalid subGraphName');
+      expect(query).not.toHaveBeenCalled();
+    } finally { query.mockRestore(); await h.store.close(); }
+  });
   it('resolves a healthy single-operation head (guard polarity control)', async () => {
     const h = makeHarness();
     await seedHealthyHead(h);

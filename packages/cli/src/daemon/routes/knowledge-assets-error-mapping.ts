@@ -83,6 +83,10 @@ const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
  */
 export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   if (respondPromoteRecoveryError(res, e, context)) return;
+  if (e?.code === 'KA_FINALIZE_VERSION_PROOF_UNAVAILABLE') {
+    jsonResponse(res, 503, { code: e.code, error: e.message, retryable: true });
+    return;
+  }
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
     jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
     return;
