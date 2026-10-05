@@ -12,7 +12,7 @@ export function inside(root, file) {
   return resolved;
 }
 export function proofIdentity(root, profile) {
-  const files = [profile.file, 'scripts/qa-prove-regression.mjs',
+  const files = [profile.file, profile.definitionFile, 'scripts/qa-prove-regression.mjs',
     'scripts/lib/regressions/profiles.mjs', 'scripts/lib/regressions/results.mjs',
     'scripts/lib/regressions/identity.mjs', 'scripts/lib/regressions/proof.mjs'];
   return Object.fromEntries(files.map((file) => [file, sha256(fs.readFileSync(inside(root, file)))]));

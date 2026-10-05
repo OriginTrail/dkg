@@ -19,8 +19,16 @@ Use Node 22 (the evaluated releases' `.nvmrc`) and pnpm 10.28.1:
 pnpm qa:check-regressions
 pnpm qa:prove-regression --case GH-2782 --bad-ref v10.0.19
 pnpm qa:prove-regression --case GH-2741 --bad-ref v10.0.18
-node --test scripts/lib/__tests__/regression-proofs.test.mjs
+pnpm test:regression-proofs
 ```
+
+On Windows, invoke these commands through pnpm. Its lifecycle provides the
+installed CLI entry via `npm_execpath`; the bounded runner invokes JavaScript
+entries with the recorded Node executable, or standalone `pnpm.exe` directly.
+It never passes proof arguments through `cmd.exe`. Missing or non-pnpm entries
+are inconclusive prerequisites, with an instruction to use the pnpm command.
+The required Windows Node 22 job also exercises pnpm-version and owned process
+tree timeout/cancellation through `pnpm qa:check-regression-launcher`.
 
 Commit production/dependency and unit-config changes before proving. The runner
 resolves refs to full commits and uses **two disposable detached worktrees**,
@@ -86,9 +94,14 @@ The current weighted planner assigns each to exactly one required unit shard.
 The register validator resolves files through **fresh test inventory**, checks
 actual named Vitest discovery and disabled/focused-test analysis, and confirms
 the planner's assignment. It rechecks the stored raw red/green reports and their
-artifact/test/profile hashes. A test or proof-execution-tool edit requires fresh
-proof. Registered assertions cannot use general disabled-test waivers, including
-records explicitly marked unproven.
+artifact/test/profile hashes. Each receipt hashes only its selected definition
+in `scripts/lib/regressions/cases/`, together with the shared execution inputs.
+Editing GH-2782's definition leaves GH-2741's identity intact. A selected test,
+case definition or shared proof-execution-tool edit requires fresh proof.
+Registered assertions cannot use general disabled-test waivers, including
+records explicitly marked unproven. The scanner enforces this through its
+explicit `applyWaivers: false` option on the original source; normal scanner
+callers retain waiver handling.
 It does not replay historical versions during ordinary PR CI.
 
 The only build-gate integration is the call from `scripts/ci/test-inventory.mjs`,
@@ -109,9 +122,10 @@ fixtures for intended red and corrected green, zero selection, skipped
 assertion, wrong failing assertion, import failure and an unrelated failure in
 the named test. It also rejects stale test/proof/receipt identities, missing or
 ambiguous discovery, duplicate case IDs, absent owner/file, optional-only
-routes and excluded/disabled assertions (also with a general waiver). Owned subprocess timeout/cancellation
-are exercised and cleaned up. These are tool fixtures, not additional incident
-proofs.
+routes and excluded/disabled assertions (also with a general waiver). Tests
+modify actual case/shared-runner bytes to demonstrate independent freshness.
+The installed pnpm version and owned descendant termination on timeout and
+cancellation are exercised. These are tool fixtures, not additional incident proofs.
 
 Actual case results, commands and limitations are recorded in `RESULTS.md` and
 the per-case evidence directories. Generated full logs are kept with the proof

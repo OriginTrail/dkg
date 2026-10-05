@@ -10,12 +10,24 @@ const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 const git = (root, args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024 }).trim();
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 
+// A pnpm lifecycle supplies its actual CLI entry. Launch that with Node (or
+// directly for standalone pnpm.exe) so no cmd.exe parsing can alter arguments.
+export function commandInvocation(command, args, { platform = process.platform, env = process.env, node = process.execPath } = {}) {
+  if (platform !== 'win32' || path.win32.basename(command).toLowerCase() !== 'pnpm.cmd') return { command, args };
+  const entry = env.npm_execpath;
+  if (!entry || !path.win32.isAbsolute(entry) || !/^pnpm\.(?:c?js|exe)$/i.test(path.win32.basename(entry))) {
+    throw new Error('Windows proof commands must run through pnpm (pnpm qa:prove-regression or pnpm test:regression-proofs)');
+  }
+  return /\.exe$/i.test(entry) ? { command: entry, args } : { command: node, args: [entry, ...args] };
+}
+
 // Own only the spawned process group. Never kill a service discovered by port.
 export function runCommand(command, args, cwd, log, timeoutMs, signal) {
+  const invocation = commandInvocation(command, args);
   return new Promise((resolve) => {
     const output = fs.openSync(log, 'wx');
     let stdout = '', stderr = '', timedOut = false, error, bytes = 0;
-    const child = spawn(command, args, { cwd, env: { ...process.env, CI: '1', FORCE_COLOR: '0' },
+    const child = spawn(invocation.command, invocation.args, { cwd, env: { ...process.env, CI: '1', FORCE_COLOR: '0' },
       detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     const collect = (kind, data) => {
       bytes += data.length;
@@ -38,7 +50,7 @@ export function runCommand(command, args, cwd, log, timeoutMs, signal) {
     child.on('error', (failure) => { error = failure.message; });
     child.on('close', (code, terminationSignal) => {
       clearTimeout(timer); signal?.removeEventListener('abort', stop); fs.closeSync(output);
-      resolve({ command, args, code, signal: terminationSignal, timedOut, ...(error ? { error } : {}), stdout, stderr });
+      resolve({ command, args, invocation, code, signal: terminationSignal, timedOut, ...(error ? { error } : {}), stdout, stderr });
     });
   });
 }
@@ -99,7 +111,7 @@ export async function proveRegression(root, record, badRef, destination, { signa
       const phase = async (name, command, args, timeout) => {
         onProgress(`${record.id}: ${side} ${name}`);
         const result = await runCommand(command, args, checkout, path.join(destination, `${side}-${name}.log`), timeout, signal);
-        receipt.phases.push({ side, name, command, args, code: result.code, signal: result.signal,
+        receipt.phases.push({ side, name, command, args, invocation: result.invocation, code: result.code, signal: result.signal,
           timedOut: result.timedOut, ...(result.error ? { error: result.error } : {}) });
         return result;
       };

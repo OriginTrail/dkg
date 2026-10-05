@@ -71,9 +71,8 @@ export function validateRegressions(root, inventory, { records = loadRecords(roo
   const profiles = records.map(({ record }) => profileFor(record));
   for (const profile of profiles) {
     const source = fs.readFileSync(inside(root, profile.file), 'utf8');
-    // Registered assertions must execute even when general test debt has a
-    // reviewed waiver; use the existing AST scanner without those pragmas.
-    const analysis = analyzeTestSource(source.replace(/test-disable-allow:/gi, 'regression-waiver-ignored:'), profile.file);
+    // Registered assertions must execute even when general test debt has a waiver.
+    const analysis = analyzeTestSource(source, profile.file, { applyWaivers: false });
     if (analysis.disabled.length || analysis.focused.length) throw new Error(`${profile.file}: disabled or focused regression test`);
   }
   const assigned = shards ?? planAgentShards(root);

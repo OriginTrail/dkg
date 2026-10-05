@@ -9,7 +9,8 @@ import { inspectExecution, verifyDiscovery } from '../regressions/results.mjs';
 import { proofIdentity, sha256, verifyIdentity } from '../regressions/identity.mjs';
 import { validateRecord, validateRegressions, validateEvidence } from '../regressions/registry.mjs';
 import { analyzeTestSource } from '../disabled-test-scanner.mjs';
-import { runCommand } from '../regressions/proof.mjs';
+import { commandInvocation, runCommand } from '../regressions/proof.mjs';
+import { checkInstalledPnpm, checkOwnedProcessTermination } from '../regressions/launcher-checks.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const record = JSON.parse(fs.readFileSync(path.join(root, 'test-policy/regressions/GH-2782.json'), 'utf8'));
@@ -113,17 +114,44 @@ test('proof identity rejects stale test and runner bytes, and stale receipt dige
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test('bounded subprocess runner stops only its own timed-out or cancelled child', { timeout: 10000 }, async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'regression-process-'));
+test('proof identities isolate each selected case while retaining shared execution inputs', () => {
+  const other = profileFor(JSON.parse(fs.readFileSync(path.join(root, 'test-policy/regressions/GH-2741.json'), 'utf8')));
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'regression-profile-identity-'));
+  const saved = [profile, other].map((selected) => proofIdentity(root, selected));
   try {
-    const args = ['-e', 'setInterval(() => {}, 1000)'];
-    const timeout = await runCommand(process.execPath, args, root, path.join(directory, 'timeout.log'), 100);
-    assert.equal(timeout.timedOut, true); assert.notEqual(timeout.code, 0);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 100);
-    const cancelled = await runCommand(process.execPath, args, root, path.join(directory, 'cancelled.log'), 5000, controller.signal);
-    clearTimeout(timer); assert.equal(cancelled.timedOut, false); assert.notEqual(cancelled.code, 0);
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    for (const file of new Set(saved.flatMap((identity) => Object.keys(identity)))) {
+      const target = path.join(temp, file); fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(path.join(root, file), target);
+    }
+    fs.appendFileSync(path.join(temp, profile.definitionFile), '\n// selected case change\n');
+    assert.throws(() => verifyIdentity(proofIdentity(temp, profile), saved[0]), /stale/);
+    assert.doesNotThrow(() => verifyIdentity(proofIdentity(temp, other), saved[1]));
+    fs.appendFileSync(path.join(temp, 'scripts/lib/regressions/proof.mjs'), '\n// shared execution change\n');
+    for (const [index, selected] of [profile, other].entries()) {
+      assert.throws(() => verifyIdentity(proofIdentity(temp, selected), saved[index]), /stale/);
+    }
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('Windows pnpm launch preserves arguments without command-interpreter expansion', () => {
+  const args = ['--version', 'spaces and "quotes"', '%PATH%', '!expanded!', '& echo unsafe | > file', '^regex$'];
+  for (const entry of ['C:\\Program Files\\pnpm\\pnpm.cjs', 'C:\\Corepack\\pnpm.js', 'C:\\Tools\\pnpm.exe']) {
+    const invocation = commandInvocation('pnpm.cmd', args, { platform: 'win32', env: { npm_execpath: entry }, node: 'C:\\Node\\node.exe' });
+    if (entry.endsWith('.exe')) assert.deepEqual(invocation, { command: entry, args });
+    else assert.deepEqual(invocation, { command: 'C:\\Node\\node.exe', args: [entry, ...args] });
+  }
+  for (const entry of [undefined, 'pnpm.cjs', 'C:\\Tools\\npm-cli.js', 'C:\\Tools\\pnpm.cmd']) {
+    assert.throws(() => commandInvocation('pnpm.cmd', args, { platform: 'win32', env: { npm_execpath: entry } }), /through pnpm/);
+  }
+  assert.deepEqual(commandInvocation(process.execPath, args, { platform: 'win32' }), { command: process.execPath, args });
+});
+
+test('bounded proof launcher executes the installed pinned pnpm version', { timeout: 35000 }, async () => {
+  await checkInstalledPnpm(root);
+});
+
+test('bounded subprocess runner stops only its own timed-out or cancelled child', { timeout: 10000 }, async () => {
+  await checkOwnedProcessTermination(root);
 });
 
 test('registry rejects skipped assertions even with a general disabled-test waiver', () => {
@@ -141,6 +169,9 @@ it.skip(${JSON.stringify(profile.title)}, () => {});
     for (const text of [source, source.replace(pragma, pragma.toUpperCase())]) {
       fs.writeFileSync(file, text);
       assert.equal(analyzeTestSource(text, profile.file).disabled.length, 0, 'the general waiver would hide this disabled test');
+      const raw = analyzeTestSource(text, profile.file, { applyWaivers: false });
+      assert.equal(raw.disabled.length, 1); assert.equal(raw.disabled[0].api, 'it.skip');
+      assert.equal(raw.disabled[0].line, 4, 'the original source location is preserved');
       assert.throws(() => validateRegressions(temp, inventory, { records: [{ file: 'GH-2782.json', record: unproven }],
         discover: () => discovered, shards }), /disabled or focused/);
     }
