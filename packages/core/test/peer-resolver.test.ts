@@ -1,16 +1,25 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   PeerResolver,
   PeerConnectionUnresolvedError,
   StubNetworkStateRegistry,
   type Network,
-  type PeerConnectionNetwork,
   type NetworkStateRegistry,
   type AgentDirectoryLookup,
   type Address,
-  type NodeIdentity,
 } from '../src/network/index.js';
 import { connectLibp2pPeer } from '../src/network/libp2p-peer-connect.js';
+import {
+  makeNetwork,
+  makeAgentDir,
+  PEER_A,
+  PEER_B,
+  RELAY_PEER_ID,
+  RELAY_ADDR,
+  TARGET_PEER_ID,
+  type FindPeerImpl,
+  type MockNetwork,
+} from './peer-resolver-fixtures.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -19,74 +28,6 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
     return impl(...args);
   };
   return Object.assign(fn, { calls });
-}
-
-const PEER_A = '12D3KooWA' + 'a'.repeat(43);
-const PEER_B = '12D3KooWB' + 'b'.repeat(43);
-const RELAY_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
-const RELAY_ADDR =
-  `/ip4/178.104.54.178/tcp/9090/p2p/${RELAY_PEER_ID}`;
-const TARGET_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-
-type FindPeerImpl = (
-  peerId: NodeIdentity,
-  opts?: { signal?: AbortSignal; timeoutMs?: number },
-) => Promise<Address[]>;
-
-interface MockNetwork extends PeerConnectionNetwork {
-  __conns: Map<NodeIdentity, Array<{ remoteAddr: { toString(): string } }>>;
-  __addedAddresses: Array<{ peerId: NodeIdentity; addrs: Address[] }>;
-  __findPeerImpl: FindPeerImpl | null;
-  __connectCalls: Array<{ peerId: NodeIdentity; addrs: readonly Address[] }>;
-}
-
-function makeNetwork(): MockNetwork {
-  const conns = new Map<NodeIdentity, Array<{ remoteAddr: { toString(): string } }>>();
-  const added: Array<{ peerId: NodeIdentity; addrs: Address[] }> = [];
-  const connectCalls: Array<{ peerId: NodeIdentity; addrs: readonly Address[] }> = [];
-  let findPeerImpl: FindPeerImpl | null = null;
-  const net: Partial<MockNetwork> = {
-    localId: PEER_A,
-    localAddresses: [],
-    isStarted: true,
-    async start() {},
-    async stop() {},
-    async dialProtocol() {
-      throw new Error('not used in resolver tests');
-    },
-    async connectPeer(peerId: NodeIdentity, addrs: readonly Address[]) {
-      connectCalls.push({ peerId, addrs });
-    },
-    async handle() {},
-    async unhandle() {},
-    getConnections(peerId: NodeIdentity) {
-      return (conns.get(peerId) ?? []) as never;
-    },
-    async addKnownAddresses(peerId: NodeIdentity, addrs: Address[]) {
-      added.push({ peerId, addrs });
-    },
-    async findPeer(peerId: NodeIdentity, opts?: { signal?: AbortSignal; timeoutMs?: number }) {
-      if (!findPeerImpl) throw new Error('findPeer not configured');
-      return findPeerImpl(peerId, opts);
-    },
-  };
-  Object.defineProperty(net, '__conns', { value: conns, enumerable: false });
-  Object.defineProperty(net, '__addedAddresses', { value: added, enumerable: false });
-  Object.defineProperty(net, '__connectCalls', { value: connectCalls, enumerable: false });
-  Object.defineProperty(net, '__findPeerImpl', {
-    get: () => findPeerImpl,
-    set: (v) => {
-      findPeerImpl = v;
-    },
-    enumerable: false,
-  });
-  return net as MockNetwork;
-}
-
-function makeAgentDir(
-  fn?: (peerId: NodeIdentity) => Promise<Address | null>,
-): AgentDirectoryLookup {
-  return { findRelayForPeer: fn ?? (async () => null) };
 }
 
 describe('PeerResolver', () => {
@@ -194,177 +135,6 @@ describe('PeerResolver', () => {
       peerId: PEER_B,
       addrs: outcome.resolvedAddresses,
     }]);
-  });
-
-  it('recovery tries hint, cached peer, then resolver without a second identity fallback', async () => {
-    const stages: string[] = [];
-    const hint = `/ip4/127.0.0.1/tcp/9090/p2p/${TARGET_PEER_ID}`;
-    net.tryConnectRecoveryStage = async (_peerId, stage) => {
-      stages.push(stage.kind);
-      if (stage.kind === 'hint') expect(stage.address).toBe(hint);
-      return false;
-    };
-    net.__findPeerImpl = async () => {
-      stages.push('resolve');
-      return ['/ip4/178.104.54.178/tcp/9090'];
-    };
-    net.connectPeer = async (peerId, addresses, options) => {
-      stages.push('connect');
-      expect(options?.skipIdentityFallback).toBe(true);
-      expect(addresses).toEqual(['/ip4/178.104.54.178/tcp/9090']);
-      net.__conns.set(peerId, [{ remoteAddr: { toString: () => addresses[0]! } }]);
-    };
-    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-
-    await expect(resolver.connect(TARGET_PEER_ID, {
-      recovery: { verifiedInitialAddress: hint },
-    })).resolves.toMatchObject({ status: 'connected' });
-    expect(stages).toEqual(['hint', 'cached', 'resolve', 'connect']);
-  });
-
-  it('reuses an observed connection before any recovery stage', async () => {
-    net.__conns.set(PEER_B, [{ remoteAddr: { toString: () => '/ip4/178.104.54.178/tcp/9090' } }]);
-    const stages: string[] = [];
-    net.tryConnectRecoveryStage = async () => { stages.push('stage'); return false; };
-    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-    await expect(resolver.connect(PEER_B, { recovery: {} })).resolves.toEqual({
-      status: 'connected', resolvedAddresses: [],
-    });
-    expect(stages).toEqual([]);
-    expect(net.__connectCalls).toEqual([]);
-  });
-
-  it.each(['hint', 'cached'] as const)('finishes after an observed %s recovery stage', async (winner) => {
-    const stages: string[] = [];
-    net.tryConnectRecoveryStage = async (peerId, stage) => {
-      stages.push(stage.kind);
-      if (stage.kind !== winner) return false;
-      net.__conns.set(peerId, [{ remoteAddr: { toString: () => '/ip4/178.104.54.178/tcp/9090' } }]);
-      return true;
-    };
-    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-    await expect(resolver.connect(PEER_B, {
-      recovery: { verifiedInitialAddress: '/ip4/178.104.54.178/tcp/9090' },
-    })).resolves.toEqual({ status: 'connected', resolvedAddresses: [] });
-    expect(stages).toEqual(winner === 'hint' ? ['hint'] : ['hint', 'cached']);
-    expect(net.__connectCalls).toEqual([]);
-  });
-
-  it('continues to the cached stage after a stale hint throws', async () => {
-    const stages: string[] = [];
-    net.tryConnectRecoveryStage = async (peerId, stage) => {
-      stages.push(stage.kind);
-      if (stage.kind === 'hint') throw new Error('stale hint');
-      net.__conns.set(peerId, [{ remoteAddr: { toString: () => '/ip4/178.104.54.178/tcp/9090' } }]);
-      return true;
-    };
-    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-    await expect(resolver.connect(PEER_B, {
-      recovery: { verifiedInitialAddress: '/ip4/178.104.54.178/tcp/9090' },
-    })).resolves.toMatchObject({ status: 'connected' });
-    expect(stages).toEqual(['hint', 'cached']);
-  });
-
-  it('does not accept a late recovery success after caller cancellation', async () => {
-    const controller = new AbortController();
-    net.tryConnectRecoveryStage = async (peerId) => {
-      net.__conns.set(peerId, [{ remoteAddr: { toString: () => '/ip4/178.104.54.178/tcp/9090' } }]);
-      controller.abort();
-      return true;
-    };
-    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-    await expect(resolver.connect(PEER_B, {
-      signal: controller.signal, recovery: { verifiedInitialAddress: '/ip4/178.104.54.178/tcp/9090' },
-    })).rejects.toMatchObject({ name: 'AbortError' });
-    expect(net.__connectCalls).toEqual([]);
-  });
-
-  it('recovery returns only after the requested peer is observed', async () => {
-    net.tryConnectRecoveryStage = async () => true;
-    net.__findPeerImpl = async () => [];
-    net.connectPeer = async () => undefined;
-    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-
-    await expect(resolver.connect(PEER_B, { recovery: {} })).resolves.toEqual({
-      status: 'unresolved', resolvedAddresses: [],
-    });
-  });
-
-  it('falls back to the unchanged canonical path when recovery capability is absent', async () => {
-    net.__findPeerImpl = async () => [];
-    net.connectPeer = async (peerId, addrs, opts) => {
-      expect(opts?.skipIdentityFallback).toBeUndefined();
-      expect(opts?.signal).toBeInstanceOf(AbortSignal);
-      net.__connectCalls.push({ peerId, addrs });
-      net.__conns.set(peerId, [{ remoteAddr: { toString: () => '/ip4/178.104.54.178/tcp/9090' } }]);
-    };
-    const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-
-    await expect(resolver.connect(PEER_B, {
-      recovery: { verifiedInitialAddress: '/ip4/127.0.0.1/tcp/9090' },
-    })).resolves.toEqual({ status: 'connected', resolvedAddresses: [] });
-    expect(net.__connectCalls).toEqual([{ peerId: PEER_B, addrs: [] }]);
-  });
-
-  it('bounds both resolution and the final dial with the recovery resolver deadline', async () => {
-    vi.useFakeTimers();
-    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds) => {
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), milliseconds);
-      return controller.signal;
-    });
-    try {
-      net.tryConnectRecoveryStage = async () => false;
-      net.__findPeerImpl = async () => ['/ip4/178.104.54.178/tcp/9090'];
-      let dialStarted: () => void = () => undefined;
-      const started = new Promise<void>((resolve) => { dialStarted = resolve; });
-      net.connectPeer = async (_peerId, _addresses, options) => {
-        dialStarted();
-        await new Promise<never>((_resolve, reject) => {
-          const abort = () => reject(options!.signal!.reason);
-          if (options!.signal!.aborted) abort();
-          else options!.signal!.addEventListener('abort', abort, { once: true });
-        });
-      };
-      const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-      const pending = resolver.connect(PEER_B, { recovery: { resolverTimeoutMs: 15_000 } });
-      const rejection = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
-      await started;
-      await vi.advanceTimersByTimeAsync(14_999);
-      expect(net.__conns.get(PEER_B)).toBeUndefined();
-      await vi.advanceTimersByTimeAsync(1);
-      await rejection;
-    } finally {
-      timeout.mockRestore();
-      vi.useRealTimers();
-    }
-  });
-
-  it('keeps the recovery deadline when the transport has no fast-path capability', async () => {
-    vi.useFakeTimers();
-    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds) => {
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), milliseconds);
-      return controller.signal;
-    });
-    try {
-      net.__findPeerImpl = async (_peerId, options) => new Promise((_resolve, reject) => {
-        const abort = () => reject(options!.signal!.reason);
-        if (options!.signal!.aborted) abort();
-        else options!.signal!.addEventListener('abort', abort, { once: true });
-      });
-      const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
-      const pending = resolver.connect(PEER_B, {
-        recovery: { resolverTimeoutMs: 100 },
-      });
-      const rejection = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
-      await vi.advanceTimersByTimeAsync(100);
-      await rejection;
-      expect(net.__connectCalls).toEqual([]);
-    } finally {
-      timeout.mockRestore();
-      vi.useRealTimers();
-    }
   });
 
   it('keeps transport-specific addresses opaque at the Network boundary', async () => {
