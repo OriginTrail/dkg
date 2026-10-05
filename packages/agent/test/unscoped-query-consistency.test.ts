@@ -2,12 +2,16 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   GraphWriteGenTracker, OxigraphStore, type GraphWriteRevisionSource,
 } from '@origintrail-official/dkg-storage';
-import { contextGraphDataUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import {
+  contextGraphDataUri,
+  DKG_ONTOLOGY,
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
+} from '@origintrail-official/dkg-core';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import {
   captureUnscopedQueryConsistency,
   executeUnscopedQuery,
-  UNSCOPED_QUERY_INVALIDATED_CODE,
   UnscopedQueryInvalidatedError,
 } from '../src/unscoped-query-consistency.js';
 
@@ -62,12 +66,13 @@ describe('unscoped query execution consistency', () => {
         execute: async () => ({ bindings: [] }), denied: () => ({ bindings: [] }),
       }).catch((error: unknown) => error);
       expect(withheld).toBeInstanceOf(UnscopedQueryInvalidatedError);
+      // Code and sentence are the dkg-core contract the daemon answers with.
       expect(withheld).toMatchObject({
         name: 'UnscopedQueryInvalidatedError',
         code: UNSCOPED_QUERY_INVALIDATED_CODE,
+        message: UNSCOPED_QUERY_INVALIDATED_MESSAGE,
         retryable: true,
       });
-      expect(UNSCOPED_QUERY_INVALIDATED_CODE).toBe('UNSCOPED_QUERY_INVALIDATED');
     } finally { await store.close(); }
 
     // Retrying cannot give a process-local store all-writer coverage.
