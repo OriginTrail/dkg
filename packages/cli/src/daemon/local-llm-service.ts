@@ -1,7 +1,10 @@
 import path from 'node:path';
 import process from 'node:process';
+import { lstatSync, readFileSync } from 'node:fs';
 import {
   probeLocalModelEndpoint,
+  parseDomainProfile,
+  type DkgLocalLlmDomainProfile,
   type LocalModelEndpointAvailability,
   type LocalModelEndpointProbeStrategy,
 } from '@origintrail-official/dkg-local-llm';
@@ -139,14 +142,45 @@ export function resolveDaemonLocalLlmSettings(
   probeConfigurationError?: string;
   defaultProjectId?: string;
   logDir: string;
+  adapterPaths?: string[];
+  domainProfile?: DkgLocalLlmDomainProfile;
 } {
   const probe = resolveProbeStrategy(env.DKG_LLM_BACKEND);
+  let domainProfile: DkgLocalLlmDomainProfile | undefined;
+  let adapterPaths: string[] | undefined;
+  let domainError: string | undefined;
+  try {
+    const adapters = trimmed(env.DKG_LLM_ADAPTERS);
+    if (adapters) {
+      adapterPaths = adapters.split(',').map(value => value.trim()).filter(Boolean);
+      if (adapterPaths.length > 16 || adapterPaths.some(value => !path.isAbsolute(value))) {
+        throw new Error('DKG_LLM_ADAPTERS requires at most 16 absolute adapter paths.');
+      }
+    }
+    const profilePath = trimmed(env.DKG_LLM_DOMAIN_PROFILE);
+    if (profilePath) {
+      if (!path.isAbsolute(profilePath)) throw new Error('DKG_LLM_DOMAIN_PROFILE requires an absolute path.');
+      const info = lstatSync(profilePath);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024 || (info.mode & 0o022)) {
+        throw new Error('The daemon domain profile must be a bounded operator-owned file.');
+      }
+      domainProfile = parseDomainProfile(JSON.parse(readFileSync(profilePath, 'utf8')));
+      if (domainProfile.writeTools?.length) throw new Error('Daemon domain profiles cannot enable write tools.');
+    }
+    if (adapterPaths?.length && !domainProfile) {
+      throw new Error('DKG_LLM_ADAPTERS requires a reviewed DKG_LLM_DOMAIN_PROFILE.');
+    }
+  } catch (error) {
+    domainError = errorMessage(error);
+  }
   const configured = [
     env.DKG_LLM_URL,
     env.LLAMA_URL,
     env.DKG_LLM_MODEL,
     env.LLAMA_MODEL,
     env.DKG_LLM_BACKEND,
+    env.DKG_LLM_ADAPTERS,
+    env.DKG_LLM_DOMAIN_PROFILE,
   ].some((value) => trimmed(value) !== undefined);
   return {
     configured,
@@ -155,7 +189,9 @@ export function resolveDaemonLocalLlmSettings(
       ?? 'http://127.0.0.1:8080/v1/chat/completions',
     model: trimmed(env.DKG_LLM_MODEL) ?? trimmed(env.LLAMA_MODEL) ?? 'local-model',
     probeStrategy: probe.strategy,
-    ...(probe.error ? { probeConfigurationError: probe.error } : {}),
+    ...(probe.error || domainError ? { probeConfigurationError: probe.error ?? domainError } : {}),
+    ...(adapterPaths ? { adapterPaths } : {}),
+    ...(domainProfile ? { domainProfile } : {}),
     defaultProjectId: trimmed(env.DKG_PROJECT),
     logDir: path.join(dkgHome, 'logs', 'local-llm'),
   };
@@ -297,8 +333,13 @@ export function createDaemonLocalLlmService(
               signal,
               initializationTimeoutMs: 15_000,
               strictProjectScope: true,
-              strictProjectScopeTools: DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS,
+              // This operator-reviewed list replaces the generic read surface.
+              // Implementations must enforce projectId; a schema alone is not
+              // proof. Runtime annotation and write guards remain in force.
+              strictProjectScopeTools: settings.domainProfile?.readTools ?? DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS,
               strictProjectScopeUnscopedTools: ['dkg_status'],
+              adapterPaths: settings.adapterPaths,
+              domainProfile: settings.domainProfile,
               profile: 'auto',
               allowWrite: false,
               logDir: settings.logDir,

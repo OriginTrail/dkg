@@ -24,6 +24,16 @@ literal routing keywords, read/write adapter tool hints, and a domain context
 addendum. Profiles boost dynamically discovered tools; they do not patch the
 core router or weaken the runtime's read-only default.
 
+The daemon-owned Node UI chat accepts `DKG_LLM_DOMAIN_PROFILE` (an absolute
+JSON path) and `DKG_LLM_ADAPTERS` (up to 16 absolute paths, comma-separated).
+Adapters require a reviewed profile. The profile must be a regular non-symlink
+file, at most 64 KiB, without group/other write permission, and cannot declare
+write tools. Its `readTools` replace the daemon's generic scoped read surface;
+operator review must verify that their implementations enforce `projectId`.
+Read-only annotation guards, argument validation, operator authentication and
+the session's single Context Graph lock still apply. The private MCP child
+reads daemon credentials from `DKG_HOME`; model requests receive no credential.
+
 The package is a library. The umbrella `dkg llm` CLI owns MCP stdio lifecycle,
 configuration, and operator-facing write opt-in.
 
