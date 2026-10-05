@@ -333,11 +333,15 @@ describe('tryConnectLibp2pRecoveryStage', () => {
       const pending = tryConnectLibp2pRecoveryStage(host, TARGET, {
         kind: 'cached', timeoutMs: 5_000,
       });
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
       const rejection = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
       await vi.advanceTimersByTimeAsync(4_999);
       expect(host.dial).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       await rejection;
+      expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }

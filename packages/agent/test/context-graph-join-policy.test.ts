@@ -340,12 +340,14 @@ describe('context graph open enrollment policy', () => {
 
     await agent.notifyJoinApproval('private-join-local', owner.agentAddress, 'generation');
 
-    expect(JSON.parse((deliver.mock.calls[0]![3] as (peerId: string) => string)(requesterPeerId)).curatorDialAddress).toBe(loopback);
+    const initialPayload = (deliver.mock.calls[0]![3] as (peerId: string) => string)(requesterPeerId);
+    expect(JSON.parse(initialPayload).curatorDialAddress).toBe(loopback);
 
     vi.spyOn(agent, 'getJoinRequestStatus').mockResolvedValue('approved');
     vi.spyOn(agent, 'getStoredJoinRequestGeneration').mockResolvedValue('generation');
     await agent.redeliverJoinApproval('private-join-local', owner.agentAddress);
-    expect(JSON.parse((deliver.mock.calls[1]![3] as (peerId: string) => string)(requesterPeerId)).curatorDialAddress).toBe(loopback);
+    const redeliveryPayload = (deliver.mock.calls[1]![3] as (peerId: string) => string)(requesterPeerId);
+    expect(redeliveryPayload).toBe(initialPayload);
   });
 
   it('redelivers a loopback hint to a registry-resolved local requester after origin tracking is gone', async () => {

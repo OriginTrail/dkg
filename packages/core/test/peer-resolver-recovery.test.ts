@@ -150,12 +150,16 @@ describe('PeerResolver recovery', () => {
       };
       const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
       const pending = resolver.connect(PEER_B, { recovery: { resolverTimeoutMs: 15_000 } });
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
       const rejection = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
       await started;
       await vi.advanceTimersByTimeAsync(14_999);
       expect(net.__conns.get(PEER_B)).toBeUndefined();
+      expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       await rejection;
+      expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -173,9 +177,14 @@ describe('PeerResolver recovery', () => {
       const pending = resolver.connect(PEER_B, {
         recovery: { resolverTimeoutMs: 100 },
       });
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
       const rejection = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
       await rejection;
+      expect(settled).toBe(true);
       expect(net.__connectCalls).toEqual([]);
     } finally {
       vi.useRealTimers();

@@ -480,9 +480,26 @@ export class PeerResolver {
    */
   async connect(peerId: NodeIdentity, opts: ConnectOpts = {}): Promise<PeerConnectionOutcome> {
     const network = supportsPeerConnection(this.network) ? this.network : undefined;
+    if (opts.recovery) {
+      return this.connectWithRecovery(peerId, opts, opts.recovery, network);
+    }
+    return this.resolveAndConnect(peerId, opts, network, {
+      signal: opts.signal,
+      skipIdentityFallback: false,
+      requireObservedConnection: false,
+      abortReason: 'generic',
+    });
+  }
+
+  /** The recovery strategy owns its ordered fast paths and final deadline. */
+  private async connectWithRecovery(
+    peerId: NodeIdentity,
+    opts: ConnectOpts,
+    recovery: NonNullable<ConnectOpts['recovery']>,
+    network: PeerConnectionNetwork | undefined,
+  ): Promise<PeerConnectionOutcome> {
     const recoveryNetwork = network?.tryConnectRecoveryStage;
-    let usedRecovery = false;
-    if (opts.recovery && network && recoveryNetwork) {
+    if (network && recoveryNetwork) {
       if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
       if (this.network.getConnections(peerId).length > 0) {
         return { status: 'connected', resolvedAddresses: [] };
@@ -499,7 +516,6 @@ export class PeerResolver {
           return false;
         }
       };
-      const recovery = opts.recovery;
       if (recovery.verifiedInitialAddress && await tryStage({
         kind: 'hint',
         address: recovery.verifiedInitialAddress,
@@ -515,46 +531,64 @@ export class PeerResolver {
       })) return { status: 'connected', resolvedAddresses: [] };
 
       if (opts.signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');
-      usedRecovery = true;
     }
-    const lifecycle = opts.recovery
-      ? startRequestAbortLifecycle(opts.recovery.resolverTimeoutMs ?? 15_000, [opts.signal])
-      : undefined;
-    const signal = lifecycle?.signal ?? opts.signal;
+    const lifecycle = startRequestAbortLifecycle(recovery.resolverTimeoutMs ?? 15_000, [opts.signal]);
     try {
-      const addresses = await this.resolve(peerId, { ...opts, signal });
-      if (signal?.aborted) throw opts.recovery
-        ? signal.reason
-        : new DOMException('Peer connection aborted', 'AbortError');
-      try {
-        if (!network) {
-          throw new Error('Network transport does not implement the peer-connection capability');
-        }
-        await network.connectPeer(peerId, addresses, {
-          signal,
-          candidateTimeoutMs: opts.candidateTimeoutMs,
-          log: opts.log,
-          ...(usedRecovery ? { skipIdentityFallback: true } : {}),
-        });
-        if (opts.recovery) {
-          if (signal?.aborted) throw signal.reason;
-          if (this.network.getConnections(peerId).length === 0) {
-            throw new PeerConnectionUnresolvedError('Peer connection was not observed');
-          }
-        }
-        return { status: 'connected', resolvedAddresses: addresses };
-      } catch (error) {
-        if (
-          !signal?.aborted
-          && addresses.length === 0
-          && error instanceof PeerConnectionUnresolvedError
-        ) {
-          return { status: 'unresolved', resolvedAddresses: [] };
-        }
-        throw error;
-      }
+      return await this.resolveAndConnect(peerId, opts, network, {
+        signal: lifecycle.signal,
+        skipIdentityFallback: recoveryNetwork !== undefined,
+        requireObservedConnection: true,
+        abortReason: 'signal',
+      });
     } finally {
-      lifecycle?.release();
+      lifecycle.release();
+    }
+  }
+
+  /** Shared resolve-and-dial operation; strategy policy is explicit at entry. */
+  private async resolveAndConnect(
+    peerId: NodeIdentity,
+    opts: ConnectOpts,
+    network: PeerConnectionNetwork | undefined,
+    policy: {
+      signal?: AbortSignal;
+      skipIdentityFallback: boolean;
+      requireObservedConnection: boolean;
+      abortReason: 'signal' | 'generic';
+    },
+  ): Promise<PeerConnectionOutcome> {
+    const { signal } = policy;
+    const addresses = await this.resolve(peerId, { ...opts, signal });
+    const abortError = (): unknown => policy.abortReason === 'signal'
+      ? signal?.reason
+      : new DOMException('Peer connection aborted', 'AbortError');
+    if (signal?.aborted) throw abortError();
+    try {
+      if (!network) {
+        throw new Error('Network transport does not implement the peer-connection capability');
+      }
+      await network.connectPeer(peerId, addresses, {
+        signal,
+        candidateTimeoutMs: opts.candidateTimeoutMs,
+        log: opts.log,
+        ...(policy.skipIdentityFallback ? { skipIdentityFallback: true } : {}),
+      });
+      if (policy.requireObservedConnection) {
+        if (signal?.aborted) throw abortError();
+        if (this.network.getConnections(peerId).length === 0) {
+          throw new PeerConnectionUnresolvedError('Peer connection was not observed');
+        }
+      }
+      return { status: 'connected', resolvedAddresses: addresses };
+    } catch (error) {
+      if (
+        !signal?.aborted
+        && addresses.length === 0
+        && error instanceof PeerConnectionUnresolvedError
+      ) {
+        return { status: 'unresolved', resolvedAddresses: [] };
+      }
+      throw error;
     }
   }
 }

@@ -594,6 +594,29 @@ function curatorJoinDialAddress(agent: DKGAgent, requesterPeerId: string): strin
   });
 }
 
+function joinApprovalPayload(
+  agent: DKGAgent,
+  contextGraphId: string,
+  agentAddress: string,
+  requestGeneration: string,
+  curatorBinding: Awaited<ReturnType<DKGAgent['readRfc64CurrentCuratorAuthorityBindingV1']>>,
+): (targetPeerId: string) => string {
+  return (targetPeerId) => {
+    const curatorDialAddress = curatorJoinDialAddress(agent, targetPeerId);
+    return JSON.stringify({
+      type: 'join-approved',
+      contextGraphId,
+      agentAddress,
+      requestGeneration,
+      ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
+      ...(curatorBinding === null ? {} : {
+        curatorAgentAddress: curatorBinding.agentAddress,
+        curatorAuthorityEra: curatorBinding.authorityEra,
+      }),
+    });
+  };
+}
+
 export class JoinRequestMethods extends DKGAgentBase {
   async flushJoinApprovalDurably(this: DKGAgent): Promise<void> {
     // Local/debounced stores expose flush; remote transactional adapters make
@@ -2537,20 +2560,9 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
-    const payload = (targetPeerId: string): string => {
-      const curatorDialAddress = curatorJoinDialAddress(this, targetPeerId);
-      return JSON.stringify({
-        type: 'join-approved',
-        contextGraphId,
-        agentAddress,
-        requestGeneration: resolvedGeneration,
-        ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
-        ...(curatorBinding === null ? {} : {
-          curatorAgentAddress: curatorBinding.agentAddress,
-          curatorAuthorityEra: curatorBinding.authorityEra,
-        }),
-      });
-    };
+    const payload = joinApprovalPayload(
+      this, contextGraphId, agentAddress, resolvedGeneration, curatorBinding,
+    );
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
       agentAddress,
@@ -2673,20 +2685,9 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
-    const payload = (targetPeerId: string): string => {
-      const curatorDialAddress = curatorJoinDialAddress(this, targetPeerId);
-      return JSON.stringify({
-        type: 'join-approved',
-        contextGraphId,
-        agentAddress,
-        requestGeneration,
-        ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
-        ...(curatorBinding === null ? {} : {
-          curatorAgentAddress: curatorBinding.agentAddress,
-          curatorAuthorityEra: curatorBinding.authorityEra,
-        }),
-      });
-    };
+    const payload = joinApprovalPayload(
+      this, contextGraphId, agentAddress, requestGeneration, curatorBinding,
+    );
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
       agentAddress,
