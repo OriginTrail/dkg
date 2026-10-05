@@ -23,9 +23,13 @@ export interface StoreMigrationRecoveryProof {
   readonly migrationDir: string;
   readonly hostPort: number;
   readonly volumeAttemptId: string;
+  readonly sourceContainerId?: string;
   readonly exportBytes?: number;
 }
 export interface RecoveryStoreMigrationMarker {
+  /** New certificates preserve checkpoint provenance; historical v1 remains readable. */
+  readonly volumeAttemptId?: string;
+  readonly sourceContainerId?: string;
   readonly version: 1;
   readonly recoveryRequired: true;
   readonly pid: number;
@@ -47,6 +51,7 @@ export type StoreMigrationMarker =
   | Readonly<StoreMigrationMarkerOwnership & { kind: 'recovery-required'; ageMs: number; value: RecoveryStoreMigrationMarker }>;
 
 const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
+const sourceId = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -54,6 +59,7 @@ function recoveryProof(value: unknown): value is StoreMigrationRecoveryProof {
   return object(value) && value.version === 1 && typeof value.containerName === 'string'
     && typeof value.namespace === 'string' && typeof value.migrationDir === 'string'
     && positive(value.hostPort) && value.hostPort <= 65535 && uuid(value.volumeAttemptId)
+    && (value.sourceContainerId === undefined || sourceId(value.sourceContainerId))
     && (value.exportBytes === undefined || positive(value.exportBytes));
 }
 
@@ -74,6 +80,8 @@ export function readStoreMigrationMarker(path: string): StoreMigrationMarker {
   if (value.version === 1 && value.recoveryRequired === true
     && typeof value.containerName === 'string' && typeof value.namespace === 'string'
     && typeof value.migrationDir === 'string' && positive(value.hostPort) && value.hostPort <= 65535
+    && (value.volumeAttemptId === undefined || uuid(value.volumeAttemptId))
+    && (value.sourceContainerId === undefined || sourceId(value.sourceContainerId))
     && (value.exportBytes === undefined || positive(value.exportBytes))) {
     return { kind: 'recovery-required', path, rawText, ageMs, value: value as unknown as RecoveryStoreMigrationMarker };
   }
@@ -138,7 +146,7 @@ export async function releaseStoreMigrationMarker(owner: StoreMigrationMarkerOwn
 
 /** Only explicit recovery may consume this certificate, with the exact original options. */
 export function requireStoreMigrationRecoveryMarker(path: string,
-  expected: Pick<RecoveryStoreMigrationMarker, 'containerName' | 'namespace' | 'migrationDir' | 'hostPort'>): StoreMigrationMarkerOwnership & { exportBytes: number; volumeAttemptId?: string } {
+  expected: Pick<RecoveryStoreMigrationMarker, 'containerName' | 'namespace' | 'migrationDir' | 'hostPort'>): StoreMigrationMarkerOwnership & { exportBytes: number; volumeAttemptId?: string; sourceContainerId?: string } {
   const marker = readStoreMigrationMarker(path);
   if (marker.kind === 'unreadable') throw new Error('Invalid migration recovery marker; startup remains blocked.');
   const value = marker.kind === 'recovery-required' ? marker.value : marker.kind === 'active' ? marker.value.recovery : undefined;
@@ -154,10 +162,11 @@ export function requireStoreMigrationRecoveryMarker(path: string,
     catch (error) { absent = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
     if (!absent) throw new Error('Migration owner is live or unverifiable; startup remains blocked.');
     return { path, rawText: marker.rawText, exportBytes: value.exportBytes,
-      volumeAttemptId: marker.value.recovery!.volumeAttemptId };
+      volumeAttemptId: marker.value.recovery!.volumeAttemptId, sourceContainerId: value.sourceContainerId };
   }
   if (marker.kind !== 'recovery-required') throw new Error('Missing migration recovery marker.');
-  return { path, rawText: marker.rawText, exportBytes: value.exportBytes };
+  return { path, rawText: marker.rawText, exportBytes: value.exportBytes,
+    volumeAttemptId: marker.value.volumeAttemptId, sourceContainerId: marker.value.sourceContainerId };
 }
 
 /** Preserve the startup marker while one recovery claimant verifies it. */

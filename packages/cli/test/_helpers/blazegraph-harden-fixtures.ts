@@ -27,6 +27,7 @@ export function inspectJson(shape: {
 }): string {
   const bindings = { '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: shape.hostPort ?? '9999' }] };
   return JSON.stringify([{
+    Id: shape.hardened ? 'replacement-container-id' : 'original-container-id',
     State: {
       Running: shape.running ?? true,
       StartedAt: shape.startedAt ?? STARTED_AT,

@@ -26,6 +26,7 @@ export interface BlazegraphInspectionPolicy {
 }
 
 export interface BlazegraphContainerFacts {
+  readonly containerId?: string;
   readonly mounts: readonly DockerJournalMount[];
   readonly startedAt?: string;
   readonly finishedAt?: string;
@@ -80,7 +81,7 @@ export function inspectBlazegraphContainerFacts(info: unknown, policy: Blazegrap
   };
   const state = record(root?.State);
   const size = root?.SizeRw;
-  return Object.freeze({ mounts: Object.freeze(mounts), startedAt: string(state?.StartedAt),
+  return Object.freeze({ ...(typeof root?.Id === 'string' && root.Id.length > 0 ? { containerId: root.Id } : {}), mounts: Object.freeze(mounts), startedAt: string(state?.StartedAt),
     finishedAt: string(state?.FinishedAt),
     writableLayerSize: typeof size === 'number' && Number.isSafeInteger(size) && size >= 0 ? size : undefined,
     journalVolumeName: journal?.name, journalMountIsVolume: journal?.type === 'volume', boundedJvm, healthProbe, boundedLogs,

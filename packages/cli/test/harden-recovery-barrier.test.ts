@@ -45,7 +45,7 @@ describe('incomplete harden rollback startup barrier', () => {
     } };
     await expect(executeHardenMigration({ ...f.options, docker, recover: true, fetch: verifier.fn }))
       .rejects.toThrow(/Cannot verify the migration backup state/);
-    expect(calls.every(args => args[0] === 'inspect')).toBe(true);
+    expect(calls.every(args => args[0] === 'inspect' || args[0] === 'volume' && args[1] === 'inspect')).toBe(true);
     expect(verifier.calls).toEqual([]);
     expect(readFileSync(storeHardenLockPath(home), 'utf8')).toBe(marker);
     await expectStartupBlocked();
@@ -54,7 +54,7 @@ describe('incomplete harden rollback startup barrier', () => {
     const f = await incompleteRollback(); await expectStartupBlocked();
     const recoveryStart = f.calls.length;
     await expect(executeHardenMigration({ ...f.options, recover: true, fetch: verifierFetch().fn })).resolves.toMatchObject({ outcome: 'recovered' });
-    expect(f.calls.slice(recoveryStart).every(args => ['inspect', 'exec'].includes(args[0]!))).toBe(true);
+    expect(f.calls.slice(recoveryStart).every(args => ['inspect', 'exec', 'volume'].includes(args[0]!))).toBe(true);
     await expectStartupAllowed();
   });
   it.each([{}, { name: {} }, { name: { value: 3 } }])('retains the startup barrier for an unbound identity row %j', async row => {
@@ -105,6 +105,17 @@ describe('incomplete harden rollback startup barrier', () => {
     await started; await expectStartupBlocked();
     expect(JSON.parse(readFileSync(storeHardenLockPath(home), 'utf8')).recoveryRequired).toBe(true);
     release(); await recovery; await expectStartupAllowed();
+  });
+  it('retains historical no-attempt/no-ID recovery certificate compatibility', async () => {
+    const f = await incompleteRollback(), path = storeHardenLockPath(home);
+    const certificate = JSON.parse(readFileSync(path, 'utf8'));
+    delete certificate.volumeAttemptId; delete certificate.sourceContainerId;
+    writeFileSync(path, JSON.stringify(certificate));
+    f.allowRemove();
+    for (const args of [['rm', '-f', NAME], ['rename', BACKUP, NAME], ['update', '--restart=unless-stopped', NAME], ['start', NAME]]) await f.runner.run(args);
+    await expect(executeHardenMigration({ ...f.options, recover: true, fetch: verifierFetch().fn }))
+      .resolves.toMatchObject({ outcome: 'recovered', backupContainerName: null });
+    await expectStartupAllowed();
   });
   it('verifies the manually restored backup before clearing the same barrier', async () => {
     const f = await incompleteRollback(); await expectStartupBlocked(); f.allowRemove();

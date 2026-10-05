@@ -129,7 +129,7 @@ describe('inspectHardenState', () => {
       },
     };
     await expect(inspectHardenState(runner, NAME)).resolves.toEqual({
-      state: 'legacy', hostPort: 9999, running: true,
+      state: 'legacy', hostPort: 9999, running: true, sourceContainerId: 'original-container-id',
     });
   });
 
@@ -219,7 +219,7 @@ describe('inspectHardenState', () => {
       },
     };
     await expect(inspectHardenState(runner, NAME)).resolves.toEqual({
-      state: 'legacy', hostPort: 10123, running: false,
+      state: 'legacy', hostPort: 10123, running: false, sourceContainerId: 'original-container-id',
     });
   });
 

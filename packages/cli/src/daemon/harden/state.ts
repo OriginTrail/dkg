@@ -25,6 +25,8 @@ export type HardenState = 'absent' | 'legacy' | 'hardened' | 'backup-only';
 
 export interface HardenStateInfo {
   state: HardenState;
+  /** Exact Docker identity of the source, preserved by backup rename. */
+  sourceContainerId?: string;
   /** Host port bound to the container's HTTP port; undefined when unknowable. */
   hostPort?: number;
   running?: boolean;
@@ -57,6 +59,7 @@ export async function inspectHardenState(
     const { facts } = result;
     const hardened = facts.journalVolumeName !== undefined && facts.boundedJvm && facts.healthProbe && facts.boundedLogs;
     return { state: hardened ? 'hardened' : 'legacy', hostPort: facts.hostPort, running: facts.running,
+      ...(facts.containerId === undefined ? {} : { sourceContainerId: facts.containerId }),
       ...(!hardened && facts.journalVolumeName === blazegraphMigrationVolumeName(containerName)
         ? { usesMigrationVolume: true as const } : {}) };
 
@@ -67,6 +70,7 @@ export async function inspectHardenState(
   if (backup.kind === 'found') {
     const { facts } = backup;
     return { state: 'backup-only', hostPort: facts.hostPort, running: facts.running,
+      ...(facts.containerId === undefined ? {} : { sourceContainerId: facts.containerId }),
       ...(facts.journalVolumeName === blazegraphMigrationVolumeName(containerName)
         ? { usesMigrationVolume: true as const } : {}) };
 

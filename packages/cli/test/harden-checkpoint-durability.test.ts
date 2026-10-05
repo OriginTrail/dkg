@@ -61,6 +61,8 @@ describe('pre-swap owned migration export persistence', () => {
     expect(f.calls.some(args => args[0] === 'rename' || args[0] === 'update' || args[0] === 'run' && args[1] === '-d')).toBe(false);
     await expect(assertStoreMigrationInactive(home)).rejects.toThrow(/Store hardening marker/);
     expect(readFileSync(exported).length).toBe(JOURNAL_BYTES);
+    const value = JSON.parse(readFileSync(marker, 'utf8'));
+    if (value.recoveryRequired) expect(value.exportBytes).toBeUndefined();
   });
   it('retains the historical exported disk factor, plan description and actual preflight', async () => {
     expect(HARDEN_DISK_PREFLIGHT_FACTOR).toBe(2.2); expect(actionFactor).toBe(HARDEN_DISK_PREFLIGHT_FACTOR);

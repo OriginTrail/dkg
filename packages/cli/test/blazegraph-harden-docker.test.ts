@@ -138,6 +138,7 @@ try {
   assert.equal(healthResult.exitCode, 0, healthResult.stderr);
   assert.match(healthResult.stdout, /(?:"boolean"\s*:\s*true|<boolean>\s*true\s*<\/boolean>)/);
   const backup = JSON.parse((await docker.run(['inspect', `${name}-backup`])).stdout)[0];
+  assert.equal(backup.Id, before.Id, 'Backup rename must preserve the captured original Docker identity');
   if (journalSource === 'writable-layer') assert.deepEqual(backup.Mounts, []);
   else assert.ok(backup.Mounts.some(m => m.Name === volumes[0]));
   const response = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' }, body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:smoke-2974> { <urn:test:subject> <urn:test:predicate> ?v } }')}` });

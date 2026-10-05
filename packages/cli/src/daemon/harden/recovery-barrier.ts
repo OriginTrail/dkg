@@ -18,7 +18,8 @@ export function hardenRecoveryStep(containerName: string): HardenStep & { docker
 export async function preserveHardenRecoveryBarrier(ctx: HardenWorkflowInputs, exportBytes: number | undefined, marker: StoreMigrationMarkerOwnership) {
   await retainStoreMigrationRecoveryMarker(marker, {
     version: 1, recoveryRequired: true, pid: process.pid, containerName: ctx.specification.containerName,
-    namespace: ctx.specification.namespace, migrationDir: ctx.specification.migrationDir, hostPort: ctx.specification.hostPort, exportBytes,
+    namespace: ctx.specification.namespace, migrationDir: ctx.specification.migrationDir, hostPort: ctx.specification.hostPort, exportBytes, volumeAttemptId: ctx.specification.volumeAttemptId,
+    sourceContainerId: ctx.specification.sourceContainerId,
   });
   ctx.log('Startup remains blocked. Finish the logged Docker recovery, or repair the replacement, then run '
     + '`dkg store harden --recover` with the same container, namespace, migration directory and port to verify recovery.');
@@ -32,6 +33,12 @@ export async function recoverHardenMigration(ctx: HardenWorkflowInputs): Promise
     if (ctx.specification.state !== 'hardened' && ctx.specification.state !== 'legacy') throw new Error('Restore the backup or replacement before verifying recovery.');
     if (evidence.volumeAttemptId !== undefined && ctx.specification.state === 'hardened') {
       await verifyInterruptedReplacementVolume(ctx, evidence.volumeAttemptId);
+    }
+    if (ctx.specification.state === 'legacy' && (evidence.volumeAttemptId !== undefined || evidence.sourceContainerId !== undefined)) {
+      const original = classifyBlazegraphContainerInspection(await ctx.docker.run(['inspect', ctx.specification.containerName]), ctx.specification.containerName,
+        { containerName: ctx.specification.containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT });
+      if (evidence.sourceContainerId === undefined || original.kind !== 'found' || original.facts.containerId !== evidence.sourceContainerId)
+        throw new Error('Cannot verify the captured original source container; startup remains blocked.');
     }
     const backup = classifyBlazegraphContainerInspection(await ctx.docker.run(['inspect', ctx.specification.backupName]), ctx.specification.backupName,
       { containerName: ctx.specification.containerName, dataPath: BLAZEGRAPH_DATA_DIR, containerPort: BLAZEGRAPH_CONTAINER_PORT });

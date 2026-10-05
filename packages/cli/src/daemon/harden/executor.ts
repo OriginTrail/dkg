@@ -91,6 +91,7 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
     + `HostConfig.PortBindings nor NetworkSettings.Ports carries a binding for ${BLAZEGRAPH_CONTAINER_PORT}/tcp (or 8080/tcp). `
     + 'Refusing to guess. Pass --port <port> (the port in your store URL, typically 9999).');
   const input = { containerName, namespace, hostPort, heapMb, migrationDir, state: info.state, running: info.running,
+    sourceContainerId: info.sourceContainerId,
     volumeAttemptId: opts.dryRun ? HARDEN_VOLUME_ATTEMPT_PLACEHOLDER : randomUUID() };
   const migration = buildHardenMigration({ ...input, dkgHome, workingDirectory });
   const spec = migration.specification;
@@ -116,7 +117,7 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
   const lockPath = storeHardenLockPath(spec.dkgHome!);
   let marker = await claimStoreMigrationMarker(lockPath, spec.containerName, { version: 1,
     containerName: spec.containerName, namespace: spec.namespace, migrationDir: spec.migrationDir,
-    hostPort: spec.hostPort, volumeAttemptId: spec.volumeAttemptId! });
+    hostPort: spec.hostPort, volumeAttemptId: spec.volumeAttemptId!, sourceContainerId: spec.sourceContainerId });
   let checkpointed = false;
   let recoveryRequired = false;
   try {
@@ -150,7 +151,7 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
       exportPath: spec.exportPath, journalBytes: exported.bytes, heapMb: spec.heapMb };
   } catch (error) {
     if (recoveryRequired) {
-      await preserveHardenRecoveryBarrier(ctx, execution.exported?.bytes, marker).catch(() => {});
+      await preserveHardenRecoveryBarrier(ctx, checkpointed ? execution.exported?.bytes : undefined, marker).catch(() => {});
     }
     throw error;
   } finally {

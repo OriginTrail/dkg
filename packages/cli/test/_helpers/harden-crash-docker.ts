@@ -5,13 +5,14 @@ import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_LOG_MAX_SIZE, BLAZEGRAPH_LOG_MAX_FILE,
 export const CRASH_NAME = 'dkg-crash-owner', CRASH_NAMESPACE = 'owner', CRASH_BYTES = 1024;
 export function crashDocker(home: string) {
   const path = join(home, 'docker-state.json');
-  const state: { stopped: boolean; renamed: boolean; replacement: boolean; attempt: string | null; mount?: string } = existsSync(path)
+  const state: { stopped: boolean; renamed: boolean; replacement: boolean; attempt: string | null; mount?: string; sourceId?: string } = existsSync(path)
     ? JSON.parse(readFileSync(path, 'utf8')) : { stopped: false, renamed: false, replacement: false, attempt: null };
   if (!existsSync(path)) writeFileSync(path, JSON.stringify(state));
   const calls: string[][] = [], volume = blazegraphMigrationVolumeName(CRASH_NAME);
   const ok = (stdout = '') => ({ stdout, stderr: '', exitCode: 0 });
   const missing = (target: string) => ({ stdout: '', stderr: `Error: No such object: ${target}`, exitCode: 1 });
   const inspect = (hardened: boolean, running: boolean) => ok(JSON.stringify([{
+    Id: hardened ? 'replacement-container-id' : state.sourceId ?? 'original-container-id',
     State: { Running: running, StartedAt: '2026-01-01', FinishedAt: '2026-01-02' }, SizeRw: CRASH_BYTES,
     Mounts: hardened ? [{ Destination: BLAZEGRAPH_DATA_DIR, Name: state.mount ?? volume, Type: 'volume' }] : [],
     Config: hardened ? { Env: ['TOMCAT_JAVA_OPTS=-Xmx256m -XX:+ExitOnOutOfMemoryError'], Healthcheck: { Test: ['CMD-SHELL', 'curl ASK%7B%7D'] } } : {},

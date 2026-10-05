@@ -68,11 +68,49 @@ describe('explicit reconciliation after actual harden owner SIGKILL', () => {
     await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/does not certify/);
     await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
   }, 15000);
-  it.each(['live owner', 'foreign options', 'foreign attempt', 'foreign mounted volume', 'changed raw marker', 'missing export'])('retains the fence for %s', async refusal => {
+  it('rejects a different legacy container substituted for the captured original', async () => {
+    const f = await interruptedReplacement();
+    await f.runner.run(['rm', '-f', CRASH_NAME]);
+    await f.runner.run(['rename', `${CRASH_NAME}-backup`, CRASH_NAME]);
+    const path = join(home, 'docker-state.json'), state = JSON.parse(readFileSync(path, 'utf8'));
+    state.sourceId = 'different-container-id'; writeFileSync(path, JSON.stringify(state));
+    await expect(executeHardenMigration({ ...f.options, docker: crashDocker(home).runner, recover: true }))
+      .rejects.toThrow(/original source/);
+    await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
+  }, 15000);
+  it.each(['foreign attempt', 'foreign mounted volume', 'missing original ID', 'foreign original ID'])('keeps the checkpoint fence after caught incomplete rollback (%s)', async refusal => {
+    const f = crashDocker(home);
+    const docker = { async run(args: readonly string[]) {
+      return args[0] === 'rm' ? { stdout: '', stderr: 'busy', exitCode: 1 } : f.runner.run(args);
+    } };
+    const options = { containerName: CRASH_NAME, namespace: CRASH_NAMESPACE, migrationDir: home, dkgHome: home,
+      docker, log() {}, freeDiskBytes: async () => 1e12, readyTimeoutMs: 100, readyIntervalMs: 1 };
+    const failed: typeof globalThis.fetch = async (...args) => String(args[1]?.body).includes('SELECT')
+      ? new Response(JSON.stringify({ results: { bindings: [] } })) : crashVerifier(...args);
+    await expect(executeHardenMigration({ ...options, fetch: failed })).rejects.toThrow(/rollback is INCOMPLETE/);
+    let marker = readFileSync(storeHardenLockPath(home), 'utf8');
+    if (refusal === 'missing original ID' || refusal === 'foreign original ID') {
+      await f.runner.run(['rm', '-f', CRASH_NAME]); await f.runner.run(['rename', `${CRASH_NAME}-backup`, CRASH_NAME]);
+    }
+    if (refusal === 'missing original ID') { const value = JSON.parse(marker); delete value.sourceContainerId; writeFileSync(storeHardenLockPath(home), JSON.stringify(value)); marker = readFileSync(storeHardenLockPath(home), 'utf8'); }
+    const path = join(home, 'docker-state.json'), state = JSON.parse(readFileSync(path, 'utf8'));
+    if (refusal === 'foreign attempt') state.attempt = 'foreign';
+    if (refusal === 'foreign mounted volume') state.mount = blazegraphVolumeName(CRASH_NAME);
+    if (refusal === 'foreign original ID') state.sourceId = 'different-container-id';
+    writeFileSync(path, JSON.stringify(state));
+    await expect(executeHardenMigration({ ...options, docker: crashDocker(home).runner, fetch: crashVerifier, recover: true })).rejects.toThrow();
+    expect(readFileSync(storeHardenLockPath(home), 'utf8')).toBe(marker);
+    await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
+  });
+  it.each(['live owner', 'foreign options', 'foreign attempt', 'foreign mounted volume', 'missing original ID', 'changed raw marker', 'missing export'])('retains the fence for %s', async refusal => {
     const f = await interruptedReplacement();
     if (refusal === 'live owner') { const value = JSON.parse(f.marker); value.pid = process.pid; writeFileSync(storeHardenLockPath(home), JSON.stringify(value)); }
     if (refusal === 'foreign attempt') { const p = join(home, 'docker-state.json'), state = JSON.parse(readFileSync(p, 'utf8')); state.attempt = 'foreign'; writeFileSync(p, JSON.stringify(state)); }
     if (refusal === 'foreign mounted volume') { const p = join(home, 'docker-state.json'), state = JSON.parse(readFileSync(p, 'utf8')); state.mount = blazegraphVolumeName(CRASH_NAME); writeFileSync(p, JSON.stringify(state)); }
+    if (refusal === 'missing original ID') {
+      await f.runner.run(['rm', '-f', CRASH_NAME]); await f.runner.run(['rename', `${CRASH_NAME}-backup`, CRASH_NAME]);
+      const marker = JSON.parse(f.marker); delete marker.recovery.sourceContainerId; writeFileSync(storeHardenLockPath(home), JSON.stringify(marker));
+    }
     if (refusal === 'missing export') rmSync(join(home, 'bigdata.jnl'));
     const replacement = crashDocker(home);
     const fetch: typeof globalThis.fetch = async (...args) => {

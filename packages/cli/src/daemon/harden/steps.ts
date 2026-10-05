@@ -102,6 +102,7 @@ function dockerPhase(id: string, description: string, dockerArgs: string[],
 /** Captured targets shared by command generation, verification and recovery. */
 export interface HardenMigrationSpecification extends Readonly<HardenPlanInput> {
   readonly sourceName: string;
+  readonly sourceContainerId?: string;
   readonly backupName: string;
   readonly volumeName: string;
   readonly exportPath: string;
@@ -117,7 +118,7 @@ export interface HardenExecutablePhase extends HardenStep {
 
 /** One state-selected sequence serves both dry-run rendering and execution. */
 export function buildHardenMigration(raw: HardenPlanInput & {
-  sourceContainerName?: string; dkgHome?: string; workingDirectory?: string;
+  sourceContainerName?: string; sourceContainerId?: string; dkgHome?: string; workingDirectory?: string;
 }) {
   const workingDirectory = raw.workingDirectory ?? process.cwd();
   const migrationDir = resolve(workingDirectory, raw.migrationDir);
@@ -129,6 +130,7 @@ export function buildHardenMigration(raw: HardenPlanInput & {
     containerName: raw.containerName, namespace: raw.namespace, hostPort: raw.hostPort,
     heapMb: raw.heapMb, migrationDir, state: raw.state, running: raw.running ?? raw.state !== 'backup-only',
     volumeAttemptId: raw.volumeAttemptId ?? HARDEN_VOLUME_ATTEMPT_PLACEHOLDER,
+    ...(raw.sourceContainerId === undefined ? {} : { sourceContainerId: raw.sourceContainerId }),
     sourceName, backupName, volumeName: blazegraphVolumeName(raw.containerName), exportPath, baseUrl,
     sparqlUrl: `${baseUrl}/bigdata/namespace/${encodeURIComponent(raw.namespace)}/sparql`,
     ...(raw.dkgHome === undefined ? {} : { dkgHome: resolve(workingDirectory, raw.dkgHome) }),
