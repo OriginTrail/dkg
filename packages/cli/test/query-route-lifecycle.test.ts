@@ -21,9 +21,9 @@ import {
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
 import { handleCclRoutes } from '../src/daemon/routes/ccl.js';
+import { respondToQueryFailure } from '../src/daemon/routes/query-error.js';
 import {
   respondIfStoreUnavailable,
-  respondIfUnscopedQueryInvalidated,
   respondWithDaemonError,
 } from '../src/daemon/http-utils.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -705,15 +705,10 @@ describe('/api/query request lifecycle', () => {
       cancel: vi.fn(),
     };
 
-    // The route has no branch of its own for it: the error reaches the daemon's
-    // top-level mapping, like every other error the route does not classify.
-    await expect(handleQueryRoutes(queryRouteContext(req, res, {
+    await handleQueryRoutes(queryRouteContext(req, res, {
       query: vi.fn(async () => { throw invalidated; }),
-    }, tracker))).rejects.toBe(invalidated);
-    expect(tracker.fail).toHaveBeenCalledTimes(1);
-    expect(tracker.cancel).not.toHaveBeenCalled();
+    }, tracker));
 
-    respondWithDaemonError(res as unknown as ServerResponse, invalidated);
     expect(res.statusCode).toBe(503);
     expect(res.headers['Retry-After']).toBe('1');
     const answer = JSON.parse(res.body);
@@ -722,15 +717,19 @@ describe('/api/query request lifecycle', () => {
       code: 'UNSCOPED_QUERY_INVALIDATED',
       retryable: true,
     });
-    // The daemon's sentence is the agent's: the text of the answer did not
+    // The sentence is the one the agent threw: the text of the answer did not
     // change with its status.
     expect(answer.error).toBe((invalidated as Error).message);
+    // The query ran and its result was discarded: a failed operation, not a
+    // cancelled one.
+    expect(tracker.fail).toHaveBeenCalledTimes(1);
+    expect(tracker.cancel).not.toHaveBeenCalled();
   });
 
   it('gives the same answer to a copy of that error that lost its message at a package boundary', () => {
     const res = new ResponseStub();
     // Error.message is non-enumerable, so a spread or serialized copy has none.
-    expect(respondIfUnscopedQueryInvalidated(res as unknown as ServerResponse, {
+    expect(respondToQueryFailure(res as unknown as ServerResponse, {
       code: 'UNSCOPED_QUERY_INVALIDATED', retryable: true,
     })).toBe(true);
     expect(res.statusCode).toBe(503);
@@ -747,9 +746,21 @@ describe('/api/query request lifecycle', () => {
     // Retrying cannot give a store the coverage an unscoped query needs.
     ['a store that can never serve an unscoped query', thrownBy(() => captureUnscopedQueryConsistency({}, () => 0))],
     ['no error object at all', undefined],
-  ])('does not offer a retry for %s', (_label, error) => {
+  ])('leaves %s to the top-level mapping, which offers no retry', async (_label, error) => {
+    const unanswered = new ResponseStub();
+    expect(respondToQueryFailure(unanswered as unknown as ServerResponse, error)).toBe(false);
+    expect(unanswered.headersSent).toBe(false);
+
+    // Through the route: it rethrows, and the daemon's top-level mapping answers 500.
     const res = new ResponseStub();
-    expect(respondIfUnscopedQueryInvalidated(res as unknown as ServerResponse, error)).toBe(false);
-    expect(res.headersSent).toBe(false);
+    const thrown = error ?? new Error('unclassified');
+    await expect(handleQueryRoutes(queryRouteContext(new RequestStub(), res, {
+      query: vi.fn(async () => { throw thrown; }),
+    }, {
+      start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn(),
+    }))).rejects.toBe(thrown);
+    respondWithDaemonError(res as unknown as ServerResponse, thrown);
+    expect(res.statusCode).toBe(500);
+    expect(res.headers['Retry-After']).toBeUndefined();
   });
 });
