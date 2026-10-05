@@ -2,7 +2,9 @@
 
 import { ethers } from 'ethers';
 import { createStrictCurrentFinalizedEvmSnapshotScopeV1, resolveRpcUrls } from '@origintrail-official/dkg-chain';
-import type { ChainIdV1, ContextGraphIdV1, DecimalU256V1, EvmAddressV1 } from '@origintrail-official/dkg-core';
+import {
+  assertCanonicalChainId, assertCanonicalDecimalU256, assertCanonicalEvmAddress,
+} from '@origintrail-official/dkg-core';
 import type { DKGAgent } from './dkg-agent.js';
 import { proveRegisteredPrivateEmptyVmV1 } from './rfc64/registered-private-empty-vm-proof-v1.js';
 
@@ -55,36 +57,49 @@ export class RegisteredPrivateEmptyVmMethods {
       if (chainId === undefined || !ethers.isAddress(chainConfig.hubAddress)) {
         trace('chain-binding-absent'); return false;
       }
+      // Normalize external bindings once, then narrow to the shared wire
+      // scalars. The graph name itself is hashed as supplied by the DKG
+      // registry and is not restricted to the RFC-64 author-lane grammar.
+      const onChainContextGraphId = before.onChainId.toString(10);
+      const hubAddress = chainConfig.hubAddress.toLowerCase();
+      assertCanonicalChainId(chainId);
+      assertCanonicalDecimalU256(onChainContextGraphId);
+      assertCanonicalEvmAddress(caller);
+      assertCanonicalEvmAddress(hubAddress);
       const indexed = await this.chain.getContextGraphAuthoritySnapshot(before.onChainId, {
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
       });
       if (indexed.chainId !== chainId
-        || indexed.contextGraphId !== before.onChainId.toString(10)
+        || indexed.contextGraphId !== onChainContextGraphId
         || indexed.active !== true || indexed.accessPolicy !== 1
         || !ethers.isAddress(indexed.governanceContract)) {
         trace('indexed-private-authority-absent'); return false;
       }
+      const governanceContractAddress = indexed.governanceContract.toLowerCase();
+      assertCanonicalEvmAddress(governanceContractAddress);
       const depth = this.chain.getFinalityConfirmations?.()
         ?? chainConfig.finalityConfirmations;
       const proven = await proveRegisteredPrivateEmptyVmV1({
-        contextGraphId: contextGraphId as ContextGraphIdV1,
-        onChainContextGraphId: before.onChainId.toString(10) as DecimalU256V1,
-        callerAgentAddress: caller as EvmAddressV1,
-        chainId: chainId as ChainIdV1,
-        hubAddress: chainConfig.hubAddress.toLowerCase() as EvmAddressV1,
-        governanceContractAddress: indexed.governanceContract.toLowerCase() as EvmAddressV1,
+        contextGraphId,
+        onChainContextGraphId,
+        callerAgentAddress: caller,
+        chainId,
+        hubAddress,
+        governanceContractAddress,
         snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
-          chainId: chainId as ChainIdV1, endpoints,
+          chainId, endpoints,
           ...(depth === undefined ? {} : { finalityConfirmations: depth }),
           owner: 'rfc64',
         }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000),
       });
       if (!proven) { trace('finalized-zero-proof-false'); return false; }
-      const after = await authority();
       const confirmedAfter = await this.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
       const privateAfter = confirmedAfter
         && await this.isPrivateContextGraph(contextGraphId).catch(() => false);
+      // This is the final async authority boundary. No awaited metadata read
+      // may follow it before the synchronous fence and persistence callback.
+      const after = await authority();
       const stillCurrent = after.outcome === 'allowed' && after.source === 'registered-chain'
         && after.onChainId === before.onChainId
         && signal?.aborted !== true

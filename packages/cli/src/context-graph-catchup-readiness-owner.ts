@@ -83,12 +83,25 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
   return withContextGraphReadinessMutationLock(agent, contextGraphId, async () => {
     // A failed proof may mean revoked membership, not merely a transient read
     // error. Never reuse admission-time authority or metadata in that path.
+    const metadataRevision = agent.getContextGraphAuthorityFactsRevision(contextGraphId);
+    const metadata = await inspectMetadata();
     const completionAuthority = privateZeroVmCandidate
       || input.admissionAuthority.registration === 'unregistered'
       ? await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
           callerAgentAddress, allowSubscriptionFallback: false,
         }).catch(() => ({ outcome: 'unavailable' as const }))
       : input.admissionAuthority;
-    return decide(await inspectMetadata(), completionAuthority, false);
+    // No await separates this fence from the synchronous readiness commit.
+    // If metadata or subscription intent moved while the live authority read
+    // was pending, this pass cannot grant either plane.
+    const current = agent.getContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
+      && agent.getSubscribedContextGraphs().get(contextGraphId)?.subscribed === true;
+    return current
+      ? decide(metadata, completionAuthority, false)
+      : decide(
+          { hasConfirmedMeta: undefined, isPrivate: false },
+          completionAuthority.outcome === 'allowed' ? { outcome: 'unavailable' } : completionAuthority,
+          false,
+        );
   });
 }

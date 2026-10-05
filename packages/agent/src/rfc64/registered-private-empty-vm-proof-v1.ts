@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import type { ChainIdV1, ContextGraphIdV1, DecimalU256V1, EvmAddressV1 } from '@origintrail-official/dkg-core';
+import type { ChainIdV1, DecimalU256V1, EvmAddressV1 } from '@origintrail-official/dkg-core';
 import {
   readFinalizedContextGraphEmptyVmFactsInSnapshotV1,
   type StrictCurrentFinalizedEvmSnapshotScopeV1,
@@ -15,7 +15,9 @@ import {
  * finalized anchor. This grants no shared-memory or query readiness.
  */
 export async function proveRegisteredPrivateEmptyVmV1(input: {
-  contextGraphId: ContextGraphIdV1;
+  // Chain registration hashes the exact DKG graph name; the author-lane
+  // ContextGraphIdV1 grammar is narrower than the names DKG can register.
+  contextGraphId: string;
   onChainContextGraphId: DecimalU256V1;
   callerAgentAddress: EvmAddressV1;
   chainId: ChainIdV1;

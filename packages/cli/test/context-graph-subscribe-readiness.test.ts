@@ -184,6 +184,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     invalidateMetaDuringProof?: boolean;
     throwEarlyReadinessCommitOnce?: boolean;
     revokeOnTerminalProof?: boolean;
+    revokeOnTerminalMetadataInspection?: boolean;
+    changeRevisionOnTerminalAuthority?: boolean;
+    unsubscribeOnTerminalAuthority?: boolean;
     authorityDecision?: TestAuthorityDecision;
     authorityAfterCatchup?: TestAuthorityDecision;
     recoverAuthorityForRetry?: boolean;
@@ -245,6 +248,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
     let metadataInvalidated = false;
+    let metadataRevision = 0;
 
     daemonState.catchupRunner = {
       run: async (request) => {
@@ -261,25 +265,33 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
-      resolveContextGraphSubscriptionBootstrapAuthority: async () => (
-        authorityRevoked
+      resolveContextGraphSubscriptionBootstrapAuthority: async () => {
+        if (catchupCompleted && opts.changeRevisionOnTerminalAuthority) {
+          metadataRevision += 1;
+        }
+        if (catchupCompleted && opts.unsubscribeOnTerminalAuthority) {
+          state.set(contextGraphId, { ...state.get(contextGraphId), subscribed: false });
+        }
+        return (authorityRevoked
           ? { outcome: 'denied' as const, source: 'registered-chain' as const,
             reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden' as const }
           : retrying
-          // Model the legacy-local admission guard after the transient store
-          // outage recovers. A wrongly persisted pendingMeta poisons retries.
-          ? state.get(contextGraphId)?.pendingMeta === true
-            ? { outcome: 'unavailable', source: 'legacy-local', reason: 'pending-authoritative-metadata', metadataBootstrap: 'eligible' }
-            : opts.authorityDecision
-          : catchupCompleted ? opts.authorityAfterCatchup ?? opts.authorityDecision : opts.authorityDecision
-      ) ?? ({
-        outcome: 'allowed' as const,
-        source: 'legacy-local' as const,
-        reason: 'test-public',
-        metadataBootstrap: 'eligible' as const,
-      }),
+            // Model the legacy-local admission guard after the transient store
+            // outage recovers. A wrongly persisted pendingMeta poisons retries.
+            ? state.get(contextGraphId)?.pendingMeta === true
+              ? { outcome: 'unavailable', source: 'legacy-local', reason: 'pending-authoritative-metadata', metadataBootstrap: 'eligible' }
+              : opts.authorityDecision
+            : catchupCompleted ? opts.authorityAfterCatchup ?? opts.authorityDecision : opts.authorityDecision
+        ) ?? ({
+          outcome: 'allowed' as const,
+          source: 'legacy-local' as const,
+          reason: 'test-public',
+          metadataBootstrap: 'eligible' as const,
+        });
+      },
       getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
+      getContextGraphAuthorityFactsRevision: () => `0:${metadataRevision + (metadataInvalidated ? 1 : 0)}`,
       subscribeToContextGraph: (
         id: string,
         options?: { syncMode?: 'on-demand' | 'always-on' },
@@ -321,6 +333,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         return 'no-accepted-public-policy';
       },
       hasConfirmedMetaState: async () => {
+        if (catchupCompleted && opts.revokeOnTerminalMetadataInspection) {
+          authorityRevoked = true;
+        }
         if (metadataInvalidated) return false;
         if (catchupCompleted && opts.metadataInspectionFailsAfterCatchup) {
           throw new Error('transient metadata store failure');
@@ -1403,6 +1418,45 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.job.error).toBeUndefined();
     expect(result.statusResponse.durablePlane).toBe('not-applicable');
     expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: true });
+  });
+
+  it('rejects SWM readiness when authority is revoked during final metadata inspection', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      result: privateSharedMemoryOnlyResult(),
+      revokeOnTerminalMetadataInspection: true,
+    });
+    expect(result.job.status).toBe('denied');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false });
+  });
+
+  it('rejects SWM readiness when metadata revision changes during completion authority', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      result: privateSharedMemoryOnlyResult(),
+      changeRevisionOnTerminalAuthority: true,
+    });
+    expect(result.job.status).toBe('unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false });
+  });
+
+  it('rejects SWM readiness when the subscription is removed during completion authority', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      result: privateSharedMemoryOnlyResult(),
+      unsubscribeOnTerminalAuthority: true,
+    });
+    expect(result.job.status).toBe('unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state).toMatchObject({ subscribed: false, synced: false, sharedMemorySynced: false });
   });
 
   it('re-derives VM applicability for the already-ready shortcut after restart', async () => {

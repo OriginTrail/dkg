@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DKGAgent } from '../src/dkg-agent.js';
+import { DKGAgent } from '../src/dkg-agent.js';
 import { RegisteredPrivateEmptyVmMethods } from '../src/dkg-agent-registered-private-empty-vm.js';
 
 const mocks = vi.hoisted(() => ({
@@ -28,6 +28,9 @@ function fixture() {
     governanceContract: `0x${'22'.repeat(20)}`,
   }));
   const subscriptions = new Map([[CG, { subscribed: true }]]);
+  const projection = {
+    readContextGraphAuthorityFactsRevision: (_contextGraphId: string) => metadataRevision,
+  };
   const agent = {
     subscribedContextGraphs: subscriptions,
     resolveContextGraphSubscriptionBootstrapAuthority: authority,
@@ -39,15 +42,14 @@ function fixture() {
       getFinalityConfirmations: () => 1,
       getContextGraphAuthoritySnapshot: chainSnapshot,
     },
-    contextGraphMetaProjection: {
-      readContextGraphAuthorityFactsRevision: () => metadataRevision,
-    },
+    contextGraphMetaProjection: projection,
     hasConfirmedMetaState: vi.fn(async () => true),
     isPrivateContextGraph: isPrivate,
   } as unknown as DKGAgent;
   return {
-    authority, chainSnapshot, subscriptions, agent, isPrivate,
+    authority, chainSnapshot, subscriptions, projection, agent, isPrivate,
     invalidateMetadata: () => { metadataRevision = '0:1'; },
+    readMetadataRevision: () => metadataRevision,
   };
 }
 
@@ -65,6 +67,13 @@ describe('registered private empty-VM agent guard', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it('exposes the graph-scoped metadata revision used by the completion fence', () => {
+    const state = fixture();
+    expect(DKGAgent.prototype.getContextGraphAuthorityFactsRevision.call(state.agent, CG)).toBe('0:0');
+    state.invalidateMetadata();
+    expect(DKGAgent.prototype.getContextGraphAuthorityFactsRevision.call(state.agent, CG)).toBe('0:1');
   });
 
   it('rechecks registered chain authority around the pinned proof', async () => {
@@ -114,8 +123,12 @@ describe('registered private empty-VM agent guard', () => {
     const config = state.agent.config.chainConfig as { chainId: string; hubAddress: string };
     config.chainId = 'not-an-evm-chain';
     expect(await prove(state.agent)).toBe(false);
+    config.chainId = `evm:${1n << 256n}`;
+    expect(await prove(state.agent)).toBe(false);
     config.chainId = 'evm:31337';
     config.hubAddress = 'not-an-address';
+    expect(await prove(state.agent)).toBe(false);
+    config.hubAddress = `0x${'00'.repeat(20)}`;
     expect(await prove(state.agent)).toBe(false);
     expect(state.chainSnapshot).not.toHaveBeenCalled();
     expect(mocks.proof).not.toHaveBeenCalled();
@@ -145,6 +158,16 @@ describe('registered private empty-VM agent guard', () => {
     expect(await prove(state.agent)).toBe(false);
   });
 
+  it('never commits a negative finalized zero-VM proof', async () => {
+    const state = fixture();
+    const commit = vi.fn();
+    mocks.proof.mockResolvedValueOnce(false);
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toBe(false);
+    expect(mocks.proof).toHaveBeenCalledTimes(1);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
   it('does not commit readiness if metadata is invalidated during chain proof', async () => {
     const state = fixture();
     const commit = vi.fn();
@@ -167,12 +190,43 @@ describe('registered private empty-VM agent guard', () => {
     expect(commit).not.toHaveBeenCalled();
   });
 
-  it('commits synchronously after the final metadata fence', async () => {
+  it('does not commit when live authority is revoked during final metadata inspection', async () => {
     const state = fixture();
-    const commit = vi.fn(state.invalidateMetadata);
+    const commit = vi.fn();
+    let revoke!: () => void;
+    const revoked = new Promise<void>((resolve) => { revoke = resolve; });
+    let finalMetadata = 0;
+    vi.mocked(state.agent.hasConfirmedMetaState).mockImplementation(async () => {
+      finalMetadata += 1;
+      if (finalMetadata === 2) {
+        state.authority.mockResolvedValue({ outcome: 'denied' });
+        revoke();
+        await revoked;
+      }
+      return true;
+    });
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('commits synchronously before a microtask can invalidate the final metadata fence', async () => {
+    const state = fixture();
+    const { projection } = state;
+    const originalRead = projection.readContextGraphAuthorityFactsRevision.bind(projection);
+    let reads = 0;
+    projection.readContextGraphAuthorityFactsRevision = vi.fn((id: string) => {
+      const revision = originalRead(id);
+      if (++reads === 3) queueMicrotask(state.invalidateMetadata);
+      return revision;
+    });
+    const revisionAtCommit: string[] = [];
+    const commit = vi.fn(() => { revisionAtCommit.push(state.readMetadataRevision()); });
     expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
       .call(state.agent, CG, CALLER, commit)).toBe(true);
     expect(commit).toHaveBeenCalledTimes(1);
+    expect(revisionAtCommit).toEqual(['0:0']);
+    expect(state.readMetadataRevision()).toBe('0:1');
   });
 
   it('leaves a caller-owned persistence failure visible after a valid proof', async () => {
