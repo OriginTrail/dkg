@@ -13,12 +13,14 @@ import {
 } from '../blazegraph-docker.js';
 import { classifyBlazegraphContainerInspection } from '../blazegraph-container-inspection.js';
 
-export interface RollbackResult {
-  complete: boolean;
-  /** Set when incomplete: the step that failed (later steps did not run). */
-  failedStep?: string;
-  detail?: string;
-}
+export type RollbackResult =
+  | { complete: true; failedStep?: never; detail?: never }
+  | {
+    complete: false;
+    /** The step that failed (later steps did not run). */
+    failedStep: string;
+    detail: string;
+  };
 
 /**
  * Automatic rollback after a failed post-swap step: remove the NEW

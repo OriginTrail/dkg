@@ -30,7 +30,7 @@ export async function rollbackMigrationFailure(ctx: HardenWorkflowInputs,
   }
   return { rollback, error: new Error(
     `Harden ${phase} failed and the automatic rollback is INCOMPLETE ` +
-    `(stopped at step "${rollback.failedStep}": ${rollback.detail ?? 'see log'}). ` +
+    `(stopped at step "${rollback.failedStep}": ${rollback.detail}). ` +
     `The legacy container was NOT restored to service. Your data is still safe in ` +
     `container "${backupName}" and in the export at ${exportPath} — see the log above ` +
     `for the exact docker commands to finish the restore by hand. ` +
