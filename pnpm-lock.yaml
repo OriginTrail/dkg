@@ -982,6 +982,9 @@ importers:
 
   packages/graph-computer:
     dependencies:
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -1408,6 +1411,9 @@ importers:
       '@bytecodealliance/jco':
         specifier: 1.32.1
         version: 1.32.1
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
       better-sqlite3:
         specifier: 12.11.1
         version: 12.11.1

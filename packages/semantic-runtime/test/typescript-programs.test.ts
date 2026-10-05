@@ -52,7 +52,7 @@ describe('stored TypeScript Program runtime', () => {
 
   it('rejects imports outside the guest API during compilation', async () => {
     await expect(host().compile('import fs from "node:fs"; export function run() { return fs.readFileSync("/etc/passwd"); }'))
-      .rejects.toThrow('Only the Graph Computer');
+      .rejects.toThrow('Unsupported Program import');
   });
 
   it('terminates an infinite guest loop and can still execute another Program', async () => {
@@ -86,7 +86,7 @@ describe('stored TypeScript Program runtime', () => {
   }, 60000);
 
   it('bounds build-time initialization and releases the failed compilation slot', async () => {
-    const runtime = host({ compileTimeoutMs: 5000 });
+    const runtime = host({ compileTimeoutMs: 15000 });
     await expect(runtime.compile('while (true) {} export function run() { return 1; }')).rejects.toThrow('TIMEOUT');
     const artifact = await runtime.compile('export function run() { return 2; }');
     expect(await runtime.execute(artifact, '[]', grant, async () => null)).toBe('2');

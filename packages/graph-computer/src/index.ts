@@ -3,6 +3,7 @@ import { getAddress } from 'ethers';
 import { GraphComputerError } from './errors.js';
 import { canonicalInputs } from './inputs.js';
 import { createUuid } from './uuid.js';
+import { readTypeScriptProgramBundle } from './program-bundle.js';
 import { sha256, signInvocation } from './signing.js';
 import { assertPeer, integer, isRecord, Transport } from './transport.js';
 import type {
@@ -12,6 +13,8 @@ import type {
 
 export { GraphComputerError } from './errors.js';
 export { createUuid } from './uuid.js';
+export { createTypeScriptProgramBundle, readTypeScriptProgramBundle, updateTypeScriptProgramBundleFile } from './program-bundle.js';
+export type { TypeScriptProgramBundle, TypeScriptProgramBundleInput } from './program-bundle.js';
 export type * from './types.js';
 
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
@@ -52,6 +55,7 @@ class Programs {
     if (!Array.isArray(input.requiredTools)) throw new TypeError('requiredTools must be an array of tool IRIs');
     const language = input.language ?? 'sexpr-v1';
     if (!['sexpr-v1', 'typescript-v1'].includes(language)) throw new TypeError('Unsupported Program language');
+    if (language === 'typescript-v1') readTypeScriptProgramBundle(input.source);
     if (input.permittedPrograms !== undefined && !Array.isArray(input.permittedPrograms)) throw new TypeError('permittedPrograms must be an array');
     const requestedPermissions = input.requestedPermissions === undefined ? undefined : JSON.stringify({
       ...input.requestedPermissions, graphId: graph(input.requestedPermissions.graphId),
