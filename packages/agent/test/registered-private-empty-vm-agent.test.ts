@@ -18,6 +18,7 @@ const CG = 'example-private-graph';
 const CALLER = `0x${'11'.repeat(20)}`;
 
 function fixture() {
+  let metadataRevision = '0:0';
   const authority = vi.fn(async () => ({
     outcome: 'allowed', source: 'registered-chain', onChainId: 3n,
   }));
@@ -37,8 +38,16 @@ function fixture() {
       getFinalityConfirmations: () => 1,
       getContextGraphAuthoritySnapshot: chainSnapshot,
     },
+    contextGraphMetaProjection: {
+      readContextGraphAuthorityFactsRevision: () => metadataRevision,
+    },
+    hasConfirmedMetaState: vi.fn(async () => true),
+    isPrivateContextGraph: vi.fn(async () => true),
   } as unknown as DKGAgent;
-  return { authority, chainSnapshot, subscriptions, agent };
+  return {
+    authority, chainSnapshot, subscriptions, agent,
+    invalidateMetadata: () => { metadataRevision = '0:1'; },
+  };
 }
 
 async function prove(agent: DKGAgent) {
@@ -98,5 +107,39 @@ describe('registered private empty-VM agent guard', () => {
     const state = fixture();
     mocks.proof.mockRejectedValue(new Error('read unavailable'));
     expect(await prove(state.agent)).toBe(false);
+  });
+
+  it('does not commit readiness if metadata is invalidated during chain proof', async () => {
+    const state = fixture();
+    const commit = vi.fn();
+    mocks.proof.mockImplementationOnce(async () => {
+      state.invalidateMetadata();
+      return true;
+    });
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('commits synchronously after the final metadata fence', async () => {
+    const state = fixture();
+    const commit = vi.fn(state.invalidateMetadata);
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit)).toBe(true);
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not commit a proof that completes after the caller deadline', async () => {
+    const state = fixture();
+    const deadline = new AbortController();
+    const commit = vi.fn();
+    mocks.proof.mockImplementationOnce(async () => {
+      deadline.abort();
+      return true;
+    });
+    expect(await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
+      .call(state.agent, CG, CALLER, commit, deadline.signal)).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    expect(state.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ signal: deadline.signal }));
   });
 });

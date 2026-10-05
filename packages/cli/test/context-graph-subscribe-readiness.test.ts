@@ -179,6 +179,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     onCatchupRun?: () => void;
     catchupRunWaitFor?: Promise<void>;
     finalizedEmptyPrivateVm?: boolean;
+    finalizedEmptyPrivateVmAfterCatchup?: boolean;
+    invalidateMetaDuringProof?: boolean;
+    throwEarlyReadinessCommitOnce?: boolean;
     authorityDecision?: TestAuthorityDecision;
     authorityAfterCatchup?: TestAuthorityDecision;
     recoverAuthorityForRetry?: boolean;
@@ -233,6 +236,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
+    let metadataInvalidated = false;
 
     daemonState.catchupRunner = {
       run: async (request) => {
@@ -283,6 +287,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         return applied;
       },
       markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
+        if (opts.throwEarlyReadinessCommitOnce && patch.synced === true && runCalls === 0) {
+          opts.throwEarlyReadinessCommitOnce = false;
+          throw new Error('test readiness write failure');
+        }
         patches.push({ ...patch });
         state.set(id, { ...state.get(id), ...patch });
       },
@@ -300,6 +308,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         return 'no-accepted-public-policy';
       },
       hasConfirmedMetaState: async () => {
+        if (metadataInvalidated) return false;
         if (runCalls > 0 && opts.metadataInspectionFailsAfterCatchup) {
           throw new Error('transient metadata store failure');
         }
@@ -308,7 +317,24 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
           : opts.hasConfirmedMeta;
       },
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
-      proveRegisteredPrivateEmptyVmV1: async () => opts.finalizedEmptyPrivateVm ?? false,
+      proveRegisteredPrivateEmptyVmV1: async (
+        _id: string, _caller: string, commit?: () => void,
+      ) => {
+        if (opts.invalidateMetaDuringProof && !metadataInvalidated) {
+          metadataInvalidated = true;
+          state.set(contextGraphId, {
+            ...state.get(contextGraphId), synced: false,
+            metaSynced: false, pendingMeta: true,
+          });
+          return false;
+        }
+        if (metadataInvalidated) return false;
+        const proven = runCalls > 0
+          ? opts.finalizedEmptyPrivateVmAfterCatchup ?? opts.finalizedEmptyPrivateVm ?? false
+          : opts.finalizedEmptyPrivateVm ?? false;
+        if (proven) commit?.();
+        return proven;
+      },
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
       getRfc64SelectedSwmGraphSyncStatus: () => ({
@@ -467,6 +493,74 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     }
   });
 
+  it('returns the minted catch-up job if best-effort early readiness persistence throws', async () => {
+    let finishCatchup!: () => void;
+    const catchupRunWaitFor = new Promise<void>((resolve) => { finishCatchup = resolve; });
+    try {
+      const result = await subscribe({
+        hasConfirmedMeta: true, isPrivate: true,
+        finalizedEmptyPrivateVm: true,
+        throwEarlyReadinessCommitOnce: true,
+        catchupRunWaitFor,
+        authorityDecision: {
+          outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+          metadataBootstrap: 'eligible', onChainId: 7n,
+        },
+      });
+      expect(result.responseStatus).toBe(200);
+      expect(result.response.catchup.jobId).toBeTruthy();
+      expect(result.job.status).toBe('running');
+    } finally {
+      finishCatchup();
+    }
+  });
+
+  it('commits a later finalized empty-VM proof after private metadata-only catch-up', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      initial: { subscribed: false, sharedMemorySynced: false },
+      finalizedEmptyPrivateVm: false,
+      finalizedEmptyPrivateVmAfterCatchup: true,
+      result: privateSharedMemoryMetaOnlyResult(),
+      authorityDecision: {
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+        metadataBootstrap: 'eligible', onChainId: 7n,
+      },
+    });
+    expect(result.responseStatus).toBe(200);
+    expect(result.job.finishedAt).toBeDefined();
+    expect(result.state).toMatchObject({
+      subscribed: true, synced: true, metaSynced: true,
+      sharedMemorySynced: false,
+    });
+    expect(result.readiness).toMatchObject({
+      durableVerified: true, sharedMemoryVerified: false,
+    });
+  });
+
+  it('does not restore readiness after metadata invalidates during an empty-VM proof', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      initial: { subscribed: false, sharedMemorySynced: false },
+      finalizedEmptyPrivateVm: true,
+      invalidateMetaDuringProof: true,
+      result: privateMetaOnlyResult(),
+      authorityDecision: {
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+        metadataBootstrap: 'eligible', onChainId: 7n,
+      },
+    });
+    expect(result.job.finishedAt).toBeDefined();
+    expect(result.state).toMatchObject({
+      synced: false, metaSynced: false, pendingMeta: true,
+    });
+    expect(result.readiness).toMatchObject({
+      durableVerified: false, sharedMemoryVerified: false,
+    });
+  });
+
   it('waits for metadata bootstrap to finish before starting catch-up', async () => {
     let releaseBootstrap!: () => void;
     let signalBootstrapStarted!: () => void;
@@ -495,6 +589,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     ['chain-public', { contextGraphId: expect.any(String), onChainId: '7' }],
     ['chain-participant', undefined],
   ] as const)('passes registered public proof only for %s admission', async (reason, proof) => {
+    const startedAt = Date.now();
     const result = await subscribe({
       hasConfirmedMeta: false,
       authorityDecision: {
@@ -504,6 +599,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
     expect(result.responseStatus).toBe(200);
     expect(result.metadataBootstrapProofs).toEqual([proof]);
+    if (reason === 'chain-public') expect(Date.now() - startedAt).toBeLessThan(4_000);
   });
 
   it.each([

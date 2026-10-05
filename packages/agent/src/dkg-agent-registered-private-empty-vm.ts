@@ -12,6 +12,8 @@ export class RegisteredPrivateEmptyVmMethods {
     this: DKGAgent,
     contextGraphId: string,
     callerAgentAddress: string,
+    commit?: () => void,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     const trace = (stage: string) => {
       if (process.env.DKG_DEBUG_PRIVATE_EMPTY_VM === '1') {
@@ -19,14 +21,24 @@ export class RegisteredPrivateEmptyVmMethods {
       }
     };
     try {
+      if (signal?.aborted) return false;
       const caller = callerAgentAddress.toLowerCase();
       if (!ethers.isAddress(caller) ||
         this.subscribedContextGraphs.get(contextGraphId)?.subscribed !== true) {
         trace('not-subscribed'); return false;
       }
+      const metadataRevision = this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId);
+      const confirmedBefore = await this.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
+      const privateBefore = confirmedBefore
+        && await this.isPrivateContextGraph(contextGraphId).catch(() => false);
+      if (!privateBefore || this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId) !== metadataRevision) {
+        trace('metadata-not-stable-before-proof'); return false;
+      }
       const authority = () => this.resolveContextGraphSubscriptionBootstrapAuthority(
         contextGraphId,
-        { callerAgentAddress: caller, allowSubscriptionFallback: false },
+        { callerAgentAddress: caller, allowSubscriptionFallback: false, signal },
       );
       const before = await authority();
       if (before.outcome !== 'allowed' || before.source !== 'registered-chain'
@@ -44,7 +56,7 @@ export class RegisteredPrivateEmptyVmMethods {
         trace('chain-binding-absent'); return false;
       }
       const indexed = await this.chain.getContextGraphAuthoritySnapshot(before.onChainId, {
-        signal: AbortSignal.timeout(20_000),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
       });
       if (indexed.chainId !== chainId
         || indexed.contextGraphId !== before.onChainId.toString(10)
@@ -66,13 +78,24 @@ export class RegisteredPrivateEmptyVmMethods {
           ...(depth === undefined ? {} : { finalityConfirmations: depth }),
           owner: 'rfc64',
         }),
-        signal: AbortSignal.timeout(45_000),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000),
       });
       if (!proven) { trace('finalized-zero-proof-false'); return false; }
       const after = await authority();
+      const confirmedAfter = await this.hasConfirmedMetaState(contextGraphId, { signal }).catch(() => false);
+      const privateAfter = confirmedAfter
+        && await this.isPrivateContextGraph(contextGraphId).catch(() => false);
       const stillCurrent = after.outcome === 'allowed' && after.source === 'registered-chain'
         && after.onChainId === before.onChainId
-        && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
+        && signal?.aborted !== true
+        && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
+        && privateAfter
+        && this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision;
+      // No await separates this fence from the caller's synchronous readiness
+      // commit. Metadata replacement and bootstrap invalidation advance the
+      // same graph's projection revision.
+      if (stillCurrent) commit?.();
       trace(stillCurrent ? 'proven' : 'post-proof-authority-changed');
       return stillCurrent;
     } catch (error) {

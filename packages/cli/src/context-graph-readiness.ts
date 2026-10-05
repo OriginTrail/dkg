@@ -20,11 +20,16 @@ import {
 } from './catchup-proof.js';
 import type { CatchupJobResult } from './catchup-runner.js';
 import { registerContextGraphReadinessEvents } from './context-graph-readiness-events.js';
+import {
+  CONTEXT_GRAPH_READINESS_VERSION,
+  mergeContextGraphPlaneEvidence,
+  type ContextGraphReadinessPatch,
+} from './context-graph-readiness-policy.js';
 export { parseProjectSyncedReadinessPayload, type ProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
 
 export { catchupPlaneCompletedWithoutFailure } from './catchup-proof.js';
 
-export const CONTEXT_GRAPH_READINESS_VERSION = 1;
+export { CONTEXT_GRAPH_READINESS_VERSION, type ContextGraphReadinessPatch } from './context-graph-readiness-policy.js';
 
 /**
  * Identifiers named in the terminal shortfall clause. The producer already caps
@@ -217,11 +222,6 @@ export interface ContextGraphSubscriptionStatePatch {
   /** Omitted when metadata could not be inspected; preserve existing facts. */
   metaSynced?: boolean;
   pendingMeta?: boolean;
-}
-
-export interface ContextGraphReadinessPatch {
-  durableVerified: boolean;
-  sharedMemoryVerified: boolean;
 }
 
 export interface MissingMetadataReadinessPatches {
@@ -612,20 +612,20 @@ function classifyCatchupReadiness(
       : { ready: false, persistable: false };
     const durableReadyThisRun = durableThisRun.ready;
     const sharedMemoryReadyThisRun = sharedMemoryThisRun.ready;
-    const currentReadinessProvenance =
-      input.readinessBeforeCatchup.version >= CONTEXT_GRAPH_READINESS_VERSION;
-    const durableVerifiedBefore =
-      currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified;
-    const sharedMemoryVerifiedBefore =
-      currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified;
-    const durableVerified = durableVerifiedBefore || durableReadyThisRun;
-    const sharedMemoryVerified = sharedMemoryVerifiedBefore || sharedMemoryReadyThisRun;
+    const thisRun = mergeContextGraphPlaneEvidence(input.readinessBeforeCatchup, {
+      durableVerified: durableReadyThisRun,
+      sharedMemoryVerified: sharedMemoryReadyThisRun,
+    });
+    const { durableVerified, sharedMemoryVerified } = thisRun;
     // What this run is allowed to FREEZE, as opposed to what it reports. These
     // diverge only for a unanimous-empty verdict, which stays re-derived per run
     // so that a wrong empty verdict cannot become permanent.
-    const durableVerifiedPersisted = durableVerifiedBefore || durableThisRun.persistable;
-    const sharedMemoryVerifiedPersisted =
-      sharedMemoryVerifiedBefore || sharedMemoryThisRun.persistable;
+    const persisted = mergeContextGraphPlaneEvidence(input.readinessBeforeCatchup, {
+      durableVerified: durableThisRun.persistable,
+      sharedMemoryVerified: sharedMemoryThisRun.persistable,
+    });
+    const durableVerifiedPersisted = persisted.durableVerified;
+    const sharedMemoryVerifiedPersisted = persisted.sharedMemoryVerified;
     // `subscription.synced` is a SECOND persisted readiness bit, living outside
     // the provenance store and consumed by callers that never see this job's
     // result — `contextGraphRowIsWritable` treats `subscribed && synced` as
@@ -778,7 +778,7 @@ const contextGraphReadinessMutationTails = new WeakMap<
   Map<string, Promise<void>>
 >();
 
-async function withContextGraphReadinessMutationLock<T>(
+export async function withContextGraphReadinessMutationLock<T>(
   agent: DKGAgent,
   contextGraphId: string,
   task: () => Promise<T>,

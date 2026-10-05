@@ -29,6 +29,8 @@ function snapshot(options: {
       read: async (calls) => calls.map(({ to, data }) => {
         if (to === HUB) {
           const call = hub.parseTransaction({ data })!;
+          expect(call.name).toBe('getAssetStorageAddress');
+          expect(call.args[0]).toBe('ContextGraphStorage');
           methods.push(call.name);
           return hub.encodeFunctionResult(call.name, [options.storageAddress ?? RFC64_VM_CG_STORAGE]);
         }
