@@ -1,4 +1,5 @@
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { DKGAgent } from '../src/index.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { persistLocalSwmOperation } from './_helpers/local-swm-operation.js';
 import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
@@ -349,6 +350,88 @@ describe('reference-safe abandoned draft maintenance', () => {
     const f = await fixture(); await f.op('old'); await f.op('new', '2'); await f.head(); const graph = await f.privateGraph(3);
     await f.store.insert([{ subject: `urn:${mode}`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `urn:dkg:publisher:${mode === 'damaged' ? 'LiftJob' : 'LiftRequest'}`, graph: 'urn:control' }]);
     expect(await f.collect()).toEqual({ operations: 0, privateGraphs: 0 }); expect(await f.has(META, workspaceOperationSubject(CG, 'old'))).toBe(true); expect(await f.has(graph)).toBe(true);
+  });
+  it.each(['snapshot', 'currency'] as const)('retains private artifacts when the coherent %s RPC rejects', async phase => {
+    const f = await fixture();
+    const failure = new Error(`${phase} RPC unavailable`);
+    if (phase === 'snapshot') f.chain.readKnowledgeAssetVersionSnapshot = async () => { throw failure; };
+    else f.chain.knowledgeAssetVersionSnapshotIsCurrent = async () => { throw failure; };
+    const graph = await f.privateGraph(9);
+    try {
+      expect(await f.collect()).toEqual({ operations: 0, privateGraphs: 0 });
+      expect(await f.has(graph)).toBe(true);
+    } finally { await f.store.close(); }
+  });
+  it.each(['AbortError', 'ABORT_ERR'] as const)('propagates %s cancellation from private evidence acquisition', async marker => {
+    const f = await fixture();
+    const failure = marker === 'AbortError'
+      ? new DOMException('chain reader closed or target superseded', 'AbortError')
+      : Object.assign(new Error('chain reader closed'), { code: 'ABORT_ERR' });
+    f.chain.readKnowledgeAssetVersionSnapshot = async () => { throw failure; };
+    const graph = await f.privateGraph(9);
+    try {
+      await expect(f.collect()).rejects.toBe(failure);
+      expect(await f.has(graph)).toBe(true);
+    } finally { await f.store.close(); }
+  });
+  it('propagates private-artifact storage deletion failure after available chain evidence', async () => {
+    const f = await fixture(); const graph = await f.privateGraph(9);
+    const failure = new Error('private artifact deletion failed');
+    const drop = vi.spyOn(f.store, 'dropGraph').mockRejectedValue(failure);
+    try {
+      await expect(f.collect()).rejects.toBe(failure);
+      expect(await f.has(graph)).toBe(true);
+    } finally { drop.mockRestore(); await f.store.close(); }
+  });
+  it('continues real TTL cleanup in this and later CGs after private-artifact RPC rejection', async () => {
+    const snapshot = vi.fn(async () => { throw new Error('snapshot RPC unavailable'); });
+    const chain = Object.assign(new NoChainAdapter(), { chainId: '31337', readKnowledgeAssetVersionSnapshot: snapshot });
+    const agent = await DKGAgent.create({ name: 'private-rpc-independent-ttl', chainAdapter: chain, sharedMemoryTtlMs: 60_000 });
+    const store = agent.store, manager = new GraphManager(store);
+    try {
+      await manager.ensureContextGraph('private-rpc-first');
+      await manager.ensureContextGraph('private-rpc-later');
+      // Put the unavailable artifact in the actual first enumeration entry,
+      // so a premature return would also strand the second Context Graph.
+      const [first, later] = await manager.listContextGraphs();
+      if (!first || !later) throw new Error('Expected both real Context Graphs');
+      const privateGraph = `did:dkg:context-graph:${first}/_private/${AUTHOR}/7/assertions/9/commitments/${'ab'.repeat(32)}`;
+      await store.insert([{ ...publicQuads[0]!, graph: privateGraph }]);
+      const seed = async (cg: string, id: string, ka = KA) => {
+        await storeKnowledgeAssetOperationPublicQuads({
+          store, graphManager: manager, contextGraphId: cg, shareOperationId: id,
+          kaUal: ka, assertionVersion: 1, quads: publicQuads, timestamp: new Date(Date.now() - 120_000),
+        });
+        await storeKnowledgeAssetWorkspaceHead({ store, graphManager: manager, contextGraphId: cg, kaUal: ka, assertionVersion: 1, shareOperationId: id });
+        const meta = manager.sharedMemoryMetaUri(cg), subject = workspaceOperationSubject(cg, id);
+        const rows = await store.query(`SELECT ?g WHERE { GRAPH <${meta}> { <${subject}> <${DKG}publicSnapshotGraph> ?g } }`);
+        if (rows.type !== 'bindings' || !rows.bindings[0]?.['g']) throw new Error('Expected actual immutable snapshot');
+        return { meta, subject, snapshot: rows.bindings[0]['g'] };
+      };
+      const expired = await seed(first, 'expired');
+      const queuedKa = KA.replace('/7', '/8');
+      const queued = await seed(first, 'queued', queuedKa);
+      const laterExpired = await seed(later, 'later-expired');
+      const queue = new TripleStoreAsyncLiftPublisher(store);
+      const jobId = await queue.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ contextGraphId: first, shareOperationId: 'queued', assertionVersion: '1', kaUal: queuedKa, reservedUal: queuedKa, kaNumber: '8' }));
+      const accepted = await queue.getStatus(jobId);
+      expect(accepted?.status).toBe('accepted');
+      const present = async (graph: string, subject?: string) => {
+        const rows = await store.query(`ASK { GRAPH <${graph}> { ${subject ? `<${subject}>` : '?s'} ?p ?o } }`);
+        if (rows.type !== 'boolean') throw new Error('Expected native ASK result');
+        return rows.value;
+      };
+      expect(await agent.cleanupExpiredSharedMemory()).toBeGreaterThan(0);
+      expect(snapshot).toHaveBeenCalled();
+      expect(await present(privateGraph)).toBe(true);
+      for (const retired of [expired, laterExpired]) {
+        expect(await present(retired.meta, retired.subject)).toBe(false);
+        expect(await present(retired.snapshot)).toBe(false);
+      }
+      expect(await present(queued.meta, queued.subject)).toBe(true);
+      expect(await present(queued.snapshot)).toBe(true);
+      expect(await queue.getStatus(jobId)).toEqual(accepted);
+    } finally { await agent.stop(); await store.close(); }
   });
   it('preserves private records when coherent chain coverage is unavailable', async () => {
     const f = await fixture(); f.chain.readKnowledgeAssetVersionSnapshot = async () => null; const graph = await f.privateGraph(9);

@@ -109,7 +109,15 @@ export async function collectAbandonedDraftArtifacts(input: {
         || references.privateVersions.has(draftPrivateReferenceKey(owner.contextGraphId, owner.subGraphName, author, number, version)))) continue;
       await withKeyedLocks(input.writeLocks, owners.map(owner => swmKaWriteLockKey(owner.contextGraphId, owner.subGraphName, `did:dkg:${chain.chainId}/${author}/${number}`)), async () => {
         const ka = `did:dkg:${chain.chainId}/${author}/${number}`;
-        const current = await resolveWithinAbort(() => readConfirmedDraftVersion(chain, ka), chainDeadline);
+        // An unavailable private-version RPC retains this artifact without
+        // blocking independent SWM TTL expiry. Cancellation still belongs to
+        // the caller; storage/reference/deletion errors stay outside this boundary.
+        const current = await resolveWithinAbort(() => readConfirmedDraftVersion(chain, ka), chainDeadline).catch((error: unknown) => {
+          if (error !== null && typeof error === 'object'
+            && (('name' in error && error.name === 'AbortError')
+              || ('code' in error && error.code === 'ABORT_ERR'))) throw error;
+          return null;
+        });
         if (current === null || current === undefined || BigInt(version) <= current + 1n) return;
         // Match any chain-qualified UAL for this author/number conservatively. A seal,
         // active head, ACK copy, or recovery receipt protects the entire version archive.
