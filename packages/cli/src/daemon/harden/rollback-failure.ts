@@ -4,7 +4,7 @@ import type { HardenWorkflowInputs } from './actions.js';
 /** Only phases after the authoritative source rename enter automatic rollback. */
 export async function rollbackMigrationFailure(ctx: HardenWorkflowInputs,
   phase: 'post-swap setup' | 'verification', err: unknown): Promise<Readonly<{ rollback: RollbackResult; error: Error }>> {
-  const { log, docker, containerName, backupName, exportPath } = ctx;
+  const { log, docker, specification: { containerName, backupName, exportPath } } = ctx;
   log(
     `${phase === 'verification' ? 'Verification' : 'Post-swap setup'} FAILED ` +
     `(${(err as Error).message}) — rolling back to ${backupName}.`,

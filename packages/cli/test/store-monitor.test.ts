@@ -7,7 +7,8 @@
  * ONE bounded `docker restart` per cooldown window — never rm/recreate,
  * never anything for operator-managed stores.
  *
- * Driven via injected `now()` + manual `tick()` — no fake timers needed.
+ * Most policies use injected `now()` + manual `tick()`; periodic cadence
+ * also exercises the real start/rearm/stop owner with fake timers.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import {
@@ -95,6 +96,35 @@ describe('createStoreRuntimeMonitor', () => {
     delete process.env.DKG_STORE_MONITOR_FAILURE_THRESHOLD;
     delete process.env.DKG_STORE_MONITOR_INTERVAL_MS;
     delete process.env.DKG_STORE_MONITOR_RESTART_COOLDOWN_MS;
+  });
+
+  it('rearms real start polling to its failure threshold and stops all further probes', async () => {
+    vi.useFakeTimers();
+    const { monitor, dockerCalls, fetch } = makeMonitor({ intervalMs: 100, failureThreshold: 3 });
+    try {
+      monitor.start();
+      expect(monitor.stats.probesTotal).toBe(0);
+      for (let pass = 1; pass <= 3; pass += 1) {
+        await vi.advanceTimersByTimeAsync(100);
+        expect(monitor.stats.probesTotal).toBe(pass);
+        expect(restartCalls(dockerCalls)).toHaveLength(pass === 3 ? 1 : 0);
+      }
+      expect(restartCalls(dockerCalls)).toEqual([['restart', '-t', '30', CONTAINER]]);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(monitor.stats.probesTotal).toBe(6);
+      expect(restartCalls(dockerCalls)).toHaveLength(1);
+      await monitor.stop();
+      const probes = fetch.calls.length;
+      await vi.advanceTimersByTimeAsync(10_000);
+      monitor.start();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetch.calls).toHaveLength(probes);
+      expect(monitor.stats.probesTotal).toBe(6);
+      expect(restartCalls(dockerCalls)).toHaveLength(1);
+    } finally {
+      await monitor.stop();
+      vi.useRealTimers();
+    }
   });
 
   it('issues exactly one bounded docker restart after 6 consecutive failures', async () => {

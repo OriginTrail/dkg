@@ -78,11 +78,11 @@ function seedScript(): string {
   );
 }
 
-function seedRunArgs(input: { containerName: string; migrationDir: string }): string[] {
+function seedRunArgs(input: { volumeName: string; migrationDir: string }): string[] {
   return [
     'run', '--rm',
     '--entrypoint', '/bin/sh',
-    '-v', `${blazegraphVolumeName(input.containerName)}:${BLAZEGRAPH_DATA_DIR}`,
+    '-v', `${input.volumeName}:${BLAZEGRAPH_DATA_DIR}`,
     '-v', `${input.migrationDir}:/seed:ro`,
     BLAZEGRAPH_IMAGE,
     '-c', seedScript(),
@@ -90,25 +90,57 @@ function seedRunArgs(input: { containerName: string; migrationDir: string }): st
 }
 
 /** Each selected phase owns its description, command, action and rollback boundary. */
-export interface HardenExecutablePhase extends HardenStep {
+interface ContextualPhase extends HardenStep {
   readonly rollbackPhase?: 'post-swap setup' | 'verification';
   execute(context: actions.HardenWorkflowInputs): Promise<void>;
 }
 
 function dockerPhase(id: string, description: string, dockerArgs: string[],
   execute: (context: actions.HardenWorkflowInputs, command: readonly string[]) => Promise<void>,
-  rollbackPhase?: HardenExecutablePhase['rollbackPhase']): HardenExecutablePhase {
-  return { id, description, dockerArgs,
+  rollbackPhase?: ContextualPhase['rollbackPhase']): ContextualPhase {
+  const command = Object.freeze([...dockerArgs]);
+  return { id, description, dockerArgs: [...command],
     ...(rollbackPhase === undefined ? {} : { rollbackPhase }),
-    execute: context => execute(context, dockerArgs) };
+    execute: context => execute(context, command) };
+}
+
+/** Captured targets shared by command generation, verification and recovery. */
+export interface HardenMigrationSpecification extends Readonly<HardenPlanInput> {
+  readonly sourceName: string;
+  readonly backupName: string;
+  readonly volumeName: string;
+  readonly exportPath: string;
+  readonly baseUrl: string;
+  readonly sparqlUrl: string;
+  readonly stoppedHint: string;
+  readonly dkgHome?: string;
+}
+export interface HardenExecutablePhase extends HardenStep {
+  readonly rollbackPhase?: 'post-swap setup' | 'verification';
+  execute(): Promise<void>;
 }
 
 /** One state-selected sequence serves both dry-run rendering and execution. */
-export function buildHardenMigration(input: HardenPlanInput & { sourceContainerName?: string }) {
-  const migrationDir = resolve(input.migrationDir);
-  const backupName = `${input.containerName}${HARDEN_BACKUP_SUFFIX}`;
-  const sourceName = input.sourceContainerName ?? (input.state === 'backup-only' ? backupName : input.containerName);
+export function buildHardenMigration(raw: HardenPlanInput & {
+  sourceContainerName?: string; dkgHome?: string; workingDirectory?: string;
+}) {
+  const workingDirectory = raw.workingDirectory ?? process.cwd();
+  const migrationDir = resolve(workingDirectory, raw.migrationDir);
+  const backupName = `${raw.containerName}${HARDEN_BACKUP_SUFFIX}`;
+  const sourceName = raw.sourceContainerName ?? (raw.state === 'backup-only' ? backupName : raw.containerName);
   const exportPath = join(migrationDir, HARDEN_EXPORT_FILENAME);
+  const baseUrl = `http://127.0.0.1:${raw.hostPort}`;
+  const specification: HardenMigrationSpecification = Object.freeze({
+    containerName: raw.containerName, namespace: raw.namespace, hostPort: raw.hostPort,
+    heapMb: raw.heapMb, migrationDir, state: raw.state, running: raw.running ?? raw.state !== 'backup-only',
+    volumeAttemptId: raw.volumeAttemptId ?? HARDEN_VOLUME_ATTEMPT_PLACEHOLDER,
+    sourceName, backupName, volumeName: blazegraphVolumeName(raw.containerName), exportPath, baseUrl,
+    sparqlUrl: `${baseUrl}/bigdata/namespace/${encodeURIComponent(raw.namespace)}/sparql`,
+    ...(raw.dkgHome === undefined ? {} : { dkgHome: resolve(workingDirectory, raw.dkgHome) }),
+    stoppedHint: `NOTE: the legacy store container "${sourceName}" is currently STOPPED — `
+      + `restore service with: docker start ${sourceName} (then re-run harden when ready).`,
+  });
+  const input = specification;
   const integrityCommand = ['inspect', '--size', sourceName];
   let preSize: number | null = null;
   let stopped: actions.StoppedContainerSnapshot | null = null;
@@ -119,7 +151,7 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
     return exported;
   };
   const verifyCommand = ['exec', input.containerName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE];
-  const phases: HardenExecutablePhase[] = input.state === 'absent' ? [] : input.state === 'hardened' ? [
+  const phases: ContextualPhase[] = input.state === 'absent' ? [] : input.state === 'hardened' ? [
     dockerPhase('verify', 'verify ASK; repeat identity and journal verification when migration backup/export remains',
       verifyCommand, async (ctx, command) => {
         const result = await actions.verifyAlreadyHardened(ctx, command);
@@ -127,7 +159,7 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
       }),
   ] : [
     dockerPhase('volume-absence', 'require exact absence of the replacement volume; retained journals need manual recovery',
-      ['volume', 'inspect', blazegraphVolumeName(input.containerName)], requireMissingReplacementVolume),
+      ['volume', 'inspect', input.volumeName], requireMissingReplacementVolume),
     ...((input.running ?? input.state !== 'backup-only') ? [
       dockerPhase('journal-size', `read in-container journal size (docker exec stat ${BLAZEGRAPH_JOURNAL_FILE})`,
         ['exec', sourceName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
@@ -150,10 +182,10 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
         if (stopped === null) throw new Error('Migration export requires a stopped-container baseline');
         exported = await actions.verifyExport(ctx, stopped, preSize, command);
       }),
-    dockerPhase('volume-create', `create named journal volume ${blazegraphVolumeName(input.containerName)} (idempotent)`,
-      ['volume', 'create', '--label', `${HARDEN_VOLUME_ATTEMPT_LABEL}=${input.volumeAttemptId ?? HARDEN_VOLUME_ATTEMPT_PLACEHOLDER}`, blazegraphVolumeName(input.containerName)], actions.createVolume),
+    dockerPhase('volume-create', `create named journal volume ${input.volumeName} (idempotent)`,
+      ['volume', 'create', '--label', `${HARDEN_VOLUME_ATTEMPT_LABEL}=${input.volumeAttemptId ?? HARDEN_VOLUME_ATTEMPT_PLACEHOLDER}`, input.volumeName], actions.createVolume),
     dockerPhase('volume-ownership', 'certify the newly created volume belongs to this unique migration attempt before seeding',
-      ['volume', 'inspect', blazegraphVolumeName(input.containerName)], certifyReplacementVolume),
+      ['volume', 'inspect', input.volumeName], certifyReplacementVolume),
     dockerPhase('seed-volume',
       `seed the volume from ${exportPath} via a helper container (same pinned image; `
       + `refuse an existing journal, then publish the fresh copy exclusively; `
@@ -166,21 +198,40 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
       ['update', '--restart=no', backupName], actions.disableBackupRestart, 'post-swap setup'),
     dockerPhase('run-hardened', `create hardened container ${input.containerName} (heap ${input.heapMb} MB, journal volume, healthcheck, log caps)`,
       buildBlazegraphRunArgs({ containerName: input.containerName, hostPort: input.hostPort,
-        namespace: input.namespace, heapMb: input.heapMb, volumeName: blazegraphVolumeName(input.containerName) }),
+        namespace: input.namespace, heapMb: input.heapMb, volumeName: input.volumeName }),
       actions.runHardened, 'post-swap setup'),
     dockerPhase('verify', `verify: /bigdata/status ready + ASK {} HTTP 200 + identity-tag SELECT returns a `
       + `binding + in-container journal size >= exported size (on failure: automatic `
       + `rollback to ${backupName}; exported journal kept at ${exportPath})`, verifyCommand,
       (ctx, command) => actions.verifyReplacement(ctx, command, requireExport()), 'verification'),
   ];
-  return { phases, get exported() { return exported; }, get backupExists() { return backupExists; } };
+  return {
+    specification,
+    steps: phases.map(description),
+    bind(dependencies: actions.HardenExecutionDependencies) {
+      if (specification.dkgHome === undefined) throw new Error('Migration execution requires a config home');
+      const context: actions.HardenWorkflowInputs = Object.freeze({
+        specification: specification as HardenMigrationSpecification & { readonly dkgHome: string },
+        docker: dependencies.docker, fetchImpl: dependencies.fetchImpl, log: dependencies.log,
+        freeDiskBytes: dependencies.freeDiskBytes, probeTimeoutMs: dependencies.probeTimeoutMs,
+        readyTimeoutMs: dependencies.readyTimeoutMs, readyIntervalMs: dependencies.readyIntervalMs,
+      });
+      return { context,
+        phases: phases.map(phase => ({ ...description(phase),
+          ...(phase.rollbackPhase === undefined ? {} : { rollbackPhase: phase.rollbackPhase }),
+          execute: () => phase.execute(context),
+        } satisfies HardenExecutablePhase)),
+        get exported() { return exported; }, get backupExists() { return backupExists; },
+      };
+    },
+  };
 }
 
-function description(phase: HardenExecutablePhase): HardenStep {
+function description(phase: ContextualPhase): HardenStep {
   return { id: phase.id, description: phase.description,
     ...(phase.dockerArgs === undefined ? {} : { dockerArgs: [...phase.dockerArgs] }) };
 }
 
 export function planHardenMigration(input: HardenPlanInput): HardenStep[] {
-  return buildHardenMigration(input).phases.map(description);
+  return buildHardenMigration(input).steps;
 }

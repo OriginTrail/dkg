@@ -1,15 +1,13 @@
 import { randomUUID } from 'node:crypto';
 /** Harden migration orchestration over the same ordered phases rendered by dry-run. */
 import { mkdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
 import * as os from 'node:os';
 import { BLAZEGRAPH_CONTAINER_PORT, computeBlazegraphHeapMb, defaultDockerRunner,
   type DockerRunner } from '../blazegraph-docker.js';
 import { claimStoreMigrationMarker, releaseStoreMigrationMarker, storeHardenLockPath } from '../store-migration-marker.js';
 import { assertDaemonStoppedForStoreMigration } from '../store-maintenance-gate.js';
 import { HARDEN_BACKUP_SUFFIX, inspectHardenState } from './state.js';
-import { HARDEN_EXPORT_FILENAME, buildHardenMigration, planHardenMigration, type HardenStep } from './steps.js';
-import { type HardenWorkflowInputs } from './actions.js';
+import { buildHardenMigration, type HardenStep } from './steps.js';
 import { hardenRecoveryStep, preserveHardenRecoveryBarrier, recoverHardenMigration } from './recovery-barrier.js';
 import { rollbackMigrationFailure } from './rollback-failure.js';
 import { HARDEN_VOLUME_ATTEMPT_PLACEHOLDER } from './volume.js';
@@ -68,10 +66,10 @@ export interface HardenMigrationResult {
 
 export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions): Promise<HardenMigrationResult> {
   const docker = opts.docker ?? defaultDockerRunner();
-  const { containerName, namespace, log } = opts;
-  const migrationDir = resolve(opts.migrationDir);
+  const { containerName, namespace, log, migrationDir, dkgHome } = opts;
+  // Capture the relative-path base before the first await; normalize it once in the specification.
+  const workingDirectory = process.cwd();
   const backupName = `${containerName}${HARDEN_BACKUP_SUFFIX}`;
-  const exportPath = join(migrationDir, HARDEN_EXPORT_FILENAME);
   const heapMb = computeBlazegraphHeapMb((opts.totalMemoryBytes ?? os.totalmem)(),
     (opts.env ?? process.env).DKG_BLAZEGRAPH_HEAP_MB);
   const info = await inspectHardenState(docker, containerName);
@@ -85,38 +83,36 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
     + 'Refusing to guess. Pass --port <port> (the port in your store URL, typically 9999).');
   const input = { containerName, namespace, hostPort, heapMb, migrationDir, state: info.state, running: info.running,
     volumeAttemptId: opts.dryRun ? HARDEN_VOLUME_ATTEMPT_PLACEHOLDER : randomUUID() };
-  const sourceName = info.state === 'backup-only' ? backupName : containerName;
-  const migration = buildHardenMigration({ ...input, sourceContainerName: sourceName });
-  if (opts.dryRun) return { outcome: 'dry-run', containerName,
-    backupContainerName: info.state === 'backup-only' ? backupName : null,
-    hostPort, exportPath: null, journalBytes: null, heapMb, steps: opts.recover ? [hardenRecoveryStep(containerName)] : planHardenMigration(input) };
-  const baseUrl = `http://127.0.0.1:${hostPort}`;
-  const ctx: HardenWorkflowInputs = { ...input, opts, docker, info, sourceName, backupName, exportPath, baseUrl,
-    sparqlUrl: `${baseUrl}/bigdata/namespace/${encodeURIComponent(namespace)}/sparql`,
-    fetchImpl: opts.fetch ?? globalThis.fetch, log,
-    stoppedHint: `NOTE: the legacy store container "${sourceName}" is currently STOPPED — `
-      + `restore service with: docker start ${sourceName} (then re-run harden when ready).`,
-  };
+  const migration = buildHardenMigration({ ...input, dkgHome, workingDirectory });
+  const spec = migration.specification;
+  if (opts.dryRun) return { outcome: 'dry-run', containerName: spec.containerName,
+    backupContainerName: spec.state === 'backup-only' ? spec.backupName : null,
+    hostPort: spec.hostPort, exportPath: null, journalBytes: null, heapMb: spec.heapMb, steps: opts.recover ? [hardenRecoveryStep(spec.containerName)] : migration.steps };
+  const execution = migration.bind({ docker, fetchImpl: opts.fetch ?? globalThis.fetch, log,
+    freeDiskBytes: opts.freeDiskBytes, probeTimeoutMs: opts.probeTimeoutMs,
+    readyTimeoutMs: opts.readyTimeoutMs, readyIntervalMs: opts.readyIntervalMs,
+  });
+  const ctx = execution.context;
   if (opts.recover) return recoverHardenMigration(ctx);
   if (info.state === 'hardened') {
-    for (const phase of migration.phases) await phase.execute(ctx);
-    return { outcome: 'already-hardened', containerName,
-      backupContainerName: migration.backupExists ? backupName : null, hostPort,
-      exportPath: migration.exported?.path ?? null, journalBytes: migration.exported?.bytes ?? null, heapMb };
+    for (const phase of execution.phases) await phase.execute();
+    return { outcome: 'already-hardened', containerName: spec.containerName,
+      backupContainerName: execution.backupExists ? spec.backupName : null, hostPort: spec.hostPort,
+      exportPath: execution.exported?.path ?? null, journalBytes: execution.exported?.bytes ?? null, heapMb: spec.heapMb };
   }
-  await mkdir(migrationDir, { recursive: true });
-  await mkdir(opts.dkgHome, { recursive: true });
-  const lockPath = storeHardenLockPath(opts.dkgHome);
-  const marker = await claimStoreMigrationMarker(lockPath, containerName);
+  await mkdir(spec.migrationDir, { recursive: true });
+  await mkdir(spec.dkgHome!, { recursive: true });
+  const lockPath = storeHardenLockPath(spec.dkgHome!);
+  const marker = await claimStoreMigrationMarker(lockPath, spec.containerName);
   let recoveryRequired = false;
   try {
-    await assertDaemonStoppedForStoreMigration(opts.dkgHome);
+    await assertDaemonStoppedForStoreMigration(spec.dkgHome!);
     log(`Wrote harden lock ${lockPath} — daemon startup and automatic store restarts stay blocked through verification and rollback.`);
-    for (const phase of migration.phases) {
+    for (const phase of execution.phases) {
       // Rename can have an uncertain Docker outcome; retain the barrier until
       // verification succeeds or rollback positively restores the source.
       if (phase.id === 'rename-backup' || phase.rollbackPhase !== undefined) recoveryRequired = true;
-      try { await phase.execute(ctx); }
+      try { await phase.execute(); }
       catch (cause) {
         if (phase.rollbackPhase === undefined) throw cause;
         const failure = await rollbackMigrationFailure(ctx, phase.rollbackPhase, cause);
@@ -124,15 +120,15 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
         throw failure.error;
       }
     }
-    const exported = migration.exported;
+    const exported = execution.exported;
     if (exported === null) throw new Error('Migration completed without a verified export');
     recoveryRequired = false;
-    log(`Verification passed — ${containerName} is hardened.`);
-    return { outcome: 'hardened', containerName, backupContainerName: backupName, hostPort,
-      exportPath, journalBytes: exported.bytes, heapMb };
+    log(`Verification passed — ${spec.containerName} is hardened.`);
+    return { outcome: 'hardened', containerName: spec.containerName, backupContainerName: spec.backupName, hostPort: spec.hostPort,
+      exportPath: spec.exportPath, journalBytes: exported.bytes, heapMb: spec.heapMb };
   } catch (error) {
     if (recoveryRequired) {
-      await preserveHardenRecoveryBarrier(ctx, migration.exported?.bytes, marker).catch(() => {});
+      await preserveHardenRecoveryBarrier(ctx, execution.exported?.bytes, marker).catch(() => {});
     }
     throw error;
   } finally {

@@ -22,6 +22,7 @@ export default defineConfig({
           'test/blazegraph-harden.test.ts',
           'test/blazegraph-harden-execution.test.ts',
           'test/blazegraph-harden-rollback.test.ts',
+          'test/harden-migration-binding.test.ts',
           'test/harden-recovery-barrier.test.ts',
           'test/blazegraph-harden-docker.test.ts',
           'test/store-monitor.test.ts',

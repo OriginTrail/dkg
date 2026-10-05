@@ -19,8 +19,8 @@ export async function requireMissingReplacementVolume(ctx: HardenWorkflowInputs,
 export async function certifyReplacementVolume(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<void> {
   const volume = args.at(-1)!;
   const inspected = classifyBlazegraphVolumeInspection(await ctx.docker.run(args), volume);
-  if (!ctx.volumeAttemptId || ctx.volumeAttemptId === HARDEN_VOLUME_ATTEMPT_PLACEHOLDER
-    || inspected.kind !== 'found' || inspected.labels[HARDEN_VOLUME_ATTEMPT_LABEL] !== ctx.volumeAttemptId) {
+  if (!ctx.specification.volumeAttemptId || ctx.specification.volumeAttemptId === HARDEN_VOLUME_ATTEMPT_PLACEHOLDER
+    || inspected.kind !== 'found' || inspected.labels[HARDEN_VOLUME_ATTEMPT_LABEL] !== ctx.specification.volumeAttemptId) {
     throw new Error(`Refusing to reseed an unproven replacement journal volume "${volume}". `
       + 'The created volume does not belong to this fresh migration attempt; preserve both journals for manual recovery.');
   }
