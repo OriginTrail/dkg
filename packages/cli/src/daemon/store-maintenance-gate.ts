@@ -1,18 +1,14 @@
-import { access, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isProcessRunning } from '../config.js';
 
-export const STORE_HARDEN_LOCK_FILENAME = '.store-harden.lock';
-export const storeHardenLockPath = (dkgHome: string): string => join(dkgHome, STORE_HARDEN_LOCK_FILENAME);
+export { STORE_HARDEN_LOCK_FILENAME, storeHardenLockPath } from './store-migration-marker.js';
+import { readStoreMigrationMarker, storeHardenLockPath } from './store-migration-marker.js';
 
 /** Daemon startup must not expose writers until migration verification settles. */
 export async function assertStoreMigrationInactive(dkgHome: string): Promise<void> {
   const path = storeHardenLockPath(dkgHome);
-  try { await access(path); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
+  if (readStoreMigrationMarker(path).kind === 'missing') return;
   throw new Error(`Store hardening marker exists at ${path}. Finish migration or recover an interrupted migration before starting the daemon.`);
 }
 

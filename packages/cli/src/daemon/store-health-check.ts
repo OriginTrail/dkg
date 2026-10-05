@@ -226,7 +226,9 @@ export async function readStoreIdentityTag(opts: {
       });
       if (!response.ok) return { ok: false, error: `identity SELECT returned HTTP ${response.status} ${response.statusText}` };
       const body = await response.json().catch(() => null) as { results?: { bindings?: Array<{ name?: { value?: unknown } }> } } | null;
-      const bindings = Array.isArray(body?.results?.bindings) ? body.results.bindings : [];
+      const bindings = body?.results?.bindings;
+      if (!Array.isArray(bindings) || bindings.some(row => typeof row?.name?.value !== 'string'))
+        return { ok: false, error: 'identity SELECT returned malformed or unbound name bindings' };
       const value = bindings[0]?.name?.value;
       return { ok: true, nodeName: typeof value === 'string' && value.length > 0 ? value : null, bindingCount: bindings.length };
     }, { timeoutMs, timeoutError: () => new Error(`identity SELECT timed out after ${timeoutMs}ms`) });

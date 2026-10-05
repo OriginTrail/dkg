@@ -123,3 +123,23 @@ export function classifyBlazegraphContainerInspection(result: DockerCommandResul
     return { kind: 'found', facts: inspectBlazegraphContainerFacts(root, policy) };
   return { kind: 'failed', reason: 'output', detail: 'unparseable container facts' };
 }
+
+export type BlazegraphVolumeInspectionOutcome =
+  | Readonly<{ kind: 'found'; name: string; labels: Readonly<Record<string, unknown>> }>
+  | Readonly<{ kind: 'missing' }>
+  | Readonly<{ kind: 'failed'; detail: string }>;
+
+/** Exact volume absence and identity are separate from container running-state evidence. */
+export function classifyBlazegraphVolumeInspection(result: DockerCommandResult,
+  queriedName: string): BlazegraphVolumeInspectionOutcome {
+  if (result.exitCode !== 0) {
+    const detail = result.stderr.trim() || 'Docker volume inspect failed';
+    return detail === `Error response from daemon: get ${queriedName}: no such volume`
+      ? { kind: 'missing' } : { kind: 'failed', detail };
+  }
+  const values = containerInspectionValues(result.stdout);
+  const root = values?.length === 1 ? record(values[0]) : undefined;
+  if (root?.Name !== queriedName || (root.Labels != null && !record(root.Labels)))
+    return { kind: 'failed', detail: 'unparseable volume identity' };
+  return { kind: 'found', name: queriedName, labels: record(root.Labels) ?? {} };
+}

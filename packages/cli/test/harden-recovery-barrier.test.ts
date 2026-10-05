@@ -57,6 +57,18 @@ describe('incomplete harden rollback startup barrier', () => {
     expect(f.calls.slice(recoveryStart).every(args => ['inspect', 'exec'].includes(args[0]!))).toBe(true);
     await expectStartupAllowed();
   });
+  it.each([{}, { name: {} }, { name: { value: 3 } }])('retains the startup barrier for an unbound identity row %j', async row => {
+    const f = await incompleteRollback(), marker = readFileSync(storeHardenLockPath(home), 'utf8');
+    const verified = verifierFetch().fn;
+    const fetch: typeof globalThis.fetch = (...args) => String(args[1]?.body ?? '').includes('SELECT')
+      ? Promise.resolve(new Response(JSON.stringify({ results: { bindings: [row] } }), { status: 200 }))
+      : verified(...args);
+    await expect(executeHardenMigration({ ...f.options, recover: true, fetch })).rejects.toThrow(/identity-tag/);
+    expect(readFileSync(storeHardenLockPath(home), 'utf8')).toBe(marker);
+    await expectStartupBlocked();
+    await executeHardenMigration({ ...f.options, recover: true, fetch: verifierFetch().fn });
+    await expectStartupAllowed();
+  });
   it('keeps startup blocked after failed recovery and allows a later verified recovery', async () => {
     const f = await incompleteRollback(); await expectStartupBlocked();
     await expect(executeHardenMigration({ ...f.options, recover: true, fetch: verifierFetch({ identityPresent: false }).fn })).rejects.toThrow(/identity-tag/);

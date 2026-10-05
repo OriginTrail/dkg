@@ -1,16 +1,18 @@
+import { randomUUID } from 'node:crypto';
 /** Harden migration orchestration over the same ordered phases rendered by dry-run. */
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import * as os from 'node:os';
 import { BLAZEGRAPH_CONTAINER_PORT, computeBlazegraphHeapMb, defaultDockerRunner,
   type DockerRunner } from '../blazegraph-docker.js';
-import { storeHardenLockPath } from '../store-runtime-monitor.js';
+import { claimStoreMigrationMarker, releaseStoreMigrationMarker, storeHardenLockPath } from '../store-migration-marker.js';
 import { assertDaemonStoppedForStoreMigration } from '../store-maintenance-gate.js';
 import { HARDEN_BACKUP_SUFFIX, inspectHardenState } from './state.js';
 import { HARDEN_EXPORT_FILENAME, buildHardenMigration, planHardenMigration, type HardenStep } from './steps.js';
 import { type HardenWorkflowInputs } from './actions.js';
 import { hardenRecoveryStep, preserveHardenRecoveryBarrier, recoverHardenMigration } from './recovery-barrier.js';
 import { rollbackMigrationFailure } from './rollback-failure.js';
+import { HARDEN_VOLUME_ATTEMPT_PLACEHOLDER } from './volume.js';
 
 export interface ExecuteHardenMigrationOptions {
   containerName: string;
@@ -81,7 +83,8 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
   if (hostPort === undefined) throw new Error(`Could not determine the host port for container "${containerName}": neither `
     + `HostConfig.PortBindings nor NetworkSettings.Ports carries a binding for ${BLAZEGRAPH_CONTAINER_PORT}/tcp (or 8080/tcp). `
     + 'Refusing to guess. Pass --port <port> (the port in your store URL, typically 9999).');
-  const input = { containerName, namespace, hostPort, heapMb, migrationDir, state: info.state, running: info.running };
+  const input = { containerName, namespace, hostPort, heapMb, migrationDir, state: info.state, running: info.running,
+    volumeAttemptId: opts.dryRun ? HARDEN_VOLUME_ATTEMPT_PLACEHOLDER : randomUUID() };
   const sourceName = info.state === 'backup-only' ? backupName : containerName;
   const migration = buildHardenMigration({ ...input, sourceContainerName: sourceName });
   if (opts.dryRun) return { outcome: 'dry-run', containerName,
@@ -104,9 +107,7 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
   await mkdir(migrationDir, { recursive: true });
   await mkdir(opts.dkgHome, { recursive: true });
   const lockPath = storeHardenLockPath(opts.dkgHome);
-  await writeFile(lockPath,
-    `${JSON.stringify({ pid: process.pid, containerName, startedAt: new Date().toISOString() })}\n`,
-    { encoding: 'utf-8', flag: 'wx' });
+  const marker = await claimStoreMigrationMarker(lockPath, containerName);
   let recoveryRequired = false;
   try {
     await assertDaemonStoppedForStoreMigration(opts.dkgHome);
@@ -131,10 +132,10 @@ export async function executeHardenMigration(opts: ExecuteHardenMigrationOptions
       exportPath, journalBytes: exported.bytes, heapMb };
   } catch (error) {
     if (recoveryRequired) {
-      await preserveHardenRecoveryBarrier(ctx, migration.exported?.bytes).catch(() => {});
+      await preserveHardenRecoveryBarrier(ctx, migration.exported?.bytes, marker).catch(() => {});
     }
     throw error;
   } finally {
-    if (!recoveryRequired) await rm(lockPath, { force: true }).catch(() => {});
+    if (!recoveryRequired) await releaseStoreMigrationMarker(marker).catch(() => {});
   }
 }

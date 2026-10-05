@@ -41,8 +41,9 @@ export interface HardenStateInfo {
  *     state, also the fresh-provision shape).
  *   - 'legacy': container exists without that mount (fleet-verified
  *     shape: `Mounts: []`, `Config.Volumes: null`).
- *   - 'backup-only': container missing but `<name>-backup` exists — a
- *     migration crashed between the rename and the hardened `docker run`.
+ *   - 'backup-only': container missing but `<name>-backup` exists. A retained
+ *     replacement volume may still hold newer writes; seeding separately
+ *     requires exact volume absence and ownership of a fresh creation.
  *   - 'absent': neither exists.
  */
 export async function inspectHardenState(

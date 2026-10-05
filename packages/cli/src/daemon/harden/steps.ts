@@ -20,6 +20,7 @@ import {
 } from '../blazegraph-docker.js';
 import { HARDEN_BACKUP_SUFFIX, type HardenState } from './state.js';
 import * as actions from './actions.js';
+import { requireMissingReplacementVolume, certifyReplacementVolume, HARDEN_VOLUME_ATTEMPT_LABEL, HARDEN_VOLUME_ATTEMPT_PLACEHOLDER } from './volume.js';
 
 /** Where the journal export lands inside the migration dir. */
 export const HARDEN_EXPORT_FILENAME = 'bigdata.jnl';
@@ -46,35 +47,33 @@ export interface HardenPlanInput {
   heapMb: number;
   migrationDir: string;
   state: HardenState;
+  /** Fresh executor-owned identity; dry-run renders the placeholder. */
+  volumeAttemptId?: string;
   /** Docker exec size preflight is available only while the source is running. */
   running?: boolean;
 }
 
 /** Shell script run inside the seed helper container (same pinned image —
- *  nothing new is pulled). Temp-file + `mv` makes the seed itself
- *  resumable: a crashed copy leaves `.seed.tmp`, never a torn journal.
+ *  nothing new is pulled). Temp-file + exclusive hard link publishes the copy atomically:
+ *  the unique temporary copy is cleaned on exit, never a torn or overwritten journal.
  *
- *  The volume journal is ALWAYS overwritten from the current export —
- *  there is deliberately NO skip-if-present / skip-if-same-size fast
- *  path. Equal byte size does not imply equal content: Blazegraph's
- *  RWStore recycles pages in place, so after a verify-failure rollback
- *  (which leaves the seeded volume behind) the legacy container can keep
- *  writing WITHOUT the journal size ever changing. A size-match skip
- *  would then carry the stale attempt-1 copy into the hardened container
- *  on the next run, and verification cannot catch it — the identity tag
- *  and the size predicate hold for the stale copy too. Silent data loss.
+ *  Seeding is permitted only for an absent replacement volume created with
+ *  this migration's unique attempt label. Existing or unproven volumes are
+ *  refused: they may have served acknowledged writes after their container
+ *  was removed. Neither equal journal size nor the identity tag proves that
+ *  a retained backup is newer; RWStore can recycle pages without growing.
  *
- *  Overwriting unconditionally is safe here: the volume copy is never
- *  the only copy (the export file and the backup/legacy container both
- *  still exist at this point) and only goes live after verify passes.
- *  The whole chain is `&&`-linked so a failed cp/mv/chown fails the
- *  step's exit code instead of falling through to echoing a (possibly
- *  stale) journal size. */
+ *  This fresh copy always comes from the current stopped-source export.
+ *  The whole chain is `&&`-linked so a failed cp/ln/chown fails the
+ *  step's exit code instead of falling through to echoing a journal size. */
 function seedScript(): string {
   return (
-    `cp /seed/${HARDEN_EXPORT_FILENAME} ${BLAZEGRAPH_DATA_DIR}/.seed.tmp && ` +
-    `mv ${BLAZEGRAPH_DATA_DIR}/.seed.tmp ${BLAZEGRAPH_JOURNAL_FILE} && ` +
-    `chown ${BLAZEGRAPH_TOMCAT_UID_GID} ${BLAZEGRAPH_JOURNAL_FILE} && ` +
+    `if [ -e ${BLAZEGRAPH_JOURNAL_FILE} ] || [ -L ${BLAZEGRAPH_JOURNAL_FILE} ]; then ` +
+    `echo 'Refusing to seed an existing replacement journal; preserve it for manual recovery.' >&2; exit 1; fi; ` +
+    `tmp=$(mktemp ${BLAZEGRAPH_DATA_DIR}/.seed.XXXXXX) || exit 1; trap 'rm -f "$tmp"' EXIT; ` +
+    `cp -p /seed/${HARDEN_EXPORT_FILENAME} "$tmp" && ` +
+    `chown ${BLAZEGRAPH_TOMCAT_UID_GID} "$tmp" && ` +
+    `ln -T "$tmp" ${BLAZEGRAPH_JOURNAL_FILE} && ` +
     `stat -c %s ${BLAZEGRAPH_JOURNAL_FILE}`
   );
 }
@@ -127,6 +126,8 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
         exported = result.exported; backupExists = result.backupExists;
       }),
   ] : [
+    dockerPhase('volume-absence', 'require exact absence of the replacement volume; retained journals need manual recovery',
+      ['volume', 'inspect', blazegraphVolumeName(input.containerName)], requireMissingReplacementVolume),
     ...((input.running ?? input.state !== 'backup-only') ? [
       dockerPhase('journal-size', `read in-container journal size (docker exec stat ${BLAZEGRAPH_JOURNAL_FILE})`,
         ['exec', sourceName, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE],
@@ -150,11 +151,13 @@ export function buildHardenMigration(input: HardenPlanInput & { sourceContainerN
         exported = await actions.verifyExport(ctx, stopped, preSize, command);
       }),
     dockerPhase('volume-create', `create named journal volume ${blazegraphVolumeName(input.containerName)} (idempotent)`,
-      ['volume', 'create', blazegraphVolumeName(input.containerName)], actions.createVolume),
+      ['volume', 'create', '--label', `${HARDEN_VOLUME_ATTEMPT_LABEL}=${input.volumeAttemptId ?? HARDEN_VOLUME_ATTEMPT_PLACEHOLDER}`, blazegraphVolumeName(input.containerName)], actions.createVolume),
+    dockerPhase('volume-ownership', 'certify the newly created volume belongs to this unique migration attempt before seeding',
+      ['volume', 'inspect', blazegraphVolumeName(input.containerName)], certifyReplacementVolume),
     dockerPhase('seed-volume',
       `seed the volume from ${exportPath} via a helper container (same pinned image; `
-      + `the volume journal is ALWAYS overwritten from the current export — equal size `
-      + `does not imply equal content; chown ${BLAZEGRAPH_TOMCAT_UID_GID})`, seedRunArgs({ ...input, migrationDir }),
+      + `refuse an existing journal, then publish the fresh copy exclusively; `
+      + `chown ${BLAZEGRAPH_TOMCAT_UID_GID})`, seedRunArgs({ ...input, migrationDir }),
       (ctx, command) => actions.seedVolume(ctx, command, requireExport())),
     ...(input.state === 'legacy' ? [dockerPhase('rename-backup',
       `docker rename ${input.containerName} ${backupName} (backup is NEVER removed by this tool)`,

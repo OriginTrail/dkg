@@ -32,7 +32,7 @@
  *     the harden executor WRITES (kept beside the reader so writer and
  *     reader can never drift).
  */
-import { existsSync, statSync } from 'node:fs';
+import { readStoreMigrationMarker, STORE_MIGRATION_RESTART_FRESHNESS_MS } from './store-migration-marker.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultDockerRunner, deriveBlazegraphContainerName, type DockerRunner } from './blazegraph-docker.js';
@@ -57,9 +57,9 @@ function parsePositiveIntegerEnv(name: string, fallback: number): number {
  * removes it in a `finally`; while it exists the monitor (and the boot
  * recovery below) must not issue ANY docker restart.
  *
- * The filename constant + path helper live here (not in
- * harden/executor.ts) because the monitor is the reader; harden
- * imports them so writer and reader can never drift. Callers plumb the
+ * The marker owner shares its filename, decoding, age and transitions.
+ * This monitor retains its restart freshness policy; startup admission
+ * blocks every nonmissing state regardless age. Callers plumb the
  * config dir (`dkgDir()`) the same way `dkg store harden` resolves it.
  */
 export { STORE_HARDEN_LOCK_FILENAME, storeHardenLockPath } from './store-maintenance-gate.js';
@@ -78,20 +78,12 @@ export function storeBootRestartTsPath(dkgHome: string): string {
  * migration (docker cp of a ~5.5 GB journal + verify) completes in
  * minutes; 6 hours is a generous ceiling.
  */
-const HARDEN_LOCK_STALE_MS = 6 * 60 * 60 * 1000;
-
-/** Live = exists and not stale. Errors reading mtime count as live (fail-safe). */
+/** Restart freshness is intentional even for a readable recovery or malformed marker. */
 function hardenLockIsLive(lockPath: string, log: (m: string) => void): boolean {
-  if (!existsSync(lockPath)) return false;
-  let ageMs: number | null = null;
-  try {
-    ageMs = Date.now() - statSync(lockPath).mtimeMs;
-  } catch {
-    // Raced deletion or unreadable: treat as live for this tick — the
-    // next tick re-checks and the cost of one skipped restart is nil.
-    return true;
-  }
-  if (ageMs > HARDEN_LOCK_STALE_MS) {
+  const marker = readStoreMigrationMarker(lockPath);
+  if (marker.kind === 'missing') return false;
+  const ageMs = marker.ageMs;
+  if (ageMs !== null && ageMs > STORE_MIGRATION_RESTART_FRESHNESS_MS) {
     log(
       `[store.monitor] store.monitor.harden-lock-stale lock=${lockPath} ageMs=${Math.round(ageMs)} ` +
       `— a previous 'dkg store harden' apparently died without cleanup; ignoring the lock ` +

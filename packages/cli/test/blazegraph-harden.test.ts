@@ -28,12 +28,14 @@ describe('planHardenMigration', () => {
   it('produces the golden step sequence for a legacy container', () => {
     const steps = planHardenMigration(input);
     expect(steps.map((s) => s.id)).toEqual([
+      'volume-absence',
       'journal-size',
       'disk-preflight',
       'stop',
       'export-journal',
       'export-integrity',
       'volume-create',
+      'volume-ownership',
       'seed-volume',
       'rename-backup',
       'disable-backup-restart',
@@ -45,12 +47,12 @@ describe('planHardenMigration', () => {
     expect(byId['export-journal'].dockerArgs).toEqual([
       'cp', `${NAME}:${BLAZEGRAPH_JOURNAL_FILE}`, '/tmp/harden/bigdata.jnl',
     ]);
-    expect(byId['volume-create'].dockerArgs).toEqual(['volume', 'create', VOLUME]);
+    expect(byId['volume-create'].dockerArgs).toEqual(['volume', 'create', '--label', 'org.origintrail.dkg.harden-attempt=<new-migration-attempt>', VOLUME]);
     expect(byId['rename-backup'].dockerArgs).toEqual(['rename', NAME, BACKUP]);
     expect(byId['disable-backup-restart'].dockerArgs).toEqual(['update', '--restart=no', BACKUP]);
     // Seed uses the SAME pinned image (nothing new pulled) + temp-file+mv.
     expect(byId['seed-volume'].dockerArgs).toContain(BLAZEGRAPH_IMAGE);
-    expect(byId['seed-volume'].dockerArgs?.join(' ')).toContain('.seed.tmp');
+    expect(byId['seed-volume'].dockerArgs?.join(' ')).toContain('.seed.XXXXXX');
     expect(byId['seed-volume'].dockerArgs?.join(' ')).toContain('chown 100:1000');
     // Export-integrity re-inspect uses --size (SizeRw is only computed then).
     expect(byId['export-integrity'].dockerArgs).toEqual(['inspect', '--size', NAME]);
@@ -71,8 +73,8 @@ describe('planHardenMigration', () => {
   it('resumes from backup-only by re-exporting the current stopped backup', () => {
     const steps = planHardenMigration({ ...input, state: 'backup-only' });
     expect(steps.map((s) => s.id)).toEqual([
-      'stop', 'export-journal', 'export-integrity',
-      'volume-create', 'seed-volume', 'disable-backup-restart', 'run-hardened', 'verify',
+      'volume-absence', 'stop', 'export-journal', 'export-integrity',
+      'volume-create', 'volume-ownership', 'seed-volume', 'disable-backup-restart', 'run-hardened', 'verify',
     ]);
   });
 
@@ -81,27 +83,22 @@ describe('planHardenMigration', () => {
     expect(planHardenMigration({ ...input, state: 'absent' })).toEqual([]);
   });
 
-  it('seed script ALWAYS overwrites the volume journal — no size-match or if-present skip', () => {
+  it('seed script refuses existing journals and never reports a skipped copy as successful', () => {
     const steps = planHardenMigration(input);
-    const script = steps.find((s) => s.id === 'seed-volume')!.dockerArgs!.at(-1)!;
-    // No conditional skip of ANY kind. Equal byte size does not imply equal
-    // content: RWStore rewrites pages in place, so a verify-failure rollback
-    // leaves a stale volume copy that can share its exact size with the next
-    // run's fresh export — a size-match skip would put the STALE copy live
-    // and verification (identity tag + size >= export) cannot tell them
-    // apart. The script must therefore start with the copy itself.
-    expect(script.startsWith(`cp /seed/${HARDEN_EXPORT_FILENAME} `)).toBe(true);
-    expect(script).not.toContain('if ');
-    expect(script).not.toContain('!=');
-    // Still atomic (copy-to-tmp && mv) and still chowns to the tomcat uid:gid.
-    expect(script).toContain(`.seed.tmp && mv ${BLAZEGRAPH_DATA_DIR}/.seed.tmp ${BLAZEGRAPH_JOURNAL_FILE}`);
-    expect(script).toContain('chown 100:1000');
-    // The whole chain is &&-linked: a failed cp/mv/chown must fail the step's
-    // exit code, never fall through to echoing a (possibly stale) journal
-    // size that the executor would then validate as a successful seed.
-    expect(script).toContain(
-      `chown 100:1000 ${BLAZEGRAPH_JOURNAL_FILE} && stat -c %s ${BLAZEGRAPH_JOURNAL_FILE}`,
-    );
+    const script = steps.find(s => s.id === 'seed-volume')!.dockerArgs!.at(-1)!;
+    // A fresh volume must still fail closed if a journal appears after its
+    // ownership check. Publish the completed copy exclusively, including
+    // when the target is created during cp; size/identity cannot prove age.
+    expect(script).toContain(`if [ -e ${BLAZEGRAPH_JOURNAL_FILE} ] || [ -L ${BLAZEGRAPH_JOURNAL_FILE} ]`);
+    expect(script).toContain('exit 1; fi;');
+    expect(script).toContain(`mktemp ${BLAZEGRAPH_DATA_DIR}/.seed.XXXXXX`);
+    expect(script).toContain(`cp -p /seed/${HARDEN_EXPORT_FILENAME} "$tmp" && chown`);
+    expect(script).toContain(`ln -T "$tmp" ${BLAZEGRAPH_JOURNAL_FILE} && stat`);
+    expect(script).toContain(`trap 'rm -f "$tmp"' EXIT`);
+    expect(script).not.toContain('mv ');
+    // Failed copy, exclusive publication or chown cannot fall through to
+    // reporting a journal size as a successful seed.
+    expect(script).toContain(`chown 100:1000 "$tmp" && ln -T`);
     expect(script.trimEnd().endsWith(`stat -c %s ${BLAZEGRAPH_JOURNAL_FILE}`)).toBe(true);
   });
 });

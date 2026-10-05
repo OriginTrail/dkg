@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { it } from 'vitest';
-import { provisionBlazegraphDocker, defaultDockerRunner, blazegraphVolumeName, blazegraphMigrationVolumeName, BLAZEGRAPH_JOURNAL_FILE, waitForBlazegraphReady } from '../src/daemon/blazegraph-docker.js';
-import { executeHardenMigration } from '../src/daemon/blazegraph-harden.js';
+import { describe, it } from 'vitest';
+import { provisionBlazegraphDocker, defaultDockerRunner, blazegraphVolumeName, blazegraphMigrationVolumeName, BLAZEGRAPH_JOURNAL_FILE, BLAZEGRAPH_IMAGE, buildBlazegraphRunArgs, waitForBlazegraphReady } from '../src/daemon/blazegraph-docker.js';
+import { executeHardenMigration, planHardenMigration } from '../src/daemon/blazegraph-harden.js';
 
 // test-disable-allow: D1 #2974 -- owner=cli lane=bura-cli expires=2026-10-25 Real Docker journal roundtrip runs explicitly in CLI shard 1.
-it.skipIf(process.env.BLAZEGRAPH_HARDEN_INTEGRATION_TEST !== '1').each(['named-volume', 'writable-layer', 'unbounded-logs', 'relative-directory'] as const)('preserves ordinary RDF records in the replacement and original backup using the pinned image (%s)', async (journalSource) => {
+describe.skipIf(process.env.BLAZEGRAPH_HARDEN_INTEGRATION_TEST !== '1')('real pinned Docker hardening', () => {
+it.each(['named-volume', 'writable-layer', 'unbounded-logs', 'relative-directory'] as const)('preserves ordinary RDF records in the replacement and original backup using the pinned image (%s)', async (journalSource) => {
 const name = `dkg-harden-test-${process.pid}-${Date.now()}`;
 const namespace = 'harden-roundtrip';
 const docker = defaultDockerRunner();
@@ -130,13 +131,31 @@ try {
   assert.equal(updated.ok, true, await updated.text());
   assert.equal((await docker.run(['exec', `${name}-backup`, 'stat', '-c', '%s', BLAZEGRAPH_JOURNAL_FILE])).stdout.trim(), oldSize);
   assert.equal((await docker.run(['rm', name])).exitCode, 0);
-  const resumed = await executeHardenMigration({ containerName: name, namespace, migrationDir,
-    dkgHome: `${temporary}/config`, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, docker: migrationDocker,
-    readyTimeoutMs: 60000, readyIntervalMs: 500, log: console.log });
-  assert.equal(resumed.outcome, 'hardened');
-  assert.ok(seedCommands[1].includes(`${resolve(migrationDir)}:/seed:ro`));
-  const latest = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' }, body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:smoke-2974> { <urn:test:subject> <urn:test:predicate> ?v } }')}` });
-  assert.equal((await latest.json()).results.bindings[0].v.value, 'latest-copy');
+  const retainedHash = async () => {
+    const result = await docker.run(['run', '--rm', '--entrypoint', '/bin/sh', '-v', `${volumes[1]}:/data:ro`,
+      BLAZEGRAPH_IMAGE, '-c', `sha256sum ${BLAZEGRAPH_JOURNAL_FILE}`]);
+    assert.equal(result.exitCode, 0, result.stderr);
+    return result.stdout;
+  };
+  const originalReplacementHash = await retainedHash(), refusedCommands: string[][] = [];
+  const refusedDocker = { run: async (args: string[], options?: Parameters<typeof docker.run>[1]) => {
+    refusedCommands.push([...args]); return docker.run(args, options);
+  } };
+  await assert.rejects(executeHardenMigration({ containerName: name, namespace, migrationDir,
+    dkgHome: `${temporary}/config`, env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, docker: refusedDocker,
+    readyTimeoutMs: 60000, readyIntervalMs: 500, log: console.log }), /Refusing to reseed.*replacement journal/s);
+  assert.ok(refusedCommands.every(args => args[0] === 'inspect' || args[0] === 'volume' && args[1] === 'inspect'));
+  assert.equal(await retainedHash(), originalReplacementHash, 'Refusal must not alter the newest retained journal');
+  // Reattach the retained replacement volume without seeding it. Its newer
+  // acknowledged write must still exist independently of the old backup.
+  assert.equal((await docker.run(['stop', '-t', '120', `${name}-backup`])).exitCode, 0);
+  assert.equal((await docker.run(buildBlazegraphRunArgs({ containerName: name, hostPort: provisioned.port,
+    namespace, heapMb: 256, volumeName: volumes[1] }))).exitCode, 0);
+  await waitForBlazegraphReady({ url: `http://127.0.0.1:${provisioned.port}`, fetch, intervalMs: 500, timeoutMs: 60000, log: console.log });
+  const retained = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' },
+    body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:new-after-migration> { <urn:new> <urn:value> ?v } }')}` });
+  assert.equal((await retained.json()).results.bindings[0].v.value, 'newer-primary');
+
 
 } finally {
   for (const container of [name, `${name}-backup`]) await docker.run(['rm', '-f', container]);
@@ -149,3 +168,52 @@ try {
 }
 
 }, 240000);
+
+// The same explicit CLI shard also executes the seed publication boundary.
+it('seed-time refusal preserves a journal appearing before or during the copy', async () => {
+  const name = `dkg-harden-seed-${process.pid}-${Date.now()}`, docker = defaultDockerRunner();
+  const volume = blazegraphMigrationVolumeName(name), migrationDir = await mkdtemp(join(tmpdir(), 'dkg-seed-guard-'));
+  try {
+    await writeFile(join(migrationDir, 'bigdata.jnl'), 'older-export');
+    assert.equal((await docker.run(['volume', 'create', volume])).exitCode, 0);
+    const args = planHardenMigration({ containerName: name, namespace: 'seed-guard', hostPort: 9999,
+      heapMb: 256, migrationDir, state: 'legacy' }).find(step => step.id === 'seed-volume')!.dockerArgs!;
+    const shell = args.at(-1)!;
+    const run = async (script: string) => docker.run([...args.slice(0, -1), script]);
+    assert.equal((await run(`printf newer-journal > ${BLAZEGRAPH_JOURNAL_FILE}`)).exitCode, 0);
+    const beforeCopy = await run(shell);
+    assert.notEqual(beforeCopy.exitCode, 0, 'An already present journal must refuse seeding');
+    assert.match(beforeCopy.stderr, /Refusing to seed an existing replacement journal/);
+    assert.equal((await run(`cat ${BLAZEGRAPH_JOURNAL_FILE}`)).stdout, 'newer-journal');
+    assert.equal((await run(`rm ${BLAZEGRAPH_JOURNAL_FILE}`)).exitCode, 0);
+    const duringCopy = await run(`cp() { command cp "$@" && printf newer-raced-journal > ${BLAZEGRAPH_JOURNAL_FILE}; }; ${shell}`);
+    assert.notEqual(duringCopy.exitCode, 0, 'A target appearing during copy must fail exclusive publication');
+    assert.equal((await run(`cat ${BLAZEGRAPH_JOURNAL_FILE}`)).stdout, 'newer-raced-journal');
+    assert.equal((await run(`rm ${BLAZEGRAPH_JOURNAL_FILE}`)).exitCode, 0);
+    const racedDirectory = await run(`cp() { command cp "$@" && mkdir /data/foreign-dir && ln -s /data/foreign-dir ${BLAZEGRAPH_JOURNAL_FILE}; }; ${shell}`);
+    assert.notEqual(racedDirectory.exitCode, 0, 'Exclusive publication cannot follow a raced directory symlink');
+    assert.equal((await run(`readlink ${BLAZEGRAPH_JOURNAL_FILE}`)).stdout.trim(), '/data/foreign-dir');
+    assert.equal((await run('ls -A /data/foreign-dir')).stdout, '');
+
+    assert.equal((await run(`rm ${BLAZEGRAPH_JOURNAL_FILE}; ln -s /data/missing ${BLAZEGRAPH_JOURNAL_FILE}`)).exitCode, 0);
+    const danglingTarget = await run(shell);
+    assert.notEqual(danglingTarget.exitCode, 0);
+    assert.match(danglingTarget.stderr, /Refusing to seed an existing replacement journal/);
+    assert.equal((await run(`readlink ${BLAZEGRAPH_JOURNAL_FILE}`)).stdout.trim(), '/data/missing');
+    assert.equal((await run(`rm ${BLAZEGRAPH_JOURNAL_FILE}; printf untouched > /data/foreign; ln -s /data/foreign /data/.seed.tmp`)).exitCode, 0);
+    const fresh = await run(shell);
+    assert.equal(fresh.exitCode, 0, fresh.stderr);
+    assert.equal(fresh.stdout.trim(), String('older-export'.length));
+    assert.equal((await run(`cat ${BLAZEGRAPH_JOURNAL_FILE}`)).stdout, 'older-export');
+    assert.equal((await run('cat /data/foreign')).stdout, 'untouched', 'The copy cannot follow a preexisting temporary symlink');
+    assert.equal((await run('readlink /data/.seed.tmp')).stdout.trim(), '/data/foreign');
+    assert.equal((await run(`stat -c '%a %u:%g' ${BLAZEGRAPH_JOURNAL_FILE}`)).stdout.trim(), '644 100:1000');
+    assert.equal((await run('for f in /data/.seed.*; do basename "$f"; done')).stdout.trim(), '.seed.tmp', 'Only our unique temporary inode is cleaned');
+
+  } finally {
+    await docker.run(['volume', 'rm', volume]);
+    await rm(migrationDir, { recursive: true, force: true });
+  }
+}, 60000);
+
+});

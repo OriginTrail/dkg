@@ -51,9 +51,28 @@ describe('canonical store identity reader', () => {
   });
 
   it('retains migration binding-presence policy even when no nonempty node name is available', async () => {
-    const { fn } = mockFetch(() => new Response(JSON.stringify({ results: { bindings: [{}] } }), { status: 200 }));
+    const { fn } = mockFetch(() => new Response(JSON.stringify({ results: { bindings: [{ name: { type: 'literal', value: '' } }] } }), { status: 200 }));
     expect(await readStoreIdentityTag({ endpoint: { queryUrl: 'http://store.test/sparql', headers: {} }, fetch: fn })).toEqual({ ok: true, nodeName: null, bindingCount: 1 });
     expect(await identityTagPresent(fn, 'http://store.test/sparql')).toBe(true);
+  });
+
+  it.each([{}, { name: {} }, { name: { value: 3 } }, null])('refuses an unbound or malformed identity row %j', async row => {
+    const { fn, calls } = mockFetch(() => new Response(JSON.stringify({ results: { bindings: [row] } }), { status: 200 }));
+    expect(await readStoreIdentityTag({ endpoint: { queryUrl: 'http://store.test/sparql', headers: {} }, fetch: fn }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('identity SELECT') });
+    expect(await identityTagPresent(fn, 'http://store.test/sparql')).toBe(false);
+    expect(await checkOrSetStoreIdentity({ storeConfig: BLAZEGRAPH_CONFIG, nodeName: 'owner', fetch: fn }))
+      .toMatchObject({ ok: false, action: 'transport-error' });
+    expect(calls.every(call => call.body?.startsWith('query='))).toBe(true);
+  });
+
+  it.each([{}, { results: {} }, { results: { bindings: 'invalid' } },
+    { results: { bindings: [{ name: { value: 'owner' } }, {}] } }])('refuses malformed SELECT evidence instead of writing a fresh tag %j', async body => {
+    const { fn, calls } = mockFetch(() => new Response(JSON.stringify(body), { status: 200 }));
+    expect(await checkOrSetStoreIdentity({ storeConfig: BLAZEGRAPH_CONFIG, nodeName: 'owner', fetch: fn }))
+      .toMatchObject({ ok: false, action: 'transport-error' });
+    expect(await identityTagPresent(fn, 'http://store.test/sparql')).toBe(false);
+    expect(calls.every(call => call.body?.startsWith('query='))).toBe(true);
   });
 
   it.each(['headers', 'body'])('bounds a never-settling identity %s read, including transports ignoring abort', async phase => {

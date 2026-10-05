@@ -101,6 +101,7 @@ export function scriptedDocker(opts: {
   let hardenedCreated = opts.initial === 'hardened';
   let stopped = opts.initial === 'legacy-stopped';
   let cpDone = false;
+  let volumeAttempt: string | null = null;
   const runner: DockerRunner = {
     async run(args) {
       calls.push([...args]);
@@ -146,7 +147,13 @@ export function scriptedDocker(opts: {
         cpDone = true;
         return ok();
       }
-      if (cmd === 'volume') return ok(VOLUME);
+      if (cmd === 'volume') {
+        if (args[1] === 'inspect') return volumeAttempt === null
+          ? { stdout: '[]', stderr: `Error response from daemon: get ${VOLUME}: no such volume`, exitCode: 1 }
+          : ok(JSON.stringify([{ Name: VOLUME, Labels: { 'org.origintrail.dkg.harden-attempt': volumeAttempt } }]));
+        if (args[1] === 'create') volumeAttempt = args[3]?.split('=').slice(1).join('=') ?? null;
+        return ok(VOLUME);
+      }
       if (cmd === 'run' && args[1] === '--rm') return ok(`${opts.seedStdout ?? String(JOURNAL_BYTES)}\n`);
       if (cmd === 'run' && args[1] === '-d') {
         hardenedCreated = true;

@@ -135,7 +135,7 @@ describe('executeHardenMigration', () => {
     };
     const { fn } = verifierFetch();
     await expect(executeHardenMigration(baseOpts(runner, fn))).resolves.toMatchObject({ outcome: 'hardened' });
-    expect(calls).toContainEqual(['volume', 'create', VOLUME]);
+    expect(calls).toContainEqual(['volume', 'create', '--label', expect.stringMatching(/^org\.origintrail\.dkg\.harden-attempt=[0-9a-f-]{36}$/), VOLUME]);
     const seed = calls.find(c => c[0] === 'run' && c.includes('--rm'))!;
     expect(seed).toContain(`${VOLUME}:${BLAZEGRAPH_DATA_DIR}`);
     expect(seed).not.toContain(`${NAME}-data:${BLAZEGRAPH_DATA_DIR}`);
@@ -158,7 +158,8 @@ describe('executeHardenMigration', () => {
     const idx = (op: string) => seq.indexOf(op);
     expect(idx('stop')).toBeGreaterThan(-1);
     expect(idx('cp')).toBeGreaterThan(idx('stop'));
-    expect(idx('volume')).toBeGreaterThan(idx('cp'));
+    expect(seq.lastIndexOf('volume')).toBeGreaterThan(idx('cp'));
+    expect(calls.find(args => args[0] === 'volume')).toEqual(['volume', 'inspect', VOLUME]);
     expect(idx('run--rm')).toBeGreaterThan(idx('volume'));
     expect(idx('rename')).toBeGreaterThan(idx('run--rm'));
     expect(idx('update')).toBeGreaterThan(idx('rename'));
@@ -352,7 +353,7 @@ describe('executeHardenMigration', () => {
         if (args[0] === 'stop') lockSeenAtStop = existsSync(lockPath);
         if (args[0] === 'cp') lockSeenAtCp = existsSync(lockPath);
         // Fail the volume create so the failure path's `finally` is exercised.
-        if (args[0] === 'volume') return { stdout: '', stderr: 'boom', exitCode: 1 };
+        if (args[0] === 'volume' && args[1] === 'create') return { stdout: '', stderr: 'boom', exitCode: 1 };
         return null;
       },
     });
@@ -677,8 +678,9 @@ describe('executeHardenMigration', () => {
     const plan = planHardenMigration({
       containerName: NAME, namespace: NAMESPACE, hostPort: 9999,
       heapMb: 3072, migrationDir, state: 'legacy',
+      volumeAttemptId: calls.find(args => args[0] === 'volume' && args[1] === 'create')![3]!.split('=').slice(1).join('='),
     });
-    expect(plan.filter((s) => s.dockerArgs).length).toBe(10);
+    expect(plan.filter((s) => s.dockerArgs).length).toBe(12);
     assertExecutionFollowsPlan(plan, calls);
   });
 
@@ -690,6 +692,7 @@ describe('executeHardenMigration', () => {
     const plan = planHardenMigration({
       containerName: NAME, namespace: NAMESPACE, hostPort: 9999,
       heapMb: 3072, migrationDir, state: 'backup-only',
+      volumeAttemptId: calls.find(args => args[0] === 'volume' && args[1] === 'create')![3]!.split('=').slice(1).join('='),
     });
     assertExecutionFollowsPlan(plan, calls);
   });
@@ -720,6 +723,35 @@ describe('executeHardenMigration', () => {
     expect(calls.filter(args => args[0] === 'inspect' && args[1] === '--size'))
       .toEqual([['inspect', '--size', BACKUP], ['inspect', '--size', BACKUP]]);
     expect(calls.some(args => args[0] === 'rename')).toBe(false);
+    assertSafetyInvariants(calls, migrationDir, true);
+  });
+
+  it.each(['legacy', 'backup-only'] as const)('refuses an existing unproven replacement volume before any journal mutation (%s)', async initial => {
+    const { runner, calls } = scriptedDocker({ initial, migrationDir, failOn: args => args[0] === 'volume' && args[1] === 'inspect'
+      ? ok(JSON.stringify([{ Name: VOLUME, Labels: {} }])) : null });
+    await expect(executeHardenMigration(baseOpts(runner, verifierFetch().fn))).rejects.toThrow(/Refusing to reseed.*replacement journal/s);
+    expect(calls.every(args => args[0] === 'inspect' || args[0] === 'volume' && args[1] === 'inspect')).toBe(true);
+    expect(existsSync(storeHardenLockPath(dkgHome))).toBe(false);
+  });
+  it.each(['wrong-name absence', 'engine', 'malformed'])('requires exact replacement-volume absence (%s)', async failure => {
+    const { runner, calls } = scriptedDocker({ initial: 'backup-only', migrationDir, failOn: args => {
+      if (args[0] !== 'volume' || args[1] !== 'inspect') return null;
+      return failure === 'malformed' ? ok('[{}]') : { stdout: '[]', exitCode: 1, stderr: failure === 'engine'
+        ? 'Cannot connect to the Docker daemon' : `Error response from daemon: get ${VOLUME}-other: no such volume` };
+    } });
+    await expect(executeHardenMigration(baseOpts(runner, verifierFetch().fn))).rejects.toThrow(/Refusing to reseed.*Cannot verify volume absence/s);
+    expect(calls.every(args => args[0] === 'inspect' || args[0] === 'volume' && args[1] === 'inspect')).toBe(true);
+  });
+  it('does not treat idempotent create as ownership of a raced existing volume', async () => {
+    let created = false;
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir, failOn: args => {
+      if (args[0] === 'volume' && args[1] === 'create') { created = true; return ok(VOLUME); }
+      if (created && args[0] === 'volume' && args[1] === 'inspect') return ok(JSON.stringify([{ Name: VOLUME, Labels: {} }]));
+      return null;
+    } });
+    await expect(executeHardenMigration(baseOpts(runner, verifierFetch().fn))).rejects.toThrow(/does not belong to this fresh migration attempt/);
+    expect(calls.some(args => args[0] === 'run' || args[0] === 'rename')).toBe(false);
+    expect(existsSync(join(migrationDir, HARDEN_EXPORT_FILENAME))).toBe(true);
     assertSafetyInvariants(calls, migrationDir, true);
   });
 
