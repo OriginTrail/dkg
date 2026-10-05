@@ -69,6 +69,25 @@ export function safePromoteErrorIdentity(
   }
 }
 
+// The causes whose code may be named beside a retryable promote. The agent does
+// not export its codes to this package, so the literal is repeated here and a
+// worker test pins it to the agent's constant.
+const SAFE_PROMOTE_RETRY_CAUSE_CODES = Object.freeze({
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS: true,
+} as const);
+
+export function safePromoteRetryCauseCode(cause: unknown): string | undefined {
+  if ((typeof cause !== 'object' && typeof cause !== 'function') || cause === null) return undefined;
+  try {
+    const value = Reflect.get(cause, 'code');
+    return typeof value === 'string' && Object.hasOwn(SAFE_PROMOTE_RETRY_CAUSE_CODES, value)
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Map a promote error to a queue disposition. Unknown errors fail closed so an
  * operator can inspect and explicitly recover them.

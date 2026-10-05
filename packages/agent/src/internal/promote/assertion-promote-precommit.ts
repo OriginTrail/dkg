@@ -10,6 +10,7 @@ import {
   isContextGraphAuthorityUnavailableMarker,
   isRetryableContextGraphAuthorityUnavailableReason,
 } from '../context-graph-authority/context-graph-authority.js';
+import { isRfc64LegacySwmBoundaryRetirementInProgressV1 } from '../../rfc64/legacy-swm-boundary-v1.js';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 type GossipSigner = Awaited<
@@ -62,6 +63,23 @@ async function resolvePromoteAuthority<T>(resolve: () => Promise<T>): Promise<T>
     return await resolve();
   } catch (error) {
     if (isRetryableAuthorityUnavailable(error)) {
+      throw createPromoteRetryableFailure(error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * The same translation for the root promote's boundary companion, which the
+ * publisher prepares synchronously. Only the retirement fence is transient:
+ * every other refusal from the prepare (unavailable persistence, the head
+ * limit, invalid input) is a hard failure and passes through unchanged.
+ */
+export function translateLegacySwmRetirementFence<T>(prepare: () => T): T {
+  try {
+    return prepare();
+  } catch (error) {
+    if (isRfc64LegacySwmBoundaryRetirementInProgressV1(error)) {
       throw createPromoteRetryableFailure(error);
     }
     throw error;

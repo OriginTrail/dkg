@@ -1,7 +1,11 @@
 import type { RegisteredContextGraphAuthorityUnavailableReason } from '@origintrail-official/dkg-agent';
 import type { PromoteJob } from '@origintrail-official/dkg-publisher';
 import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
-import { safePromoteErrorIdentity, type ClassifiedPromoteError } from './async-promote-error-classification.js';
+import {
+  safePromoteErrorIdentity,
+  safePromoteRetryCauseCode,
+  type ClassifiedPromoteError,
+} from './async-promote-error-classification.js';
 import type { PromoteWorkerSyncLogger } from './async-promote-worker.js';
 
 const SAFE_PROMOTE_AUTHORITY_REASONS = Object.freeze({
@@ -69,9 +73,9 @@ export function logPromoteAttemptFailure(input: {
   log: PromoteWorkerSyncLogger;
 }): void {
   try {
-    // The queue marker hides arbitrary cause text. A typed authority reason is
-    // a closed, privacy-bounded value that identifies which prerequisite kept
-    // this pre-commit attempt from making progress.
+    // The queue marker hides arbitrary cause text. A typed authority reason or
+    // retry cause code is a closed, privacy-bounded value that identifies which
+    // prerequisite kept this pre-commit attempt from making progress.
     const cause = input.classified.diagnostic?.code === 'PROMOTE_RETRYABLE_FAILURE'
       && (typeof input.err === 'object' || typeof input.err === 'function')
       && input.err !== null
@@ -79,6 +83,7 @@ export function logPromoteAttemptFailure(input: {
       : undefined;
     const authorityReason = safePromoteAuthorityReason(cause);
     const authorityOrigin = safePromoteAuthorityOrigin(cause);
+    const causeCode = safePromoteRetryCauseCode(cause);
     input.log(
       `[async-promote-worker] ${JSON.stringify({
         event: 'async_promote_attempt_failed',
@@ -99,6 +104,7 @@ export function logPromoteAttemptFailure(input: {
           ?? 'unknown',
         ...(authorityReason === undefined ? {} : { authorityReason }),
         ...(authorityOrigin === undefined ? {} : { authorityOrigin }),
+        ...(causeCode === undefined ? {} : { causeCode }),
       })}`,
     );
   } catch {
