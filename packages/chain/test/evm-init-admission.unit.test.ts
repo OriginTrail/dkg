@@ -57,17 +57,14 @@ describe('optional contract initialization preserves local refusal', () => {
     expect(adapter.contracts.knowledgeAssetsLifecycle).toBeUndefined();
   });
 
-  it('ends a caller cancelled during an optional contract read with its own reason', async () => {
+  it('does not swallow cancellation during an optional contract read', async () => {
     const controller = new AbortController();
     const reason = new Error('bootstrap cancelled');
-    const { adapter } = fixture('KnowledgeAssetsLifecycle', new Error('ContractDoesNotExist'),
+    const { adapter } = fixture('KnowledgeAssetsLifecycle', new Error('aborted transport'),
       () => controller.abort(reason));
     await expect(withRpcRequestContext({ signal: controller.signal }, () => adapter.getIdentityId()))
       .rejects.toBe(reason);
-    // The initialization is shared and not the caller's to interrupt, so its
-    // read was not cut short: what it learned about the contract stands.
-    await vi.waitFor(() => expect(adapter.initialized).toBe(true));
-    expect(adapter.contracts.knowledgeAssetsLifecycle).toBeUndefined();
+    expect(adapter.initialized).toBe(false);
   });
 
   it('detaches both adapter-owned background starts from transient bootstrap context', async () => {
