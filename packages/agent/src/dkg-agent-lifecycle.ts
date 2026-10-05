@@ -9004,7 +9004,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (
         !this.localApprovedAgentByCG.has(contextGraphId)
         || current?.subscribed !== true
-        || current.pendingMeta !== true
+        // Generic `_meta` confirmation can clear the UI's pending marker
+        // before this approved join has recovered SWM readiness. It cannot
+        // terminate the authority retry while the subscription is unsynced.
+        || current.synced === true
       ) return;
     }
   }

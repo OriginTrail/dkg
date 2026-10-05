@@ -1878,7 +1878,28 @@ describe('private read authorization uses the on-chain participant roster', () =
       expect(resume).toHaveBeenCalledTimes(1);
     });
 
-    it('stops once the row is no longer a pending join approval', async () => {
+    it('keeps trying after metadata clears the pending marker but SWM is not ready', async () => {
+      const { agent: member, internals } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        ...internals.subscribedContextGraphs.get(contextGraphId),
+        pendingMeta: false,
+        metaSynced: true,
+        synced: false,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops once the subscription is ready', async () => {
       const { agent: member, internals } = await restrictedMember();
       const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata').mockResolvedValue('retry');
       vi.useFakeTimers();
@@ -1890,6 +1911,8 @@ describe('private read authorization uses the on-chain participant roster', () =
         ...internals.subscribedContextGraphs.get(contextGraphId),
         pendingMeta: false,
         metaSynced: true,
+        sharedMemorySynced: true,
+        synced: true,
       });
       await vi.advanceTimersByTimeAsync(15_000);
       await recovery;
