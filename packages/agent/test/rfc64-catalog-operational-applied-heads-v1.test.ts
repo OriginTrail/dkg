@@ -669,6 +669,10 @@ describe('approved private catalog readiness handoff', () => {
     ['no approved identity', (f: ReturnType<typeof fixture>) => { f.agent.localApprovedAgentByCG.clear(); }],
     ['authority unavailable', (f: ReturnType<typeof fixture>) => { f.agent.resolveContextGraphSubscriptionBootstrapAuthority.mockResolvedValue({ outcome: 'unavailable', registration: undefined } as never); }],
     ['now registered', (f: ReturnType<typeof fixture>) => { f.agent.resolveContextGraphSubscriptionBootstrapAuthority.mockResolvedValue({ outcome: 'allowed', registration: undefined } as never); }],
+    ['no accepted policy', (f: ReturnType<typeof fixture>) => { vi.spyOn(f.service, 'acceptedPolicySnapshot').mockReturnValue(null as never); }],
+    ['accepted public policy', (f: ReturnType<typeof fixture>) => { f.service.acceptedPolicySnapshot().policy.accessPolicy = 0; }],
+    ['another policy source', (f: ReturnType<typeof fixture>) => { f.service.acceptedPolicySnapshot().policy.source.kind = 'finalized-registry'; }],
+    ['no accepted roster', (f: ReturnType<typeof fixture>) => { f.service.acceptedPolicySnapshot().roster = null as never; }],
     ['member proof absent', (f: ReturnType<typeof fixture>) => { f.agent.store.query.mockResolvedValue({ type: 'bindings', bindings: [] }); }],
     ['named legacy scope', (f: ReturnType<typeof fixture>) => { f.agent.listSubGraphs.mockResolvedValue([{}]); }],
     ['unreadable applied head', (f: ReturnType<typeof fixture>) => { f.storage.fault(f.head.objectDigest, 'missing'); }],
@@ -687,12 +691,34 @@ describe('approved private catalog readiness handoff', () => {
     { catalogServiceStarted: false }, { stableReason: 'catalog-replay-incomplete' },
     { legacyReadOnlyCount: 1 }, { authorHeadCount: 0 }, { missingRowCount: '1' },
     { appliedRowCount: '0', expectedRowCount: '0' }, { appliedRowCount: null },
-    { expectedRowCount: '2' }, { expectedCatalogHeadDigest: null },
-    { appliedCatalogHeadDigest: DELEGATION_DIGEST }, { expectedInventoryDigest: null },
+    { appliedRowCount: '01', expectedRowCount: '01' },
+    { appliedRowCount: '+1', expectedRowCount: '+1' },
+    { appliedRowCount: '1.0', expectedRowCount: '1.0' },
+    { appliedRowCount: ' 1', expectedRowCount: ' 1' },
+    { expectedRowCount: null }, { expectedRowCount: '2' }, { expectedCatalogHeadDigest: null },
+    { appliedCatalogHeadDigest: null }, { appliedCatalogHeadDigest: DELEGATION_DIGEST },
+    { expectedInventoryDigest: null }, { appliedInventoryDigest: null },
     { appliedInventoryDigest: DELEGATION_DIGEST },
   ])('never promotes incomplete/stale projection %j', async (patch) => {
     const f = fixture(); Object.assign(f.status, patch);
     await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing catalog status row', async () => {
+    const f = fixture();
+    f.agent.readRfc64CatalogOperationalStatusV1.mockResolvedValue([]);
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
+  });
+
+  it('rejects approval disappearing after the membership proof', async () => {
+    const f = fixture();
+    f.agent.readRequesterJoinRequestState
+      .mockResolvedValueOnce(f.requester).mockResolvedValueOnce(f.requester)
+      .mockResolvedValueOnce(null as never);
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.agent.readRequesterJoinRequestState).toHaveBeenCalledTimes(3);
     expect(f.commit).not.toHaveBeenCalled();
   });
 
@@ -705,6 +731,9 @@ describe('approved private catalog readiness handoff', () => {
     ['registration', (f: ReturnType<typeof fixture>) => { f.subscription.onChainId = '7'; }],
     ['request generation', (f: ReturnType<typeof fixture>) => { f.requester.requestGeneration = 'request-2'; }],
     ['approval rejection', (f: ReturnType<typeof fixture>) => { f.requester.status = 'rejected'; }],
+    ['curator peer', (f: ReturnType<typeof fixture>) => { f.requester.curatorPeerId = 'another-curator'; }],
+    ['curator owner', (f: ReturnType<typeof fixture>) => { f.requester.curatorAgentAddress = OTHER_AUTHOR; }],
+    ['curator era', (f: ReturnType<typeof fixture>) => { f.requester.curatorAuthorityEra = '1'; }],
     ['local agent removal', (f: ReturnType<typeof fixture>) => { f.agent.listLocalAgents.mockReturnValue([]); }],
     ['transport authority', (f: ReturnType<typeof fixture>) => { f.agent.isRfc64CatalogTransportAuthorityActiveV1.mockReturnValue(false); }],
     ['shutdown', (f: ReturnType<typeof fixture>) => { f.service.started = false; }],

@@ -2,6 +2,9 @@
 
 import type { ContextGraphIdV1, NetworkIdV1 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../dkg-agent.js';
+import type { Rfc64CatalogOperationalStatusV1 } from '../dkg-agent-rfc64-catalog.js';
+import type { RequesterJoinRequestState } from '../dkg-agent-join.js';
+import type { ApprovedPrivateReplicaAuthority } from '../approved-private-replica.js';
 import { isApprovedPrivateReplicaDelegationActive, resolveApprovedPrivateReplicaAuthority } from '../approved-private-replica.js';
 import { loadRfc64OperationalAppliedHeadsV1 } from './catalog-operational-applied-heads-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from './public-catalog-service-v1.js';
@@ -19,6 +22,42 @@ export interface PrivateCatalogReadinessStateV1 {
   replay: { revision: number };
   authorityRevision: number | undefined;
   targetFence: string;
+}
+
+// The status projection is necessary, but is not itself an authority proof.
+function hasCompletePrivateCatalogStatus(
+  status: Rfc64CatalogOperationalStatusV1 | undefined,
+  policyDigest: string,
+): boolean {
+  return status?.effectiveMode === 'catalog' && status.phase === 'complete'
+    && status.authorityState === 'accepted' && status.authorityFreshness === 'current'
+    && status.policyDigest === policyDigest && status.accessPolicy === 1
+    && status.catalogServiceStarted && status.stableReason === null;
+}
+
+function hasExactRootCatalogParity(status: Rfc64CatalogOperationalStatusV1 | undefined): boolean {
+  if (status === undefined || status.legacyReadOnlyCount !== 0
+    || status.authorHeadCount < 1 || status.missingRowCount !== '0') return false;
+
+  const { appliedRowCount, expectedRowCount } = status;
+  if (appliedRowCount === null || !/^[1-9][0-9]*$/.test(appliedRowCount)
+    || expectedRowCount !== appliedRowCount) return false;
+
+  return status.expectedCatalogHeadDigest !== null
+    && status.expectedCatalogHeadDigest === status.appliedCatalogHeadDigest
+    && status.expectedInventoryDigest !== null
+    && status.expectedInventoryDigest === status.appliedInventoryDigest;
+}
+
+function matchesApprovedJoinRequest(
+  requester: RequesterJoinRequestState | null,
+  authority: ApprovedPrivateReplicaAuthority,
+): boolean {
+  return requester?.status === 'approved'
+    && requester.requestGeneration === authority.requestGeneration
+    && requester.curatorPeerId === authority.curatorPeerId
+    && requester.curatorAgentAddress === authority.ownerAddress
+    && requester.curatorAuthorityEra === '0';
 }
 
 /**
@@ -55,30 +94,34 @@ export async function verifyPrivateCatalogSubscriptionReadinessV1(
   const replayRevision = replay.revision;
   const inventorySnapshot = persistence.inventory.readAppliedCatalogHeadsSnapshotV1();
   const targetsBefore = admitted.targetFence;
-  const current = () => {
+  const isAdmittedGenerationCurrent = () => {
     const live = readState();
-    return live.service === service && service.started
-    && live.persistence === persistence && live.networkId === networkId
-    && live.plan === plan
-    && service.acceptedPolicySnapshot(networkId as NetworkIdV1, contextGraphId as ContextGraphIdV1) === accepted
-    && live.approvedAgent === approvedAgent
-    && agent.listLocalAgents().some(({ agentAddress }) => agentAddress.toLowerCase() === approvedAgent.toLowerCase())
-    && agent.isRfc64JoinDerivedAcceptedAuthorityV1(contextGraphId)
-    && live.subscription?.subscribed === true
-    && live.subscription?.onChainId === undefined
-    && live.metadataRevision === metadataRevision
-    && live.authorityRevision === authorityRevision
-    && live.replay === replay && replay.revision === replayRevision
-    && persistence.inventory.readAppliedCatalogHeadsSnapshotV1().token === inventorySnapshot.token
-    && live.targetFence === targetsBefore
-    && agent.isRfc64CatalogTransportAuthorityActiveV1(contextGraphId);
+
+    // The same catalog owner and accepted policy must still be installed.
+    if (live.service !== service || !service.started || live.persistence !== persistence
+      || live.networkId !== networkId || live.plan !== plan
+      || service.acceptedPolicySnapshot(networkId as NetworkIdV1, contextGraphId as ContextGraphIdV1) !== accepted) return false;
+
+    // The local participant must still own this unregistered subscription.
+    if (live.approvedAgent !== approvedAgent
+      || !agent.listLocalAgents().some(({ agentAddress }) => agentAddress.toLowerCase() === approvedAgent.toLowerCase())
+      || !agent.isRfc64JoinDerivedAcceptedAuthorityV1(contextGraphId)
+      || live.subscription?.subscribed !== true || live.subscription.onChainId !== undefined) return false;
+
+    // No metadata, authority, replay, inventory or recovery target may move.
+    if (live.metadataRevision !== metadataRevision || live.authorityRevision !== authorityRevision
+      || live.replay !== replay || replay.revision !== replayRevision
+      || persistence.inventory.readAppliedCatalogHeadsSnapshotV1().token !== inventorySnapshot.token
+      || live.targetFence !== targetsBefore) return false;
+
+    return agent.isRfc64CatalogTransportAuthorityActiveV1(contextGraphId);
   };
   const proof = await resolveApprovedPrivateReplicaAuthority(
     agent, contextGraphId, approvedAgent,
     () => readState().approvedAgent === approvedAgent,
     () => readState().metadataRevision === metadataRevision,
   );
-  if (proof?.kind !== 'unregistered-private-replica' || !current()) return false;
+  if (proof?.kind !== 'unregistered-private-replica' || !isAdmittedGenerationCurrent()) return false;
   if ((await agent.listSubGraphs(contextGraphId)).length > 0) return false;
   const heads = await loadRfc64OperationalAppliedHeadsV1(persistence);
   // The operator projection deliberately skips unreadable heads. That
@@ -93,24 +136,12 @@ export async function verifyPrivateCatalogSubscriptionReadinessV1(
   const status = (await agent.readRfc64CatalogOperationalStatusV1())
     .find((row) => row.contextGraphId === contextGraphId);
   const requester = await agent.readRequesterJoinRequestState(contextGraphId, approvedAgent);
-  if (
-    status?.effectiveMode !== 'catalog' || status.phase !== 'complete'
-    || status.authorityState !== 'accepted' || status.authorityFreshness !== 'current'
-    || status.policyDigest !== accepted.policyDigest || status.accessPolicy !== 1
-    || !status.catalogServiceStarted || status.stableReason !== null
-    || status.legacyReadOnlyCount !== 0 || status.authorHeadCount < 1
-    || status.missingRowCount !== '0' || status.appliedRowCount === null
-    || !/^[1-9][0-9]*$/.test(status.appliedRowCount)
-    || status.expectedRowCount !== status.appliedRowCount
-    || status.expectedCatalogHeadDigest === null
-    || status.expectedCatalogHeadDigest !== status.appliedCatalogHeadDigest
-    || status.expectedInventoryDigest === null
-    || status.expectedInventoryDigest !== status.appliedInventoryDigest
-    || requester?.status !== 'approved' || requester.requestGeneration !== proof.authority.requestGeneration
-    || requester.curatorPeerId !== proof.authority.curatorPeerId
-    || requester.curatorAgentAddress !== proof.authority.ownerAddress || requester.curatorAuthorityEra !== '0'
-    || !isApprovedPrivateReplicaDelegationActive(proof.authority) || !current()
-  ) return false;
+  if (!hasCompletePrivateCatalogStatus(status, accepted.policyDigest)) return false;
+  if (!hasExactRootCatalogParity(status)) return false;
+  if (!matchesApprovedJoinRequest(requester, proof.authority)) return false;
+  if (!isApprovedPrivateReplicaDelegationActive(proof.authority) || !isAdmittedGenerationCurrent()) return false;
+
+  // Keep this commit synchronous with the final authority and generation checks.
   commit();
   return true;
 }
