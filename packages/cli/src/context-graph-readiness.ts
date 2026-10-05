@@ -2,6 +2,7 @@ import type {
   CatchupPassDecisionReason,
   ConfiguredContextGraphMetadataReconciliationResult,
   DKGAgent,
+  InspectedContextGraphReadinessV1,
   SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
 import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -18,10 +19,6 @@ import {
   catchupPlaneReady,
   type CatchupPlaneCompletionEvidence,
 } from './catchup-proof.js';
-import {
-  contextGraphCatchupMetadataState,
-  type ContextGraphCatchupMetadataInput,
-} from './context-graph-readiness-metadata.js';
 import type { CatchupJobResult } from './catchup-runner.js';
 import { registerContextGraphReadinessEvents } from './context-graph-readiness-events.js';
 import { registeredPrivateEmptyVmEvidence } from './context-graph-independent-vm-evidence.js';
@@ -498,11 +495,6 @@ export interface ContextGraphCatchupReadinessClassification {
   };
 }
 
-/** Live completion authority takes precedence over peer progress or old proof. */
-export type ContextGraphCatchupCompletionAuthority =
-  | { outcome: 'allowed'; registration?: 'unregistered' }
-  | { outcome: 'denied' | 'unavailable' };
-
 /**
  * A subscription known only by its on-chain name hash cannot sync anything
  * under that id, whatever the peers answered: holders key the graph by its
@@ -523,13 +515,10 @@ export function classifyNameHashOnlyCatchup(
 interface ContextGraphCatchupReadinessBaseInput {
   result: CatchupJobResult;
   includeSharedMemory: boolean;
+  inspection: InspectedContextGraphReadinessV1;
   readinessBeforeCatchup: ContextGraphReadinessProvenance;
-  /** Current bootstrap authority, never persisted or inferred from metadata. */
-  completionAuthority: ContextGraphCatchupCompletionAuthority;
   finalizedEmptyRegisteredPrivateVm?: boolean;
 }
-
-type ContextGraphCatchupReadinessInput = ContextGraphCatchupReadinessBaseInput & ContextGraphCatchupMetadataInput;
 
 /**
  * Canonical policy for converting one catch-up result into externally visible
@@ -537,25 +526,36 @@ type ContextGraphCatchupReadinessInput = ContextGraphCatchupReadinessBaseInput &
  * the returned patches; all readiness decisions remain in this pure function.
  */
 export function classifyContextGraphCatchupReadiness(
-  input: ContextGraphCatchupReadinessInput,
+  input: ContextGraphCatchupReadinessBaseInput,
 ): ContextGraphCatchupReadinessClassification {
+  const authority = input.inspection.authority;
+  const durablePlane = authority.outcome === 'allowed' && authority.registration === 'unregistered'
+    ? 'not-applicable' : 'required';
+  if (input.inspection.kind === 'invalidated') {
+    const denied = authority.outcome === 'denied';
+    return {
+      durablePlane, jobStatus: denied ? 'denied' : 'unreachable',
+      error: denied ? 'Context-graph authority denied access at catch-up completion.'
+        : 'Context-graph readiness inspection was invalidated before completion. Retry after metadata stabilizes.',
+      statePatch: { synced: false, sharedMemorySynced: false },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+    };
+  }
   return {
-    ...classifyCatchupReadiness(input),
-    durablePlane: input.completionAuthority.outcome === 'allowed'
-      && input.completionAuthority.registration === 'unregistered'
-      ? 'not-applicable' : 'required',
+    ...classifyCatchupReadiness(input, input.inspection), durablePlane,
   };
 }
 
 function classifyCatchupReadiness(
-  input: ContextGraphCatchupReadinessInput,
+  input: ContextGraphCatchupReadinessBaseInput,
+  inspection: Extract<InspectedContextGraphReadinessV1, { kind: 'current' }>,
 ): Omit<ContextGraphCatchupReadinessClassification, 'durablePlane'> {
-  const metadata = contextGraphCatchupMetadataState(input);
+  const { metadata, authority } = inspection;
   const isPrivate = metadata.kind === 'confirmed' && metadata.accessPolicy === 'private';
-  if (input.completionAuthority.outcome !== 'allowed') {
+  if (authority.outcome !== 'allowed') {
     return {
-      jobStatus: input.completionAuthority.outcome === 'denied' ? 'denied' : 'unreachable',
-      error: input.completionAuthority.outcome === 'denied'
+      jobStatus: authority.outcome === 'denied' ? 'denied' : 'unreachable',
+      error: authority.outcome === 'denied'
         ? 'Context-graph authority denied access at catch-up completion.'
         : 'Context-graph authority is unavailable at catch-up completion. Retry after authority recovers.',
       statePatch: {
@@ -566,7 +566,7 @@ function classifyCatchupReadiness(
       readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
     };
   }
-  const registration = input.completionAuthority.registration;
+  const registration = authority.registration;
   const { result } = input;
   const durableDataProgress = result.dataSynced > 0;
   const sharedMemoryProgress = result.sharedMemorySynced > 0;

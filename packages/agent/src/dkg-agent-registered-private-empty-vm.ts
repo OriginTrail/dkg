@@ -2,6 +2,7 @@
 
 import type { DKGAgent } from './dkg-agent.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import {
   attemptRegisteredPrivateEmptyVmV1,
@@ -157,7 +158,9 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
           .readContextGraphAuthorityFactsRevision(contextGraphId),
         readChainConfig: () => this.config.chainConfig,
         hasAuthorityReader: () => this.contextGraphAuthorityReaderCapability.status !== 'unsupported',
-        readFinalityConfirmations: () => this.chain.getFinalityConfirmations?.(),
+        readResolvedFinalityConfirmations: () => resolveChainFinalityConfirmationsV1(
+          this.chain, this.config.chainConfig,
+        ),
       }, contextGraphId, callerAgentAddress, signal)
       : UNPROVEN_PRIVATE_EMPTY_VM;
     // Completion always obtains one last live authority and metadata view. Its

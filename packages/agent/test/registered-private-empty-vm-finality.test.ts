@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { RegisteredPrivateEmptyVmMethods } from '../src/dkg-agent-registered-private-empty-vm.js';
+import { resolveChainFinalityConfirmationsV1 } from '../src/chain-finality-confirmations-v1.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
@@ -104,6 +105,13 @@ async function proveAtDepth(depthFromAdapter?: number, depthFromConfig?: number)
 }
 
 describe('registered private zero-VM readiness finality', () => {
+  it.each([
+    ['adapter precedence', { getFinalityConfirmations: () => 12 }, { finalityConfirmations: 3 }, 12],
+    ['configuration fallback', { getFinalityConfirmations: () => undefined }, { finalityConfirmations: 7 }, 7],
+    ['unspecified depth', {}, undefined, undefined],
+  ] as const)('uses the shared %s policy', (_label, chain, config, expected) => {
+    expect(resolveChainFinalityConfirmationsV1(chain, config)).toBe(expected);
+  });
   it.each([
     ['adapter depth', 12, 3, '0x8b'],
     ['chain config fallback', undefined, 7, '0x90'],

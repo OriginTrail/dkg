@@ -25,10 +25,9 @@ export interface PrivateEmptyVmAgentBindingsV1 {
     rpcUrls?: string[];
     chainId?: string;
     hubAddress: string;
-    finalityConfirmations?: number;
   } | undefined;
   hasAuthorityReader(): boolean;
-  readFinalityConfirmations(): number | undefined;
+  readResolvedFinalityConfirmations(): number | undefined;
 }
 
 export function tracePrivateEmptyVm(stage: string): void {
@@ -100,7 +99,7 @@ export async function attemptRegisteredPrivateEmptyVmV1(
       }) !== undefined) {
       tracePrivateEmptyVm('indexed-private-authority-absent'); return UNPROVEN_PRIVATE_EMPTY_VM;
     }
-    const depth = bindings.readFinalityConfirmations() ?? chainConfig.finalityConfirmations;
+    const depth = bindings.readResolvedFinalityConfirmations();
     const proven = await proveRegisteredPrivateEmptyVmV1({
       contextGraphId,
       onChainContextGraphId: indexed.contextGraphId,

@@ -32,26 +32,12 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
     && callerAgentAddress !== undefined && result.dataSynced === 0;
 
   const decide = (inspection: InspectedContextGraphReadinessV1, finalizedEmptyRegisteredPrivateVm: boolean) => {
-    const classification = inspection.kind === 'invalidated'
-      ? {
-          durablePlane: inspection.authority.outcome === 'allowed'
-            && inspection.authority.registration === 'unregistered'
-            ? 'not-applicable' as const : 'required' as const,
-          jobStatus: inspection.authority.outcome === 'denied' ? 'denied' as const : 'unreachable' as const,
-          error: inspection.authority.outcome === 'denied'
-            ? 'Context-graph authority denied access at catch-up completion.'
-            : 'Context-graph readiness inspection was invalidated before completion. Retry after metadata stabilizes.',
-          statePatch: { synced: false, sharedMemorySynced: false },
-          readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
-        }
-      : classifyContextGraphCatchupReadiness({
-          result, includeSharedMemory: input.includeSharedMemory,
-          completionAuthority: inspection.authority,
-          metadata: inspection.metadata,
-          finalizedEmptyRegisteredPrivateVm,
-          // Catalog recovery can finish while the foreground catch-up runs.
-          readinessBeforeCatchup: readContextGraphReadiness(store, contextGraphId),
-        });
+    const classification = classifyContextGraphCatchupReadiness({
+      result, includeSharedMemory: input.includeSharedMemory,
+      inspection, finalizedEmptyRegisteredPrivateVm,
+      // Catalog recovery can finish while the foreground catch-up runs.
+      readinessBeforeCatchup: readContextGraphReadiness(store, contextGraphId),
+    });
     commitContextGraphReadinessPatches({
       agent, store, contextGraphId,
       statePatch: classification.statePatch,
