@@ -314,6 +314,41 @@ describe('authoritative private metadata proof', () => {
 });
 
 describe('refreshMetaFromCurator', () => {
+  it('resolves a restarted curator by peer ID without trusting resolver status alone', async () => {
+    let resolvedPeerId: string | undefined;
+    let fetched = false;
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [],
+          dial: async () => { throw new Error('no cached address after restart'); },
+          peerStore: { merge: async () => undefined },
+        },
+      },
+      discovery: { findAgentByPeerId: async () => null },
+      peerResolver: {
+        connect: async (peerId: string) => {
+          resolvedPeerId = peerId;
+          return { status: 'connected' as const };
+        },
+      },
+      fetchSyncPages: async () => { fetched = true; throw new Error('unexpected fetch'); },
+      log: { warn: noop, info: noop },
+    };
+
+    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      'unit-test-cg',
+      { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
+    );
+
+    expect(resolvedPeerId).toBe(CURATOR_PEER_ID);
+    expect(refreshed).toBe(false);
+    expect(fetched).toBe(false);
+  });
+
   it('passes caller abort signal to direct and relay curator dials', async () => {
     const controller = new AbortController();
     const dialSignals: Array<AbortSignal | undefined> = [];

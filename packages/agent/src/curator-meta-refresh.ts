@@ -121,6 +121,16 @@ interface CuratorMetaRefreshAgent {
   readonly discovery: {
     findAgentByPeerId(peerId: string): Promise<{ relayAddress?: string } | undefined>;
   };
+  readonly peerResolver?: {
+    connect(
+      peerId: string,
+      options: {
+        signal?: AbortSignal;
+        perStepTimeoutMs?: number;
+        candidateTimeoutMs?: number;
+      },
+    ): Promise<{ status: 'connected' | 'unresolved' }>;
+  };
   readonly store: TripleStore;
   readonly syncCheckpoints: Pick<SyncCheckpointStore, 'delete'>;
   readonly oversizeTombstoneLog: {
@@ -418,6 +428,26 @@ async function dialCurator(
           connection.remotePeer.toString() === curatorPeerId
         ));
       }
+    }
+
+    if (!isConnected && agent.peerResolver) {
+      // A restarted member may retain the curator's authenticated peer ID
+      // but lose its in-memory peer-store addresses. The shared resolver can
+      // recover a direct address through DHT or the agent directory. Its
+      // result is only a transport hint: the libp2p peer ID and the fetched
+      // curator metadata are still verified independently below.
+      const timeout = AbortSignal.timeout(15_000);
+      const dialSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      await agent.peerResolver.connect(curatorPeerId, {
+        signal: dialSignal,
+        perStepTimeoutMs: 5_000,
+        candidateTimeoutMs: 5_000,
+      });
+      throwIfCuratorMetaRefreshAborted(signal);
+      connections = agent.node.libp2p.getConnections();
+      isConnected = connections.some((connection) => (
+        connection.remotePeer.toString() === curatorPeerId
+      ));
     }
   } catch (error) {
     throwIfCuratorMetaRefreshAborted(signal);
