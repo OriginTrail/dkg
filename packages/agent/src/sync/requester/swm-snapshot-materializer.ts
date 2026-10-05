@@ -14,6 +14,8 @@ import { filterRecoveredBulkMetadata } from '../../internal/swm-recovery/swm-rec
  * subject, the operation subject, or the KA's own assertion graph), so each
  * query is bounded by one KA's size — never by context-graph or fleet growth.
  */
+import { canonicalQuadKey } from './quad-key.js';
+import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-filter.js';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
   swmKaWriteLockKey,
@@ -126,6 +128,13 @@ export interface SharedMemorySnapshotMaterializer {
     companion: Readonly<DurableRootAtomicCompanion>,
     attribution?: Readonly<Pick<QueryOptions, 'source'>>,
   ): Promise<void>;
+  /** Apply prepared metadata under the caller's KA lock and return settled provider rows. */
+  commitRecoveredMetadata(
+    contextGraphId: string,
+    descriptor: PreparedSwmRecoveryDescriptor,
+    ingest: 'swm-sync' | 'swm-recovery',
+    attribution?: Readonly<Pick<QueryOptions, 'source'>>,
+  ): Promise<{ insertedMetaQuads: number; withholdRows: readonly Quad[] }>;
   /**
    * Delete the KA's head rows and every share-operation subject its head
    * references (including the descriptor's own, which the caller re-inserts
@@ -201,6 +210,11 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   invalidateListContextGraphsCache: () => void;
   readConfirmedKnowledgeAssetVersion?: ConfirmedKnowledgeAssetVersionReader;
   pendingAckTxWindowMs?: number;
+  /** Observation only; the materializer owns every metadata insertion policy. */
+  metadataIngestObserver?: Readonly<{
+    recordDrops: OversizeGuardHooks['recordDrops'];
+    markMetaProjectionDirty: (quads: Quad[]) => void;
+  }>;
 }): SharedMemorySnapshotMaterializer {
   // #2079 operator override, default ON. Blank is UNSET, not false:
   // `DKG_SWM_MATERIALIZATION_WITNESS=` is the normal compose/.env shape for
@@ -373,12 +387,14 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       && publisherWorkspaceOperationSemanticsKey(candidate.semantics) === semanticKey);
   };
 
-  const repairHeadPreservingIdentity: SharedMemorySnapshotMaterializer['repairHeadPreservingIdentity'] = async (contextGraphId, descriptor, winnerShareOperationId) => {
+  const applyPreservedHeadMetadata = async (
+    contextGraphId: string, descriptor: PreparedSwmRecoveryDescriptor, winnerShareOperationId: string,
+    applyHealthyExtension: (rows: Quad[]) => Promise<void>,
+  ) => {
     const extension = healthyRecoveredAliasRows(contextGraphId, descriptor);
     if (extension !== null) {
-      if (extension.length > 0) await deps.store.insert(extension);
-      deps.invalidateListContextGraphsCache();
-      return;
+      await applyHealthyExtension(extension);
+      return { kind: 'extended' as const, rows: extension };
     }
     const publisherAlias = retainedPublisherAlias(descriptor, winnerShareOperationId);
     const loserSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
@@ -426,6 +442,68 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       );
     }
     deps.invalidateListContextGraphsCache();
+    return { kind: 'repaired' as const };
+  };
+
+  const replaceHeadMetadata: SharedMemorySnapshotMaterializer['replaceHeadMetadata'] = async (contextGraphId, descriptor, attribution) => {
+    const source = attribution?.source ?? 'agent.sharedMemorySync.snapshotMaterializer';
+    const operationSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
+      seed: [descriptor.operationSubject],
+    });
+    await deleteByPatternWithoutCount(
+      deps.store,
+      { graph: descriptor.metaGraph, subject: descriptor.headSubject },
+      { priority: 'background', source: `${source}.deleteHead` },
+    );
+    for (const operationSubject of operationSubjects) {
+      await deleteByPatternWithoutCount(
+        deps.store,
+        { graph: descriptor.metaGraph, subject: operationSubject },
+        { priority: 'background', source: `${source}.deleteOperation` },
+      );
+    }
+  };
+
+  /** Preserve the actual public/private ingest source, filtering and observation effects. */
+  const insertRecoveredMetadata = async (rows: readonly Quad[], ingest: 'swm-sync' | 'swm-recovery') => {
+    const inserted = await insertWithOversizeGuard(
+      kept => deps.store.insert(kept, { priority: 'background', source: ingest === 'swm-sync'
+        ? 'agent.sharedMemorySync.storeInsert' : 'agent.swmRecovery.insert' }),
+      rows, { recordDrops: deps.metadataIngestObserver?.recordDrops ?? (() => {}) }, ingest,
+    );
+    if (ingest === 'swm-sync') deps.metadataIngestObserver?.markMetaProjectionDirty(inserted);
+    else if (inserted.length > 0) {
+      deps.invalidateListContextGraphsCache();
+      deps.metadataIngestObserver?.markMetaProjectionDirty(inserted);
+    }
+  };
+
+  const commitRecoveredMetadata: SharedMemorySnapshotMaterializer['commitRecoveredMetadata'] = async (contextGraphId, descriptor, ingest, attribution) => {
+    const selected = await selectRepairIdentity(contextGraphId, descriptor);
+    let withheld: readonly Quad[] = [];
+    if (selected) {
+      const preserved = await applyPreservedHeadMetadata(contextGraphId, descriptor, selected.winnerShareOperationId,
+        async rows => { if (rows.length > 0) await insertRecoveredMetadata(rows, ingest); });
+      if (preserved.kind === 'extended') {
+        const providerKeys = new Set(descriptor.providerMetadataQuads.map(canonicalQuadKey));
+        return { insertedMetaQuads: preserved.rows.filter(row => providerKeys.has(canonicalQuadKey(row))).length,
+          withholdRows: descriptor.providerMetadataQuads };
+      }
+      withheld = selected.withholdRows;
+    } else await replaceHeadMetadata(contextGraphId, descriptor, attribution);
+    const keys = new Set(withheld.map(canonicalQuadKey));
+    const rows = descriptor.metadataQuads.filter(row => !keys.has(canonicalQuadKey(row)));
+    if (rows.length > 0) await insertRecoveredMetadata(rows, ingest);
+    // Nominal provider accounting is retained even when oversize guards filter.
+    return { insertedMetaQuads: rows.length, withholdRows: descriptor.providerMetadataQuads };
+  };
+
+  /** Historical direct repair remains a compatibility entry into the same metadata owner. */
+  const repairHeadPreservingIdentity: SharedMemorySnapshotMaterializer['repairHeadPreservingIdentity'] = async (contextGraphId, descriptor, winnerShareOperationId) => {
+    await applyPreservedHeadMetadata(contextGraphId, descriptor, winnerShareOperationId, async rows => {
+      if (rows.length > 0) await deps.store.insert(rows);
+      deps.invalidateListContextGraphsCache();
+    });
   };
 
   const materializer: SharedMemorySnapshotMaterializer = {
@@ -606,24 +684,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       await invalidateReplacementEffects(graphUri, source);
     },
 
-    replaceHeadMetadata: async (contextGraphId, descriptor, attribution) => {
-      const source = attribution?.source ?? 'agent.sharedMemorySync.snapshotMaterializer';
-      const operationSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
-        seed: [descriptor.operationSubject],
-      });
-      await deleteByPatternWithoutCount(
-        deps.store,
-        { graph: descriptor.metaGraph, subject: descriptor.headSubject },
-        { priority: 'background', source: `${source}.deleteHead` },
-      );
-      for (const operationSubject of operationSubjects) {
-        await deleteByPatternWithoutCount(
-          deps.store,
-          { graph: descriptor.metaGraph, subject: operationSubject },
-          { priority: 'background', source: `${source}.deleteOperation` },
-        );
-      }
-    },
+    commitRecoveredMetadata,
+
+    replaceHeadMetadata,
 
     selectRepairIdentity,
 

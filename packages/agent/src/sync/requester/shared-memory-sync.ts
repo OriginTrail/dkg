@@ -864,7 +864,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       /** Refs that fetched but could not be written; named in the shortfall. */
       const unresolvedRefSample: string[] = [];
 
-      // #2050 G7. `replaceHeadMetadata` is DELETE-ONLY, and the compensating
+      // #2050 G7. Historically `replaceHeadMetadata` was DELETE-ONLY, and the compensating
       // `storeInsert(processed.verifiedMeta)` sits below the `continue` on the
       // incomplete branch — so a round that ran out of clock mid-list deleted the
       // head rows of the KAs it had just materialized and never rewrote them:
@@ -907,7 +907,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
             asset: { kind: 'replace', descriptor,
               loadVerifiedQuads: async () => (await materializeGraphScopedSwmRecoveryAsset({ descriptor, fetchedDataQuads, publicSnapshotStore })).quads },
             ensureContextGraph: ensureContextGraphOnce,
-            insertMetadata: rows => storeInsert([...rows]),
+            metadataIngest: 'swm-sync',
             resolveRootAtomicCompanion: resolveRootSnapshotAtomicCompanion,
             assertCurrent: () => recoveryBoundary.assertCurrent(),
             allowed: () => descriptor.subGraphName !== undefined || context.mode.kind !== 'ordinary' || ordinaryRootSnapshotApplyAllowed?.(pid) !== false,
@@ -962,7 +962,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
               asset: { kind: 'replace', descriptor,
                 loadVerifiedQuads: async () => (await materializeGraphScopedSwmRecoveryAsset({ descriptor, fetchedDataQuads: [], publicSnapshotStore })).quads },
               ensureContextGraph: ensureContextGraphOnce,
-              insertMetadata: rows => storeInsert([...rows]),
+              metadataIngest: 'swm-sync',
               resolveRootAtomicCompanion: resolveRootSnapshotAtomicCompanion,
               assertCurrent: () => recoveryBoundary.assertCurrent(),
               allowed: () => descriptor.subGraphName !== undefined || context.mode.kind !== 'ordinary' || ordinaryRootSnapshotApplyAllowed?.(pid) !== false,

@@ -151,6 +151,7 @@ export class SwmTargetExecutorV1 {
       readConfirmedKnowledgeAssetVersion: ports.readConfirmedKnowledgeAssetVersion,
       pendingAckTxWindowMs: ports.pendingAckTxWindowMs,
       invalidateListContextGraphsCache: ports.invalidateListContextGraphsCache,
+      metadataIngestObserver: { recordDrops: ports.recordDrops, markMetaProjectionDirty: ports.markMetaProjectionDirty },
     });
     this.#recoveryMutation = ports.recoveryMutation;
   }

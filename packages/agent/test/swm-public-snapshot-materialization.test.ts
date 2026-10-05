@@ -1,3 +1,4 @@
+import { healthyRecoveredAliasRows } from '../src/internal/swm-recovery/swm-draft-order.js';
 import { mkdtemp, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -226,7 +227,7 @@ function harness(overrides: HarnessOverrides = {}) {
           const storedHead: PreparedSwmRecoveryDescriptor['storedHead'] = state.version === null ? { status: 'missing' } : state.needsRepair
             ? { status: 'corrupt', error: new Error('fixture corruption') } as PreparedSwmRecoveryDescriptor['storedHead']
             : { status: 'resolved', head: { assertionVersion: state.version, operationAliases: [{ shareOperationId: 'snapshot-materialization-op' }] } } as PreparedSwmRecoveryDescriptor['storedHead'];
-          return { ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead };
+          return { ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead };
         },
         filterBulkMetadata: async (rows, withheld = []) => { const keys = new Set(withheld.map(canonicalQuadKey)); return rows.filter(row => !keys.has(canonicalQuadKey(row))); },
         // Private-lane mutations are outside this public orchestration fixture.
@@ -263,22 +264,24 @@ function harness(overrides: HarnessOverrides = {}) {
           if (overrides.replaceImpl) return overrides.replaceImpl(graphUri, quads);
           replaced.push({ graphUri, quads });
         },
-        replaceHeadMetadata: async (contextGraphId, descriptor) => {
-          events.push('head-swapped');
-          headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
-        },
-        // GH#2273 — this fake proves ORDERING, not store state; identity
-        // preservation never fires here (no stored foreign id), so the
-        // decision hook reports "descriptor wins" and the rewrite hook only
-        // records that it ran.
-        selectRepairIdentity: async () => {
+        commitRecoveredMetadata: async (contextGraphId, descriptor) => {
           events.push('repair-identity-selected');
-          return overrides.selectRepairIdentity?.() ?? (overrides.storedHead?.().version === '1' && overrides.contentPresent?.() && !overrides.storedHead?.().needsRepair ? { winnerShareOperationId: 'snapshot-materialization-op', withholdRows: [] } : null);
-        },
-        repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
-          events.push('head-repaired-preserving-identity');
-          headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
-          void winnerShareOperationId;
+          const selected = overrides.selectRepairIdentity?.() ?? (overrides.storedHead?.().version === '1' && overrides.contentPresent?.() && !overrides.storedHead?.().needsRepair ? { winnerShareOperationId: 'snapshot-materialization-op', withholdRows: [] } : null);
+          let rows = descriptor.metadataQuads;
+          if (selected && descriptor.storedHead.status === 'resolved') {
+            rows = healthyRecoveredAliasRows(contextGraphId, descriptor)!;
+          } else {
+            events.push(selected ? 'head-repaired-preserving-identity' : 'head-swapped');
+            headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+            if (selected) {
+              const withheld = new Set(selected.withholdRows.map(canonicalQuadKey));
+              rows = rows.filter(row => !withheld.has(canonicalQuadKey(row)));
+            }
+          }
+          if (rows.length > 0) {
+            await overrides.onStoreInsert?.(); events.push('meta-inserted'); inserted.push([...rows]);
+          }
+          return { insertedMetaQuads: rows.length, withholdRows: descriptor.metadataQuads };
         },
       },
       reconcileFinalizedTwin: async () => {

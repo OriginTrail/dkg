@@ -251,10 +251,10 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         putSnapshot: async () => { throw new Error('No snapshot write expected'); },
       },
       snapshotMaterializer: {
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
         filterBulkMetadata: async rows => rows,
         selectRepairIdentity: async () => null,
-        replaceHeadMetadata: async () => undefined,
+        commitRecoveredMetadata: async (_cg, descriptor) => ({ insertedMetaQuads: descriptor.metadataQuads.length, withholdRows: descriptor.metadataQuads }),
         withKaWriteLock: async (
           _contextGraphId: string,
           _subGraphName: string | undefined,

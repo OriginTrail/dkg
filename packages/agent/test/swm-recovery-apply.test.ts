@@ -289,10 +289,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         },
         snapshotMaterializer: {
           replaceGraph: async (_graph, quads) => { graphRows = [...quads]; failAfter('replace-graph'); },
-          replaceHeadMetadata: async () => { graphMetaCurrent = true; failAfter('replace-graph-meta'); },
+          commitRecoveredMetadata: async (_cg, descriptor) => { graphMetaCurrent = true; failAfter('replace-graph-meta'); await store.insert(descriptor.metadataQuads); return { insertedMetaQuads: descriptor.metadataQuads.length, withholdRows: descriptor.metadataQuads }; },
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
         isGraphAssetMaterialized: async () => false,
           withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
           draftMayReplace: async () => true,
@@ -356,10 +356,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       replaceMetaForRoots: async () => undefined,
       snapshotMaterializer: {
         replaceGraph: canonical.replaceGraph,
-        replaceHeadMetadata: async () => undefined,
+        commitRecoveredMetadata: async (_cg, descriptor) => ({ insertedMetaQuads: descriptor.metadataQuads.length, withholdRows: descriptor.metadataQuads }),
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
         isGraphAssetMaterialized: async () => false,
         withKaWriteLock: async (_cg: string, _sg: string | undefined, _ual: string, fn: () => Promise<unknown>) => fn(),
         draftMayReplace: async () => true,
@@ -434,7 +434,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       };
       const replaceGraph = vi.fn();
       const replaceGraphWithAtomicCompanion = vi.fn().mockResolvedValue(undefined);
-      const replaceHeadMetadata = vi.fn().mockResolvedValue(undefined);
+      const commitRecoveredMetadata = vi.fn(async (_cg, descriptor) => ({ insertedMetaQuads: descriptor.metadataQuads.length, withholdRows: descriptor.metadataQuads }));
       const resolveRootAtomicCompanion = vi.fn(() => companion);
 
       await expect(applyVerifiedSwmRecoveryGraphAsset({
@@ -450,10 +450,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
           },
           snapshotMaterializer: {
             replaceGraph,
-            replaceHeadMetadata,
+            commitRecoveredMetadata,
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
         isGraphAssetMaterialized: async () => kind === 'preserve-equivalent',
             withKaWriteLock: async (
               _cg: string,
@@ -535,10 +535,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
         },
         snapshotMaterializer: {
           replaceGraph,
-          replaceHeadMetadata: vi.fn(),
+          commitRecoveredMetadata: vi.fn(),
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
         isGraphAssetMaterialized: async () => false,
           withKaWriteLock: async (
             _cg: string,
@@ -604,7 +604,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       graph: assertionGraph,
     }];
     const replaceGraph = vi.fn();
-    const replaceHeadMetadata = vi.fn().mockResolvedValue(undefined);
+    const commitRecoveredMetadata = vi.fn(async (_cg, descriptor) => ({ insertedMetaQuads: descriptor.metadataQuads.length, withholdRows: descriptor.metadataQuads }));
     const ports = {
       store: {
         insert: async () => undefined,
@@ -613,10 +613,10 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       },
       snapshotMaterializer: {
         replaceGraph,
-        replaceHeadMetadata,
+        commitRecoveredMetadata,
           selectRepairIdentity: async () => null,
         filterBulkMetadata: async rows => rows,
-        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
+        prepareRecoveredDescriptor: async descriptor => ({ ...descriptor, providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired' as const, operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const } }),
         isGraphAssetMaterialized: async () => true,
         withKaWriteLock: async (
           _cg: string,
@@ -634,14 +634,14 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       asset: { kind: 'preserve-equivalent', descriptor },
       ports,
     })).resolves.toMatchObject({ insertedGraphQuads: 1 });
-    expect(replaceHeadMetadata).toHaveBeenCalledOnce();
-    expect(replaceHeadMetadata).toHaveBeenCalledWith('private-recovery-cg', {
+    expect(commitRecoveredMetadata).toHaveBeenCalledOnce();
+    expect(commitRecoveredMetadata).toHaveBeenCalledWith('private-recovery-cg', {
       ...descriptor,
-      preparation: 'local-evidence-acquired', operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const },
-    }, { source: 'agent.swmRecovery.replaceMetaForGraphAssets' });
+      providerMetadataQuads: descriptor.metadataQuads, preparation: 'local-evidence-acquired', operationCandidates: [], storedOperationCandidates: [], storedAliasIds: [], storedHead: { status: 'missing' as const },
+    }, 'swm-recovery', { source: 'agent.swmRecovery.replaceMetaForGraphAssets' });
     expect(replaceGraph).not.toHaveBeenCalled();
 
-    replaceHeadMetadata.mockClear();
+    commitRecoveredMetadata.mockClear();
     ports.snapshotMaterializer.isGraphAssetMaterialized = async () => false;
     await expect(applyVerifiedSwmRecoveryGraphAsset({
       contextGraphId: 'private-recovery-cg',
@@ -652,7 +652,7 @@ describe('applySwmRecovery (per-root replace, not union)', () => {
       insertedMetaQuads: 0,
       withholdRows: descriptor.metadataQuads,
     });
-    expect(replaceHeadMetadata).not.toHaveBeenCalled();
+    expect(commitRecoveredMetadata).not.toHaveBeenCalled();
     expect(replaceGraph).not.toHaveBeenCalled();
   });
 });

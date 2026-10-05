@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import { healthyRecoveredAliasRows } from './swm-draft-order.js';
 import type { DurableRootAtomicCompanionResolver } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../../sync/graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from '../../sync/requester/swm-snapshot-materializer.js';
-import { canonicalQuadKey } from '../../sync/requester/quad-key.js';
 
 export interface SwmRecoveryCommitResult {
   readonly kind: 'committed' | 'superseded' | 'deferred';
@@ -31,7 +29,7 @@ export async function commitRecoveredSwmAsset(input: {
   contextGraphId: string;
   asset: SwmRecoveryCommitAsset;
   materializer: SharedMemorySnapshotMaterializer;
-  insertMetadata: (rows: readonly Quad[]) => Promise<unknown>;
+  metadataIngest: 'swm-sync' | 'swm-recovery';
   ensureContextGraph?: () => Promise<void>;
   mutationAttribution?: Readonly<{ graphSource: string; metadataSource: string }>;
   resolveRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
@@ -68,26 +66,8 @@ export async function commitRecoveredSwmAsset(input: {
       if (companion) await materializer.replaceGraphWithAtomicCompanion(descriptor.assertionGraph, [...quads], companion, input.mutationAttribution ? { source: input.mutationAttribution.graphSource } : undefined);
       else if (!equivalent) await materializer.replaceGraph(descriptor.assertionGraph, [...quads], input.mutationAttribution ? { source: input.mutationAttribution.graphSource } : undefined);
     }
-    const stored = descriptor.storedHead;
-    const selected = await materializer.selectRepairIdentity(contextGraphId, descriptor);
-    // Equivalent healthy aliases are a normal resolved state. Keep the whole
-    // class, including queued ACK identities; no head/operation repair is owed.
-    if (selected && stored.status === 'resolved') {
-      const history = healthyRecoveredAliasRows(contextGraphId, descriptor)!;
-      if (history.length > 0) await input.insertMetadata(history);
-      const providerKeys = new Set(asset.descriptor.metadataQuads.map(canonicalQuadKey));
-      return result('committed', equivalent ? 0 : quads?.length ?? 0, history.filter(row => providerKeys.has(canonicalQuadKey(row))).length);
-    }
-    let withheld: readonly Quad[] = [];
-    if (selected) {
-      await materializer.repairHeadPreservingIdentity(contextGraphId, descriptor, selected.winnerShareOperationId);
-      withheld = selected.withholdRows;
-    } else {
-      await materializer.replaceHeadMetadata(contextGraphId, descriptor, input.mutationAttribution ? { source: input.mutationAttribution.metadataSource } : undefined);
-    }
-    const keys = new Set(withheld.map(canonicalQuadKey));
-    const rows = descriptor.metadataQuads.filter(row => !keys.has(canonicalQuadKey(row)));
-    if (rows.length > 0) await input.insertMetadata(rows);
-    return result('committed', equivalent ? 0 : quads?.length ?? 0, rows.length);
+    const metadata = await materializer.commitRecoveredMetadata(contextGraphId, descriptor, input.metadataIngest,
+      input.mutationAttribution ? { source: input.mutationAttribution.metadataSource } : undefined);
+    return { kind: 'committed', insertedGraphQuads: equivalent ? 0 : quads?.length ?? 0, ...metadata };
   });
 }

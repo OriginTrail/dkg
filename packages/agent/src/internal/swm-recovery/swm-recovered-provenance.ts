@@ -18,6 +18,8 @@ export function isAuthenticatedPublisherCandidate(candidate: RecoveryOperationCa
 /** The prepared boundary separates decoded local evidence from provider claims. */
 export interface PreparedSwmRecoveryDescriptor extends GraphScopedSwmRecoveryDescriptor {
   readonly preparation: 'local-evidence-acquired';
+  /** Exact provider rows to settle, before substituting locally authenticated operation metadata. */
+  readonly providerMetadataQuads: readonly Quad[];
   readonly storedHead: KnowledgeAssetWorkspaceHeadResolution;
   readonly storedAliasIds: readonly string[];
   readonly operationCandidates: readonly RecoveryOperationCandidate[];
@@ -99,6 +101,6 @@ export async function prepareRecoveredDescriptor(store: TripleStore, descriptor:
   const storedAliasIds = [...new Set(headRows.filter(row => row.predicate === `${DKG}shareOperationId`).map(row => stripMetadataLiteral(row.object).trim()))];
   const storedOperationCandidates = [...ownedSubjects].every(subject => locals.has(subject))
     ? [...ownedSubjects].map(subject => locals.get(subject)!) : null;
-  return { ...descriptor, metadataQuads, preparation: 'local-evidence-acquired',
+  return { ...descriptor, providerMetadataQuads: descriptor.metadataQuads, metadataQuads, preparation: 'local-evidence-acquired',
     operationCandidates, storedOperationCandidates, authenticatedPublisherOperation, storedHead, storedAliasIds };
 }

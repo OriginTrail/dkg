@@ -19,3 +19,9 @@ void admitted.materializer.replaceGraph('urn:test:graph', [], {
   // @ts-expect-error Attribution cannot replace the materializer's store priority policy.
   priority: 'interactive',
 });
+
+void commitRecoveredSwmAsset({
+  ...admitted,
+  // @ts-expect-error metadata application is exclusively owned by the materializer
+  insertMetadata: async () => undefined,
+});

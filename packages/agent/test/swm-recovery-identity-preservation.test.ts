@@ -611,7 +611,7 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     let settled = false;
     const decision = commitRecoveredSwmAsset({
       contextGraphId: CG, asset: { kind: 'preserve-equivalent', descriptor: descriptor! },
-      materializer, insertMetadata: rows => store.insert([...rows]),
+      materializer, metadataIngest: 'swm-sync',
     })
       .then((result) => { settled = true; return result; });
     await new Promise((resolve) => setTimeout(resolve, 50));

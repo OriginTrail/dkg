@@ -55,3 +55,9 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 declare const store: TripleStore;
 // @ts-expect-error collection cannot enter a queue-only optional mode
 void withUnqueuedDraftOperation(store, 'cg', undefined, 'urn:op', 1, async () => {});
+
+materializer.commitRecoveredMetadata('cg', prepared, 'swm-sync');
+// @ts-expect-error metadata commit requires locally acquired evidence
+materializer.commitRecoveredMetadata('cg', provider, 'swm-sync');
+// @ts-expect-error metadata ingestion keeps public/private policy explicit
+materializer.commitRecoveredMetadata('cg', prepared);

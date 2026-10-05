@@ -10,12 +10,12 @@ describe('already completed SWM asset', () => {
       ual: 'did:dkg:31337/0x1111111111111111111111111111111111111111/1' });
     const descriptor = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: 'completed-asset', metaQuads: fixture.meta })[0]!;
     const lock = vi.fn(async () => { throw new Error('completed asset requested a mutation lock'); });
-    const insertMetadata = vi.fn();
+    const commitRecoveredMetadata = vi.fn();
     const result = await commitRecoveredSwmAsset({ contextGraphId: 'completed-asset',
       asset: { kind: 'already-replaced', descriptor },
-      materializer: { withKaWriteLock: lock } as unknown as SharedMemorySnapshotMaterializer, insertMetadata });
+      materializer: { withKaWriteLock: lock, commitRecoveredMetadata } as unknown as SharedMemorySnapshotMaterializer, metadataIngest: 'swm-sync' });
     expect(result).toEqual({ kind: 'committed', insertedGraphQuads: 0, insertedMetaQuads: 0, withholdRows: descriptor.metadataQuads });
     expect(lock).not.toHaveBeenCalled();
-    expect(insertMetadata).not.toHaveBeenCalled();
+    expect(commitRecoveredMetadata).not.toHaveBeenCalled();
   });
 });

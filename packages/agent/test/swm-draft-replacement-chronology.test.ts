@@ -145,7 +145,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
     expect(await readSwmMaterializationWitness(store, current.assertionGraph, current.digest)).toBe(true);
     const replaceGraph = vi.spyOn(h.materializer, 'replaceGraph');
-    const replaceMetadata = vi.spyOn(h.materializer, 'replaceHeadMetadata');
+    const replaceMetadata = vi.spyOn(h.materializer, 'commitRecoveredMetadata');
 
     await h[lane]();
 
@@ -204,7 +204,7 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     const before = await readSnapshot(); expect(before.quads).toHaveLength(ack.payload.length);
     const query = vi.spyOn(store, 'query');
     const h = harness(store, newer);
-    if (lane === 'canonicalCommit') expect(await commitRecoveredSwmAsset({ contextGraphId: CG, asset: { kind: 'preserve-equivalent', descriptor: parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: newer.meta })[0]! }, materializer: h.materializer, insertMetadata: rows => store.insert([...rows]) })).toMatchObject({ kind: 'committed' });
+    if (lane === 'canonicalCommit') expect(await commitRecoveredSwmAsset({ contextGraphId: CG, asset: { kind: 'preserve-equivalent', descriptor: parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: newer.meta })[0]! }, materializer: h.materializer, metadataIngest: 'swm-sync' })).toMatchObject({ kind: 'committed' });
     else await h[lane]();
     expect(query.mock.calls.filter(([, options]) => options?.source === 'agent.swmRecovery.localPublisherEvidence')).toHaveLength(1);
     expect(query.mock.calls.some(([, options]) => ['agent.swmRecovery.storedHead', 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates', 'agent.sharedMemorySync.snapshotMaterializer.selectRepairIdentity'].includes(options?.source ?? ''))).toBe(false);
@@ -533,9 +533,9 @@ describe('legacy catch-up respects publisher draft chronology', () => {
     expect(descriptor).toBeDefined();
     expect(await h.materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
     expect((await h.materializer.prepareRecoveredDescriptor(descriptor)).storedHead).toMatchObject({ status: 'resolved' });
-    const repair = vi.spyOn(h.materializer, 'repairHeadPreservingIdentity');
+    const remove = vi.spyOn(store, 'deleteByPatternWithoutCount');
     await h[lane]();
-    expect(repair).not.toHaveBeenCalled();
+    expect(remove.mock.calls.some(([pattern]) => pattern.subject === served.headSubject || pattern.subject === publisher.operationSubject || pattern.subject === ack.operationSubject)).toBe(false);
     const restarted = harness(store, served).materializer;
     expect((await restarted.prepareRecoveredDescriptor(descriptor)).storedHead).toMatchObject({ status: 'resolved' });
     expect(await restarted.isGraphAssetMaterialized(descriptor)).toBe(true);
@@ -642,7 +642,7 @@ describe('prepared recovery rechecks unpublished evidence after snapshot loading
     const gate = new Promise<void>(resolve => { release = resolve; });
     const loadVerifiedQuads = vi.fn(async () => { entered(); await gate; return inGraph(incoming); });
     const running = commitRecoveredSwmAsset({ contextGraphId: CG, asset: { kind: 'replace', descriptor, loadVerifiedQuads },
-      materializer: h.materializer, insertMetadata: rows => store.insert([...rows]), resolveRootAtomicCompanion: prepareCompanion });
+      materializer: h.materializer, metadataIngest: 'swm-sync', resolveRootAtomicCompanion: prepareCompanion });
     await ready;
     expect(readConfirmed).toHaveBeenCalledTimes(1); expect(loadVerifiedQuads).toHaveBeenCalledOnce();
     if (advance) confirmed = 2n;

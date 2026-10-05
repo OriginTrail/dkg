@@ -349,7 +349,7 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
     asset: asset.kind === 'replace' ? { kind: asset.kind, descriptor: asset.descriptor,
       loadVerifiedQuads: async () => asset.replacementQuads } : asset,
     materializer: ports.snapshotMaterializer,
-    insertMetadata: rows => ports.store.insert([...rows]),
+    metadataIngest: 'swm-recovery',
     mutationAttribution: { graphSource: 'agent.swmRecovery.graphScopedReplace', metadataSource: 'agent.swmRecovery.replaceMetaForGraphAssets' },
     resolveRootAtomicCompanion: ports.resolveRootAtomicCompanion,
   });
