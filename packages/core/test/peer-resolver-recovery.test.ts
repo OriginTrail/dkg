@@ -37,6 +37,7 @@ describe('PeerResolver recovery', () => {
     net.connectPeer = async (peerId, addresses, options) => {
       stages.push('connect');
       expect(options?.skipIdentityFallback).toBe(true);
+      expect(options?.allowResolvedPrivateDirect).toBe(true);
       expect(addresses).toEqual(['/ip4/178.104.54.178/tcp/9090']);
       net.__conns.set(peerId, [{ remoteAddr: { toString: () => addresses[0]! } }]);
     };
@@ -63,6 +64,7 @@ describe('PeerResolver recovery', () => {
     net.connectPeer = async (peerId, addresses, options) => {
       stages.push('connect');
       expect(options?.skipIdentityFallback).toBe(true);
+      expect(options?.allowResolvedPrivateDirect).toBe(true);
       expect(addresses).toEqual([privateRoute]);
       expect(net.__addedAddresses).toContainEqual({ peerId, addrs: [privateRoute] });
       net.__conns.set(peerId, [{ remoteAddr: { toString: () => privateRoute } }]);
@@ -157,6 +159,7 @@ describe('PeerResolver recovery', () => {
     net.__findPeerImpl = async () => [];
     net.connectPeer = async (peerId, addrs, opts) => {
       expect(opts?.skipIdentityFallback).toBeUndefined();
+      expect(opts?.allowResolvedPrivateDirect).toBeUndefined();
       expect(opts?.signal).toBeInstanceOf(AbortSignal);
       net.__connectCalls.push({ peerId, addrs });
       net.__conns.set(peerId, [{ remoteAddr: { toString: () => '/ip4/178.104.54.178/tcp/9090' } }]);
@@ -192,6 +195,46 @@ describe('PeerResolver recovery', () => {
       await started;
       await vi.advanceTimersByTimeAsync(14_999);
       expect(net.__conns.get(PEER_B)).toBeUndefined();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejection;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses one recovery deadline across slow resolution and a stalled dial', async () => {
+    vi.useFakeTimers();
+    try {
+      net.tryConnectRecoveryStage = async () => false;
+      net.__findPeerImpl = async () => [];
+      registry = {
+        lookup: () => new Promise((resolve) => {
+          setTimeout(() => resolve(['/ip4/178.104.54.178/tcp/9090']), 10_000);
+        }),
+      };
+      let dialStarted: () => void = () => undefined;
+      const started = new Promise<void>((resolve) => { dialStarted = resolve; });
+      net.connectPeer = async (_peerId, _addresses, options) => {
+        dialStarted();
+        await new Promise<never>((_resolve, reject) => {
+          const abort = () => reject(options!.signal!.reason);
+          if (options!.signal!.aborted) abort();
+          else options!.signal!.addEventListener('abort', abort, { once: true });
+        });
+      };
+      const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
+      const pending = resolver.connect(PEER_B, { recovery: { resolverTimeoutMs: 15_000 } });
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+      const rejection = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(net.__connectCalls).toEqual([]);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await started;
+      await vi.advanceTimersByTimeAsync(4_999);
       expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       await rejection;

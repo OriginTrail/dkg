@@ -532,7 +532,9 @@ export class PeerResolver {
     try {
       const outcome = await this.resolveAndConnect(
         peerId, opts, network, lifecycle.signal,
-        recoveryNetwork ? { skipIdentityFallback: true } : {},
+        recoveryNetwork
+          ? { skipIdentityFallback: true, allowResolvedPrivateDirect: true }
+          : {},
       );
       if (lifecycle.signal.aborted) throw lifecycle.signal.reason;
       if (outcome.status === 'connected' && this.network.getConnections(peerId).length === 0) {
@@ -556,7 +558,7 @@ export class PeerResolver {
     opts: ConnectOpts,
     network: PeerConnectionNetwork | undefined,
     signal?: AbortSignal,
-    transportOptions: Pick<PeerConnectOpts, 'skipIdentityFallback'> = {},
+    transportOptions: Pick<PeerConnectOpts, 'skipIdentityFallback' | 'allowResolvedPrivateDirect'> = {},
   ): Promise<PeerConnectionOutcome> {
     const addresses = await this.resolve(peerId, { ...opts, signal });
     if (signal?.aborted) throw new DOMException('Peer connection aborted', 'AbortError');

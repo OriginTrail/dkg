@@ -327,9 +327,30 @@ describe('connectLibp2pPeer', () => {
 
     await connectLibp2pPeer(host, TARGET, [privateRoute], {
       skipIdentityFallback: true,
+      allowResolvedPrivateDirect: true,
       configuredRelayTargets: [CONFIGURED_RELAYS[0]!],
     });
     expect(calls).toEqual([privateRoute]);
+  });
+
+  it('keeps private eligibility separate from identity fallback control', async () => {
+    const privateRoute = `/ip4/192.168.1.20/tcp/9091/p2p/${TARGET}`;
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn(async () => undefined),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    await expect(connectLibp2pPeer(host, TARGET, [privateRoute], {
+      skipIdentityFallback: true,
+    })).rejects.toMatchObject({ code: 'PEER_CONNECTION_UNRESOLVED' });
+    expect(host.dial).not.toHaveBeenCalled();
+
+    await expect(connectLibp2pPeer(host, TARGET, [privateRoute], {
+      allowResolvedPrivateDirect: true,
+      candidateTimeoutMs: 1,
+    })).resolves.toBeUndefined();
+    expect(host.dial.mock.calls.map(([target]) => targetString(target)))
+      .toEqual([privateRoute, TARGET]);
   });
 
   it('does not retry identity for a targetless, wrong-peer, or nonterminal private route', async () => {
@@ -347,6 +368,7 @@ describe('connectLibp2pPeer', () => {
     ]) {
       await expect(connectLibp2pPeer(host, TARGET, [route], {
         skipIdentityFallback: true,
+        allowResolvedPrivateDirect: true,
       })).rejects.toMatchObject({ code: 'PEER_CONNECTION_UNRESOLVED' });
     }
     expect(host.dial).not.toHaveBeenCalled();

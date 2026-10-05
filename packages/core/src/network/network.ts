@@ -53,6 +53,8 @@ export interface PeerConnectOpts {
   log?: (message: string) => void;
   /** Recovery already tried the cached peer-ID route before resolution. */
   skipIdentityFallback?: boolean;
+  /** Explicitly try resolved, terminal target-bound private direct routes. */
+  allowResolvedPrivateDirect?: boolean;
 }
 
 interface PeerRecoveryStageBase {

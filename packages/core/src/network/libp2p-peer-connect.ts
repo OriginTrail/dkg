@@ -334,7 +334,7 @@ export async function connectLibp2pPeer(
     canonicalPeerId,
     resolvedAddresses,
     options.configuredRelayTargets,
-    options.skipIdentityFallback,
+    options.allowResolvedPrivateDirect,
   );
 
   let lastCandidateError: unknown;
