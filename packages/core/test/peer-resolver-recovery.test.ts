@@ -23,10 +23,11 @@ describe('PeerResolver recovery', () => {
 
   it('recovery tries hint, cached peer, then resolver without a second identity fallback', async () => {
     const stages: string[] = [];
+    const forwardedHints: string[] = [];
     const hint = `/ip4/127.0.0.1/tcp/9090/p2p/${TARGET_PEER_ID}`;
     net.tryConnectRecoveryStage = async (_peerId, stage) => {
       stages.push(stage.kind);
-      if (stage.kind === 'hint') expect(stage.address).toBe(hint);
+      if (stage.kind === 'hint') forwardedHints.push(stage.address);
       return false;
     };
     net.__findPeerImpl = async () => {
@@ -44,6 +45,7 @@ describe('PeerResolver recovery', () => {
     await expect(resolver.connect(TARGET_PEER_ID, {
       recovery: { verifiedInitialAddress: hint },
     })).resolves.toMatchObject({ status: 'connected' });
+    expect(forwardedHints).toEqual([hint]);
     expect(stages).toEqual(['hint', 'cached', 'resolve', 'connect']);
   });
 

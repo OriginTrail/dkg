@@ -8986,10 +8986,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (
         !this.localApprovedAgentByCG.has(contextGraphId)
         || current?.subscribed !== true
-        // Generic `_meta` confirmation can clear the UI's pending marker
-        // before this approved join has recovered SWM readiness. It cannot
-        // terminate the authority retry while the subscription is unsynced.
-        || current.synced === true
+        // A concurrent data catch-up can set `synced` while authoritative
+        // join metadata is still pending or unknown. Only its explicit
+        // confirmation ends this join-specific retry.
+        || (current.synced === true && current.metaSynced === true && current.pendingMeta !== true)
       ) return;
     }
   }
@@ -10804,24 +10804,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // snapshot already read by the provenance phase. Load every persisted
       // row (not just rows under the activation cap) so a dormant subscription
       // still has the right signer when an operator activates it explicitly.
-      const approvedCuratorDialAddresses = new Map<string, string>();
-      if (persistedMembershipRows !== null) {
-        const persistedContextGraphIds = new Set(rows.map((row) => row.id));
-        const localAgentAddresses = new Set(
-          [...this.localAgents.keys()].map((address) => address.toLowerCase()),
-        );
-        const newestApprovalByContextGraph = projectPersistedJoinApprovals(
+      const newestApprovalByContextGraph = persistedMembershipRows === null
+        ? null
+        : projectPersistedJoinApprovals(
           persistedMembershipRows,
-          persistedContextGraphIds,
-          localAgentAddresses,
+          new Set(rows.map((row) => row.id)),
+          new Set([...this.localAgents.keys()].map((address) => address.toLowerCase())),
         );
+      if (newestApprovalByContextGraph) {
         for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
           this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
           if (approval.curatorPeerId) {
             this.preferredSyncPeers.set(contextGraphId, approval.curatorPeerId);
-            if (approval.curatorDialAddress) {
-              approvedCuratorDialAddresses.set(contextGraphId, approval.curatorDialAddress);
-            }
           }
         }
       }
@@ -11049,7 +11043,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             void this.recoverPendingJoinApprovalMetadata(
               row.id,
               curatorPeerId,
-              approvedCuratorDialAddresses.get(row.id),
+              newestApprovalByContextGraph?.get(row.id)?.curatorDialAddress,
             ).catch((error) => {
               this.log.warn(
                 ctx,

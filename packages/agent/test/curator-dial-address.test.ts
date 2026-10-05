@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { multiaddr } from '@multiformats/multiaddr';
-import { verifiedCuratorDialAddress } from '../src/curator-dial-address.js';
+import { selectCuratorJoinDialAddress, verifiedCuratorDialAddress } from '../src/curator-dial-address.js';
 
 const PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const OTHER_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
@@ -28,5 +28,26 @@ describe('verifiedCuratorDialAddress', () => {
     expect(multiaddr(oversizedAddress).toString()).toBe(oversizedAddress);
     expect(verifiedCuratorDialAddress(oversizedAddress, PEER_ID)).toBeUndefined();
     expect(verifiedCuratorDialAddress(null, PEER_ID)).toBeUndefined();
+  });
+});
+
+describe('selectCuratorJoinDialAddress', () => {
+  const lanAddress = `/ip4/192.168.1.20/tcp/9090/p2p/${PEER_ID}`;
+
+  it('prefers a verified LAN listener over an earlier loopback listener', () => {
+    expect(selectCuratorJoinDialAddress([ADDRESS, lanAddress], PEER_ID)).toBe(lanAddress);
+  });
+
+  it('keeps loopback available for local deployments', () => {
+    expect(selectCuratorJoinDialAddress([ADDRESS], PEER_ID)).toBe(ADDRESS);
+  });
+
+  it('ignores malformed, wrong-peer, and unspecified listeners', () => {
+    expect(selectCuratorJoinDialAddress([
+      'not a multiaddr',
+      `/ip4/127.0.0.1/tcp/9090/p2p/${OTHER_PEER_ID}`,
+      `/ip4/0.0.0.0/tcp/9090/p2p/${PEER_ID}`,
+      lanAddress,
+    ], PEER_ID)).toBe(lanAddress);
   });
 });

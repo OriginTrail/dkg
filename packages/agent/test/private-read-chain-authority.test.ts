@@ -1899,6 +1899,48 @@ describe('private read authorization uses the on-chain participant roster', () =
       expect(resume).toHaveBeenCalledTimes(2);
     });
 
+    it('keeps trying when data sync completes before authoritative metadata', async () => {
+      const { agent: member, internals } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        ...internals.subscribedContextGraphs.get(contextGraphId),
+        synced: true,
+        metaSynced: false,
+        pendingMeta: true,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps trying when data sync completes but join metadata remains unknown', async () => {
+      const { agent: member, internals } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        ...internals.subscribedContextGraphs.get(contextGraphId),
+        synced: true,
+        metaSynced: undefined,
+        pendingMeta: undefined,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(2);
+    });
+
     it('stops once the subscription is ready', async () => {
       const { agent: member, internals } = await restrictedMember();
       const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata').mockResolvedValue('retry');
