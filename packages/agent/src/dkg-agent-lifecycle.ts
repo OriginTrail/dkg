@@ -5665,7 +5665,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async canUseLegacySharedMemorySyncForContextGraphV1(this: DKGAgent, contextGraphId: string): Promise<boolean> {
     // The private predicate verifies local membership and current lane authority.
     return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
-      || await this.rfc64PrivateRootSwmOnLegacyLaneV1?.(contextGraphId) === true;
+      || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
   }
 
   /** One agent-owned admission decision for the legacy durable VM lane. */

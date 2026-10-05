@@ -651,11 +651,13 @@ describe('WorkerCatchupRunner agent bridge', () => {
 
   it('does not fall back to legacy SWM when catalog authority forbids it', async () => {
     const legacyAdmission = vi.fn((_contextGraphId: string) => false);
+    const privateMember = vi.fn().mockResolvedValue(false);
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
       rfc64LegacySwmGossipAllowedForContextGraph: legacyAdmission,
       canUseLegacySharedMemorySyncForContextGraphV1:
         RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
     });
 
     const posted = await invokeThroughBridge(
@@ -670,6 +672,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(calls.selectedShared).toEqual([]);
     expect(calls.shared).toEqual([]);
     expect(legacyAdmission).toHaveBeenCalledWith('cg-catalog-only');
+    expect(privateMember).toHaveBeenCalledWith('cg-catalog-only');
   });
 
   it('decides the selected SWM lane on every call, not once per job', async () => {

@@ -46,7 +46,11 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     const rfc64LegacySwmGossipAllowedForContextGraph = vi.fn(
       (contextGraphId: string) => contextGraphId === 'cg-legacy',
     );
-    const agent = { rfc64LegacySwmGossipAllowedForContextGraph };
+    const privateMember = vi.fn().mockResolvedValue(false);
+    const agent = {
+      rfc64LegacySwmGossipAllowedForContextGraph,
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+    };
     const allowed = LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1;
 
     await expect(allowed.call(agent as never, 'cg-legacy')).resolves.toBe(true);
@@ -55,6 +59,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       ['cg-legacy'],
       ['cg-catalog-only'],
     ]);
+    expect(privateMember).toHaveBeenCalledExactlyOnceWith('cg-catalog-only');
   });
 
   it('admits only a locally proven private member after legacy policy declines', async () => {
