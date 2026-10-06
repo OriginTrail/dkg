@@ -3,6 +3,13 @@
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import { deleteByPatternWithoutCount, isStoreOperationNotStarted, type TripleStore, type Quad, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
 
+/** What a destructive mutation names beyond its graph and subject. */
+export interface StoreMutationScope {
+  predicate?: string;
+  /** The inserted quads were not visible to the decorator. */
+  unscopedPayload?: boolean;
+}
+
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
   invalidate: () => void,
@@ -12,14 +19,19 @@ export function createListContextGraphsCacheInvalidatingStore(
     quads?: readonly Quad[],
     targetGraph?: string,
     targetSubject?: string,
+    scope?: StoreMutationScope,
   ) => void,
+  // Called before an inserting write is dispatched (no quads: they are unknown).
+  anticipateWrite?: (quads?: readonly Quad[]) => void,
 ): TripleStore & Partial<SortedGraphSetSource> {
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
     changed: (result: T) => boolean,
     markDirty?: () => void,
     operation?: StoreOperation,
+    anticipate?: () => void,
   ): Promise<T> => {
+    anticipate?.();
     try {
       const result = await work();
       if (changed(result)) {
@@ -58,6 +70,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => quads.length > 0,
         () => markProjectionDirty?.(quads),
         'insert',
+        () => anticipateWrite?.(quads),
       );
     },
     delete(quads, options) {
@@ -72,7 +85,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
-        () => markProjectionDirty?.(undefined, pattern.graph),
+        () => markProjectionDirty?.(undefined, pattern.graph, pattern.subject, { predicate: pattern.predicate }),
         'deleteByPattern',
       );
     },
@@ -80,7 +93,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => deleteByPatternWithoutCount(innerStore, pattern, options),
         () => true,
-        () => markProjectionDirty?.(undefined, pattern.graph),
+        () => markProjectionDirty?.(undefined, pattern.graph, pattern.subject, { predicate: pattern.predicate }),
         'deleteByPattern',
       );
     },
@@ -90,6 +103,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => isSparqlUpdateOperation(sparql),
         () => markProjectionDirty?.(),
         isSparqlUpdateOperation(sparql) ? 'query' : undefined,
+        isSparqlUpdateOperation(sparql) ? () => anticipateWrite?.() : undefined,
       );
     },
     hasGraph(graphUri, options) {
@@ -110,8 +124,9 @@ export function createListContextGraphsCacheInvalidatingStore(
       ? (graphUri, quads, options) => invalidateAfterMutation(
           () => innerStore.replaceGraph!(graphUri, quads, options),
           () => true,
-          () => markProjectionDirty?.(undefined, graphUri),
+          () => markProjectionDirty?.(quads, graphUri),
           'replaceGraph',
+          () => anticipateWrite?.(quads),
         )
       : undefined,
     // Rootless KA materialization replaces the assertion graph and its UAL
@@ -130,13 +145,13 @@ export function createListContextGraphsCacheInvalidatingStore(
               options,
             ),
             () => true,
-            // Both deletion targets are named. A graph-scoped invalidation
-            // covers inserted and removed facts without scanning the payload.
+            // Both deletion targets are named, the metadata one with its subject.
             () => {
-              markProjectionDirty?.(undefined, graphUri);
-              markProjectionDirty?.(undefined, metaGraphUri);
+              markProjectionDirty?.(graphQuads, graphUri);
+              markProjectionDirty?.(metadataQuads, metaGraphUri, metadataSubject);
             },
             'replaceGraphAndSubject',
+            () => anticipateWrite?.([...graphQuads, ...metadataQuads]),
           )
       : undefined,
     // #1863 — the async-lift publisher persists a job transition via this atomic
@@ -154,6 +169,7 @@ export function createListContextGraphsCacheInvalidatingStore(
             // invalidation distinguish exact atomic replacement paths.
             () => markProjectionDirty?.(quads, graphUri, subject),
             'replaceSubject',
+            () => anticipateWrite?.(quads),
           )
       : undefined,
     // RFC-64 author publication moves a complete public-SWM projection and
@@ -172,7 +188,8 @@ export function createListContextGraphsCacheInvalidatingStore(
             // target, including deleted facts, without losing the conservative
             // all-graph fallback used by genuinely opaque store mutations.
             if (markProjectionDirty === undefined) return;
-            markProjectionDirty(undefined, input.sharedProjectionGraph);
+            const unscoped = { unscopedPayload: true };
+            markProjectionDirty(undefined, input.sharedProjectionGraph, undefined, unscoped);
             markProjectionDirty(undefined, input.authorSealGraph);
             if ('currentHead' in input) {
               for (const transition of [
@@ -197,6 +214,7 @@ export function createListContextGraphsCacheInvalidatingStore(
             }
           },
           'rfc64AuthorCommitCasV1',
+          () => anticipateWrite?.(),
         )
       : undefined,
     listGraphs(options) {
@@ -235,6 +253,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => true,
         () => markProjectionDirty?.(),
         'update',
+        () => anticipateWrite?.(),
       )
       : undefined,
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,

@@ -79,6 +79,8 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
       1,
       undefined,
       manifest.sharedProjectionGraph,
+      undefined,
+      { unscopedPayload: true },
     );
     expect(markProjectionDirty.mock.calls.every((call) => call[1] !== undefined)).toBe(true);
 

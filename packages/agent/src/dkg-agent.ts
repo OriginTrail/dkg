@@ -458,6 +458,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
+import { createProjectionWriteHooks } from './internal/projection-write-hooks.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
@@ -1570,24 +1571,14 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
+    const projectionWriteHooks = createProjectionWriteHooks(() => agentRef?.contextGraphMetaProjection);
     const agentStore = createListContextGraphsCacheInvalidatingStore(
       store,
       () => {
         agentRef?.invalidateListContextGraphsCache();
       },
-      (quads, targetGraph) => {
-        if (!agentRef) return;
-        // #1863 — a single-graph destructive mutation (replaceSubject) passes its
-        // TARGET GRAPH so deleted facts are fenced, while replacement quads
-        // cover inserted authority facts.
-        if (targetGraph !== undefined) {
-          agentRef.contextGraphMetaProjection.markDirtyForGraph(targetGraph);
-          if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
-          return;
-        }
-        if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
-        else agentRef.contextGraphMetaProjection.markAllDirty();
-      },
+      projectionWriteHooks.markDirty,
+      projectionWriteHooks.anticipate,
     );
 
     const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory
