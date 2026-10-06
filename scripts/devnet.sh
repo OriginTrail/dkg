@@ -1179,8 +1179,15 @@ collect_devnet_node_pids() {
   fi
 
   if command -v ps >/dev/null 2>&1; then
+    # Only a node process (daemon, supervisor, worker, helpers) or a managed
+    # store binary (oxigraph*) that mentions the home counts as the node's.
+    # Anything else that merely names it (`tail -f <home>/daemon.log` from
+    # `devnet.sh logs`, an editor, a grep) is a bystander and is never signalled.
     ps_pids=$(ps eww -axo pid=,command= 2>/dev/null | awk -v root="$root_node" '
-      index($0, "DKG_HOME=" root) > 0 || index($0, root "/") > 0 { print $1 }
+      (index($0, "DKG_HOME=" root) > 0 || index($0, root "/") > 0) {
+        n = split($2, argv0, "/")
+        if (argv0[n] == "node" || argv0[n] ~ /^oxigraph/) print $1
+      }
     ' 2>/dev/null || true)
     for pid in $ps_pids; do pids+=" $pid"; done
   fi

@@ -26,10 +26,14 @@
  * SIGKILL, clear the dead PID files) and only then calls `devnet.sh
  * restart-node`. That script's own stop phase signals whatever the PID files
  * list without any check, so after our stop it finds no live entry to signal.
- * Not covered by this module: the script's stop phase also sweeps the process
- * table for processes that mention the node's home directory and their children
- * (the node's managed store servers and detached children), by design and
- * unchanged.
+ * The script's stop phase also sweeps the process table for processes that
+ * mention the node's home directory, and their children (the node's managed
+ * store servers and detached children). `devnet.sh` limits that sweep to node
+ * processes and managed store binaries (`oxigraph*`): a `tail -f <home>/daemon.log`
+ * (`devnet.sh logs`), an editor or a grep that only names the home is never
+ * signalled (tests: "devnet.sh stop phase"). A node or `oxigraph*` process that
+ * mentions the home (say a `DKG_HOME=<home> node cli.js status`) still counts as
+ * the node's, as it always has.
  *
  * Why the command line names the CHECKOUT and not the node's home: a daemon's
  * argv is `<node> [execArgv] <repoRoot>/packages/cli/dist/cli.js daemon-supervisor|daemon-worker`
@@ -440,7 +444,8 @@ export interface RestartNodeOptions {
  * if a live PID-file entry is not a daemon of this checkout), then
  * `scripts/devnet.sh restart-node <num>` with the devnet's port environment, then
  * wait until the node answers. The script's own stop phase signals PID-file
- * entries unchecked; running ours first leaves it no live entry to signal.
+ * entries unchecked; running ours first leaves it no live entry to signal. Its
+ * process-table sweep is limited to node and managed store processes.
  */
 export async function restartNodeAndWait(paths: DevnetPaths, options: RestartNodeOptions): Promise<void> {
   await stopNodeProcesses(paths, options.num, { readCommandLine: options.readCommandLine });

@@ -77,10 +77,14 @@ itself (`sigkillPids`) stays immediate. Restarts go through the same check: the
 suite's setup verifies both nodes before it edits a config, and `restartNodeAndWait`
 stops the node itself (verify, SIGTERM, SIGKILL after the grace period, remove the
 dead PID files) before it calls `devnet.sh restart-node`, whose own stop phase signals
-whatever the PID files list without a check and so finds nothing live. (That script
-also sweeps the process table for processes that mention the node's home directory,
-as it always has; the helpers do not change that.) The node's home is not used
-for it: `DKG_HOME` is only in the process environment, while the checkout path is
+whatever the PID files list without a check and so finds nothing live. The script's
+stop phase also sweeps the process table for processes that mention the node's home
+directory (its detached children and managed store servers). `devnet.sh` now limits
+that sweep to node processes and managed store binaries (`oxigraph*`), so a
+`tail -f <home>/daemon.log` (what `devnet.sh logs 4` runs), an editor or a grep that
+merely names the home is left alone; a node or `oxigraph*` process that mentions the
+home, such as a `DKG_HOME=<home> node cli.js status`, still counts as the node's. The
+node's home is not used for the ownership check itself: `DKG_HOME` is only in the process environment, while the checkout path is
 in every daemon's argv (`devnet.sh` runs nodes with `DKG_NO_BLUE_GREEN=1`). What it
 cannot tell apart is a recycled PID that became another daemon of this same
 checkout. This suite keeps its own choices as explicit arguments: an

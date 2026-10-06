@@ -1,7 +1,7 @@
 // No-devnet tests for the shared node-lifecycle helpers (node-lifecycle.ts): PID files,
 // the ownership rule (only this devnet's own, live PIDs, and only a daemon of this
 // checkout, are ever signalled), port resolution, the readiness probe, and the restart
-// wiring against a stand-in devnet.sh.
+// wiring against a stand-in devnet.sh, and which processes the real devnet.sh stop phase signals.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -750,5 +750,118 @@ describe('restartNodeAndWait', () => {
       }),
     ).rejects.toThrow();
     expect(api.seen).toEqual([]);
+  });
+});
+
+// The stop phase of `devnet.sh restart-node` (`stop_devnet_node_processes`) reaps the node's
+// processes by scanning the process table for the node's home directory. It must find the
+// node's own processes (daemon, helpers, a managed store binary) and nothing else: a
+// `tail -f <home>/daemon.log` (what `devnet.sh logs 4` runs) only mentions the home.
+describe('devnet.sh stop phase: which processes that mention the node home it signals', () => {
+  const devnetSh = join(import.meta.dirname, '../../scripts/devnet.sh');
+  const home = () => join(paths.devnetDir, 'node4');
+  const env = () => ({ ...process.env, DEVNET_DIR: paths.devnetDir });
+  const strayPids: number[] = [];
+
+  afterEach(() => {
+    for (const pid of strayPids.splice(0)) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+    }
+  });
+
+  /** Sources the real script and runs `body`, without blocking this process (children of the test must still be reaped). */
+  const run = (body: string) =>
+    new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const bash = spawn('bash', ['-c', `DEVNET_SOURCE_ONLY=1 source "${devnetSh}"; ${body}`], { env: env() });
+      let stdout = '';
+      let stderr = '';
+      bash.stdout.on('data', (chunk) => { stdout += chunk; });
+      bash.stderr.on('data', (chunk) => { stderr += chunk; });
+      bash.once('error', reject);
+      bash.once('close', (status) => resolve({ status, stdout, stderr }));
+    });
+
+  /** A `tail -f <home>/daemon.log`: names the home, is not part of the node. */
+  function logTail(): ChildProcess {
+    writeFileSync(join(home(), 'daemon.log'), 'line\n');
+    const child = spawn('tail', ['-f', join(home(), 'daemon.log')], { stdio: 'ignore' });
+    children.push(child);
+    return child;
+  }
+
+  /** A node process that mentions the home in its arguments (a daemon helper). */
+  const homeNode = () => sleeper({ argv: [join(home(), 'work')] });
+
+  /** A process named like the managed store binary (`oxigraph-v<version>`) working in the home. */
+  function homeStore(): ChildProcess {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', join(home(), 'store')], {
+      argv0: 'oxigraph-v0.0.0',
+      stdio: 'ignore',
+    });
+    children.push(child);
+    return child;
+  }
+
+  const alive = (child: ChildProcess) => child.exitCode === null && child.signalCode === null && pidAlive(child.pid!);
+  const collected = async () => (await run('collect_devnet_node_pids 4')).stdout.split(/\s+/).filter(Boolean).map(Number);
+
+  it('lists a node process and a managed store binary that mention the home, and not a log tail', async () => {
+    const node = homeNode();
+    const store = homeStore();
+    const tail = logTail();
+    const pids = await collected();
+    expect(pids).toEqual(expect.arrayContaining([node.pid, store.pid]));
+    expect(pids).not.toContain(tail.pid);
+  });
+
+  it('does not list a process that mentions another node\'s home', async () => {
+    const other = sleeper({ argv: [join(paths.devnetDir, 'node5', 'work')] });
+    expect(await collected()).not.toContain(other.pid);
+  });
+
+  it('stops the node\'s own processes and leaves the log tail running', async () => {
+    const node = homeNode();
+    const store = homeStore();
+    const tail = logTail();
+    const result = await run('stop_devnet_node_processes 4');
+    expect(result.status, result.stderr).toBe(0);
+    expect(await exited(node), 'the node process is reaped').toBe(true);
+    expect(await exited(store), 'the managed store binary is reaped').toBe(true);
+    expect(alive(tail), 'the log tail is a bystander').toBe(true);
+  });
+
+  it('restartNodeAndWait, through the real script\'s restart-node, leaves a log tail alone', async () => {
+    // The real script's restart-node with only start_node replaced by a recorder.
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(
+      join(root, 'scripts/devnet.sh'),
+      [
+        '#!/usr/bin/env bash',
+        `export DEVNET_DIR="${paths.devnetDir}"`,
+        `DEVNET_SOURCE_ONLY=1 source "${devnetSh}"`,
+        'start_node() { echo "start_node $1" >> "$DEVNET_DIR/start-node-called"; }',
+        'cmd_restart_node "$@"',
+      ].join('\n'),
+    );
+    writeFileSync(join(paths.devnetDir, 'node1', 'config.json'), JSON.stringify({ apiPort: 9333, listenPort: 10222 }));
+    // restartNodeAndWait blocks this process while the script runs, so a child of ours that the
+    // script kills would stay a zombie (the script waits on it) until it returns. A node's own
+    // processes are not children of the caller: start the store from a launcher that exits.
+    const launcher = spawnSync(
+      process.execPath,
+      ['-e', "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', process.argv[1]], { argv0: 'oxigraph-v0.0.0', detached: true, stdio: 'ignore' }); c.unref(); console.log(c.pid)", join(home(), 'store')],
+      { encoding: 'utf8' },
+    );
+    const storePid = Number(launcher.stdout.trim());
+    strayPids.push(storePid);
+    expect(pidAlive(storePid), 'the stand-in store must be running before the restart').toBe(true);
+    const tail = logTail();
+    const api = await listen(() => ({ status: 200 }));
+    await restartNodeAndWait(paths, {
+      num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'x', timeoutMs: 5_000, pollIntervalMs: 50,
+    });
+    expect(readFileSync(join(paths.devnetDir, 'start-node-called'), 'utf8')).toBe('start_node 4\n');
+    expect(pidAlive(storePid), 'the managed store binary is reaped by the stop phase').toBe(false);
+    expect(alive(tail), 'the log tail survives the restart').toBe(true);
   });
 });
