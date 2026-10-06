@@ -67,6 +67,13 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       }
     });
 
+    it('sees a bracketed predicate and remembers a bracketed graph under its bare name', async () => {
+      const fence = await readyFence([]);
+      const bracketed = { subject: AGENT, predicate: `<${DKG_ONTOLOGY.DKG_PEER_ID}>`, object: '"p"', graph: `<${DATA_GRAPH}>` };
+      expect(moved(fence, () => fence.noteQuads([bracketed]))).toBe(true);
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+    });
+
     it('does not move for a key predicate on a subject that is not an agent', async () => {
       const fence = await readyFence();
       const quads = [...RECIPIENT_KEY_ROUTE_PREDICATES].flatMap((predicate) => [

@@ -318,6 +318,7 @@ export default defineConfig({
       "test/replace-subject-agent-wrapper.test.ts",
       "test/recipient-key-route-fence.test.ts",
       "test/recipient-key-route-fence-wrapper.test.ts",
+      "test/recipient-key-route-fence.property.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
