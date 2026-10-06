@@ -93,7 +93,7 @@
     "packages/cli/src/daemon/routes/hermes.ts": 893,
     "packages/cli/src/daemon/routes/knowledge-assets-import.ts": 2280,
     "packages/cli/src/daemon/routes/knowledge-assets.ts": 1938,
-    "packages/cli/src/daemon/routes/memory.ts": 2102,
+    "packages/cli/src/daemon/routes/memory.ts": 2055,
     "packages/cli/src/daemon/routes/openclaw.ts": 1058,
     "packages/cli/src/daemon/routes/pca.ts": 899,
     "packages/cli/src/daemon/routes/query.ts": 1222,

@@ -69,6 +69,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
+import { handleSharedMemoryHostCatchupRoute } from './shared-memory-host-catchup.js';
 import {
   DashboardDB,
   MetricsCollector,
@@ -1170,69 +1171,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     });
   }
 
-  // OT-RFC-38 LU-6 -- dedicated host-catchup endpoint.
-  //
-  // POST /api/shared-memory/host-catchup
-  // Body: { contextGraphId: string, peerId?: string, sinceSeqno?: number, maxRounds?: number,
-  //         maxEntriesPerRound?: number, includeEntries?: boolean }
-  //
-  // `maxEntriesPerRound` sets the page size asked of each host. The agent
-  // signs and sends the value capped at the protocol's limit of 1024 entries.
-  // `includeEntries` adds, per peer, the seqno and SHA-256 of every envelope
-  // that peer served, in order: the evidence of what a host holds.
-  //
-  // Pulls opaque ciphertext envelopes from cores that have been
-  // hosting the curated CG's SWM substrate and re-applies each
-  // through the local agent so the existing Sender-Key decrypt
-  // path runs verbatim. Distinct from the "fallback" leg embedded
-  // in /catchup above -- exposed so operators can debug host
-  // hosting independently (e.g. to confirm a specific core has
-  // stored ciphertext for a CG).
-  if (req.method === 'POST' && path === '/api/shared-memory/host-catchup') {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    if (typeof parsed.contextGraphId !== 'string' || !parsed.contextGraphId.trim()) {
-      return jsonResponse(res, 400, { error: 'Missing or invalid "contextGraphId"' });
-    }
-    const cgId = parsed.contextGraphId.trim();
-    const peerIdParam = typeof parsed.peerId === 'string' ? parsed.peerId.trim() : undefined;
-    const sinceSeqno = typeof parsed.sinceSeqno === 'number' && parsed.sinceSeqno >= 0 ? Math.floor(parsed.sinceSeqno) : 0;
-    const maxRounds = typeof parsed.maxRounds === 'number' && parsed.maxRounds > 0 ? Math.min(64, Math.floor(parsed.maxRounds)) : 8;
-    // Left undefined unless asked for, so the host's own default page applies.
-    const maxEntriesPerRound = typeof parsed.maxEntriesPerRound === 'number' && parsed.maxEntriesPerRound >= 1
-      ? Math.floor(parsed.maxEntriesPerRound)
-      : undefined;
-    const reportEntries = parsed.includeEntries === true;
-    if (typeof (agent as any).catchupSwmFromConnectedHosts !== 'function') {
-      return jsonResponse(res, 501, { error: 'Host-catchup is not supported on this agent build' });
-    }
-    try {
-      const peerResults = await (agent as any).catchupSwmFromConnectedHosts(cgId, {
-        peers: peerIdParam ? [peerIdParam] : undefined,
-        sinceSeqno,
-        maxRounds,
-        ...(maxEntriesPerRound !== undefined ? { maxEntriesPerRound } : {}),
-        ...(reportEntries ? { reportEntries } : {}),
-      });
-      // Codex PR #610 R2: report triples (`appliedTriples`) as the
-      // user-facing total; keep envelope count alongside as
-      // `appliedEnvelopes` for diagnostics. Same fix as the
-      // `/catchup` fallback leg above.
-      const appliedTotal = peerResults.reduce((sum: number, r: any) => sum + (r.appliedTriples ?? 0), 0);
-      const appliedEnvelopes = peerResults.reduce((sum: number, r: any) => sum + (r.applied ?? 0), 0);
-      const fetchedTotal = peerResults.reduce((sum: number, r: any) => sum + (r.fetched ?? 0), 0);
-      return jsonResponse(res, 200, {
-        contextGraphId: cgId,
-        peers: peerResults,
-        appliedTotal,
-        appliedEnvelopes,
-        fetchedTotal,
-      });
-    } catch (err: any) {
-      return jsonResponse(res, 500, { error: err?.message ?? String(err) });
-    }
-  }
+  // OT-RFC-38 LU-6 -- POST /api/shared-memory/host-catchup (see the module for the contract).
+  if (await handleSharedMemoryHostCatchupRoute(ctx)) return;
 
   // OT-RFC-38 LU-6 -- host-mode store diagnostics.
   // GET /api/shared-memory/host-mode/stats
