@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
  * VM exact-recovery holder tier — live devnet coverage.
  *
  * Precondition: `pnpm run build && ./scripts/devnet.sh start 6`. The suite
- * restarts nodes 1, 5 and 6 itself (see automated.test.ts), so it takes a while:
+ * restarts nodes 1 to 6 itself (see automated.test.ts), so it takes a while:
  * the hooks cover the publish + restart choreography, the test the convergence.
  *
  * Run via: `pnpm test:devnet:vm-holder-tier`

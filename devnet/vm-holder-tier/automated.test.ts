@@ -14,10 +14,15 @@
  *     before anything is published: a Core with VM reconciliation off declines
  *     every public StorageACK and never back-fills a public graph, so it never
  *     holds this one (a Core with it on fills its gaps from the other Cores within
- *     a minute of a restart, which the first live run showed). Core 4 then creates
- *     the graph and publishes N KAs: cores 2 and 3 sign and hold them. Core 4 - the
- *     graph's curator and author - is stopped afterwards, for the rest of the
- *     suite, so the curator tier of the recovery roster points at an offline peer.
+ *     a minute of a restart, which the first live run showed). Cores 2 to 4 are
+ *     then restarted so they reserve on the fresh relay (its restart dropped every
+ *     reservation, and a node that kept finding none waits out a ten minute
+ *     cooldown), and the suite waits until each advertises a circuit address
+ *     through core 1: that address is the only way an edge that knows just their
+ *     profiles can reach them. Core 4 then creates the graph and publishes N KAs:
+ *     cores 2 and 3 sign and hold them. Core 4 - the graph's curator and author -
+ *     is stopped afterwards, for the rest of the suite, so the curator tier of the
+ *     recovery roster points at an offline peer.
  *   - Edges 5 and 6 are restarted with `DEVNET_EDGE_BOOTSTRAP_CORES=1`, so their
  *     only bootstrap peer (and relay) is core 1, with the periodic peer-sync
  *     reconciler off so nothing but the subscribe catch-up and the VM reconcile
@@ -25,24 +30,49 @@
  *   - Edge 5 runs the default build. Edge 6 is the control: the same node with
  *     `DKG_VM_RECONCILE_HOLDER_TIER=0`, i.e. the behavior before the tier.
  *
- * What is asserted, and what is only recorded. Edge 5 must reach N/N (the
- * regression: the default path works in this topology) and, when its VM
- * reconcile pass resolved the tier, the resolution must be real - hinted holders
- * across ShardingTable identities, every profile bound. The control's count and
- * both edges' connections are RECORDED, not asserted: the subscribe catch-up's
- * connection-priming walk (`primeCatchupConnections`) dials core-role phonebook
- * profiles on its own, so on a six-node devnet the control can reach the holders
- * without the tier. Set `HOLDER_TIER_STRICT_CONTROL=1` to also require that the
- * control does not converge (it holds when priming does not reach the holders).
- * The in-process libp2p and Hardhat suites in packages/agent are the
- * discriminating evidence; this one is the live, real-node regression.
+ * What is asserted. Everything about the tier itself is asserted
+ * UNCONDITIONALLY on the enabled edge, from the daemon's own log, as one causal
+ * chain that only the holder tier can produce:
+ *   1. the VM reconcile pass resolved the tier for the graph: at least two
+ *      hinted holders across at least two ShardingTable identities, BOTH holder
+ *      cores among the hinted peers (a peer is hinted only when its profile's
+ *      wallet resolves on chain to a ShardingTable identity, so this is the
+ *      wallet-to-identity binding of both cores), and `unmatched=0`: no core-role
+ *      row the pass read failed that binding (true here because every core-role
+ *      profile on this devnet is a ShardingTable member's). The stats line's
+ *      `unbound` is not asserted: the phonebook query admits only rows with a
+ *      well-formed wallet, so it is always 0 by construction and shows nothing;
+ *   2. the recovery pass then found a hinted holder NOT connected and dialed it
+ *      itself ("dialing hinted ShardingTable holder"): a peer that an earlier
+ *      connection had already made reachable is never dialed, so this line is
+ *      absent when something else connected the edge first;
+ *   3. an exact fetch from that dialed holder came back `disposition=found`;
+ *   4. the edge reaches N/N KAs.
+ * A change that disables the tier or hides its hints removes 1 to 3 and fails
+ * the suite.
+ *
+ * The tier-off control (edge 6) is INFORMATIONAL, not a pass criterion for the
+ * feature. Its KA count and both edges' connections are only recorded: the
+ * subscribe catch-up's connection-priming walk (`primeCatchupConnections`) and
+ * the VM sweep's cached-miss check both dial the core-role phonebook profiles
+ * that advertise a relay, with no help from the tier, and on a devnet the only
+ * address either has for a holder is the relay circuit its profile advertises
+ * (loopback addresses are never published). Nothing here can keep priming from
+ * reaching a holder while still letting the tier reach it, so whether the
+ * control converges is timing, not evidence: it reached N/N through the priming
+ * walk in 7 of 11 live runs. The one thing asserted about it is that its kill
+ * switch is honoured (no tier line, no dial line). `HOLDER_TIER_STRICT_CONTROL=1`
+ * additionally requires that it does not converge, for a run known not to prime
+ * in time. "Without the tier the holder is never reached" is asserted
+ * deterministically by the in-process libp2p and Hardhat suites in
+ * packages/agent.
  *
  * Preconditions:
  *   pnpm run build
  *   ./scripts/devnet.sh start 6
  * Run: pnpm test:devnet:vm-holder-tier
  *
- * The suite restarts nodes 1, 5 and 6 and stops node 4 (never node identities,
+ * The suite restarts nodes 1 to 6 and stops node 4 (never node identities,
  * wallets or chain state) and publishes only into its own freshly created
  * Context Graph. Evidence is written to `.devnet/vm-holder-tier-evidence.json`.
  */
@@ -130,6 +160,29 @@ async function connectedPeerIds(node: DevnetNode): Promise<Set<string>> {
   return new Set((json?.connections ?? []).map((c: { peerId: string }) => c.peerId));
 }
 
+/**
+ * A node holds a relay reservation when it advertises a circuit address through
+ * that relay: the address a peer that only knows this node's profile dials.
+ */
+async function hasRelayReservation(node: DevnetNode, relayPeerId: string): Promise<boolean> {
+  const { status, json } = await getJson(node, '/api/status');
+  return status === 200
+    && Array.isArray(json?.multiaddrs)
+    && (json.multiaddrs as string[]).some((address) => address.includes(`/p2p/${relayPeerId}/p2p-circuit`));
+}
+
+async function waitForRelayReservation(node: DevnetNode, relayPeerId: string, budgetMs = 240_000): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  do {
+    if (await hasRelayReservation(node, relayPeerId)) return;
+    await sleep(3_000);
+  } while (Date.now() < deadline);
+  throw new Error(
+    `core ${node.num} holds no relay reservation on core ${RELAY_CORE} after ${budgetMs} ms: `
+      + 'an edge that only knows its profile could not dial it, so the topology is not usable',
+  );
+}
+
 /** Distinct finalized subjects the node holds in the graph's Verifiable Memory. */
 async function vmCount(node: DevnetNode, cgId: string): Promise<number> {
   try {
@@ -150,6 +203,9 @@ const logPath = (node: DevnetNode): string => join(node.home, 'daemon.log');
 function logSize(node: DevnetNode): number {
   return existsSync(logPath(node)) ? statSync(logPath(node)).size : 0;
 }
+
+/** The last 8 characters of a peer id: how the daemon's log names peers. */
+const shortId = (peerId: string): string => peerId.slice(-8);
 
 /** This suite's lines only: written after the node's last restart and naming its graph. */
 function suiteLog(node: DevnetNode, offset: number, cgId: string): string[] {
@@ -195,7 +251,16 @@ beforeAll(async () => {
   // 1. Core 1 declines ACKs and never back-fills; core 4 then creates its own
   //    public graph and publishes, so only cores 2, 3 and 4 hold it.
   await restartNode(RELAY_CORE, { DKG_VM_RECONCILER_ENABLED: '0' });
-  await sleep(20_000); // let cores 2-4 re-reserve their relay slots on core 1
+  // The relay's restart dropped every circuit reservation it held, and a node
+  // whose watchdog kept finding none waits out a ten-minute cooldown before it
+  // asks again (a first live run of this suite left both holders unreachable
+  // for the whole wait). Restart the cores an edge must later reach through
+  // core 1, so each reserves on the fresh relay and re-meshes with the others,
+  // and wait until each advertises a circuit address through it.
+  for (const n of [...HOLDER_CORES, AUTHOR_CORE]) await restartNode(n);
+  for (const n of [...HOLDER_CORES, AUTHOR_CORE]) {
+    await waitForRelayReservation(state.nodes[n]!, peerIds[RELAY_CORE]!);
+  }
   const slug = `vm-holder-tier-${Date.now().toString(36)}`;
   const created = await runDkgCli(author, [
     'context-graph', 'create', slug,
@@ -246,6 +311,13 @@ describe('VM exact recovery holder tier on a live devnet', () => {
     const { state, peerIds, holderCounts } = topology;
     expect(Math.max(...HOLDER_CORES.map((n) => holderCounts[n]!)), 'a holder core has the whole graph').toBe(N_KAS);
     expect(holderCounts[RELAY_CORE], 'the relay core must lack the graph').toBeLessThan(N_KAS);
+    // ...but every holder core is reachable through the one relay both edges know.
+    for (const holder of HOLDER_CORES) {
+      expect(
+        await hasRelayReservation(state.nodes[holder]!, peerIds[RELAY_CORE]!),
+        `core ${holder} holds a relay reservation on core ${RELAY_CORE}`,
+      ).toBe(true);
+    }
     for (const edgeNum of [EDGE_TIER_ON, EDGE_CONTROL]) {
       const connected = await connectedPeerIds(state.nodes[edgeNum]!);
       expect(connected.has(peerIds[RELAY_CORE]!), `edge ${edgeNum} reaches core ${RELAY_CORE}`).toBe(true);
@@ -278,33 +350,72 @@ describe('VM exact recovery holder tier on a live devnet', () => {
 
     const edgeLines = suiteLog(edge, logOffsets[EDGE_TIER_ON]!, cgId);
     const controlLines = suiteLog(control, logOffsets[EDGE_CONTROL]!, cgId);
-    const tierLines = edgeLines.filter((line) => line.includes('VM exact fetch holder tier'));
-    const fetchedFrom = HOLDER_CORES.filter((n) =>
-      edgeLines.some((line) => line.includes(`from ${peerIds[n]!.slice(-8)}:`) && line.includes('VM exact fetch for')));
+    const isTierLine = (line: string) => line.includes('VM exact fetch holder tier for');
+    const isDialLine = (line: string) => line.includes('VM exact fetch dialing hinted ShardingTable holder');
+    const tierLines = edgeLines.filter(isTierLine);
+    const firstTierAt = edgeLines.findIndex(isTierLine);
+    const dialedAt = (holder: number) => edgeLines.findIndex(
+      (line) => isDialLine(line) && line.includes(`holder ${shortId(peerIds[holder]!)} `),
+    );
+    const foundAt = (holder: number) => edgeLines.findIndex(
+      (line) => line.includes(`from ${shortId(peerIds[holder]!)}:`)
+        && line.includes('VM exact fetch for')
+        && line.includes('disposition=found'),
+    );
+    const dialedAndFetched = HOLDER_CORES.filter((n) => dialedAt(n) >= 0 && foundAt(n) > dialedAt(n));
     const connectedAfter = await connectedPeerIds(edge);
     const controlConnectedAfter = await connectedPeerIds(control);
     const reached = (connected: Set<string>) => HOLDER_CORES.filter((n) => connected.has(peerIds[n]!));
+    const stat = (name: string): number => Number(new RegExp(`${name}=(\\d+)`).exec(tierLines.at(-1) ?? '')?.[1] ?? Number.NaN);
     evidence.tierLogLines = tierLines.slice(-3);
-    evidence.edgeFetchedFromHolderCores = fetchedFrom;
+    evidence.tierStats = {
+      profiles: stat('profiles'),
+      unbound: stat('unbound'),
+      unmatched: stat('unmatched'),
+      pages: stat('pages'),
+      lookups: stat('lookups'),
+      identities: Number(/across (\d+) identit/.exec(tierLines.at(-1) ?? '')?.[1] ?? Number.NaN),
+    };
+    evidence.edgeDialedHolderCores = HOLDER_CORES.filter((n) => dialedAt(n) >= 0);
+    evidence.edgeFetchedFoundFromHolderCores = HOLDER_CORES.filter((n) => foundAt(n) >= 0);
+    evidence.edgeDialedThenFetchedFromHolderCores = dialedAndFetched;
     evidence.edgeConnectedHolderCores = reached(connectedAfter);
     evidence.controlConnectedHolderCores = reached(controlConnectedAfter);
-    evidence.controlTierLogLines = controlLines.filter((line) => line.includes('VM exact fetch holder tier')).length;
-    evidence.edgeTierResolvedForGraph = tierLines.length > 0;
+    evidence.controlTierOrDialLogLines = controlLines.filter((l) => isTierLine(l) || isDialLine(l)).length;
     writeFileSync(join(DEVNET_DIR, 'vm-holder-tier-evidence.json'), JSON.stringify(evidence, null, 2));
 
-    // The default path works in this topology.
-    expect(edgeCount, 'edge with the holder tier reaches the full KA count').toBe(N_KAS);
-    expect(fetchedFrom.length + reached(connectedAfter).length, 'the data came from holder cores').toBeGreaterThan(0);
-    // When the VM reconcile pass resolved the tier, the resolution is real: the
-    // ShardingTable identities, their bound wallets and the profiles line up.
-    if (tierLines.length > 0) {
-      const last = tierLines.at(-1)!;
-      const hinted = Number(/(\d+) hinted ShardingTable holder\(s\)/.exec(last)?.[1] ?? 0);
-      expect(hinted, `hinted holders in: ${last}`).toBeGreaterThanOrEqual(HOLDER_CORES.length);
-      expect(last).toMatch(/unbound=0/);
+    // 1. The tier resolved for the graph, and the resolution is real: hinted
+    //    peers exist only for wallets the chain bound to ShardingTable identities.
+    expect(tierLines.length, 'the enabled edge resolved the holder tier for the graph').toBeGreaterThan(0);
+    const last = tierLines.at(-1)!;
+    const hinted = Number(/(\d+) hinted ShardingTable holder\(s\)/.exec(last)?.[1] ?? 0);
+    expect(hinted, `hinted holders in: ${last}`).toBeGreaterThanOrEqual(HOLDER_CORES.length);
+    const identities = Number(/across (\d+) identit/.exec(last)?.[1] ?? 0);
+    expect(identities, `ShardingTable identities behind the hinted holders in: ${last}`).toBeGreaterThanOrEqual(HOLDER_CORES.length);
+    // Every core-role row read resolved to a ShardingTable identity (`unbound` would show nothing:
+    // the phonebook query never returns a row without a well-formed wallet).
+    expect(last).toMatch(/unmatched=0\b/);
+    const hintedPeers = (/\[peers=([^\]]*)\]/.exec(last)?.[1] ?? '').split(',');
+    for (const holder of HOLDER_CORES) {
+      expect(hintedPeers, `core ${holder} is among the hinted peers in: ${last}`).toContain(shortId(peerIds[holder]!));
     }
-    // The kill switch is honoured: the control never resolves the tier.
-    expect(controlLines.filter((line) => line.includes('VM exact fetch holder tier'))).toEqual([]);
+    // 2 + 3. A hinted holder that was not connected was dialed by the recovery
+    //    pass itself, after the tier resolved, and then served the data.
+    expect(
+      dialedAndFetched.length,
+      'a hinted holder core was dialed by the recovery pass and then served the graph '
+        + `(dialed: ${JSON.stringify(evidence.edgeDialedHolderCores)}, `
+        + `found: ${JSON.stringify(evidence.edgeFetchedFoundFromHolderCores)}, `
+        + `connected at the end: ${JSON.stringify(evidence.edgeConnectedHolderCores)})`,
+    ).toBeGreaterThan(0);
+    for (const holder of dialedAndFetched) {
+      expect(dialedAt(holder), `core ${holder} was dialed after the tier resolved`).toBeGreaterThan(firstTierAt);
+    }
+    // 4. The whole graph arrived.
+    expect(edgeCount, 'edge with the holder tier reaches the full KA count').toBe(N_KAS);
+
+    // The kill switch is honoured: the control neither resolves the tier nor dials a hinted holder.
+    expect(controlLines.filter((line) => isTierLine(line) || isDialLine(line))).toEqual([]);
     if (STRICT_CONTROL) {
       expect(controlCount, 'the tier-off control must not converge in a topology that isolates the holders').toBeLessThan(N_KAS);
     }
