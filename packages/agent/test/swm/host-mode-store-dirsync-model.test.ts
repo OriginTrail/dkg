@@ -32,7 +32,7 @@
  * Seeded means the failures and the order in which fsyncs finish are drawn from
  * the seed; how they interleave with the real file I/O underneath is not, so a
  * failing seed is a pointer to the trace it prints, not an exact replay. The
- * deterministic regression tests in host-mode-store-durability.test.ts pin the
+ * deterministic regression tests in host-mode-store-dirsync-retries.test.ts pin the
  * known cases; this test is the net for the ones nobody thought of.
  *
  * The default seed count keeps this in the unit lane's budget. For a wide run:
