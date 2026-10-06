@@ -51,7 +51,7 @@ describe('PeerResolver recovery', () => {
   });
 
   it('primes a newly discovered private listener after the cached stage failed', async () => {
-    const privateRoute = `/ip4/192.168.1.20/tcp/9091/p2p/${TARGET_PEER_ID}`;
+    const privateRoute = '/ip4/192.168.1.20/tcp/9091';
     const stages: string[] = [];
     net.tryConnectRecoveryStage = async (_peerId, stage) => {
       stages.push(stage.kind);
@@ -239,6 +239,36 @@ describe('PeerResolver recovery', () => {
       await vi.advanceTimersByTimeAsync(1);
       await rejection;
       expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops waiting when the recovery deadline expires during registry lookup', async () => {
+    vi.useFakeTimers();
+    try {
+      net.tryConnectRecoveryStage = async () => false;
+      net.__findPeerImpl = async () => [];
+      let finishRegistry: (addresses: string[]) => void = () => undefined;
+      registry = {
+        lookup: () => new Promise((resolve) => { finishRegistry = resolve; }),
+      };
+      const resolver = new PeerResolver({ network: net, registry, agentDirectory: makeAgentDir() });
+      const pending = resolver.connect(PEER_B, { recovery: { resolverTimeoutMs: 15_000 } });
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+      const rejection = expect(pending).rejects.toMatchObject({ name: 'TimeoutError' });
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(settled).toBe(false);
+      expect(net.__connectCalls).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejection;
+      expect(settled).toBe(true);
+      expect(net.__connectCalls).toEqual([]);
+      finishRegistry(['/ip4/178.104.54.178/tcp/9090']);
+      await Promise.resolve();
+      expect(net.__addedAddresses).toEqual([]);
+      expect(net.__connectCalls).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

@@ -172,8 +172,13 @@ export {
   // Public-address classifier (used by profile.ts to filter what we
   // advertise as `dkg:multiaddr` so peers don't learn RFC1918/CGNAT
   // entries from the phonebook).
+  isIpLoopbackAddress,
   isPublicLikeAddress,
   isLocalOrInternalHostname,
+  isLocalhostAddress,
+  isLocalhostHostname,
+  isLoopbackAddress,
+  isUnspecifiedAddress,
 } from './node.js';
 // Transport-level network isolation. `peerIdFromRelayAddress` is shared with
 // the CLI, which derives other-network relay ids from bundled network configs.

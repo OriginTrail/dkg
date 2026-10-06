@@ -37,7 +37,7 @@ async function connectCurator(
 ): Promise<boolean> {
   const verifiedAddress = verifiedCuratorDialAddress(addressHint, curatorPeerId);
   try {
-    await agent.peerResolver.connect(curatorPeerId, {
+    const outcome = await agent.peerResolver.connect(curatorPeerId, {
       signal,
       recovery: {
         verifiedInitialAddress: verifiedAddress,
@@ -49,9 +49,7 @@ async function connectCurator(
       candidateTimeoutMs: 5_000,
     });
     throwIfAborted(signal);
-    return agent.node.libp2p.getConnections().some((connection) => (
-      connection.remotePeer.toString() === curatorPeerId
-    ));
+    return outcome.status === 'connected';
   } catch (error) {
     throwIfAborted(signal);
     agent.log.warn(

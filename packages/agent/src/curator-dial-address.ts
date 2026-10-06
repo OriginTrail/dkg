@@ -2,7 +2,10 @@
 
 import {
   canonicalPeerIdString,
+  isIpLoopbackAddress,
+  isLoopbackAddress,
   isPublicLikeAddress,
+  isUnspecifiedAddress,
   parseLibp2pConnectCandidate,
 } from '@origintrail-official/dkg-core';
 
@@ -33,12 +36,8 @@ export function selectCuratorJoinDialAddress(
   let privateRemote: string | undefined;
   for (const address of addresses) {
     const verified = verifiedCuratorDialAddress(address, peerId);
-    if (!verified || verified.startsWith('/ip4/0.0.0.0/') || verified.startsWith('/ip6/::/')) continue;
-    if (
-      /^\/ip4\/127(?:\.\d{1,3}){3}\//.test(verified)
-      || /^\/ip6\/(?:::1|0:0:0:0:0:0:0:1)\//i.test(verified)
-      || /^\/dns(?:4|6|addr)?\/(?:localhost|[^/]+\.localhost)\//i.test(verified)
-    ) {
+    if (!verified || isUnspecifiedAddress(verified)) continue;
+    if (isLoopbackAddress(verified)) {
       if (verified.includes('/p2p-circuit')) loopbackCircuit ??= verified;
       else directLoopback ??= verified;
       continue;
@@ -62,7 +61,6 @@ export function requesterHasDirectLoopbackConnection(
     const address = connection.remoteAddr?.toString();
     return address !== undefined
       && !address.includes('/p2p-circuit')
-      && (/^\/ip4\/127(?:\.\d{1,3}){3}\//.test(address)
-        || /^\/ip6\/(?:::1|0:0:0:0:0:0:0:1)\//i.test(address));
+      && isIpLoopbackAddress(address);
   });
 }

@@ -1,7 +1,7 @@
 import { peerIdFromString } from '@libp2p/peer-id';
 import type { PeerId } from '@libp2p/interface';
 import { multiaddr, type Component, type Multiaddr } from '@multiformats/multiaddr';
-import { isPublicLikeAddress } from './address-policy.js';
+import { isPublicLikeAddress, isUnspecifiedAddress } from './address-policy.js';
 import type { Address, NodeIdentity, PeerConnectOpts, PeerRecoveryStageOpts } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
@@ -118,20 +118,26 @@ function planLibp2pPeerConnectionCandidates(
 
   const appendCandidate = (rawAddress: Address): Libp2pConnectCandidate | undefined => {
     try {
-      const candidate = parseLibp2pConnectCandidate(rawAddress);
+      let candidate = parseLibp2pConnectCandidate(rawAddress);
       if (
         candidate.targetPeerId !== undefined
         && candidate.targetPeerId !== canonicalPeerId
       ) return undefined;
       if (candidate.kind === 'direct' && !isPublicLikeAddress(candidate.address)) {
-        if (!allowResolvedPrivateDirect || candidate.targetPeerId !== canonicalPeerId) {
-          return undefined;
-        }
-        // Private routes are dialed only when resolution binds the terminal
-        // target to the requested peer. Unspecified listeners are unusable.
-        parseLibp2pConnectCandidate(rawAddress, { requireTerminalTargetPeerId: true });
-        if (candidate.address.startsWith('/ip4/0.0.0.0/')
-          || candidate.address.startsWith('/ip6/::/')) return undefined;
+        if (!allowResolvedPrivateDirect) return undefined;
+        // Resolver results are keyed to the requested peer when written to the
+        // peer store, but libp2p routing commonly returns targetless private
+        // listeners. Bind those listeners before dialing so identity remains
+        // explicit without discarding the newly resolved route.
+        const boundAddress = candidate.targetPeerId === undefined
+          ? `${candidate.address}/p2p/${canonicalPeerId}`
+          : candidate.address;
+        const bound = parseLibp2pConnectCandidate(boundAddress, {
+          requireTerminalTargetPeerId: true,
+        });
+        if (bound.kind !== 'direct' || bound.targetPeerId !== canonicalPeerId) return undefined;
+        if (isUnspecifiedAddress(bound.address)) return undefined;
+        candidate = bound;
       }
       if (!seen.has(candidate.address)) {
         seen.add(candidate.address);

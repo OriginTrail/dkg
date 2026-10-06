@@ -47,6 +47,7 @@ import type {
 } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
 import { startRequestAbortLifecycle } from '../request-abort-lifecycle.js';
+import { resolveWithinAbort } from '../abort-boundary.js';
 import type { NetworkStateRegistry } from './network-state-registry.js';
 
 /**
@@ -385,8 +386,11 @@ export class PeerResolver {
     // skipping steps 4+).
     if (aborted()) return accumulated;
     try {
-      const registryAddrs = await this.registry.lookup(peerId);
-      await primeAndAppend(registryAddrs, 'registry');
+      const registryAddrs = await resolveWithinAbort(
+        () => this.registry.lookup(peerId),
+        opts?.signal,
+      );
+      if (registryAddrs) await primeAndAppend(registryAddrs, 'registry');
     } catch (err) {
       this.logger.debug?.(`registry lookup for ${peerId} failed: ${errMsg(err)}`);
     }
@@ -405,9 +409,11 @@ export class PeerResolver {
     try {
       let handledByRicher = false;
       if (typeof this.agentDirectory.findAgentDialAddresses === 'function') {
-        const dial = await this.agentDirectory.findAgentDialAddresses(peerId, {
-          signal: opts?.signal,
-        });
+        const dial = await resolveWithinAbort(
+          (signal) => this.agentDirectory.findAgentDialAddresses!(peerId, { signal }),
+          opts?.signal,
+        );
+        if (aborted()) return accumulated;
         if (dial) {
           handledByRicher = true;
           // Codex review of PR #700 round 2: only use direct multiaddrs
@@ -444,9 +450,11 @@ export class PeerResolver {
         // PR yet) still resolves. Codex review of PR #700 caught this.
       }
       if (!handledByRicher) {
-        const relay = await this.agentDirectory.findRelayForPeer(peerId, {
-          signal: opts?.signal,
-        });
+        const relay = await resolveWithinAbort(
+          (signal) => this.agentDirectory.findRelayForPeer(peerId, { signal }),
+          opts?.signal,
+        );
+        if (aborted()) return accumulated;
         if (relay) {
           const circuitAddr = `${relay}/p2p-circuit/p2p/${peerId}`;
           await primeAndAppend([circuitAddr], 'agents-CG');

@@ -54,6 +54,8 @@ describe('selectCuratorJoinDialAddress', () => {
 
   it('keeps loopback available for local deployments', () => {
     expect(selectCuratorJoinDialAddress([ADDRESS], PEER_ID)).toBe(ADDRESS);
+    const localhost = `/dns4/node.localhost/tcp/9090/p2p/${PEER_ID}`;
+    expect(selectCuratorJoinDialAddress([localhost], PEER_ID)).toBe(localhost);
   });
 
   it('selects loopback for the exact requester on a direct local connection', () => {
@@ -97,6 +99,7 @@ describe('selectCuratorJoinDialAddress', () => {
       'not a multiaddr',
       `/ip4/127.0.0.1/tcp/9090/p2p/${OTHER_PEER_ID}`,
       `/ip4/0.0.0.0/tcp/9090/p2p/${PEER_ID}`,
+      `/ip6/::/tcp/9090/p2p/${PEER_ID}`,
       lanAddress,
     ], PEER_ID)).toBe(lanAddress);
   });

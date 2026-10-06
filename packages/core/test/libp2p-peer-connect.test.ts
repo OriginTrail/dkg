@@ -333,6 +333,26 @@ describe('connectLibp2pPeer', () => {
     expect(calls).toEqual([privateRoute]);
   });
 
+  it('binds a fresh targetless private route to the requested peer before dialing', async () => {
+    const privateRoute = '/ip4/192.168.1.20/tcp/9091';
+    const boundRoute = `${privateRoute}/p2p/${TARGET}`;
+    const calls: string[] = [];
+    const host = {
+      getConnections: () => calls.includes(boundRoute)
+        ? [{ remotePeer: { toString: () => TARGET } }]
+        : [],
+      dial: vi.fn(async (target: unknown) => { calls.push(targetString(target)); }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+
+    await connectLibp2pPeer(host, TARGET, [privateRoute], {
+      skipIdentityFallback: true,
+      allowResolvedPrivateDirect: true,
+      configuredRelayTargets: [CONFIGURED_RELAYS[0]!],
+    });
+    expect(calls).toEqual([boundRoute]);
+  });
+
   it('keeps private eligibility separate from identity fallback control', async () => {
     const privateRoute = `/ip4/192.168.1.20/tcp/9091/p2p/${TARGET}`;
     const host = {
@@ -353,14 +373,13 @@ describe('connectLibp2pPeer', () => {
       .toEqual([privateRoute, TARGET]);
   });
 
-  it('does not retry identity for a targetless, wrong-peer, or nonterminal private route', async () => {
+  it('does not retry identity for a wrong-peer, nonterminal, or unspecified private route', async () => {
     const host = {
       getConnections: () => [],
       dial: vi.fn(async () => undefined),
       peerStore: { merge: vi.fn(async () => undefined) },
     };
     for (const route of [
-      '/ip4/192.168.1.20/tcp/9091',
       `/ip4/192.168.1.20/tcp/9091/p2p/${WRONG_TARGET}`,
       `/ip4/192.168.1.20/tcp/9091/p2p/${TARGET}/ws`,
       `/ip4/0.0.0.0/tcp/9091/p2p/${TARGET}`,

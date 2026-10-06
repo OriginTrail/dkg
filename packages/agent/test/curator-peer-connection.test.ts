@@ -6,12 +6,14 @@ const CURATOR_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const OTHER_PEER_ID = '12D3KooWR5C8ajtPigVGnBwDGTZ4XAtCepRs2WCgfPuBPrgGqcNK';
 const CONTEXT = { kind: 'sync', id: 'curator-connection-test', startedAt: 0 } as OperationContext;
 
-function makeAgent() {
+function makeAgent(
+  outcome: { status: 'connected'; resolvedAddresses: string[] }
+    | { status: 'unresolved'; resolvedAddresses: [] } = {
+      status: 'connected', resolvedAddresses: [],
+    },
+) {
   let connected = false;
-  const connect = vi.fn(async () => {
-    connected = true;
-    return { status: 'connected' as const, resolvedAddresses: [] };
-  });
+  const connect = vi.fn(async () => outcome);
   return {
     node: { libp2p: { getConnections: () => connected
       ? [{ remotePeer: { toString: () => CURATOR_PEER_ID } }]
@@ -44,6 +46,18 @@ describe('curator connection recovery request', () => {
     expect(agent.peerResolver.connect).toHaveBeenCalledWith(CURATOR_PEER_ID, expect.objectContaining({
       recovery: expect.objectContaining({ verifiedInitialAddress: undefined }),
     }));
+  });
+
+  it('uses the resolver outcome instead of re-reading raw libp2p state', async () => {
+    const connectedAgent = makeAgent();
+    await expect(ensureCuratorConnected(
+      connectedAgent, CURATOR_PEER_ID, undefined, CONTEXT, () => undefined,
+    )).resolves.toBe(true);
+
+    const unresolvedAgent = makeAgent({ status: 'unresolved', resolvedAddresses: [] });
+    await expect(ensureCuratorConnected(
+      unresolvedAgent, CURATOR_PEER_ID, undefined, CONTEXT, () => undefined,
+    )).resolves.toBe(false);
   });
 
   it('keeps the synchronous read-only connection fast path', () => {
