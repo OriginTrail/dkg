@@ -1531,6 +1531,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
           state.allowedPeers === null ? null : [...state.allowedPeers]
         )),
         ensureAgentsInOnDemandPhonebook: vi.fn(),
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       };
       const ready = store.insert(options.seed(context));
       return { host, context, ready, projection };
@@ -1870,6 +1871,53 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         'churn',
       )).rejects.toThrow(/is not in the recipient set/);
       expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+    });
+
+    it('counts last-window accepts in one rate-limited line that carries no key, agent or peer', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        // Beyond any line an earlier test of this module logged for the graph.
+        vi.setSystemTime(Date.now() + 2 * 3_600_000);
+        const first = churningHost({ seed: profileKeys });
+        await first.ready;
+        await resolve(first.host);
+        expect(first.host.log.info).toHaveBeenCalledTimes(1);
+        const line = String(first.host.log.info.mock.calls[0][1]);
+        expect(line).toContain(`"${CONTEXT_GRAPH_ID}"`);
+        for (const secret of [first.context.member.address, first.context.other.address,
+          first.context.peerId, first.context.otherPeerId, first.context.memberKey.recipientKeyId]) {
+          expect(line).not.toContain(secret);
+        }
+
+        const quiet = churningHost({ seed: profileKeys });
+        await quiet.ready;
+        await resolve(quiet.host);
+        expect(quiet.host.log.info).not.toHaveBeenCalled();
+
+        vi.setSystemTime(Date.now() + 61_000);
+        const later = churningHost({ seed: profileKeys });
+        await later.ready;
+        await resolve(later.host);
+        expect(later.host.log.info).toHaveBeenCalledTimes(1);
+        expect(String(later.host.log.info.mock.calls[0][1])).toContain('(1 more since the last line)');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not let a failing log line change the outcome of a resolution that proved its set', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(Date.now() + 4 * 3_600_000);
+        const { host, ready } = churningHost({ seed: profileKeys });
+        await ready;
+        host.log.info.mockImplementation(() => { throw new Error('hostile sink'); });
+
+        expectRecipients(await resolve(host), 2);
+        expect(host.log.info).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not move the node-wide revision for a plain insert into an unrelated graph', async () => {

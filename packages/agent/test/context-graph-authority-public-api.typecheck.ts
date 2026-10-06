@@ -174,6 +174,22 @@ type ExpectedMatchesRegisteredUnavailableReason = AssertTrue<
   ExpectedRegisteredAuthorityUnavailable['reason'] extends
     RootRegisteredAuthorityUnavailableReason ? true : false
 >;
+// GH#3067: the closed set of throw sites the worker log may carry. Only the TYPE
+// is public; the error class, its marker and any runtime list stay internal.
+type RootAuthorityFailureSite = import(
+  '@origintrail-official/dkg-agent'
+).ContextGraphAuthorityFailureSite;
+type ExpectedAuthorityFailureSite =
+  | 'transport-unavailable'
+  | 'transport-changed'
+  | 'revision-moved'
+  | 'recipient-set-changed';
+type AuthorityFailureSiteMatchesExpected = AssertTrue<
+  RootAuthorityFailureSite extends ExpectedAuthorityFailureSite ? true : false
+>;
+type ExpectedMatchesAuthorityFailureSite = AssertTrue<
+  ExpectedAuthorityFailureSite extends RootAuthorityFailureSite ? true : false
+>;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
   typeof import('@origintrail-official/dkg-agent/dist/internal/context-graph-authority/context-graph-authority.js');
@@ -214,6 +230,8 @@ export type {
   ExpectedMatchesRegisteredUnavailable,
   RegisteredUnavailableReasonMatchesExpected,
   ExpectedMatchesRegisteredUnavailableReason,
+  AuthorityFailureSiteMatchesExpected,
+  ExpectedMatchesAuthorityFailureSite,
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
   DeepAuthorityStaysInternal,

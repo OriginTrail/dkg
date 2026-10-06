@@ -374,6 +374,7 @@ export type {
   UnavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityFailureSite,
   ContextGraphAuthorityReadMode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,

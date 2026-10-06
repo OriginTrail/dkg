@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { RegisteredContextGraphAuthorityUnavailableReason } from
-  '../../registered-context-graph-authority.js';
+import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import type {
+  ContextGraphAuthorityFailureSite,
+  RegisteredContextGraphAuthorityUnavailableReason,
+} from '../../registered-context-graph-authority.js';
 
 const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASON_REGISTRY = Object.freeze({
   'finalized-name-absence-unaccepted': true,
@@ -89,15 +92,22 @@ export class ContextGraphAuthorityUnavailableError extends Error {
   readonly code = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE;
   readonly reason: ContextGraphAgentGateUnavailableReason;
   readonly detail?: string;
+  /** Which check of the recipient stability loop raised it, when one did. */
+  readonly site?: ContextGraphAuthorityFailureSite;
 
   constructor(
     message: string,
-    options: { reason: ContextGraphAgentGateUnavailableReason; detail?: string },
+    options: {
+      reason: ContextGraphAgentGateUnavailableReason;
+      detail?: string;
+      site?: ContextGraphAuthorityFailureSite;
+    },
   ) {
     super(message);
     this.name = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME;
     this.reason = options.reason;
     if (options.detail !== undefined) this.detail = options.detail;
+    if (options.site !== undefined) this.site = options.site;
   }
 }
 
@@ -119,10 +129,82 @@ export function isContextGraphAuthorityUnavailableMarker(
 
 export function createContextGraphAuthorityError(
   message: string,
-  failure: { reason: ContextGraphAgentGateUnavailableReason; detail?: string },
+  failure: {
+    reason: ContextGraphAgentGateUnavailableReason;
+    detail?: string;
+    site?: ContextGraphAuthorityFailureSite;
+  },
 ): ContextGraphAuthorityUnavailableError {
   return new ContextGraphAuthorityUnavailableError(message, {
     reason: failure.reason,
     ...(failure.detail === undefined ? {} : { detail: failure.detail }),
+    ...(failure.site === undefined ? {} : { site: failure.site }),
   });
+}
+
+/** The details of the recipient stability loop's refusals; kept as the callers match them. */
+const RECIPIENT_AUTHORITY_CHANGED_DETAIL = Object.freeze({
+  'transport-changed': 'retry recipient resolution against the current private authority',
+  'revision-moved': 'retry recipient resolution against the current private authority',
+  'recipient-set-changed': 'recipient routes changed while retrying against current private authority',
+} as const satisfies Record<Exclude<ContextGraphAuthorityFailureSite, 'transport-unavailable'>, string>);
+
+/** The refusal of the recipient stability loop: the private authority moved while keys resolved. */
+export function createRecipientAuthorityChangedError(
+  contextGraphId: string,
+  site: keyof typeof RECIPIENT_AUTHORITY_CHANGED_DETAIL,
+): ContextGraphAuthorityUnavailableError {
+  return createContextGraphAuthorityError(
+    `Context graph "${contextGraphId}" private authority changed while recipient keys were resolving`,
+    {
+      reason: 'chain-participant-authority-unavailable',
+      detail: RECIPIENT_AUTHORITY_CHANGED_DETAIL[site],
+      site,
+    },
+  );
+}
+
+const RELAXED_ACCEPT_LOG_INTERVAL_MS = 60_000;
+const relaxedAcceptLog = new Map<string, { loggedAt: number; suppressed: number }>();
+
+/**
+ * The last window of the recipient stability loop of a private roster (GH#3067).
+ * The node-wide authority-facts revision moved in every window, which on a busy
+ * node says nothing about this graph. What the loop did prove: the transport's
+ * roster read after the last collect is exactly the resolved agents, and the
+ * last collect equalled the one before it. The one fact those do not cover is
+ * the peer gate the last collect filtered by, so it is read again here and has
+ * to be the same. A graph whose gate moved is refused like any recipient change.
+ * Every acceptance is counted in a rate-limited line (closed text, no ids of
+ * keys, agents or peers) so an operator can see how often the revision alone
+ * would have refused a share.
+ */
+export async function confirmRelaxedRecipientAuthority(
+  log: { info(ctx: OperationContext, message: string): void },
+  readAllowedPeers: () => Promise<readonly string[] | null>,
+  contextGraphId: string,
+  allowedPeersOfLastCollect: readonly string[] | null | undefined,
+): Promise<void> {
+  const current = await readAllowedPeers();
+  const resolvedWith = allowedPeersOfLastCollect ?? null;
+  const same = current === null || resolvedWith === null
+    ? current === resolvedWith
+    : current.length === resolvedWith.length && current.every((peer) => resolvedWith.includes(peer));
+  if (!same) throw createRecipientAuthorityChangedError(contextGraphId, 'recipient-set-changed');
+  const now = Date.now();
+  const seen = relaxedAcceptLog.get(contextGraphId);
+  if (seen !== undefined && now - seen.loggedAt < RELAXED_ACCEPT_LOG_INTERVAL_MS) {
+    seen.suppressed += 1;
+    return;
+  }
+  relaxedAcceptLog.set(contextGraphId, { loggedAt: now, suppressed: 0 });
+  try {
+    log.info(
+      createOperationContext('share'),
+      `Recipient authority of "${contextGraphId}" kept moving during key resolution; accepted on the exact recipient set `
+        + `and the roster read after the last collect (${seen?.suppressed ?? 0} more since the last line)`,
+    );
+  } catch {
+    // A diagnostic never changes the outcome of a resolution that proved its set.
+  }
 }

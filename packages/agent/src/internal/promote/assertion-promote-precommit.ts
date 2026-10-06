@@ -113,14 +113,16 @@ const REAL_PROMOTE_RECIPIENT_RETRY_TIMING: PromoteRecipientRetryTiming = Object.
  * Repeat a promote's recipient read while it fails with a retryable authority
  * outage and the bound allows.
  *
- * The recipient read accepts its roster only while the node-wide authority
- * facts revision stands still, and it gives up after a few attempts. Work that
- * has nothing to do with this promote moves that revision: after a Context
- * Graph is registered the node reconciles the new graph's gossip subscription
- * several times within a few hundred milliseconds. A share sent straight after
- * a registration can therefore use up those attempts and report the roster as
- * temporarily unavailable, although no fact changed and the same read succeeds
- * moments later.
+ * The recipient read re-collects while the node-wide authority facts revision
+ * moves, and it gives up after a few attempts (a private roster whose last
+ * window proved its exact recipient set is accepted even if the revision moved,
+ * GH#3067; the other kinds still refuse). Work that has nothing to do with this
+ * promote moves that revision: after a Context Graph is registered the node
+ * reconciles the new graph's gossip subscription several times within a few
+ * hundred milliseconds. A share sent straight after a registration can
+ * therefore use up those attempts and report the roster as temporarily
+ * unavailable, although no fact changed and the same read succeeds moments
+ * later.
  *
  * Repeating it is safe. It only reads authority and recipient keys, it fails
  * closed every time, and the publisher asks for it before the attempt claims

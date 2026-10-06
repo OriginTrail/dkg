@@ -150,7 +150,9 @@ import {
   type LiveOnChainAccessPolicyState,
 } from './internal/context-graph-authority/context-graph-access-policy.js';
 import {
+  confirmRelaxedRecipientAuthority,
   createContextGraphAuthorityError,
+  createRecipientAuthorityChangedError,
   isContextGraphAuthorityUnavailableMarker,
   isRetryableContextGraphAuthorityUnavailableReason,
   type ContextGraphAgentGateAuthority,
@@ -1783,6 +1785,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return { requiresEncryption: false, recipients: [] };
     }
     let recipientAuthorityRevision: number | null = null;
+    let resolvedAllowedPeers: readonly string[] | null | undefined;
     let resolveKeys: () => Promise<WorkspaceAgentRecipientResolution>;
     if (transport.kind === 'legacy-unregistered') {
       resolveKeys = async () => {
@@ -1845,7 +1848,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       if (transport.kind === 'unavailable') {
         const message =
           `Registered context graph "${input.contextGraphId}" authority is unavailable (${transport.reason})`;
-        throw createContextGraphAuthorityError(message, transport);
+        throw createContextGraphAuthorityError(message, { ...transport, site: 'transport-unavailable' });
       }
       const participantAgents = transport.participantAgents;
       if (participantAgents.length === 0) {
@@ -1907,6 +1910,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         // completed. A failed pre-hydration attempt must not pin its revision
         // across the phonebook write and the successful retry.
         recipientAuthorityRevision = attemptRevision;
+        resolvedAllowedPeers = allowedPeers;
         return {
           requiresEncryption: true,
           recipients: [firstRecipient, ...remainingRecipients],
@@ -1948,9 +1952,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // transport decision after them so an accepted-private (or registered)
       // roster rotation cannot return keys for a member removed meanwhile.
       // The store revision is deliberately conservative because recipient
-      // facts can live in any named graph. Unrelated graph activity therefore
-      // triggers a bounded optimistic retry, but a retry is accepted only when
-      // both the exact (agent,key,peer) set and transport authority are stable.
+      // facts can live in any named graph, so it only decides whether to collect
+      // again: a retry is accepted when the exact (agent,key,peer) set and the
+      // transport authority are stable. Unrelated writes on a busy node move it in
+      // every window, so the last window of a private roster does not fail on it
+      // alone (GH#3067): the roster was read after the last collect, that collect
+      // equalled the one before it (ATTEMPTS >= 2) and its peer gate is re-read.
       for (
         let attempt = 0;
         attempt < SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS;
@@ -1966,7 +1973,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         if (currentTransport.kind === 'unavailable') {
           throw createContextGraphAuthorityError(
             `Context graph "${input.contextGraphId}" recipient authority is unavailable (${currentTransport.reason})`,
-            currentTransport,
+            { ...currentTransport, site: 'transport-unavailable' },
           );
         }
         const transportStayedCurrent = transport.kind === 'private-roster'
@@ -1981,16 +1988,16 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           === this.contextGraphMetaProjection.readAuthorityFactsRevision;
         if (transportStayedCurrent && revisionStayedCurrent) break;
 
-        const hasAnotherAttempt =
-          attempt + 1 < SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS;
-        if (!transportStayedCurrent || !hasAnotherAttempt) {
-          throw createContextGraphAuthorityError(
-            `Context graph "${input.contextGraphId}" private authority changed while recipient keys were resolving`,
-            {
-              reason: 'chain-participant-authority-unavailable',
-              detail: 'retry recipient resolution against the current private authority',
-            },
-          );
+        if (!transportStayedCurrent) {
+          throw createRecipientAuthorityChangedError(input.contextGraphId, 'transport-changed');
+        }
+        if (attempt + 1 >= SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS) {
+          if (transport.kind !== 'private-roster') {
+            throw createRecipientAuthorityChangedError(input.contextGraphId, 'revision-moved');
+          }
+          await confirmRelaxedRecipientAuthority(this.log, () => this.getContextGraphAllowedPeers(
+            input.contextGraphId), input.contextGraphId, resolvedAllowedPeers);
+          break;
         }
 
         const retriedResolution = await resolveWithPhonebookHydration();
@@ -1999,13 +2006,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
             && hasExactWorkspaceRecipientSet(resolution, retriedResolution)
           : !retriedResolution.requiresEncryption;
         if (!recipientSnapshotStayedCurrent) {
-          throw createContextGraphAuthorityError(
-            `Context graph "${input.contextGraphId}" private authority changed while recipient keys were resolving`,
-            {
-              reason: 'chain-participant-authority-unavailable',
-              detail: 'recipient routes changed while retrying against current private authority',
-            },
-          );
+          throw createRecipientAuthorityChangedError(input.contextGraphId, 'recipient-set-changed');
         }
         resolution = retriedResolution;
       }
