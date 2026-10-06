@@ -1117,10 +1117,13 @@ describe('ChatMemoryManager WM write discipline', () => {
 
 // A turn id is only unique inside its session, and the durable state of a turn
 // (persistence state, message links, transitions) hangs off the turn's subject.
-// A new turn is therefore written under one subject per (sessionId, turnId),
-// while turns stored before that (`urn:dkg:chat:turn:<turnId>`) stay where they
-// are and are found through their session link. The cross-session behavior
-// against a real store lives in packages/cli's openclaw-persist-turn e2e.
+// A new turn is therefore written under one subject per (sessionId, turnId)
+// (`scopedChatTurnUri`), while turns stored before that
+// (`urn:dkg:chat:turn:<turnId>`) stay where they are and are found through their
+// session link (`chatTurnSubjectPattern`). Which subject wins, and that a subject
+// two sessions share is excluded, is the store's work and is covered against a
+// real store in chat-memory-subject-ownership.test.ts and packages/cli's
+// openclaw-persist-turn e2e; the cases below pin what the manager asks and writes.
 describe('ChatMemoryManager chat-turn identity: one subject per session and turn id', () => {
   const CHAT = 'urn:dkg:chat:';
   const DKG = 'http://dkg.io/ontology/';
@@ -1158,7 +1161,8 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
 
   /** Write one turn through the manager and hand back the quads it wrote. */
   async function storeTurn(sessionId: string, turnId: string): Promise<Quad[]> {
-    mockQuery.returns.push({ bindings: [] });
+    // Known sessions, then the lookup of an existing subject for the turn.
+    mockQuery.returns.push({ bindings: [] }, { bindings: [] });
     await createManager().storeChatExchange(sessionId, 'question', 'answer', undefined, { turnId });
     return lastWrittenQuads();
   }
@@ -1173,9 +1177,9 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
       const subject = turnSubjectOf(quads);
 
       expect(subject.startsWith(SCOPED_TURN_PREFIX)).toBe(true);
-      expect(subject.slice(SCOPED_TURN_PREFIX.length)).toMatch(/^[0-9a-f]{64}$/);
+      // The suffix is the URI-encoded JSON of the pair, so it is injective in it.
+      expect(JSON.parse(decodeURIComponent(subject.slice(SCOPED_TURN_PREFIX.length)))).toEqual(['session-1', 'turn-1']);
       expect(subject.startsWith(LEGACY_TURN_PREFIX)).toBe(false);
-      expect(subject).not.toContain('turn-1');
     });
 
     it('carries every fact of the turn on that one subject, and keeps the caller-visible ids as literals', async () => {
@@ -1255,14 +1259,15 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
         expect(read).toContain(`<${SCHEMA_ORG}isPartOf> <${CHAT}session:session-1>`);
         expect(read).toContain(`<${DKG}turnId> "turn-1"`);
         expect(read).not.toContain(LEGACY_TURN_PREFIX);
-        expect(read).not.toContain(SCOPED_TURN_PREFIX);
+        // The scoped namespace appears only as a prefix test, never as a subject.
+        expect(read).not.toContain(`<${SCOPED_TURN_PREFIX}`);
+        expect(read).not.toContain('%5B');
       }
     });
   });
 
   describe('getChatTurnPersistenceState', () => {
     const SESSION = `${CHAT}session:session-1`;
-    const OTHER_SESSION = `${CHAT}session:session-2`;
     const LEGACY = `${LEGACY_TURN_PREFIX}turn-1`;
     const SCOPED = `${SCOPED_TURN_PREFIX}${'ab'.repeat(32)}`;
 
@@ -1272,32 +1277,23 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
       return createManager().getChatTurnPersistenceState('session-1', 'turn-1');
     }
 
-    it('asks which sessions the turn subject is linked to', async () => {
+    it('asks only for the subject this session owns: one that no other session is linked to', async () => {
       await stateFor([]);
+      const read = String(mockQuery.calls.at(-1)![0]);
 
-      expect(String(mockQuery.calls.at(-1)![0])).toContain(`?turn <${SCHEMA_ORG}isPartOf> ?linkedSession`);
+      expect(read).toContain(`<${SCHEMA_ORG}isPartOf> <${SESSION}>`);
+      expect(read).toContain('FILTER NOT EXISTS');
+      expect(read).toContain('?otherTurnSession');
     });
 
-    it('reports the state of a subject only this session is linked to, legacy or session-scoped', async () => {
-      expect(await stateFor([{ turn: LEGACY, linkedSession: SESSION, persistenceState: '"pending"' }])).toBe('pending');
-      expect(await stateFor([{ turn: `<${SCOPED}>`, linkedSession: `<${SESSION}>`, persistenceState: '"failed"', transitionState: '"stored"' }]))
-        .toBe('stored');
+    it('reports the state of the subject the store selected, legacy or session-scoped', async () => {
+      expect(await stateFor([{ persistenceState: '"pending"' }])).toBe('pending');
+      expect(await stateFor([{ persistenceState: '"failed"', transitionState: '"stored"' }])).toBe('stored');
+      expect(await stateFor([{ turn: LEGACY, persistenceState: '"failed"' }, { turn: SCOPED, persistenceState: '"pending"' }])).toBe('failed');
     });
 
-    it('reports nothing for a legacy subject another session is linked to as well', async () => {
-      // One row per (linked session, state): the subject holds both sessions' states.
-      const shared = [SESSION, OTHER_SESSION].flatMap((linkedSession) =>
-        ['"stored"', '"pending"'].map((persistenceState) => ({ turn: LEGACY, linkedSession, persistenceState })));
-
-      expect(await stateFor(shared)).toBeNull();
-    });
-
-    it('reads the session-scoped subject and ignores the shared legacy one beside it', async () => {
-      expect(await stateFor([
-        { turn: LEGACY, linkedSession: SESSION, persistenceState: '"stored"' },
-        { turn: LEGACY, linkedSession: OTHER_SESSION, persistenceState: '"stored"' },
-        { turn: SCOPED, linkedSession: SESSION, persistenceState: '"pending"' },
-      ])).toBe('pending');
+    it('reports nothing when the store selects no subject for the turn', async () => {
+      expect(await stateFor([])).toBeNull();
     });
   });
 
@@ -1307,7 +1303,7 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
 
     it('attaches the transition to the session-scoped subject a new turn was written under', async () => {
       const scoped = turnSubjectOf(await storeTurn('session-1', 'turn-1'));
-      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: scoped }] });
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: scoped, tid: '"turn-1"' }] });
 
       await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', { assistantReply: 'done' });
 
@@ -1315,7 +1311,7 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
     });
 
     it('attaches the transition to the legacy subject a turn stored before the scheme sits under', async () => {
-      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: `${LEGACY_TURN_PREFIX}turn-1` }] });
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: `${LEGACY_TURN_PREFIX}turn-1`, tid: '"turn-1"' }] });
 
       await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', { assistantReply: 'done' });
 
@@ -1323,7 +1319,7 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
     });
 
     it('looks the subject up through the session and the trimmed turn id, so another session that reuses the id is never targeted', async () => {
-      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: `${LEGACY_TURN_PREFIX}turn-1` }] });
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: `${LEGACY_TURN_PREFIX}turn-1`, tid: '"turn-1"' }] });
 
       await createManager().recordChatTurnPersistenceTransition('session-1', ' turn-1 ', 'stored');
       const lookup = String(mockQuery.calls.at(-1)![0]);
@@ -1346,7 +1342,7 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
 
     it('does not follow a lookup answer that is not a safe IRI', async () => {
       const wouldBe = turnSubjectOf(await storeTurn('session-1', 'turn-1'));
-      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: 'not an iri<' }] });
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: 'not an iri<', tid: '"turn-1"' }] });
 
       await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored');
 

@@ -150,6 +150,9 @@ async function single(sessionId: string): Promise<HistoryMessage[]> {
 
 const newSessionId = () => `openclaw:e2e:${randomUUID()}`;
 const newTurnId = () => `turn-${randomUUID()}`;
+/** The subject a new turn of `(sessionId, turnId)` is written under: the URI-encoded JSON of the pair. */
+const scopedSubject = (sessionId: string, turnId: string) =>
+  `urn:dkg:chat:session-turn:${encodeURIComponent(JSON.stringify([sessionId, turnId]))}`;
 
 async function select(sparql: string): Promise<Array<Record<string, string>>> {
   const result = await agent.query(sparql, {
@@ -259,7 +262,7 @@ describe('OpenClaw persist-turn over real HTTP into a real store', () => {
     });
     const turnIdTriples = delta.triples.filter((triple) => triple.predicate === 'http://dkg.io/ontology/turnId');
     const turnSubject = turnIdTriples.find((triple) => triple.object === second)?.subject;
-    expect(turnSubject).toMatch(/^urn:dkg:chat:session-turn:[0-9a-f]{64}$/);
+    expect(turnSubject).toBe(scopedSubject(sessionId, second));
     // The delta is the second turn's: its turn subject, and not the first turn's.
     expect(delta.triples.some((triple) => triple.subject === turnSubject && triple.predicate === 'http://dkg.io/ontology/hasUserMessage')).toBe(true);
     expect(turnIdTriples.some((triple) => triple.object === first && triple.subject === turnSubject)).toBe(false);
@@ -305,7 +308,7 @@ describe('OpenClaw persist-turn over real HTTP into a real store', () => {
     expect(delta.mode).toBe('delta');
     const turnSubject = delta.triples.find((triple) =>
       triple.predicate === 'http://dkg.io/ontology/hasAssistantMessage')?.subject;
-    expect(turnSubject).toMatch(/^urn:dkg:chat:session-turn:[0-9a-f]{64}$/);
+    expect(turnSubject).toBe(scopedSubject(sessionId, turnId));
     const transitions = delta.triples
       .filter((triple) => triple.predicate === 'http://dkg.io/ontology/updatesTurn' && triple.object === turnSubject)
       .map((triple) => triple.subject);
@@ -799,7 +802,7 @@ describe('turns stored under the legacy turn subject, against the real store', (
     // Each session has its own subject: the legacy one and a session-scoped one.
     expect(await turnSubjects(legacySession, turnId)).toEqual([legacySubject(turnId)]);
     const [newSubject] = await turnSubjects(newSession, turnId);
-    expect(newSubject).toMatch(/^urn:dkg:chat:session-turn:[0-9a-f]{64}$/);
+    expect(newSubject).toBe(scopedSubject(newSession, turnId));
     expect(await transitionTargets(turnId)).toEqual([legacySubject(turnId)]);
     expect(await conversation(legacySession)).toEqual([
       ['user', 'legacy question', 'stored'],
@@ -836,7 +839,7 @@ describe('turns stored under the legacy turn subject, against the real store', (
     const subjectsB = await turnSubjects(sessionB, turnId);
     expect(subjectsB).toHaveLength(2);
     expect(subjectsB).toContain(legacySubject(turnId));
-    expect(subjectsB.find((subject) => subject !== legacySubject(turnId))).toMatch(/^urn:dkg:chat:session-turn:[0-9a-f]{64}$/);
+    expect(subjectsB.find((subject) => subject !== legacySubject(turnId))).toBe(scopedSubject(sessionB, turnId));
     expect(await select(`SELECT ?p ?o WHERE { <${legacySubject(turnId)}> ?p ?o }`)).toHaveLength(sharedBefore.length);
     expect(await transitionTargets(turnId)).toEqual([]);
     expect(await turnSubjects(sessionA, turnId)).toEqual([legacySubject(turnId)]);
