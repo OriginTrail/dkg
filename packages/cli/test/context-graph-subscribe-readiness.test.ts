@@ -348,11 +348,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       // Exercise the production inspection and proof coordinator. This general
       // fixture has no finalized-proof transport; focused empty-VM scenarios
       // supply one in context-graph-subscribe-empty-vm.test.ts.
-      proveRegisteredPrivateEmptyVmV1: DKGAgent.prototype.proveRegisteredPrivateEmptyVmV1,
       prepareContextGraphReadinessWithPrivateEmptyVmV1:
         DKGAgent.prototype.prepareContextGraphReadinessWithPrivateEmptyVmV1,
-      inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
-        DKGAgent.prototype.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1,
       config: { chainConfig: undefined },
       contextGraphAuthorityReaderCapability: { status: 'unsupported' },
       resolveAgentByToken: () => undefined,
