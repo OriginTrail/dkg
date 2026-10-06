@@ -116,7 +116,7 @@
     "packages/mcp-dkg/src/tools/assertions.ts": 1123,
     "packages/network-sim/src/components/ControlPanel.tsx": 1133,
     "packages/node-ui/src/api.ts": 824,
-    "packages/node-ui/src/chat-memory.ts": 1600,
+    "packages/node-ui/src/chat-memory.ts": 1431,
     "packages/node-ui/src/db.ts": 3859,
     "packages/node-ui/src/ui/api.ts": 3412,
     "packages/node-ui/src/ui/components/Shell/PanelRight/ConnectedAgentsTab.tsx": 877,

@@ -2,7 +2,8 @@ import { chatTurnSubjectPattern, scopedChatTurnUri, decodeExistingChatTurn, type
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
-import { decodeRdfStringLiteral } from './rdf-literal.js';
+import { normalizeChatAttachmentRefs, stripRdfLiteral, type ChatAttachmentRef, type ChatToolCall } from './chat-literals.js';
+import { foldListedRows, foldSessionRows } from './chat-history-rows.js';
 export { decodeRdfStringLiteral } from './rdf-literal.js';
 
 export interface MemoryToolContext {
@@ -121,7 +122,6 @@ export interface SessionGraphDeltaResult {
 }
 
 export type ChatTurnPersistenceState = 'stored' | 'failed' | 'pending';
-type ChatTurnPersistenceDisplayState = 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
 
 const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
 export type ImportSource = (typeof IMPORT_SOURCES)[number];
@@ -177,184 +177,6 @@ const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_I
 const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
-const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> = {
-  skipped: 1,
-  pending: 2,
-  in_progress: 3,
-  failed: 4,
-  stored: 5,
-};
-
-interface ChatAttachmentRef {
-  id?: string;
-  fileName: string;
-  contextGraphId: string;
-  assertionName?: string;
-  assertionUri: string;
-  fileHash: string;
-  detectedContentType?: string;
-  extractionStatus?: 'completed' | 'skipped' | 'failed';
-  tripleCount?: number;
-  rootEntity?: string;
-}
-
-interface ChatToolCall {
-  name: string;
-  args: Record<string, unknown>;
-  result: unknown;
-}
-
-function stripRdfLiteral(value: string): string {
-  if (!value) return '';
-  const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
-  if (typed) return typed[1];
-  return value;
-}
-
-function normalizePersistenceStatus(value: string): ChatTurnPersistenceDisplayState | undefined {
-  const status = stripRdfLiteral(value).trim();
-  if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
-    return status;
-  }
-  return undefined;
-}
-
-function choosePersistenceStatus(
-  current: ChatTurnPersistenceDisplayState | undefined,
-  candidate: ChatTurnPersistenceDisplayState | undefined,
-): ChatTurnPersistenceDisplayState | undefined {
-  if (!candidate) return current;
-  if (!current) return candidate;
-  return PERSISTENCE_STATUS_RANK[candidate] > PERSISTENCE_STATUS_RANK[current] ? candidate : current;
-}
-
-/**
- * The reply a turn's agent message shows once the turn completed, or `undefined`
- * when this row does not complete it.
- *
- * A turn that first reported `pending` or `failed` and completed later is not
- * written a second time: a `stored` transition records the completion and
- * carries the final reply, and the assistant Message keeps the `schema:text`
- * of the first report. Every reader that returns a turn's reply has to resolve
- * it through here, so `getSession` and `getRecentChats` cannot disagree about
- * which reply a turn ended with. `row` is one result row of a query that joins
- * a turn to its transitions.
- *
- * The transition's `assistantReply` is written with `JSON.stringify`, exactly
- * like the base `schema:text`, so it needs the same decode. Without it a
- * stored turn (the dominant path on reload) would replace the correctly decoded
- * base text with a literal-`\n` string and markdown would break after a refresh.
- */
-function completedTurnReply(row: {
-  transitionState?: string;
-  persistenceState?: string;
-  transitionAssistantReply?: string;
-}): string | undefined {
-  const status = normalizePersistenceStatus(row.transitionState ?? row.persistenceState ?? '');
-  const reply = String(row.transitionAssistantReply ?? '');
-  return status === 'stored' && reply ? decodeRdfStringLiteral(reply) : undefined;
-}
-
-function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const record = raw as Record<string, unknown>;
-  const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
-  const contextGraphId = typeof record.contextGraphId === 'string' ? record.contextGraphId.trim() : '';
-  const assertionUri = typeof record.assertionUri === 'string' ? record.assertionUri.trim() : '';
-  const fileHash = typeof record.fileHash === 'string' ? record.fileHash.trim() : '';
-  if (!fileName || !contextGraphId || !assertionUri || !fileHash) return null;
-
-  const normalized: ChatAttachmentRef = {
-    fileName,
-    contextGraphId,
-    assertionUri,
-    fileHash,
-  };
-  if (typeof record.id === 'string' && record.id.trim()) normalized.id = record.id.trim();
-  if (typeof record.assertionName === 'string' && record.assertionName.trim()) normalized.assertionName = record.assertionName.trim();
-  if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
-    normalized.detectedContentType = record.detectedContentType.trim();
-  }
-  if (record.extractionStatus === 'completed' || record.extractionStatus === 'skipped' || record.extractionStatus === 'failed') {
-    normalized.extractionStatus = record.extractionStatus;
-  }
-  if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
-    normalized.tripleCount = record.tripleCount;
-  }
-  if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) normalized.rootEntity = record.rootEntity.trim();
-  return normalized;
-}
-
-function normalizeChatAttachmentRefs(raw: unknown): ChatAttachmentRef[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const refs = raw
-    .map((entry) => normalizeChatAttachmentRef(entry))
-    .filter((entry): entry is ChatAttachmentRef => entry != null);
-  return refs.length > 0 ? refs : undefined;
-}
-
-function normalizeChatToolCall(raw: unknown): ChatToolCall | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const record = raw as Record<string, unknown>;
-  const name = typeof record.name === 'string' && record.name.trim() ? record.name.trim() : 'unknown';
-  return {
-    name,
-    args: record.args && typeof record.args === 'object' && !Array.isArray(record.args)
-      ? record.args as Record<string, unknown>
-      : {},
-    result: record.result,
-  };
-}
-
-function normalizeChatToolCalls(raw: unknown): ChatToolCall[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const calls = raw
-    .map((entry) => normalizeChatToolCall(entry))
-    .filter((entry): entry is ChatToolCall => entry != null);
-  return calls.length > 0 ? calls : undefined;
-}
-
-function parseNestedJsonLiteral(value: string): unknown {
-  let current: unknown = value;
-  for (let depth = 0; depth < 4; depth += 1) {
-    if (typeof current !== 'string') return current;
-    const trimmed = current.trim();
-    if (!trimmed) return undefined;
-    try {
-      current = JSON.parse(trimmed);
-    } catch {
-      return undefined;
-    }
-  }
-  return current;
-}
-
-function parseAttachmentRefsLiteral(value: string): ChatAttachmentRef[] | undefined {
-  const candidates = [value, stripRdfLiteral(value)]
-    .map((candidate) => candidate.trim())
-    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
-
-  for (const candidate of candidates) {
-    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
-    const normalized = normalizeChatAttachmentRefs(parsed);
-    if (normalized?.length) return normalized;
-  }
-  return undefined;
-}
-
-function parseToolCallsLiteral(value: string): ChatToolCall[] | undefined {
-  const candidates = [value, stripRdfLiteral(value)]
-    .map((candidate) => candidate.trim())
-    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
-
-  for (const candidate of candidates) {
-    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
-    const normalized = normalizeChatToolCalls(parsed);
-    if (normalized?.length) return normalized;
-  }
-  return undefined;
-}
-
 function parseRdfInt(value: string): number {
   if (!value) return 0;
   const match = value.match(/^"(\d+)"/);
@@ -1141,57 +963,9 @@ export class ChatMemoryManager {
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
-      const messagesByUri = new Map<string, {
-        uri: string;
-        author: string;
-        text: string;
-        ts: string;
-        turnId?: string;
-        persistStatus?: ChatTurnPersistenceDisplayState;
-        failureReason?: string | null;
-        attachmentRefs?: ChatAttachmentRef[];
-        toolCalls?: ChatToolCall[];
-      }>();
-      for (const mb of bindings) {
-        const uri = String(mb.m ?? '').replace(/[<>]/g, '');
-        const key = uri || `${String(mb.author ?? '')}:${String(mb.ts ?? '')}:${String(mb.text ?? '')}`;
-        let message = messagesByUri.get(key);
-        if (!message) {
-          message = {
-            uri,
-            author: mb.author?.includes('user') ? 'user' : 'agent',
-            text: decodeRdfStringLiteral(mb.text ?? ''),
-            ts: stripRdfLiteral(mb.ts ?? ''),
-            turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
-            attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
-          };
-          messagesByUri.set(key, message);
-        }
-        const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
-        const completedReply = completedTurnReply(mb);
-        if (message.author === 'agent' && completedReply !== undefined) {
-          message.text = completedReply;
-        }
-        const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
-        if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {
-          message.attachmentRefs = transitionAttachmentRefs;
-        }
-        const transitionToolCalls = parseToolCallsLiteral(String(mb.transitionToolCalls ?? ''));
-        if (message.author === 'agent' && candidateStatus === 'stored' && transitionToolCalls?.length) {
-          message.toolCalls = transitionToolCalls;
-        }
-        message.persistStatus = choosePersistenceStatus(message.persistStatus, candidateStatus);
-        const candidateReason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();
-        if (candidateStatus === 'failed' && candidateReason) {
-          message.failureReason = candidateReason;
-        }
-        if (message.persistStatus && message.persistStatus !== 'failed') {
-          message.failureReason = undefined;
-        }
-      }
       return {
         session: sessionId,
-        messages: [...messagesByUri.values()],
+        messages: foldSessionRows(bindings),
       };
     } catch {
       return null;
@@ -1289,39 +1063,7 @@ export class ChatMemoryManager {
         this.wmReadOpts(),
       );
 
-      const bySession = new Map<string, Array<{ uri: string; author: string; text: string; ts: string }>>();
-      // A message with several transitions comes back once per transition, in
-      // transition order (the rows of one message are adjacent and ordered by
-      // `transitionTs`), so the first row lists the message and the latest
-      // completion wins.
-      const listedMessages = new Set<string>();
-      const completedReplies = new Map<string, string>();
-      for (const row of allMsgs.bindings ?? []) {
-        const uri = String(row.m ?? '').replace(/[<>]/g, '');
-        if (uri && row.transitionAssistantReply) {
-          const reply = completedTurnReply(row);
-          if (reply !== undefined) completedReplies.set(uri, reply);
-        }
-        if (uri && listedMessages.has(uri)) continue;
-        if (uri) listedMessages.add(uri);
-        const sessionUri = String(row.session ?? '').replace(/[<>]/g, '');
-        if (!sessionUri) continue;
-        if (!bySession.has(sessionUri)) bySession.set(sessionUri, []);
-        const msgs = bySession.get(sessionUri)!;
-        if (msgs.length >= 100) continue;
-        msgs.push({
-          uri,
-          author: row.author?.includes('user') ? 'user' : 'agent',
-          text: decodeRdfStringLiteral(row.text ?? ''),
-          ts: stripRdfLiteral(row.ts ?? ''),
-        });
-      }
-      for (const msgs of bySession.values()) {
-        for (const msg of msgs) {
-          const completedReply = msg.author === 'agent' ? completedReplies.get(msg.uri) : undefined;
-          if (completedReply !== undefined) msg.text = completedReply;
-        }
-      }
+      const bySession = foldListedRows(allMsgs.bindings ?? []);
 
       return sessionEntries.map((entry: { sessionUri: string; sessionId: string }) => ({
         session: entry.sessionId,
