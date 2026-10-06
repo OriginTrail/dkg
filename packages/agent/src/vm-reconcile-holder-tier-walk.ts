@@ -99,12 +99,15 @@ export async function resolveHolderPeerHints(
  * wallets, and stops starting reads that its time budget cannot cover; the next
  * one resumes at the first row it did not examine (the row
  * after the window's last page when everything was, or the first row whose
- * wallet was left unasked) and wraps at the end of the phonebook. Where it
- * resumes depends on the rows alone, not on how long a remembered answer lives
- * or how often resolutions run, so each resolution moves the walk a fixed number
- * of rows and wallets at any spacing (a wallet is asked about once per pass). The
- * walk goes on after a satisfied stop as well, from the rows
- * it examined. What windows verified is carried, so a holder stays once found,
+ * wallet was left unasked) and wraps at the end of the phonebook. How far a
+ * resolution gets does not depend on how often resolutions run. A resolution
+ * ends at the first of 256 new wallets asked about, four pages read, its time
+ * budget, a satisfied tier or the end of the phonebook; a remembered answer saves
+ * a lookup, so it can only carry a resolution further than one that finds none,
+ * and a wallet is asked about once per pass at most (about, as an evicted or
+ * expired answer is asked for again when the walk comes back to the wallet). The
+ * walk goes on after a satisfied stop as well, from the rows it examined. What
+ * windows verified is carried, so a holder stays once found,
  * until one of these ends it: a binding goes when a range that includes its row
  * was examined without it, when its identity leaves the ShardingTable, when its
  * identity holds {@link VM_HOLDER_TIER_CARRY_PEERS_PER_IDENTITY} better ranked

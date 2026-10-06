@@ -245,9 +245,11 @@ export class VmHolderTierController {
   }
 
   /**
-   * The phonebook gained profiles: the shared resolution is stale for every
-   * graph, and the listed graphs (the ones with a recovery to re-run) forget
-   * their entries, so the first of them to run again asks for a new resolution.
+   * The phonebook gained profiles (the host calls this when the Edge's on-demand
+   * `agents` phonebook fetch resolved curators): the shared resolution is stale
+   * for every graph, and the listed graphs (the ones with a recovery to re-run)
+   * forget their entries, so the first of them to run again asks for a new
+   * resolution.
    * That resolution resumes where the walk stands (see
    * {@link VmHolderHintResolver.invalidate}): a profile that arrives or changes in
    * rows the walk has already passed is read when the walk wraps, up to one pass

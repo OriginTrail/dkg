@@ -270,7 +270,8 @@ ignored, and any unreadable chain or phonebook fact leaves the peer set
 unchanged.
 
 Because anyone can publish a profile, no claim a profile makes about itself
-(such as how recently it was seen) decides which rows are read. The phonebook
+(such as how recently it was seen) decides which rows are read; such a claim
+only orders the peers of one identity. The phonebook
 is read in pages of 256 core-role rows in a fixed wallet order, at most four
 pages per resolution, and the peer cap applies to the peers the chain vouches
 for. A resolution asks the chain about at most 256 wallets it has not asked
@@ -279,9 +280,9 @@ identity and 10 when it has). It starts a page read or a chain lookup only
 when the slowest of its kind so far leaves time to end within 8 of its 10
 seconds, so a slow chain or store shortens a resolution instead of timing it
 out. The walk resumes at the first row the last resolution did not examine and
-wraps at the end of the phonebook, so where it stands depends on the rows
-alone, not on how long remembered answers live or how often resolutions run.
-It keeps walking when the peers it already has fill the cap or give every
+wraps at the end of the phonebook. How far a resolution gets does not depend on
+how often resolutions run, and a remembered answer only saves a lookup, so it
+can carry a resolution further than one that finds none. It keeps walking when the peers it already has fill the cap or give every
 identity its two, so the bindings it carries from behind a flood of junk are
 verified again before they expire.
 
@@ -315,12 +316,12 @@ lookup) in R junk rows sorting ahead of it:
   resolution about every two minutes (30 an hour), so about 7,680 distinct junk
   wallets, or about 7,680 rows once the tier is satisfied (rows that share
   wallets are read faster before that: up to about 30,720). A simulation with
-  distinct junk wallets held the set up to 7,400 of them and lost it at 7,700,
-  the wait at the end of each pass included. A slow chain stretches the period
+  one graph, a 1 ms chain and distinct junk wallets held the set up to 7,400 of
+  them and lost it at 7,700, the wait at the end of each pass included. A slow chain stretches the period
   and lowers the limit; more graphs make resolutions more frequent (see the cost
   below) and raise it.
 - Rows that claim one identity's wallet cannot displace another identity's
-  peers.
+  peers from the carry.
 - Cost: while the phonebook is larger than one page the tier keeps walking even
   when it is satisfied. Each such resolution costs at most 256 lookups and, once
   the tier is satisfied, typically one page read (up to four before it is, for
@@ -328,10 +329,13 @@ lookup) in R junk rows sorting ahead of it:
   minute after the previous one ended (the cached answer expires then), and the
   resolver is shared by every graph, so the bound for the node is about 60
   resolutions, 240 page reads (four per resolution) and 15,360 lookups an hour,
-  plus one resolution for each phonebook arrival that invalidates the hints.
+  plus one resolution for each phonebook arrival that invalidates the hints (the
+  Edge's on-demand `agents` phonebook fetch resolving a graph's curator, which
+  waits at least ten minutes between fetches that reached a peer; a node that
+  syncs the phonebook on every connect has no such arrival).
   That bound is not what to expect: a node with 3,000 junk wallets ahead of its
-  holders, the default 60 second sweep and a 1 ms chain measured 24 to 26
-  resolutions (6,006 to 6,518 lookups, one page each) an hour with one graph,
+  holders, the default 60 second sweep and a 1 ms chain measured 26
+  resolutions (6,449 to 6,518 lookups, one page each) an hour with one graph,
   and 32 to 45 resolutions (about 8,000 to 11,300 lookups) an hour with 2 to 12
   graphs whose sweeps are out of phase. With one graph a resolution is due just
   after the next sweep tick and runs on the one after, and the resolution that
@@ -347,7 +351,10 @@ lookup) in R junk rows sorting ahead of it:
 - A profile that claims a real Core's wallet with peer ids that rank above the
   Core's own (a later `lastSeen`, or a smaller peer id at an equal one) takes
   that identity's two peers until peers are bound to wallets by signature. It
-  cannot take another identity's.
+  cannot take another identity's from the carry. With more than 16 identities in
+  the ShardingTable the 32-peer cap is spread over the identities in id order,
+  each one's best peer first, so a claim that gives a low-numbered identity a
+  second peer can take the cap slot of a higher-numbered identity's second peer.
 - The reads of a resolution must finish within its 10 second bound, and a read
   abandoned at the bound commits nothing. A resolution always makes its first
   page read and one batch of 8 lookups, so only a chain or store that needs the
@@ -367,8 +374,8 @@ lookup) in R junk rows sorting ahead of it:
   not move the walk back: what it covers again are the rows a read that was
   still running might have missed, not rows behind the walk. With 3,000 junk
   wallets (a pass of about 24 minutes at the default sweep) a holder profile
-  that sorts near the start of the phonebook, published and announced at minute
-  12, was found at minute 30.
+  that sorts before every junk wallet, published and announced at minute 12,
+  was found at minute 29 (published at minute 6 or 20: also 29).
 
 The tier is on by default; turn it off
 with

@@ -168,12 +168,14 @@ export class VmHolderHintResolver {
   }
 
   /**
-   * Forget the cached answer, e.g. after the phonebook gained profiles. The walk
-   * over the phonebook keeps its place, except that a read still running cannot
-   * move it: what it read may predate the arrival, and the next read must
-   * cover those rows again. (Invalidations arriving faster than a read ends
-   * therefore hold the walk still; they come from phonebook fetches, which are
-   * spaced by minutes.)
+   * Forget the cached answer, e.g. after the Edge's on-demand `agents` phonebook
+   * fetch resolved a curator. The walk over the phonebook keeps its place, except
+   * that a read still running cannot move it: what it read may predate the
+   * arrival, and the next read must cover those rows again. (Invalidations
+   * arriving faster than a read ends therefore hold the walk still. That fetch
+   * waits at least ten minutes between fetches that reached a peer, and a node
+   * that syncs the phonebook on every connect has no such fetch, so it is never
+   * invalidated this way.)
    *
    * The next read is fresh, but it resumes where the walk stands, so a profile
    * that arrives or changes in rows the walk has already passed is read only when

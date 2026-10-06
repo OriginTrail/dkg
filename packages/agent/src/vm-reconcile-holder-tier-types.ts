@@ -27,11 +27,11 @@ export const VM_HOLDER_TIER_PEERS_PER_IDENTITY = 2;
  * first) and then peer id; carrying twice that lets an identity fall back to its
  * next-best peer, without waiting for the walk to come round again, when one of
  * the two disappears. When an identity holds more, the peer the selection would
- * rank last is dropped, so rows that claim one wallet can never displace the
- * peers of another identity. The carried set is therefore at most (ShardingTable
- * identities) x this many bindings, however many rows claim a wallet, and needs
- * no global cap of its own: only bindings of identities that are in the table are
- * carried, and the table is the chain's.
+ * rank last is dropped, so rows that claim one wallet cannot displace the peers
+ * of another identity from the carry. The carried set is therefore at most
+ * (ShardingTable identities) x this many bindings, no matter how many rows claim
+ * a wallet, and needs no global cap of its own: only bindings of identities that
+ * are in the table are carried, and the table is the chain's.
  */
 export const VM_HOLDER_TIER_CARRY_PEERS_PER_IDENTITY = 4;
 /** Core-role phonebook rows per page of one resolution. */
@@ -85,9 +85,10 @@ export const VM_HOLDER_TIER_IDENTITY_TTL_MS = 10 * 60_000;
 /**
  * A wallet with no identity is re-read sooner than one with an identity, but
  * not sooner than a resolution is reused, so a pass of the walk that wraps
- * within this time does not pay for the same junk twice. The walk's progress
- * does not depend on it (a wallet examined once is not read again until the
- * walk wraps). A Core wallet that registers after its row was examined is
+ * within this time does not pay for the same junk twice. It only decides whether
+ * a lookup is saved: a remembered answer never makes the walk skip a row, and the
+ * walk does not wait for an answer to expire to move on. A Core wallet that
+ * registers after its row was examined is
  * recognised when the walk next reaches the row with this answer expired: up to
  * this long plus the time the walk needs to come back to it (one pass).
  */
@@ -95,9 +96,10 @@ export const VM_HOLDER_TIER_NEGATIVE_IDENTITY_TTL_MS = VM_HOLDER_TIER_RESOLUTION
 /**
  * Wallet answers remembered, oldest evicted first. A flood of junk wallets can
  * push a genuine wallet's answer out, which costs that wallet one lookup when
- * the walk reaches its row again (at most one per pass of the walk, out of the
- * 256 a resolution may spend) and hides nothing: what the walk examines does not
- * depend on what this cache holds.
+ * the walk reaches its row again (about one per pass of the walk, out of the
+ * 256 a resolution may spend) and hides nothing: a lookup the cache could not
+ * save is one of those 256, so it can end a window a few rows sooner, and no row
+ * is skipped for it.
  */
 export const VM_HOLDER_TIER_IDENTITY_CACHE_MAX_ENTRIES = 1_024;
 /** A previous holder set survives an unavailable read for at most this long. */
