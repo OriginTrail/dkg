@@ -180,10 +180,15 @@ export class VmHolderTierController {
   }
 
   /**
-   * Refresh one graph's entry when it is due. Advisory and bounded: reads at
-   * most one shared resolution per TTL and writes only this graph's entry, so
-   * no other graph's roster moves. A private graph gets an empty tier
-   * (hint-derived peers are never asked about it).
+   * Refresh one graph's entry when it is due. Advisory and bounded: each time the
+   * entry is due it reads the graph's public policy (one bounded authority read,
+   * capped at the policy deadline, for every graph separately and outside the
+   * shared resolver's bounds), then takes the shared resolution (cached by the
+   * resolver for every graph) and writes only this graph's entry, so no other
+   * graph's roster moves. An entry is due again five minutes after a complete
+   * resolution or a private graph, and a minute after a resolution that was cut
+   * short or unavailable or a policy that is unknown. A private graph gets an
+   * empty tier (hint-derived peers are never asked about it).
    */
   async refresh(
     localCgId: string,

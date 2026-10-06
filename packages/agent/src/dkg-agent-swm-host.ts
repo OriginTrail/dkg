@@ -6741,8 +6741,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // connected-peer tiers. Their tier is refreshed here, before the gate below
     // reads it, and for this graph only: a set that appeared after a completed
     // proof cycle is pure roster growth, which breaks that backoff at once, and
-    // one graph's refresh never restarts another graph's cycle. The work is one
-    // shared, cached resolution per TTL; between refreshes this is a no-op.
+    // one graph's refresh never restarts another graph's cycle. Each time this
+    // graph's entry is due (every minute while its resolutions are cut short or
+    // unavailable or its policy is unknown, otherwise every five minutes) the
+    // work is one bounded policy read plus the shared, cached resolution;
+    // between due times this is a no-op.
     try {
       await this.refreshVmReconcileHolderTier(localCgId, {
         signal,

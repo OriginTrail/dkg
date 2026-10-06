@@ -11,11 +11,16 @@
 /** Hinted peers one graph's roster may add, at most. */
 export const VM_HOLDER_TIER_MAX_PEERS = 32;
 /**
- * Peers one identity may contribute, so that one identity's peers (real or
- * claimed) never take a slot of another identity. What a profile can still do
- * is claim a real member wallet with peer ids that rank above the genuine ones
- * (a later `lastSeen`, or a smaller peer id at an equal one): they then take
- * that identity's slots until peers are bound to wallets by signature.
+ * Peers one identity may contribute. The carry bounds each identity on its own,
+ * so no claim displaces another identity's peers from it; the selection spreads
+ * the {@link VM_HOLDER_TIER_MAX_PEERS} cap over the identities in id order (each
+ * one's best peer first, then each one's second), so with more than 16
+ * identities in the table a claim that gives a low-numbered identity a second
+ * peer can take the cap slot of a higher-numbered identity's second peer. What a
+ * profile can also do is claim a real member wallet with peer ids that rank above
+ * the genuine ones (a later `lastSeen`, or a smaller peer id at an equal one):
+ * they then take that identity's slots until peers are bound to wallets by
+ * signature.
  */
 export const VM_HOLDER_TIER_PEERS_PER_IDENTITY = 2;
 /**

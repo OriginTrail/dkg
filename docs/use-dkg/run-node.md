@@ -327,7 +327,7 @@ lookup) in R junk rows sorting ahead of it:
   the tier is satisfied, typically one page read (up to four before it is, for
   example when the carried bindings have expired). A resolution can start a
   minute after the previous one ended (the cached answer expires then), and the
-  resolver is shared by every graph, so the bound for the node is about 60
+  resolver is shared by every graph, so its bound for the node is about 60
   resolutions, 240 page reads (four per resolution) and 15,360 lookups an hour,
   plus one resolution for each phonebook arrival that invalidates the hints (the
   Edge's on-demand `agents` phonebook fetch resolving a graph's curator, which
@@ -341,6 +341,12 @@ lookup) in R junk rows sorting ahead of it:
   after the next sweep tick and runs on the one after, and the resolution that
   reaches the end of the phonebook waits the full 5 minutes. When the core rows
   fit one page, nothing changes: one resolution every 5 minutes.
+  The policy reads are not part of that bound: each graph's refresh reads the
+  graph's access policy (a bounded chain-authority read, at most 5 seconds)
+  whenever its entry is due, every 5 minutes, or about every minute while its
+  resolutions are cut short (a phonebook larger than one page keeps them so) or
+  its policy is unknown, so with G graphs a node makes up to about G such reads
+  a minute.
 
 **What it does not guarantee.**
 
