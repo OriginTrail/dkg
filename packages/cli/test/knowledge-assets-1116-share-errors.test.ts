@@ -438,8 +438,26 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
     });
     expect(result.status).toBe(409);
-    expect(result.body.code).toBe('KA_SLOT_ALREADY_CLAIMED');
+    expect(result.body).toEqual({
+      code: 'KA_SLOT_ALREADY_CLAIMED', error: 'KA slot is already owned by another lifecycle',
+    });
     expect(writeCalls).toHaveLength(0);
+  });
+
+  it('keeps atomic creation recovery coordinates for an already finalized lifecycle', async () => {
+    await startWith({
+      history: async () => null,
+      create: async () => { throw Object.assign(new Error('already finalized'), { code: 'KA_ASSERTION_ALREADY_FINALIZED' }); },
+    });
+    const result = await postRoot({
+      contextGraphId: CG_ID, name: 'sealed-conflict',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+    });
+    expect(result.status).toBe(409);
+    expect(result.body).toEqual({
+      code: 'KA_ASSERTION_ALREADY_FINALIZED', error: 'already finalized',
+      retryAction: 'resume_existing_knowledge_asset', retryKnowledgeAssetName: 'sealed-conflict',
+    });
   });
 
   it('atomic create uses a node/admin pre-signed author and exact reserved slot as the fresh storage lane', async () => {

@@ -72,10 +72,19 @@ export function respondPublicationPricingPolicyError(res: RequestContext["res"],
 
 const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['KA_ASSERTION_ALREADY_FINALIZED', 409],
+  ['KA_SLOT_ALREADY_CLAIMED', 409],
   ['ASSERTION_EMPTY', 409],
   ['KA_WM_LIFECYCLE_REQUIRED', 409],
   ['KA_WM_LIFECYCLE_CORRUPT', 500],
 ]);
+
+/** Shared typed lifecycle classification; callers retain route-specific recovery. */
+export function respondAssertionCodeError(res: RequestContext["res"], e: any): boolean {
+  const status = ASSERTION_CODE_STATUS.get(e?.code);
+  if (status === undefined) return false;
+  jsonResponse(res, status, { error: e.message, code: e.code });
+  return true;
+}
 
 /**
  * Map typed WM/SWM preconditions and integrity failures before message fallbacks.
@@ -124,11 +133,7 @@ export function respondAssertionError(res: RequestContext["res"], e: any, contex
     });
     return;
   }
-  const status = ASSERTION_CODE_STATUS.get(e?.code);
-  if (status !== undefined) {
-    jsonResponse(res, status, { error: e.message, code: e.code });
-    return;
-  }
+  if (respondAssertionCodeError(res, e)) return;
   // KA-number-floor reconcile couldn't reach the chain (e.g. a rate-limited RPC
   // 429'd the one-time-per-author read) -> retryable 503, not 500.
   if (respondIfReconcileUnavailable(res, e)) return;
@@ -152,4 +157,3 @@ export function respondAssertionError(res: RequestContext["res"], e: any, contex
   }
   jsonResponse(res, 500, { error: msg });
 }
-

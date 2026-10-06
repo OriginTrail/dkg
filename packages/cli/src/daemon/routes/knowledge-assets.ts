@@ -93,6 +93,7 @@ import { authenticatedAgentAddress } from '../../auth.js';
 
 import {
   respondAssertionError,
+  respondAssertionCodeError,
   respondPromoteRecoveryError,
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
@@ -1134,9 +1135,6 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (respondPromoteRecoveryError(res, e, {
         contextGraphId: resolvedContextGraphId, name, subGraphName, phase: 'create',
       })) return;
-      if (e?.code === 'KA_SLOT_ALREADY_CLAIMED') {
-        return jsonResponse(res, 409, { code: e.code, error: e.message });
-      }
       if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
         return jsonResponse(res, 409, {
           code: e.code,
@@ -1145,6 +1143,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           retryKnowledgeAssetName: name,
         });
       }
+      if (respondAssertionCodeError(res, e)) return;
       if (e?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
       }

@@ -1453,11 +1453,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               }]]),
             }
           : undefined;
-        // Never let a live caller inherit a bounded caller's absence proof.
-        const freshnessSuffix = options.freshness === 'bounded' ? ':bounded' : '';
-        const flightKey = repairHints === undefined
-          ? `registration-binding:${contextGraphId}${freshnessSuffix}`
-          : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}${freshnessSuffix}`;
+        // Keep graph IDs, repair hints and freshness distinct even with delimiters.
+        const flightKey = JSON.stringify([
+          'registration-binding', contextGraphId, options.freshness ?? 'live',
+          repairHints === undefined ? null : [durableBinding?.onChainId ?? null, durableBinding?.onChainHash ?? null],
+        ]);
         const coldResolution = finalizedAuthorityColdResolutionOf(this);
         // A read-authority caller with an already accepted unregistered proof
         // may still need the retained finalized projection to re-establish
