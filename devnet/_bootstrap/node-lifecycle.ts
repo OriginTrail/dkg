@@ -16,8 +16,8 @@
  * a silent skip that would leave the node running. A PID file is only ever
  * deleted when the PID in it is known to be dead; a live process keeps its
  * file until it is explicitly stopped, otherwise `restart-node` would launch a
- * duplicate and could signal a recycled PID. A process that has exited but not
- * been collected by its parent yet (a zombie, which is what a just-SIGKILLed
+ * duplicate and could signal a recycled PID. A process that is exiting or has
+ * exited but not been collected by its parent yet (a zombie: what a just-SIGKILLed
  * daemon is for a moment) counts as dead. Nothing here scans the process
  * table or signals by name.
  *
@@ -136,11 +136,21 @@ export function readProcessState(pid: number): string | null {
 }
 
 /**
- * Whether the process is still running. A process that has exited but whose parent
- * has not collected it yet (a zombie: what a SIGKILLed daemon is for a moment) still
- * answers signal 0 and shows a mangled command line (`(node)`), yet nothing is left
- * to signal and nothing of the daemon runs: it counts as gone, or a restart right
- * after a kill would refuse it as "not a daemon of this checkout". A state that
+ * Whether a `ps` state (`readProcessState`) is that of a process that is not running any
+ * more: a zombie (`Z...`, exited but not yet collected by its parent) or, on macOS, one
+ * that is in the middle of exiting (`E` flag, "trying to exit", for example `?E`). A
+ * `null` or ordinary state (`S`, `Ss+`, `R`, ...) is not.
+ */
+export function processStateIsGone(state: string | null): boolean {
+  return state !== null && (state.startsWith('Z') || state.includes('E'));
+}
+
+/**
+ * Whether the process is still running. A SIGKILLed daemon is, for a moment, a process in
+ * the middle of exiting and then a zombie until its parent (or init) collects it: it
+ * still answers signal 0 and `ps` shows its command line as `(node)`, yet nothing of the
+ * daemon runs and nothing is left to signal. Such a process counts as gone, or a restart
+ * right after a kill would refuse it as "not a daemon of this checkout". A state that
  * cannot be read counts as alive.
  */
 export function pidAlive(pid: number): boolean {
@@ -149,7 +159,7 @@ export function pidAlive(pid: number): boolean {
   } catch {
     return false;
   }
-  return !readProcessState(pid)?.startsWith('Z');
+  return !processStateIsGone(readProcessState(pid));
 }
 
 /**

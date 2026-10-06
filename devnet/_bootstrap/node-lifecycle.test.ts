@@ -17,6 +17,7 @@ import {
   nodeReachable,
   parsePid,
   pidAlive,
+  processStateIsGone,
   readNodePidEntries,
   readNodePids,
   readProcessCommandLine,
@@ -150,6 +151,12 @@ describe('PID files', () => {
     expect(pidAlive(pid)).toBe(false);
     expect(readProcessState(process.pid)).not.toMatch(/^Z/);
     expect(readProcessState(deadPid())).toBeNull();
+  });
+
+  it('processStateIsGone: a zombie and a process trying to exit (macOS `E`) are gone, ordinary states and an unreadable one are not', () => {
+    // The first live session saw exactly `(node)` / `?E` for a daemon that had just been SIGKILLed.
+    for (const state of ['Z', 'Z+', 'Zs', '?E', 'UE', 'S E']) expect(processStateIsGone(state), state).toBe(true);
+    for (const state of ['S', 'Ss', 'Ss+', 'R', 'R+', 'U', 'Ssl', 'SN', 'I', null]) expect(processStateIsGone(state), String(state)).toBe(false);
   });
 
   it('clearDeadNodePidFiles removes the file of a zombie, as it does for any dead PID', async () => {
