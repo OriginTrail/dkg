@@ -426,6 +426,22 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(finalizeCalls[0]?.opts?.preSignedAuthorAttestation?.address).toBe(preSignedAuthor);
   });
 
+  it('atomic create reports a reserved-slot conflict without attempting writes', async () => {
+    const writeCalls: unknown[] = [];
+    await startWith({
+      history: async () => null,
+      create: async () => { throw Object.assign(new Error('KA slot is already owned by another lifecycle'), { code: 'KA_SLOT_ALREADY_CLAIMED' }); },
+      write: async (...args: unknown[]) => { writeCalls.push(args); },
+    });
+    const result = await postRoot({
+      contextGraphId: CG_ID, name: 'slot-conflict',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+    });
+    expect(result.status).toBe(409);
+    expect(result.body.code).toBe('KA_SLOT_ALREADY_CLAIMED');
+    expect(writeCalls).toHaveLength(0);
+  });
+
   it('atomic create uses a node/admin pre-signed author and exact reserved slot as the fresh storage lane', async () => {
     const preSignedAuthor = `0x${'ab'.repeat(20)}`;
     const reservedKaId = (BigInt(preSignedAuthor) << 96n) | 27n;

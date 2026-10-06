@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-
-const KA_NUMBER_MASK = (1n << 96n) - 1n;
+import { KaNumberAllocator } from './allocator.js';
 
 /** Bind an externally signed KA id to its author lane and exact low-96 slot. */
 export function resolveReservedKaIdAllocationV1(
@@ -15,14 +14,15 @@ export function resolveReservedKaIdAllocationV1(
   allocateKaNumber: () => Promise<{ number: bigint; reservedUal: string }>;
 }> {
   const canonicalAuthor = ethers.getAddress(author);
-  if ((reservedKaId >> 96n) !== BigInt(canonicalAuthor)) {
+  const { author: reservedAuthor, number } = KaNumberAllocator.unpack(reservedKaId);
+  if (reservedAuthor !== canonicalAuthor.toLowerCase()) {
     throw new Error(
       `Reserved KA id ${reservedKaId} is outside author ${canonicalAuthor}'s namespace`,
     );
   }
-  const number = reservedKaId & KA_NUMBER_MASK;
   return {
-    author: canonicalAuthor,
+    // Lifecycle subjects preserve the caller spelling across create/write/finalize.
+    author,
     allocateKaNumber: async () => {
       // The signed slot is already consumed. Keep local allocation above it.
       allocator?.reconcile(canonicalAuthor, number);

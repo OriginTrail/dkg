@@ -1,3 +1,4 @@
+import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
@@ -7813,10 +7814,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<string> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
     return this.withAssertionLifecycleWriteLock(
-      contextGraphId,
-      name,
-      agentAddress,
-      subGraphName,
+      contextGraphId, name, agentAddress, subGraphName,
       async () => {
         await this.assertNoUnfinishedAssertionPromote(
           contextGraphId,
@@ -7855,6 +7853,14 @@ export class DKGPublisher implements Publisher {
       allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
       onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
     },
+  ): Promise<string> {
+    return this.withWriteLocks([assertionAllocationLockKey(contextGraphId, agentAddress, subGraphName)], () =>
+      this.assertionCreateWithAllocationLock(contextGraphId, name, agentAddress, subGraphName, opts));
+  }
+
+  private async assertionCreateWithAllocationLock(
+    contextGraphId: string, name: string, agentAddress: string, subGraphName?: string,
+    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
   ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 
@@ -7914,23 +7920,8 @@ export class DKGPublisher implements Publisher {
         }
       }
     }
-    const staleEvents = await this.store.query(
-      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
-    );
-    if (staleEvents.type === 'bindings') {
-      for (const row of staleEvents.bindings) {
-        const subj = row['s'];
-        if (subj) await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: subj });
-      }
-    }
-    if (preserved.length > 0) {
-      await this.store.insert(preserved);
-    }
-
-    // D1 (identity-at-create): mint the KA number now, UNLESS the draft already
-    // carries a persistent identity. The A2 preserve step above re-inserts a prior
-    // kaId on discard+recreate / pull-from, so reuse it and never double-allocate
-    // (this is the re-open guard the create-time allocation needs).
+    // Preserve the lifecycle's stable identity on reopen. Allocate and check
+    // ownership before changing draft metadata, then restore retained pointers.
     const hasPreservedKaId = preserved.some((q) => q.predicate === `${A2_DKG}kaId`);
     let kaNumber: bigint | undefined;
     let reservedUal: string | undefined;
@@ -7949,6 +7940,23 @@ export class DKGPublisher implements Publisher {
         kaNumber = kaId & ((1n << 96n) - 1n);
         reservedUal = `did:dkg:${this.chain.chainId}/${agentAddress.toLowerCase()}/${kaNumber}`;
       }
+    }
+
+    if (kaNumber !== undefined) {
+      await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName);
+    }
+
+    const staleEvents = await this.store.query(
+      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
+    );
+    if (staleEvents.type === 'bindings') {
+      for (const row of staleEvents.bindings) {
+        const subj = row['s'];
+        if (subj) await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: subj });
+      }
+    }
+    if (preserved.length > 0) {
+      await this.store.insert(preserved);
     }
 
     // Uniform layout: WM data lives in the per-KA graph keyed by {number} once the KA

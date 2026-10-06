@@ -2969,7 +2969,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).not.toHaveBeenCalled();
   });
 
-  it('lets an approved unregistered replica consume a retained projection while the circuit is open', async () => {
+  it('admits approved replica lookup during an open circuit but rejects unaccepted finalized absence', async () => {
     const contextGraphId = `${AUTHOR}/approved-registration-binding-open-circuit`;
     const resolveSnapshots = vi.fn(async () => new Map());
     const edge = await startAgent({

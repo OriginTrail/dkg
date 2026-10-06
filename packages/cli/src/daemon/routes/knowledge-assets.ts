@@ -272,11 +272,18 @@ function layerStatus(hist: Record<string, unknown>, layer: "wm" | "swm" | "vm"):
   );
 }
 
+type ResolvedFinalizeOptions = {
+  subGraphName?: string;
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: NonNullable<ReturnType<typeof validatePreSignedAuthorAttestation>>;
+  schemeVersion?: number;
+};
+
 export function resolveFinalizeOptions(
   raw: Record<string, any>,
   res: RequestContext["res"],
   tokenAgentAddress?: string,
-): Record<string, unknown> | null {
+): ResolvedFinalizeOptions | null {
   const {
     subGraphName,
     authorAgentAddress,
@@ -353,7 +360,7 @@ export function resolveFinalizeOptions(
       : explicitAuthorAgentAddress) ??
     (resolvedPreSignedAttestation == null ? tokenAgentAddress : undefined);
   return {
-    ...(subGraphName ? { subGraphName } : {}),
+    ...(typeof subGraphName === "string" && subGraphName ? { subGraphName } : {}),
     ...(typeof effectiveAuthorAgentAddress === "string" ? { authorAgentAddress: effectiveAuthorAgentAddress } : {}),
     ...(resolvedPreSignedAttestation ? { preSignedAuthorAttestation: resolvedPreSignedAttestation } : {}),
     ...(schemeVersion != null ? { schemeVersion } : {}),
@@ -365,7 +372,7 @@ function hasFinalizeOnlyCreateFields(raw: Record<string, unknown>): boolean {
 }
 
 function resolveAuthorAgentAddressFromFinalizeOptions(
-  finalizeOptions: Record<string, unknown>,
+  finalizeOptions: ResolvedFinalizeOptions,
   tokenAgentAddress?: string,
 ): string | undefined {
   const finalizedAuthor = finalizeOptions.authorAgentAddress;
@@ -385,16 +392,12 @@ function resolveAuthorAgentAddressFromFinalizeOptions(
  * be sealing an already-open draft in the daemon's default lane.
  */
 function resolveAtomicCreateAuthorFromFinalizeOptions(
-  finalizeOptions: Record<string, unknown>,
+  finalizeOptions: ResolvedFinalizeOptions,
   tokenAgentAddress?: string,
 ): { agentAddress?: string; reservedKaId?: bigint } {
   const preSigned = finalizeOptions.preSignedAuthorAttestation;
-  if (preSigned !== null && typeof preSigned === "object") {
-    const address = Reflect.get(preSigned, "address");
-    const reservedKaId = Reflect.get(preSigned, "reservedKaId");
-    if (typeof address === "string" && typeof reservedKaId === "bigint") {
-      return { agentAddress: address, reservedKaId };
-    }
+  if (preSigned !== undefined) {
+    return { agentAddress: preSigned.address, reservedKaId: preSigned.reservedKaId };
   }
   const agentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
     finalizeOptions,
@@ -448,7 +451,7 @@ async function resolveFinalizeStorageLane(
   agent: RequestContext["agent"],
   contextGraphId: string,
   name: string,
-  finalizeOptions: Record<string, unknown>,
+  finalizeOptions: ResolvedFinalizeOptions,
   tokenAgentAddress?: string,
 ): Promise<{ agentAddress?: string }> {
   const tokenLane = scopedTokenStorageLane(tokenAgentAddress);
@@ -1131,6 +1134,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (respondPromoteRecoveryError(res, e, {
         contextGraphId: resolvedContextGraphId, name, subGraphName, phase: 'create',
       })) return;
+      if (e?.code === 'KA_SLOT_ALREADY_CLAIMED') {
+        return jsonResponse(res, 409, { code: e.code, error: e.message });
+      }
       if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
         return jsonResponse(res, 409, {
           code: e.code,

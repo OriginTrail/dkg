@@ -59,3 +59,17 @@ async function connectCurator(
     return false;
   }
 }
+
+/** Dial recovery cannot prevent Messenger from durably accepting an offline join. */
+export async function recoverCuratorConnectionBeforeQueueing(
+  agent: CuratorPeerConnectionAgent,
+  curatorPeerId: string,
+  signal: AbortSignal,
+  ctx: OperationContext,
+): Promise<void> {
+  try {
+    await ensureCuratorConnected(agent, curatorPeerId, signal, ctx, (abort) => abort?.throwIfAborted());
+  } catch (error) {
+    agent.log.warn(ctx, `Curator connection recovery deferred: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}

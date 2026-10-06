@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { ethers } from 'ethers';
+import { buildAuthorAttestationTypedData, MemoryLayer, contextGraphLayerUri } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 
@@ -51,6 +54,46 @@ describe('create with an externally reserved KA id', () => {
       reservedUal: `did:dkg:none/${AUTHOR.toLowerCase()}/7`,
     });
     expect(allocator.peekKaId(AUTHOR)).toBe((BigInt(AUTHOR) << 96n) | 8n);
+  });
+
+  it('keeps lowercase pre-signed create/write/finalize/share on one real lifecycle', async () => {
+    const wallet = new ethers.Wallet(`0x${'35'.repeat(32)}`);
+    const author = wallet.address.toLowerCase();
+    const kav10Address = `0x${'11'.repeat(20)}`;
+    const store = new OxigraphStore();
+    agent = await DKGAgent.create({
+      name: 'LowercaseReservedSlot', listenPort: 0, listenHost: '127.0.0.1', store,
+      chainAdapter: Object.assign(new NoChainAdapter(), {
+        chainId: 'evm:31337',
+        getEvmChainId: async () => 31337n,
+        getKnowledgeAssetsLifecycleAddress: async () => kav10Address,
+      }),
+      nodeRole: 'core', skills: [], kaNumberAllocator: makeTestKaNumberAllocator(),
+    });
+    await agent.start();
+    const contextGraphId = 'reserved-slot-cg';
+    const name = 'lowercase';
+    const reservedKaId = (BigInt(author) << 96n) | 7n;
+    const quads = [{ subject: 'urn:test:lowercase', predicate: 'urn:test:value', object: '"one lifecycle"', graph: '' }];
+    const merkleRoot = computeFlatKCRootV10(quads, []);
+    const typedData = buildAuthorAttestationTypedData({
+      chainId: 31337n, kav10Address, authorAddress: author, merkleRoot, reservedKaId, schemeVersion: 1,
+    });
+    const signed = ethers.Signature.from(await wallet.signTypedData(typedData.domain, typedData.types, typedData.message));
+    const preSignedAuthorAttestation = {
+      address: author, reservedKaId,
+      signature: { r: ethers.getBytes(signed.r), vs: ethers.getBytes(signed.yParityAndS) },
+    };
+    await agent.assertion.create(contextGraphId, name, { agentAddress: author, reservedKaId });
+    await agent.assertion.write(contextGraphId, name, quads, { agentAddress: author });
+    const sealed = await agent.assertion.finalize(contextGraphId, name, { agentAddress: author, preSignedAuthorAttestation });
+    expect(sealed.authorAddress.toLowerCase()).toBe(author);
+    expect(sealed.kaUal).toBe(`did:dkg:evm:31337/${author}/7`);
+    await expect(agent.assertion.promote(contextGraphId, name, {
+      agentAddress: author, preSignedAuthorAttestation, entities: 'all',
+    })).resolves.toMatchObject({ promotedCount: 1, sealed: true });
+    expect(await store.countQuads(contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, author, 7n)))
+      .toBeGreaterThan(0);
   });
 
   it('rejects a reserved id from another author namespace before creating', async () => {
