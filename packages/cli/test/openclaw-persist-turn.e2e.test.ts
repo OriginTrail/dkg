@@ -32,7 +32,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, type ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import { primeAgentDkgSessionId } from '../src/daemon/prime-agent.js';
-import { ONE_STORED_TURN, completedByTransition } from './_helpers/chat-turn-footprint.js';
+import { ONE_STORED_TURN, completedByTransition, summarizeGraphDelta } from './_helpers/chat-turn-footprint.js';
 import {
   CHAT,
   DKG,
@@ -55,7 +55,7 @@ const fixture = createPersistTurnFixture();
 let agent: DKGAgent;
 let memoryManager: ChatMemoryManager;
 let agentAddress: string;
-const { persistTurn, listed, single, select, footprint } = fixture;
+const { persistTurn, listed, single, graphDelta, select, footprint } = fixture;
 const { writeLegacyTurn, writeStoredTransition } = createLegacyChatTurnWriter(() => fixture);
 
 beforeAll(async () => {
@@ -67,6 +67,19 @@ afterAll(() => fixture.stop());
 
 const newSessionId = () => `openclaw:e2e:${randomUUID()}`;
 const newTurnId = () => `turn-${randomUUID()}`;
+
+/**
+ * The graph delta of a turn first reported as `first` that completed by a `stored`
+ * transition: its one exchange, `first` still on the turn itself, and the
+ * completion (state and final reply) on a transition node that points at the turn.
+ */
+const completedDelta = (subject: string, first: 'pending' | 'failed', reply: string) => ({
+  mode: 'delta',
+  turns: [subject],
+  turnStates: [first],
+  messages: 2,
+  transitions: [{ state: 'stored', reply, target: subject }],
+});
 
 const USER_TEXT = 'what is a knowledge asset?';
 const ASSISTANT_TEXT = 'A knowledge asset is a verifiable unit of knowledge.';
@@ -154,18 +167,16 @@ describe('OpenClaw persist-turn over real HTTP into a real store', () => {
 
     await persistTurn(turn(sessionId, first));
     await persistTurn(turn(sessionId, second, { userMessage: 'and a context graph?' }));
-    const delta = await memoryManager.getSessionGraphDelta(sessionId, second, { baseTurnId: first });
+    const delta = await graphDelta(sessionId, second, first);
 
     expect(delta).toMatchObject({
       mode: 'delta',
       watermark: { baseTurnId: first, previousTurnId: first, appliedTurnId: second, turnCount: 2 },
     });
-    const turnIdTriples = delta.triples.filter((triple) => triple.predicate === 'http://dkg.io/ontology/turnId');
-    const turnSubject = turnIdTriples.find((triple) => triple.object === second)?.subject;
-    expect(turnSubject).toBe(scopedSubject(sessionId, second));
     // The delta is the second turn's: its turn subject, and not the first turn's.
-    expect(delta.triples.some((triple) => triple.subject === turnSubject && triple.predicate === 'http://dkg.io/ontology/hasUserMessage')).toBe(true);
-    expect(turnIdTriples.some((triple) => triple.object === first && triple.subject === turnSubject)).toBe(false);
+    expect(summarizeGraphDelta(delta).turns).toEqual([scopedSubject(sessionId, second)]);
+    expect(delta.triples.some((triple) => triple.subject === scopedSubject(sessionId, second) && triple.predicate === `${DKG}hasUserMessage`)).toBe(true);
+    expect(delta.triples.some((triple) => triple.predicate === `${DKG}turnId` && triple.object === first)).toBe(false);
   });
 
   it('records a pending turn completing as a transition, not a second exchange', async () => {
@@ -192,30 +203,18 @@ describe('OpenClaw persist-turn over real HTTP into a real store', () => {
   it('carries a completing transition in the graph delta of its turn', async () => {
     const sessionId = newSessionId();
     const turnId = newTurnId();
+    const subject = scopedSubject(sessionId, turnId);
 
     await persistTurn(turn(sessionId, turnId, { assistantReply: 'working on it', persistenceState: 'pending' }));
-    const before = await memoryManager.getSessionGraphDelta(sessionId, turnId);
+    const before = await graphDelta(sessionId, turnId);
     await persistTurn(turn(sessionId, turnId, { assistantReply: 'the final answer', persistenceState: 'stored' }));
-    const delta = await memoryManager.getSessionGraphDelta(sessionId, turnId);
+    const delta = await graphDelta(sessionId, turnId);
 
-    expect(delta.mode).toBe('delta');
-    const turnSubject = delta.triples.find((triple) =>
-      triple.predicate === 'http://dkg.io/ontology/hasAssistantMessage')?.subject;
-    expect(turnSubject).toBe(scopedSubject(sessionId, turnId));
-    const transitions = delta.triples
-      .filter((triple) => triple.predicate === 'http://dkg.io/ontology/updatesTurn' && triple.object === turnSubject)
-      .map((triple) => triple.subject);
-    expect(transitions).toHaveLength(1);
-    const ofTransition = (predicate: string) => delta.triples
-      .filter((triple) => triple.subject === transitions[0] && triple.predicate === predicate)
-      .map((triple) => triple.object);
-    expect(ofTransition('http://dkg.io/ontology/persistenceState')).toEqual(['stored']);
-    expect(ofTransition('http://dkg.io/ontology/assistantReply')).toEqual(['the final answer']);
+    expect(summarizeGraphDelta(before)).toEqual({ mode: 'delta', turns: [subject], turnStates: ['pending'], messages: 2, transitions: [] });
+    expect(summarizeGraphDelta(delta)).toEqual(completedDelta(subject, 'pending', 'the final answer'));
     // The completion is the only addition: the turn is still one exchange.
-    expect(before.triples.some((triple) => triple.predicate === 'http://dkg.io/ontology/updatesTurn')).toBe(false);
-    const withoutTransition = delta.triples.filter((triple) => triple.subject !== transitions[0]);
-    expect(withoutTransition).toHaveLength(before.triples.length);
-    expect(delta.triples.filter((triple) => triple.predicate === 'http://dkg.io/ontology/hasAssistantMessage')).toHaveLength(1);
+    const transition = delta.triples.find((triple) => triple.predicate === `${DKG}updatesTurn`)!.subject;
+    expect(delta.triples.filter((triple) => triple.subject !== transition)).toHaveLength(before.triples.length);
   });
 
   it('records a failed turn recovering as a transition and never downgrades a stored turn', async () => {
@@ -330,6 +329,16 @@ const CHANNELS = [
     echoesSession: true,
   },
 ] as const;
+
+/** Complete a turn `pending` -> `stored` behind `channel`, then read its graph delta over HTTP. */
+async function completedTurnDelta(channel: (typeof CHANNELS)[number]) {
+  const sessionId = channel.storeSessionId(channel.newSession());
+  const turnId = newTurnId();
+  const post = (overrides: Record<string, unknown>) => persistTurn(turn(sessionId, turnId, overrides), channel.path);
+  await post({ assistantReply: 'working on it', persistenceState: 'pending' });
+  await post({ assistantReply: 'the final answer', persistenceState: 'stored' });
+  return { subject: scopedSubject(sessionId, turnId), delta: summarizeGraphDelta(await graphDelta(sessionId, turnId)) };
+}
 
 /**
  * One turn id reused by two sessions. A turn id is only meaningful inside its
@@ -585,11 +594,9 @@ describe('turns stored under the legacy turn subject, against the real store', (
       { author: 'agent', text: 'legacy final answer' },
     ]);
     expect(await listed(sessionId)).toEqual(await single(sessionId));
-    // graph-delta finds the legacy subject through the session link.
-    expect(await memoryManager.getSessionGraphDelta(sessionId, turnId)).toMatchObject({
-      mode: 'delta',
-      watermark: { appliedTurnId: turnId, turnCount: 1 },
-    });
+    // graph-delta finds the legacy subject through the session link and carries the completion.
+    expect(summarizeGraphDelta(await graphDelta(sessionId, turnId)))
+      .toEqual(completedDelta(legacySubject(turnId), legacy.persistenceState, 'legacy final answer'));
   });
 
   it('a new session that reuses the id of a legacy pending turn is isolated from it, in both directions', async () => {
@@ -675,6 +682,10 @@ describe('turns stored under the legacy turn subject, against the real store', (
       { author: 'user', text: 'question a' },
       { author: 'agent', text: 'working on a' },
     ]);
+    // The graph delta only selects a subject one session owns, so it carries neither's.
+    for (const sessionId of [sessionA, sessionB]) {
+      expect(summarizeGraphDelta(await graphDelta(sessionId, turnId))).toMatchObject({ mode: 'full_refresh_required', transitions: [] });
+    }
   });
 });
 
@@ -827,6 +838,12 @@ describe('chat history routes over a turn that completes by transition, against 
     expect(await listed(storeSessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
   });
 
+  it.each(CHANNELS)('$name: the graph delta carries the stored transition and the final reply of a turn completed pending -> stored', async (channel) => {
+    const { subject, delta } = await completedTurnDelta(channel);
+
+    expect(delta).toEqual(completedDelta(subject, 'pending', 'the final answer'));
+  });
+
   it('lists the reply of the latest stored transition, whatever order the transitions were written in', async () => {
     // The durable-turn owner never writes a second `stored` transition, so
     // the two per turn are written directly: one stamped a minute after the
@@ -862,12 +879,13 @@ describe('chat history routes over a turn that completes by transition, against 
  * A by-name read of the working-memory view also spans the assertion's scoped
  * child graphs (`<assertion>/_named_graph/...`), and a node whose agent address
  * has more than one candidate layer graph reads several graphs as well. The
- * query engine cannot evaluate a query that combines a UNION with a solution-set
- * modifier (ORDER BY, LIMIT, ...) across graphs and refuses it, so the session
- * list, whose query was such a UNION, failed on a real node and came back empty
- * (the failure was caught), while a single graph, which every test above runs
- * on, reads fine. This describe gives the chat-turns assertion a scoped child
- * graph, so every by-name read spans two, and repeats the history reads there.
+ * query engine refuses a query that combines a UNION with a solution-set modifier
+ * (DISTINCT, ORDER BY, LIMIT, ...) across graphs. The session list and the graph
+ * delta's related-subjects read were such queries: the list came back empty (the
+ * failure was caught) and the delta answered 500, while a single graph, which
+ * every test above runs on, reads fine. This describe gives the chat-turns
+ * assertion a scoped child graph, so every by-name read spans two, and repeats
+ * the history reads and the graph delta there.
  */
 describe('the chat-history reads when the working-memory view spans more than one graph, against the real store', () => {
   beforeAll(async () => {
@@ -910,5 +928,22 @@ describe('the chat-history reads when the working-memory view spans more than on
     expect(await single(sessionId)).toEqual(expected);
     expect(await listed(sessionId)).toEqual(expected);
     expect(await memoryManager.getChatTurnPersistenceState(sessionId, turnId)).toBe('stored');
+  });
+
+  it.each(CHANNELS)('$name: the graph delta carries the stored transition and the final reply of a turn completed pending -> stored', async (channel) => {
+    const { subject, delta } = await completedTurnDelta(channel);
+
+    expect(delta).toEqual(completedDelta(subject, 'pending', 'the final answer'));
+  });
+
+  it('the graph delta of a legacy turn completed by transition carries it, on the legacy subject', async () => {
+    const sessionId = newSessionId();
+    const turnId = newTurnId();
+    await writeLegacyTurn(sessionId, turnId, { persistenceState: 'pending', userText: 'legacy question', assistantText: 'legacy working on it' });
+
+    await persistTurn(turn(sessionId, turnId, { userMessage: 'legacy question', assistantReply: 'legacy final answer', persistenceState: 'stored' }));
+
+    expect(summarizeGraphDelta(await graphDelta(sessionId, turnId)))
+      .toEqual(completedDelta(legacySubject(turnId), 'pending', 'legacy final answer'));
   });
 });

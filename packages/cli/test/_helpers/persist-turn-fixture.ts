@@ -43,7 +43,14 @@ export type HistoryMessage = { author: string; text: string };
 export interface GraphDeltaResponse {
   mode: string;
   reason?: string;
-  watermark: { appliedTurnId: string | null; turnCount: number };
+  watermark: {
+    baseTurnId: string | null;
+    previousTurnId: string | null;
+    appliedTurnId: string | null;
+    latestTurnId: string | null;
+    turnIndex: number;
+    turnCount: number;
+  };
   triples: Array<{ subject: string; predicate: string; object: string }>;
 }
 
@@ -133,8 +140,9 @@ export function createPersistTurnFixture() {
 
   async function getJson<T>(path: string): Promise<T> {
     const response = await fetch(`${baseUrl}${path}`);
-    expect(response.status).toBe(200);
-    return await response.json() as T;
+    const body = await response.text();
+    expect(response.status, `GET ${path}: ${body.slice(0, 300)}`).toBe(200);
+    return JSON.parse(body) as T;
   }
 
   /** The session as `GET /api/memory/sessions` lists it. */
