@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { acquireFinalizedChainRead } from '@origintrail-official/dkg-chain';
+import { acquireFinalizedChainRead, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import {
   RegisteredPrivateEmptyVmMethods,
   type InspectedContextGraphReadinessV1,
+  type InspectedPrivateEmptyVmReadinessV1,
 } from '../src/dkg-agent-registered-private-empty-vm.js';
 
 const mocks = vi.hoisted(() => ({
@@ -186,6 +188,27 @@ describe('registered private empty-VM agent guard', () => {
       }, (facts) => facts);
     expect(inspected).toMatchObject({ kind: 'current', metadata: { kind: 'absent' } });
     expect(state.isPrivate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { error: new Error('authority unavailable'), dependency: 'unknown' },
+    { error: new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', 'RPC unavailable'), dependency: 'chain' },
+    {
+      error: new StoreOperationTimeoutError({
+        backend: 'oxigraph-server', operation: 'query', outcome: 'not_started',
+        message: 'store unavailable',
+      }),
+      dependency: 'store',
+    },
+  ])('preserves canonical authority diagnostics for $dependency failures', async ({ error, dependency }) => {
+    const state = fixture();
+    state.authority.mockRejectedValueOnce(error);
+    const result = await RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1
+      .call(state.agent, { contextGraphId: CG, inspectMetadata: true }, (inspection) => inspection);
+    expect(result.authority).toEqual({
+      outcome: 'unavailable', source: 'legacy-local', reason: 'unexpected-authority-error',
+      metadataBootstrap: 'eligible', dependency,
+    });
   });
 
   it('never commits a zero-VM proof when private-policy inspection fails after it', async () => {
@@ -432,9 +455,7 @@ describe('registered private empty-VM agent guard', () => {
 
   it('delivers a failed proof and final live denial to one fenced completion callback', async () => {
     const state = fixture();
-    const commit = vi.fn((inspection: InspectedContextGraphReadinessV1, proof: { proven: boolean }) => ({
-      inspection, proof,
-    }));
+    const commit = vi.fn((completion: InspectedPrivateEmptyVmReadinessV1) => completion);
     mocks.proof.mockResolvedValueOnce(false);
     state.authority.mockResolvedValueOnce({
       outcome: 'allowed', source: 'registered-chain', onChainId: 3n,
@@ -450,7 +471,25 @@ describe('registered private empty-VM agent guard', () => {
       inspection: expect.objectContaining({
         kind: 'current', authority: { outcome: 'denied' },
       }),
-      proof: { proven: false },
+      proven: false,
+    });
+  });
+
+  it('carries the validated final inspection inside a successful completion', async () => {
+    const state = fixture();
+    const commit = vi.fn((completion: InspectedPrivateEmptyVmReadinessV1) => completion);
+    const result = await RegisteredPrivateEmptyVmMethods.prototype
+      .inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1.call(state.agent, {
+        contextGraphId: CG, inspectMetadata: true, attemptPrivateEmptyVm: true,
+        callerAgentAddress: CALLER,
+      }, commit);
+    expect(commit).toHaveBeenCalledExactlyOnceWith(result);
+    expect(result).toEqual({
+      proven: true,
+      inspection: {
+        kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' },
+        authority: { outcome: 'allowed', source: 'registered-chain', onChainId: 3n },
+      },
     });
   });
 

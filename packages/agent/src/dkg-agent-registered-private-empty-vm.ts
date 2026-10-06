@@ -3,7 +3,11 @@
 import type { DKGAgent } from './dkg-agent.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
-import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+import {
+  contextGraphReadAuthorityDependencyOf,
+  unavailableContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityDecision,
+} from './context-graph-read-authority.js';
 import {
   attemptRegisteredPrivateEmptyVmV1,
   RETRYABLE_PRIVATE_EMPTY_VM,
@@ -15,10 +19,6 @@ import {
 export type RegisteredPrivateEmptyVmReadinessResult<T> =
   | { readonly proven: false; readonly retryable?: boolean }
   | { readonly proven: true; readonly value: T };
-
-export type ContextGraphReadinessAuthorityV1 =
-  | ContextGraphReadAuthorityDecision
-  | { readonly outcome: 'unavailable' };
 
 /** The same-turn commit cannot return work that persists after its final fence. */
 export type SynchronousReadinessCommitResult<T> = T extends PromiseLike<unknown> ? never : T;
@@ -33,46 +33,69 @@ export type InspectedContextGraphReadinessV1 =
   | {
       readonly kind: 'current';
       readonly metadata: ContextGraphReadinessMetadataV1;
-      readonly authority: ContextGraphReadinessAuthorityV1;
+      readonly authority: ContextGraphReadAuthorityDecision;
     }
   | {
       readonly kind: 'invalidated';
-      readonly authority: ContextGraphReadinessAuthorityV1;
+      readonly authority: ContextGraphReadAuthorityDecision;
     };
+
+export type ProvenRegisteredPrivateEmptyVmInspectionV1 = {
+  readonly kind: 'current';
+  readonly metadata: { readonly kind: 'confirmed'; readonly accessPolicy: 'private' };
+  readonly authority: ContextGraphReadAuthorityDecision & {
+    readonly outcome: 'allowed';
+    readonly source: 'registered-chain';
+    readonly onChainId: bigint;
+    readonly registration?: never;
+  };
+};
+
+export type InspectedPrivateEmptyVmReadinessV1 =
+  | { readonly proven: false; readonly retryable?: boolean; readonly inspection: InspectedContextGraphReadinessV1 }
+  | { readonly proven: true; readonly inspection: ProvenRegisteredPrivateEmptyVmInspectionV1 };
+
+function hasValidatedPrivateEmptyVmInspection(
+  inspection: Extract<InspectedContextGraphReadinessV1, { kind: 'current' }>,
+  onChainId: bigint,
+): inspection is ProvenRegisteredPrivateEmptyVmInspectionV1 {
+  const { metadata, authority } = inspection;
+  return metadata.kind === 'confirmed' && metadata.accessPolicy === 'private'
+    && authority.outcome === 'allowed' && authority.source === 'registered-chain'
+    && authority.registration !== 'unregistered' && authority.onChainId === onChainId;
+}
 
 function finalizePrivateEmptyVmEvidence(
   attempt: RegisteredPrivateEmptyVmAttemptV1,
   inspection: InspectedContextGraphReadinessV1,
   isSubscribed: () => boolean,
   signal?: AbortSignal,
-): { readonly proven: false; readonly retryable?: boolean } | { readonly proven: true } {
+): InspectedPrivateEmptyVmReadinessV1 {
   if (!attempt.proven) {
     // A transient pre-proof observation cannot overrule a later definitive
     // denial or a removed subscription at the final live fence.
     if (signal?.aborted || !isSubscribed() || inspection.authority.outcome === 'denied') {
-      return UNPROVEN_PRIVATE_EMPTY_VM;
+      return { ...UNPROVEN_PRIVATE_EMPTY_VM, inspection };
     }
-    return attempt;
+    return { ...attempt, inspection };
   }
   if (inspection.kind === 'invalidated') {
     tracePrivateEmptyVm('post-proof-metadata-changed');
-    return signal?.aborted || !isSubscribed()
-      ? UNPROVEN_PRIVATE_EMPTY_VM : RETRYABLE_PRIVATE_EMPTY_VM;
+    return {
+      ...(signal?.aborted || !isSubscribed() ? UNPROVEN_PRIVATE_EMPTY_VM : RETRYABLE_PRIVATE_EMPTY_VM),
+      inspection,
+    };
   }
-  const { metadata, authority } = inspection;
-  if (authority.outcome === 'unavailable') {
+  if (inspection.authority.outcome === 'unavailable') {
     tracePrivateEmptyVm('post-proof-authority-unavailable');
-    return RETRYABLE_PRIVATE_EMPTY_VM;
+    return { ...RETRYABLE_PRIVATE_EMPTY_VM, inspection };
   }
-  if (metadata.kind !== 'confirmed' || metadata.accessPolicy !== 'private'
-    || authority.outcome !== 'allowed' || authority.source !== 'registered-chain'
-    || authority.registration === 'unregistered'
-    || authority.onChainId !== attempt.onChainId) {
+  if (!hasValidatedPrivateEmptyVmInspection(inspection, attempt.onChainId)) {
     tracePrivateEmptyVm('post-proof-authority-changed');
-    return UNPROVEN_PRIVATE_EMPTY_VM;
+    return { ...UNPROVEN_PRIVATE_EMPTY_VM, inspection };
   }
   tracePrivateEmptyVm('proven');
-  return { proven: true };
+  return { proven: true, inspection };
 }
 
 export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
@@ -116,13 +139,15 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
         }
       }
     }
-    const authority: ContextGraphReadinessAuthorityV1 =
+    const authority: ContextGraphReadAuthorityDecision =
       await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
         callerAgentAddress: input.callerAgentAddress,
         allowSubscriptionFallback: false,
         freshness: 'live',
         signal,
-      }).catch(() => ({ outcome: 'unavailable' as const }));
+      }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
+        'legacy-local', 'unexpected-authority-error', contextGraphReadAuthorityDependencyOf(error),
+      ));
     // The callback is synchronous. No await can separate this final fence from
     // classification or persistence; a caller cannot turn stale facts into
     // durable readiness while an authority read is in flight.
@@ -145,10 +170,7 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       signal?: AbortSignal;
     },
-    commit: (
-      inspection: InspectedContextGraphReadinessV1,
-      proof: { readonly proven: false; readonly retryable?: boolean } | { readonly proven: true },
-    ) => SynchronousReadinessCommitResult<T>,
+    commit: (completion: InspectedPrivateEmptyVmReadinessV1) => SynchronousReadinessCommitResult<T>,
   ): Promise<T> {
     const { contextGraphId, callerAgentAddress, signal } = input;
     const attempt = input.attemptPrivateEmptyVm && callerAgentAddress !== undefined
@@ -173,14 +195,11 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
       ...(attempt.proven ? { expectedRevision: attempt.metadataRevision } : {}),
       callerAgentAddress,
       signal,
-    }, (inspection) => commit(
-      inspection,
-      finalizePrivateEmptyVmEvidence(
-        attempt, inspection,
-        () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
-        signal,
-      ),
-    ));
+    }, (inspection) => commit(finalizePrivateEmptyVmEvidence(
+      attempt, inspection,
+      () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
+      signal,
+    )));
   }
 
   /** A zero-VM proof grants durable readiness only; SWM still needs its own proof. */
@@ -188,7 +207,7 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     callerAgentAddress: string,
-    commit: (inspection: InspectedContextGraphReadinessV1) => SynchronousReadinessCommitResult<T>,
+    commit: (inspection: ProvenRegisteredPrivateEmptyVmInspectionV1) => SynchronousReadinessCommitResult<T>,
     signal?: AbortSignal,
   ): Promise<RegisteredPrivateEmptyVmReadinessResult<T>> {
     return this.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1({
@@ -197,8 +216,8 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
       attemptPrivateEmptyVm: true,
       callerAgentAddress,
       signal,
-    }, (inspection, proof) => proof.proven
-      ? { proven: true, value: commit(inspection) }
-      : proof);
+    }, (completion) => completion.proven
+      ? { proven: true, value: commit(completion.inspection) }
+      : { proven: false, ...(completion.retryable === undefined ? {} : { retryable: completion.retryable }) });
   }
 }

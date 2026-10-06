@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { DKGAgent, InspectedContextGraphReadinessV1 } from '@origintrail-official/dkg-agent';
+import type { DKGAgent, InspectedPrivateEmptyVmReadinessV1 } from '@origintrail-official/dkg-agent';
 import {
   catchupResultHasCleanResponse,
   classifyContextGraphCatchupReadiness,
@@ -31,20 +31,15 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
     && input.admissionAuthority.registration !== 'unregistered'
     && callerAgentAddress !== undefined && result.dataSynced === 0;
 
-  const decide = (inspection: InspectedContextGraphReadinessV1, provenEmptyVm: boolean) => {
+  const decide = (completion: InspectedPrivateEmptyVmReadinessV1) => {
     // The agent's final inspection and proof arrive in the same synchronous
     // callback. Normalize this source to durable-plane evidence here; the
     // classifier handles only plane evidence and peer status.
-    const independentPlaneEvidence = provenEmptyVm
-      && inspection.kind === 'current'
-      && inspection.metadata.kind === 'confirmed'
-      && inspection.metadata.accessPolicy === 'private'
-      && inspection.authority.outcome === 'allowed'
-      && inspection.authority.registration !== 'unregistered'
+    const independentPlaneEvidence = completion.proven
       ? { durable: { ready: true, persistable: true } } : undefined;
     const classification = classifyContextGraphCatchupReadiness({
       result, includeSharedMemory: input.includeSharedMemory,
-      inspection, independentPlaneEvidence,
+      inspection: completion.inspection, independentPlaneEvidence,
       // Catalog recovery can finish while the foreground catch-up runs.
       readinessBeforeCatchup: readContextGraphReadiness(store, contextGraphId),
     });
@@ -65,6 +60,6 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
       inspectMetadata: catchupResultHasCleanResponse(result) || privateZeroVmCandidate,
       attemptPrivateEmptyVm: privateZeroVmCandidate,
       callerAgentAddress,
-    }, (inspection, proof) => decide(inspection, proof.proven));
+    }, decide);
   });
 }

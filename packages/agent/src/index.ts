@@ -386,6 +386,8 @@ export type { FinalizedContextGraphAuthoritySnapshotReadV1 } from './dkg-agent-c
 export type {
   ContextGraphReadinessMetadataV1,
   InspectedContextGraphReadinessV1,
+  InspectedPrivateEmptyVmReadinessV1,
+  ProvenRegisteredPrivateEmptyVmInspectionV1,
   SynchronousReadinessCommitResult,
 } from './dkg-agent-registered-private-empty-vm.js';
 export {

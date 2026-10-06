@@ -1091,11 +1091,11 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           reconcileRfc64CatalogResponsibilityV1: async () => undefined,
           inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1: async (
             _input: unknown,
-            commit: (facts: Record<string, unknown>, proof: { proven: false }) => unknown,
-          ) => commit({
+            commit: (completion: { proven: false; inspection: Record<string, unknown> }) => unknown,
+          ) => commit({ proven: false, inspection: {
             kind: 'current', metadata: { kind: 'absent' },
             authority: { outcome: 'allowed', source: 'legacy-local' },
-          }, { proven: false }),
+          } }),
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };
