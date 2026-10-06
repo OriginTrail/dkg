@@ -2,7 +2,7 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.0.21] - 2026-10-05
+## [10.0.21] - 2026-10-06
 
 A release about getting data onto a node faster and keeping busy nodes
 responsive. A cold node can recover the Verifiable Memory of a registered
@@ -112,10 +112,11 @@ release adds one published package, `@origintrail-official/dkg-node-store`.
   Have the member send a signed join request; a pre-authorized member is
   approved automatically.
 - **A restarted member Edge may not reconnect to its private graph's curator
-  Edge** (#2865): it reconnects to bootstrap Cores, which do not serve the
-  graph's private content. Its Shared Working Memory recovery and Verifiable
-  Memory refresh retry until it reaches the curator. Connect it to the
-  curator's multiaddr with `POST /api/connect`.
+  Edge if the curator is unreachable** (#2865): approval now carries a
+  validated listener hint and recovery retries the curator connection
+  (#3058). This does not make an unavailable curator reachable. If automatic
+  discovery cannot establish the connection, connect to a reachable curator
+  multiaddr with `POST /api/connect`.
 - **Copies already stale before the upgrade may wait for another update**
   (#2866): the update lane initially replays about 500 blocks. Older stale
   copies, and refresh targets given up after 24 hours, need the next update
@@ -139,6 +140,36 @@ release adds one published package, `@origintrail-official/dkg-node-store`.
 
 ### Fixed
 
+- **An approved member can become ready to write to a new registered private
+  graph before it has any Verifiable Memory** (#3056, #3057, #3061): catch-up
+  can prove that the finalized inventory is empty instead of waiting for
+  content that does not exist. Readiness uses current authority and the
+  configured finality depth, and remains separate from the outcome of an
+  individual peer job.
+- **Private Shared Working Memory recovery continues after a member restarts**
+  (#3054, #3058): recovery keeps trying until the subscription is ready.
+  Approved join notices include an optional validated curator listener hint,
+  while notices from older peers remain supported. Membership checks still
+  apply to every private read and update.
+- **A durably queued join request is reported as pending** (#3062): the node
+  tries to recover its curator connection before forwarding the request, and
+  a request accepted by the reliable delivery queue retains its automatic
+  retries instead of being reported as a delivery failure.
+- **Atomic create, finalize and share preserve the supplied author's asset
+  allocation** (#3062): these steps use the same reserved asset slot and
+  existing lifecycle address. Conflicting reservations are rejected before
+  draft metadata changes; valid retries keep their existing allocation.
+- **Eligible finalized authority projections remain usable during a read
+  circuit cooldown** (#3062): bounded read and sync operations can reuse
+  retained evidence when it meets the graph, freshness and current authority
+  requirements. Missing or ineligible evidence still defers the operation.
+- **Retiring shared state after a finalized publish only holds back shares of
+  that asset** (#3053): unrelated assets in the same graph can continue
+  sharing. Catalog-wide operations still use a graph-wide fence.
+- **A share interrupted while retiring its previous shared state remains
+  retryable** (#3051). An unscoped query invalidated by a concurrent write
+  now answers a retryable `503 UNSCOPED_QUERY_INVALIDATED` with
+  `Retry-After: 1`, where it previously answered 500 (#3048).
 - **An approved member can subscribe to a private graph that was never
   registered on chain** (#2871, #2955, #2967): the member held the curator's
   approval and the graph's metadata, but its node had no accepted authority

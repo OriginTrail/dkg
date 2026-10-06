@@ -8,7 +8,7 @@ import { createDaemonRpcTelemetrySource, formatRpcUsageLines, emitRpcUsage, star
  * pin it: one logfmt line per method, delta counts, token-safe values.
  */
 describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => {
-  it('composes live adapter windows and retains the governor drain receiver', () => {
+  it('composes live adapter windows and retains the governor drain receiver', async () => {
     let publisherCount = 5;
     const governor = new RpcRequestGovernor({ maxRequestsPerSecond: 10 }, {
       clock: {
@@ -26,7 +26,9 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 7 });
     publisherCount = 9;
     expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 11 });
-    expect(source.drainRpcRequestGovernor?.()).toEqual(governor.drainWindow());
+    await governor.acquire('foreground');
+    expect(source.drainRpcRequestGovernor?.().foregroundAdmitted).toBe(1);
+    expect(source.drainRpcRequestGovernor?.().foregroundAdmitted).toBe(0);
     expect(source.drainRpcReadBatching?.()).toMatchObject({ batches: 0, readsByLabel: {} });
     expect(createDaemonRpcTelemetrySource([]).drainRpcRequestGovernor).toBeUndefined();
   });

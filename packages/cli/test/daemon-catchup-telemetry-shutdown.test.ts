@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent, InspectedPrivateEmptyVmReadinessV1 } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -273,6 +273,25 @@ async function createHarness(opts: HarnessOptions = {}) {
     reconcileRfc64CatalogResponsibilityV1: async () => undefined,
     hasConfirmedMetaState: async () => opts.hasConfirmedMeta ?? true,
     isPrivateContextGraph: async () => opts.isPrivate ?? false,
+    prepareContextGraphReadinessWithPrivateEmptyVmV1: async (
+      input: { contextGraphId: string; callerAgentAddress?: string },
+    ) => ({
+      inspectAndCommit: async (
+        _completionInput: { inspectMetadata: boolean },
+        commit: (completion: InspectedPrivateEmptyVmReadinessV1) => unknown,
+      ) => commit({ proven: false, inspection: subscriptions.get(input.contextGraphId)?.subscribed === true
+        ? {
+            kind: 'current',
+            metadata: opts.hasConfirmedMeta === false
+              ? { kind: 'absent' }
+              : { kind: 'confirmed', accessPolicy: opts.isPrivate ? 'private' : 'public' },
+            authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
+          }
+        : {
+            kind: 'invalidated',
+            authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
+          } }),
+    }),
     resolveAgentByToken: () => undefined,
     getDefaultAgentAddress: () =>
       opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
