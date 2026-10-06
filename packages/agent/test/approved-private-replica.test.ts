@@ -623,10 +623,10 @@ describe('approved private bare-name replica authorization', () => {
     }
   });
 
-  it.each(['cold', 'expired', 'invalidated'] as const)('defers repeated %s retained-projection misses throughout circuit cooldown without RPC', async (condition) => {
+  it.each(['cold', 'expired', 'invalidated', 'unsupported'] as const)('defers repeated %s retained-projection misses throughout circuit cooldown without RPC', async (condition) => {
     const fixture = await approvedBareNameReplicaFixture();
     const retained = retainedAuthorityReaderFixture();
-    if (condition !== 'cold') {
+    if (condition !== 'cold' && condition !== 'unsupported') {
       await retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash);
       if (condition === 'expired') retained.advanceTime(30000);
       else retained.invalidateAnchor();
@@ -634,7 +634,8 @@ describe('approved private bare-name replica authorization', () => {
     retained.providerRead.mockClear();
     retained.initialize.mockClear();
     const normalRead = vi.fn(retained.reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!.bind(retained.reader));
-    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = { ...retained.reader, resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: normalRead };
+    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = { ...retained.reader, resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: normalRead,
+      ...(condition === 'unsupported' ? { peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: undefined } : {}) };
     const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
     await expect(coordinator.run(undefined, async () => {
       throw new RpcEndpointsExhaustedError('authority pool exhausted', { exhaustionKind: 'mixed', retryAfterMs: 30000 });

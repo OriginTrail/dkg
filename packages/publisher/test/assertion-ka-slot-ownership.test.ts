@@ -28,9 +28,12 @@ describe('persistent KA slot ownership', () => {
     const graph = await p.assertionCreate(CG, 'owner', AUTHOR, undefined, allocation);
     await p.assertionWrite(CG, 'owner', AUTHOR, [{ subject: 'urn:owner', predicate: 'urn:value', object: '"retained"' }]);
     const before = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${contextGraphMetaUri(CG)}> { ?s ?p ?o } }`);
+    const contentBefore = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+    expect(contentBefore).toMatchObject({ type: 'quads', quads: expect.arrayContaining([expect.objectContaining({ object: '"retained"' })]) });
     await expect(p.assertionCreate(CG, 'other', AUTHOR, undefined, allocation))
       .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
     expect(await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${contextGraphMetaUri(CG)}> { ?s ?p ?o } }`)).toEqual(before);
+    expect(await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`)).toEqual(contentBefore);
     expect(await p.assertionCreate(CG, 'owner', AUTHOR, undefined, allocation)).toBe(graph);
     await p.assertionDiscard(CG, 'owner', AUTHOR);
     expect(await p.assertionCreate(CG, 'owner', AUTHOR, undefined, allocation)).toBe(graph);

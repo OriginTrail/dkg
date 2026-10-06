@@ -56,9 +56,9 @@ describe('create with an externally reserved KA id', () => {
     expect(allocator.peekKaId(AUTHOR)).toBe((BigInt(AUTHOR) << 96n) | 8n);
   });
 
-  it('keeps lowercase pre-signed create/write/finalize/share on one real lifecycle', async () => {
+  it.each(['lowercase', 'checksummed'])('keeps a lowercase signature on its %s storage lifecycle through share', async (casing) => {
     const wallet = new ethers.Wallet(`0x${'35'.repeat(32)}`);
-    const author = wallet.address.toLowerCase();
+    const author = casing === 'lowercase' ? wallet.address.toLowerCase() : wallet.address;
     const kav10Address = `0x${'11'.repeat(20)}`;
     const store = new OxigraphStore();
     agent = await DKGAgent.create({
@@ -81,14 +81,16 @@ describe('create with an externally reserved KA id', () => {
     });
     const signed = ethers.Signature.from(await wallet.signTypedData(typedData.domain, typedData.types, typedData.message));
     const preSignedAuthorAttestation = {
-      address: author, reservedKaId,
+      address: author.toLowerCase(), reservedKaId,
       signature: { r: ethers.getBytes(signed.r), vs: ethers.getBytes(signed.yParityAndS) },
     };
     await agent.assertion.create(contextGraphId, name, { agentAddress: author, reservedKaId });
     await agent.assertion.write(contextGraphId, name, quads, { agentAddress: author });
     const sealed = await agent.assertion.finalize(contextGraphId, name, { agentAddress: author, preSignedAuthorAttestation });
-    expect(sealed.authorAddress.toLowerCase()).toBe(author);
-    expect(sealed.kaUal).toBe(`did:dkg:evm:31337/${author}/7`);
+    expect(sealed.authorAddress.toLowerCase()).toBe(author.toLowerCase());
+    expect(sealed.kaUal).toBe(`did:dkg:evm:31337/${author.toLowerCase()}/7`);
+    const selected = casing === 'lowercase' ? wallet.address : wallet.address.toLowerCase();
+    expect((await agent.assertion.history(contextGraphId, name, { agentAddress: selected }))?.agentAddress).toBe(author);
     await expect(agent.assertion.promote(contextGraphId, name, {
       agentAddress: author, preSignedAuthorAttestation, entities: 'all',
     })).resolves.toMatchObject({ promotedCount: 1, sealed: true });

@@ -398,7 +398,7 @@ function resolveAtomicCreateAuthorFromFinalizeOptions(
 ): { agentAddress?: string; reservedKaId?: bigint } {
   const preSigned = finalizeOptions.preSignedAuthorAttestation;
   if (preSigned !== undefined) {
-    return { agentAddress: preSigned.address, reservedKaId: preSigned.reservedKaId };
+    return { agentAddress: tokenAgentAddress ?? preSigned.address, reservedKaId: preSigned.reservedKaId };
   }
   const agentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
     finalizeOptions,
@@ -621,19 +621,21 @@ function resolveSelectedAuthorAgentAddress(
   return { ok: true, value: raw };
 }
 
-function resolvePromoteStorageLane(
+async function resolvePromoteStorageLane(
   ctx: RequestContext,
   source: Record<string, unknown>,
-  callerAgentAddress?: string,
-): { agentAddress?: string; authorAgentAddress?: string } | null {
+  contextGraphId: string, name: string, subGraphName?: string, callerAgentAddress?: string,
+): Promise<{ agentAddress?: string; authorAgentAddress?: string } | null> {
   const selected = resolveSelectedAuthorAgentAddress(ctx, source);
   if (!selected.ok) return null;
   if (!authorizeAgentScopedAuthorClaim(
     ctx.res, callerAgentAddress, selected.value, SELECTED_AUTHOR_FIELD,
   )) return null;
-  return selected.value === undefined
-    ? scopedTokenPromoteLane(callerAgentAddress)
-    : { agentAddress: selected.value, authorAgentAddress: selected.value };
+  if (callerAgentAddress || selected.value === undefined) return scopedTokenPromoteLane(callerAgentAddress);
+  const history = await ctx.agent.assertion.history(contextGraphId, name, { subGraphName, agentAddress: selected.value });
+  const storedAuthor = history?.agentAddress ?? selected.value;
+  if (!isSameAgentAddress(storedAuthor, selected.value)) throw new Error("Selected lifecycle author does not match its stored identity");
+  return { agentAddress: storedAuthor, authorAgentAddress: storedAuthor };
 }
 
 /**
@@ -1414,8 +1416,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── SWM verb: share (WM → SWM; OT-RFC-43 §10.6 renames promote → share) ──
     if (layer === "swm" && verb === "share") {
-      const promoteStorageLane = resolvePromoteStorageLane(
-        ctx, parsed, writePreflightCallerAgentAddress,
+      const promoteStorageLane = await resolvePromoteStorageLane(
+        ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress,
       );
       if (promoteStorageLane === null) return;
       // Per-request opt-in to the strict curator-ack gate (OT-RFC-49). Omitted →
@@ -1500,8 +1502,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // `respondAssertionError` catch.
     if (layer === "swm" && verb === "share-async") {
       if (asyncPromoteUnavailable(res)) return;
-      const promoteStorageLane = resolvePromoteStorageLane(
-        ctx, parsed, writePreflightCallerAgentAddress,
+      const promoteStorageLane = await resolvePromoteStorageLane(
+        ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress,
       );
       if (promoteStorageLane === null) return;
       const entities = parsed.entities;

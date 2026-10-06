@@ -139,12 +139,11 @@ import {
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
-import { retainedAuthoritySnapshotReaderV1 } from './internal/context-graph-authority/retained-authority-reader.js';
+import { finalizedTargetPlan, projectFinalizedTargets, peekFinalizedTargets } from './internal/context-graph-authority/finalized-target-projection.js';
 import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
   './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   finalizedContextGraphSnapshotMismatchV1,
-  resolveFinalizedContextGraphNameBindingV1,
 } from './internal/context-graph-authority/finalized-context-graph-binding.js';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
@@ -890,7 +889,6 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     contextGraphIds: readonly string[],
     options: ContextGraphAuthorityReadOptions & Readonly<{
       onRpcRead?: () => void;
-      retainedOnly?: boolean;
       /** Fresh durable identities used only by restart repair before install. */
       durableBindingHints?: ReadonlyMap<
         string,
@@ -898,26 +896,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       >;
     }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
-    const { onRpcRead, durableBindingHints, retainedOnly, ...chainReadOptions } = options;
-    const uniqueContextGraphIds = [...new Set(contextGraphIds)];
-    const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
-      const hintedBinding = durableBindingHints?.get(contextGraphId);
-      const durableHint = hintedBinding?.contextGraphId === contextGraphId
-        ? hintedBinding
-        : undefined;
-      const { localId, subscription, expectedNameHash } =
-        resolveFinalizedContextGraphNameBindingV1(this, contextGraphId, durableHint);
-      const authoritativeOnChainId = this.contextGraphBindingState
-        .authorityIndexOnChainIdFor(localId, subscription ?? durableHint);
-      return {
-        contextGraphId,
-        expectedNameHash,
-        expectedOnChainId: authoritativeOnChainId === undefined
-          ? undefined
-          : BigInt(authoritativeOnChainId),
-      } as const;
-    });
-
+    const { onRpcRead, durableBindingHints, ...chainReadOptions } = options;
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader === undefined) return { kind: 'legacy-current' };
 
@@ -926,26 +905,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // commitments make that lookup deliberately ambiguous even though the
     // locally persisted binding remains authoritative. The caller still owns
     // a finalized numeric snapshot batch and validates its id/name evidence.
-    const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
-    const reverseBindingTargets = bindingTargets.filter((target) => {
-      if (target.expectedOnChainId === undefined) return true;
-      targets.set(target.contextGraphId, Object.freeze({
-        kind: 'durable-binding' as const,
-        expectedNameHash: target.expectedNameHash,
-        expectedOnChainId: target.expectedOnChainId,
-      }));
-      return false;
-    });
+    const plan = finalizedTargetPlan(
+      this, this.contextGraphBindingState.authorityIndexOnChainIdFor.bind(this.contextGraphBindingState),
+      contextGraphIds, durableBindingHints,
+    );
+    const { targets, reverseBindingTargets } = plan;
     if (reverseBindingTargets.length === 0) {
       return { kind: 'finalized-index', targets };
     }
 
-    const resolveSnapshots = retainedOnly
-      ? retainedAuthoritySnapshotReaderV1(indexReader, this.rfc64AuthorityReadCoordinatorV1.snapshot())
-      : indexReader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
+    const resolveSnapshots = indexReader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
-      if (!retainedOnly) onRpcRead?.();
+      onRpcRead?.();
       // Registration classification gates private catalog admission and read
       // access. A background reconciliation must not sit behind the ordinary
       // background RPC reserve until the authority read's fail-closed deadline
@@ -962,18 +934,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
       options.signal?.throwIfAborted();
-      for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
-        const finalizedSnapshot = snapshotsByNameHash.get(expectedNameHash);
-        if (finalizedSnapshot !== undefined) {
-          targets.set(contextGraphId, Object.freeze({
-            kind: 'resolved-snapshot' as const,
-            expectedNameHash,
-            expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
-            finalizedSnapshot,
-          }));
-        }
-      }
-      return { kind: 'finalized-index', targets };
+      return projectFinalizedTargets(plan, snapshotsByNameHash);
     }
 
     if (reverseBindingTargets.length === 1) {
@@ -1478,7 +1439,6 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               [contextGraphId],
               {
                 ...evidence.agentResolverReadOptions(readSignal),
-                retainedOnly: this.rfc64AuthorityReadCoordinatorV1.snapshot().state === 'open',
                 ...(options.freshness === undefined
                   ? {}
                   : { freshness: options.freshness }),
@@ -1486,7 +1446,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               },
             ),
             mayServeAcceptedUnregisteredProjection
-              ? { admitWhileOpen: true }
+              ? { retainedFallback: (signal) => peekFinalizedTargets(
+                  finalizedTargetPlan(
+                    this, this.contextGraphBindingState.authorityIndexOnChainIdFor.bind(this.contextGraphBindingState),
+                    [contextGraphId], repairHints?.durableBindingHints,
+                  ),
+                  this.chain.contextGraphAuthorityIndexRevisionReader,
+                  { signal, ...(options.freshness === undefined ? {} : { freshness: options.freshness }) },
+                ) }
               : undefined,
           ),
           {

@@ -75,7 +75,9 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
   ): ContextGraphAuthorityReadOptions;
 }
 
-export interface Rfc64AuthorityReadRunOptionsV1 {
+export interface Rfc64AuthorityReadRunOptionsV1<T = never> {
+  /** Local evidence only, chosen under the permit during cooldown. Undefined defers. */
+  readonly retainedFallback?: (signal: AbortSignal) => Promise<T | undefined>;
   /**
    * Admit this read even while the circuit is open.
    *
@@ -235,7 +237,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       signal: AbortSignal,
       evidence: Rfc64AuthorityRpcProbeEvidenceV1,
     ) => Promise<T>,
-    options: Rfc64AuthorityReadRunOptionsV1 = {},
+    options: Rfc64AuthorityReadRunOptionsV1<T> = {},
   ): Promise<T> {
     return this.#enqueue('bulk', signal, operation, options);
   }
@@ -268,7 +270,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       signal: AbortSignal,
       evidence: Rfc64AuthorityRpcProbeEvidenceV1,
     ) => Promise<T>,
-    options: Rfc64AuthorityReadRunOptionsV1 = {},
+    options: Rfc64AuthorityReadRunOptionsV1<T> = {},
   ): Promise<T> {
     return this.#enqueue('foreground', signal, operation, options);
   }
@@ -287,7 +289,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       signal: AbortSignal,
       evidence: Rfc64AuthorityRpcProbeEvidenceV1,
     ) => Promise<T>,
-    options: Rfc64AuthorityReadRunOptionsV1,
+    options: Rfc64AuthorityReadRunOptionsV1<T>,
   ): Promise<T> {
     const runSignal = signal === undefined
       ? this.#lifecycleAbort.signal
@@ -338,10 +340,18 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       signal: AbortSignal,
       evidence: Rfc64AuthorityRpcProbeEvidenceV1,
     ) => Promise<T>,
-    options: Rfc64AuthorityReadRunOptionsV1,
+    options: Rfc64AuthorityReadRunOptionsV1<T>,
   ): Promise<T> {
     throwIfAborted(runSignal);
     const now = this.#now();
+    if (this.#roundInProgress(now) && options.retainedFallback !== undefined) {
+      const retained = await options.retainedFallback(runSignal);
+      throwIfAborted(runSignal);
+      // Local evidence cannot close or extend a provider outage round.
+      if (retained !== undefined) return retained;
+      const retryAfterMs = Math.max(0, this.#retryAtMs - this.#now());
+      throw new Rfc64AuthorityRpcCircuitOpenErrorV1(this.#retryAtMs, retryAfterMs);
+    }
     if (options.admitWhileOpen !== true && this.#roundInProgress(now)) {
       throw new Rfc64AuthorityRpcCircuitOpenErrorV1(
         this.#retryAtMs,

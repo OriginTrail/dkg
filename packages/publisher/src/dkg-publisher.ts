@@ -1,3 +1,4 @@
+import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
@@ -6693,9 +6694,10 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
+    knownWmGraph?: string,
   ): Promise<string[]> {
     const nameKeyed = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    const currentWmGraph = await this.wmGraphUri(
+    const currentWmGraph = knownWmGraph ?? await this.wmGraphUri(
       contextGraphId,
       agentAddress,
       name,
@@ -6927,22 +6929,17 @@ export class DKGPublisher implements Publisher {
     name: string,
     subGraphName?: string,
   ): Promise<{ agentAddress: string; number: bigint; kaUal?: string } | null> {
+    const record = await readAssertionLifecycleRecord(this.store, contextGraphId, agentAddress, name, subGraphName);
+    return this.kaGraphIdentityFromLifecycle(contextGraphId, agentAddress, name, subGraphName, record);
+  }
+
+  private kaGraphIdentityFromLifecycle(
+    contextGraphId: string, agentAddress: string, name: string, subGraphName: string | undefined, record: AssertionLifecycleRecord,
+  ): { agentAddress: string; number: bigint; kaUal?: string } | null {
     const urn = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const res = await this.store.query(
-      `SELECT ?n ?u WHERE { GRAPH <${metaGraph}> {
-        <${urn}> <http://dkg.io/ontology/kaId> ?n .
-        OPTIONAL { <${urn}> <http://dkg.io/ontology/reservedUal> ?u }
-      } } LIMIT 1`,
-    );
-    if (res.type === 'bindings' && res.bindings.length > 0) {
-      const m = res.bindings[0]['n']?.match(/(\d+)/);
-      if (!m) return null;
-      const number = BigInt(m[1]);
-      const rawUal = res.bindings[0]['u']
-        ?.replace(/^"/, '')
-        .replace(/"(\^\^<[^>]+>)?$/, '')
-        .trim();
+    if (record.number !== undefined) {
+      const number = record.number;
+      const rawUal = record.reservedUal;
       if (rawUal) {
         try {
           const scope = createGraphKnowledgeAssetScope(rawUal, 1);
@@ -6988,6 +6985,7 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
+    knownWmGraph?: string,
   ): Promise<boolean> {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     for (const subject of await this.activeAssertionSealSubjects(
@@ -6995,6 +6993,7 @@ export class DKGPublisher implements Publisher {
       name,
       agentAddress,
       subGraphName,
+      knownWmGraph,
     )) {
       const result = await this.store.query(`ASK { GRAPH <${assertSafeIri(metaGraph)}> {
         <${assertSafeIri(subject)}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root
@@ -7189,7 +7188,14 @@ export class DKGPublisher implements Publisher {
 
   /** A KA's WM graph URI: the per-KA `…/_working_memory/{addr}/{number}` once minted (D1), else legacy name-keyed. */
   async wmGraphUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): Promise<string> {
-    const identity = await this.resolveKaGraphIdentity(contextGraphId, agentAddress, name, subGraphName);
+    const record = await readAssertionLifecycleRecord(this.store, contextGraphId, agentAddress, name, subGraphName);
+    return this.wmGraphUriFromLifecycle(contextGraphId, agentAddress, name, subGraphName, record);
+  }
+
+  private wmGraphUriFromLifecycle(
+    contextGraphId: string, agentAddress: string, name: string, subGraphName: string | undefined, record: AssertionLifecycleRecord,
+  ): string {
+    const identity = this.kaGraphIdentityFromLifecycle(contextGraphId, agentAddress, name, subGraphName, record);
     return identity !== null
       ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, identity.agentAddress, identity.number, subGraphName)
       : contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
@@ -7819,7 +7825,9 @@ export class DKGPublisher implements Publisher {
     return this.withAssertionLifecycleWriteLock(
       contextGraphId, name, agentAddress, subGraphName,
       async () => {
-        await assertExpectedKaSlotMatchesLifecycle(this.store, contextGraphId, agentAddress, name, opts?.expectedKaNumber, subGraphName);
+        const lifecycle = await readAssertionLifecycleRecord(this.store, contextGraphId, agentAddress, name, subGraphName,
+          opts?.expectedKaNumber === undefined ? 'legacy' : 'strict-reservation');
+        assertExpectedKaSlotMatchesLifecycle(lifecycle, opts?.expectedKaNumber);
         await this.assertNoUnfinishedAssertionPromote(
           contextGraphId,
           name,
@@ -7830,17 +7838,18 @@ export class DKGPublisher implements Publisher {
         // would reopen its immutable WM graph and let a later write append data
         // that no longer matches the signed commitment. Sanctioned pull-from
         // clears the active seal before calling assertionCreateUnlocked.
-        if (await this.hasActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName)) {
+        const currentWmGraph = this.wmGraphUriFromLifecycle(contextGraphId, agentAddress, name, subGraphName, lifecycle);
+        if (await this.hasActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName, currentWmGraph)) {
           await this.assertGraphScopedLifecycleWritable(contextGraphId, agentAddress, name, subGraphName);
           opts?.onDisposition?.('sealed-noop');
-          return this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
+          return currentWmGraph;
         }
         const assertionUri = await this.assertionCreateUnlocked(
           contextGraphId,
           name,
           agentAddress,
           subGraphName,
-          opts,
+          { ...opts, lifecycle },
         );
         opts?.onDisposition?.('created');
         return assertionUri;
@@ -7856,6 +7865,7 @@ export class DKGPublisher implements Publisher {
     opts?: {
       allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
       expectedKaNumber?: bigint;
+      lifecycle?: AssertionLifecycleRecord;
       onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
     },
   ): Promise<string> {
@@ -7865,7 +7875,7 @@ export class DKGPublisher implements Publisher {
 
   private async assertionCreateWithAllocationLock(
     contextGraphId: string, name: string, agentAddress: string, subGraphName?: string,
-    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>; expectedKaNumber?: bigint },
+    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>; expectedKaNumber?: bigint; lifecycle?: AssertionLifecycleRecord },
   ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 
@@ -7903,36 +7913,31 @@ export class DKGPublisher implements Publisher {
     const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const preserved: Quad[] = [];
-    const preserveRes = await this.store.query(
-      `SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${lifecycleSubject}> ?p ?o } }`,
-    );
-    if (preserveRes.type === 'bindings') {
-      const scopeObject = preserveRes.bindings.find(
-        (row) => row['p'] === `${A2_DKG}contentScopeVersion`,
-      )?.['o'];
-      const scopeVersion = scopeObject?.match(/(\d+)/)?.[1];
-      if (
-        (scopeVersion !== undefined && scopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) ||
-        (scopeVersion === undefined && preserveRes.bindings.length > 0)
-      ) {
-        throw new LegacyKnowledgeAssetReadOnlyError();
-      }
-      for (const row of preserveRes.bindings) {
-        const p = row['p'];
-        const o = row['o'];
-        if (p && o != null && A2_PRESERVE_PREDS.has(p)) {
-          preserved.push({ subject: lifecycleSubject, predicate: p, object: o, graph: metaGraph });
-        }
+    const lifecycle = opts?.lifecycle ?? await readAssertionLifecycleRecord(this.store, contextGraphId, agentAddress, name, subGraphName);
+    const scopeObject = lifecycle.bindings.find(
+      (row) => row['p'] === `${A2_DKG}contentScopeVersion`,
+    )?.['o'];
+    const scopeVersion = scopeObject?.match(/(\d+)/)?.[1];
+    if (
+      (scopeVersion !== undefined && scopeVersion !== String(GRAPH_KA_CONTENT_SCOPE_VERSION)) ||
+      (scopeVersion === undefined && lifecycle.bindings.length > 0)
+    ) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    for (const row of lifecycle.bindings) {
+      const p = row['p'];
+      const o = row['o'];
+      if (p && o != null && A2_PRESERVE_PREDS.has(p)) {
+        preserved.push({ subject: lifecycleSubject, predicate: p, object: o, graph: metaGraph });
       }
     }
     // Preserve the lifecycle's stable identity on reopen. Allocate and check
     // ownership before changing draft metadata, then restore retained pointers.
-    const hasPreservedKaId = preserved.some((q) => q.predicate === `${A2_DKG}kaId`);
+    const hasPreservedKaId = lifecycle.hasKaId;
     let kaNumber: bigint | undefined;
     let reservedUal: string | undefined;
     if (hasPreservedKaId) {
-      const m = preserved.find((q) => q.predicate === `${A2_DKG}kaId`)?.object?.match(/(\d+)/);
-      if (m) kaNumber = BigInt(m[1]);
+      kaNumber = lifecycle.number;
     } else if (opts?.allocateKaNumber) {
       ({ number: kaNumber, reservedUal } = await opts.allocateKaNumber());
     } else if (this.kaAllocator && isAllocatableKaAuthorV1(agentAddress)) {

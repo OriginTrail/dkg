@@ -37,21 +37,40 @@ describe('locked create reservation validation', () => {
     await expect(publisher.assertionCreate(cg, name, author, undefined, { expectedKaNumber: 0n })).resolves.toBe(graph);
   });
 
-  it.each(['missing', 'multiple', 'malformed', 'wrong-type'] as const)('preserves a %s persisted identity instead of replacing it', async (condition) => {
+  it('reuses one decoded lifecycle record when reopening a reserved draft', async () => {
+    const { publisher, store } = await fixture();
+    const graph = await publisher.assertionCreate(cg, name, author, undefined, { allocateKaNumber: allocation(7n), expectedKaNumber: 7n });
+    const query = vi.spyOn(store, 'query');
+    await expect(publisher.assertionCreate(cg, name, author, undefined, { expectedKaNumber: 7n })).resolves.toBe(graph);
+    const identityReads = query.mock.calls.filter(([q]) => q.includes('SELECT ?p ?o') && q.includes(assertionLifecycleUri(cg, author, name)));
+    expect(identityReads).toHaveLength(1);
+  });
+
+  it('keeps the explicit legacy numeric policy for creates without a reservation', async () => {
+    const { publisher, store } = await fixture();
+    const graph = await publisher.assertionCreate(cg, name, author, undefined, { allocateKaNumber: allocation(7n) });
+    const coordinate = { graph: contextGraphMetaUri(cg), subject: assertionLifecycleUri(cg, author, name), predicate: 'http://dkg.io/ontology/kaId' };
+    await store.deleteByPattern(coordinate);
+    await store.insert([{ ...coordinate, object: '"legacy-slot-7"' }]);
+    await expect(publisher.assertionCreate(cg, name, author)).resolves.toBe(graph);
+    await expect(publisher.wmGraphUri(cg, author, name)).resolves.toBe(graph);
+  });
+
+  it.each(['missing', 'multiple', 'malformed', 'wrong-type', 'too-large'] as const)('preserves a %s persisted identity instead of replacing it', async (condition) => {
     const { publisher, store, snapshot } = await fixture();
     await publisher.assertionCreate(cg, name, author, undefined, { allocateKaNumber: allocation(7n) });
     const coordinate = { graph: contextGraphMetaUri(cg), subject: assertionLifecycleUri(cg, author, name), predicate: 'http://dkg.io/ontology/kaId' };
     if (condition !== 'multiple') await store.deleteByPattern(coordinate);
-    if (condition !== 'missing') await store.insert([{ ...coordinate, object: condition === 'multiple' ? '"8"' : condition === 'malformed' ? '"invalid"' : '"7"@en' }]);
+    if (condition !== 'missing') await store.insert([{ ...coordinate, object: condition === 'multiple' ? '"8"' : condition === 'malformed' ? '"invalid"' : condition === 'too-large' ? '"79228162514264337593543950336"' : '"7"@en' }]);
     const before = await snapshot();
     await expect(publisher.assertionCreate(cg, name, author, undefined, { expectedKaNumber: 7n }))
       .rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_CORRUPT' });
     expect(await snapshot()).toEqual(before);
   });
 
-  it('fails closed when the identity read is not a binding result', async () => {
+  it.each([{ type: 'boolean' as const, value: false }, { type: 'bindings' as const, bindings: [{ p: 'urn:missing-object' }] }])('fails closed on unreadable identity records: %j', async (result) => {
     const { publisher, store } = await fixture();
-    vi.spyOn(store, 'query').mockResolvedValue({ type: 'boolean', value: false });
+    vi.spyOn(store, 'query').mockResolvedValue(result);
     const insert = vi.spyOn(store, 'insert');
     await expect(publisher.assertionCreate(cg, name, author, undefined, { expectedKaNumber: 7n }))
       .rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_CORRUPT' });

@@ -518,6 +518,45 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
+  it.each(['swm/share', 'swm/share-async'])('%s preserves the scoped token lane after lowercase signed atomic create', async (verb) => {
+    const signedAuthor = `0x${'ab'.repeat(20)}`;
+    const caller = ethers.getAddress(signedAuthor);
+    const token = 'scoped-atomic';
+    const reservedKaId = (BigInt(signedAuthor) << 96n) | 27n;
+    let storedAuthor: string | undefined;
+    const lanes: string[] = [];
+    const promote = async (_cg: string, _name: string, opts: { agentAddress: string }) => {
+      lanes.push(opts.agentAddress);
+      if (opts.agentAddress !== storedAuthor) throw new Error('Missing stored lifecycle');
+      return { promotedCount: 1, sealed: true, publishReady: true, jobId: 'scoped-share' };
+    };
+    daemonState.promoteWorkerAvailable = true;
+    await startWith({
+      history: async () => null,
+      create: async (_cg: string, _name: string, opts: { agentAddress: string }) => {
+        storedAuthor = opts.agentAddress;
+        return 'did:dkg:assertion:scoped';
+      },
+      write: async (_cg: string, _name: string, _quads: unknown, opts: { agentAddress: string }) => { lanes.push(opts.agentAddress); },
+      finalize: async (_cg: string, _name: string, opts: { agentAddress: string }) => {
+        lanes.push(opts.agentAddress);
+        return { assertionUri: 'did:dkg:assertion:scoped', merkleRoot: new Uint8Array(32), authorAddress: signedAuthor, schemeVersion: 1, chainId: 1n, kav10Address: `0x${'ef'.repeat(20)}`, eip712Digest: `0x${'12'.repeat(32)}` };
+      },
+      promote, promoteAsync: promote,
+    }, { resolveAgentByToken: (candidate?: string) => candidate === token ? caller : undefined },
+    { requestToken: token, requestAgentAddress: caller });
+    expect((await postRoot({ contextGraphId: CG_ID, name: ASSERTION_NAME,
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }], finalize: true,
+      preSignedAuthorAttestation: { address: signedAuthor, reservedKaId: reservedKaId.toString(),
+        signature: { r: `0x${'01'.repeat(32)}`, vs: `0x${'02'.repeat(32)}` } },
+    })).status).toBe(201);
+    expect(storedAuthor).toBe(caller);
+    // Ordinary share and an explicit same-address selector must find that lane.
+    expect((await post(verb, { contextGraphId: CG_ID })).status).toBe(200);
+    expect((await post(verb, { contextGraphId: CG_ID, selectedAuthorAgentAddress: signedAuthor })).status).toBe(200);
+    expect(lanes).toEqual([caller, caller, caller, caller]);
+  });
+
   it('swm/share: an unrelated promote error still propagates (not silently 409ed)', async () => {
     // Guard: the new 409 branch must only catch UNSEALED_SHARE_BLOCKED. Any
     // other error rethrows to the outer handler (→ 500 here).
@@ -533,8 +572,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
   it('swm/share selects a resident pre-signed author lane without changing authorship', async () => {
     const selected = `0x${'7b'.repeat(20)}`;
+    const stored = ethers.getAddress(selected);
     const calls: any[] = [];
     await startWith({
+      history: async () => ({ agentAddress: stored }),
       promote: async (...args: any[]) => {
         calls.push(args);
         return { promotedCount: 1, sealed: true, publishReady: true };
@@ -548,16 +589,18 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
     expect(res.status).toBe(200);
     expect(calls[0]?.[2]).toMatchObject({
-      agentAddress: selected,
-      authorAgentAddress: selected,
+      agentAddress: stored,
+      authorAgentAddress: stored,
     });
   });
 
   it('swm/share-async keeps the selected resident author lane in the queued job', async () => {
     const selected = `0x${'7c'.repeat(20)}`;
+    const stored = ethers.getAddress(selected);
     const calls: any[] = [];
     daemonState.promoteWorkerAvailable = true;
     await startWith({
+      history: async () => ({ agentAddress: stored }),
       promoteAsync: async (...args: any[]) => {
         calls.push(args);
         return { jobId: 'selected-author-share' };
@@ -571,8 +614,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
     expect(res.status).toBe(200);
     expect(calls[0]?.[2]).toMatchObject({
-      agentAddress: selected,
-      authorAgentAddress: selected,
+      agentAddress: stored,
+      authorAgentAddress: stored,
     });
   });
 
