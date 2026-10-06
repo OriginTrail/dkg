@@ -4,7 +4,7 @@
 // wiring against a stand-in devnet.sh, and which processes the real devnet.sh stop phase signals.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -812,6 +812,15 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
     const pids = await collected();
     expect(pids).toEqual(expect.arrayContaining([node.pid, store.pid]));
     expect(pids).not.toContain(tail.pid);
+  });
+
+  it('lists a node process whose executable path contains a space (a checkout under a directory with a space in its name)', async () => {
+    const spaced = join(root, 'my projects');
+    mkdirSync(spaced);
+    symlinkSync(process.execPath, join(spaced, 'node'));
+    const child = spawn(join(spaced, 'node'), ['-e', 'setInterval(() => {}, 1000)', join(home(), 'work')], { stdio: 'ignore' });
+    children.push(child);
+    expect(await collected()).toContain(child.pid);
   });
 
   it('does not list a process that mentions another node\'s home', async () => {
