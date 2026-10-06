@@ -893,19 +893,10 @@ export class DkgDaemonClient {
 
   /**
    * Persist a chat turn through the daemon's `/api/openclaw-channel/persist-turn`
-   * route, which hands the turn to the daemon's shared durable-turn owner
-   * (`persistDurableChatTurn`) and, for a new turn, on to
-   * `ChatMemoryManager.storeChatExchange`. As of v1 of the
-   * openclaw-dkg-primary-memory work the downstream writer targets the
-   * `'chat-turns'` Working Memory assertion of the `'agent-context'` context
-   * graph via `agent.assertion.write`, not `agent.share`.
-   *
-   * Idempotency is keyed by `(sessionId, turnId)`: resending a turn with the
-   * same stable `turnId` is a no-op on the daemon (the response carries
-   * `duplicate: true`), and resending it with a higher `persistenceState`
-   * (`pending` → `failed` → `stored`) records a transition instead of a second
-   * exchange. Pass a stable `turnId` for that to take effect. A call without
-   * one gets a fresh daemon-generated id each time and is never deduped.
+   * route (`persistDurableChatTurn`, then `ChatMemoryManager.storeChatExchange`)
+   * into the `'chat-turns'` Working Memory assertion of the `'agent-context'`
+   * context graph. Keyed by `(sessionId, turnId)`: a resend is a no-op
+   * (`duplicate: true`), a higher `persistenceState` records a transition.
    */
   async storeChatTurn(
     sessionId: string,
