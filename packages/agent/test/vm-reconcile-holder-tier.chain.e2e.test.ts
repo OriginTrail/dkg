@@ -91,7 +91,7 @@ describe('holder tier resolves ShardingTable membership on a real chain', () => 
     expect(unstakedIdentityId).toBeGreaterThan(0);
     const internals = agent as unknown as {
       chain: { listDesignatableNodes(): Promise<Array<{ identityId: bigint }>>; getIdentityIdForAddress(a: string): Promise<bigint> };
-      vmReconcileHolderTierByCg: Map<string, { peerIds: readonly string[] }>;
+      vmReconcileHolderTier: { peerIdsFor(cg: string): readonly string[] };
       refreshVmReconcileHolderTier(cg: string, o: { isCurrent: () => boolean }): Promise<void>;
       vmReconcileObservedCandidatePeerIds(cg: string): string[];
     };
@@ -108,7 +108,7 @@ describe('holder tier resolves ShardingTable membership on a real chain', () => 
 
     await internals.refreshVmReconcileHolderTier(CG, { isCurrent: () => true });
 
-    const holders = internals.vmReconcileHolderTierByCg.get(CG)?.peerIds ?? [];
+    const holders = internals.vmReconcileHolderTier.peerIdsFor(CG);
     expect([...holders].sort()).toEqual([PEER_CORE, PEER_REC1, PEER_REC2].sort());
     // No connection view and no curator: the roster is exactly the hinted holders.
     expect(internals.vmReconcileObservedCandidatePeerIds(CG).sort()).toEqual([PEER_CORE, PEER_REC1, PEER_REC2].sort());

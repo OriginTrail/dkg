@@ -213,7 +213,7 @@ function subscribeEdge(edge: DKGAgent): void {
 async function learnProfile(
   edge: DKGAgent,
   core: DKGAgent,
-  options: { agentAddress?: string; nodeRole?: 'core' | 'edge' } = {},
+  options: { agentAddress?: string; nodeRole?: 'core' | 'edge'; lastSeen?: string } = {},
 ): Promise<void> {
   const { quads } = buildAgentProfile({
     peerId: core.peerId,
@@ -222,7 +222,7 @@ async function learnProfile(
     nodeRole: options.nodeRole ?? 'core',
     ...(options.agentAddress === undefined ? {} : { agentAddress: options.agentAddress }),
     multiaddrs: [directAddress(core)],
-    lastSeen: new Date().toISOString(),
+    lastSeen: options.lastSeen ?? new Date().toISOString(),
   });
   await edge.store.insert(quads);
 }
@@ -325,10 +325,176 @@ describe('VM exact recovery reaches a ShardingTable holder the edge is not conne
 
     // The same peer with a wallet that is bound to a ShardingTable identity.
     await learnProfile(edge, holder, { agentAddress: WALLET_HOLDER });
-    (edge as unknown as { vmReconcileHolderTierByCg: Map<string, unknown> }).vmReconcileHolderTierByCg.clear();
-    (edge as unknown as { vmReconcileHolderHints?: { invalidate(): void } }).vmReconcileHolderHints?.invalidate();
+    // A phonebook arrival: forget what the holder tier remembered, hints and graph sets together.
+    (edge as unknown as { vmReconcileHolderTier?: { close(): void } }).vmReconcileHolderTier?.close();
     expect(await reconcileUntil(edge, async () => (await vmValues(edge)).length === 1)).toBe(true);
     expect(await vmValues(edge)).toEqual([TRUE_VALUE]);
+  }, 120_000);
+
+  it('reaches a holder whose profile sits behind more fresh junk profiles than one phonebook page holds', async () => {
+    const holderChain = await chainFor('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
+    const edgeChain = await chainFor('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
+    const holder = await startAgent('JunkAheadHolder', holderChain, 'core');
+    const edge = await startAgent('JunkAheadEdge', edgeChain, 'edge');
+    const { kaId, merkleRootHex } = await seedHolder(holder, holderChain, TRUE_VALUE);
+    registerKnowledgeAsset([holderChain, edgeChain], kaId, merkleRootHex);
+    subscribeEdge(edge);
+
+    // 160 unregistered wallets that sort before the holder's, two fresh peers
+    // each: 320 unsigned core-role rows, more than one page, all ahead of the
+    // holder's own profile. Every wallet is real hex and every peer id unusable.
+    const junkPeers: string[] = [];
+    const quads: Quad[] = [];
+    for (let wallet = 1; wallet <= 0xa0; wallet += 1) {
+      for (const copy of ['A', 'B']) {
+        const peerId = `12D3KooWJunk${wallet.toString(16).padStart(4, '0')}${copy}Unreachable`;
+        junkPeers.push(peerId);
+        quads.push(...buildAgentProfile({
+          peerId,
+          name: `junk-${wallet}-${copy}`,
+          skills: [],
+          nodeRole: 'core',
+          agentAddress: `0x${'0'.repeat(36)}${wallet.toString(16).padStart(4, '0')}`,
+          lastSeen: new Date().toISOString(),
+        }).quads);
+      }
+    }
+    await edge.store.insert(quads);
+    expect(junkPeers.length).toBeGreaterThan(256);
+    // The holder's own claim is the oldest in the phonebook (still recent enough
+    // for its direct address to count), so a freshness-ordered read puts it last.
+    await learnProfile(edge, holder, {
+      agentAddress: WALLET_HOLDER,
+      lastSeen: new Date(Date.now() - 60 * 60_000).toISOString(),
+    });
+    const lookups = vi.spyOn(edgeChain, 'getIdentityIdForAddress');
+    const ensureConnected = vi.spyOn(edge, 'ensurePeerConnected');
+
+    const reached = await reconcileUntil(edge, async () => (await vmValues(edge)).length === 1);
+
+    expect(reached).toBe(true);
+    expect(await vmValues(edge)).toEqual([TRUE_VALUE]);
+    expect(connectedTo(edge, holder)).toBe(true);
+    // The junk cost one lookup per wallet at most, and none of its peers was ever dialed.
+    expect(lookups.mock.calls.length).toBeLessThanOrEqual(0xa0 + 1);
+    const dialed = new Set(ensureConnected.mock.calls.map(([peerId]) => peerId));
+    expect(junkPeers.some((peerId) => dialed.has(peerId))).toBe(false);
+  }, 120_000);
+
+  it('walks on through a phonebook larger than one window until it reaches the holder behind it', async () => {
+    const holderChain = await chainFor('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
+    const edgeChain = await chainFor('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
+    const holder = await startAgent('WindowedHolder', holderChain, 'core');
+    const edge = await startAgent('WindowedEdge', edgeChain, 'edge');
+    const { kaId, merkleRootHex } = await seedHolder(holder, holderChain, TRUE_VALUE);
+    registerKnowledgeAsset([holderChain, edgeChain], kaId, merkleRootHex);
+    subscribeEdge(edge);
+
+    // 160 unregistered wallets that sort before the holder's, seven fresh peers
+    // each: 1,120 core-role rows, more than a resolution's four pages of 256.
+    const junkPeers: string[] = [];
+    const quads: Quad[] = [];
+    for (let wallet = 1; wallet <= 0xa0; wallet += 1) {
+      for (let copy = 0; copy < 7; copy += 1) {
+        const peerId = `12D3KooWWide${wallet.toString(16).padStart(4, '0')}x${copy}Unreachable`;
+        junkPeers.push(peerId);
+        quads.push(...buildAgentProfile({
+          peerId,
+          name: `wide-${wallet}-${copy}`,
+          skills: [],
+          nodeRole: 'core',
+          agentAddress: `0x${'0'.repeat(36)}${wallet.toString(16).padStart(4, '0')}`,
+          lastSeen: new Date().toISOString(),
+        }).quads);
+      }
+    }
+    await edge.store.insert(quads);
+    expect(junkPeers.length).toBeGreaterThan(4 * 256);
+    await learnProfile(edge, holder, {
+      agentAddress: WALLET_HOLDER,
+      lastSeen: new Date(Date.now() - 60 * 60_000).toISOString(),
+    });
+    // The holder-tier cadence runs on the agent's rotation clock; let the test move it a minute per pass.
+    let skew = 0;
+    (edge as unknown as { vmReconcileRotationNow: () => number }).vmReconcileRotationNow = () => Date.now() + skew;
+    const lookups = vi.spyOn(edgeChain, 'getIdentityIdForAddress');
+    const ensureConnected = vi.spyOn(edge, 'ensurePeerConnected');
+
+    const reached = await reconcileUntil(edge, async () => {
+      skew += 61_000;
+      return (await vmValues(edge)).length === 1;
+    });
+
+    expect(reached).toBe(true);
+    expect(await vmValues(edge)).toEqual([TRUE_VALUE]);
+    expect(connectedTo(edge, holder)).toBe(true);
+    // Each wallet was resolved on chain at most once, and no junk peer was ever dialed.
+    expect(lookups.mock.calls.length).toBeLessThanOrEqual(0xa0 + 1);
+    const dialed = new Set(ensureConnected.mock.calls.map(([peerId]) => peerId));
+    expect(junkPeers.some((peerId) => dialed.has(peerId))).toBe(false);
+  }, 120_000);
+
+  it('reaches a holder behind more distinct junk wallets than one resolution may ask the chain about, however far apart the sweeps run', async () => {
+    const holderChain = await chainFor('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
+    const edgeChain = await chainFor('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
+    const holder = await startAgent('DistinctJunkHolder', holderChain, 'core');
+    const edge = await startAgent('DistinctJunkEdge', edgeChain, 'edge');
+    const { kaId, merkleRootHex } = await seedHolder(holder, holderChain, TRUE_VALUE);
+    registerKnowledgeAsset([holderChain, edgeChain], kaId, merkleRootHex);
+    subscribeEdge(edge);
+
+    // 1,100 unregistered wallets, one fresh peer each, all sorting before the holder's: more than four
+    // resolutions' worth of lookups (256 each), so the first answers are older than a remembered
+    // negative answer lives by the time the holder's row comes up.
+    const JUNK = 1_100;
+    const LATE_WALLET = '0xf0000000000000000000000000000000000000f1';
+    edgeChain.seedIdentity(LATE_WALLET, IDENTITY_HOLDER);
+    const junkPeers: string[] = [];
+    const quads: Quad[] = [];
+    // (Away from the two wallets this file registers on chain: a profile that claims one of those is
+    // bound to a real identity, which is the accepted Phase 2 residual, not what this test is about.)
+    for (let wallet = 0x1000; wallet < 0x1000 + JUNK; wallet += 1) {
+      const peerId = `12D3KooWDistinct${wallet.toString(16).padStart(4, '0')}Unreachable`;
+      junkPeers.push(peerId);
+      quads.push(...buildAgentProfile({
+        peerId,
+        name: `distinct-${wallet}`,
+        skills: [],
+        nodeRole: 'core',
+        agentAddress: `0x${'0'.repeat(36)}${wallet.toString(16).padStart(4, '0')}`,
+        lastSeen: new Date().toISOString(),
+      }).quads);
+    }
+    await edge.store.insert(quads);
+    await learnProfile(edge, holder, {
+      agentAddress: LATE_WALLET,
+      lastSeen: new Date(Date.now() - 60 * 60_000).toISOString(),
+    });
+    // The holder tier's cadence runs on the agent's rotation clock. Two minutes per pass is what
+    // the sweep really gives it (a resolution is due a minute after it ENDED, past the next tick),
+    // and it is longer than a remembered negative answer lives (a minute per resolution in the
+    // first design), so a walk that depends on those answers never gets past the junk.
+    let skew = 0;
+    (edge as unknown as { vmReconcileRotationNow: () => number }).vmReconcileRotationNow = () => Date.now() + skew;
+    const lookups = vi.spyOn(edgeChain, 'getIdentityIdForAddress');
+    const ensureConnected = vi.spyOn(edge, 'ensurePeerConnected');
+
+    let passes = 0;
+    const reached = await reconcileUntil(edge, async () => {
+      passes += 1;
+      skew += 121_000;
+      return (await vmValues(edge)).length === 1;
+    });
+
+    expect(reached).toBe(true);
+    expect(await vmValues(edge)).toEqual([TRUE_VALUE]);
+    expect(connectedTo(edge, holder)).toBe(true);
+    // 1,100 junk wallets at 256 lookups a resolution is five resolutions, the holder's the fifth or sixth.
+    expect(passes).toBeLessThanOrEqual(Math.ceil(JUNK / 256) + 2);
+    // Each wallet was resolved on chain once (junk and the holder's), and no junk peer was ever dialed.
+    expect(lookups.mock.calls.length).toBeLessThanOrEqual(JUNK + 1);
+    const dialed = new Set(ensureConnected.mock.calls.map(([peerId]) => peerId));
+    expect(junkPeers.some((peerId) => dialed.has(peerId))).toBe(false);
   }, 120_000);
 
   it('rejects tampered content from a hinted holder and still recovers the true content from another', async () => {
@@ -361,8 +527,8 @@ describe('VM exact recovery reaches a ShardingTable holder the edge is not conne
 
     // The honest holder becomes known as well: the edge ends with the true content only.
     await learnProfile(edge, holder, { agentAddress: WALLET_HOLDER });
-    (edge as unknown as { vmReconcileHolderTierByCg: Map<string, unknown> }).vmReconcileHolderTierByCg.clear();
-    (edge as unknown as { vmReconcileHolderHints?: { invalidate(): void } }).vmReconcileHolderHints?.invalidate();
+    // A phonebook arrival: forget what the holder tier remembered, hints and graph sets together.
+    (edge as unknown as { vmReconcileHolderTier?: { close(): void } }).vmReconcileHolderTier?.close();
     expect(await reconcileUntil(edge, async () => (await vmValues(edge)).length > 0)).toBe(true);
     expect(await vmValues(edge)).toEqual([TRUE_VALUE]);
   }, 180_000);
