@@ -23,6 +23,8 @@ watchProtocolRefusal(node.libp2p, PROTOCOL, () => {});
 declare const declaredHost: Parameters<typeof watchProtocolRefusal>[0];
 declare const peerId: PeerId;
 void declaredHost.dialProtocol(peerId, [PROTOCOL]);
+// The protocols parameter is a string or a list of strings (libp2p's own dialProtocol takes both).
+void declaredHost.dialProtocol(peerId, PROTOCOL);
 
 // A test's own host, with its own peer, options and result types. The watcher infers them from it
 // and leaves the host's dial signature as declared, so a wrong type is an error at the call site.
