@@ -11,7 +11,12 @@ export const EXACT_BATCH_MAX_REQUEST_BYTES = 8 * 1024;
 export const EXACT_BATCH_MAX_ASSETS = 10;
 export const EXACT_BATCH_MAX_CHUNKS_PER_ASSET = 1024;
 const MAGIC = new Uint8Array([68, 75, 66, 49]); // DKB1
-export const EXACT_BATCH_REFUSALS = Object.freeze(['UNSUPPORTED', 'RESOURCE_LIMIT', 'SOURCE_CHANGED', 'ASSET_MISSING', 'DENIED'] as const);
+/**
+ * `BUSY` (added after the first five) says the responder is alive and could not
+ * admit the request now. A requester built before it rejects the frame as an
+ * unknown refusal, which it handles like the stream reset it got before.
+ */
+export const EXACT_BATCH_REFUSALS = Object.freeze(['UNSUPPORTED', 'RESOURCE_LIMIT', 'SOURCE_CHANGED', 'ASSET_MISSING', 'DENIED', 'BUSY'] as const);
 export type ExactBatchFrameKind = typeof EXACT_BATCH_FRAME_KIND[keyof typeof EXACT_BATCH_FRAME_KIND];
 export type ExactBatchRefusal = typeof EXACT_BATCH_REFUSALS[number];
 export interface ExactBatchFrame {

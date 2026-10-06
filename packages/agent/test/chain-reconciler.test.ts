@@ -667,6 +667,8 @@ describe('reconcileContextGraph — sweep', () => {
       hasMore: false,
       shouldContinueImmediately: false,
     });
+    // No peer was asked, so the pass did not use the node's sync admission.
+    expect(refused.recoveryAttempted).toBeUndefined();
     expect(inspections[0]).toEqual(inspectedOrdinals);
     expect(recoveryCalls).toEqual([recoveryOrdinals]);
     expect(fetchAttempts).toEqual([]);
@@ -689,7 +691,9 @@ describe('reconcileContextGraph — sweep', () => {
       watermark: 0,
       hasMore: true,
       shouldContinueImmediately: true,
+      recoveryAttempted: true,
     });
+    expect(admitted.localAdmissionDeferred).toBeUndefined();
     expect(state.scanOrdinal).toBe(nextScanOrdinal);
     expect(state.ahead.size).toBe(10);
     expect(persisted).toEqual([]);

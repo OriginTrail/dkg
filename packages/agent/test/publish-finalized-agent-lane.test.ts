@@ -2,11 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
-  contextGraphDataUri,
   contextGraphSharedMemoryUri,
   assertionLifecycleUri,
   contextGraphMetaUri,
-  createOperationContext,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -90,39 +88,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     });
     expect(() => sharedMemoryScopeForFinalizedLifecycle(DEFAULT_AGENT, RESERVED_KA_ID))
       .toThrow(/not in author .* namespace/);
-  });
-
-  it('keeps the legacy catalog-in-SWM helper scoped to the selected lifecycle graph', async () => {
-    const store = new OxigraphStore();
-    const agent = Object.create(DKGAgent.prototype) as any;
-    agent.store = store;
-    agent.log = makeLog();
-    const swmGraph = contextGraphSharedMemoryUri(CG);
-    const exactGraph = `${swmGraph}/${AGENT_B}/1`;
-    const cgDid = contextGraphDataUri(CG);
-
-    const selection = await agent._ensureCuratedCatalogInSwm(
-      CG,
-      { rootEntities: [ROOT] },
-      undefined,
-      createOperationContext('test'),
-      {
-        kind: 'named-lifecycle',
-        identity: { agentAddress: AGENT_B, kaNumber: 1n },
-      },
-    );
-
-    expect(selection).toEqual({ rootEntities: [ROOT, cgDid] });
-    const exact = await store.query(
-      `SELECT ?p ?o WHERE { GRAPH <${exactGraph}> { <${cgDid}> ?p ?o } }`,
-    );
-    const legacyBucket = await store.query(
-      `SELECT ?p ?o WHERE { GRAPH <${swmGraph}> { <${cgDid}> ?p ?o } }`,
-    );
-    expect(exact.type).toBe('bindings');
-    expect(exact.type === 'bindings' ? exact.bindings : []).toHaveLength(4);
-    expect(legacyBucket.type).toBe('bindings');
-    expect(legacyBucket.type === 'bindings' ? legacyBucket.bindings : []).toHaveLength(0);
   });
 
   it('reads finalized assertions from the explicitly selected non-default agent lane', async () => {

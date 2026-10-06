@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
@@ -187,6 +187,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       sharedMemoryVerified: boolean;
       updatedAt?: number;
     };
+    readinessDuringCatchup?: { version: number; durableVerified: boolean; sharedMemoryVerified: boolean };
   }): Promise<{
     response: any;
     responseStatus: number;
@@ -235,6 +236,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       run: async (request) => {
         runCalls += 1;
         opts.onCatchupRun?.();
+        if (opts.readinessDuringCatchup) readiness = { ...opts.readinessDuringCatchup, updatedAt: Date.now() };
         runSawMetadataBootstrap = metadataBootstrapCompleted;
         runRequests.push(request);
         return opts.result ?? cleanEmptyResult();
@@ -500,6 +502,26 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.job).toBeUndefined();
     expect(result.state).toEqual({});
     expect(result.patches).toEqual([]);
+  });
+
+  it('logs a bounded unavailable reason without exposing arbitrary decision text', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await subscribe({
+        hasConfirmedMeta: false,
+        authorityDecision: {
+          outcome: 'unavailable', source: 'registered-chain',
+          reason: 'private diagnostic text', metadataBootstrap: 'eligible',
+        },
+      });
+      expect(result.responseStatus).toBe(503);
+      expect(warn).toHaveBeenCalledWith(
+        '[context-graph-subscribe] authority unavailable: reason=other dependency=undefined',
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('private diagnostic text');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('forwards explicit on-demand edge intent without making it always-on', async () => {
@@ -855,6 +877,19 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.job.status).not.toBe('done');
     expect(result.state).toMatchObject({ synced: false });
     expect(result.readiness).toMatchObject({ durableVerified: false });
+  });
+
+  it('preserves newer catalog proof delivered while a foreground metadata-only job runs', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true, isPrivate: true, result: privateMetaOnlyResult(), forceCatchup: true,
+      authorityDecision: { outcome: 'allowed', source: 'legacy-local', reason: 'approved-private-replica', metadataBootstrap: 'eligible', registration: 'unregistered' },
+      initial: { subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: true },
+      readinessDuringCatchup: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+    });
+    expect(result.job.status).toBe('done');
+    expect(result.job.durablePlane).toBe('not-applicable');
+    expect(result.state).toMatchObject({ synced: true, sharedMemorySynced: true });
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: true });
   });
 
   it('does not promote private data readiness from unrelated empty responders after metadata is local', async () => {

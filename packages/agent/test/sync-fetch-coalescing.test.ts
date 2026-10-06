@@ -1724,24 +1724,22 @@ describe('DKGAgent sync fetch coalescing', () => {
         cleanSharedMemorySyncResult();
 
       const [windowA, windowB] = await Promise.all([
-        agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+        agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
           includeSharedMemory: true,
           maxPeers: 1,
           peerRotationKey: 'window-a',
         }),
-        agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+        agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
           includeSharedMemory: true,
           maxPeers: 1,
           peerRotationKey: 'window-b',
         }),
       ]);
 
-      expect(windowA.cleanMissPeerIds).toEqual([PEER_A]);
-      expect(windowB.cleanMissPeerIds).toEqual([PEER_B]);
-      expect(windowA.catchup.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
-      expect(windowB.catchup.cleanSharedMemoryPeerIds).toEqual([PEER_B]);
-      expect(Object.isFrozen(windowA.catchup.cleanSharedMemoryPeerIds)).toBe(true);
-      expect(Object.isFrozen(windowB.catchup.cleanSharedMemoryPeerIds)).toBe(true);
+      expect(windowA.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
+      expect(windowB.cleanSharedMemoryPeerIds).toEqual([PEER_B]);
+      expect(Object.isFrozen(windowA.cleanSharedMemoryPeerIds)).toBe(true);
+      expect(Object.isFrozen(windowB.cleanSharedMemoryPeerIds)).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1773,11 +1771,11 @@ describe('DKGAgent sync fetch coalescing', () => {
         await releaseRefresh.promise;
       };
 
-      const first = agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+      const first = agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
       await refreshEntered.promise;
-      const lateJoiner = agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+      const lateJoiner = agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
       await flushMicrotasks();
@@ -1785,9 +1783,9 @@ describe('DKGAgent sync fetch coalescing', () => {
 
       const [firstResult, lateResult] = await Promise.all([first, lateJoiner]);
       expect(sharedSyncs).toBe(1);
-      expect(firstResult.cleanMissPeerIds).toEqual([PEER_A]);
-      expect(lateResult.cleanMissPeerIds).toEqual([PEER_A]);
-      expect(lateResult.catchup).toBe(firstResult.catchup);
+      expect(firstResult.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
+      expect(lateResult.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
+      expect(lateResult).toBe(firstResult);
     } finally {
       releaseRefresh.resolve();
       await agent.stop().catch(() => {});
@@ -2034,17 +2032,17 @@ describe('DKGAgent sync fetch coalescing', () => {
         };
       };
 
-      const recovery = await agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+      const recovery = await agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
-      const result = recovery.catchup;
+      const result = recovery;
 
       expect(durableCalls).toEqual([PEER_A]);
       expect(sharedCalls).toEqual([PEER_A, PEER_A]);
       expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(3));
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
       expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
-      expect(recovery.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(recovery.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
     } finally {
       await agent.stop().catch(() => {});
     }

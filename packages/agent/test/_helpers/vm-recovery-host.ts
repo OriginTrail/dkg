@@ -2,6 +2,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from '../../src/vm-recovery-core-transport-preference.js';
+import type { VmRecoveryTransportBudgetPolicy } from '../../src/vm-recovery-transport-budget-policy.js';
 import type { DurableSyncAdmissionOutcome } from '../../src/sync/requester/admission-boundary.js';
 
 import type {
@@ -13,8 +14,9 @@ import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
 import { DKGAgent } from '../../src/index.js';
 import { exactAssetUalsForSelection, type ExactAssetSelection } from '../../src/sync/exact-assets.js';
-import type { ExactRecoveryTransportMode } from '../../src/sync/requester/exact-recovery-transport.js';
+import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from '../../src/sync/requester/exact-recovery-transport.js';
 import type {
+  VmRecoveryProviderPolicy,
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
 import type { VmRecoveryRegisteredPublicEvidence } from '../../src/vm-recovery-pass-authority.js';
@@ -34,6 +36,9 @@ interface ExactFetchResult {
     deferredBackpressure: number;
   };
   disposition: VmRecoveryUalDisposition;
+  responderCapability?: 'legacy-filter-unsupported';
+  /** Set by a fixture that plays the exact-batch stream; the default fixture never does. */
+  streamOutcome?: ExactBatchStreamOutcome;
 }
 
 /**
@@ -66,8 +71,16 @@ export interface VmRecoveryHostInternals {
   openVmReconcileRotationState(): void;
   clearNetworkRejectedPeerState(peerId: string): void;
   vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
+  vmReconcileRotationAdmissionCursorByCg: Map<string, number>;
+  vmReconcileTransportBudgetPolicy: VmRecoveryTransportBudgetPolicy;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
+  selectVmReconcileExactCandidate(
+    record: VmReconcileRotationRecord | undefined,
+    fallbackCandidatePeerIds: readonly string[],
+    policy: VmRecoveryProviderPolicy,
+    binding?: { localCgId: string; onChainCgId: string; experimentalStreamPeerIds?: ReadonlySet<string> },
+  ): string | undefined;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
   installVmReconcileActiveFetchCooldown(localCgId: string, now: number): symbol;
   readVmReconcileActiveFetchCooldown(
@@ -99,6 +112,7 @@ export interface VmRecoveryHostInternals {
     selection: readonly string[] | ExactAssetSelection,
     options?: { signal?: AbortSignal; isCurrent?: () => boolean; onWorkStarted?: () => void;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+      totalTimeoutMs?: number;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
@@ -108,7 +122,6 @@ export interface VmRecoveryHostInternals {
     headBlock: number | undefined,
     options?: {
       isTargetCurrent?: () => boolean;
-      deferActiveFetch?: boolean;
     },
   ): Promise<OrdinalOutcome>;
   executeVmRecoveryBatch(input: {
@@ -130,6 +143,8 @@ export interface VmRecoveryHostInternals {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
+    exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+    legacyAttemptTimeoutMs?: number;
     registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
   }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' | 'local-admission-deferred' }>;
   recoverVmReconcileBatch(

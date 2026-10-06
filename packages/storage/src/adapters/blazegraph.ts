@@ -342,6 +342,9 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
+    // The N-Quads body bypasses the SPARQL builders. Blazegraph rejects a
+    // relative IRI here but stores an RFC 3987-invalid one verbatim.
+    statements.checkIris.insert(quads);
     await this.runStoreWork('insert', {
       ...options,
       source: options?.source ?? 'blazegraph.insert',
@@ -444,6 +447,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       label: 'BlazegraphStore.replaceGraph',
     });
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    statements.checkIris.replaceGraph(graphUri, quads);
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -481,6 +485,13 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       metadataSubject,
       metadataQuads,
     );
+    statements.checkIris.replaceGraphAndSubject(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -510,8 +521,10 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     // Blazegraph runs one UPDATE request (DELETE WHERE + INSERT DATA) as a single
     // transaction, so the subject is replaced atomically. No staging/cleanup: a
     // failed request commits nothing.
+    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
+    statements.checkIris.replaceSubject(graphUri, subject, quads);
     await this.sparqlUpdate(
-      buildAtomicSubjectReplaceUpdate(graphUri, subject, quads),
+      update,
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
       'replaceSubject',
     );
@@ -527,6 +540,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.rfc64AuthorCommitCasV1',
     });
+    statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.sparqlUpdate(
         plan.update,

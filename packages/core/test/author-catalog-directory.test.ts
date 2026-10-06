@@ -409,6 +409,60 @@ describe('author catalog selected directory paths', () => {
     )).toThrow(/totalRows/);
   });
 
+  it('rejects a next node that is not the selected child range', () => {
+    const fixture = twoLevelFixture(300n);
+    // A valid leaf for buckets 0..255 that the root's second child descriptor
+    // (range 256..511) commits to. Digest, byte length and row count all
+    // match, so the range comparison is the only check left to reject it.
+    const misplacedEntries = emptyBucketDescriptors(256, 0n);
+    misplacedEntries[44] = nonemptyBucketDescriptor(44n);
+    const misplacedLeaf = signedEnvelope({
+      ...fixture.leaf.payload,
+      entries: misplacedEntries,
+      firstBucketId: '0',
+    }, '512');
+    const misplacedLeafBytes = canonicalizeAuthorCatalogDirectoryNodePayloadBytesV1(
+      misplacedLeaf.payload,
+      '512',
+    ).byteLength;
+    const root = signedEnvelope({
+      ...fixture.root.payload,
+      entries: fixture.root.payload.entries.map((entry, index) => index === 1
+        ? {
+            ...(entry as AuthorCatalogChildDescriptorV1),
+            byteLength: misplacedLeafBytes.toString(),
+            childDigest: misplacedLeaf.objectDigest,
+          }
+        : entry),
+    }, '512');
+
+    expect(() => verifyAuthorCatalogDirectoryPathV1(
+      signedHeadEnvelope({ ...fixture.head.payload, directoryRootDigest: root.objectDigest }),
+      [root, misplacedLeaf],
+      '300',
+    )).toThrow(/selected child range does not match the next path node/);
+  });
+
+  it('rejects a descriptor of the wrong kind for its level at the structure check', () => {
+    const fixture = twoLevelFixture(300n);
+    const childDescriptor = fixture.root.payload.entries[1];
+    const bucketDescriptor = fixture.leaf.payload.entries[0];
+    // The path normalizer's leaf/branch guards sit behind this check, so a
+    // mixed node must already fail here, with the schema code.
+    expect(() => assertAuthorCatalogDirectoryNodeV1({
+      ...fixture.leaf.payload,
+      entries: fixture.leaf.payload.entries.map((entry, index) => index === 0
+        ? childDescriptor
+        : entry),
+    }, '512')).toThrow(/catalog-directory-schema/);
+    expect(() => assertAuthorCatalogDirectoryNodeV1({
+      ...fixture.root.payload,
+      entries: fixture.root.payload.entries.map((entry, index) => index === 0
+        ? bucketDescriptor
+        : entry),
+    }, '512')).toThrow(/catalog-directory-schema/);
+  });
+
   it('mints an opaque exact-head capability and rejects every structural forgery', () => {
     const fixture = twoLevelFixture(300n);
     const verifiedPath = verifyAuthorCatalogDirectoryPathV1(
@@ -584,7 +638,7 @@ describe('author catalog selected directory paths', () => {
       .toThrow(/catalog-directory-path/);
   });
 
-  it('never consumes poisoned inherited iterators on entries or paths', () => {
+  it('never consumes poisoned inherited array methods on entries or paths', () => {
     const entries = [...EMPTY_NODE.entries];
     const node = { ...EMPTY_NODE, entries };
     const signed = signedEnvelope(node, '1');
@@ -593,26 +647,55 @@ describe('author catalog selected directory paths', () => {
       ...EMPTY_HEAD.payload,
       directoryRootDigest: signed.objectDigest,
     });
-    const originalIterator = Array.prototype[Symbol.iterator];
-    Object.defineProperty(Array.prototype, Symbol.iterator, {
-      configurable: true,
-      writable: true,
-      value(this: unknown[]) {
-        if (this === entries || this === path) {
-          throw new Error('poisoned directory iterator was consumed');
-        }
-        return originalIterator.call(this);
-      },
-    });
+    const fixture = twoLevelFixture(300n);
+    const poisoned = new Set<unknown>([
+      entries,
+      path,
+      fixture.path,
+      fixture.root.payload.entries,
+      fixture.leaf.payload.entries,
+    ]);
+    // The iterator covers spread and for...of; the named methods are the
+    // inherited reads a refactor would most plausibly reach for.
+    const poisonedMethods = [
+      Symbol.iterator,
+      'map',
+      'slice',
+      'filter',
+      'forEach',
+      'concat',
+      'some',
+      'indexOf',
+    ] as const;
+    const prototype = Array.prototype as unknown as Record<PropertyKey, (...args: never[]) => unknown>;
+    const originals = poisonedMethods.map((method) => prototype[method]);
+    for (let index = 0; index < poisonedMethods.length; index += 1) {
+      const method = poisonedMethods[index];
+      const original = originals[index];
+      Object.defineProperty(Array.prototype, method, {
+        configurable: true,
+        writable: true,
+        value(this: unknown[], ...args: never[]) {
+          if (poisoned.has(this)) {
+            throw new Error(`poisoned directory ${String(method)} was consumed`);
+          }
+          return original.apply(this, args);
+        },
+      });
+    }
     try {
       expect(() => assertAuthorCatalogDirectoryNodeV1(node, '1')).not.toThrow();
       expect(() => verifyAuthorCatalogDirectoryPathV1(head, path, '0')).not.toThrow();
+      expect(() => verifyAuthorCatalogDirectoryPathV1(fixture.head, fixture.path, '300'))
+        .not.toThrow();
     } finally {
-      Object.defineProperty(Array.prototype, Symbol.iterator, {
-        configurable: true,
-        writable: true,
-        value: originalIterator,
-      });
+      for (let index = 0; index < poisonedMethods.length; index += 1) {
+        Object.defineProperty(Array.prototype, poisonedMethods[index], {
+          configurable: true,
+          writable: true,
+          value: originals[index],
+        });
+      }
     }
   });
 });

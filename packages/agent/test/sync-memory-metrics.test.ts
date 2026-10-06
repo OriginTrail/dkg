@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { metrics } from '@opentelemetry/api';
 import {
   AggregationTemporality,
@@ -177,6 +177,57 @@ describe('sync memory attribution metrics', () => {
       estimateQuadHeapBytes({ subject: 'urn:s:1', predicate: 'urn:p', object: '"one"', graph: 'urn:data' }) +
       estimateQuadHeapBytes({ subject: 'urn:s:2', predicate: 'urn:p', object: '"two"', graph: 'urn:data' });
     expect(completedValue('dkg.sync.requester.accumulated_bytes').sum).toBe(expectedBytes);
+  });
+
+  it('decodes each response once and does not leak a rejected retry body', async () => {
+    const encoder = new TextEncoder();
+    const decoded = vi.spyOn(TextDecoder.prototype, 'decode');
+    const responses = [
+      encoder.encode('__DKG_SYNC_BUSY__'),
+      encoder.encode('<urn:s> <urn:p> "o" <urn:data> .'),
+      new Uint8Array(),
+    ];
+    let sends = 0;
+    const parsedBodies: string[] = [];
+    try {
+      const result = await fetchSyncPages({
+        ctx: { operationId: 'test', operationName: 'sync' },
+        remotePeerId: 'peer-decode-once',
+        contextGraphId: 'graph-decode-once',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: 'urn:data',
+        deadline: Date.now() + 10_000,
+        syncPageTimeoutMs: 1_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 2,
+        syncPageSize: 2,
+        syncDeniedResponse: 'denied',
+        debugSyncProgress: false,
+        protocolSync: '/dkg/test/sync',
+        checkpointStore: new MemorySyncCheckpointStore(),
+        buildSyncRequest: async () => encoder.encode('request'),
+        parseAndFilter: async (body) => {
+          parsedBodies.push(body);
+          return {
+            quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:data' }],
+            totalQuads: 1,
+          };
+        },
+        send: async () => responses[sends++]!,
+        logWarn: () => {},
+        logInfo: () => {},
+        logDebug: () => {},
+      });
+
+      expect(result.quads).toHaveLength(1);
+      expect(parsedBodies).toEqual(['<urn:s> <urn:p> "o" <urn:data> .']);
+      expect(sends).toBe(2);
+      // One decode for the rejected busy attempt and one for the accepted page.
+      expect(decoded).toHaveBeenCalledTimes(2);
+    } finally {
+      decoded.mockRestore();
+    }
   });
 
   it('attributes requester phase memory to the error outcome when parsing throws', async () => {

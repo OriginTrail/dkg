@@ -21,7 +21,9 @@ import {
   exactBatchTransportOptions, exactBatchStartFrame, exchangeExactBatchVerified,
   ExactBatchPartialSyncError, type ExactBatchVerifiedReceiverOptions,
 } from './exact-batch-stream.js';
-import type { ExactRecoveryTransportMode } from './exact-recovery-transport.js';
+import type {
+  ExactBatchStreamOutcome, ExactBatchStreamSetback, ExactRecoveryTransportMode,
+} from './exact-recovery-transport.js';
 import type { DetailedDurableSyncResult } from './durable-sync.js';
 
 export interface ExactBatchStreamDriverOptions {
@@ -68,11 +70,23 @@ export const EXACT_BATCH_STREAM_RETRY = Object.freeze({
   minRemainingMs: 5_000,
 });
 
+/**
+ * How a peer that answered BUSY is asked again inside the same fetch. Kept
+ * short on purpose: the fetch holds this node's sync admission while it waits,
+ * and a peer that stays busy longer is asked again by the recovery pass, which
+ * can use other peers in between.
+ */
+export const EXACT_BATCH_STREAM_BUSY_RETRY = Object.freeze({
+  /** The pause before each further exchange; one entry per exchange allowed. */
+  backoffMs: Object.freeze([2_000, 5_000, 10_000] as const),
+});
+
 export type ExactBatchStreamDriverOutcome =
   | Readonly<{ kind: 'not-selected' }>
   | Readonly<{ kind: 'unsupported-before-start' }>
   | Readonly<{ kind: 'settled'; detailed: DetailedDurableSyncResult & {
       readonly committedExactAssetUals?: readonly string[];
+      readonly exactStreamOutcome?: ExactBatchStreamOutcome;
     } }>;
 
 function unavailableStream(): ExactBatchStreamDriverOutcome {
@@ -95,6 +109,13 @@ function isUnsupportedBeforeStart(error: unknown): boolean {
   const cause = error instanceof Error ? error.cause : undefined;
   return error instanceof ExperimentalExactBatchUnsupportedError
     || cause instanceof ExperimentalExactBatchUnsupportedError;
+}
+
+/** Whether an exchange stopped for a reason that says nothing about the peer's data. */
+function exactBatchStreamSetback(error: unknown): ExactBatchStreamSetback | undefined {
+  if (!(error instanceof ExactBatchPartialSyncError)) return undefined;
+  if (error.refusalObservation?.code === 'BUSY') return 'responder-busy';
+  return error.streamInterrupted ? 'stream-interrupted' : undefined;
 }
 
 /**
@@ -161,6 +182,15 @@ async function reconnectForRetry(
     if (pauseMs < 1 || !await pause(pauseMs, signal)) return false;
   }
   return false;
+}
+
+/**
+ * Wait before asking a busy peer again. False when the fetch is cancelled, or
+ * would be left with less time than another exchange needs.
+ */
+async function pauseForBusyRetry(options: ExactBatchStreamDriverOptions, backoffMs: number): Promise<boolean> {
+  if (Date.now() + backoffMs > options.fetchDeadline - EXACT_BATCH_STREAM_RETRY.minRemainingMs) return false;
+  return await pause(backoffMs, options.signal) && options.isCurrent?.() !== false;
 }
 
 /** Open one stream for `assetUals` and apply what it delivers. */
@@ -254,11 +284,13 @@ async function exchangeExactBatchOnce(
  * stream always retains its applied prefix and never replays the enlarged
  * selection over the ordinary wire.
  *
- * A stream that broke is opened once more with the same peer, for the assets
- * it had not applied yet: a break says nothing about the peer's data, and
- * leaving it sends every one of those assets to the peers that cannot stream.
- * Nothing else is retried. A refusal, a rejected or unstorable asset and a
- * cancellation settle as they did.
+ * Two ways of stopping say nothing about the peer's data, and leaving the peer
+ * after either sends every outstanding asset to the peers that cannot stream.
+ * So the same peer is asked again for the assets not applied yet: once after
+ * the stream broke, and after each short pause while it answers BUSY. Nothing
+ * else is retried. Any other refusal, a rejected or unstorable asset and a
+ * cancellation settle as they did. When the retries run out, the outcome names
+ * which of the two it was, for the caller to decide whether to come back.
  */
 export async function runExactBatchStreamDriver(
   options: ExactBatchStreamDriverOptions,
@@ -269,24 +301,28 @@ export async function runExactBatchStreamDriver(
   const selected = exactAssetUalsForSelection(options.selection);
   const accumulator = createDurableSyncAccumulator();
   const committed: string[] = [];
+  // Set while the last exchange stopped without a verdict on the peer's data.
+  let setback: ExactBatchStreamSetback | undefined;
   const incomplete = (): ExactBatchStreamDriverOutcome => {
     recordDurableSyncDiagnostics(accumulator, { failedPhases: 1 });
     markDurableTerminalBoundary(accumulator, false);
     return { kind: 'settled', detailed: {
       result: finalizeDurableSyncCompletion(accumulator), exactFetchDisposition: 'incomplete',
       committedExactAssetUals: Object.freeze([...committed]),
+      ...(setback === undefined ? {} : { exactStreamOutcome: setback }),
     } };
   };
+  let interruptionRetries = 0, busyRetries = 0;
 
-  for (let retries = 0; ; retries += 1) {
+  for (let exchanges = 0; ; exchanges += 1) {
     const resourceRefusalScope = options.streamEnabled ? ports.captureRefusalScope() : null;
     const connectionKey = options.streamEnabled ? ports.captureConnectionKey() : null;
     if (!options.streamEnabled || !ports.isChainEnabled()
       || exactBatchStreamUnsupported(ports.capabilityOwner, remotePeerId, connectionKey, Date.now(), resourceRefusalScope)
       || !(await ports.getPeerProtocols()).includes(EXACT_BATCH_STREAM_PROTOCOL)
       || !await ports.isRegisteredPublic()) {
-      // After a break the first exchange has run: its applied prefix stands.
-      if (retries > 0) return incomplete();
+      // An earlier exchange of this call has run: its applied prefix stands.
+      if (exchanges > 0) return incomplete();
       // Required stream sizing must never widen an ordinary paging request.
       return transportMode === 'stream-required' ? unavailableStream() : { kind: 'not-selected' };
     }
@@ -297,7 +333,7 @@ export async function runExactBatchStreamDriver(
       markDurableTerminalBoundary(accumulator, true, { countCompletedPhase: true });
       return { kind: 'settled', detailed: {
         result: finalizeDurableSyncCompletion(accumulator), exactFetchDisposition: 'found',
-        committedExactAssetUals: Object.freeze([...committed]),
+        committedExactAssetUals: Object.freeze([...committed]), exactStreamOutcome: 'complete',
       } };
     }
     const { error } = exchange;
@@ -314,16 +350,31 @@ export async function runExactBatchStreamDriver(
     if (isUnsupportedBeforeStart(error)) {
       rememberExactBatchStreamUnsupported(ports.capabilityOwner, remotePeerId, connectionKey, ports.captureConnectionKey(), Date.now());
       // Only while no START of this call has been sent may the ordinary wire take over.
-      if (retries === 0 && transportMode !== 'stream-required') return { kind: 'unsupported-before-start' };
+      if (exchanges === 0 && transportMode !== 'stream-required') return { kind: 'unsupported-before-start' };
     }
 
     const outstandingAssets = selected.length - committed.length;
-    if (retries >= EXACT_BATCH_STREAM_RETRY.maxRetries
-      || !(error instanceof ExactBatchPartialSyncError) || !error.streamInterrupted
-      || outstandingAssets < 1
-      || signal?.aborted || options.isCurrent?.() === false) return incomplete();
+    setback = outstandingAssets < 1 || signal?.aborted || options.isCurrent?.() === false
+      ? undefined
+      : exactBatchStreamSetback(error);
+    if (setback === undefined) return incomplete();
+    // A fetch cancelled while it waits settles as a cancellation, not as a setback.
+    const settleUnretried = (): ExactBatchStreamDriverOutcome => {
+      if (signal?.aborted || options.isCurrent?.() === false) setback = undefined;
+      return incomplete();
+    };
+    if (setback === 'responder-busy') {
+      const backoffMs = EXACT_BATCH_STREAM_BUSY_RETRY.backoffMs[busyRetries];
+      if (backoffMs === undefined || !await pauseForBusyRetry(options, backoffMs)) return settleUnretried();
+      busyRetries += 1;
+      observeExactBatch(() => ports.logInfo(
+        `Exact batch requester retry reason=responder-busy committedAssets=${committed.length} outstandingAssets=${outstandingAssets} backoffMs=${backoffMs}`));
+      continue;
+    }
+    if (interruptionRetries >= EXACT_BATCH_STREAM_RETRY.maxRetries) return incomplete();
     const reconnectStartedAtMs = Date.now();
-    if (!await reconnectForRetry(options, ports)) return incomplete();
+    if (!await reconnectForRetry(options, ports)) return settleUnretried();
+    interruptionRetries += 1;
     observeExactBatch(() => ports.logInfo(
       `Exact batch requester retry reason=stream-interrupted committedAssets=${committed.length} outstandingAssets=${outstandingAssets} reconnectMs=${Date.now() - reconnectStartedAtMs}`));
   }

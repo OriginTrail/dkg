@@ -11,6 +11,9 @@
  * the external public API is unchanged.
  */
 
+
+import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
+export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
@@ -39,11 +42,12 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
   classifyRpcRetryDisposition,
+  rethrowInterruptedInitialization,
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   resolveRpcUrls,
@@ -58,16 +62,15 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
 import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
-import {
+import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
+  rpcReadDescriptor,
   type ReadOpts,
-  type RpcReadDescriptor,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
@@ -108,6 +111,7 @@ import { ContextGraphRegistryRepairCoordinator } from
   './context-graph-registry-repair-coordinator.js';
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
+import { BackgroundContractReadBatching } from './evm-background-read-batching.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type {
@@ -148,24 +152,6 @@ type SerializedSignerWriteContext = {
   /** Refresh the lane-health clock after a meaningful write-stage boundary. */
   markProgress: () => void;
 };
-
-/**
- * Bind an adapter read's human label and telemetry owner together.
- *
- * Kept as a module helper so it does not become part of the concrete adapter's
- * prototype API (the mock-adapter parity test intentionally enumerates that
- * surface).
- */
-function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
-  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
-  return createRpcReadDescriptor(label, consumer);
-}
-
-function rethrowInterruptedInitialization(error: unknown): void {
-  activeRpcRequestAbortSignal()?.throwIfAborted();
-  // Local refusal is not proof that an optional contract is absent.
-  if (isRpcRequestGovernorQueueFullError(error)) throw error;
-}
 
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
@@ -363,40 +349,6 @@ const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
 export type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
-
-/**
- * B8 — decode the `CostCovered` event from a publish receipt's logs via the
- * PublishingConviction LOGIC ABI (the event is emitted by the logic contract, a
- * different address than KA storage, so the KA-storage receipt loop skips it).
- * Returns the discount detail (cost fields bigint → decimal strings via the
- * daemon's JSON replacer; `epoch` a number) when a publish drew on a Publishing
- * Conviction Account, else `undefined`. `coverPublishingCost` runs once per
- * publish tx, so a (batch) publish emits ONE CostCovered covering the batch's
- * total draw — this returns that single event (the "discount applied" badge is
- * tx-level; a precise per-KA breakdown would be a future enhancement). Exported
- * for unit testing.
- */
-export function decodeConvictionCostCovered(
-  logs: ReadonlyArray<{ topics: ReadonlyArray<string>; data: string }>,
-): OnChainPublishResult['convictionCostCovered'] {
-  const pcaLogic = getPcaLogicInterface();
-  for (const log of logs) {
-    try {
-      const parsed = pcaLogic.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === 'CostCovered') {
-        return {
-          accountId: BigInt(parsed.args.accountId),
-          epoch: Number(parsed.args.epoch),
-          baseCost: BigInt(parsed.args.baseCost),
-          discountedCost: BigInt(parsed.args.discountedCost),
-          drawnFromEpoch: BigInt(parsed.args.drawnFromEpoch),
-          drawnFromTopUp: BigInt(parsed.args.drawnFromTopUp),
-        };
-      }
-    } catch { /* not a PublishingConviction event */ }
-  }
-  return undefined;
-}
 
 function normalizeScanPageSize(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 1
@@ -691,6 +643,8 @@ export class EVMChainAdapterBase {
    * the adapter and never owns tx-safety state.
    */
   protected readonly rpcFailover: RpcFailoverClient;
+  /** Background views coalesced into one Multicall3 request (see `evm-background-read-batching.ts`). */
+  protected readonly backgroundReadBatching: BackgroundContractReadBatching;
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
@@ -1484,6 +1438,12 @@ export class EVMChainAdapterBase {
         stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
       },
     );
+    this.backgroundReadBatching = new BackgroundContractReadBatching({
+      readContract: (descriptor, contract, fn, opts) => this.rpcFailover.readContract(descriptor, contract, fn, opts),
+      readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
+      // Resolved here at the config boundary, live per read, like the stickiness switch.
+      isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',
+    });
     this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
       config.chainEventLogStore,
       (error) => {
@@ -1802,12 +1762,16 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(
+    const direct = (): Promise<T> => this.rpcFailover.readContract(
       rpcReadDescriptor(label, opts),
       contract,
       (c) => c[method](...args),
       opts,
     );
+    // A background read of a batchable view leaves with the others waiting
+    // for the request budget. Anything else is issued as it always was.
+    return this.backgroundReadBatching.tryRead<T>({ contract, label, method, args, opts, direct })
+      ?? direct();
   }
 
   /** Canonical KAS update-context ABI read shared by storage and publish mixins. */

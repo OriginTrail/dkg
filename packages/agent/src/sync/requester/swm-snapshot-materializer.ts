@@ -30,6 +30,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
+import { createSwmMaterializationMemo } from './swm-materialization-memo.js';
 import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -306,6 +307,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     if (!raw) return true;
     return raw !== '0' && raw.toLowerCase() !== 'false';
   })();
+
+  const materializationMemo = createSwmMaterializationMemo(deps.store);
 
   /**
    * The ONE discovery of which operation subjects a head references AND this
@@ -638,6 +641,15 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
       if (!Number.isSafeInteger(expected) || expected < 0) return false;
+      const validationRevision = materializationMemo.readRevision(descriptor.assertionGraph);
+      // Memo fast path, ahead of the count gate on purpose. The gate exists
+      // for removals a witness cannot see; an unchanged all-writers generation
+      // proves there was no removal, or any other write, since the validation
+      // that seeded the entry.
+      //
+      // Empty projections have a second control-plane health check below;
+      // keep that check on every call instead of memoizing only the graph row.
+      if (expected > 0 && materializationMemo.has(descriptor)) return true;
       // 1) Count gate: exact-IRI scope, so bounded — and cheap enough to run
       // every round. Strictly equal: a short graph is a partial write and must
       // be replaced, not treated as already materialized.
@@ -672,6 +684,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessAsk' },
         )
       ) {
+        const currentRevision = materializationMemo.readRevision(descriptor.assertionGraph);
+        materializationMemo.admit(descriptor, validationRevision, currentRevision);
         return true;
       }
       // 2) Content binding: a matching count does not prove the stored graph
@@ -690,6 +704,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       if (contentResult.type !== 'quads') return false;
       const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
       const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+      const currentRevision = materializationMemo.readRevision(descriptor.assertionGraph);
       if (matches && witnessUsable) {
         // Written HERE — from the branch that just computed the digest over
         // this node's own store content and matched it — and nowhere else.
@@ -708,6 +723,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessWrite' },
         ).catch(() => false);
       }
+      if (matches) materializationMemo.admit(descriptor, validationRevision, currentRevision);
       return matches;
     },
 
@@ -774,6 +790,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         priority: 'background',
         source: 'agent.sharedMemorySync.materializeSnapshot.witnessInvalidate',
       }).catch(() => {});
+      materializationMemo.invalidate(graphUri);
       deps.invalidateListContextGraphsCache();
     },
 
