@@ -16,6 +16,11 @@ const unavailable = { kind: 'unavailable', onChainId: 1n, reason: 'chain-access-
 const available = { kind: 'public', onChainId: 1n } as never;
 
 async function harness(options: { retryIntervalMs?: number; olderDelayMs?: number } = {}) {
+  // These fixtures pin the recovery executor's own authority reads (one per pass, and none on an
+  // ordinary pass). The holder tier reads the graph's access policy through the same resolver, once
+  // per refresh, and would be counted as one of them; it has its own wiring tests
+  // (vm-reconcile-holder-tier-agent.test.ts), so these hosts run without it.
+  vi.stubEnv('DKG_VM_RECONCILE_HOLDER_TIER', '0');
   const h = await createVmRecoveryHostHarness({
     name: 'StreamEvidenceRetry', localCgId: cg, peers: [older, core], targetCount: 13,
     footprintForOrdinal: () => ({ byteSize: 4n * 1024n * 1024n, merkleLeafCount: 10_000n }),
