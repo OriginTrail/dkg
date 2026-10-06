@@ -60,8 +60,9 @@ export function retainedAuthorityReaderFixture() {
     getNetwork: () => providerRead('network'),
   } as unknown as JsonRpcProvider;
   const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore(), undefined, { tickMs: 6000, now: () => now });
+  const initialize = vi.fn(async () => undefined);
   const reader = createEvmContextGraphAuthorityIndexRevisionReaderV1({
-    index, deploymentId: deployment, initialize: async () => undefined,
+    index, deploymentId: deployment, initialize,
     requireContextGraphStorage: () => new ethers.Contract(storage, abi),
     readTipProvider: async (_label, read) => read(provider),
     resolveContractDeployBlockNumber: async () => 10,
@@ -69,7 +70,7 @@ export function retainedAuthorityReaderFixture() {
   });
   reader.snapshots.open();
   return {
-    reader, providerRead, presentNameHash, index,
+    reader, providerRead, initialize, presentNameHash, index,
     advanceTime: (ms: number) => { now += ms; },
     invalidateAnchor: () => { source.anchorHolds = async () => false; },
   };

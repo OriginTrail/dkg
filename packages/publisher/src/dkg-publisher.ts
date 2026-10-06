@@ -1,3 +1,4 @@
+import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
@@ -7809,6 +7810,8 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
     opts?: {
       allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
+      /** Explicit caller reservation; both retained and new identity must match. */
+      expectedKaNumber?: bigint;
       onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
     },
   ): Promise<string> {
@@ -7816,6 +7819,7 @@ export class DKGPublisher implements Publisher {
     return this.withAssertionLifecycleWriteLock(
       contextGraphId, name, agentAddress, subGraphName,
       async () => {
+        await assertExpectedKaSlotMatchesLifecycle(this.store, contextGraphId, agentAddress, name, opts?.expectedKaNumber, subGraphName);
         await this.assertNoUnfinishedAssertionPromote(
           contextGraphId,
           name,
@@ -7851,6 +7855,7 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
     opts?: {
       allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
+      expectedKaNumber?: bigint;
       onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
     },
   ): Promise<string> {
@@ -7860,7 +7865,7 @@ export class DKGPublisher implements Publisher {
 
   private async assertionCreateWithAllocationLock(
     contextGraphId: string, name: string, agentAddress: string, subGraphName?: string,
-    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>; expectedKaNumber?: bigint },
   ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 
@@ -7942,6 +7947,7 @@ export class DKGPublisher implements Publisher {
       }
     }
 
+    assertExpectedKaSlotMatchesAllocation(opts?.expectedKaNumber, kaNumber);
     if (kaNumber !== undefined) {
       await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName);
     }

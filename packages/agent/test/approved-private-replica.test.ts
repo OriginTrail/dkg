@@ -590,6 +590,7 @@ describe('approved private bare-name replica authorization', () => {
     await expect(retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash))
       .resolves.toBe(7n);
     retained.providerRead.mockClear();
+    retained.initialize.mockClear();
     const projection = vi.spyOn(retained.index, 'peekProjection');
     Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = retained.reader;
     const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
@@ -606,6 +607,7 @@ describe('approved private bare-name replica authorization', () => {
       });
       expect(projection).toHaveBeenCalled();
       expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
       // Retained chain absence cannot stand in for the current private proof.
       await fixture.receiver.writeRequesterJoinRequestState(CONTEXT_GRAPH_ID, fixture.approvedAddress, {
         status: 'rejected', requestGeneration: `0x${'12'.repeat(32)}`,
@@ -615,6 +617,7 @@ describe('approved private bare-name replica authorization', () => {
         allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
       })).resolves.toMatchObject({ kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' });
       expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
     } finally {
       await retained.reader.snapshots.close();
     }
@@ -629,6 +632,7 @@ describe('approved private bare-name replica authorization', () => {
       else retained.invalidateAnchor();
     }
     retained.providerRead.mockClear();
+    retained.initialize.mockClear();
     const normalRead = vi.fn(retained.reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!.bind(retained.reader));
     Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = { ...retained.reader, resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: normalRead };
     const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
@@ -644,6 +648,7 @@ describe('approved private bare-name replica authorization', () => {
       }
       expect(normalRead).not.toHaveBeenCalled();
       expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
       expect(fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1()).toEqual(circuit);
     } finally {
       await retained.reader.snapshots.close();

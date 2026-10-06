@@ -10,6 +10,7 @@ describe('retained-only finalized authority snapshots', () => {
     try {
       await fixture.reader.resolveFinalizedContextGraphIdByNameHash!(fixture.presentNameHash);
       fixture.providerRead.mockClear();
+      fixture.initialize.mockClear();
       const served = vi.fn();
       const read = fixture.reader.peekFinalizedContextGraphAuthoritySnapshotsByNameHashes!.bind(fixture.reader);
       expect((await read([fixture.presentNameHash], { onContextGraphAuthorityProjectionServed: served }))?.get(fixture.presentNameHash))
@@ -19,6 +20,7 @@ describe('retained-only finalized authority snapshots', () => {
       expect(await read([])).toEqual(new Map());
       expect(served).toHaveBeenCalledWith(expect.objectContaining({ source: 'log' }));
       expect(fixture.providerRead).not.toHaveBeenCalled();
+      expect(fixture.initialize).not.toHaveBeenCalled();
     } finally { await fixture.reader.snapshots.close(); }
   });
 
@@ -32,11 +34,13 @@ describe('retained-only finalized authority snapshots', () => {
         if (condition === 'cleared') fixture.index.clear();
       }
       fixture.providerRead.mockClear();
+      fixture.initialize.mockClear();
       for (let attempt = 0; attempt < 3; attempt += 1) {
         expect(await fixture.reader.peekFinalizedContextGraphAuthoritySnapshotsByNameHashes!([absent], { freshness: 'bounded' }))
           .toBeUndefined();
       }
       expect(fixture.providerRead).not.toHaveBeenCalled();
+      expect(fixture.initialize).not.toHaveBeenCalled();
     } finally { await fixture.reader.snapshots.close(); }
   });
 
@@ -49,5 +53,6 @@ describe('retained-only finalized authority snapshots', () => {
     await expect(fixture.reader.peekFinalizedContextGraphAuthoritySnapshotsByNameHashes!([absent]))
       .rejects.toMatchObject({ name: 'AbortError' });
     expect(fixture.providerRead).not.toHaveBeenCalled();
+    expect(fixture.initialize).not.toHaveBeenCalled();
   });
 });

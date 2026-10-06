@@ -426,11 +426,11 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(finalizeCalls[0]?.opts?.preSignedAuthorAttestation?.address).toBe(preSignedAuthor);
   });
 
-  it('atomic create reports a reserved-slot conflict without attempting writes', async () => {
+  it.each(['KA_SLOT_ALREADY_CLAIMED', 'KA_RESERVED_ID_MISMATCH'])('atomic create reports %s without attempting writes', async (code) => {
     const writeCalls: unknown[] = [];
     await startWith({
       history: async () => null,
-      create: async () => { throw Object.assign(new Error('KA slot is already owned by another lifecycle'), { code: 'KA_SLOT_ALREADY_CLAIMED' }); },
+      create: async () => { throw Object.assign(new Error('KA slot is already owned by another lifecycle'), { code }); },
       write: async (...args: unknown[]) => { writeCalls.push(args); },
     });
     const result = await postRoot({
@@ -439,7 +439,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
     expect(result.status).toBe(409);
     expect(result.body).toEqual({
-      code: 'KA_SLOT_ALREADY_CLAIMED', error: 'KA slot is already owned by another lifecycle',
+      code, error: 'KA slot is already owned by another lifecycle',
     });
     expect(writeCalls).toHaveLength(0);
   });

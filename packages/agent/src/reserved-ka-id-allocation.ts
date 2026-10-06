@@ -11,6 +11,7 @@ export function resolveReservedKaIdAllocationV1(
   allocator?: Readonly<{ reconcile(authorAddress: string, observedNumber: bigint): void }>,
 ): Readonly<{
   author: string;
+  expectedKaNumber: bigint;
   allocateKaNumber: () => Promise<{ number: bigint; reservedUal: string }>;
 }> {
   const canonicalAuthor = ethers.getAddress(author);
@@ -23,6 +24,7 @@ export function resolveReservedKaIdAllocationV1(
   return {
     // Lifecycle subjects preserve the caller spelling across create/write/finalize.
     author,
+    expectedKaNumber: number,
     allocateKaNumber: async () => {
       // The signed slot is already consumed. Keep local allocation above it.
       allocator?.reconcile(canonicalAuthor, number);

@@ -49,7 +49,7 @@ describe('knowledge-assets mutation error mapping', () => {
     vi.restoreAllMocks();
   });
 
-  it.each(['KA_ASSERTION_ALREADY_FINALIZED', 'ASSERTION_EMPTY', 'KA_SLOT_ALREADY_CLAIMED'])('keeps the %s conflict mapping', (code) => {
+  it.each(['KA_ASSERTION_ALREADY_FINALIZED', 'ASSERTION_EMPTY', 'KA_SLOT_ALREADY_CLAIMED', 'KA_RESERVED_ID_MISMATCH'])('keeps the %s conflict mapping', (code) => {
     const { record, res } = fakeResponse();
     respondAssertionError(res, { code, message: 'caller precondition' });
     expect(record.status).toBe(409);

@@ -3,7 +3,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { contextGraphAuthorityProjectionAnchorProvenByLogV1, contextGraphFinalizedNameAbsenceAnchorHoldsV1, peekRetainedAuthoritySnapshotsV1 } from './evm-context-graph-authority-retained.js';
 export { contextGraphAuthorityProjectionAnchorProvenByLogV1, contextGraphFinalizedNameAbsenceAnchorHoldsV1 } from './evm-context-graph-authority-retained.js';
-import { snapshotAuthorityRevisionTargetsV1, snapshotAuthorityNameHashTargetsV1, authoritySnapshotV1 } from './evm-context-graph-authority-snapshot.js';
+import { snapshotAuthorityRevisionTargetsV1, snapshotAuthorityNameHashTargetsV1, authoritySnapshotV1, projectAuthoritySnapshotsByNameHashesV1 } from './evm-context-graph-authority-snapshot.js';
 import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ContextGraphAuthorityReadOptions,
@@ -948,13 +948,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return readFinalizedProjection(
       operationLabel,
       options,
-      ({ view, chainId, contractAddress }) => {
-        const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
-        for (const [nameHash, state] of view.statesByNameHashes(nameHashes)) {
-          snapshots.set(nameHash, authoritySnapshotV1(state, chainId, contractAddress));
-        }
-        return { complete: snapshots.size === nameHashes.length, value: snapshots };
-      },
+      (projection) => projectAuthoritySnapshotsByNameHashesV1(nameHashes, projection),
       validateFinalizedNameAbsence(operationLabel, options),
     );
   };

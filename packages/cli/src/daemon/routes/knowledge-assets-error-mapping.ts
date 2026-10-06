@@ -73,6 +73,7 @@ export function respondPublicationPricingPolicyError(res: RequestContext["res"],
 const ASSERTION_CODE_STATUS: ReadonlyMap<string, number> = new Map([
   ['KA_ASSERTION_ALREADY_FINALIZED', 409],
   ['KA_SLOT_ALREADY_CLAIMED', 409],
+  ['KA_RESERVED_ID_MISMATCH', 409],
   ['ASSERTION_EMPTY', 409],
   ['KA_WM_LIFECYCLE_REQUIRED', 409],
   ['KA_WM_LIFECYCLE_CORRUPT', 500],

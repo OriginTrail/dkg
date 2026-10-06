@@ -3,7 +3,7 @@ import type { ContextGraphAuthorityReadOptions, ContextGraphAuthoritySnapshot } 
 import type { ChainEventLogAuthoritySource } from './chain-event-log-binding.js';
 import type { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
 import { contextGraphAuthorityIndexScope, type ContextGraphAuthorityIndexProjection } from './context-graph-authority-index-projection.js';
-import { snapshotAuthorityNameHashTargetsV1, authoritySnapshotV1 } from './evm-context-graph-authority-snapshot.js';
+import { snapshotAuthorityNameHashTargetsV1, projectAuthoritySnapshotsByNameHashesV1 } from './evm-context-graph-authority-snapshot.js';
 
 /**
  * Can the LOG alone prove a retained fold's anchor is still current?
@@ -114,13 +114,7 @@ export async function peekRetainedAuthoritySnapshotsV1(
   const retained = await input.index.peekProjection({
     scope: contextGraphAuthorityIndexScope(input.deploymentId, input.contractAddress),
     signal: options.signal,
-    project: ({ view, chainId, contractAddress }) => {
-      const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
-      for (const [nameHash, state] of view.statesByNameHashes(nameHashes)) {
-        snapshots.set(nameHash, authoritySnapshotV1(state, chainId, contractAddress));
-      }
-      return { complete: snapshots.size === nameHashes.length, value: snapshots };
-    },
+    project: (projection) => projectAuthoritySnapshotsByNameHashesV1(nameHashes, projection),
     validateAnchor: proveAnchor,
     validateIncomplete: async (cached) => options.freshness === 'bounded' && await proveAnchor(cached) === true,
     onServed: options.onContextGraphAuthorityProjectionServed,

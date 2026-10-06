@@ -96,6 +96,55 @@ describe('create with an externally reserved KA id', () => {
       .toBeGreaterThan(0);
   });
 
+  it.each([false, true])('rejects a conflicting reservation without changing an existing lifecycle (sealed: %s)', async (sealed) => {
+    const wallet = new ethers.Wallet(`0x${'35'.repeat(32)}`);
+    const author = wallet.address.toLowerCase();
+    const store = new OxigraphStore();
+    const allocator = makeTestKaNumberAllocator();
+    const kav10Address = `0x${'11'.repeat(20)}`;
+    agent = await DKGAgent.create({
+      name: 'ExistingReservedSlot', listenPort: 0, listenHost: '127.0.0.1', store,
+      chainAdapter: Object.assign(new NoChainAdapter(), {
+        chainId: 'evm:31337', getEvmChainId: async () => 31337n,
+        getKnowledgeAssetsLifecycleAddress: async () => kav10Address,
+      }),
+      nodeRole: 'core', skills: [], kaNumberAllocator: allocator,
+    });
+    await agent.start();
+    const contextGraphId = 'existing-reserved-slot';
+    const name = 'asset';
+    const reservedKaId = (BigInt(author) << 96n) | 7n;
+    const opts = { agentAddress: author, reservedKaId };
+    const quads = [{ subject: 'urn:existing', predicate: 'urn:value', object: '"original"', graph: '' }];
+    const graph = await agent.assertion.create(contextGraphId, name, opts);
+    await agent.assertion.write(contextGraphId, name, quads, opts);
+    if (sealed) {
+      const typedData = buildAuthorAttestationTypedData({
+        chainId: 31337n, kav10Address, authorAddress: author,
+        merkleRoot: computeFlatKCRootV10(quads, []), reservedKaId, schemeVersion: 1,
+      });
+      const signed = ethers.Signature.from(await wallet.signTypedData(typedData.domain, typedData.types, typedData.message));
+      await agent.assertion.finalize(contextGraphId, name, {
+        agentAddress: author,
+        preSignedAuthorAttestation: { address: author, reservedKaId,
+          signature: { r: ethers.getBytes(signed.r), vs: ethers.getBytes(signed.yParityAndS) } },
+      });
+    }
+    const snapshot = () => store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+    const before = await snapshot();
+    const floor = allocator.peekKaId(author);
+    const disposition = vi.fn();
+    await expect(agent.assertion.create(contextGraphId, name, {
+      ...opts, reservedKaId: reservedKaId + 1n, onDisposition: disposition,
+    })).rejects.toMatchObject({ code: 'KA_RESERVED_ID_MISMATCH' });
+    expect(disposition).not.toHaveBeenCalled();
+    expect(await snapshot()).toEqual(before);
+    expect(allocator.peekKaId(author)).toBe(floor);
+    await expect(agent.assertion.create(contextGraphId, name, opts)).resolves.toBe(graph);
+    expect(await agent.assertion.query(contextGraphId, name, { agentAddress: author })).toEqual(expect.arrayContaining(quads.map(q => expect.objectContaining({ subject: q.subject, object: q.object }))));
+    if (sealed) expect(await snapshot()).toEqual(before);
+  });
+
   it('rejects a reserved id from another author namespace before creating', async () => {
     agent = await DKGAgent.create({
       name: 'ReservedSlotNamespaceNode',
