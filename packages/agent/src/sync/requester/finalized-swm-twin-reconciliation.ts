@@ -319,12 +319,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     // confirmed assertion and private commitment before considering deletion.
     const vmQuads = await readExactGraph(params.store, evidence.vmGraph);
     const vmDigest = workspacePublicQuadsDigest(vmQuads);
-    // `expectedVmDigest` can come from a peer's SWM descriptor or from an
-    // earlier build, so it may be another accepted form of the same content.
-    // `vmDigest` stays this process's own form for the local SWM comparisons
-    // below, where both sides are recomputed here and must not be loosened.
-    const isVmDigest = (digest: string): boolean =>
-      digest === vmDigest || workspacePublicQuadsDigestMatches(vmQuads, digest);
+    const isVmDigest = (digest: string) => digest === vmDigest || workspacePublicQuadsDigestMatches(vmQuads, digest); // any accepted form
     if (!isVmDigest(evidence.expectedVmDigest)) return 'vm-changed';
     const vmMetadata = await readExactVmMetadata(params.store, evidence);
     if (!vmMetadataMatchesEvidence(vmMetadata, evidence, vmQuads)) {
@@ -675,11 +670,7 @@ function swmCommitmentMatchesEvidence(
   return commitment !== null
     && commitment.kaUal === evidence.kaUal
     && commitment.assertionVersion === evidence.assertionVersion
-    // The SWM operation was committed by whichever node produced it, in that
-    // node's digest form; it commits to the VM content if it is any accepted
-    // form of that content.
-    && (commitment.publicQuadsDigest === evidence.expectedVmDigest
-      || isVmDigest(commitment.publicQuadsDigest))
+    && isVmDigest(commitment.publicQuadsDigest) // committed in its producer's digest form
     && commitment.publicQuadsCount === evidence.expectedPublicQuadsCount
     && commitment.privateTripleCount === evidence.privateTripleCount
     && commitment.privateMerkleRoot === evidence.privateMerkleRoot;

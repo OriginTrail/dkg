@@ -1129,8 +1129,6 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
       `share operation ${params.shareOperationId}`,
     );
   }
-  // The recorded digest may be in any form this build accepts (a legacy
-  // own-locale digest persisted before an upgrade, or a code-unit digest).
   if (
     quads.length !== expectedCount ||
     !workspacePublicQuadsDigestMatches(quads, expectedDigest)
@@ -1522,10 +1520,7 @@ async function resolveCompactWorkspaceOperationPublicQuads(params: {
       missingRoots.push(root);
       continue;
     }
-    if (
-      snapshotQuads.length !== expectedCount
-      || !workspacePublicQuadsDigestMatches(snapshotQuads, expectedDigest)
-    ) {
+    if (snapshotQuads.length !== expectedCount || !workspacePublicQuadsDigestMatches(snapshotQuads, expectedDigest)) {
       staleRoots.push(root);
       continue;
     }

@@ -1623,10 +1623,7 @@ export class SharedMemoryHandler {
               currentHead.assertionGraph === swmGraph &&
               currentHead.access.accessPolicy === graphAccessPolicy &&
               currentHead.access.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000') &&
-              // Last: a head recorded before an upgrade or a digest-ordering
-              // change may carry another accepted form of the same content.
-              (currentHead.publicQuadsDigest === publicDigest ||
-                workspacePublicQuadsDigestMatches(publicDigestQuads, currentHead.publicQuadsDigest));
+              (currentHead.publicQuadsDigest === publicDigest || workspacePublicQuadsDigestMatches(publicDigestQuads, currentHead.publicQuadsDigest)); // an older head may carry another accepted form
             if (sameAssertion) {
               if (
                 this.legacyApplyAllowedOracle !== undefined

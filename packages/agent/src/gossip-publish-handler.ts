@@ -551,12 +551,8 @@ export class GossipPublishHandler {
           || workspaceHead.publicTripleCount !== graphPublish.publicTripleCount
           || workspaceHead.privateTripleCount !== graphPublish.privateTripleCount
           || workspaceHead.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
-          // The durable head was written by this node's StorageACK path,
-          // possibly before an upgrade or a digest-ordering change.
-          || !workspacePublicQuadsDigestMatches(
-            normalized.map((quad) => ({ ...quad, graph: '' })),
-            workspaceHead.publicQuadsDigest,
-          )
+          // head written by this node's StorageACK path, possibly before an upgrade or digest-ordering change
+          || !workspacePublicQuadsDigestMatches(normalized.map((quad) => ({ ...quad, graph: '' })), workspaceHead.publicQuadsDigest)
         ) {
           this.log.warn(
             ctx,

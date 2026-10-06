@@ -727,11 +727,10 @@ export async function materializeGraphScopedSwmRecoveryAsset(params: {
     normalized.length !== descriptor.publicQuadsCount
     || !workspacePublicQuadsDigestMatches(normalized, descriptor.publicQuadsDigest)
   ) {
-    const actualDigest = workspacePublicQuadsDigest(normalized);
     throw new Error(
       `Graph-scoped SWM snapshot failed integrity for ${descriptor.kaUal}: ` +
       `expected ${descriptor.publicQuadsDigest}/${descriptor.publicQuadsCount}, ` +
-      `got ${actualDigest}/${normalized.length}`,
+      `got ${workspacePublicQuadsDigest(normalized)}/${normalized.length}`,
     );
   }
   return {
