@@ -20,7 +20,10 @@ daemons, over HTTP with the node's bearer token, the suite checks that:
   completion into a duplicate;
 - after `pending` -> `stored`, both history routes (`GET /api/memory/sessions`,
   the session list, and `GET /api/memory/sessions/:id`) return the final reply
-  and one exchange for the turn;
+  and one exchange for the turn, and the graph view's read of the turn
+  (`GET /api/memory/sessions/:id/graph-delta?turnId=`) answers 200 with a delta
+  that keeps the first report on the turn and carries the completion as a
+  transition node (state `stored`, the final reply), still one exchange;
 - a POST without a `turnId` still writes every time, under a generated id that
   the response returns so the caller can retry idempotently;
 - an invalid payload answers 400 and writes nothing;

@@ -14,7 +14,10 @@
  *
  * The suite drives that route on live devnet daemons over HTTP with the node's
  * bearer token and reads the assertion back through `POST /api/query` (the
- * harness's `queryNode`), and the dashboard's two history routes over `GET`. A
+ * harness's `queryNode`), and the dashboard's two history routes and the graph
+ * view's per-turn read (`GET /api/memory/sessions/:id/graph-delta`) over `GET`.
+ * A turn that completed by transition has to show its final reply on the history
+ * routes and carry the completion transition in the graph delta. A
  * turn id is only unique inside its session, so one case reuses a turn id in two
  * sessions and requires each to be created, completed and retried on its own.
  * It runs against nodes 1, 3 and 5, which sit on different store backends
@@ -54,6 +57,7 @@ import {
   NO_CHAT_TURN,
   ONE_STORED_TURN,
   readChatTurnFootprint,
+  summarizeGraphDelta,
   type ChatTurnFootprint,
 } from '../../packages/cli/test/_helpers/chat-turn-footprint.js';
 import { FOOTPRINT_SETTLE, settleOnExpected } from './settle.js';
@@ -282,7 +286,7 @@ describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
     expect(await settledFootprint(node(), sessionB, turnId, expectedB)).toEqual(expectedB);
   });
 
-  it('lists and returns the final reply on both history routes after pending -> stored', async () => {
+  it('lists and returns the final reply on both history routes, and carries the completion in the graph delta, after pending -> stored', async () => {
     const sessionId = newSessionId('openclaw');
     const turnId = newTurnId();
     const expected = [
@@ -292,10 +296,17 @@ describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
     const history = async () => {
       const single = await getJson(node(), `/api/memory/sessions/${encodeURIComponent(sessionId)}`);
       const list = await getJson(node(), '/api/memory/sessions?limit=100');
+      const delta = await getJson(node(), `/api/memory/sessions/${encodeURIComponent(sessionId)}/graph-delta?turnId=${encodeURIComponent(turnId)}`);
       const listed = (list.json?.sessions ?? []).find((entry: { session?: string }) => entry.session === sessionId);
       const texts = (messages: Array<{ author: string; text: string }> | undefined) =>
         (messages ?? []).map(({ author, text }) => ({ author, text }));
-      return { statuses: [single.status, list.status], single: texts(single.json?.messages), listed: texts(listed?.messages) };
+      const { mode, turnStates, messages, transitions } = summarizeGraphDelta(delta.json);
+      return {
+        statuses: [single.status, list.status, delta.status],
+        single: texts(single.json?.messages),
+        listed: texts(listed?.messages),
+        delta: { mode, turnStates, messages, transitions: transitions.map(({ state, reply }) => ({ state, reply })) },
+      };
     };
 
     await persist(node(), 'openclaw', turnPayload(sessionId, turnId, {
@@ -309,7 +320,18 @@ describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
     expect(stored.body).toEqual({ ok: true, transitioned: true, turnId });
 
     // The reads may lag the writes on an external store, so wait for the routes to agree and then keep reading.
-    const expectedHistory = { statuses: [200, 200], single: expected, listed: expected };
+    // The graph delta keeps the first report on the turn and its one exchange, and carries the completion as a transition node.
+    const expectedHistory = {
+      statuses: [200, 200, 200],
+      single: expected,
+      listed: expected,
+      delta: {
+        mode: 'delta',
+        turnStates: ['pending'],
+        messages: 2,
+        transitions: [{ state: 'stored', reply: 'devnet: the final answer' }],
+      },
+    };
     const { value } = await settleOnExpected(history, expectedHistory, FOOTPRINT_SETTLE);
     if (value.listed.length === 0) {
       // An empty list says nothing about why: report what the list route did hold.
