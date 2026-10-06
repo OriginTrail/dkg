@@ -509,6 +509,7 @@ describe('private CG membership bootstrap recovery', () => {
 
     it.each([
       ['a registered private roster', { kind: 'private-roster', participantAgents: [] }],
+      ['an approved private replica', { kind: 'approved-private-replica', allowedPeers: [] }],
       ['a legacy unregistered graph', { kind: 'legacy-unregistered' }],
       ['unavailable authority', { kind: 'unavailable', reason: 'chain-access-policy-unavailable' }],
       ['an unreadable chain', new Error('rpc down')],

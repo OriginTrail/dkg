@@ -15,6 +15,7 @@ import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { MockModeBanner } from './components/MockModeBanner.js';
+import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
 
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
@@ -196,6 +197,7 @@ function AppShell() {
   return (
     <div className="v10-app">
       <MockModeBanner />
+      <ApiTokenPrompt />
       <Header />
       <div className="v10-app-body">
         {!leftCollapsed && (
@@ -246,9 +248,12 @@ export function App() {
   return (
     <Routes>
       <Route path="/network" element={
-        <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
-          <NetworkDebugPage />
-        </React.Suspense>
+        <>
+          <ApiTokenPrompt />
+          <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
+            <NetworkDebugPage />
+          </React.Suspense>
+        </>
       } />
       <Route path="/context-graph-primer" element={<ContextGraphPrimerRoute />} />
       <Route path="/agent" element={<Navigate to="/" replace />} />

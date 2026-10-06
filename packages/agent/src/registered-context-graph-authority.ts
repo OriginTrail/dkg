@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ApprovedPrivateReplicaAuthority } from './approved-private-replica.js';
 
 /**
  * What could not answer when Context Graph authority is unavailable, for
@@ -53,9 +54,21 @@ export type RegisteredContextGraphAuthorityUnavailable =
       dependency?: ContextGraphReadAuthorityDependency;
     };
 
+/** Explicit non-applicability proof, separate from legacy read fallbacks. */
+export type ContextGraphUnregisteredEvidence =
+  | 'local-create'
+  | 'accepted-rfc64-finalized-absence'
+  | 'approved-private-replica-finalized-absence';
+
 /** Stable public contract for registered Context Graph authority state. */
 export type RegisteredContextGraphAuthority =
-  | { kind: 'unregistered' }
+  | {
+      kind: 'unregistered';
+      /** Missing on compatibility fallbacks: those do not exempt VM catch-up. */
+      unregisteredEvidence?: ContextGraphUnregisteredEvidence;
+      /** Current participant-only authority for an approved private replica. */
+      approvedPrivateReplicaAuthority?: ApprovedPrivateReplicaAuthority;
+    }
   | { kind: 'public'; onChainId: bigint }
   | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
   | RegisteredContextGraphAuthorityUnavailable;

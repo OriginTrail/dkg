@@ -4,15 +4,12 @@
 // api.ts share one same-origin, bearer-authed, HttpError-shaped fetch layer
 // instead of re-declaring it. Pure relocation — no behavior change.
 
+import { currentApiToken } from './lib/apiToken.js';
+
 export const BASE = '';
 
-declare global {
-  interface Window { __DKG_TOKEN__?: string; }
-}
-
 export function authHeaders(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = window.__DKG_TOKEN__;
+  const token = currentApiToken();
   if (!token) return {};
   return { Authorization: `Bearer ${token}` };
 }

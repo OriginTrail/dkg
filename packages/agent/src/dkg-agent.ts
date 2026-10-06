@@ -139,7 +139,6 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
-  createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -457,6 +456,8 @@ import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './d
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistShutdownTimeoutError } from './context-graph-subscription-persist-scheduler.js';
+import { drainsWithin } from './keyed-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { chainAuthorityReadBudgetsOf, resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 import { OntologyBindingSlotClassifier } from './ontology-binding-slot-classifier.js';
@@ -892,6 +893,7 @@ export class DKGAgent extends DKGAgentBase {
       writeLocks,
       publicSnapshotStore,
     );
+    this.initializeVmReconcilePublicCoreTransportPreferencePolicy();
     this.configureSwmTargetExecutorSessionsV1({
       privateRecoveryBudgetMs: resolvePrivateSwmRecoveryBudgetMs(),
       store: this.store,
@@ -1570,8 +1572,6 @@ export class DKGAgent extends DKGAgentBase {
     const node = new DKGNode(nodeConfig);
     const workspaceOwnedEntities = new Map<string, Map<string, string>>();
     const writeLocks = new Map<string, Promise<void>>();
-    const publicSnapshotStore = config.publicSnapshotStore
-      ?? createPublicSnapshotStore(config.dataDir, config.sharedMemoryPublicSnapshotStorage);
     const legacyAdapterOperationalKey = opKeys?.[0];
     const legacyAdapterOperationalAddress = privateKeyAddress(legacyAdapterOperationalKey);
     const configuredPublisherAddress = normalizeAdapterPublisherAddress(config.publisherAddress);
@@ -1595,16 +1595,21 @@ export class DKGAgent extends DKGAgentBase {
       (quads, targetGraph) => {
         if (!agentRef) return;
         // #1863 — a single-graph destructive mutation (replaceSubject) passes its
-        // TARGET GRAPH so the projection is dirtied by graph (covers deleted meta
-        // rows the inserted quads wouldn't reveal); no-op for non-CG graphs.
+        // TARGET GRAPH so deleted facts are fenced, while replacement quads
+        // cover inserted authority facts.
         if (targetGraph !== undefined) {
           agentRef.contextGraphMetaProjection.markDirtyForGraph(targetGraph);
+          if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
           return;
         }
         if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
         else agentRef.contextGraphMetaProjection.markAllDirty();
       },
     );
+
+    const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory
+      ? config.publicSnapshotStoreFactory(agentStore)
+      : createPublicSnapshotStore(config.dataDir, config.sharedMemoryPublicSnapshotStorage, agentStore));
 
     const publisher = new DKGPublisher({
       store: agentStore,
@@ -2891,7 +2896,12 @@ export class DKGAgent extends DKGAgentBase {
     if (dispatcherDrain) drains.push(dispatcherDrain);
 
     let retirement!: Promise<void>;
-    retirement = Promise.allSettled(drains).then(() => {
+    retirement = Promise.allSettled(drains).then(async () => {
+      // All agent-owned producers are fenced and physically drained before
+      // sampling the reader's GLOBAL activity. Its idle boundary also owns
+      // detached adapter work, including readers without snapshots.close().
+      // Never attach this unrelated global drain to individual read results.
+      await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
       if (this.vmReconcileScheduling === vmReconcileScheduling) {
         this.vmReconcileScheduling = undefined;
       }
@@ -2948,6 +2958,13 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     this.contextGraphMembershipPersistenceShutdownBlocked = false;
+    // A core-host recording persists its host row through the strict
+    // subscription queue, so it has to retire while that queue still admits
+    // writes. Fence new recordings first, then drain the tracked ones: a
+    // StorageACK gate or promotion-audit recording paused before its persist
+    // finishes here instead of being refused by a closed queue. The audit and
+    // promotion flights, which reach subscription state only through
+    // recordings, drain right behind them.
     this.coreHostRecordingsClosed = true;
     await this.drainCoreHostRecordings();
     // An in-flight ACK promotion audit stops at its next checkpoint once the
@@ -2967,6 +2984,29 @@ export class DKGAgent extends DKGAgentBase {
         }),
       ]).finally(() => { if (auditDrainTimer) clearTimeout(auditDrainTimer); });
     }
+    // Subscription writes come from graph-scoped sync and reconciliation (cursor
+    // and binding snapshots), from inside a join approval's membership write,
+    // and from core-host recordings. All three have finished by here, so
+    // admission closes now: a run that stop() just waited for still had its
+    // write admitted, and only a late network callback finds the queue closed.
+    // The drain has the same bounded budget as membership's, and a timeout
+    // blocks store teardown until stop() is retried.
+    if (!await drainsWithin(
+      this.contextGraphSubscriptionPersistence.closeAndDrain(),
+      DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
+    )) {
+      this.contextGraphSubscriptionPersistenceShutdownBlocked = true;
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: context-graph subscription persistence did not drain within `
+        + `${DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS}ms; `
+        + `store teardown is blocked until stop() is retried`,
+      );
+      throw new ContextGraphSubscriptionPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
+    }
+    this.contextGraphSubscriptionPersistenceShutdownBlocked = false;
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
@@ -3062,6 +3102,10 @@ export class DKGAgent extends DKGAgentBase {
     try {
       await this.node.stop();
     } finally {
+      // The libp2p node, and every pubsub subscription with it, is gone; what
+      // the agent recorded about the session's gossip wiring is now stale
+      // (restart contract on DKGAgentBase). Subscription intent is untouched.
+      this.resetGossipSessionState();
       this.finalizationRuntime.markStopped();
       // Node stop aborts active transport first; now drain the peer-serial
       // owners and release every retained selected-SWM prefix/checkpoint before
@@ -4072,19 +4116,18 @@ export class DKGAgent extends DKGAgentBase {
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
         // WM/VM). A VM no-op must not restamp a pointer or notify SWM observers.
+        // The hook classifies its own pointer stamp (canonical durable-finalization
+        // boundary): a failure never reports success, and a replay of this same
+        // committed operation repairs it.
         if (promotedAllRoots) {
-          try {
-            await agent.afterDurableSwmPromotionV1({
-              contextGraphId,
-              subGraphName: opts?.subGraphName,
-              assertionCoordinate: name,
-              lifecycleAgentAddress: promoteAgentAddress,
-              shareOperationId: shareOperationId ?? null,
-              ctx: createOperationContext('share'),
-            });
-          } catch (error) {
-            throw createPromotePostCommitFailure(error);
-          }
+          await agent.afterDurableSwmPromotionV1({
+            contextGraphId,
+            subGraphName: opts?.subGraphName,
+            assertionCoordinate: name,
+            lifecycleAgentAddress: promoteAgentAddress,
+            shareOperationId: shareOperationId ?? null,
+            ctx: createOperationContext('share'),
+          });
         }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the
@@ -4158,6 +4201,10 @@ export class DKGAgent extends DKGAgentBase {
         chainId: bigint;
         kav10Address: string;
         eip712Digest: string;
+        /** The KA this draft belongs to. */
+        kaUal: string;
+        /** The number this draft will be published as (GH#2958: one above the confirmed version). */
+        assertionVersion: string;
       }> {
         const finalizeAgentAddress = opts?.agentAddress ?? agentAddress;
         if (opts?.layer === 'swm') {

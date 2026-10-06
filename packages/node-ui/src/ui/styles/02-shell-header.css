@@ -52,6 +52,49 @@
   background: rgba(251, 191, 36, 0.55);
 }
 
+/* ── API token entry, shown when the node rejects the page's credentials ── */
+.v10-token-prompt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-warning, #7c2d12);
+  background: var(--amber-dim, rgba(251, 191, 36, 0.18));
+  border-bottom: 1px solid rgba(251, 191, 36, 0.45);
+  z-index: 30;
+}
+.v10-token-prompt-text {
+  flex: 1 1 320px;
+}
+.v10-token-prompt-input {
+  flex: 0 1 280px;
+  min-width: 160px;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--text-primary, inherit);
+  background: var(--bg-surface, transparent);
+  border: 1px solid rgba(251, 191, 36, 0.6);
+}
+.v10-token-prompt-submit {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-warning, #7c2d12);
+  background: rgba(251, 191, 36, 0.35);
+  border: 1px solid rgba(251, 191, 36, 0.6);
+}
+.v10-token-prompt-submit:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 /* ── Inline stale-refresh banner for an open project (GH #905) ── */
 .v10-stale-banner {
   display: flex;

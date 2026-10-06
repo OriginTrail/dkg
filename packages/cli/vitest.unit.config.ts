@@ -65,7 +65,16 @@ export default defineConfig({
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
+          'test/knowledge-assets-error-mapping.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
+          // The dashboard shell carries the operator token only for trusted
+          // local requests (loopback socket and loopback Host). Pure helpers
+          // plus a real HTTP server; no hardhat.
+          'test/daemon-ui-token-delivery.test.ts',
+          // Node-wide routes accept only node-admin callers. Pure route
+          // handlers plus one live daemon on the mock chain; no hardhat.
+          'test/node-admin-scope-routes.test.ts',
+          'test/daemon-operator-scope-live.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
@@ -149,6 +158,7 @@ export default defineConfig({
           'test/async-promote-worker.test.ts',
           'test/async-promote-error-classification.test.ts',
           'test/async-promote-publisher-recovery.test.ts',
+          'test/async-promote-swm-pointer-recovery.test.ts',
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
@@ -187,6 +197,7 @@ export default defineConfig({
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
           'test/publisher-runtime-snapshot-store-injection.test.ts',
+          'test/publisher-default-snapshot-retirement.test.ts',
           'test/publisher-runtime-chain-config.test.ts',
           'test/publisher-ka-recovery.test.ts',
           // #2270 — the runner's chain lookup reports WHICH chain fact it found
@@ -217,6 +228,12 @@ export default defineConfig({
           // Public snapshot paging — one SQLite-indexed store must reach the
           // agent sync responder, admission publisher, and background runtime.
           'test/daemon-snapshot-page-index-wiring.test.ts',
+          // Protocol persistence stores (node-store): runDaemonInner composes
+          // every one over a seeded legacy node-ui.db; no hardhat, no network.
+          'test/daemon-protocol-store-wiring.test.ts',
+          // The typed composition seam behind that wiring: createProtocolStores
+          // over one shared connection, real DashboardDB.
+          'test/protocol-persistence.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           'test/snapshot-page-index-store.test.ts',

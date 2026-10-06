@@ -387,6 +387,7 @@ import {
   ContextGraphReadAuthorityUnavailableError,
   contextGraphReadAuthorityDependencyOf,
   resolveContextGraphReadAuthorityDecision,
+  resolveContextGraphReadAuthorityResolution,
   unavailableContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -849,21 +850,25 @@ export class QueryMethods extends DKGAgentBase {
         async (signal) => {
           const boundedOpts = { ...opts, signal };
           const resolve = async () => {
-            const authority = await resolveContextGraphReadAuthorityDecision(
-              QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
-                this,
-                contextGraphId,
-                boundedOpts,
-                {
-                  registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-                  authorityReadMode: 'live-current',
-                  hasAcceptedRfc64PublicPolicy:
-                    this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
-                      ? true
-                      : undefined,
-                },
-              ),
+            const input = QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+              this,
+              contextGraphId,
+              boundedOpts,
+              {
+                registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+                authorityReadMode: 'live-current',
+                hasAcceptedRfc64PublicPolicy:
+                  this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                    ? true
+                    : undefined,
+              },
             );
+            // Carry applicability from the SAME canonical registration read
+            // that authorizes this caller. A nullable id or local RDF marker
+            // cannot substitute for it. Do not persist this absence: the next
+            // admission/catch-up completion must resolve it afresh.
+            const resolution = await resolveContextGraphReadAuthorityResolution(input);
+            const authority = resolution.decision;
             // A remote graph can be visible before its new chain binding is
             // indexed and before its local definition arrives. During that
             // interval the legacy fallback can mistake absent local policy
@@ -886,7 +891,9 @@ export class QueryMethods extends DKGAgentBase {
                 'local-state',
               );
             }
-            return authority;
+            return authority.outcome === 'allowed' && resolution.registration !== undefined
+              ? { ...authority, registration: resolution.registration }
+              : authority;
           };
           const initial = await resolve();
           if (
@@ -1042,6 +1049,7 @@ export class QueryMethods extends DKGAgentBase {
               : { durableSubscriptionBinding: opts.durableSubscriptionBinding }),
             allowAcceptedRfc64FinalizedAbsence:
               this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
+            allowApprovedPrivateReplicaFinalizedAbsence: true,
             authorityReadMode,
             // READ authorization, and therefore correctable by the next read.
             // A roster this node has not caught up on denies a member who was

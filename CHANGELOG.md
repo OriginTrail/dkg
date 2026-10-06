@@ -2,6 +2,34 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A Knowledge Asset whose earlier update was finalized but never published
+  can be updated again** (#2958, #2961): a draft of an already-published
+  Knowledge Asset is now numbered one above its latest *confirmed* version
+  instead of one above its last *finalized* draft, so an abandoned finalized
+  update no longer burns a number that `update()`, the publisher and the chain
+  then refuse. A draft sealed under any other number is refused with `409
+  PUBLISH_INTENT_STALE` (naming the numbers and the recovery) instead of
+  failing as a retryable `rpc_unavailable` that looped on every re-submit, and
+  `wm/finalize` now returns `assertionVersion` and `kaUal`. KAs already stuck
+  need `POST /api/publisher/clear-job` for the failed job, then `wm/pull-from`
+  (`layer: "swm"`), `wm/finalize`, `swm/share`, `vm/publish-async`. **Known
+  limits** (tracked in #2964): the successor of an abandoned *shared* draft is
+  shared under the same number, which peers' share gate, the RFC-64 catalog
+  ("strictly newer" rule) and curator confirmation (`swmAwaitCuratorAck`)
+  do not yet replace, so peers may keep showing the earlier draft until the
+  update is published; and the replacement replaces the private payload sealed
+  under that number.
+
+- **`@origintrail-official/dkg-core/dist/absolute-rfc3987-iri.js` resolves
+  again** (#2926): 10.0.19 moved `isAbsoluteRfc3987IriV1` to
+  `@origintrail-official/dkg-rdf-utils`, which removed this published
+  deep-import path. The old path now re-exports the rdf-utils function; new
+  code should import it from rdf-utils.
+
 ## [10.0.20] - 2026-09-28
 
 A fast-follow to 10.0.19 that fixes both of its known issues: on-demand

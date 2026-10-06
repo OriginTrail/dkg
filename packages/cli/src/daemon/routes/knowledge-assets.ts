@@ -262,7 +262,7 @@ function respondPromoteRecoveryError(
  * Map caller preconditions on WM/SWM operations to actionable 4xx responses.
  * VM publishing keeps its own mapping so chain failures remain server errors.
  */
-function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
+export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   if (respondPromoteRecoveryError(res, e, context)) return;
   if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
     jsonResponse(res, 409, { code: e.code, error: e.message });
@@ -319,6 +319,17 @@ function respondAssertionError(res: RequestContext["res"], e: any, context?: Pro
     jsonResponse(res, 409, {
       error: e.message,
       code: "ASSERTION_EMPTY",
+    });
+    return;
+  }
+  // GH#1425 — discard is valid only for an active WM draft. A shared or
+  // published asset must keep its lifecycle metadata so it can be reopened;
+  // expose the engine's typed precondition as an actionable conflict instead
+  // of leaking it as a generic 500.
+  if (e?.code === "KA_WM_LIFECYCLE_REQUIRED") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "KA_WM_LIFECYCLE_REQUIRED",
     });
     return;
   }
@@ -1155,6 +1166,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // attribution on the atomic create+finalize path, mirroring the dedicated
         // wm/finalize route's response.
         result.authorAddress = seal.authorAddress;
+        if (seal.assertionVersion !== undefined) result.assertionVersion = seal.assertionVersion;
+        if (seal.kaUal !== undefined) result.kaUal = seal.kaUal;
         result.status = "wm-sealed";
         emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
       }
@@ -1481,6 +1494,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           chainId: seal.chainId?.toString?.(),
           kav10Address: seal.kav10Address,
           eip712Digest: seal.eip712Digest,
+          // GH#2958 — the number this draft will be published as, and the KA it belongs to
+          // (the same fields the vm/publish-async 202 reports once the share has closed).
+          ...(seal.assertionVersion !== undefined ? { assertionVersion: seal.assertionVersion } : {}),
+          ...(seal.kaUal !== undefined ? { kaUal: seal.kaUal } : {}),
         });
       }
       if (verb === "discard") {
@@ -1769,6 +1786,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
+            // GH#2942 - WHY this job is held (what its record lacks, or whether this node can act on
+            // it), in the vocabulary `retryState.blocker` uses. Additive: the prose above and
+            // `retryable` keep their meaning, and a thrower with no blocker simply omits the key.
+            ...(err.blocker ? { blocker: err.blocker } : {}),
           });
         }
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
@@ -1906,6 +1927,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (respondPublicationPricingPolicyError(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;
+        // GH#2958 — the finalized version is not the next publishable one (the async lane maps
+        // the same code at enqueue). Raised by update() before anything was staged or sent, so
+        // 409 is safe; a 500 would invite a blind retry of a deterministic precondition.
+        if (e?.code === "PUBLISH_INTENT_STALE") {
+          return jsonResponse(res, 409, { code: "PUBLISH_INTENT_STALE", error: msg });
+        }
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }

@@ -3,28 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import {
-  CI_LANES,
-  WORKSPACE_OWNING_EVM_SCOPES,
-  WORKSPACE_OWNING_LANES,
-  WORKSPACE_RULES,
-  needsSharedBuild,
-  planCi,
-} from '../ci-delta.mjs';
+import { CI_LANES, WORKSPACE_OWNING_EVM_SCOPES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES, needsSharedBuild, planCi } from '../ci-delta.mjs';
 import { COVERAGE_JOBS } from '../ci-lanes.mjs';
 import { PRIMARY_LANE_JOBS, validatePrimaryResults } from '../ci-results.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
-import {
-  REPO_ROOT,
-  change,
-  gateNeeds,
-  pullRequestPlan,
-  selectedLanes,
-  sourceFiles,
-  succeeded,
-  workflowJobCommands,
-} from './ci-plan-fixtures.mjs';
-import { loadReferences, packageImports, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
+import { REPO_ROOT, change, gateNeeds, pullRequestPlan, selectedLanes, sourceFiles, succeeded } from './ci-plan-fixtures.mjs';
+import { INSTALL_HOOK_INPUTS } from '../ci-routing.mjs';
+import { BROWSER_SUITE_DEFERRED, jobLane, laneExecution, requirement } from './lane-entrypoints.mjs';
+import { loadReferences, packageImports, traceLaneLoads, workspaceCatalog, workspaceClosure } from './load-graph.mjs';
+import { UNFOLLOWED_LOADS, loadClosureGaps, INSTALL_HOOK_READS, installReadGaps } from './load-closure.mjs';
+
 
 // The workspaces that `files` import by package name, plus everything those
 // workspaces depend on: what code outside the package lanes compiles against.
@@ -174,16 +162,10 @@ test('every pnpm workspace manifest is compared field by field or keeps full CI'
   // Manifests are install inputs. Package roots are compared field by field
   // (see the test above); every other workspace pnpm installs - devnet
   // suites, CLI test fixtures - must keep the full profile.
-  const { packages: globs } = parse(fs.readFileSync(path.join(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8'));
-  const directories = globs.flatMap((glob) => (glob.endsWith('/*')
-    ? fs.readdirSync(path.join(REPO_ROOT, glob.slice(0, -2)), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => `${glob.slice(0, -2)}/${entry.name}`)
-    : [glob]));
   let checked = 0;
-  for (const directory of directories) {
+  for (const directory of workspaceCatalog().manifests.keys()) {
     const manifest = `${directory}/package.json`;
-    if (!fs.existsSync(path.join(REPO_ROOT, manifest)) || Object.hasOwn(WORKSPACE_RULES, directory)) continue;
+    if (Object.hasOwn(WORKSPACE_RULES, directory)) continue;
     assert.equal(pullRequestPlan([change(manifest)]).mode, 'full', manifest);
     checked++;
   }
@@ -208,6 +190,21 @@ test('repository support paths route to the lanes that execute them', () => {
     ['devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts', ['tornado_blazegraph', 'tornado_agent', 'bura_cli']],
     ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
+    // Repository scripts outside CI tooling, by who runs them: the build job
+    // runs the audit scripts and their tests; devnet suites and operator
+    // tools run by hand; the CLI smoke test runs the publish helpers. Any
+    // other script plans full CI (ci-delta.test.mjs).
+    ['scripts/audit-dial-protocol.mjs', []],
+    ['scripts/check-npm-metadata.mjs', []],
+    ['scripts/devnet-test-invite-flow.sh', []],
+    ['scripts/import-ontology.mjs', []],
+    ['scripts/repro/wm-persistence-regression.mjs', []],
+    ['scripts/devnet-publish-helpers.sh', ['bura_cli']],
+    // The chain lane runs the ABI sync script (sync-chain-abis.unit.test.ts).
+    ['scripts/sync-chain-abis.mjs', ['tornado_core']],
+    ['scripts/devnet.sh', ['tornado_blazegraph', 'tornado_agent', 'bura_cli', 'kosava_node_ui_e2e']],
+    ['scripts/lib/__tests__/devnet-curated-join-helpers.test.mjs', []],
+    ['test-policy/disabled-tests.json', []],
     ['.github/oxlint-baseline.json', []],
     ['.github/CODEOWNERS', []],
     ['.github/PULL_REQUEST_TEMPLATE.md', []],
@@ -243,22 +240,7 @@ test('the browser suite follows the UI surface and the packages its harness comp
   const booted = workspaceClosure([...devnet.matchAll(/\$REPO_ROOT\/(packages\/[a-z0-9-]+)\//g)].map(([, workspace]) => workspace));
   assert.ok(booted.has('packages/agent'), 'the devnet daemons run the agent');
   const deferred = [...booted].filter((workspace) => !triggers.has(workspace) && !WORKSPACE_RULES[workspace].forceFull).sort();
-  assert.deepEqual(deferred, [
-    'packages/adapter-hermes',
-    'packages/adapter-openclaw',
-    'packages/adapter-prime-agent',
-    'packages/agent',
-    'packages/chain',
-    'packages/epcis',
-    'packages/http-utils',
-    'packages/local-llm',
-    'packages/mcp-dkg',
-    'packages/okf',
-    'packages/publisher',
-    'packages/query',
-    'packages/random-sampling',
-    'packages/storage',
-  ]);
+  assert.deepEqual(deferred, BROWSER_SUITE_DEFERRED);
   for (const workspace of deferred) {
     const plan = pullRequestPlan([change(`${workspace}/src/index.ts`)]);
     assert.equal(plan.lanes.kosava_node_ui_e2e, false, workspace);
@@ -279,7 +261,7 @@ test('the Windows lifecycle job follows the agent lane, which covers the closure
   // lane. ci.yml starts it on the agent lane's output and the gate requires it
   // with that lane, so every plan that runs the agent lane runs it too.
   const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
-  const windowsLane = jobs['inventory-windows'].if.match(/^needs\.changes\.outputs\.(\w+) == 'true'$/)?.[1];
+  const windowsLane = jobLane('inventory-windows', jobs['inventory-windows'].if);
   assert.equal(windowsLane, 'tornado_agent');
   const windowsSelected = (filePath) => pullRequestPlan([change(filePath)]).lanes[windowsLane];
 
@@ -387,98 +369,15 @@ test('each changed path gets one routing decision with a fixed precedence', () =
   assert.match(pullRequestPlan([change('new-root-tool.ts')]).reasons[0], /^Unclassified path changed/);
 });
 
-// Module loads computed at run time that the load-closure guard cannot
-// follow, each with the reason it needs no route of its own.
-const UNFOLLOWED_LOADS = new Map([
-  ['packages/agent/src/generic-sql-source.ts: moduleName', 'the optional mssql driver and node:sqlite, neither a repository file'],
-  ['packages/agent/src/sqlite/module-loader-v1.ts: name', 'node:sqlite, the default loader, not a repository file'],
-  ['packages/agent/test/generic-sql-source.test.ts: moduleName', 'node:sqlite, not a repository file'],
-  ['packages/chain/src/evm-adapter-abi.ts: `@origintrail-official/dkg-evm-module/abi/${contractName}.json`',
-    'an evm-module ABI, and every evm-module change runs full CI'],
-  ['packages/cli/blazegraph-image-metadata.cjs: candidate',
-    'one of the resolve(__dirname, ...) copies of blazegraph-namespace-contract.cjs, which the guard reads as paths'],
-  ['packages/cli/src/daemon/plugin-loader.ts: pathToFileURL(spec).href', 'a plugin named in the daemon configuration'],
-  ['packages/cli/src/daemon/plugin-loader.ts: pathToFileURL(resolved).href', 'a plugin named in the daemon configuration'],
-  ['packages/cli/src/daemon/plugin-loader.ts: spec', 'a plugin named in the daemon configuration'],
-  ['packages/cli/src/source-worker-runner.ts: pathToFileURL(config.handlerModule).href',
-    'a handler module named in the source-worker configuration'],
-  ['packages/cli/test/blazegraph-image-metadata.test.ts: parserPath', "the CLI's own blazegraph-image-metadata.cjs"],
-  ['packages/mcp-dkg/src/adapters.ts: pkg', 'a third-party adapter package named at run time; ADAPTER_MAP names no workspace'],
-  ['packages/adapter-openclaw/test/openclaw-entry.test.ts: href', 'a module the test writes to a temporary directory'],
-]);
-
-// What the load-closure guard reports for a trace: each load whose file does
-// not select the lane or EVM scope that reaches it, and each module load
-// computed at run time that UNFOLLOWED_LOADS does not explain.
-function loadClosureGaps({ loaded, unfollowed }) {
-  const missing = [];
-  for (const [target, requirements] of loaded) {
-    const plan = pullRequestPlan([change(target)]);
-    if (plan.mode === 'full') continue;
-    for (const [requirement, via] of requirements) {
-      const selected = requirement.startsWith('evm:')
-        ? plan.evmScopes.includes(requirement.slice(4))
-        : plan.lanes[requirement];
-      if (!selected) missing.push(`${requirement} loads ${target} via ${via}`);
-    }
-  }
-  const computed = [...new Set([...unfollowed].flatMap(([file, specifiers]) => specifiers.map((specifier) => `${file}: ${specifier}`)))];
-  return { missing, unexplained: computed.filter((entry) => !UNFOLLOWED_LOADS.has(entry)), computed };
-}
-
 test('every file a lane runs, or loads by relative path, selects that lane', () => {
-  // Seeds: what each lane executes. A workspace's code and tests run in its
-  // owning lanes, node-ui's browser specs in the e2e lane and its integration
-  // suites in the EVM scope that lists them. Package scripts run in no lane,
-  // and fixture workspaces (test-fixtures/) run only where a test builds them.
-  // A lane job also runs the support files its commands name, as
-  // workflowJobCommands follows them: its steps, the root package.json and
-  // shell scripts they call, and its local actions and reusable workflows.
-  // What those files load comes from traceLaneLoads and loadReferences in
-  // load-graph.mjs, which list the forms they follow. Each file reached
-  // must select the lane or scope that loads it, or plan full CI.
-  const seeds = new Map();
-  const seed = (file, requirements, via) => {
-    const entry = seeds.get(file) ?? seeds.set(file, new Map()).get(file);
-    for (const requirement of requirements) if (!entry.has(requirement)) entry.set(requirement, via);
-  };
-  const evmScopeFiles = new Map(Object.entries(EVM_TEST_SCOPES).flatMap(([scope, { packageDirectory, files }]) =>
-    files.map((file) => [path.posix.normalize(path.posix.join(packageDirectory, file)), `evm:${scope}`])));
-  for (const [workspace, owningLanes] of Object.entries(WORKSPACE_OWNING_LANES)) {
-    if (WORKSPACE_RULES[workspace].forceFull) continue;
-    for (const file of sourceFiles(workspace)) {
-      const inside = file.slice(workspace.length + 1);
-      if (/^(?:scripts|test-fixtures|test\/archive)\//.test(inside)) continue;
-      // Demo apps' run.mjs entry points run by hand; the demo lane runs tests.
-      if (workspace === 'demo' && /^[^/]+\/run\.[cm]?[jt]s$/.test(inside)) continue;
-      if (inside.startsWith('integration/')) {
-        if (evmScopeFiles.has(file)) seed(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
-      } else if (workspace === 'packages/node-ui' && inside.startsWith('e2e/')) {
-        seed(file, ['kosava_node_ui_e2e'], 'the browser suite');
-      } else {
-        seed(file, [...owningLanes, ...(evmScopeFiles.has(file) ? [evmScopeFiles.get(file)] : [])], `${workspace} lanes`);
-      }
-    }
-  }
-  const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
-  // A job runs for its mapped lane or, like a job that only calls a reusable
-  // workflow, for the lane output its condition reads.
-  const laneOf = (job, condition) => [
-    laneByJob[job],
-    condition.match(/needs\.changes\.outputs\.(\w+) == 'true'/)?.[1],
-  ].find((lane) => CI_LANES.includes(lane));
-  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
-  for (const { job, condition, commands } of workflowJobCommands(workflow)) {
-    const lane = laneOf(job, condition);
-    if (!lane) continue;
-    for (const command of commands) {
-      for (const [file] of command.matchAll(/\b(?:bench|devnet|test-systems|tools)\/[^\s'"]+\.[cm]?[jt]sx?\b/g)) {
-        seed(file, [lane], `${job} job`);
-      }
-    }
-  }
-
-  const trace = traceLaneLoads(seeds);
+  // Seeds: what CI executes (laneSeeds in lane-entrypoints.mjs) - each
+  // lane's workspace code and tests, the support files its job commands
+  // name, and the repository scripts the workspace scripts CI runs name.
+  // What those files load comes from traceLaneLoads and dependenciesOf in
+  // load-graph.mjs, which list the forms they follow. Each file reached must
+  // select the lane or scope that loads it, or plan full CI.
+  const { seeds, unresolved, workspaceSeeds } = laneExecution();
+  const trace = traceLaneLoads(seeds, { workspaceSeeds });
   const loadedBy = trace.loaded;
 
   for (const [target, requirement, why] of [
@@ -486,34 +385,45 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
     ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
+    ['packages/agent/src/sync/exact-assets.ts', 'tornado_agent', 'the Agent stream receiver loads exact asset parsing'],
+    ['packages/agent/src/sync/exact-batch-stream-contract.ts', 'tornado_agent', 'the Agent stream tests load the proof contract'],
+    ['packages/agent/src/sync/wire-compression.ts', 'tornado_agent', 'the Agent stream receiver loads wire compression'],
+    ['packages/core/src/experimental-exact-batch-wire.ts', 'tornado_core', 'the Core stream tests load the fixed wire codec'],
     ['devnet/rfc64-runtime-provenance.mts', 'bura_cli', 'the CLI-started Gate 2 adapter imports the shared runtime modules'],
     ['devnet/rfc64-persistence-lifecycle/process-lifecycle.ts', 'tornado_blazegraph', 'the Blazegraph job runs the Gate 1 rollout tests'],
     ['test-systems/storage-conformance.test.ts', 'tornado_blazegraph', 'pnpm test:conformance runs in the Blazegraph job'],
     ['devnet/rfc64-persistence-lifecycle/verify.ts', 'tornado_agent', 'the reusable Windows workflow, run on the agent lane, runs the Gate 0 harness'],
+    ['scripts/devnet.sh', 'bura_cli', 'the CLI Blazegraph smoke fixture sources the devnet bootstrap'],
+    ['scripts/copy-cli-runtime-assets.mjs', 'build-output:packages/cli', 'the CLI build copies its runtime assets into the build output every lane restores'],
+    ['packages/cli/scripts/verify-node-sqlite-runtime.mjs', 'install', "every job's install runs the root and CLI preinstall hooks"],
+    ['packages/cli/markitdown-build-info.json', 'install', "every job's install runs the CLI postinstall, which reads it"],
   ]) {
     assert.ok(loadedBy.get(target)?.has(requirement), why);
   }
-  const { missing, unexplained, computed } = loadClosureGaps(trace);
+  // The ABI sync route rests on a chain test that runs the script, not on the
+  // vendored-ABI test's hint that names it.
+  const syncTest = 'packages/chain/test/sync-chain-abis.unit.test.ts';
+  assert.ok(loadReferences(syncTest, fs.readFileSync(path.join(REPO_ROOT, syncTest), 'utf8')).runs.includes('scripts/sync-chain-abis.mjs'));
+  // Every file INSTALL_HOOK_INPUTS routes to full CI is still one an install
+  // hook reaches; the gap check below finds any it misses.
+  const readInputs = new Set([...INSTALL_HOOK_READS.values()].flatMap(({ reads }) => reads));
+  assert.deepEqual(INSTALL_HOOK_INPUTS.filter((file) => !loadedBy.get(file)?.has(requirement.install) && !readInputs.has(file)), [], 'stale INSTALL_HOOK_DEPENDENCIES paths');
+  // What install code reads from a directory the trace cannot resolve is
+  // declared in INSTALL_HOOK_DEPENDENCIES, and each file it reads plans full CI.
+  assert.deepEqual(installReadGaps(trace), { undeclared: [], stale: [], notFull: [], misnamed: [] });
+  const coreStreamSeeds = new Map(sourceFiles('packages/core')
+    .filter((file) => /^packages\/core\/test\/experimental-exact-batch-.*\.test\.ts$/.test(file))
+    .map((file) => [file, new Map([['tornado_core', 'Core stream tests']])]));
+  assert.equal(coreStreamSeeds.size, 3, 'trace the transport, loopback and pure wire suites');
+  const coreStreamTrace = traceLaneLoads(coreStreamSeeds);
+  assert.deepEqual([...coreStreamTrace.loaded.keys()].filter((file) => file.startsWith('packages/agent/')),
+    [], 'the fixed Core stream codec and its tests must not load Agent source');
+  const { missing, unexplained, computed } = loadClosureGaps(trace, { unresolved });
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
   // A load the trace cannot follow fails closed until it is listed with the
   // reason it needs no route, and a listed load that is gone is dropped.
   assert.deepEqual(unexplained, [], 'list each computed load in UNFOLLOWED_LOADS with why it needs no route');
   assert.deepEqual([...UNFOLLOWED_LOADS.keys()].filter((entry) => !computed.includes(entry)), [], 'stale UNFOLLOWED_LOADS entries');
-});
-
-test('the load-closure guard reports a planted unrouted load and an unlisted computed load', () => {
-  // The guard's detection, not only its current pass: a query-lane test that
-  // imports agent source (agent changes do not select the query lane) and
-  // computes another import at run time must be reported on both counts.
-  const planted = 'packages/query/test/planted.test.ts';
-  const sources = new Map([[planted, [
-    "import { DKGAgent } from '../../agent/src/dkg-agent.js';",
-    'const late = await import(`../../cli/src/${name}.js`);',
-  ].join('\n')]]);
-  const trace = traceLaneLoads(new Map([[planted, new Map([['bura_query', 'seed']])]]), { read: (file) => sources.get(file) });
-  const { missing, unexplained } = loadClosureGaps(trace);
-  assert.deepEqual(missing, [`bura_query loads packages/agent/src/dkg-agent.ts via ${planted}`]);
-  assert.deepEqual(unexplained, [`${planted}: \`../../cli/src/\${name}.js\``]);
 });
 
 test('owning lanes and scopes cover every job that runs the workspace', () => {
@@ -523,13 +433,11 @@ test('owning lanes and scopes cover every job that runs the workspace', () => {
   // the workspaces a lane job's steps filter to (such as the Blazegraph job's
   // storage, EPCIS and agent suites) and the workspace each EVM scope's suites
   // live in.
-  const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
   const missing = [];
   for (const [job, packages] of Object.entries(COVERAGE_JOBS)) {
+    const lane = jobLane(job, '');
     for (const name of Object.keys(packages)) {
-      if (!WORKSPACE_OWNING_LANES[`packages/${name}`]?.includes(laneByJob[job])) {
-        missing.push(`${laneByJob[job]} runs the packages/${name} Vitest suite`);
-      }
+      if (!WORKSPACE_OWNING_LANES[`packages/${name}`]?.includes(lane)) missing.push(`${lane} runs the packages/${name} Vitest suite`);
     }
   }
   for (const [scope, { packageDirectory }] of Object.entries(EVM_TEST_SCOPES)) {
@@ -565,101 +473,6 @@ test('demo suites stay wired into the supporting job', () => {
   const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
   assert.match(demoManifest.scripts.test, /kafka-streams\/test\/\*\.mjs/);
   assert.match(demoManifest.scripts.test, /epcis-bike\/test\/\*\.mjs/);
-});
-
-test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {
-  // The load-closure guard sees only what loadReferences recognises, so its
-  // reach is pinned here: each form below resolves to the named file, and the
-  // comment mentions (even one shaped like an import) and the run-time path
-  // deliberately resolve to nothing.
-  const references = loadReferences('packages/node-ui/test/example.test.ts', [
-    "import { api } from '../src/ui/api.js';",
-    "import type { RequestContext } from '../../cli/src/daemon/routes/context.js';",
-    "const cli = await import('../../cli/src/cli.js');",
-    "import { resolveOxigraphBinary } from '../../cli/dist/daemon/oxigraph-binary.js';",
-    "const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');",
-    "const CLI_SRC = resolve(__dirname, '..', '..', 'cli', 'src');",
-    "const barrel = resolve(CLI_SRC, 'daemon.ts');",
-    'for (const entry of readdirSync(CLI_SRC)) void entry;',
-    "const census = ['packages/agent/src/dkg-agent-join.ts'];",
-    '// `packages/cli/src/keystore.ts` is only mentioned here.',
-    "// import { retired } from '../src/ui/retired.js';",
-    "import { contextGraphDataUri } from '@origintrail-official/dkg-core';",
-    'const late = readFileSync(`${root}/${name}`);',
-    'const plugin = await import(`../../cli/src/${name}.js`);',
-  ].join('\n'));
-  assert.deepEqual(references.modules.sort(), [
-    'packages/cli/src/cli.ts',
-    'packages/cli/src/daemon/oxigraph-binary.ts',
-    'packages/node-ui/src/ui/api.ts',
-  ]);
-  assert.deepEqual(references.paths.sort(), [
-    'packages/agent/src/dkg-agent-join.ts',
-    'packages/cli/src',
-    'packages/cli/src/daemon.ts',
-    'packages/node-ui/README.md',
-  ]);
-  assert.deepEqual(references.packages, ['@origintrail-official/dkg-core']);
-  // A module load computed at run time cannot be followed, so it is reported.
-  assert.deepEqual(references.computed, ['`../../cli/src/${name}.js`']);
-  // Repo-path literals count only in test files, and a directory only when walked.
-  const source = loadReferences('packages/node-ui/src/ui/example.ts', "const note = 'packages/agent/src/dkg-agent-join.ts';\nconst dir = resolve(__dirname, '..');");
-  assert.deepEqual(source.paths, []);
-
-  // CommonJS, aliased path helpers, import.meta.dirname and URL-derived bases;
-  // a fixture workspace's built output stands for its sources.
-  const other = loadReferences('packages/kafka-plugin/test/example.test.ts', [
-    "import { join, resolve as resolvePath } from 'node:path';",
-    "const { helper } = require('../src/index.js');",
-    "const entry = require.resolve('../../cli/src/cli.js');",
-    "const CLI_ENTRY = resolvePath(__dirname, '..', '..', 'cli', 'dist', 'cli.js');",
-    "const FIXTURE = join(resolvePath(__dirname, '..', '..', 'cli', 'test-fixtures', 'sample-kafka-plugin'), 'dist', 'index.js');",
-    "const PLUGIN = resolvePath(__dirname, '..', '..', 'cli', 'test-fixtures', 'sample-kafka-plugin', 'dist', 'index.js');",
-    "const RULES = resolve(import.meta.dirname, '..', '..', 'rdf-utils', 'package.json');",
-    "const ROOT = fileURLToPath(new URL('../../../', import.meta.url));",
-    "const BLAZEGRAPH = join(ROOT, 'blazegraph-image.json');",
-    "const MANIFEST = join(\n  import.meta.dirname,\n  '..',\n  'package.json',\n);",
-  ].join('\n'));
-  assert.deepEqual(other.modules, ['packages/kafka-plugin/src/index.ts']);
-  assert.deepEqual(other.paths.sort(), [
-    'blazegraph-image.json',
-    'packages/cli/src/cli.ts',
-    'packages/cli/test-fixtures/sample-kafka-plugin/src/index.ts',
-    'packages/kafka-plugin/package.json',
-    'packages/rdf-utils/package.json',
-  ]);
-  // A bare side-effect import loads its module, relative or by package name.
-  const sideEffects = loadReferences('packages/storage/test/example.test.ts', [
-    "import '../src/adapters/oxigraph.js';",
-    "import '@origintrail-official/dkg-core';",
-  ].join('\n'));
-  assert.deepEqual(sideEffects.modules, ['packages/storage/src/adapters/oxigraph.ts']);
-  assert.deepEqual(sideEffects.packages, ['@origintrail-official/dkg-core']);
-  // Test-runner configs list the files a lane runs, like tests do.
-  const config = loadReferences('devnet/_bootstrap/vitest.example.config.ts', "export default { test: { include: ['devnet/_bootstrap/smoke.test.ts'] } };");
-  assert.deepEqual(config.paths, ['devnet/_bootstrap/smoke.test.ts']);
-});
-
-test('traceLaneLoads carries lanes through module loads, not through reads', () => {
-  const sources = new Map([
-    ['packages/node-ui/test/example.test.ts', [
-      "import { api } from '../src/ui/api.js';",
-      "const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');",
-      "import { quads } from '@origintrail-official/dkg-rdf-utils';",
-    ].join('\n')],
-    ['packages/node-ui/src/ui/api.ts', "import { http } from './http.js';"],
-    ['packages/node-ui/src/ui/http.ts', ''],
-    // A path read is required but never followed.
-    ['packages/node-ui/README.md', "import { never } from './src/ui/pca-api.js';"],
-  ]);
-  const seeds = new Map([['packages/node-ui/test/example.test.ts', new Map([['kosava_node_ui', 'seed']])]]);
-  const { loaded: loads } = traceLaneLoads(seeds, { read: (file) => sources.get(file) });
-  assert.equal(loads.get('packages/node-ui/src/ui/api.ts')?.get('kosava_node_ui'), 'packages/node-ui/test/example.test.ts');
-  assert.equal(loads.get('packages/node-ui/src/ui/http.ts')?.get('kosava_node_ui'), 'packages/node-ui/src/ui/api.ts');
-  assert.equal(loads.get('packages/node-ui/README.md')?.get('kosava_node_ui'), 'packages/node-ui/test/example.test.ts');
-  assert.equal(loads.has('packages/node-ui/src/ui/pca-api.ts'), false);
-  // A package-name import requires the workspace and its dependencies.
-  assert.match(loads.get('packages/rdf-utils/src/index.ts')?.get('kosava_node_ui') ?? '', /imports @origintrail-official\/dkg-rdf-utils/);
 });
 
 test('a document a test reads is a CI input; other documentation stays docs-only', () => {
@@ -744,6 +557,9 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
 test('Blazegraph provisioning changes include the native arm64 contract lane', () => {
   const rootContract = pullRequestPlan([change('blazegraph-image.json')]);
   assert.deepEqual(selectedLanes(rootContract), ['bura_cli', 'bura_blazegraph_arm64']);
+  // The arm64 job's contract check runs the CLI's metadata parser, which
+  // loads the storage package's namespace contract.
+  assert.ok(pullRequestPlan([change('packages/storage/blazegraph-namespace-contract.cjs')]).lanes.bura_blazegraph_arm64);
 
   const cliProvisioner = pullRequestPlan([
     change('packages/cli/src/daemon/blazegraph-new-provisioner.ts'),

@@ -85,6 +85,7 @@ describe('private share recipients with a missing member key (#2849)', () => {
     });
     Object.assign(host, {
       store,
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
       resolveSwmTransportAuthority: vi.fn(async () => (transportKind === 'private-roster'
         ? { kind: 'private-roster' as const, participantAgents: members.map((member) => member.address) }
         : { kind: 'legacy-unregistered' as const })),
@@ -139,7 +140,7 @@ describe('private share recipients with a missing member key (#2849)', () => {
     expect(ensureAgentsInOnDemandPhonebook).toHaveBeenCalledTimes(1);
   });
 
-  it('asks for every missing member in one fetch and reads the roster once', async () => {
+  it('asks for every missing member in one fetch and rechecks the roster afterward', async () => {
     const first = ethers.Wallet.createRandom();
     const keyed = ethers.Wallet.createRandom();
     const second = ethers.Wallet.createRandom();
@@ -159,8 +160,10 @@ describe('private share recipients with a missing member key (#2849)', () => {
       resolveSwmTransportAuthority: ReturnType<typeof vi.fn>;
       getContextGraphAllowedPeers: ReturnType<typeof vi.fn>;
     };
-    expect(internals.resolveSwmTransportAuthority).toHaveBeenCalledTimes(1);
-    expect(internals.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+    expect(internals.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+    // Each resolution attempt owns its peer-gate snapshot, including the retry
+    // after phonebook hydration.
+    expect(internals.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
   });
 
   it('names every member still without a key when the fetch cannot find them', async () => {

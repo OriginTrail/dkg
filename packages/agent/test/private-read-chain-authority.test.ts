@@ -2138,8 +2138,12 @@ describe('private read authorization uses the on-chain participant roster', () =
       allowSubscriptionFallback: true,
     })).resolves.toMatchObject({
       outcome: 'unavailable',
-      source: 'legacy-local',
-      reason: 'pending-authoritative-metadata',
+      // Legacy unregistered adapters now require the approved-private proof
+      // before they expose participant authority. With no metadata that proof
+      // fails closed, while remaining eligible for metadata bootstrap.
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+      metadataBootstrap: 'eligible',
     });
     await expect(agent.canReadContextGraph(contextGraphId)).resolves.toBe(false);
   });
@@ -2712,8 +2716,8 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     expect(scans).toBe(1);
     expect(scanSignals[0]?.aborted).toBe(false);
-    // The physical index fence ran for the completed flight exactly once.
-    expect(whenIdle).toHaveBeenCalledTimes(1);
+    // The completed flight does not sample unrelated global reader work.
+    expect(whenIdle).not.toHaveBeenCalled();
 
     await expect(agent.resolveContextGraphReadAuthority(contextGraphId, {
       callerAgentAddress: NON_MEMBER,

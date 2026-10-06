@@ -1,3 +1,4 @@
+import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -18,7 +19,7 @@ import {
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
-import { withKeyedLocks } from './keyed-lock.js';
+import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
@@ -121,7 +122,7 @@ import {
   CuratorRejectedError,
   type CASCondition,
 } from './errors.js';
-import { isQuorumUnmetError } from './ack-errors.js';
+import { RpcPreconditionError, isQuorumUnmetError } from './ack-errors.js';
 import { stripOptionalLiteral } from './sparql-binding-literal.js';
 import {
   runLegacyWorkingMemoryMigration,
@@ -1172,6 +1173,7 @@ export class DKGPublisher implements Publisher {
   private tentativeCounter = 0;
   readonly writeLocks: Map<string, Promise<void>>;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  private readonly publishedSnapshotRetirement: PublishedSnapshotRetirement;
   /** OT-RFC-43 Option 1 — deterministic KA-id allocator (optional; see DKGPublisherConfig). */
   private readonly kaAllocator?: KaIdAllocator;
   private readonly resolveDurableRootPromotionAtomicCompanion?: (
@@ -1242,6 +1244,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -2638,6 +2641,7 @@ export class DKGPublisher implements Publisher {
           options?.subGraphName,
           ctx,
           graphPublish.scope.ual,
+          graphPublish.scope.assertionVersion,
         );
       } else {
         const kaMap = skolemizeByEntity(quads);
@@ -7531,6 +7535,13 @@ export class DKGPublisher implements Publisher {
    * Drain one complete rootless KA from SWM after its VM graph is durable.
    * The named-lifecycle scope is the ownership boundary, so cleanup drops
    * only that exact graph (plus historical casing aliases for the same KA).
+   *
+   * A publication passes the assertion version it confirmed. The cleanup then
+   * holds the per-KA SWM write lock and runs only while the head it finds is
+   * at or below that version: a newer head keeps its graph, operation rows,
+   * snapshot and StorageACK copies, and so does a head that cannot be
+   * resolved. Without a version the caller must already hold that lock and
+   * have ruled out a newer head itself.
    */
   async clearPublishedKnowledgeAssetSwm(
     contextGraphId: string,
@@ -7538,6 +7549,7 @@ export class DKGPublisher implements Publisher {
     subGraphName: string | undefined,
     ctx: OperationContext,
     kaUal: string,
+    finalizedAssertionVersion?: string | number | bigint,
   ): Promise<void> {
     if (scope.kind !== 'named-lifecycle') {
       throw new Error('Graph-scoped KA SWM cleanup requires an exact named-lifecycle scope');
@@ -7549,6 +7561,57 @@ export class DKGPublisher implements Publisher {
     ) {
       throw new Error('Graph-scoped KA SWM cleanup UAL does not match the named-lifecycle scope');
     }
+    if (finalizedAssertionVersion === undefined) {
+      await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
+      return;
+    }
+    const finalizedVersion = BigInt(
+      createGraphKnowledgeAssetScope(kaUal, finalizedAssertionVersion).assertionVersion,
+    );
+    await this.withWriteLocks(
+      [swmKaWriteLockKey(contextGraphId, subGraphName, kaScope.ual)],
+      async () => {
+        const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          kaUal: kaScope.ual,
+          subGraphName,
+        });
+        // On corruption the head's version is unknown, so it cannot be shown
+        // to be at or below the finalized one: fail toward retention.
+        if (headResolution.status === 'corrupt') {
+          this.log.warn(
+            ctx,
+            `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
+              `its head cannot be resolved (${headResolution.error.message})`,
+          );
+          return;
+        }
+        if (
+          headResolution.status === 'resolved'
+          && BigInt(headResolution.head.assertionVersion) > finalizedVersion
+        ) {
+          this.log.info(
+            ctx,
+            `Kept graph-scoped KA SWM ${kaScope.ual} after finalized version ${finalizedVersion}: ` +
+              `its head is at version ${headResolution.head.assertionVersion}`,
+          );
+          return;
+        }
+        await this.clearPublishedKnowledgeAssetSwmUnlocked(contextGraphId, scope, subGraphName, ctx, kaScope);
+      },
+    );
+  }
+
+  /** The cleanup itself. The per-KA SWM write lock is held and no head above the finalized asset owns the graph. */
+  private async clearPublishedKnowledgeAssetSwmUnlocked(
+    contextGraphId: string,
+    scope: Extract<SharedMemoryGraphScope, { kind: 'named-lifecycle' }>,
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+    kaScope: GraphKnowledgeAssetScope,
+  ): Promise<void> {
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
     const headSubject = assertSafeIri(`${kaScope.ual}#dkg-swm-head`);
@@ -7567,10 +7630,20 @@ export class DKGPublisher implements Publisher {
     const operationSubjects = operationRows.type === 'bindings'
       ? [...new Set(operationRows.bindings.map((row) => row['operation']).filter(Boolean))]
       : [];
+    // Persist the candidate BEFORE removing its references. If cleanup fails or
+    // the process exits midway, remaining metadata makes collection fail closed.
+    // Only this confirmed/durable cleanup boundary creates retirement candidates.
+    const warn = (message: string) => this.log.warn(ctx, message);
+    await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, warn);
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
     }
+    // The SWM data is gone, so the StorageACK copies of it describe nothing. This must run BEFORE the
+    // asset's own operation rows are deleted below: the update reads its version boundary from them
+    // and, once they are gone, finds none and removes nothing. It never fails the cleanup.
+    await this.publishedSnapshotRetirement.clearStorageAckCopies(
+      swmMetaGraph, kaScope.ual, operationSubjects, warn);
     await this.deleteStoreByPatternWithoutCount({ graph: swmMetaGraph, subject: headSubject });
     for (const operationSubject of operationSubjects) {
       await this.deleteStoreByPatternWithoutCount({
@@ -9519,10 +9592,16 @@ export class DKGPublisher implements Publisher {
           // A flaky/incapable oracle must not silently let the allocator reuse a
           // number; surface it so the operator notices rather than burning ids.
           // (The contract's _safeMint revert remains the ultimate backstop.)
-          throw new Error(
-            `OT-RFC-43 Option 1: failed to reconcile KA-number floor for author ${author} ` +
-            `against chain: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          // Thrown as the publisher's own RPC-precondition wrapper with the oracle's error kept as
+          // `cause`, so a typed transient transport failure raised here can still qualify for the
+          // same-job retry lane (the failure writer unwraps this wrapper by exactly one level).
+          throw new RpcPreconditionError({
+            method: 'getMaxKaNumberForAuthor',
+            message:
+              `OT-RFC-43 Option 1: failed to reconcile KA-number floor for author ${author} ` +
+              `against chain: ${err instanceof Error ? err.message : String(err)}`,
+            cause: err,
+          });
         }
       }
       if (chainMax >= 0n) {

@@ -1,3 +1,4 @@
+import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -40,6 +41,7 @@ import type { Rfc64CatalogShadowObservabilityRuntimeV1 } from
   './rfc64/catalog-shadow-observability-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from './context-graph-subscription-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SlotFactsIndex } from './context-graph-claim-proof.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
@@ -141,7 +143,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -473,19 +475,35 @@ export function createListContextGraphsCacheInvalidatingStore(
   invalidate: () => void,
   // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
   // dirty the projection by graph rather than by inserted quads (covers deletes).
-  markProjectionDirty?: (quads?: readonly Quad[], targetGraph?: string) => void,
+  markProjectionDirty?: (
+    quads?: readonly Quad[],
+    targetGraph?: string,
+    targetSubject?: string,
+  ) => void,
 ): TripleStore & Partial<SortedGraphSetSource> {
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
     changed: (result: T) => boolean,
-    markDirty?: (result: T) => void,
+    markDirty?: () => void,
+    operation?: StoreOperation,
   ): Promise<T> => {
-    const result = await work();
-    if (changed(result)) {
-      invalidate();
-      markDirty?.(result);
+    try {
+      const result = await work();
+      if (changed(result)) {
+        invalidate();
+        markDirty?.();
+      }
+      return result;
+    } catch (error) {
+      // A mutation may have committed before its response was lost. Only an
+      // outcome-tagged pre-dispatch refusal proves cache/authority state did
+      // not change; every indeterminate outcome must invalidate fail-closed.
+      if (operation !== undefined && !isStoreOperationNotStarted(error, operation)) {
+        invalidate();
+        markDirty?.();
+      }
+      throw error;
     }
-    return result;
   };
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
     === 'function'
@@ -506,13 +524,15 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.insert(quads, options),
         () => quads.length > 0,
         () => markProjectionDirty?.(quads),
+        'insert',
       );
     },
     delete(quads, options) {
       return invalidateAfterMutation(
         () => innerStore.delete(quads, options),
         () => quads.length > 0,
-        () => markProjectionDirty?.(),
+        () => markProjectionDirty?.(quads),
+        'delete',
       );
     },
     deleteByPattern(pattern, options) {
@@ -520,6 +540,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
+        'deleteByPattern',
       );
     },
     deleteByPatternWithoutCount(pattern, options) {
@@ -527,6 +548,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => deleteByPatternWithoutCount(innerStore, pattern, options),
         () => true,
         () => markProjectionDirty?.(),
+        'deleteByPattern',
       );
     },
     query(sparql, options) {
@@ -534,6 +556,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.query(sparql, options),
         () => isSparqlUpdateOperation(sparql),
         () => markProjectionDirty?.(),
+        isSparqlUpdateOperation(sparql) ? 'query' : undefined,
       );
     },
     hasGraph(graphUri, options) {
@@ -547,6 +570,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.dropGraph(graphUri, options),
         () => true,
         () => markProjectionDirty?.(),
+        'dropGraph',
       );
     },
     replaceGraph: innerStore.replaceGraph
@@ -554,6 +578,7 @@ export function createListContextGraphsCacheInvalidatingStore(
           () => innerStore.replaceGraph!(graphUri, quads, options),
           () => true,
           () => markProjectionDirty?.(),
+          'replaceGraph',
         )
       : undefined,
     // Rootless KA materialization replaces the assertion graph and its UAL
@@ -572,7 +597,10 @@ export function createListContextGraphsCacheInvalidatingStore(
               options,
             ),
             () => true,
-            () => markProjectionDirty?.([...graphQuads, ...metadataQuads]),
+            // A complete replacement can delete recipient facts not present in
+            // the replacement payload. Treat it as opaque authority mutation.
+            () => markProjectionDirty?.(),
+            'replaceGraphAndSubject',
           )
       : undefined,
     // #1863 — the async-lift publisher persists a job transition via this atomic
@@ -585,12 +613,11 @@ export function createListContextGraphsCacheInvalidatingStore(
           invalidateAfterMutation(
             () => innerStore.replaceSubject!(graphUri, subject, quads, options),
             () => true,
-            // Dirty the projection by the TARGET GRAPH, not the inserted quads:
-            // a subject replace can DELETE projection-relevant metadata (or insert
-            // non-relevant/empty rows), which quad-keyed dirtying would miss. The
-            // target graph covers both delete and insert (#1863). No-op for a
-            // non-CG graph (e.g. the control-plane graph), so no hot-path churn.
-            () => markProjectionDirty?.(undefined, graphUri),
+            // The target graph covers deleted facts; the replacement quads
+            // cover inserted recipient facts. The subject lets downstream
+            // invalidation distinguish exact atomic replacement paths.
+            () => markProjectionDirty?.(quads, graphUri, subject),
+            'replaceSubject',
           )
       : undefined,
     // RFC-64 author publication moves a complete public-SWM projection and
@@ -598,24 +625,12 @@ export function createListContextGraphsCacheInvalidatingStore(
     // capability through this cache-invalidation decorator and invalidate only
     // after a proven commit; a clean guard conflict changes nothing.
     rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
-      ? async (input, options) => {
-          try {
-            return await invalidateAfterMutation(
-              () => innerStore.rfc64AuthorCommitCasV1!(input, options),
-              result => result === 'committed',
-              () => markProjectionDirty?.(),
-            );
-          } catch (error) {
-            // A rejected CAS may have committed before its response was lost.
-            // Only an outcome-tagged pre-dispatch refusal proves caches remain
-            // valid; every indeterminate failure dirties both cache layers.
-            if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
-              invalidate();
-              markProjectionDirty?.();
-            }
-            throw error;
-          }
-        }
+      ? (input, options) => invalidateAfterMutation(
+          () => innerStore.rfc64AuthorCommitCasV1!(input, options),
+          result => result === 'committed',
+          () => markProjectionDirty?.(),
+          'rfc64AuthorCommitCasV1',
+        )
       : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
@@ -636,6 +651,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.deleteBySubjectPrefix(graphUri, prefix, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
+        'deleteBySubjectPrefix',
       );
     },
     countQuads(graphUri, options) {
@@ -651,6 +667,7 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => innerStore.update!(sparql, options),
         () => true,
         () => markProjectionDirty?.(),
+        'update',
       )
       : undefined,
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
@@ -661,6 +678,45 @@ export function createListContextGraphsCacheInvalidatingStore(
   return wrapper;
 }
 
+/**
+ * Same-instance restart contract.
+ *
+ * `stop()` followed by `start()` on the SAME `DKGAgent` instance is a supported
+ * lifecycle: `start()` re-opens the runtimes `stop()` closed, and reuses
+ * `this.node` (whose `DKGNode.start()` creates a brand-new libp2p node every
+ * time). Every instance field is exactly one of three kinds:
+ *
+ * 1. Session-scoped, bound to the libp2p node and its `GossipSubManager`.
+ *    `start()` builds a new manager with zero subscriptions and zero handlers,
+ *    so anything that records "topic X is subscribed and handler Y is
+ *    installed on the manager" describes a dead object once the session ends.
+ *    The subscribe helpers short-circuit on these records, so a stale copy
+ *    makes a restarted node silently deaf: `gossipRegistered`,
+ *    `sharedMemoryGossipRegistered`, `swmHostModeSubscribed`,
+ *    `swmHostModeCurated` and `swmHostModeHandlers`. They are reset by
+ *    {@link resetGossipSessionState} (end of `stop()` and again right before
+ *    `start()` builds the replacement manager).
+ * 2. Session-scoped, owned by a lifecycle runtime that `stop()` closes and
+ *    `start()` re-opens or rebuilds: the router, messenger, peer resolver and
+ *    network admission, the peer-sync session, the chain and VM-reconcile
+ *    schedulers and their lifecycle generation, the RFC-64 dispatcher and
+ *    catalog runtimes, the membership-persistence scheduler, the StorageACK
+ *    registration runtime, random sampling, the host-mode store, and every
+ *    timer.
+ * 3. Durable across `stop()`/`start()` (everything else): subscription INTENT
+ *    (`subscribedContextGraphs`, `config.syncContextGraphs`), disconnect
+ *    history (`lastSyncDisconnectedAt`), local agents, the beacon registry,
+ *    and the process-lifetime caches and counters. They are keyed by durable
+ *    identifiers (context graph id, peer id, agent address) and are
+ *    reconciled lazily.
+ *
+ * `start()` re-derives kind 1 from kind 3, so that a restart ends in the state
+ * a fresh process would reach from the same durable stores, plus the
+ * process-local (on-demand, or store-less) subscriptions that were live:
+ * `rehydrateContextGraphsFromDurableState()` replays the durable rows behind
+ * their authority gate, and `restoreLiveContextGraphGossipSubscriptions()`
+ * re-arms the live process-local ones.
+ */
 export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
@@ -722,7 +778,7 @@ export class DKGAgentBase {
   protected readonly lastHostCatchupSeqno: Map<string, Map<string, number>> = new Map();
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
-  protected readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
@@ -766,6 +822,12 @@ export class DKGAgentBase {
    * subscribed via beacon" from "restored on restart" should consult
    * the daemon log at subscribe time, not the live `subscriptionSource`
    * field.
+   *
+   * Session-scoped, together with {@link swmHostModeCurated} and
+   * {@link swmHostModeHandlers}: they describe handlers installed on the
+   * current `GossipSubManager` and are reset by {@link resetGossipSessionState}
+   * (restart contract on {@link DKGAgentBase}). The persisted host-mode
+   * markers in `swmHostModeStore` are the durable side.
    */
   protected readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
   /**
@@ -1015,6 +1077,8 @@ export class DKGAgentBase {
   static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
   /** Ledgered copies one audit pass examines (local reads only), keyset paged. */
   static readonly VM_PROMOTION_AUDIT_PAGE_SIZE = 1_000;
+  /** Max ledger rows checked for VM promotion in one graph-scoped store query. */
+  static readonly VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE = 64;
   /** Ledger namespaces one backfill pass pages through. */
   static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
   /** Per-asset VM reconciles one audit pass may run for landed copies. */
@@ -1065,6 +1129,8 @@ export class DKGAgentBase {
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   /** How long a clean legacy exact-filter miss suppresses one peer. */
   static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
+  /** Transport affinity is short-lived and never establishes asset coverage. */
+  static readonly VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS = 2 * 60_000;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
@@ -1076,6 +1142,11 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /** Maximum bound graphs one timer sweep admits before yielding to live work. */
+  static readonly VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE',
+    8,
+  );
   /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
   static readonly RS_HEAL_BATCH_MAX = 64;
   /**
@@ -1346,12 +1417,23 @@ export class DKGAgentBase {
     connectionKey: string;
     expiresAt: number;
   }>();
+  /** Owns process-local Core ordering and reusable-holder transitions. */
+  protected vmReconcilePublicCoreTransportPreferencePolicy!: VmRecoveryCoreTransportPreferencePolicy;
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
   /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
   protected readonly contextGraphMembershipPersistence = new ContextGraphMembershipPersistScheduler();
   protected contextGraphMembershipPersistenceShutdownBlocked = false;
   static readonly CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
+  /**
+   * Per-context-graph subscription store writes. Membership and subscription
+   * lanes stay separate instances of one scheduler type: a join approval
+   * enqueues a subscription write from inside a membership write, which needs
+   * the two to make progress independently.
+   */
+  protected readonly contextGraphSubscriptionPersistence = new ContextGraphSubscriptionPersistScheduler();
+  protected contextGraphSubscriptionPersistenceShutdownBlocked = false;
+  static readonly CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
   /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
@@ -1456,6 +1538,11 @@ export class DKGAgentBase {
   /** Bounded process-local terminal receiver failures, keyed by announced head. */
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+  /**
+   * Subscription INTENT per context graph. Durable across `stop()`/`start()`
+   * (restart contract on {@link DKGAgentBase}): only the gossip wiring derived
+   * from it is session-scoped and re-established by `start()`.
+   */
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /**
    * Process-local fence for a registration operation whose durable marker has
@@ -1483,11 +1570,20 @@ export class DKGAgentBase {
   /** Non-hosted rows waiting behind the rolling rehydration cap. */
   protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  /**
+   * {@link contextGraphSubscriptionRehydrationAccountedIds} as the latest
+   * rehydration pass left it: the non-system rows that pass read, or the
+   * accounting it inherited when it failed. Only the pass writes it, and
+   * `start()` runs one pass per session, so the restart re-arm
+   * (`restoreLiveContextGraphGossipSubscriptions()`) decides on a fixed set.
+   * The live accounting keeps following persistence completions, including
+   * one from a retired session.
+   */
+  protected readonly contextGraphSubscriptionRehydrationPassAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistPendingRevisions = new Map<string, Set<number>>();
-  protected readonly contextGraphSubscriptionPersistChains = new Map<string, Promise<void>>();
   protected readonly listContextGraphsCache = new Map<string, {
     expiresAt: number;
     rows: Array<Record<string, unknown>>;
@@ -1550,8 +1646,38 @@ export class DKGAgentBase {
       this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
     }
   }
+  /**
+   * Session-scoped (see the restart contract on {@link DKGAgentBase}): the
+   * context graphs whose publish/app/update/finalization topics are subscribed
+   * on the CURRENT `GossipSubManager`. Cleared by
+   * {@link resetGossipSessionState} whenever that manager is retired.
+   */
   protected readonly gossipRegistered = new Set<string>();
+  /** Session-scoped, like {@link gossipRegistered}: member-mode SWM topics on the current manager. */
   protected readonly sharedMemoryGossipRegistered = new Set<string>();
+  /**
+   * How many `GossipSubManager`s `start()` has built for this instance. Above
+   * one, the running `start()` is a same-instance restart.
+   */
+  protected gossipSessionCount = 0;
+  /**
+   * Forget everything recorded about the retired `GossipSubManager`'s
+   * subscriptions and handlers: the five session-scoped registries of the
+   * restart contract on {@link DKGAgentBase}. This is a plain in-memory
+   * `clear()`. It must never go through `unsubscribeFromContextGraph` or
+   * `unwireSwmHostModeHandler`, which also change durable state (persisted
+   * subscription rows, host-mode markers, sync scope): a restart drops the
+   * wiring, not the intent behind it.
+   */
+  protected resetGossipSessionState(): void {
+    // Optional chaining, like the other registries `stop()` touches: partial
+    // hosts built on the prototype never ran these field initializers.
+    this.gossipRegistered?.clear();
+    this.sharedMemoryGossipRegistered?.clear();
+    this.swmHostModeSubscribed?.clear();
+    this.swmHostModeCurated?.clear();
+    this.swmHostModeHandlers?.clear();
+  }
   protected readonly seenOnChainIds = new Set<string>();
   /**
    * Chain-public facts per on-chain Context Graph id (decimal), merged from the
@@ -1924,7 +2050,9 @@ export class DKGAgentBase {
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a
-   * `lastSuccessfulSyncAt` value from before an offline gap.
+   * `lastSuccessfulSyncAt` value from before an offline gap. Durable across
+   * `stop()`/`start()` on purpose: `stop()` records every still-connected peer
+   * here, and the restarted session reads it on reconnect.
    */
   protected readonly lastSyncDisconnectedAt = new Map<string, number>();
   /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
@@ -1992,6 +2120,8 @@ export class DKGAgentBase {
   */
   protected readonly pendingSenderKeyByAgent = new Map<string, PendingSenderKeyEntry[]>();
   protected readonly pendingSenderKeyDrainByAgent = new Map<string, Promise<number>>();
+  /** Agent-wide serialization for the single SWM sender-key state file. */
+  protected swmSenderKeyStateSaveQueue: Promise<void> = Promise.resolve();
   /** Per-CG serialized host-mode persistence queue (moved here from the host-mode cluster during the mixin split). */
   protected readonly hostModePersistenceQueues = new Map<string, Promise<void>>();
   /** System graph holding agent-registry triples (moved here so holder classes can reference it). */

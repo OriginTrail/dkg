@@ -468,6 +468,62 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   /**
+   * Same-instance restart: `start()` has just built a `GossipSubManager` with
+   * no subscriptions (restart contract on {@link DKGAgentBase}), yet
+   * `subscribedContextGraphs` still says which graphs were live. Durable rows
+   * are replayed by `rehydrateContextGraphsFromDurableState()` behind its
+   * authority gate; this re-arms the remaining live ones, the process-local
+   * subscriptions (on-demand, or no subscription store) that no durable row
+   * can bring back. Returns the number of graphs re-armed.
+   *
+   * Never revives what rehydration decided about: a row it accounts for, or
+   * left dormant (authority denied or unavailable, activation cap, the
+   * rehydration kill-switch). The restricted `pendingMeta` bootstrap is skipped
+   * for the same reason: it holds no live gossip until its authority resolves.
+   * What rehydration accounts for is fixed when its pass ends. A save still in
+   * flight when the previous session stopped can be accounted after the pass
+   * read the store; no durable row brought that graph back, so it is re-armed.
+   * Subscriptions and sync scope are only re-wired, never re-persisted.
+   */
+  restoreLiveContextGraphGossipSubscriptions(this: DKGAgent): number {
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    let restored = 0;
+    // A snapshot: re-arming can retire or replace rows while it runs.
+    const candidateIds = Array.from(this.subscribedContextGraphs.keys());
+    for (const contextGraphId of candidateIds) {
+      const subscription = this.subscribedContextGraphs.get(contextGraphId);
+      if (
+        subscription?.subscribed !== true
+        || subscription.pendingMeta === true
+        || systemContextGraphs.has(contextGraphId)
+        || this.gossipRegistered.has(contextGraphId)
+        || this.contextGraphSubscriptionRehydrationPassAccountedIds.has(contextGraphId)
+        || this.contextGraphSubscriptionDormancyById.has(contextGraphId)
+      ) continue;
+      try {
+        this.subscribeToContextGraph(contextGraphId, {
+          trackSyncScope: false,
+          persist: false,
+          syncMode: subscription.syncMode,
+        });
+        restored += 1;
+      } catch (err) {
+        this.log.warn(
+          createOperationContext('system'),
+          `Failed to re-arm gossip for "${contextGraphId}" after restart: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (restored > 0) {
+      this.log.info(
+        createOperationContext('system'),
+        `Re-armed gossip for ${restored} process-local context-graph subscription(s) after restart`,
+      );
+    }
+    return restored;
+  }
+
+  /**
    * Install one subscription after alias adoption: the row, its sync scope
    * and its gossip handlers, or the RFC-64 catalog-owned equivalent.
    */
@@ -1272,7 +1328,28 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
-        contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
+        contextGraphMetaOracle: async (cgId: string) => {
+          // The approved-private proof authorizes this receiver only. Another
+          // member can be revoked after the metadata snapshot but before that
+          // proof finishes without invalidating the receiver's proof. Retry
+          // one changed snapshot so the ordinary revoke race does not drop an
+          // otherwise valid envelope, then fail closed under continued churn.
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+            const meta = await this.getCgMeta(cgId);
+            const allowedPeers =
+              await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
+            if (
+              this.contextGraphMetaProjection.readAuthorityFactsRevision
+                === metadataRevision
+            ) {
+              return allowedPeers === undefined ? meta : { ...meta, allowedPeers };
+            }
+          }
+          throw new Error(
+            `Context graph "${cgId}" metadata authority kept changing while resolving its SWM gate`,
+          );
+        },
         // Same predicate the SENDER uses to decide plaintext vs encrypted SWM
         // (`resolveWorkspaceRecipientsGated`), so both sides of the wire stay
         // on one authority. Without it the receiver judged from local
@@ -1492,7 +1569,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   getOrCreateCGMemberEnumerator(this: DKGAgent): CGMemberEnumerator {
     if (!this.cgMemberEnumerator) {
       this.cgMemberEnumerator = createCGMemberEnumerator({
-        getContextGraphAllowedPeers: (cgId) => this.getContextGraphAllowedPeers(cgId),
+        getContextGraphAllowedPeers: (cgId) =>
+          this.resolveSwmAllowedPeersForCurrentAuthority(cgId),
         getContextGraphAllowedAgentPeers: (cgId) => this.resolvePrivateSwmAgentPeerRoster(cgId),
         isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
