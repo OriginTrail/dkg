@@ -10,7 +10,7 @@ import {
   DIVERGENT_QUADS,
   divergentDigests,
   useAmbientCollation,
-} from './_helpers/digest-locale.js';
+} from '../../../scripts/testing/digest-locale.js';
 import { snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
 vi.mock('../src/workspace-snapshot-source.js', async (importOriginal) => {

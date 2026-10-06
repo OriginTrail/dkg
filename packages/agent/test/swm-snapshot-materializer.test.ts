@@ -64,7 +64,7 @@ import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { RecoveryExecutionGuard } from
   '../src/sync/requester/recovery-execution-guard.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
-import { divergentObjectQuads, referenceDigest, useAmbientCollation } from './_helpers/digest-locale.js';
+import { divergentObjectQuads, referenceDigest, useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 
 const CG = 'ws00-materializer-real-store';
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);

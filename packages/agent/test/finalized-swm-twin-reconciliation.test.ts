@@ -22,7 +22,7 @@ import {
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
-import { divergentObjectQuads, useAmbientCollation } from './_helpers/digest-locale.js';
+import { divergentObjectQuads, useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 
 const CG = 'durable-vm-swm-twin';
 const AUTHOR = '0x1111111111111111111111111111111111111111';

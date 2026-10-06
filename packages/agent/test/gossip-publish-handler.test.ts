@@ -17,7 +17,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
-import { divergentObjectQuads, useAmbientCollation } from './_helpers/digest-locale.js';
+import { divergentObjectQuads, useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'test-gossip-handler';

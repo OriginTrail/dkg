@@ -27,7 +27,7 @@ import {
 } from '../src/index.js';
 import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
-import { useAmbientCollation } from './_helpers/digest-locale.js';
+import { useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
 const PEER_ID = '12D3KooWGraphScopedPeer';

@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
 import { vi } from 'vitest';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import type { Quad } from '../../packages/storage/dist/index.js';
 
 /**
+ * Shared by the agent and publisher test suites (one copy: the oracle, the divergent
+ * corpus and the process-wide collation mocking must not drift apart).
+ *
  * An independent oracle for the SWM public-quads digest: the same framing as
  * production (`sha256` over `[row,row,...]` of `[s, p, o, '']` JSON rows), with
  * the row order supplied by the test. It deliberately does not import any

@@ -16,7 +16,7 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
 } from '../src/workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from '../src/workspace-snapshot-store.js';
-import { divergentObjectQuads, referenceDigest, useAmbientCollation } from './_helpers/digest-locale.js';
+import { divergentObjectQuads, referenceDigest, useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 
 const CONTEXT_GRAPH_ID = 'staging-lock-cg';
 const UAL = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7';

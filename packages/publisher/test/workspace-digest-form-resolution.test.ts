@@ -8,7 +8,7 @@ import {
 } from '../src/workspace-resolution.js';
 import { WORKSPACE_DIGEST_ORDERING_ENV } from '../src/workspace-public-quads-digest.js';
 import type { WorkspacePublicSnapshotStore } from '../src/workspace-snapshot-store.js';
-import { divergentObjectQuads, referenceDigest, useAmbientCollation } from './_helpers/digest-locale.js';
+import { divergentObjectQuads, referenceDigest, useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 
 /**
  * Metadata records the digest of the snapshot it points at, in whatever form

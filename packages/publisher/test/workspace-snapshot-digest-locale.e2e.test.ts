@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DIVERGENT_QUADS } from './_helpers/digest-locale.js';
+import { DIVERGENT_QUADS } from '../../../scripts/testing/digest-locale.js';
 
 /**
  * Real processes, real host locales, real files. Each child is started with its

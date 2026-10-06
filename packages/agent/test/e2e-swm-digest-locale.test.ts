@@ -36,7 +36,7 @@ import {
 } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
-import { divergentObjectQuads, referenceDigest, useAmbientCollation } from './_helpers/digest-locale.js';
+import { divergentObjectQuads, referenceDigest, useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {

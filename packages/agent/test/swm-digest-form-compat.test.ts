@@ -33,7 +33,7 @@ import {
   divergentObjectQuads,
   referenceDigest,
   useAmbientCollation,
-} from './_helpers/digest-locale.js';
+} from '../../../scripts/testing/digest-locale.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
