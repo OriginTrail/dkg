@@ -369,6 +369,14 @@ test('each changed path gets one routing decision with a fixed precedence', () =
   assert.match(pullRequestPlan([change('new-root-tool.ts')]).reasons[0], /^Unclassified path changed/);
 });
 
+test('the mutation pilot configuration selects the core job that runs it', () => {
+  for (const file of ['test-policy/stryker.config.mjs', 'test-policy/vitest.mutation.config.ts']) {
+    assert.deepEqual(selectedLanes(pullRequestPlan([change(file)])), ['tornado_core'], file);
+  }
+  // The rest of test-policy/ is still checked by the shared build job alone.
+  assert.deepEqual(selectedLanes(pullRequestPlan([change('test-policy/vitest.properties.config.ts')])), []);
+});
+
 test('every file a lane runs, or loads by relative path, selects that lane', () => {
   // Seeds: what CI executes (laneSeeds in lane-entrypoints.mjs) - each
   // lane's workspace code and tests, the support files its job commands

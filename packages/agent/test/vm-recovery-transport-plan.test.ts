@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   planVmRecoveryTransport,
   type VmRecoveryTransportPlanningOptions,
+  type VmRecoveryTransportPreparationPort,
 } from '../src/vm-recovery-transport-plan.js';
 import type { VmRecoveryFootprintObservation, VmRecoveryPreparedHints } from '../src/vm-recovery-footprint.js';
 import type { VmRecoveryChainFootprint } from '../src/vm-recovery-types.js';
@@ -34,6 +35,15 @@ describe('VM recovery transport planning pipeline', () => {
     expect(f.ports.createSizingReader).not.toHaveBeenCalled();
     expect(f.ports.resolvePublicAccess).not.toHaveBeenCalled();
     expect(f.readUpdateContext).not.toHaveBeenCalled();
+  });
+
+  it('carries the selected legacy budget into the execution plan only for a legacy probe', async () => {
+    const f = fixture();
+    const plan = await planVmRecoveryTransport({ ...f.options, providerAttemptKind: 'probe',
+      legacyAttemptTimeoutMs: 120_000 }, f.ports);
+    expect(plan).toMatchObject({ transportMode: 'legacy', legacyAttemptTimeoutMs: 120_000 });
+    expect((await planVmRecoveryTransport({ ...f.options,
+      legacyAttemptTimeoutMs: 120_000 }, f.ports)).legacyAttemptTimeoutMs).toBeUndefined();
   });
 
   it('uses one sizing read for a streaming probe without granting holder evidence', async () => {
@@ -147,7 +157,11 @@ describe('VM recovery transport planning with prepared sizing', () => {
   });
   function hints(ready: Record<string, VmRecoveryChainFootprint>) {
     const take = vi.fn(async (kaId: string) => ready[kaId]);
-    return { take, port: { take } satisfies VmRecoveryPreparedHints };
+    const release = vi.fn();
+    const prepareRemainder = vi.fn();
+    return { take, release, prepareRemainder, port: {
+      hints: () => ({ take } satisfies VmRecoveryPreparedHints), release, prepareRemainder,
+    } satisfies VmRecoveryTransportPreparationPort };
   }
 
   it('serves a holder prefix from prepared hints without a live read for those assets', async () => {
@@ -155,11 +169,13 @@ describe('VM recovery transport planning with prepared sizing', () => {
     const prepared = hints({ '1': hint(2_048n), '2': hint(2_048n) });
     const observed: VmRecoveryFootprintObservation[] = [];
     const plan = await planVmRecoveryTransport({ ...f.options, observeSizing: o => observed.push(o) },
-      { ...f.ports, preparedHints: prepared.port });
+      { ...f.ports, preparation: prepared.port });
     expect(plan.attempts).toEqual(f.attempts);
     expect(f.readUpdateContext.mock.calls.map(([id]) => id)).toEqual([3n, 4n]);
     expect(observed).toHaveLength(1);
     expect(observed[0]).toMatchObject({ requested: 4, prepared: 2, resolved: 2 });
+    expect(prepared.release).toHaveBeenCalledOnce();
+    expect(prepared.prepareRemainder).toHaveBeenCalledWith([]);
   });
 
   it('plans exactly the same batch with or without prepared hints', async () => {
@@ -167,7 +183,7 @@ describe('VM recovery transport planning with prepared sizing', () => {
     const baseline = await planVmRecoveryTransport(without.options, without.ports);
     const withHints = fixture(6);
     const prepared = hints(Object.fromEntries(withHints.attempts.map(a => [String(a.ordinal + 1), hint(1_024n)])));
-    const plan = await planVmRecoveryTransport(withHints.options, { ...withHints.ports, preparedHints: prepared.port });
+    const plan = await planVmRecoveryTransport(withHints.options, { ...withHints.ports, preparation: prepared.port });
     expect(plan.attempts.map(a => a.ordinal)).toEqual(baseline.attempts.map(a => a.ordinal));
     expect(plan.transportMode).toBe(baseline.transportMode);
     expect(withHints.readUpdateContext).not.toHaveBeenCalled();
@@ -177,11 +193,24 @@ describe('VM recovery transport planning with prepared sizing', () => {
     const f = fixture();
     const prepared = hints({ '1': hint(1_024n) });
     const plan = await planVmRecoveryTransport({ ...f.options, providerAttemptKind: 'probe',
-      streamEligible: true, registeredPublicAccess: true }, { ...f.ports, preparedHints: prepared.port });
+      streamEligible: true, registeredPublicAccess: true,
+      probeRemainder: [{ kaId: '2' }, { kaId: '3' }] }, { ...f.ports, preparation: prepared.port });
     expect(plan.transportMode).toBe('stream-preferred');
     expect(prepared.take).not.toHaveBeenCalled();
+    expect(prepared.release).not.toHaveBeenCalled();
+    expect(prepared.prepareRemainder).toHaveBeenCalledWith([{ kaId: '2' }, { kaId: '3' }]);
     expect(f.readUpdateContext.mock.calls.map(([id]) => id)).toEqual([1n]);
     expect(plan.unplanned).toEqual([]);
+  });
+
+  it('releases the scoped preparation on holder selection failure and prepares no next work', async () => {
+    const f = fixture();
+    const prepared = hints({});
+    f.ports.createSizingReader.mockImplementation(() => { throw new Error('sizing factory failed'); });
+    await expect(planVmRecoveryTransport(f.options,
+      { ...f.ports, preparation: prepared.port })).rejects.toThrow('sizing factory failed');
+    expect(prepared.release).toHaveBeenCalledOnce();
+    expect(prepared.prepareRemainder).not.toHaveBeenCalled();
   });
 
   it('hands back the sized candidates after the selected prefix with their observed footprints', async () => {
@@ -191,7 +220,8 @@ describe('VM recovery transport planning with prepared sizing', () => {
       if (kaId === 4n) throw new Error('Sizing unavailable');
       return { merkleRootsCount: 1n, byteSize: 1_024n, merkleLeafCount: 8 };
     });
-    const plan = await planVmRecoveryTransport(f.options, f.ports);
+    const prepared = hints({});
+    const plan = await planVmRecoveryTransport(f.options, { ...f.ports, preparation: prepared.port });
     expect(plan.attempts.map(a => a.ordinal)).toEqual([0, 1, 2]);
     // Only the first ten candidates are sized; the unsized tail carries no footprint.
     expect(plan.unplanned.map(item => item.kaId)).toEqual(['4', '5', '6', '7', '8', '9', '10', '11', '12']);
@@ -199,6 +229,10 @@ describe('VM recovery transport planning with prepared sizing', () => {
     expect(byKa.get('4')).toEqual({ kind: 'unknown' });
     expect(byKa.get('5')?.kind).toBe('public-v10');
     expect(byKa.get('12')).toEqual({ kind: 'unknown' });
+    expect(prepared.release).toHaveBeenCalledOnce();
+    expect(prepared.prepareRemainder).toHaveBeenCalledWith(plan.unplanned.map(({ kaId, recoveryFootprint }) => ({
+      kaId, ...(recoveryFootprint ? { footprint: recoveryFootprint } : {}),
+    })));
     expect(Object.isFrozen(plan.unplanned)).toBe(true);
     for (const item of plan.unplanned) expect(item.attempt).toBe(f.attempts[Number(item.kaId) - 1]);
   });

@@ -120,7 +120,7 @@ interface RefreshInternals {
     onChainCgId: bigint,
     ordinal: number,
     headBlock: number | undefined,
-    options?: { deferActiveFetch?: boolean },
+    options?: Record<string, never>,
   ): Promise<OrdinalOutcome>;
 }
 
@@ -862,7 +862,7 @@ describe('VM refresh worker (#2858)', () => {
     const rootReadsBefore = rootReads.calls.length;
     await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 90 }))
       .resolves.toEqual([]);
-    await expect(internals.reconcileChainOrdinal(CG, ON_CHAIN_CG, 0, 200, { deferActiveFetch: true }))
+    await expect(internals.reconcileChainOrdinal(CG, ON_CHAIN_CG, 0, 200))
       .resolves.toEqual({ status: 'already', blockNumber: 200 });
     expect(rootReads.calls.length).toBe(rootReadsBefore);
     expect(fetches.calls).toHaveLength(1);

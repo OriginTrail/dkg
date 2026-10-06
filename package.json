@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.20",
+  "version": "10.0.21",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
@@ -32,6 +32,7 @@
     "bench:baseline": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config bench/esbench.config.mjs",
     "bench:compare": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_DIFF=bench/results/baseline.json ESBENCH_RESULT=bench/results/compare.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/compare.html esbench --config bench/esbench.config.mjs",
     "lint": "node scripts/ci/check-tracked-text-nul.mjs && node scripts/ci/check-oxlint-baseline.mjs && node scripts/ci/check-incoming-copy-boundary.mjs && pnpm run lint:tests",
+    "check:file-size": "node scripts/audit-file-size.mjs",
     "lint:nul": "node scripts/ci/check-tracked-text-nul.mjs",
     "lint:baseline:update": "node scripts/ci/check-oxlint-baseline.mjs --write",
     "knip": "knip --config .github/knip.json",

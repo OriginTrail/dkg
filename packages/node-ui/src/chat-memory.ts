@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { chatTurnSubjectPattern, scopedChatTurnUri, decodeExistingChatTurn, type ExistingChatTurn } from './chat-turn-subject.js';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
@@ -177,39 +177,6 @@ const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_I
 const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
-
-/**
- * The subject a NEW chat turn is written under: one per `(sessionId, turnId)`.
- *
- * A turn id is only unique inside its session (an adapter numbers the turns of
- * each conversation, Prime Agent uses a request's correlation id), and the
- * turn's durable state lives on this subject: `persistenceState`, the message
- * links, `isPartOf`, and the transitions that point at it. Turns written
- * before this scheme (and any that a caller wrote straight to the store) sit
- * under `urn:dkg:chat:turn:<turnId>`, which two sessions that reused an id
- * shared, so one session's state, duplicate check and completed reply were
- * read as the other's. Those subjects are neither rewritten nor migrated:
- * every read goes through the turn's session link and `turnId` literal rather
- * than the subject's name, so both shapes are found, and a transition is
- * attached to whichever subject the turn already has (`resolveChatTurnUri`).
- *
- * One legacy shape is not trusted: a subject that more than one session is
- * linked to. Its state cannot be attributed to either session, so
- * `getChatTurnPersistenceState` reports nothing for it and the session's next
- * report is written as a new turn under the session's own subject, the way it
- * was written before turns were deduplicated. The shared subject stays as it
- * is. From then on the session's state is read from its own subject.
- *
- * The suffix is a hash of the JSON form of the pair, so the subject is
- * injective in `(sessionId, turnId)` whatever characters either holds (a `:`
- * in a Hermes id, a lone surrogate in a free-form OpenClaw session id), stays
- * a safe IRI, and its `session-turn:` namespace cannot collide with a legacy
- * `turn:<turnId>` subject, whatever that turn id looks like.
- */
-function chatTurnUri(sessionId: string, turnId: string): string {
-  const digest = createHash('sha256').update(JSON.stringify([sessionId, turnId])).digest('hex');
-  return `${CHAT_NS}session-turn:${digest}`;
-}
 const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> = {
   skipped: 1,
   pending: 2,
@@ -677,7 +644,7 @@ export class ChatMemoryManager {
     const failureReason = typeof opts?.failureReason === 'string'
       ? opts.failureReason.trim()
       : (opts?.failureReason === null ? null : undefined);
-    const turnUri = turnId ? chatTurnUri(sessionId, turnId) : undefined;
+    const turnUri = turnId ? (await this.findExistingChatTurn(sessionId, turnId))?.uri ?? scopedChatTurnUri(sessionId, turnId) : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
 
@@ -762,9 +729,7 @@ export class ChatMemoryManager {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
       `SELECT ?turn WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(trimmedTurnId))}
       } LIMIT 1`,
       this.wmReadOpts(),
     );
@@ -777,11 +742,8 @@ export class ChatMemoryManager {
     if (!trimmedTurnId) return null;
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
-      `SELECT ?turn ?linkedSession ?persistenceState ?transitionState WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
-        ?turn <${SCHEMA}isPartOf> ?linkedSession .
+      `SELECT ?persistenceState ?transitionState WHERE {
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(trimmedTurnId))}
         OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
         OPTIONAL {
           ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
@@ -791,21 +753,8 @@ export class ChatMemoryManager {
       }`,
       this.wmReadOpts(),
     );
-    const bindings: Array<Record<string, string>> = result.bindings ?? [];
-    // A legacy `turn:<turnId>` subject that two sessions reused carries the
-    // states and transitions of both, and nothing on it says whose is whose.
-    // What it holds is no evidence about this session's turn, so it is left
-    // out: the caller then writes the report instead of dropping it as a
-    // duplicate of the other session's turn (see `chatTurnUri`).
-    const iri = (value: string | undefined): string => String(value ?? '').replace(/[<>]/g, '');
-    const sharedTurns = new Set(
-      bindings
-        .filter((binding) => binding.linkedSession !== undefined && iri(binding.linkedSession) !== sessionUri)
-        .map((binding) => iri(binding.turn)),
-    );
-    const states = bindings
-      .filter((binding) => !sharedTurns.has(iri(binding.turn)))
-      .flatMap((binding) => [
+    const states = (result.bindings ?? [])
+      .flatMap((binding: Record<string, string>) => [
         stripRdfLiteral(binding.transitionState ?? '').trim(),
         stripRdfLiteral(binding.persistenceState ?? '').trim(),
       ]);
@@ -815,27 +764,17 @@ export class ChatMemoryManager {
     return null;
   }
 
-  /**
-   * The subject `(sessionId, turnId)` is stored under: found through the turn's
-   * session link and `turnId` literal, so a turn written under the legacy
-   * `turn:<turnId>` subject keeps receiving its transitions there, and a turn
-   * of another session that reuses the id is never touched. When the turn does
-   * not exist yet, the subject it would be created under. A session that has
-   * both a subject of its own and a legacy one gets its own: `session-turn:`
-   * sorts before `turn:`.
-   */
-  private async resolveChatTurnUri(sessionId: string, turnId: string): Promise<string> {
+  private async findExistingChatTurn(sessionId: string, turnId: string): Promise<ExistingChatTurn | null> {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
-      `SELECT ?turn WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${JSON.stringify(turnId)} .
+      `SELECT ?turn ?tid ?ts WHERE {
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(turnId))}
+        ?turn <${DKG_ONT}turnId> ?tid .
+        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
       } ORDER BY ?turn LIMIT 1`,
       this.wmReadOpts(),
     );
-    const found = String(result.bindings?.[0]?.turn ?? '').replace(/[<>]/g, '');
-    return found && isSafeIri(found) ? found : chatTurnUri(sessionId, turnId);
+    return decodeExistingChatTurn(result.bindings?.[0], turnId, stripRdfLiteral);
   }
 
   async recordChatTurnPersistenceTransition(
@@ -853,7 +792,7 @@ export class ChatMemoryManager {
     const trimmedTurnId = turnId.trim();
     if (!trimmedTurnId) return;
     const transitionId = crypto.randomUUID().slice(0, 8);
-    const turnUri = await this.resolveChatTurnUri(sessionId, trimmedTurnId);
+    const turnUri = (await this.findExistingChatTurn(sessionId, trimmedTurnId))?.uri ?? scopedChatTurnUri(sessionId, trimmedTurnId);
     const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
     const now = new Date().toISOString();
     const failureReason = typeof opts?.failureReason === 'string'
@@ -1184,9 +1123,7 @@ export class ChatMemoryManager {
           OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
           OPTIONAL { ?m <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?attachmentRefs }
           OPTIONAL {
-            ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-            ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-            ?turn <${DKG_ONT}turnId> ?turnId .
+            ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?turnId')}
             OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
             OPTIONAL { ?turn <${DKG_ONT}failureReason> ?failureReason }
             OPTIONAL {
@@ -1310,7 +1247,7 @@ export class ChatMemoryManager {
       // Message of both, and a transition on it does not say whose completion
       // it is. Such a subject contributes no completion here, so the list keeps
       // each session's reply as it was written and never shows one session the
-      // other's (see `chatTurnUri`).
+      // other's (see `chatTurnSubjectPattern`).
       //
       // The completed turns are an independent subquery over the listed
       // sessions' turns, joined to the messages on the assistant Message. The
@@ -1404,9 +1341,8 @@ export class ChatMemoryManager {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const baseTurnId = opts?.baseTurnId?.trim() || null;
     const countResult = await this.tools.query(
-      `SELECT (COUNT(*) AS ?c) WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+      `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
       }`,
       this.wmReadOpts(),
     );
@@ -1429,34 +1365,16 @@ export class ChatMemoryManager {
       };
     }
 
-    // The turn's subject is found through its session link and `turnId`, not
-    // built from the id: a turn is stored under a session-scoped subject, or
-    // under the legacy `turn:<turnId>` one (see `chatTurnUri`).
-    const currentTurnResult = await this.tools.query(
-      `SELECT ?turn ?tid ?ts WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${JSON.stringify(turnId)} .
-        ?turn <${DKG_ONT}turnId> ?tid .
-        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
-      } ORDER BY ?turn LIMIT 1`,
-      this.wmReadOpts(),
-    );
-    const currentTurn = (currentTurnResult.bindings ?? [])[0];
-    const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
-    const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
-    const turnUri = String(currentTurn?.turn ?? '').replace(/[<>]/g, '');
+    const currentTurn = await this.findExistingChatTurn(sessionId, turnId);
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
-        ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?latestTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?latestTurn <${DKG_ONT}turnId> ?latestTurnId .
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?latestTurn', '?latestTurnId')}
         OPTIONAL { ?latestTurn <${SCHEMA}dateCreated> ?latestTs }
       } ORDER BY DESC(?latestTs) DESC(?latestTurnId) LIMIT 1`,
       this.wmReadOpts(),
     );
     const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
-    if (!currentTurnId || currentTurnId !== turnId || !isSafeIri(turnUri)) {
+    if (!currentTurn) {
       return {
         mode: 'full_refresh_required',
         reason: 'turn_not_found',
@@ -1474,15 +1392,15 @@ export class ChatMemoryManager {
       };
     }
 
+    const { uri: turnUri, turnId: currentTurnId, createdAt: currentTurnTs } = currentTurn;
     const currentTurnIdLiteral = JSON.stringify(currentTurnId);
     const currentTsLiteral = currentTurnTs
       ? `"${currentTurnTs}"^^<${XSD_DATETIME}>`
       : null;
     const previousTurnQuery = currentTsLiteral
       ? `SELECT ?previousTurnId WHERE {
-          ?previousTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-          ?previousTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-          ?previousTurn <${DKG_ONT}turnId> ?previousTurnId .
+          ${chatTurnSubjectPattern(`<${sessionUri}>`, '?previousTurn', '?previousTurnId')}
+          FILTER(?previousTurnId != ${currentTurnIdLiteral})
           ?previousTurn <${SCHEMA}dateCreated> ?previousTs .
           FILTER(
             ?previousTs < ${currentTsLiteral}
@@ -1490,9 +1408,8 @@ export class ChatMemoryManager {
           )
         } ORDER BY DESC(?previousTs) DESC(?previousTurnId) LIMIT 1`
       : `SELECT ?previousTurnId WHERE {
-          ?previousTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-          ?previousTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-          ?previousTurn <${DKG_ONT}turnId> ?previousTurnId .
+          ${chatTurnSubjectPattern(`<${sessionUri}>`, '?previousTurn', '?previousTurnId')}
+          FILTER(?previousTurnId != ${currentTurnIdLiteral})
           FILTER(?previousTurnId < ${currentTurnIdLiteral})
         } ORDER BY DESC(?previousTurnId) LIMIT 1`;
     const previousTurnResult = await this.tools.query(
@@ -1502,10 +1419,8 @@ export class ChatMemoryManager {
     const previousTurnId = stripRdfLiteral((previousTurnResult.bindings ?? [])[0]?.previousTurnId ?? '').trim() || null;
     const turnIndexResult = currentTsLiteral
       ? await this.tools.query(
-          `SELECT (COUNT(*) AS ?c) WHERE {
-            ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-            ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-            ?turn <${DKG_ONT}turnId> ?tid .
+          `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+            ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
             ?turn <${SCHEMA}dateCreated> ?ts .
             FILTER(
               ?ts < ${currentTsLiteral}
@@ -1514,7 +1429,13 @@ export class ChatMemoryManager {
           }`,
           this.wmReadOpts(),
         )
-      : { bindings: [{ c: String(previousTurnId ? 2 : 1) }] };
+      : await this.tools.query(
+          `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+            ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
+            FILTER(?tid <= ${currentTurnIdLiteral})
+          }`,
+          this.wmReadOpts(),
+        );
     const turnIndex = Math.max(0, sumBindingValues(turnIndexResult.bindings, 'c'));
 
     if (previousTurnId && !baseTurnId) {

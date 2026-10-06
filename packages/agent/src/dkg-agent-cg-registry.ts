@@ -9,6 +9,8 @@
  * class.
  */
 
+
+import { contextGraphBindingAbortReason, raceContextGraphBindingAgainstAbort } from './internal/context-graph-binding-abort.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   resolveApprovedPrivateReplicaAuthority,
@@ -103,7 +105,7 @@ import {
   contextGraphMetadataHomeGraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcRequestContext, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -245,7 +247,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -472,40 +474,6 @@ export type FinalizedContextGraphAuthorityTargetsResolutionV1 = Readonly<
     }
   | { kind: 'legacy-current' }
 >;
-
-function contextGraphBindingAbortReason(signal: AbortSignal): Error {
-  if (signal.reason instanceof Error) return signal.reason;
-  const error = new Error(String(signal.reason ?? 'Context Graph binding resolution aborted'));
-  error.name = 'AbortError';
-  return error;
-}
-
-function raceContextGraphBindingAgainstAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) return Promise.reject(contextGraphBindingAbortReason(signal));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup();
-      reject(contextGraphBindingAbortReason(signal));
-    };
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      },
-    );
-    if (signal.aborted) onAbort();
-  });
-}
 
 function localContextGraphIdFromTerm(raw: unknown): string | undefined {
   const uri = typeof raw === 'string' ? raw.replace(/^<|>$/g, '') : '';
@@ -975,10 +943,18 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
       onRpcRead?.();
-      const snapshotsByNameHash = await resolveSnapshots.call(
-        indexReader,
-        reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
-        chainReadOptions,
+      // Registration classification gates private catalog admission and read
+      // access. A background reconciliation must not sit behind the ordinary
+      // background RPC reserve until the authority read's fail-closed deadline
+      // expires; use the same bounded foreground authority lane as explicit
+      // security reads, while retaining the caller's cancellation signal.
+      const snapshotsByNameHash = await withRpcRequestContext(
+        { requestClass: 'foreground', admissionPriority: 'authority', signal: options.signal },
+        () => resolveSnapshots.call(
+          indexReader,
+          reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+          chainReadOptions,
+        ),
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
@@ -1246,7 +1222,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (options.allowApprovedPrivateReplicaFinalizedAbsence !== true) return null;
       const approved = this.localApprovedAgentByCG?.get(contextGraphId);
       if (approved === undefined) return null;
-      const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+      const metadataRevision = this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId);
       let privateResolution: ApprovedPrivateReplicaAuthorityResolution | null = null;
       try {
         privateResolution = await runBoundedOperation(
@@ -1256,8 +1233,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             approved,
             () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
               === approved.toLowerCase(),
-            () => this.contextGraphMetaProjection.readAuthorityFactsRevision
-              === metadataRevision,
+            () => this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision,
             signal,
           ),
           {

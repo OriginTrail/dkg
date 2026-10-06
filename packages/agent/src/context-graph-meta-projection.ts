@@ -12,6 +12,7 @@ import {
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
 
 export interface ContextGraphSubGraphMeta {
   uri: string;
@@ -191,12 +192,19 @@ function emptyContextGraphMetaRecord(
 export class ContextGraphMetaProjection {
   private readonly entries = new Map<string, ProjectionEntry>();
   private authorityFactsRevision = 0;
+  private allFactsRevision = 0;
 
   constructor(private readonly store: TripleStore) {}
 
   /** Invalidate request-local absence proofs when projection sources change. */
   get readAuthorityFactsRevision(): number {
     return this.authorityFactsRevision;
+  }
+
+  /** Fence a source-qualified proof over one CG's metadata without rejecting
+   * it when an unrelated graph or agent profile changes during the read. */
+  readContextGraphAuthorityFactsRevision(contextGraphId: string): string {
+    return `${this.allFactsRevision}:${this.entries.get(contextGraphId)?.invalidationVersion ?? 0}`;
   }
 
   /**
@@ -295,7 +303,8 @@ export class ContextGraphMetaProjection {
       .then((record) => {
         entry.value = record;
         entry.inflight = undefined;
-        entry.dirty = entry.invalidationVersion !== rebuildVersion;
+        // A fresh-read request during the rebuild leaves the version as it is.
+        entry.dirty ||= entry.invalidationVersion !== rebuildVersion;
         this.entries.set(contextGraphId, entry);
         return record;
       })
@@ -320,6 +329,16 @@ export class ContextGraphMetaProjection {
       return;
     }
     this.entries.set(contextGraphId, { dirty: true, invalidationVersion: 1 });
+  }
+
+  /**
+   * Rebuild this graph's cached record on its next read without reporting a
+   * change of authority facts, for a caller that wrote nothing itself: no
+   * authority-facts revision advances. Supersedes a rebuild in flight.
+   */
+  requireFreshRead(contextGraphId: string): void {
+    const existing = this.entries.get(contextGraphId);
+    if (existing) existing.dirty = true;
   }
 
   /**
@@ -362,6 +381,7 @@ export class ContextGraphMetaProjection {
 
   markAllDirty(): void {
     this.authorityFactsRevision += 1;
+    this.allFactsRevision += 1;
     for (const entry of this.entries.values()) {
       entry.dirty = true;
       entry.invalidationVersion += 1;
@@ -877,27 +897,6 @@ function contextGraphIdFromCatalogGraphUri(uri: string): string | null {
   const tail = uri.slice(CONTEXT_GRAPH_PREFIX.length, -'/_catalog'.length);
   if (!tail) return null;
   return tail;
-}
-
-function cloneMetaRecord(record: ContextGraphMetaRecord): ContextGraphMetaRecord {
-  return {
-    ...record,
-    creators: [...record.creators],
-    curators: [...record.curators],
-    allowedPeers: [...record.allowedPeers],
-    allowedAgents: [...record.allowedAgents],
-    participantAgents: [...record.participantAgents],
-    participantIdentityIds: [...record.participantIdentityIds],
-    revokedAgents: [...record.revokedAgents],
-    delegations: record.delegations.map((delegation) => ({
-      ...delegation,
-      agents: [...delegation.agents],
-      allowedPeers: [...delegation.allowedPeers],
-      allowedKeys: [...delegation.allowedKeys],
-      expiresAtValues: [...delegation.expiresAtValues],
-    })),
-    subGraphs: record.subGraphs.map((subGraph) => ({ ...subGraph })),
-  };
 }
 
 function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {

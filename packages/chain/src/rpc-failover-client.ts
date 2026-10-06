@@ -18,6 +18,9 @@
  * That is pure ordering — it only decides which endpoint each loop TRIES FIRST;
  * it never signs, never gates a broadcast, never re-orders the tx-safety
  * guards, and every loop still falls through to the full endpoint set. The
+ * read loop keeps one more piece of ordering state beside it, of the same
+ * kind: which endpoint refused which read (`EndpointReadRefusals`, see
+ * endpoint-read-refusals.ts), so that read starts at the others. The
  * module never references the adapter; it is constructed with two required
  * capabilities and one optional per-endpoint transport preflight:
  *   1. `getEndpoints()` — a LIVE thunk over the RPC endpoints, each a
@@ -39,6 +42,9 @@
  * telemetry have one owner.
  */
 
+
+import { type RpcReadDescriptor, createRpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
+export { type RpcReadDescriptor, createRpcReadDescriptor, rpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -60,6 +66,9 @@ import {
   rpcHost,
 } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
+import { EndpointReadRefusals } from './endpoint-read-refusals.js';
+import { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
+export { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
 import {
   ChainRpcTransportError,
   RpcEndpointsExhaustedError,
@@ -73,9 +82,6 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import {
-  RPC_READ_STALL_TIMEOUT_MS,
-  RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS,
-  RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
@@ -92,99 +98,6 @@ import {
 export interface RpcEndpoint {
   provider: JsonRpcProvider;
   rpcUrl: string;
-}
-
-/**
- * Named per-attempt timeout policy for a failover read: callers pick an intent,
- * not a millisecond value. The exact cap each policy yields is in
- * {@link resolveCapMs}.
- *   - `pointRead`           — a single `eth_call` / point provider read.
- *   - `wideLogScan`         — a multi-thousand-block `eth_getLogs` scan.
- *   - `durablePagedLogScan` — a checkpointed scan whose physical requests
- *     carry their own deadlines, so the complete projection is uncapped.
- *   - `watchdogPointRead`   — a background point read that must not wedge a
- *     one-RPC node.
- *   - `watchdogWideLogScan` — a background log scan that must not wedge a
- *     one-RPC node.
- *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
- *     stall selection (capped on EVERY attempt, including single-RPC).
- *   - `securityGatePointRead` — a live authorization read whose multi-RPC
- *     attempts must fail over inside the caller's 2.5s fail-closed deadline.
- */
-export type ReadPolicy =
-  | 'pointRead'
-  | 'wideLogScan'
-  | 'durablePagedLogScan'
-  | 'watchdogPointRead'
-  | 'watchdogWideLogScan'
-  | 'failOpenFundingRead'
-  | 'securityGatePointRead';
-
-/**
- * The human-facing label and the low-cardinality telemetry owner for one RPC
- * read. Keeping them together prevents a read from accidentally changing its
- * diagnostic label while silently retaining (or losing) its usage bucket.
- * `consumer: null` is an explicit opt-out for reads that must remain
- * unattributed.
- */
-export interface RpcReadDescriptor {
-  readonly label: string;
-  readonly consumer: string | null;
-}
-
-/** Construct an immutable, validated RPC read descriptor. */
-export function createRpcReadDescriptor(
-  label: string,
-  consumer: string | null = label,
-): RpcReadDescriptor {
-  if (typeof label !== 'string' || label.trim().length === 0) {
-    throw new TypeError('RPC read label must be a non-empty string');
-  }
-  if (consumer !== null && (typeof consumer !== 'string' || consumer.trim().length === 0)) {
-    throw new TypeError('RPC read consumer must be a non-empty string or null');
-  }
-  return Object.freeze({ label, consumer });
-}
-
-export type RpcReadDescriptorInput = string | RpcReadDescriptor;
-
-/** Per-read options: timeout/failover behavior plus a compatibility escape
- *  hatch for callers that have not migrated to {@link RpcReadDescriptor} yet.
- *  New code should put the consumer owner beside the human label in a
- *  descriptor. `null` deliberately suppresses raw-read attribution. */
-export interface ReadOpts {
-  policy?: ReadPolicy;
-  isRetryable?: (err: unknown) => boolean;
-  /** @deprecated Use `RpcReadDescriptor.consumer`; retained for compatibility. */
-  rpcUsageConsumer?: string | null;
-  /**
-   * Opt this read OUT of endpoint stickiness — it always uses the canonical
-   * (configured) endpoint order AND never mutates the preferred pointer
-   * (fully preference-transparent). Set on TIP-SENSITIVE reads (current head /
-   * latest block) where a lagging preferred backend could return a stale/lower
-   * head and make the tip non-monotonic across calls. A `skipPreferred` read on
-   * a selectively-healthy primary must NOT clear the preference the heavy
-   * read/write paths rely on — hence transparent, not merely canonical-ordered.
-   */
-  skipPreferred?: boolean;
-  /**
-   * Marks a read whose result may be a benign "not on this endpoint (yet)" EMPTY
-   * value (e.g. `eth_getTransactionReceipt` / `getBlock` returning `null`) rather
-   * than a definitive answer. When set, an empty result is NOT a transport
-   * failure: the loop tries the next endpoint WITHOUT de-preferring it or emitting
-   * failover/exhaustion telemetry, and if EVERY endpoint returns empty (and none
-   * errored) the empty value itself is returned. A real transport error still
-   * fails over / exhausts / propagates as usual. This keeps nullable reads
-   * (receipt/tx/block lookups) failing over on a lagging endpoint without a thrown
-   * sentinel polluting stickiness or telemetry.
-   */
-  isEmptyResult?: (value: unknown) => boolean;
-  /** Retry a complete endpoint pass only when every failure was a throttle. */
-  endpointSetRetry?: 'all-throttled';
-  /** Cancels the active raw ethers FetchRequest for this read. */
-  signal?: AbortSignal;
-  /** Absolute operation deadline shared by every endpoint attempt. */
-  deadlineMs?: number;
 }
 
 /** Optional absolute deadline and low-cardinality label for one receipt pass. */
@@ -282,39 +195,15 @@ export function isContractViewRetryable(err: unknown): boolean {
   return isRpcEndpointFailoverEligible(err) && errorCode(err) !== 'BAD_DATA';
 }
 
-/**
- * The timeout-policy matrix — the per-attempt cap each named policy yields:
- *
- *   | policy              | multi-RPC cap            | single-RPC cap          |
- *   |---------------------|--------------------------|-------------------------|
- *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         |
- *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
- *   | durablePagedLogScan | uncapped                 | uncapped                |
- *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
- *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
- *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
- *   | securityGatePointRead | SECURITY_GATE (1s)     | uncapped                |
- *
- * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
- * to; #894). The watchdog policies are for background reads that must clear
- * their scheduler gate even on one-RPC nodes, without imposing a poll-level
- * deadline over a multi-RPC failover sequence.
- */
-export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
-  if (policy === 'durablePagedLogScan') return undefined;
-  if (policy === 'failOpenFundingRead' || policy === 'watchdogPointRead') {
-    return RPC_READ_STALL_TIMEOUT_MS;
-  }
-  if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
-  if (providerCount <= 1) return undefined;
-  if (policy === 'securityGatePointRead') return RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS;
-  return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
-}
-
 export class RpcFailoverClient {
-  /** Transport-ordering preference state machine — the ONLY mutable state this
-   *  module owns (see SAFETY BOUNDARY + endpoint-stickiness.ts). */
+  /** Transport-ordering preference state machine (see SAFETY BOUNDARY +
+   *  endpoint-stickiness.ts). With `readRefusals` below, the only mutable state
+   *  this module owns, and both only order the endpoints of a pass. */
   private readonly stickiness: EndpointStickiness;
+  /** Which endpoint refused which read (see endpoint-read-refusals.ts). */
+  private readonly readRefusals: EndpointReadRefusals;
+  /** The stickiness kill switch: off means every pass uses the configured order. */
+  private readonly endpointOrderingEnabled: () => boolean;
   /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
   private readonly validateEndpoint?: ValidateEndpointFn;
   private readonly readThrottleRetries: number;
@@ -344,6 +233,8 @@ export class RpcFailoverClient {
       isEnabled,
       onEstablished: (url) => notePreferredEndpoint('rpc failover', url),
     });
+    this.readRefusals = new EndpointReadRefusals({ now: stickiness?.now ?? Date.now });
+    this.endpointOrderingEnabled = isEnabled;
   }
 
   /**
@@ -869,7 +760,16 @@ export class RpcFailoverClient {
     // binding its endpoint + outcome recorders. Same members, possibly reordered —
     // so the cap/exhaustion contract stays canonical while only the try-order changes.
     const canonical = this.getEndpoints();
-    const attempts = this.stickiness.attempts(canonical, options.intent);
+    // A read that an endpoint has refused by policy starts at the others; the
+    // refusing endpoint stays in the pass, last. `readRefusals` builds the pass
+    // from the stickiness order and owns what each outcome is recorded as. A
+    // tip-sensitive read keeps the configured order, as it does under
+    // stickiness, and so does every read when ordering is switched off.
+    const attempts = this.readRefusals.attempts(
+      label,
+      this.stickiness.attempts(canonical, options.intent),
+      options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
+    );
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let lastRetryable: unknown;
     let allEndpointsThrottled = true;
@@ -935,7 +835,7 @@ export class RpcFailoverClient {
           const hint = errorRetryAfterMs(err);
           if (hint !== undefined) retryAfterMs = Math.max(retryAfterMs ?? 0, hint);
         }
-        attempt.recordFailure(); // de-prefer a failed backend
+        attempt.recordFailure(err); // de-prefer a failed backend; remember a refusal
         const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
         if (!isLast && canTryNext) {
           noteRpcFailover(label, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
