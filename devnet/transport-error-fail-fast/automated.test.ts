@@ -73,11 +73,10 @@ beforeAll(async () => {
   if (!state) {
     throw new Error(`Live ${NODE_COUNT}-node devnet not detected. Run ./scripts/devnet.sh start ${NODE_COUNT} first.`);
   }
-  peers = [];
-  for (const num of Object.keys(state.nodes).map(Number).sort((a, b) => a - b)) {
-    const node = state.nodes[num];
-    peers.push(await loadPeer(num, node.apiPort, node.home));
-  }
+  // Loaded in parallel; Promise.all keeps the nodes in ascending node-number order.
+  peers = await Promise.all(
+    Object.keys(state.nodes).map(Number).sort((a, b) => a - b).map((num) => loadPeer(num, state.nodes[num].apiPort, state.nodes[num].home)),
+  );
 
   // An ephemeral libp2p node of our own, bootstrapped to every devnet node.
   probeNode = new DKGNode({
