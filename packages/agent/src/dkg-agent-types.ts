@@ -1553,6 +1553,14 @@ export interface DKGAgentConfig {
    * every StorageACK, because it could not promote the ACKed data to VM.
    */
   vmReconcilerEnabled?: boolean;
+  /**
+   * Switch for the VM exact-recovery holder tier: ShardingTable Cores the node
+   * is not connected to, named by an unsigned phonebook profile and bound to a
+   * ShardingTable identity on chain, that recovery may dial behind the curator
+   * and connected-peer tiers. Env DKG_VM_RECONCILE_HOLDER_TIER wins (`0` is the
+   * kill switch); default on. Per instance: two agents in one process can differ.
+   */
+  vmReconcileHolderTierEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */

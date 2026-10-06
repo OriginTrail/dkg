@@ -552,6 +552,19 @@ export function resolveVmReconcilerEnabled(configValue?: boolean): boolean {
   );
 }
 
+/** Effective activation of the VM exact-recovery holder tier: the ShardingTable
+ * holders a recovery pass may dial although the node is not connected to them
+ * (`vm-reconcile-holder-tier.ts`). Same precedence as every other switch here:
+ * environment (`DKG_VM_RECONCILE_HOLDER_TIER`, the operator kill switch), then
+ * config, then the default (on). */
+export function resolveVmReconcileHolderTierEnabled(configValue?: boolean): boolean {
+  return resolveBooleanSwitch(
+    configValue,
+    'DKG_VM_RECONCILE_HOLDER_TIER',
+    true,
+  );
+}
+
 function parseIntegerEnv(name: string): number | undefined {
   const raw = process.env[name]?.trim();
   if (!raw) return undefined;
