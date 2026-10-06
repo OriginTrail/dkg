@@ -172,16 +172,27 @@ describe('workspacePublicQuadsDigestMatches', () => {
     expect(stringify).not.toHaveBeenCalled();
   });
 
-  it('stops at the first matching form, so the common case costs one digest', () => {
-    const stringify = vi.spyOn(JSON, 'stringify');
+  it('stops at the first matching form, so the common case sorts and hashes once', () => {
+    // Each form costs one sort of the rows (and one hash), so the sort count is the digest count.
+    const sort = vi.spyOn(Array.prototype, 'sort');
     expect(workspacePublicQuadsDigestMatches(DIVERGENT_QUADS, enUS)).toBe(true);
-    // Rows are serialised once, however many forms are tried.
-    expect(stringify).toHaveBeenCalledTimes(DIVERGENT_QUADS.length);
+    expect(sort).toHaveBeenCalledTimes(1);
   });
 
-  it('serialises the rows once even when every form is tried', () => {
+  it('tries every accepted form, one sort each, before it reports a mismatch', () => {
     useAmbientCollation('da-DK');
+    const sort = vi.spyOn(Array.prototype, 'sort');
+    expect(workspacePublicQuadsDigestMatches(DIVERGENT_QUADS, `sha256:${'1'.repeat(64)}`)).toBe(false);
+    // The node's own da-DK form, code-unit order and the pinned en-US form.
+    expect(sort).toHaveBeenCalledTimes(3);
+  });
+
+  it('serialises the rows once, however many forms are tried', () => {
     const stringify = vi.spyOn(JSON, 'stringify');
+    expect(workspacePublicQuadsDigestMatches(DIVERGENT_QUADS, enUS)).toBe(true);
+    expect(stringify).toHaveBeenCalledTimes(DIVERGENT_QUADS.length);
+    stringify.mockClear();
+    useAmbientCollation('da-DK');
     expect(workspacePublicQuadsDigestMatches(DIVERGENT_QUADS, `sha256:${'1'.repeat(64)}`)).toBe(false);
     expect(stringify).toHaveBeenCalledTimes(DIVERGENT_QUADS.length);
   });
