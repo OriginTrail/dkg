@@ -114,6 +114,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
   let baseUrl: string;
 
   afterEach(async () => {
+    daemonState.promoteWorkerAvailable = false;
     if (server) {
       await new Promise<void>((resolve, reject) => {
         server!.close((err) => (err ? reject(err) : resolve()));
@@ -494,6 +495,51 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
     const res = await post('swm/share', { contextGraphId: CG_ID });
     expect(res.status).toBeGreaterThanOrEqual(500);
+  });
+
+  it('swm/share selects a resident pre-signed author lane without changing authorship', async () => {
+    const selected = `0x${'7b'.repeat(20)}`;
+    const calls: any[] = [];
+    await startWith({
+      promote: async (...args: any[]) => {
+        calls.push(args);
+        return { promotedCount: 1, sealed: true, publishReady: true };
+      },
+    });
+
+    const res = await post('swm/share', {
+      contextGraphId: CG_ID,
+      selectedAuthorAgentAddress: selected,
+    });
+
+    expect(res.status).toBe(200);
+    expect(calls[0]?.[2]).toMatchObject({
+      agentAddress: selected,
+      authorAgentAddress: selected,
+    });
+  });
+
+  it('swm/share-async keeps the selected resident author lane in the queued job', async () => {
+    const selected = `0x${'7c'.repeat(20)}`;
+    const calls: any[] = [];
+    daemonState.promoteWorkerAvailable = true;
+    await startWith({
+      promoteAsync: async (...args: any[]) => {
+        calls.push(args);
+        return { jobId: 'selected-author-share' };
+      },
+    });
+
+    const res = await post('swm/share-async', {
+      contextGraphId: CG_ID,
+      selectedAuthorAgentAddress: selected,
+    });
+
+    expect(res.status).toBe(200);
+    expect(calls[0]?.[2]).toMatchObject({
+      agentAddress: selected,
+      authorAgentAddress: selected,
+    });
   });
 
   it('vm/publish-async preflights the immutable share snapshot before enqueue', async () => {

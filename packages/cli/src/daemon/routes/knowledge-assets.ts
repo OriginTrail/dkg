@@ -617,6 +617,18 @@ function resolveSelectedAuthorAgentAddress(
   return { ok: true, value: raw };
 }
 
+function resolvePromoteStorageLane(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+  callerAgentAddress?: string,
+): { agentAddress?: string; authorAgentAddress?: string } | null {
+  const selected = resolveSelectedAuthorAgentAddress(ctx, source);
+  if (!selected.ok) return null;
+  return selected.value === undefined
+    ? scopedTokenPromoteLane(callerAgentAddress)
+    : { agentAddress: selected.value, authorAgentAddress: selected.value };
+}
+
 /**
  * GH#1786 — the create route publishes the KA it just created, whose author is
  * fixed by the create itself, so selecting a foreign resident author there is
@@ -1394,6 +1406,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── SWM verb: share (WM → SWM; OT-RFC-43 §10.6 renames promote → share) ──
     if (layer === "swm" && verb === "share") {
+      const promoteStorageLane = resolvePromoteStorageLane(
+        ctx, parsed, writePreflightCallerAgentAddress,
+      );
+      if (promoteStorageLane === null) return;
       // Per-request opt-in to the strict curator-ack gate (OT-RFC-49). Omitted →
       // agent config default (`swmAwaitCuratorAck`). The promote aborts with 503
       // (mapped in respondAssertionError) if the curator doesn't confirm.
@@ -1427,7 +1443,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           subGraphName,
           awaitCuratorAck,
           skipSeal,
-          ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
+          ...promoteStorageLane,
         });
         if (share.promotedCount !== 0) {
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
@@ -1476,6 +1492,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // `respondAssertionError` catch.
     if (layer === "swm" && verb === "share-async") {
       if (asyncPromoteUnavailable(res)) return;
+      const promoteStorageLane = resolvePromoteStorageLane(
+        ctx, parsed, writePreflightCallerAgentAddress,
+      );
+      if (promoteStorageLane === null) return;
       const entities = parsed.entities;
       if (!validateEntities(entities, res)) return;
       if (Array.isArray(entities)) {
@@ -1502,7 +1522,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const result = await agent.assertion.promoteAsync(contextGraphId, name, {
           entities: entities ?? "all",
           subGraphName,
-          ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
+          ...promoteStorageLane,
         });
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
