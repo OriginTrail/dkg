@@ -1453,9 +1453,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               }]]),
             }
           : undefined;
+        // Never let a live caller inherit a bounded caller's absence proof.
+        const freshnessSuffix = options.freshness === 'bounded' ? ':bounded' : '';
         const flightKey = repairHints === undefined
-          ? `registration-binding:${contextGraphId}`
-          : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}`;
+          ? `registration-binding:${contextGraphId}${freshnessSuffix}`
+          : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}${freshnessSuffix}`;
         const coldResolution = finalizedAuthorityColdResolutionOf(this);
         // A read-authority caller with an already accepted unregistered proof
         // may still need the retained finalized projection to re-establish

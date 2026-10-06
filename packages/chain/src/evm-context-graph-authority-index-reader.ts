@@ -199,6 +199,7 @@ export async function contextGraphFinalizedNameAbsenceAnchorHoldsV1(
     readCurrentFinalized: () => Promise<Readonly<{ number: number; hash: string }>>;
   }>,
 ): Promise<boolean> {
+  options.signal?.throwIfAborted();
   if (options.freshness === 'bounded') {
     const provenByLog = await contextGraphAuthorityProjectionAnchorProvenByLogV1(
       cached,

@@ -1492,9 +1492,9 @@ export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
    */
   freshness?: 'live' | 'bounded';
 }
-/** Options honored only by finalized Context Graph authority projections. */
-export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
-  freshness?: 'live' | 'bounded';
+
+/** Finalized authority projection reads; freshness defaults to live. */
+export interface ContextGraphAuthorityReadOptions extends ChainReadOptions, Pick<ContextGraphLiveAuthorityReadOptions, 'freshness'> {
   /**
    * Finalized Context Graph authority reads only: told how the read was
    * answered. FOUR ways, and a consumer that assumes three will read the

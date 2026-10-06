@@ -258,7 +258,7 @@ import {
   requesterHasDirectLoopbackConnection,
   selectCuratorJoinDialAddress,
 } from './curator-dial-address.js';
-import { ensureCuratorConnectedFromComponents } from './curator-peer-connection.js';
+import { ensureCuratorConnected } from './curator-peer-connection.js';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
@@ -3350,13 +3350,12 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (curatorPeerId !== this.peerId) {
       recordAcceptedBy(curatorPeerId);
       try {
-        await ensureCuratorConnectedFromComponents(
-          this.node,
-          this.peerResolver,
+        await ensureCuratorConnected(
+          { node: this.node, peerResolver: this.peerResolver, log: this.log },
           curatorPeerId,
           AbortSignal.timeout(JOIN_REQUEST_SEND_TIMEOUT_MS),
           ctx,
-          (operationContext, message) => this.log.warn(operationContext, message),
+          (signal) => signal?.throwIfAborted(),
         );
         const sendResult = await this.messenger.sendReliable(
           curatorPeerId,

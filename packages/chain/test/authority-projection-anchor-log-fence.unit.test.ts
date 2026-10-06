@@ -192,6 +192,37 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
 });
 
 describe('contextGraphFinalizedNameAbsenceAnchorHoldsV1', () => {
+  it('defaults to provider-backed validation and compares hashes without case sensitivity', async () => {
+    const cached = projection(LOG_ORIGIN);
+    const readCurrentFinalized = vi.fn(async () => ({ ...cached.finalized, hash: cached.finalized.hash.toUpperCase() }));
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(cached, {}, {
+      currentSource: source(async () => true), contractAddress: STORAGE, readCurrentFinalized,
+    })).resolves.toBe(true);
+    expect(readCurrentFinalized).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a pre-aborted read without touching either source', async () => {
+    const anchorHolds = vi.fn(async () => true);
+    const readCurrentFinalized = vi.fn(async () => ANCHOR.finalized);
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(projection(LOG_ORIGIN), {
+      freshness: 'bounded', signal: AbortSignal.abort(),
+    }, { currentSource: source(anchorHolds), contractAddress: STORAGE, readCurrentFinalized })).rejects.toThrow();
+    expect(anchorHolds).not.toHaveBeenCalled();
+    expect(readCurrentFinalized).not.toHaveBeenCalled();
+  });
+
+  it('does not serve local proof or start fallback after cancellation during the log check', async () => {
+    const controller = new AbortController();
+    const readCurrentFinalized = vi.fn(async () => ANCHOR.finalized);
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(projection(LOG_ORIGIN), {
+      freshness: 'bounded', signal: controller.signal,
+    }, {
+      currentSource: source(async () => { controller.abort(); return true; }),
+      contractAddress: STORAGE, readCurrentFinalized,
+    })).rejects.toThrow();
+    expect(readCurrentFinalized).not.toHaveBeenCalled();
+  });
+
   it('lets a bounded read reuse a log-fenced absence without touching the provider', async () => {
     const readCurrentFinalized = vi.fn(async () => ANCHOR.finalized);
     await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(

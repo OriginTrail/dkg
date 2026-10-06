@@ -60,6 +60,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/index.js';
+import { peekFinalizedAuthorityColdResolution } from '../src/finalized-authority-cold-resolution.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
@@ -2997,6 +2998,47 @@ describe('RFC-64 rollout authority integration', () => {
       kind: 'unavailable',
       reason: 'finalized-name-absence-unaccepted',
     });
+  });
+
+  it('keeps live registration callers separate from a bounded in-flight read', async () => {
+    const contextGraphId = `${AUTHOR}/registration-binding-freshness`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = finalizedAuthoritySnapshot(contextGraphId, [AUTHOR], '0');
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const resolveSnapshots = vi.fn(async (_hashes: readonly string[], options?: ContextGraphAuthorityReadOptions) => {
+      if (options?.freshness === 'bounded') {
+        entered.resolve();
+        await release.promise;
+      }
+      return new Map([[nameHash, snapshot]]);
+    });
+    const edge = await startAgent({
+      name: 'registration-binding-freshness',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    const bounded = edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      freshness: 'bounded', registrationTimeoutMs: 10_000,
+    });
+    await entered.promise;
+    const live = edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      freshness: 'live', registrationTimeoutMs: 10_000,
+    });
+    try {
+      await vi.waitFor(() => expect(peekFinalizedAuthorityColdResolution(edge)?.inFlightKeys).toHaveLength(2));
+    } finally {
+      release.resolve();
+      await Promise.allSettled([bounded, live]);
+    }
+    expect(resolveSnapshots.mock.calls.map((call) => call[1]?.freshness)).toEqual(['bounded', 'live']);
   });
 
   it('resolves a registration binding while a slow authority read holds the serializer', async () => {

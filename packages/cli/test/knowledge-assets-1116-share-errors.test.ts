@@ -542,6 +542,25 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
+  it.each(['swm/share', 'swm/share-async'])('%s rejects another author lane for an agent-scoped caller', async (verb) => {
+    const caller = `0x${'7d'.repeat(20)}`;
+    const token = 'scoped-share-token';
+    let calls = 0;
+    daemonState.promoteWorkerAvailable = true;
+    await startWith({
+      promote: async () => { calls++; return { promotedCount: 1 }; },
+      promoteAsync: async () => { calls++; return { jobId: 'unexpected' }; },
+    }, {
+      resolveAgentByToken: (candidate?: string) => candidate === token ? caller : undefined,
+    }, { requestToken: token, requestAgentAddress: caller });
+    const res = await post(verb, {
+      contextGraphId: CG_ID,
+      selectedAuthorAgentAddress: `0x${'7e'.repeat(20)}`,
+    });
+    expect(res.status).toBe(403);
+    expect(calls).toBe(0);
+  });
+
   it('vm/publish-async preflights the immutable share snapshot before enqueue', async () => {
     let enqueueCalls = 0;
     await startWith({}, {

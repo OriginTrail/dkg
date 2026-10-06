@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { ethers } from 'ethers';
 
 const KA_NUMBER_MASK = (1n << 96n) - 1n;

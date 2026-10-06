@@ -624,6 +624,9 @@ function resolvePromoteStorageLane(
 ): { agentAddress?: string; authorAgentAddress?: string } | null {
   const selected = resolveSelectedAuthorAgentAddress(ctx, source);
   if (!selected.ok) return null;
+  if (!authorizeAgentScopedAuthorClaim(
+    ctx.res, callerAgentAddress, selected.value, SELECTED_AUTHOR_FIELD,
+  )) return null;
   return selected.value === undefined
     ? scopedTokenPromoteLane(callerAgentAddress)
     : { agentAddress: selected.value, authorAgentAddress: selected.value };
