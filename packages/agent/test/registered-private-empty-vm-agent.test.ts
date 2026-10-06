@@ -325,7 +325,9 @@ describe('registered private empty-VM agent guard', () => {
     vi.mocked(state.agent.hasConfirmedMetaState).mockResolvedValueOnce(false);
     state.authority.mockResolvedValueOnce({ outcome: 'denied' });
     const commit = vi.fn();
-    expect(await complete(state.agent, commit)).toMatchObject({ proven: false });
+    const denial = await complete(state.agent, commit);
+    expect(denial).toMatchObject({ proven: false });
+    if (!denial.proven) expect(denial.retryable).not.toBe(true);
     expect(state.authority).toHaveBeenCalledOnce();
     expect(commit).not.toHaveBeenCalled();
   });
@@ -336,7 +338,9 @@ describe('registered private empty-VM agent guard', () => {
     state.authority.mockResolvedValueOnce({ outcome: 'unavailable' });
     expect(await complete(state.agent, commit)).toMatchObject({ proven: false, retryable: true });
     state.authority.mockResolvedValueOnce({ outcome: 'denied' });
-    expect(await complete(state.agent, commit)).toMatchObject({ proven: false });
+    const denial = await complete(state.agent, commit);
+    expect(denial).toMatchObject({ proven: false });
+    if (!denial.proven) expect(denial.retryable).not.toBe(true);
     expect(mocks.proof).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
   });

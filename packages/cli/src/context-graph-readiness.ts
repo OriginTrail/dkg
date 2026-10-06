@@ -10,24 +10,18 @@ import type {
   ContextGraphReadinessProvenance,
   DashboardDB,
 } from '@origintrail-official/dkg-node-ui';
-import {
-  catchupPlaneCompletedWithoutFailure,
-  catchupPlaneProvenByAuthorityHostedEmpty,
-  catchupPlaneProvenByData,
-  catchupPlaneProvenBySelectedScope,
-  catchupPlaneProvenByUnanimousEmpty,
-  catchupPlaneReady,
-  type CatchupPlaneCompletionEvidence,
-} from './catchup-proof.js';
+import type { CatchupPlaneCompletionEvidence } from './catchup-proof.js';
 import type { CatchupJobResult } from './catchup-runner.js';
+import {
+  contextGraphPlaneReadinessVerdict,
+  deriveCatchupReadiness,
+  type DerivedCatchupReadiness,
+} from './context-graph-catchup-readiness-classification.js';
 import { registerContextGraphReadinessEvents } from './context-graph-readiness-events.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
   NO_CONTEXT_GRAPH_PLANE_EVIDENCE,
-  composeContextGraphPlaneEvidence,
-  reduceContextGraphPlaneEvidence,
   type ContextGraphIndependentPlaneEvidence,
-  type ContextGraphPlaneEvidence,
   type ContextGraphReadinessPatch,
 } from './context-graph-readiness-policy.js';
 export { parseProjectSyncedReadinessPayload, type ProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
@@ -250,33 +244,6 @@ export function missingMetadataReadinessPatches(): MissingMetadataReadinessPatch
   };
 }
 
-interface ContextGraphPlaneReadinessVerdict {
-  /** Compatibility/write-readiness: either persisted usable plane opens the graph. */
-  readonly writeReady: boolean;
-  /** Catch-up completion: applicable VM plus SWM when the caller requested it. */
-  readonly requestedPlanesVerified: boolean;
-  readonly missingRequestedDurable: boolean;
-  readonly missingRequestedSharedMemory: boolean;
-}
-
-function contextGraphPlaneReadinessVerdict(input: {
-  durableVerified: boolean;
-  sharedMemoryVerified: boolean;
-  includeSharedMemory: boolean;
-  registration?: 'unregistered';
-}): ContextGraphPlaneReadinessVerdict {
-  const missingRequestedDurable = input.registration !== 'unregistered' && !input.durableVerified;
-  const missingRequestedSharedMemory =
-    input.includeSharedMemory && !input.sharedMemoryVerified;
-  return {
-    writeReady: input.durableVerified || input.sharedMemoryVerified,
-    requestedPlanesVerified:
-      !missingRequestedDurable && !missingRequestedSharedMemory,
-    missingRequestedDurable,
-    missingRequestedSharedMemory,
-  };
-}
-
 export function classifyExistingContextGraphReadiness(input: {
   subscription: ContextGraphSubscriptionReadinessState;
   readiness: ContextGraphReadinessProvenance;
@@ -402,89 +369,6 @@ export function catchupResultHasCleanResponse(result: CatchupJobResult): boolean
     (!result.denied && peerReturnedMetadata);
 }
 
-interface CatchupPlaneReadinessThisRun {
-  /** Whether this plane counts as ready for THIS run's reported job status. */
-  ready: boolean;
-  /**
-   * Whether the evidence is strong enough to PERSIST as sticky readiness
-   * provenance.
-   *
-   * Readiness provenance is carried forward by an OR against
-   * `readinessBeforeCatchup`, so anything recorded here is permanent for the
-   * subscription. Verified content earns it outright, as does the curator's own
-   * word that it hosts an empty graph.
-   *
-   * A unanimous-empty round earns it only when the round was FULLY ACCOUNTED:
-   * every peer the walk attempted actually answered (`failedPeers === 0`).
-   * Emptiness is a verdict derived from ABSENCE of evidence, so it is only as
-   * good as the denominator it was taken over — with peers unaccounted for and
-   * no authoritative curator to anchor it, a single unrelated empty response
-   * produces the same verdict as a genuinely empty graph.
-   *
-   * Splitting it this way keeps both properties that pulled against each other:
-   *
-   * - LIVENESS. The per-run verdict is unchanged, so a graph on a lossy network
-   *   still reports `done` instead of retrying forever. Failing the verdict
-   *   itself closed on unaccounted peers was rejected for exactly that reason.
-   * - NO FROZEN GUESS. Nothing derived from a partial round is written down, so
-   *   a wrong empty verdict cannot outlive the run that produced it.
-   *
-   * This bit is what `statePatch.synced` is built from, and `synced` gates
-   * write preflight (`contextGraphRowIsWritable`), so anything admitted here
-   * grants durable readiness to consumers that never see the job result.
-   */
-  persistable: boolean;
-}
-
-function catchupPlaneReadinessThisRun(input: {
-  result: CatchupJobResult;
-  plane: 'durable' | 'sharedMemory';
-  isPrivate: boolean;
-}): CatchupPlaneReadinessThisRun {
-  const diagnostics = input.result.diagnostics?.[input.plane];
-  const completion = input.result.cleanPlaneCompletions?.[input.plane];
-  const options = { isPrivate: input.isPrivate };
-  // Every attempted peer answered, so the empty verdict was taken over the
-  // whole peer set rather than over whoever happened to reply.
-  const fullyAccounted = (diagnostics?.failedPeers ?? 0) === 0;
-  if (completion) {
-    const provenPositively = catchupPlaneProvenByData(completion)
-      || catchupPlaneProvenBySelectedScope(completion)
-      || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options);
-    const unanimousEmpty = catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
-    return {
-      ready: provenPositively || unanimousEmpty,
-      persistable: provenPositively || (unanimousEmpty && fullyAccounted),
-    };
-  }
-
-  // Backward compatibility for callers that construct a legacy result (for
-  // example, an older in-process runner during a rolling upgrade). New worker
-  // results always carry cleanPlaneCompletions, so aggregate failures are not
-  // used as readiness evidence on the production path. The same fail-closed
-  // rule applies: aggregate counters can show that SOMEBODY answered empty, but
-  // only a content-free, failure-free round proves the plane really is empty.
-  const dataProgress = input.plane === 'durable'
-    ? input.result.dataSynced > 0 ||
-      (input.result.diagnostics?.durable.verifiedPrivateOnlyResponses ?? 0) > 0
-    : input.result.sharedMemorySynced > 0;
-  if (catchupPlaneCompletedWithoutFailure(diagnostics) && dataProgress) {
-    return { ready: true, persistable: true };
-  }
-  // Pass NO completion evidence rather than an all-zero stand-in: the empty
-  // proof consults the raw aggregate counters only when completion evidence is
-  // genuinely absent, and a synthetic `emptyPeers: 0` would read as "the
-  // per-peer view saw no clean empty response" and suppress the legacy path.
-  const ready = catchupPlaneReady(undefined, diagnostics, options);
-  return {
-    ready,
-    // No completion evidence means neither positive proof mode can fire, so
-    // anything true here came from the aggregate empty counter and is subject
-    // to the same fully-accounted requirement.
-    persistable: ready && fullyAccounted,
-  };
-}
-
 export interface ContextGraphCatchupReadinessClassification {
   durablePlane: 'required' | 'not-applicable';
   jobStatus: 'done' | 'failed' | 'denied' | 'partial' | 'unreachable';
@@ -553,81 +437,6 @@ type CatchupTerminalStatus = Pick<
   ContextGraphCatchupReadinessClassification,
   'jobStatus' | 'error'
 >;
-
-interface DerivedCatchupReadiness {
-  readonly statePatch: ContextGraphSubscriptionStatePatch;
-  readonly readinessPatch: ContextGraphReadinessPatch;
-  readonly eventPayload?: ContextGraphCatchupReadinessClassification['eventPayload'];
-  readonly planeReadiness: ContextGraphPlaneReadinessVerdict;
-  readonly madeIncompleteProgress: boolean;
-  readonly sharedMemoryVerified: boolean;
-}
-
-/** Derive sticky readiness independently from the foreground job's terminal status. */
-function deriveCatchupReadiness(input: {
-  result: CatchupJobResult;
-  includeSharedMemory: boolean;
-  isPrivate: boolean;
-  registration?: 'unregistered';
-  readinessBeforeCatchup: ContextGraphReadinessProvenance;
-  cleanPeerEvidence: boolean;
-  independentDurable: ContextGraphPlaneEvidence;
-  independentSharedMemory: ContextGraphPlaneEvidence;
-}): DerivedCatchupReadiness {
-  const {
-    result, includeSharedMemory, isPrivate, registration, readinessBeforeCatchup,
-    cleanPeerEvidence, independentDurable, independentSharedMemory,
-  } = input;
-  const noEvidence = NO_CONTEXT_GRAPH_PLANE_EVIDENCE;
-  const peerDurable = cleanPeerEvidence
-    ? catchupPlaneReadinessThisRun({ result, plane: 'durable', isPrivate })
-    : noEvidence;
-  const peerSharedMemory = cleanPeerEvidence && includeSharedMemory
-    ? catchupPlaneReadinessThisRun({ result, plane: 'sharedMemory', isPrivate })
-    : noEvidence;
-  const durableThisRun = composeContextGraphPlaneEvidence(peerDurable, independentDurable);
-  const sharedMemoryThisRun = composeContextGraphPlaneEvidence(
-    peerSharedMemory, independentSharedMemory,
-  );
-  const reduced = reduceContextGraphPlaneEvidence(readinessBeforeCatchup, {
-    durable: durableThisRun,
-    sharedMemory: sharedMemoryThisRun,
-  });
-  const { durableVerified, sharedMemoryVerified } = reduced.observed;
-  const planeReadiness = contextGraphPlaneReadinessVerdict({
-    durableVerified,
-    sharedMemoryVerified,
-    includeSharedMemory,
-    registration,
-  });
-  const durableReadyThisRun = durableThisRun.ready;
-  const sharedMemoryReadyThisRun = sharedMemoryThisRun.ready;
-  return {
-    planeReadiness,
-    madeIncompleteProgress:
-      (result.dataSynced > 0 && !durableReadyThisRun)
-      || (result.sharedMemorySynced > 0 && !sharedMemoryReadyThisRun),
-    sharedMemoryVerified,
-    statePatch: {
-      synced: reduced.writeReady,
-      sharedMemorySynced: reduced.persisted.sharedMemoryVerified,
-      metaSynced: true,
-      pendingMeta: false,
-    },
-    readinessPatch: reduced.persisted,
-    eventPayload: durableReadyThisRun || sharedMemoryReadyThisRun
-      ? {
-          dataSynced: durableReadyThisRun ? result.dataSynced : 0,
-          sharedMemorySynced: sharedMemoryReadyThisRun ? result.sharedMemorySynced : 0,
-          verifiedPrivateOnlyResponses: durableReadyThisRun
-            ? result.cleanPlaneCompletions?.durable.verifiedPrivateOnlyPeers
-              ?? result.diagnostics?.durable.verifiedPrivateOnlyResponses
-              ?? 0
-            : 0,
-        }
-      : undefined,
-  };
-}
 
 /** Select one terminal job outcome after readiness derivation has completed. */
 function selectCatchupTerminalStatus(input: {
