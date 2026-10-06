@@ -1,11 +1,12 @@
 import { peerIdFromString } from '@libp2p/peer-id';
 import type { PeerId } from '@libp2p/interface';
 import { multiaddr, type Component, type Multiaddr } from '@multiformats/multiaddr';
-import { isPublicLikeAddress } from './address-policy.js';
-import type { Address, NodeIdentity, PeerConnectOpts } from './network.js';
+import { isPublicLikeAddress, isUnspecifiedAddress } from './address-policy.js';
+import type { Address, NodeIdentity, PeerConnectOpts, PeerRecoveryStageOpts } from './network.js';
 import { PeerConnectionUnresolvedError } from './network.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 import type { ConfiguredRelayTarget } from './relay-target.js';
+import { startRequestAbortLifecycle } from '../request-abort-lifecycle.js';
 
 export interface Libp2pConnectHost {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -50,9 +51,15 @@ function targetPeerId(components: readonly Component[], start = 0): string | und
     .at(-1);
 }
 
-export function parseLibp2pConnectCandidate(raw: string): Libp2pConnectCandidate {
+export function parseLibp2pConnectCandidate(
+  raw: string,
+  options: { requireTerminalTargetPeerId?: boolean } = {},
+): Libp2pConnectCandidate {
   const parsed = multiaddr(raw);
   const components = parsed.getComponents();
+  if (options.requireTerminalTargetPeerId && components.at(-1)?.name !== 'p2p') {
+    throw new Libp2pConnectCandidateParseError('Multiaddr must end with a target peer id');
+  }
   const circuitIndex = components.findIndex((component) => component.name === 'p2p-circuit');
   if (circuitIndex === -1) {
     const rawTarget = targetPeerId(components);
@@ -102,6 +109,7 @@ function planLibp2pPeerConnectionCandidates(
   peerId: NodeIdentity,
   resolvedAddresses: readonly Address[],
   configuredRelayTargets: readonly ConfiguredRelayTarget[] = [],
+  allowResolvedPrivateDirect = false,
 ): Libp2pConnectCandidate[] {
   const canonicalPeerId = peerIdFromString(peerId).toString();
   const planned: Libp2pConnectCandidate[] = [];
@@ -110,13 +118,26 @@ function planLibp2pPeerConnectionCandidates(
 
   const appendCandidate = (rawAddress: Address): Libp2pConnectCandidate | undefined => {
     try {
-      const candidate = parseLibp2pConnectCandidate(rawAddress);
+      let candidate = parseLibp2pConnectCandidate(rawAddress);
       if (
         candidate.targetPeerId !== undefined
         && candidate.targetPeerId !== canonicalPeerId
       ) return undefined;
       if (candidate.kind === 'direct' && !isPublicLikeAddress(candidate.address)) {
-        return undefined;
+        if (!allowResolvedPrivateDirect) return undefined;
+        // Resolver results are keyed to the requested peer when written to the
+        // peer store, but libp2p routing commonly returns targetless private
+        // listeners. Bind those listeners before dialing so identity remains
+        // explicit without discarding the newly resolved route.
+        const boundAddress = candidate.targetPeerId === undefined
+          ? `${candidate.address}/p2p/${canonicalPeerId}`
+          : candidate.address;
+        const bound = parseLibp2pConnectCandidate(boundAddress, {
+          requireTerminalTargetPeerId: true,
+        });
+        if (bound.kind !== 'direct' || bound.targetPeerId !== canonicalPeerId) return undefined;
+        if (isUnspecifiedAddress(bound.address)) return undefined;
+        candidate = bound;
       }
       if (!seen.has(candidate.address)) {
         seen.add(candidate.address);
@@ -130,7 +151,9 @@ function planLibp2pPeerConnectionCandidates(
 
   for (const address of resolvedAddresses) {
     const candidate = appendCandidate(address);
-    if (candidate?.kind === 'direct') hasPublicDirect = true;
+    if (candidate?.kind === 'direct' && isPublicLikeAddress(candidate.address)) {
+      hasPublicDirect = true;
+    }
   }
 
   if (hasPublicDirect) return planned;
@@ -250,10 +273,52 @@ export async function connectLibp2pCandidate(
   }
 }
 
+/** Transport-owned recovery dial. The resolver owns stage order and deadlines. */
+export async function tryConnectLibp2pRecoveryStage(
+  host: Libp2pConnectHost,
+  peerId: NodeIdentity,
+  stage: PeerRecoveryStageOpts,
+): Promise<boolean> {
+  throwIfAborted(stage.signal);
+  const canonicalPeerId = peerIdFromString(peerId).toString();
+  const isConnected = (): boolean => host.getConnections().some(
+    (connection) => connection.remotePeer.toString() === canonicalPeerId,
+  );
+  if (isConnected()) return true;
+
+  if (stage.kind === 'hint') {
+    if (!stage.address) return false;
+    const candidate = parseLibp2pConnectCandidate(stage.address, {
+      requireTerminalTargetPeerId: true,
+    });
+    // A recovery hint may be private, but must bind to the exact requested peer.
+    if (candidate.targetPeerId !== canonicalPeerId) return false;
+    await connectLibp2pCandidate(host, candidate, {
+      expectedPeerId: canonicalPeerId,
+      signal: stage.signal,
+      timeoutMs: stage.timeoutMs,
+      log: stage.log,
+    });
+    return isConnected();
+  }
+
+  const lifecycle = startRequestAbortLifecycle(stage.timeoutMs, [stage.signal]);
+  try {
+    await host.dial(peerIdFromString(canonicalPeerId), { signal: lifecycle.signal });
+    if (lifecycle.signal.aborted) throw lifecycle.signal.reason;
+    throwIfAborted(stage.signal);
+    return isConnected();
+  } finally {
+    lifecycle.release();
+  }
+}
+
 /**
  * Canonical libp2p implementation of PeerConnectionNetwork.connectPeer(). Resolver output is
- * attempted in order, with private direct addresses ignored, before one final
- * peer-id fallback. Candidate-local timeouts never masquerade as caller aborts.
+ * attempted in order, with private direct addresses normally left in the peer
+ * store, before one final peer-id fallback. Recovery can explicitly try newly
+ * resolved peer-bound private routes before configured relays. Candidate-local
+ * timeouts never masquerade as caller aborts.
  */
 export async function connectLibp2pPeer(
   host: Libp2pConnectHost,
@@ -275,6 +340,7 @@ export async function connectLibp2pPeer(
     canonicalPeerId,
     resolvedAddresses,
     options.configuredRelayTargets,
+    options.allowResolvedPrivateDirect,
   );
 
   let lastCandidateError: unknown;
@@ -295,6 +361,10 @@ export async function connectLibp2pPeer(
   }
 
   throwIfAborted(options.signal);
+  if (options.skipIdentityFallback) {
+    if (lastCandidateError !== undefined) throw lastCandidateError;
+    throw new PeerConnectionUnresolvedError();
+  }
   try {
     await host.dial(
       peerIdFromString(canonicalPeerId),
