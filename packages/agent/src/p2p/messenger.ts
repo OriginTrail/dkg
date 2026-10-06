@@ -123,14 +123,8 @@ class MessengerResponseRejectedError extends Error {
 }
 
 function isRecoverableMessengerSendError(err: unknown, errMsg: string): boolean {
-  // `isRetryableLaterSendError`, not `isRecoverableSendError`: the router no
-  // longer retries a peer that refuses the protocol inside one `send()`, but
-  // the durable outbox keeps such a message queued. multistream answers "no
-  // such protocol" for a peer that is still booting (or about to be upgraded)
-  // exactly as it does for one that never will, and a queued message costs one
-  // backoff-ladder retry per interval while a thrown one is simply lost.
   return err instanceof MessengerResponseRejectedError ||
-    isRetryableLaterSendError(err) ||
+    isRetryableLaterSendError(err) || // not isRecoverableSendError: a refused protocol stays queued for the outbox
     shouldTriggerDhtWalk(errMsg);
 }
 

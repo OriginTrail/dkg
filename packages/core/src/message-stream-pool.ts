@@ -315,16 +315,9 @@ export interface PerPeerStats {
 }
 
 /**
- * Error returned to callers whose request was rejected by stream
- * teardown / pool close. `classifyTransportError` recognises it by
- * `name` (so it stays retryable whatever the wording), and the message
- * still contains "reset" for consumers that only see the text.
- *
- * `detail` is the underlying message, embedded verbatim. When the
- * teardown was caused by another error, pass it as `options.cause`:
- * the classifier looks through this wrapper at the cause, so a wrapped
- * `UnsupportedProtocolError` is still recognised as "the peer does not
- * speak this protocol" rather than as a plain (retryable) reset.
+ * Error returned to callers whose request was rejected by stream teardown / pool close.
+ * `classifyTransportError` recognises it by `name` (retryable whatever the wording) and looks through it at
+ * `options.cause`, so a wrapped `UnsupportedProtocolError` is still a protocol refusal, not a plain reset.
  */
 export class PooledStreamResetError extends Error {
   constructor(detail: string, options?: { cause?: unknown }) {
@@ -1347,9 +1340,7 @@ export class MessageStreamPool {
 
   private toResetError(err: unknown, fallback: string): PooledStreamResetError {
     if (err instanceof PooledStreamResetError) return err;
-    // Keep the original error as `cause` so its typed name survives the
-    // wrapper (the message is unchanged).
-    if (err instanceof Error) return new PooledStreamResetError(err.message, { cause: err });
+    if (err instanceof Error) return new PooledStreamResetError(err.message, { cause: err }); // keeps the typed name
     return new PooledStreamResetError(fallback);
   }
 }
