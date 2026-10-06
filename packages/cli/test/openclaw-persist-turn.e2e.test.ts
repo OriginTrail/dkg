@@ -2,14 +2,13 @@
  * E2E: the `persist-turn` routes of the local-agent channels over real HTTP, into
  * a real store, and the dashboard's chat-history routes over what they wrote.
  *
- * Nothing under test is mocked. A real `DKGAgent` (real libp2p, real Oxigraph
- * store, `MockChainAdapter` for the chain) backs the daemon's real chat-memory
- * stack (`buildChatMemoryStack`, the same wiring `runDaemonInner` uses), and the
- * real OpenClaw, Hermes and Prime Agent route handlers and the dashboard's
- * chat-history handler (`handleNodeUIRequest`, which serves
- * `GET /api/memory/sessions[/:id]`) sit behind a real `http.Server`. Each test
- * POSTs like the adapters do, then reads the `'chat-turns'` Working Memory
- * assertion back with SPARQL and through the chat memory manager.
+ * Nothing under test is mocked. The stack (a real `DKGAgent` with a real Oxigraph
+ * store, the daemon's real chat-memory wiring, the real OpenClaw, Hermes and Prime
+ * Agent route handlers and the dashboard's chat-history handler behind a real
+ * `http.Server`) lives in `_helpers/persist-turn-fixture.ts`. Each test POSTs
+ * like the adapters do, then reads the `'chat-turns'` Working Memory assertion
+ * back with SPARQL, through the chat memory manager and through the history
+ * routes (`GET /api/memory/sessions[/:id[/graph-delta]]`).
  *
  * The OpenClaw tests read a footprint (Message and state counts, not ChatTurn
  * subjects) through the helper this tier shares with the devnet suite; see
@@ -19,154 +18,55 @@
  * (its duplicate check, its transitions) is keyed by `(sessionId, turnId)`.
  * `describe.each(CHANNELS)` reuses one turn id in two sessions behind each of the
  * three routes. The legacy-subject `describe` reads turns that were stored under
- * the subject scheme that shared one subject per turn id. The next `describe`
- * reads the session list and the single-session route over turns that completed
- * by transition, and the last repeats those reads on a working-memory view that
- * spans more than one graph. Every other test uses its own random turn id as well
- * as its own session, so a failure in one cannot be caused by another's turns.
+ * the subject scheme that shared one subject per turn id (written by
+ * `_helpers/legacy-chat-turn.ts`). The next `describe` reads the session list, the
+ * single-session route and the graph delta over turns that completed by
+ * transition, and the last repeats those reads on a working-memory view that
+ * spans more than one graph: its `beforeAll` changes the graph layout of the
+ * suite's one shared agent, so it stays last. Every other test uses its own
+ * random turn id as well as its own session, so a failure in one cannot be
+ * caused by another's turns.
  */
 import { randomUUID } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '@origintrail-official/dkg-agent';
-import {
-  AGENT_CONTEXT_GRAPH,
-  CHAT_TURNS_ASSERTION,
-  handleNodeUIRequest,
-  type ChatMemoryManager,
-} from '@origintrail-official/dkg-node-ui';
-import { buildChatMemoryStack, resolveMemoryAgentAddress } from '../src/daemon.js';
-import { handleHermesRoutes } from '../src/daemon/routes/hermes.js';
-import { handleOpenclawRoutes } from '../src/daemon/routes/openclaw.js';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, type ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import { primeAgentDkgSessionId } from '../src/daemon/prime-agent.js';
-import { handlePrimeAgentRoutes } from '../src/daemon/routes/prime-agent.js';
-import { ONE_STORED_TURN, lexicalTerm, readChatTurnFootprint } from './_helpers/chat-turn-footprint.js';
-import { requestAuthentication } from './_helpers/request-authentication.js';
+import { ONE_STORED_TURN, completedByTransition } from './_helpers/chat-turn-footprint.js';
+import {
+  CHAT,
+  DKG,
+  RDF_TYPE_IRI,
+  SCHEMA_ORG,
+  createLegacyChatTurnWriter,
+  legacySubject,
+  scopedSubject,
+} from './_helpers/legacy-chat-turn.js';
+import {
+  PERSIST_TURN,
+  createPersistTurnFixture,
+  type HistoryMessage,
+  type PersistResponse,
+} from './_helpers/persist-turn-fixture.js';
 
-const PERSIST_TURN = '/api/openclaw-channel/persist-turn';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+const fixture = createPersistTurnFixture();
 let agent: DKGAgent;
 let memoryManager: ChatMemoryManager;
 let agentAddress: string;
-let server: Server;
-let baseUrl: string;
+const { persistTurn, listed, single, select, footprint } = fixture;
+const { writeLegacyTurn, writeStoredTransition } = createLegacyChatTurnWriter(() => fixture);
 
 beforeAll(async () => {
-  agent = await DKGAgent.create({
-    name: 'OpenClawPersistTurnE2E',
-    listenHost: '127.0.0.1',
-    nodeRole: 'edge',
-    chainAdapter: new MockChainAdapter(),
-    rfc64CatalogActivation: { enabled: false },
-  });
-  await agent.start();
-
-  agentAddress = resolveMemoryAgentAddress(agent);
-  ({ manager: memoryManager } = buildChatMemoryStack({
-    agent,
-    emitMemoryGraphChanged: () => {},
-    llmConfig: { apiKey: '' },
-    agentAddress,
-  }));
-
-  server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const ctx = {
-      req,
-      res,
-      agent,
-      config: { name: 'openclaw-persist-turn-e2e', apiPort: 0, listenPort: 0, nodeRole: 'edge' },
-      memoryManager,
-      bridgeAuthToken: 'bridge-token',
-      extractionStatus: new Map(),
-      url,
-      path: url.pathname,
-      requestAgentAddress: agentAddress,
-      authentication: requestAuthentication({ kind: 'nodeOperator' }),
-    } as any;
-    // The three local-agent channels, each with its own persist-turn route, all
-    // in front of the one real chat-memory stack.
-    for (const handle of [handleOpenclawRoutes, handleHermesRoutes, handlePrimeAgentRoutes]) {
-      await handle(ctx);
-      if (res.writableEnded) break;
-    }
-    // The dashboard's chat-history routes (`GET /api/memory/sessions[/:id]`), the
-    // same handler the daemon runs, over the same real manager.
-    if (!res.writableEnded) {
-      await handleNodeUIRequest(req, res, url, {} as any, '.', undefined, undefined, undefined, memoryManager);
-    }
-    if (!res.writableEnded) {
-      res.statusCode = 404;
-      res.end('{}');
-    }
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('route server did not bind');
-  baseUrl = `http://127.0.0.1:${address.port}`;
+  await fixture.start();
+  ({ agent, memoryManager, agentAddress } = fixture);
 }, 60_000);
 
-afterAll(async () => {
-  await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
-  await agent?.stop().catch(() => {});
-});
-
-interface PersistResponse {
-  status: number;
-  body: { ok?: boolean; duplicate?: boolean; transitioned?: boolean; turnId?: string; sessionId?: string; error?: string };
-}
-
-/** POST one turn the way the OpenClaw adapter's `DkgClient.storeChatTurn` does. */
-async function persistTurn(payload: Record<string, unknown>, path = PERSIST_TURN): Promise<PersistResponse> {
-  const response = await fetch(`${baseUrl}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  return { status: response.status, body: await response.json() as PersistResponse['body'] };
-}
-
-type HistoryMessage = { author: string; text: string };
-
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`);
-  expect(response.status).toBe(200);
-  return await response.json() as T;
-}
-
-/** The session as `GET /api/memory/sessions` lists it. */
-async function listed(sessionId: string): Promise<HistoryMessage[] | undefined> {
-  const { sessions } = await getJson<{ sessions: Array<{ session: string; messages: HistoryMessage[] }> }>('/api/memory/sessions?limit=100');
-  return sessions.find((entry) => entry.session === sessionId)?.messages.map(({ author, text }) => ({ author, text }));
-}
-
-/** The session as `GET /api/memory/sessions/:id` returns it. */
-async function single(sessionId: string): Promise<HistoryMessage[]> {
-  const { messages } = await getJson<{ messages: HistoryMessage[] }>(`/api/memory/sessions/${encodeURIComponent(sessionId)}`);
-  return messages.map(({ author, text }) => ({ author, text }));
-}
+afterAll(() => fixture.stop());
 
 const newSessionId = () => `openclaw:e2e:${randomUUID()}`;
 const newTurnId = () => `turn-${randomUUID()}`;
-/** The subject a new turn of `(sessionId, turnId)` is written under: the URI-encoded JSON of the pair. */
-const scopedSubject = (sessionId: string, turnId: string) =>
-  `urn:dkg:chat:session-turn:${encodeURIComponent(JSON.stringify([sessionId, turnId]))}`;
-
-async function select(sparql: string): Promise<Array<Record<string, string>>> {
-  const result = await agent.query(sparql, {
-    contextGraphId: AGENT_CONTEXT_GRAPH,
-    view: 'working-memory',
-    agentAddress,
-    assertionName: CHAT_TURNS_ASSERTION,
-  });
-  return (result.bindings ?? []) as Array<Record<string, string>>;
-}
-
-/** Everything one `(sessionId, turnId)` left in the chat-turns assertion. */
-const footprint = (sessionId: string, turnId: string) =>
-  readChatTurnFootprint(select, lexicalTerm, sessionId, turnId);
 
 const USER_TEXT = 'what is a knowledge asset?';
 const ASSISTANT_TEXT = 'A knowledge asset is a verifiable unit of knowledge.';
@@ -279,14 +179,7 @@ describe('OpenClaw persist-turn over real HTTP into a real store', () => {
     expect(pending.body).toEqual({ ok: true, turnId });
     expect(stored.body).toEqual({ ok: true, transitioned: true, turnId });
     expect(resend.body).toEqual({ ok: true, duplicate: true, turnId });
-    expect(await footprint(sessionId, turnId)).toEqual({
-      turns: 1,
-      messages: 2,
-      userMessages: 1,
-      assistantMessages: 1,
-      states: ['pending'],
-      transitions: [{ state: 'stored', assistantReply: 'the final answer' }],
-    });
+    expect(await footprint(sessionId, turnId)).toEqual(completedByTransition('pending', 'the final answer'));
     expect(await memoryManager.getChatTurnPersistenceState(sessionId, turnId)).toBe('stored');
     const session = await memoryManager.getSession(sessionId);
     expect(session?.messages).toHaveLength(2);
@@ -339,14 +232,7 @@ describe('OpenClaw persist-turn over real HTTP into a real store', () => {
     expect(failedResend.body).toEqual({ ok: true, duplicate: true, turnId });
     expect(recovered.body).toEqual({ ok: true, transitioned: true, turnId });
     expect(lateFailure.body).toEqual({ ok: true, duplicate: true, turnId });
-    expect(await footprint(sessionId, turnId)).toEqual({
-      turns: 1,
-      messages: 2,
-      userMessages: 1,
-      assistantMessages: 1,
-      states: ['failed'],
-      transitions: [{ state: 'stored', assistantReply: 'recovered answer' }],
-    });
+    expect(await footprint(sessionId, turnId)).toEqual(completedByTransition('failed', 'recovered answer'));
     expect(await memoryManager.getChatTurnPersistenceState(sessionId, turnId)).toBe('stored');
   });
 
@@ -508,14 +394,7 @@ describe.each(CHANNELS)('$name: one turn id reused by two sessions, against the 
       ['agent', 'final answer of b', 'stored'],
     ]);
     expect(await footprint(channel.storeSessionId(sessionA), turnId)).toEqual(ONE_STORED_TURN);
-    expect(await footprint(channel.storeSessionId(sessionB), turnId)).toEqual({
-      turns: 1,
-      messages: 2,
-      userMessages: 1,
-      assistantMessages: 1,
-      states: ['pending'],
-      transitions: [{ state: 'stored', assistantReply: 'final answer of b' }],
-    });
+    expect(await footprint(channel.storeSessionId(sessionB), turnId)).toEqual(completedByTransition('pending', 'final answer of b'));
   });
 
   it('pending in session-a, then stored in session-b: a can still complete afterwards', async () => {
@@ -548,14 +427,7 @@ describe.each(CHANNELS)('$name: one turn id reused by two sessions, against the 
       ['agent', 'answer of b', 'stored'],
     ]);
     expect(await footprint(channel.storeSessionId(sessionB), turnId)).toEqual(ONE_STORED_TURN);
-    expect(await footprint(channel.storeSessionId(sessionA), turnId)).toEqual({
-      turns: 1,
-      messages: 2,
-      userMessages: 1,
-      assistantMessages: 1,
-      states: ['pending'],
-      transitions: [{ state: 'stored', assistantReply: 'final answer of a' }],
-    });
+    expect(await footprint(channel.storeSessionId(sessionA), turnId)).toEqual(completedByTransition('pending', 'final answer of a'));
   });
 
   it('stored in session-a, then failed in session-b: b recovers on its own and a late failure of b stays a duplicate', async () => {
@@ -585,14 +457,7 @@ describe.each(CHANNELS)('$name: one turn id reused by two sessions, against the 
       ['agent', 'recovered answer of b', 'stored'],
     ]);
     expect(await footprint(channel.storeSessionId(sessionA), turnId)).toEqual(ONE_STORED_TURN);
-    expect(await footprint(channel.storeSessionId(sessionB), turnId)).toEqual({
-      turns: 1,
-      messages: 2,
-      userMessages: 1,
-      assistantMessages: 1,
-      states: ['failed'],
-      transitions: [{ state: 'stored', assistantReply: 'recovered answer of b' }],
-    });
+    expect(await footprint(channel.storeSessionId(sessionB), turnId)).toEqual(completedByTransition('failed', 'recovered answer of b'));
   });
 
   it('pending in both sessions: each completes with its own reply, and a completed session never masks or rewrites the other', async () => {
@@ -643,57 +508,6 @@ describe.each(CHANNELS)('$name: one turn id reused by two sessions, against the 
  * previous `storeChatExchange` produced, not through the current manager.
  */
 describe('turns stored under the legacy turn subject, against the real store', () => {
-  const CHAT = 'urn:dkg:chat:';
-  const SCHEMA_ORG = 'http://schema.org/';
-  const DKG = 'http://dkg.io/ontology/';
-  const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-  const XSD_DATETIME_IRI = 'http://www.w3.org/2001/XMLSchema#dateTime';
-  const legacySubject = (turnId: string) => `${CHAT}turn:${turnId}`;
-
-  /** What `storeChatExchange` wrote for a turn with a turn id before session-scoped subjects. */
-  async function writeLegacyTurn(
-    sessionId: string,
-    turnId: string,
-    turnState: { persistenceState: 'stored' | 'failed' | 'pending'; userText: string; assistantText: string; failureReason?: string },
-  ): Promise<void> {
-    await memoryManager.ensureInitialized();
-    const suffix = randomUUID().slice(0, 8);
-    const session = `${CHAT}session:${sessionId}`;
-    const turnUri = legacySubject(turnId);
-    const user = `${CHAT}msg:legacy-user-${suffix}`;
-    const assistant = `${CHAT}msg:legacy-assistant-${suffix}`;
-    const at = new Date();
-    const stamp = (offsetMs: number) => `"${new Date(at.getTime() + offsetMs).toISOString()}"^^<${XSD_DATETIME_IRI}>`;
-    const quad = (subject: string, predicate: string, object: string) => ({ subject, predicate, object, graph: '' });
-    await agent.assertion.write(AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, [
-      quad(session, RDF_TYPE_IRI, `${SCHEMA_ORG}Conversation`),
-      quad(session, `${DKG}sessionId`, `"${sessionId}"`),
-      quad(user, RDF_TYPE_IRI, `${SCHEMA_ORG}Message`),
-      quad(user, `${SCHEMA_ORG}isPartOf`, session),
-      quad(user, `${SCHEMA_ORG}author`, `${CHAT}actor:user`),
-      quad(user, `${SCHEMA_ORG}dateCreated`, stamp(0)),
-      quad(user, `${SCHEMA_ORG}text`, JSON.stringify(turnState.userText)),
-      quad(assistant, RDF_TYPE_IRI, `${SCHEMA_ORG}Message`),
-      quad(assistant, `${SCHEMA_ORG}isPartOf`, session),
-      quad(assistant, `${SCHEMA_ORG}author`, `${CHAT}actor:agent`),
-      quad(assistant, `${SCHEMA_ORG}dateCreated`, stamp(1)),
-      quad(assistant, `${SCHEMA_ORG}text`, JSON.stringify(turnState.assistantText)),
-      quad(assistant, `${DKG}replyTo`, user),
-      quad(turnUri, RDF_TYPE_IRI, `${DKG}ChatTurn`),
-      quad(turnUri, `${SCHEMA_ORG}isPartOf`, session),
-      quad(turnUri, `${DKG}turnId`, JSON.stringify(turnId)),
-      quad(turnUri, `${SCHEMA_ORG}dateCreated`, stamp(0)),
-      quad(turnUri, `${DKG}hasUserMessage`, user),
-      quad(turnUri, `${DKG}hasAssistantMessage`, assistant),
-      quad(turnUri, `${DKG}persistenceState`, JSON.stringify(turnState.persistenceState)),
-      ...(turnState.persistenceState === 'failed' && turnState.failureReason
-        ? [quad(turnUri, `${DKG}failureReason`, JSON.stringify(turnState.failureReason))]
-        : []),
-      quad(user, `${DKG}turnId`, JSON.stringify(turnId)),
-      quad(assistant, `${DKG}turnId`, JSON.stringify(turnId)),
-    ], { agentAddress });
-  }
-
   /** Every ChatTurn subject of the session that carries the turn id. */
   const turnSubjects = async (sessionId: string, turnId: string): Promise<string[]> =>
     (await select(`SELECT ?t WHERE { ?t <${RDF_TYPE_IRI}> <${DKG}ChatTurn> . ?t <${SCHEMA_ORG}isPartOf> <${CHAT}session:${sessionId}> . ?t <${DKG}turnId> ${JSON.stringify(turnId)} }`))
@@ -759,14 +573,7 @@ describe('turns stored under the legacy turn subject, against the real store', (
     // The turn keeps its one legacy subject and the transition points at it.
     expect(await turnSubjects(sessionId, turnId)).toEqual([legacySubject(turnId)]);
     expect(await transitionTargets(turnId)).toEqual([legacySubject(turnId)]);
-    expect(await footprint(sessionId, turnId)).toEqual({
-      turns: 1,
-      messages: 2,
-      userMessages: 1,
-      assistantMessages: 1,
-      states: [legacy.persistenceState],
-      transitions: [{ state: 'stored', assistantReply: 'legacy final answer' }],
-    });
+    expect(await footprint(sessionId, turnId)).toEqual(completedByTransition(legacy.persistenceState, 'legacy final answer'));
     expect(await conversation(sessionId)).toEqual([
       ['user', 'legacy question', 'stored'],
       ['agent', 'legacy final answer', 'stored'],
@@ -849,27 +656,13 @@ describe('turns stored under the legacy turn subject, against the real store', (
     expect((await single(sessionA)).map((message) => message.text)).not.toContain('final answer b');
   });
 
-  /** A completion as the previous code attached it: a `stored` transition on the legacy subject. */
-  async function writeLegacyTransition(turnId: string, assistantReply: string): Promise<void> {
-    const transition = `${CHAT}turn-transition:legacy-${randomUUID().slice(0, 8)}`;
-    const quad = (subject: string, predicate: string, object: string) => ({ subject, predicate, object, graph: '' });
-    await agent.assertion.write(AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, [
-      quad(transition, RDF_TYPE_IRI, `${DKG}ChatTurnPersistenceTransition`),
-      quad(transition, `${DKG}updatesTurn`, legacySubject(turnId)),
-      quad(transition, `${DKG}turnId`, JSON.stringify(turnId)),
-      quad(transition, `${DKG}persistenceState`, JSON.stringify('stored')),
-      quad(transition, `${SCHEMA_ORG}dateCreated`, `"${new Date().toISOString()}"^^<${XSD_DATETIME_IRI}>`),
-      quad(transition, `${DKG}assistantReply`, JSON.stringify(assistantReply)),
-    ], { agentAddress });
-  }
-
   it('a completion on a legacy subject that two sessions share is not listed as either session\'s reply', async () => {
     const [sessionA, sessionB] = [newSessionId(), newSessionId()];
     const turnId = newTurnId();
     await writeLegacyTurn(sessionA, turnId, { persistenceState: 'pending', userText: 'question a', assistantText: 'working on a' });
     await writeLegacyTurn(sessionB, turnId, { persistenceState: 'pending', userText: 'question b', assistantText: 'working on b' });
     // Session A completed, and the transition went onto the subject both sessions share.
-    await writeLegacyTransition(turnId, 'final answer a');
+    await writeStoredTransition(legacySubject(turnId), turnId, 'final answer a');
 
     // The shared subject links both assistant messages, and nothing on the
     // transition says whose completion it is: the list shows neither session
@@ -1035,25 +828,6 @@ describe('chat history routes over a turn that completes by transition, against 
   });
 
   it('lists the reply of the latest stored transition, whatever order the transitions were written in', async () => {
-    const CHAT = 'urn:dkg:chat:';
-    const DKG = 'http://dkg.io/ontology/';
-    const SCHEMA_ORG = 'http://schema.org/';
-    const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-    const XSD_DATETIME_IRI = 'http://www.w3.org/2001/XMLSchema#dateTime';
-    const quad = (subject: string, predicate: string, object: string) => ({ subject, predicate, object, graph: '' });
-    /** A `stored` transition on `turnSubject`, stamped `at`, written straight to the assertion. */
-    const writeStoredTransition = (turnSubject: string, turnId: string, at: Date, assistantReply: string) => {
-      const transition = `${CHAT}turn-transition:order-${randomUUID().slice(0, 8)}`;
-      return agent.assertion.write(AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, [
-        quad(transition, RDF_TYPE_IRI, `${DKG}ChatTurnPersistenceTransition`),
-        quad(transition, `${DKG}updatesTurn`, turnSubject),
-        quad(transition, `${DKG}turnId`, JSON.stringify(turnId)),
-        quad(transition, `${DKG}persistenceState`, JSON.stringify('stored')),
-        quad(transition, `${SCHEMA_ORG}dateCreated`, `"${at.toISOString()}"^^<${XSD_DATETIME_IRI}>`),
-        quad(transition, `${DKG}assistantReply`, JSON.stringify(assistantReply)),
-      ], { agentAddress });
-    };
-
     // The durable-turn owner never writes a second `stored` transition, so
     // the two per turn are written directly: one stamped a minute after the
     // other. Half the turns get the newer one written first, half the older.
@@ -1071,8 +845,8 @@ describe('chat history routes over a turn that completes by transition, against 
       const [subject] = (await select(
         `SELECT ?t WHERE { ?t <${RDF_TYPE_IRI}> <${DKG}ChatTurn> . ?t <${SCHEMA_ORG}isPartOf> <${CHAT}session:${sessionId}> . ?t <${DKG}turnId> ${JSON.stringify(turnId)} }`,
       )).map((row) => row.t.replace(/[<>]/g, ''));
-      const older = () => writeStoredTransition(subject, turnId, new Date(base + 60_000), `older completion ${index}`);
-      const newer = () => writeStoredTransition(subject, turnId, new Date(base + 120_000), `newer completion ${index}`);
+      const older = () => writeStoredTransition(subject, turnId, `older completion ${index}`, new Date(base + 60_000));
+      const newer = () => writeStoredTransition(subject, turnId, `newer completion ${index}`, new Date(base + 120_000));
       for (const write of index % 2 === 0 ? [newer, older] : [older, newer]) await write();
     }
 

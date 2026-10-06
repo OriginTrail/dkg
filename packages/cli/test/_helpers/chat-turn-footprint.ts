@@ -112,3 +112,54 @@ export async function readChatTurnFootprint<Cell>(
       .sort((a, b) => a.state.localeCompare(b.state)),
   };
 }
+
+/** The footprint of a turn first reported as `firstState` that completed by a `stored` transition carrying `reply`: still one exchange. */
+export const completedByTransition = (firstState: 'pending' | 'failed', reply: string): ChatTurnFootprint => ({
+  ...ONE_STORED_TURN,
+  states: [firstState],
+  transitions: [{ state: 'stored', assistantReply: reply }],
+});
+
+export interface GraphDeltaSummary {
+  mode: string | undefined;
+  /** The ChatTurn subjects in the delta. */
+  turns: string[];
+  /** The persistence state(s) carried by the turn subjects themselves. */
+  turnStates: string[];
+  messages: number;
+  /** Each transition node (a resource that points at a turn) with its state, final reply and target. */
+  transitions: Array<{ state: string; reply: string; target: string }>;
+}
+
+/**
+ * What a graph delta (`GET /api/memory/sessions/:id/graph-delta`) says about one
+ * turn: its subject(s) and their states, how many Messages it carries, and every
+ * transition node with its state and reply. The delta is a slice of the graph, so
+ * a turn that completed after it was first written has its first state on the
+ * turn, one exchange, and the completion on a transition. A body that is not a
+ * delta reads as `mode: undefined` with nothing else. Transitions come back
+ * sorted: the stores do not order rows.
+ */
+export function summarizeGraphDelta(
+  delta: { mode?: string; triples?: Array<{ subject: string; predicate: string; object: string }> } | null | undefined,
+): GraphDeltaSummary {
+  const triples = delta?.triples ?? [];
+  const valuesOf = (subject: string, predicate: string) =>
+    triples.filter((t) => t.subject === subject && t.predicate === predicate).map((t) => t.object);
+  const subjectsOfType = (type: string) =>
+    triples.filter((t) => t.predicate === RDF_TYPE && t.object === type).map((t) => t.subject);
+  const turns = subjectsOfType(`${DKG_ONT}ChatTurn`).sort();
+  return {
+    mode: delta?.mode,
+    turns,
+    turnStates: turns.flatMap((turn) => valuesOf(turn, `${DKG_ONT}persistenceState`)).sort(),
+    messages: subjectsOfType(`${SCHEMA}Message`).length,
+    transitions: subjectsOfType(`${DKG_ONT}ChatTurnPersistenceTransition`)
+      .map((subject) => ({
+        state: valuesOf(subject, `${DKG_ONT}persistenceState`)[0],
+        reply: valuesOf(subject, `${DKG_ONT}assistantReply`)[0],
+        target: valuesOf(subject, `${DKG_ONT}updatesTurn`)[0],
+      }))
+      .sort((a, b) => `${a.state}${a.reply}`.localeCompare(`${b.state}${b.reply}`)),
+  };
+}
