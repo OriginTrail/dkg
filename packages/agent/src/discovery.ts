@@ -329,11 +329,11 @@ export class DiscoveryClient implements AgentPeerDiscovery {
    * distinct (agentAddress, peerId) binding, in ascending (agentAddress,
    * peerId) order, at most `limit`, starting strictly after `after`.
    *
-   * Every value is an UNSIGNED profile claim, so nothing a profile says about
-   * itself may decide which rows are read: the order is the binding's own key,
-   * not its `lastSeen` (which only travels along, newest per binding), and
-   * the walk is keyset-paged so a consumer can continue past junk at a rate of
-   * its own choosing (a page costs time that grows with the phonebook, so how
+   * Every value is an UNSIGNED profile claim. The order is the binding's own
+   * key, not its `lastSeen` (which only travels along, newest per binding), so
+   * a publisher chooses where its rows sort but cannot move one ahead by
+   * freshness; and the walk is keyset-paged so a consumer can continue past
+   * junk at a rate of its own choosing (a page costs time that grows with the phonebook, so how
    * fast it gets through a flood is the consumer's bound to state). The
    * `nodeRole`, wallet-shape and peer-id-shape filters are cost bounds (an
    * Edge with the phonebook holds ~1,900 profiles on Base mainnet, about 60 of

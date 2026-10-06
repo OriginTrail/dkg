@@ -88,8 +88,11 @@ export async function resolveHolderPeerHints(
  * nothing): no timers and no state of its own, so the whole policy is
  * unit-testable.
  *
- * The phonebook is unsigned, so nothing about a row may decide whether it is
- * read. The rows are walked in a fixed order in bounded pages, each row is
+ * The phonebook is unsigned, so no claim a row makes about itself may decide
+ * whether it is read. The rows are walked in the order of their own key
+ * (wallet, then peer id: a publisher chooses where its junk sorts, so it can
+ * sit ahead of a holder; position decides when a row is read, not whether) in
+ * bounded pages, each row is
  * checked cheaply first (a well-formed wallet, a plausible peer id, once per
  * wallet), and the caps apply to what the CHAIN then vouches for.
  *

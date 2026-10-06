@@ -1203,6 +1203,21 @@ describe('a satisfied tier keeps walking, so bindings behind junk are verified a
       expect(second.next.cursor).toEqual({ agentAddress: junkWallet(VM_HOLDER_TIER_LOOKUP_CONCURRENCY - 1), peerId: `peer-junk-${VM_HOLDER_TIER_LOOKUP_CONCURRENCY - 1}` });
     });
 
+    it('reports rows left on the phonebook\'s last page when only part of it was asked about', async () => {
+      // 26 rows on one page, so the page has no successor: whether rows are left depends on the wallets it asked about.
+      const world = createWorld({ junk: 20, holders: satisfiedHolders(5) });
+      const first = await resolveHolderScanWindow(world.deps, new Map(), VM_HOLDER_TIER_FRESH_SCAN);
+      expect(first.resolution).toMatchObject({ kind: 'resolved', peerIds: SIX, stats: { pages: 1, rowsLeft: false } });
+      expect(first.next.cursor).toBeUndefined();
+      // No remembered answer and no time: one batch of lookups runs and the rest of the page is left unasked.
+      const second = await resolveHolderScanWindow(world.deps, new Map(), { cursor: undefined, carried: first.next.carried }, undefined, { readBudgetMs: 0 });
+      expect(second.resolution).toMatchObject({
+        kind: 'resolved',
+        peerIds: SIX,
+        stats: { stopped: 'satisfied', lookups: VM_HOLDER_TIER_LOOKUP_CONCURRENCY, rowsLeft: true },
+      });
+    });
+
     it('drops a carried binding whose row is gone once the range holding it has been examined', async () => {
       const world = phonebook();
       const cache: VmHolderIdentityCache = new Map();

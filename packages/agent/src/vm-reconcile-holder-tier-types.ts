@@ -145,7 +145,7 @@ export interface HolderProfilePageRequest {
 }
 
 export interface HolderProfilePage {
-  /** At most `limit` rows, in a fixed order the profiles' own claims do not choose. */
+  /** At most `limit` rows, in the rows' own key order (wallet, then peer id), which a publisher chooses. */
   readonly hints: readonly HolderProfileHint[];
   /** Cursor of the next page; null when the phonebook holds no further core row. */
   readonly next: HolderProfileCursor | null;
@@ -164,9 +164,9 @@ export interface VmHolderHintDeps {
    */
   getIdentityIdForAddress(address: string): Promise<bigint | undefined>;
   /**
-   * One page of core-role phonebook rows. The order is fixed by the rows'
-   * wallet and peer id, never by a freshness claim: nothing a profile says
-   * about itself moves it ahead of another.
+   * One page of core-role phonebook rows. The order is the rows' own key,
+   * wallet then peer id, so a publisher chooses where its rows sort; what it
+   * cannot do is move one ahead of another by a freshness claim.
    */
   listCoreProfileHints(request: HolderProfilePageRequest): Promise<HolderProfilePage>;
   /** This node's own peer id; never a candidate. */

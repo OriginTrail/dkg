@@ -66,7 +66,7 @@ describe('DiscoveryClient.findCoreAgentPeerHintPage', () => {
 
     const page = await discovery.findCoreAgentPeerHintPage({ limit: 10 });
 
-    // The freshest claim does not lead: nothing a profile says about itself picks its place.
+    // The freshest claim does not lead: the order is the row's own key (wallet, then peer id), not lastSeen.
     expect(page.hints.map((hint) => hint.peerId)).toEqual(['peerOld', 'peerFresh', 'peerMid']);
     expect(page.next).toBeNull();
     expect(page.hints[1]).toMatchObject({

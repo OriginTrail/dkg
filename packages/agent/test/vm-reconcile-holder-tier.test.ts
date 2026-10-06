@@ -358,7 +358,7 @@ describe('resolveHolderPeerHints', () => {
     });
   });
 
-  describe('unsigned rows an attacker chooses do not decide which rows are read', () => {
+  describe('junk rows an attacker publishes ahead of a holder delay it but do not keep it out of the walk', () => {
     const FRESH = '2026-09-30T11:59:00.000Z';
     const OLD = '2020-01-01T00:00:00.000Z';
     const junkRow = (i: number): HolderProfileHint => ({

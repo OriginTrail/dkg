@@ -270,20 +270,24 @@ ignored, and any unreadable chain or phonebook fact leaves the peer set
 unchanged.
 
 Because anyone can publish a profile, no claim a profile makes about itself
-(such as how recently it was seen) decides which rows are read; such a claim
+(such as how recently it was seen) moves a row ahead of another; such a claim
 only orders the peers of one identity. The phonebook
-is read in pages of 256 core-role rows in a fixed wallet order, at most four
-pages per resolution, and the peer cap applies to the peers the chain vouches
+is read in pages of 256 core-role rows in wallet order (then peer id), at most
+four pages per resolution. The order is the rows' own key, so a publisher
+chooses where its junk sorts and can place it ahead of the holders; what bounds
+that is that the walk resumes where it stopped, so position decides when a row
+is read, not whether. The peer cap applies to the peers the chain vouches
 for. A resolution asks the chain about at most 256 wallets it has not asked
 about lately (an answer is remembered for 5 minutes when the wallet has no
 identity and 10 when it has). It starts a page read or a chain lookup only
 when the slowest of its kind so far leaves time to end within 8 of its 10
 seconds, so a slow chain or store shortens a resolution instead of timing it
 out. The walk resumes at the first row the last resolution did not examine and
-wraps at the end of the phonebook. How far a resolution gets does not depend on
-how often resolutions run, and a remembered answer only saves a lookup, so it
-can carry a resolution further than one that finds none. It keeps walking when the peers it already has fill the cap or give every
-identity its two, so the bindings it carries from behind a flood of junk are
+wraps at the end of the phonebook. The number of resolutions a walk needs does
+not depend on how far apart they run (the spacing only decides how many answers
+are still remembered), and a remembered answer only saves a lookup, so it can
+carry a resolution further than one that finds none. It keeps walking when the
+peers it already has fill the cap or give every identity its two, so the bindings it carries from behind a flood of junk are
 verified again before they expire.
 
 What is carried is bounded per identity: at most 4 verified peers for each
