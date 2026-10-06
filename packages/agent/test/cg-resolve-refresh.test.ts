@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  PeerResolver,
+  StubNetworkStateRegistry,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   resolveApprovedMemberAcceptanceDecision,
@@ -314,27 +321,60 @@ describe('authoritative private metadata proof', () => {
 
 describe('refreshMetaFromCurator', () => {
   it('resolves a restarted curator by peer ID without trusting resolver status alone', async () => {
-    let resolvedPeerId: string | undefined;
-    let recoveryHint: string | undefined;
+    const directHint = `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`;
+    const recoveryStages: Array<{ peerId: string; kind: string; address?: string }> = [];
+    const connectPeerIds: string[] = [];
+    const warnings: string[] = [];
     let fetched = false;
+    const network = {
+      localId: 'local-peer',
+      localAddresses: [],
+      isStarted: true,
+      start: async () => undefined,
+      stop: async () => undefined,
+      dialProtocol: async () => { throw new Error('not used by curator refresh'); },
+      handle: async () => undefined,
+      unhandle: async () => undefined,
+      getConnections: () => [],
+      addKnownAddresses: async () => undefined,
+      tryConnectRecoveryStage: async (
+        peerId: string,
+        stage: { kind: string; address?: string },
+      ) => {
+        recoveryStages.push({
+          peerId,
+          kind: stage.kind,
+          ...(stage.address === undefined ? {} : { address: stage.address }),
+        });
+        // A transport attempt is not proof of a usable connection. Leave the
+        // connection set empty so PeerResolver must reject this false success.
+        return true;
+      },
+      connectPeer: async (peerId: string) => {
+        connectPeerIds.push(peerId);
+      },
+    };
+    const peerResolver = new PeerResolver({
+      network: network as never,
+      registry: new StubNetworkStateRegistry(),
+      agentDirectory: { findRelayForPeer: async () => null },
+    });
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
-          getConnections: () => [],
+          getConnections: network.getConnections,
         },
       },
-      discovery: { findAgentByPeerId: async () => null },
-      peerResolver: {
-        connect: async (peerId: string, options: { recovery?: { verifiedInitialAddress?: string } }) => {
-          resolvedPeerId = peerId;
-          recoveryHint = options.recovery?.verifiedInitialAddress;
-          return { status: 'connected' as const };
-        },
-      },
+      peerResolver,
       fetchSyncPages: async () => { fetched = true; throw new Error('unexpected fetch'); },
-      log: { warn: noop, info: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: {
+        warn: (_ctx: OperationContext, message: string) => { warnings.push(message); },
+        info: noop,
+      },
     };
 
     const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
@@ -342,15 +382,23 @@ describe('refreshMetaFromCurator', () => {
       'unit-test-cg',
       {
         trustedCuratorPeerId: CURATOR_PEER_ID,
-        curatorDialAddressHint: `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`,
+        curatorDialAddressHint: directHint,
         force: true,
       },
     );
 
-    expect(resolvedPeerId).toBe(CURATOR_PEER_ID);
-    expect(recoveryHint).toBe(`/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`);
+    expect(recoveryStages).toEqual([{
+      peerId: CURATOR_PEER_ID,
+      kind: 'hint',
+      address: directHint,
+    }, {
+      peerId: CURATOR_PEER_ID,
+      kind: 'cached',
+    }]);
+    expect(connectPeerIds).toEqual([CURATOR_PEER_ID]);
     expect(refreshed).toBe(false);
     expect(fetched).toBe(false);
+    expect(warnings).toEqual([]);
   });
 
   it('cancels a pending resolver connection before metadata fetch', async () => {
