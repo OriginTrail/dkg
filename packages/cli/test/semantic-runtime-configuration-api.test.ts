@@ -21,6 +21,7 @@ import { startConfiguredSemanticRuntime, type ConfiguredSemanticRuntimeService }
 import { authenticateHttpRequest } from '../src/auth.js';
 import { signAgentHttpHeaders } from '../src/agent-http-signing.js';
 import { boundSemanticInvocationScope } from '../src/semantic-runtime-bound-invocation.js';
+import { registerLocalLlmProgramProvider } from '../src/semantic-runtime-local-llm-adapter.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { GraphComputer } from '../../graph-computer/src/index.js';
 import { examples as sdkExamples } from '../../graph-computer/examples/programs.mjs';
@@ -193,6 +194,38 @@ async function toolFixture(text: string, permissions: any = { graphId: graph, sp
 }
 
 describe('TypeScript direct tools through shared authorization and effects', () => {
+  it('calls the native LLM from WASM, persists evidence, replays once and rejects revoked access', async () => {
+    const toolIri = 'urn:dkg:tool:safe-llm';
+    const localLlm = { toolIri, configurationSha256: 'a'.repeat(64) };
+    const question = 'What is the stored quantity for order 62994?';
+    const answer = { question, answer: 'Stored quantity: 280.', contextGraphId: graph,
+      evidence: [{ snapshot: 'urn:snapshot:62994', source: 'AFFAIRE', lastSuccessfulFetchAt: '2026-10-06T10:42:10.278Z' }] };
+    const run = vi.fn(async () => answer);
+    const unregister = registerLocalLlmProgramProvider({
+      capability: { ...localLlm, contextGraphId: graph, ownerAgentAddress: owner }, run,
+    });
+    try {
+      const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+        export async function run(question) {
+          const response = await invoke_tool('${toolIri}', { prompt: question });
+          return JSON.parse(response.output);
+        }`, { graphId: graph, localLlm: { toolIri } }, [toolIri]);
+      const approval = await f.approve({ allowedCallers: [owner], localLlm });
+      const input = f.manager.programs.prepareInvocation({ ...f.operation, inputs: [question] });
+      const result = await f.manager.programs.invoke(input);
+      expect(result).toMatchObject({ persisted: true, executionLayer: 'wm', outputs: [answer] });
+      expect(result.trace?.calls).toMatchObject([{ kind: 'tool', target: toolIri, status: 'succeeded' }]);
+      expect(run).toHaveBeenCalledWith(question);
+      const creates = f.agent.assertion.create.mock.calls.length;
+      expect(await f.manager.programs.invoke(input)).toEqual(result);
+      expect(f.agent.assertion.create.mock.calls).toHaveLength(creates);
+      expect(run).toHaveBeenCalledTimes(1);
+      await f.manager.programs.revoke({ ...f.operation, expectedRevision: approval.revision });
+      await expect(f.manager.programs.invoke(input)).rejects.toMatchObject({ status: 403 });
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally { unregister(); }
+  });
+
   it('returns durable tool traces only to the executor and rechecks authority on replay', async () => {
     const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
       export async function run() { const rows = await invoke_tool('${tool}', { sparql: ${JSON.stringify(readQuery)} }); return { count: rows.result.bindings.length }; }`);
@@ -419,6 +452,7 @@ describe('durable Program management API', () => {
     expect(catalog.status).toBe(200);
     expect(catalog.body.tools.map((tool: any) => [tool.kind, tool.definition.operation])).toEqual([
       ['sparqlRead', 'dkg/sparql-read'], ['query', 'dkg/query'], ['assetCreation', 'dkg/asset-create'],
+      ['localLlm', 'llm/safe'],
     ]);
     expect(await request(f.target, 'operator', 'GET', inspect)).toEqual(before);
     for (const identity of ['anonymous', 'disabled-anonymous'] as const)

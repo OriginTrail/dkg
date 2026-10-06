@@ -112,10 +112,13 @@ export interface DkgLocalLlmOptions {
 
 export interface DkgLocalLlmRunOptions {
   signal?: AbortSignal;
+  /** Return the authoritative evidence of this turn for native Program persistence. */
+  captureEvidence?: boolean;
 }
 
 export interface DkgLocalLlmResult {
   answer: string;
+  evidence?: DkgChatEvidence[];
   profile: Exclude<ToolProfile, 'auto'>;
   toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>;
   traceFile?: string;
@@ -745,7 +748,8 @@ export class DkgLocalLlmRuntime {
         if (!answer) throw new Error('Local LLM endpoint returned an empty final answer.');
         await this.trace.write('FINAL ANSWER', answer);
         await this.rememberTurn(prompt, answer, sessionEvidence, signal);
-        return { answer, profile: route.profile, toolCalls: executed, traceFile: this.trace.filePath };
+        return { answer, profile: route.profile, toolCalls: executed, traceFile: this.trace.filePath,
+          ...(options.captureEvidence ? { evidence: sessionEvidence.map(item => ({ ...item, arguments: { ...item.arguments } })) } : {}) };
       }
 
       if (!routedTools.length) {

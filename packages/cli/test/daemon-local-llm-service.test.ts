@@ -7,6 +7,7 @@ import {
   DaemonLocalLlmError,
   resolveDaemonLocalLlmSettings,
 } from '../src/daemon/local-llm-service.js';
+import { createLocalLlmProgramAdapter } from '../src/semantic-runtime-local-llm-adapter.js';
 import { listLocalAgentIntegrations } from '../src/daemon/local-agents.js';
 
 function onlineFetch(): typeof fetch {
@@ -38,6 +39,50 @@ function fakeSession(options: {
 }
 
 describe('daemon local LLM service', () => {
+  it('reports an unavailable Program executor without falling back to direct inference', async () => {
+    const owner = '0x' + '1'.repeat(40);
+    const createSession = vi.fn();
+    const service = createDaemonLocalLlmService({ dkgHome: '/tmp/dkg', env: {
+      DKG_PROJECT: owner + '/jpb-data', DKG_LLM_PROGRAM_AGENT: owner,
+      DKG_LLM_PROGRAM_EXECUTOR: '/reviewed/program.mjs',
+    }, fetch: onlineFetch(), createSession,
+    createProgramExecutor: async () => { throw new Error('JPB_CHAT_APPROVAL_CHANGED'); } });
+    try {
+      expect(await service.health()).toMatchObject({ ready: false, executionMode: 'program', error: 'JPB_CHAT_APPROVAL_CHANGED' });
+      await expect(service.chat({ message: 'Read 62994' })).rejects.toMatchObject({ status: 502, message: 'JPB_CHAT_APPROVAL_CHANGED' });
+      expect(createSession).not.toHaveBeenCalled();
+    } finally { await service.close(); }
+  });
+
+  it('routes Program-mode chat through the approved effect and captures evidence without recursion', async () => {
+    const owner = '0x' + '1'.repeat(40), graph = owner + '/jpb-data';
+    const run = vi.fn(async () => ({ answer: '280', profile: 'catalog', toolCalls: [],
+      evidence: [{ name: 'order', arguments: { orderNo: '62994' }, result: 'SQL snapshot' }] }));
+    const invoke = vi.fn();
+    const service = createDaemonLocalLlmService({ dkgHome: '/tmp/dkg', env: {
+      DKG_PROJECT: graph, DKG_LLM_PROGRAM_AGENT: owner, DKG_LLM_PROGRAM_EXECUTOR: '/reviewed/program.mjs',
+    }, fetch: onlineFetch(), createSession: async () => fakeSession({ run }),
+    createProgramExecutor: async ({ capability }) => ({ chat: async input => {
+      invoke(input);
+      const adapter = createLocalLlmProgramAdapter(graph, owner, capability, async () => {});
+      const effect = await adapter.dispatch({} as any, { prompt: input.message });
+      const result = JSON.parse(JSON.parse(effect.output!).output);
+      return { text: result.answer, contextGraphId: graph, profile: result.profile, toolCalls: result.toolCalls,
+        execution: { invocationId: 'test', executionIri: 'urn:execution:test', persisted: true,
+          executionLayer: 'wm', programIri: 'urn:program:chat', contextGraphId: graph, assetName: 'semantic-execution-test' } };
+    } }) });
+    try {
+      expect(await service.health()).toMatchObject({ executionMode: 'program' });
+      expect(await service.chat({ message: 'NAF 62994', contextGraphId: graph }))
+        .toMatchObject({ text: '280', execution: { persisted: true } });
+      expect(invoke).toHaveBeenCalledOnce();
+      expect(run).toHaveBeenCalledWith('NAF 62994', expect.objectContaining({ captureEvidence: true }));
+      await expect(service.chat({ message: 'Read elsewhere', contextGraphId: 'other' }))
+        .rejects.toMatchObject({ code: 'LOCAL_LLM_PROJECT_MISMATCH' });
+      expect(run).toHaveBeenCalledOnce();
+    } finally { await service.close(); }
+  });
+
   it('loads a reviewed read-only domain profile and keeps its adapter tools project-bound', async () => {
     const folder = mkdtempSync(join(tmpdir(), 'dkg-llm-profile-'));
     try {

@@ -1,5 +1,8 @@
 import path from 'node:path';
 import process from 'node:process';
+import { pathToFileURL } from 'node:url';
+import { LOCAL_LLM_PROGRAM_TOOL, localLlmConfigurationSha256, registerLocalLlmProgramProvider,
+  type LocalLlmProgramCapability } from '../semantic-runtime-local-llm-adapter.js';
 import { lstatSync, readFileSync } from 'node:fs';
 import {
   probeLocalModelEndpoint,
@@ -69,9 +72,17 @@ export interface DaemonLocalLlmHealth {
   traceFile?: string;
   error?: string;
   initFailure?: string;
+  executionMode?: 'program' | 'direct';
+  programCapability?: LocalLlmProgramCapability;
+}
+
+export interface LocalLlmProgramExecution {
+  invocationId: string; executionIri: string; executionLayer: string;
+  persisted: true; programIri: string; contextGraphId: string; assetName: string;
 }
 
 export interface DaemonLocalLlmChatResult {
+  execution?: LocalLlmProgramExecution;
   text: string;
   sessionId: string;
   contextGraphId?: string;
@@ -96,7 +107,13 @@ type SessionFactory = (
   options: DkgLocalLlmRuntimeSessionOptions,
 ) => Promise<DkgLocalLlmRuntimeSession>;
 
+export interface LocalLlmProgramExecutor {
+  chat(input: { message: string; contextGraphId?: string; signal?: AbortSignal }):
+    Promise<Omit<DaemonLocalLlmChatResult, 'sessionId' | 'readOnly'>>;
+}
+
 export interface DaemonLocalLlmServiceOptions {
+  createProgramExecutor?: (options: { dkgHome: string; capability: LocalLlmProgramCapability }) => Promise<LocalLlmProgramExecutor>;
   dkgHome: string;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
@@ -204,6 +221,16 @@ export function createDaemonLocalLlmService(
   const fetcher = options.fetch ?? globalThis.fetch;
   const createSession = options.createSession ?? createDkgLocalLlmRuntimeSession;
   const probeTimeoutMs = options.probeTimeoutMs ?? 2_000;
+  const env = options.env ?? process.env;
+  const programPath = trimmed(env.DKG_LLM_PROGRAM_EXECUTOR);
+  const programOwner = trimmed(env.DKG_LLM_PROGRAM_AGENT)?.toLowerCase();
+  const capability: LocalLlmProgramCapability | undefined = programOwner && settings.defaultProjectId
+    ? { toolIri: LOCAL_LLM_PROGRAM_TOOL, contextGraphId: settings.defaultProjectId,
+      ownerAgentAddress: programOwner, configurationSha256: localLlmConfigurationSha256(settings, programOwner) }
+    : undefined;
+  let programExecutor: Promise<LocalLlmProgramExecutor> | undefined;
+  let modelBusy = false;
+  let modelSettlement: Promise<void> | undefined;
   let session: DkgLocalLlmRuntimeSession | undefined;
   let lockedProjectId: string | undefined;
   let hasProjectLock = false;
@@ -212,6 +239,7 @@ export function createDaemonLocalLlmService(
     kind: 'chat' | 'clear';
     settlement: Promise<void>;
     controller?: AbortController;
+    signal?: AbortSignal;
   } | undefined;
   let closePromise: Promise<void> | undefined;
   let initFailure: string | undefined;
@@ -249,25 +277,130 @@ export function createDaemonLocalLlmService(
     await current.close();
   };
 
+  const ensureSession = async (requestedProjectId: string | undefined, signal?: AbortSignal) => {
+    if (!session) {
+      try {
+        const created = await createSession({
+          dkgHome: options.dkgHome,
+          llamaUrl: settings.llamaUrl,
+          model: settings.model,
+          projectId: requestedProjectId,
+          signal,
+          initializationTimeoutMs: 15_000,
+          strictProjectScope: true,
+          // This operator-reviewed list replaces the generic read surface.
+          // Implementations must enforce projectId; a schema alone is not
+          // proof. Runtime annotation and write guards remain in force.
+          strictProjectScopeTools: settings.domainProfile?.readTools ?? DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS,
+          strictProjectScopeUnscopedTools: ['dkg_status'],
+          adapterPaths: settings.adapterPaths,
+          domainProfile: settings.domainProfile,
+          profile: 'auto',
+          allowWrite: false,
+          logDir: settings.logDir,
+          maxToolCalls: 4,
+          maxToolsPerTurn: 8,
+          maxToolJsonBytes: 18_000,
+          maxEvidenceChars: 12_000,
+          maxSessionTurns: 6,
+          maxSessionChars: 8_000,
+          requestTimeoutMs: 120_000,
+          temperature: 0.15,
+          topP: 0.9,
+          maxTokens: 1_024,
+          cwd: options.cwd,
+          stderr: options.stderr,
+        });
+        if (signal?.aborted) {
+          await created.close();
+          signal?.throwIfAborted();
+        }
+        if (closed) {
+          await created.close();
+          throw new DaemonLocalLlmError(
+            'LOCAL_LLM_RUNTIME_ERROR',
+            503,
+            'The local LLM service is shutting down.',
+          );
+        }
+        session = created;
+        lockedProjectId = requestedProjectId;
+        hasProjectLock = true;
+        initFailure = undefined;
+      } catch (error) {
+        if (error instanceof DaemonLocalLlmError) throw error;
+        if (signal?.aborted) signal?.throwIfAborted();
+        initFailure = errorMessage(error);
+        throw new DaemonLocalLlmError(
+          'LOCAL_LLM_RUNTIME_ERROR',
+          500,
+          `Failed to initialize the local DKG LLM runtime: ${initFailure}`,
+        );
+      }
+    }
+    return session!;
+  };
+
+  const runModel = async (message: string, requestedProjectId: string | undefined,
+    signal?: AbortSignal, captureEvidence = false) => {
+    if (closed || modelBusy || activeOperation?.kind === 'clear') {
+      throw new DaemonLocalLlmError('LOCAL_LLM_BUSY', 409, 'The model session is busy or shutting down.');
+    }
+    if (hasProjectLock && requestedProjectId !== lockedProjectId) {
+      throw new DaemonLocalLlmError('LOCAL_LLM_PROJECT_MISMATCH', 409, 'Clear the session before changing Context Graph.');
+    }
+    modelBusy = true;
+    let settle!: () => void;
+    modelSettlement = new Promise<void>(resolve => { settle = resolve; });
+    try {
+      const current = await ensureSession(requestedProjectId, signal);
+      const result = await current.runtime.run(message, { signal, captureEvidence });
+      return { ...result, model: settings.model, contextGraphId: requestedProjectId, readOnly: true as const };
+    } finally {
+      modelBusy = false;
+      settle();
+    }
+  };
+
+  const unregisterProvider = capability ? registerLocalLlmProgramProvider({
+    capability,
+    run: prompt => runModel(prompt, capability.contextGraphId, activeOperation?.signal, true),
+  }) : undefined;
+
+  const getProgramExecutor = () => (programExecutor ??= (async () => {
+    if (!capability || !programPath || !path.isAbsolute(programPath)) throw new Error('LOCAL_LLM_PROGRAM_NOT_CONFIGURED');
+    if (options.createProgramExecutor) return options.createProgramExecutor({ dkgHome: options.dkgHome, capability });
+    const info = lstatSync(programPath);
+    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o022)) throw new Error('LOCAL_LLM_PROGRAM_MODULE_UNSAFE');
+    const module = await import(pathToFileURL(programPath).href);
+    return module.createProgramChatExecutor({ dkgHome: options.dkgHome, capability });
+  })());
+
   return {
     async health() {
       const availability = await probe();
       const reachable = availability.status !== 'offline';
-      const ready = availability.status === 'ready' && !initFailure && !closed;
+      let programError: string | undefined;
+      if (programPath) {
+        try { await getProgramExecutor(); } catch (error) { programError = errorMessage(error); }
+      }
+      const ready = availability.status === 'ready' && !initFailure && !programError && !closed;
       return {
         ok: ready,
         configured: settings.configured,
         ready,
         reachable,
         offline: !reachable,
-        busy: Boolean(activeOperation),
+        busy: Boolean(activeOperation) || modelBusy,
+        executionMode: programPath ? 'program' : 'direct',
+        ...(capability ? { programCapability: capability } : {}),
         initialized: Boolean(session),
         readOnly: true,
         sessionId: DKG_LOCAL_LLM_UI_SESSION_ID,
         ...(hasProjectLock && lockedProjectId ? { contextGraphId: lockedProjectId } : {}),
         ...(session?.trace.filePath ? { traceFile: session.trace.filePath } : {}),
-        ...(availability.status !== 'ready' || initFailure
-          ? { error: availability.status === 'ready' ? initFailure : availability.error }
+        ...(availability.status !== 'ready' || initFailure || programError
+          ? { error: availability.status === 'ready' ? initFailure ?? programError : availability.error }
           : {}),
         ...(initFailure ? { initFailure } : {}),
       };
@@ -290,7 +423,7 @@ export function createDaemonLocalLlmService(
           'The local LLM service is shutting down.',
         );
       }
-      if (activeOperation) {
+      if (activeOperation || modelBusy) {
         throw new DaemonLocalLlmError(
           'LOCAL_LLM_BUSY',
           409,
@@ -317,75 +450,23 @@ export function createDaemonLocalLlmService(
         kind: 'chat' as const,
         settlement: turnSettlement,
         controller: turnController,
+        signal,
       };
       activeOperation = operation;
       try {
         const availability = await probe();
         signal.throwIfAborted();
         if (availability.status !== 'ready') throw unavailableError(availability);
-        if (!session) {
-          try {
-            const created = await createSession({
-              dkgHome: options.dkgHome,
-              llamaUrl: settings.llamaUrl,
-              model: settings.model,
-              projectId: requestedProjectId,
-              signal,
-              initializationTimeoutMs: 15_000,
-              strictProjectScope: true,
-              // This operator-reviewed list replaces the generic read surface.
-              // Implementations must enforce projectId; a schema alone is not
-              // proof. Runtime annotation and write guards remain in force.
-              strictProjectScopeTools: settings.domainProfile?.readTools ?? DKG_LOCAL_LLM_STRICT_PROJECT_TOOLS,
-              strictProjectScopeUnscopedTools: ['dkg_status'],
-              adapterPaths: settings.adapterPaths,
-              domainProfile: settings.domainProfile,
-              profile: 'auto',
-              allowWrite: false,
-              logDir: settings.logDir,
-              maxToolCalls: 4,
-              maxToolsPerTurn: 8,
-              maxToolJsonBytes: 18_000,
-              maxEvidenceChars: 12_000,
-              maxSessionTurns: 6,
-              maxSessionChars: 8_000,
-              requestTimeoutMs: 120_000,
-              temperature: 0.15,
-              topP: 0.9,
-              maxTokens: 1_024,
-              cwd: options.cwd,
-              stderr: options.stderr,
-            });
-            if (signal.aborted) {
-              await created.close();
-              signal.throwIfAborted();
-            }
-            if (closed) {
-              await created.close();
-              throw new DaemonLocalLlmError(
-                'LOCAL_LLM_RUNTIME_ERROR',
-                503,
-                'The local LLM service is shutting down.',
-              );
-            }
-            session = created;
-            lockedProjectId = requestedProjectId;
-            hasProjectLock = true;
-            initFailure = undefined;
-          } catch (error) {
-            if (error instanceof DaemonLocalLlmError) throw error;
-            if (signal.aborted) signal.throwIfAborted();
-            initFailure = errorMessage(error);
-            throw new DaemonLocalLlmError(
-              'LOCAL_LLM_RUNTIME_ERROR',
-              500,
-              `Failed to initialize the local DKG LLM runtime: ${initFailure}`,
-            );
-          }
-        }
 
         try {
-          const result = await session.runtime.run(message, { signal });
+          if (programPath) {
+            const result = await (await getProgramExecutor()).chat({ message, contextGraphId: requestedProjectId, signal });
+            signal.throwIfAborted();
+            lockedProjectId = requestedProjectId;
+            hasProjectLock = true;
+            return { ...result, sessionId: DKG_LOCAL_LLM_UI_SESSION_ID, readOnly: true };
+          }
+          const result = await runModel(message, requestedProjectId, signal);
           signal.throwIfAborted();
           return {
             text: result.answer,
@@ -393,7 +474,7 @@ export function createDaemonLocalLlmService(
             ...(lockedProjectId ? { contextGraphId: lockedProjectId } : {}),
             profile: result.profile,
             toolCalls: result.toolCalls,
-            traceFile: result.traceFile ?? session.trace.filePath,
+            traceFile: result.traceFile ?? session?.trace.filePath,
             readOnly: true,
           };
         } catch (error) {
@@ -423,7 +504,7 @@ export function createDaemonLocalLlmService(
           'The local LLM service is shutting down.',
         );
       }
-      if (activeOperation) {
+      if (activeOperation || modelBusy) {
         throw new DaemonLocalLlmError(
           'LOCAL_LLM_BUSY',
           409,
@@ -453,6 +534,8 @@ export function createDaemonLocalLlmService(
         pendingOperation?.controller?.abort(new Error('The local LLM service is shutting down.'));
         closePromise = (async () => {
           await pendingOperation?.settlement;
+          await modelSettlement;
+          unregisterProvider?.();
           await closeSession(false);
         })();
       }

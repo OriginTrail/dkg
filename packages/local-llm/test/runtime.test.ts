@@ -175,7 +175,9 @@ describe('DkgLocalLlmRuntime', () => {
       projectId: 'testing',
     });
 
-    const result = await runtime.run('Which DKG query catalog queries are saved?');
+    const result = await runtime.run('Which DKG query catalog queries are saved?', { captureEvidence: true });
+    expect(result.evidence?.[0]).toMatchObject({ name: 'dkg_query_catalog_list', arguments: { projectId: 'testing' } });
+    expect(result.evidence?.[0].result).toContain('supply/lifecycle');
 
     expect(result.profile).toBe('catalog');
     expect(result.toolCalls).toEqual([{

@@ -1,4 +1,5 @@
 import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
+import { createLocalLlmProgramAdapter } from './semantic-runtime-local-llm-adapter.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -671,13 +672,15 @@ function assertRequestedToolPermissions(program: StoredSemanticProgram, binding:
     ...(binding.query ? { query: { selector: binding.query.selector, outputSchema: binding.query.outputSchema } } : {}),
     ...(binding.sparqlRead ? { sparqlRead: (({ outputSchemaSha256: _, ...grant }) => grant)(binding.sparqlRead) } : {}),
     ...(binding.assetCreation ? { assetCreation: binding.assetCreation } : {}),
+    ...(binding.localLlm ? { localLlm: { toolIri: binding.localLlm.toolIri } } : {}),
   };
   const tools = new Set(program.requiredTools);
-  const expectedCount = Number(!!binding.query) + Number(!!binding.sparqlRead) + Number(!!binding.assetCreation);
+  const expectedCount = Number(!!binding.query) + Number(!!binding.sparqlRead) + Number(!!binding.assetCreation) + Number(!!binding.localLlm);
   if (!sameSet(tools, new Set(binding.typescript?.requiredTools ?? []))
     || tools.size !== expectedCount
     || binding.sparqlRead && !tools.has(binding.sparqlRead.toolIri)
     || binding.assetCreation && !tools.has(binding.assetCreation.toolIri)
+    || binding.localLlm && !tools.has(binding.localLlm.toolIri)
     || (expectedCount > 0 && !requested)) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Declared tools must match the approved tool grants', 403);
   }
@@ -969,7 +972,8 @@ async function resolveProgramTools(
     const descriptors: string[] = [];
     for (const toolIri of program.requiredTools) {
       const definition = programToolDefinition(toolIri === bound.binding.assetCreation?.toolIri
-        ? 'assetCreation' : toolIri === bound.binding.sparqlRead?.toolIri ? 'sparqlRead' : 'query');
+        ? 'assetCreation' : toolIri === bound.binding.sparqlRead?.toolIri ? 'sparqlRead'
+          : toolIri === bound.binding.localLlm?.toolIri ? 'localLlm' : 'query');
       toolDefinitions.set(toolIri, new Map([[JSON.stringify(definition), definition]]));
       descriptors.push(toolIri, definition.operation, definition.version, definition.wit);
     }
@@ -1092,6 +1096,10 @@ async function resolveProgramTools(
   if (bound?.binding.assetCreation) {
     registry.register(createAssetCreationAdapter(agent, contextGraphId, executionLayer, operatorAddress, assetStore, bound.assertAuthorized));
   }
+  if (bound?.binding.localLlm) {
+    registry.register(createLocalLlmProgramAdapter(contextGraphId, operatorAddress,
+      bound.binding.localLlm, bound.assertAuthorized));
+  }
   if (!bound && (!config?.programPolicy || config.programPolicy.disclosure)) {
     registry.register(createSafeLlmAdapter(
       llmConfig,
@@ -1206,7 +1214,8 @@ async function resolveInternal(
   if (bound && (compilation.plan.adapterVersions.size !== program.requiredTools.length
     || [...compilation.plan.adapterVersions].some(([operation, version]) => version !== 1
       || !(operation === 'dkg/query' && bound.binding.query || operation === 'dkg/asset-create' && bound.binding.assetCreation
-        || operation === 'dkg/sparql-read' && bound.binding.sparqlRead))
+        || operation === 'dkg/sparql-read' && bound.binding.sparqlRead
+        || operation === 'llm/safe' && bound.binding.localLlm))
     || compilation.plan.effectUpperBound.some((effect) => !['read', 'asset-creation'].includes(effect)))) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Program uses tools outside the tenant binding', 403);
   }
@@ -1594,7 +1603,8 @@ async function invokeResolved(
     executionIri, invocationId, assertAuthorized, bound);
   const childExecutions: string[] = [];
   const toolDispatcher: ComponentToolDispatcher = async (call) => {
-    if (bound && !(call.kind === 'asset-create' && bound.binding.assetCreation)
+    if (bound && !(call.kind === 'safe-llm' && bound.binding.localLlm)
+      && !(call.kind === 'asset-create' && bound.binding.assetCreation)
       && !(call.kind === 'sparql-read' && bound.binding.sparqlRead)
       && (call.kind !== 'query-catalog' || call.queryId !== bound.binding.query?.selector || call.parameters.length !== 0)) {
       throw new SemanticProgramError('PROGRAM_BINDING_QUERY_FORBIDDEN', 'Only the tenant-approved tools and fixed query arguments can be invoked', 403);
