@@ -478,11 +478,11 @@ function metadataObjectsByPredicate(
   return objects;
 }
 
-async function readGraphKnowledgeAssetMetadataObjects(
+async function readGraphKnowledgeAssetMetadataRows(
   store: TripleStore,
   contextGraphId: string,
   ual: string,
-): Promise<Map<string, string[]> | undefined> {
+): Promise<ReadonlyArray<Pick<Quad, 'predicate' | 'object'>>> {
   const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
@@ -494,19 +494,14 @@ async function readGraphKnowledgeAssetMetadataObjects(
   if (result.type !== 'bindings') {
     throw new Error('Graph-scoped metadata SELECT expected a bindings result');
   }
-  if (result.bindings.length === 0) return undefined;
   if (result.bindings.some((row) =>
     row['predicate'] === undefined || row['object'] === undefined)) {
     throw new Error('Graph-scoped metadata SELECT returned an incomplete binding');
   }
-  const rows = result.bindings.map((row) => ({
+  return result.bindings.map((row) => ({
     predicate: row['predicate']!,
     object: row['object']!,
   }));
-  const objects = metadataObjectsByPredicate(rows);
-  return (objects.get(`${DKG}contentScopeVersion`) ?? []).length > 0
-    ? objects
-    : undefined;
 }
 
 function singleMetadataObject(
@@ -543,12 +538,17 @@ export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
   store: TripleStore,
   input: { contextGraphId: string; ual: string },
 ): Promise<ConfirmedGraphKnowledgeAssetMetadataRead> {
-  const objects = await readGraphKnowledgeAssetMetadataObjects(
-    store,
-    input.contextGraphId,
-    input.ual,
-  );
-  if (!objects) return { state: 'absent' };
+  const rows = await readGraphKnowledgeAssetMetadataRows(store, input.contextGraphId, input.ual);
+  return parseConfirmedGraphKnowledgeAssetMetadataEnvelope(rows, input);
+}
+
+/** Parse an already-loaded graph-scoped assertion envelope without store IO. */
+export function parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
+  rows: readonly Pick<Quad, 'predicate' | 'object'>[],
+  input: { contextGraphId: string; ual: string },
+): ConfirmedGraphKnowledgeAssetMetadataRead {
+  const objects = metadataObjectsByPredicate(rows);
+  if ((objects.get(`${DKG}contentScopeVersion`) ?? []).length === 0) return { state: 'absent' };
 
   const scopeVersion = unsignedIntegerLiteral(singleMetadataObject(
     objects,

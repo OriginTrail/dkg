@@ -11,6 +11,7 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
+  SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
   SYNC_PAGE_SIZE,
@@ -296,7 +297,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
       const lines = linesFromNquads(response);
       expect(new TextEncoder().encode(response).byteLength)
         .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
-      expect(lines.length).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
+      expect(lines.length).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_EXACT_MAX_ROWS);
       if (lines.length === 0) break;
       received.push(...lines);
       offset += lines.length;
@@ -312,13 +313,15 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
       page.length === MAX_EXACT_SYNC_ASSETS
       && page.every((ual, index) => ual === canonicalAssetUals[index]))).toBe(true);
     const totalRows = MAX_EXACT_SYNC_ASSETS * rowsPerKa;
-    expect(requestedOffsets).toEqual([
-      ...Array.from(
-        { length: Math.ceil(totalRows / SYNC_REQUEST_SAFE_PAGE_SIZE) },
-        (_, index) => index * SYNC_REQUEST_SAFE_PAGE_SIZE,
-      ),
-      totalRows,
-    ]);
+    expect(requestedOffsets[0]).toBe(0);
+    expect(requestedOffsets.at(-1)).toBe(totalRows);
+    expect(requestedOffsets.every((requestedOffset, index) => index === 0 || (
+      requestedOffset > requestedOffsets[index - 1]!
+      && requestedOffset - requestedOffsets[index - 1]! <= SYNC_BYTE_BUDGET_EXACT_MAX_ROWS
+    ))).toBe(true);
+    // Large literals fill the byte budget before the larger row ceiling; the
+    // requester advances by the prefix actually returned, including across KAs.
+    expect(requestedOffsets.length).toBeLessThan(Math.ceil(totalRows / SYNC_REQUEST_SAFE_PAGE_SIZE) + 1);
     expect(payloadReadLimits.length).toBeGreaterThan(0);
     expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
     expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
@@ -387,7 +390,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     await store.close();
   });
 
-  it('keeps fake signature fields on the 64-row page-only exact-fetch policy', async () => {
+  it('keeps fake signature fields on the bounded page-only exact-fetch policy', async () => {
     const contextGraphId = 'fake-signature-public-exact';
     const store = new OxigraphStore();
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -397,7 +400,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
       MemoryLayer.VerifiableMemory,
       createGraphKnowledgeAssetScope(ual, 1),
     );
-    const rowCount = 200;
+    const rowCount = 1_200;
     await store.insert([
       { graph: metaGraph, subject: ual, predicate: `${DKG}contentScopeVersion`, object: integer(GRAPH_KA_CONTENT_SCOPE_VERSION) },
       { graph: metaGraph, subject: ual, predicate: `${DKG}kaUal`, object: ual },
@@ -456,12 +459,12 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
       requesterSignatureVS: 'attacker-controlled-vs',
     }));
 
-    expect(linesFromNquads(response)).toHaveLength(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(linesFromNquads(response)).toHaveLength(SYNC_BYTE_BUDGET_EXACT_MAX_ROWS);
     expect(new TextEncoder().encode(response).byteLength)
       .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
     expect(payloadReadLimits.length).toBeGreaterThan(0);
-    expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
-    expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE + 1);
+    expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE + 1);
     expect(payloadSnapshotQueries).toBe(0);
 
     await store.close();

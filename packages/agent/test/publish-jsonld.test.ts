@@ -10,6 +10,7 @@ import {
   OxigraphStore,
   PrivateContentStore,
   SharedMemoryLiteralBlobStore,
+  StoreSchedulerBusyError,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
@@ -354,6 +355,49 @@ describe('publishJsonLd', () => {
     releaseShadow();
     await agent.awaitInFlightRfc64SwmInventoryObserversV1();
     expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
+    shadow.mockRestore();
+  }, CHAIN_JSONLD_TIMEOUT_MS);
+
+  it('keeps the swm pointer stamp best-effort on publishAsync and still schedules the observer (GH#2901)', async () => {
+    // publishAsync mints a fresh `async-<uuid>` name per call, so the caller cannot replay a
+    // failed stamp. A stamp failure must therefore not fail the call or drop the RFC-64
+    // observer (the named-KA `assertion.promote` path surfaces and replays it instead).
+    const { agent, store } = await createAgent('AsyncPointerBot');
+    await agent.createContextGraph({ id: 'async-pointer', name: 'AsyncPointer', description: '' });
+    await agent.registerContextGraph('async-pointer');
+    const stamp = vi
+      .spyOn(agent as any, '_stampSwmPointer')
+      .mockRejectedValue(new StoreSchedulerBusyError(
+        'queue_wait_timeout', 'normal', 'agent.publish.swmPointerSeal', { storeOperation: 'query' },
+      ));
+    const shadow = vi
+      .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockResolvedValue({
+        status: 'dormant',
+        action: 'upsert',
+        attempts: 0,
+        headObjectDigest: null,
+        error: null,
+      });
+
+    const { captureID } = await agent.publishAsync(
+      'did:dkg:context-graph:async-pointer',
+      {
+        private: {
+          '@context': 'http://schema.org/',
+          '@id': 'http://example.org/AsyncPointer',
+          '@type': 'Thing',
+          'name': 'Async Pointer',
+        },
+      },
+      { localOnly: true },
+    );
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+
+    expect(stamp).toHaveBeenCalledOnce();
+    expect(await new TripleStoreAsyncLiftPublisher(store).getStatus(captureID)).toBeTruthy();
+    expect(shadow).toHaveBeenCalledOnce();
+    stamp.mockRestore();
     shadow.mockRestore();
   }, CHAIN_JSONLD_TIMEOUT_MS);
 

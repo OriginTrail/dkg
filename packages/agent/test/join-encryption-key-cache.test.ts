@@ -159,14 +159,44 @@ function defaultBestEffortStore(input: Readonly<{
       if (sparql.includes('SELECT ?predicate ?object')) {
         return { type: 'bindings', bindings: input.cacheRows ?? [] };
       }
-      if (sparql.includes('SELECT ?key ?algorithm ?proof ?peerId')) {
+      if (sparql.includes('SELECT DISTINCT ?key WHERE')) {
         expect(sparql).toContain(
           'FILTER (?g NOT IN (<urn:dkg:local:join-encryption-key-cache>))',
         );
-        expect(sparql).toContain('LIMIT 65');
-        return { type: 'bindings', bindings: input.profileRows };
+        expect(sparql).toContain('LIMIT 64');
+        return {
+          type: 'bindings',
+          bindings: [...new Set(input.profileRows.flatMap((row) => (
+            row['key'] === undefined ? [] : [row['key']]
+          )))].map((key) => ({ key })),
+        };
       }
-      if (sparql.includes('SELECT ?keyId ?revokedAt ?revocationProof')) {
+      if (sparql.includes('SELECT DISTINCT ?key ?peerId')) {
+        expect(sparql).toContain(
+          'FILTER (?g NOT IN (<urn:dkg:local:join-encryption-key-cache>))',
+        );
+        return {
+          type: 'bindings',
+          bindings: input.profileRows.map((row) => ({
+            ...(row['key'] === undefined ? {} : { key: row['key'] }),
+            ...(row['algorithm'] === undefined ? {} : { algorithm: row['algorithm'] }),
+            ...(row['peerId'] === undefined ? {} : { peerId: row['peerId'] }),
+          })),
+        };
+      }
+      if (sparql.includes('SELECT DISTINCT ?proof WHERE')) {
+        expect(sparql).toContain(
+          'FILTER (?g NOT IN (<urn:dkg:local:join-encryption-key-cache>))',
+        );
+        expect(sparql).toContain('LIMIT 64');
+        return {
+          type: 'bindings',
+          bindings: input.profileRows.flatMap((row) => (
+            row['proof'] === undefined ? [] : [{ proof: row['proof'] }]
+          )),
+        };
+      }
+      if (sparql.includes('SELECT DISTINCT ?keyId ?revokedAt ?revocationProof')) {
         return { type: 'bindings', bindings: [] };
       }
       throw new Error(`Unexpected query: ${sparql}`);
@@ -367,7 +397,7 @@ describe('cold join encryption-key cache replacement', () => {
       await expect(cache(agent, warm.delegation)).resolves.toBeUndefined();
 
       expect(replaceSubject).toHaveBeenCalledTimes(1);
-      expect(query).toHaveBeenCalledTimes(3);
+      expect(query).toHaveBeenCalledTimes(6);
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
@@ -519,4 +549,47 @@ describe('cold join encryption-key cache replacement', () => {
       initial.publicEncryptionKey,
     ]);
   });
+});
+
+
+describe('signed key bundle rejection preserves cached authority', () => {
+  it.each(['empty', 'malformed', 'bad-proof', 'missing-attestation', 'bad-attestation'] as const)(
+    'preserves the established key when a %s bundle arrives',
+    async (damage) => {
+      const wallet = new ethers.Wallet('0x' + '31'.repeat(32));
+      const store = new OxigraphStore();
+      const agent = cacheHost(store);
+      const initial = await signedKeyDelegation(wallet, 'key-validation', 'established');
+      await cache(agent, initial.delegation);
+      const replacement = await signedKeyDelegation(
+        wallet, 'key-validation', 'rejected', initial.delegation.issuedAtMs + 1,
+      );
+      const key = replacement.delegation.workspaceEncryptionKeys![0]!;
+      const damaged: SignedAgentDelegation = damage === 'empty'
+        ? { ...replacement.delegation, workspaceEncryptionKeys: [] }
+        : damage === 'malformed'
+          ? { ...replacement.delegation, workspaceEncryptionKeys: [null as unknown as typeof key] }
+          : damage === 'bad-proof'
+            ? { ...replacement.delegation, workspaceEncryptionKeys: [{ ...key, encryptionKeyProof: '0xff' }] }
+            : damage === 'missing-attestation'
+              ? { ...replacement.delegation, workspaceEncryptionKeysSignature: undefined }
+              : { ...replacement.delegation, workspaceEncryptionKeysSignature: '0xff' };
+      if (damage === 'bad-proof') {
+        // Keep the bundle attestation valid so it cannot mask a missing proof check.
+        damaged.workspaceEncryptionKeysSignature = await wallet.signMessage(
+          computeWorkspaceEncryptionKeysAttestationDigest(damaged),
+        );
+      }
+      const expectedRefusal = {
+        empty: /between 1 and 8 workspace encryption keys/,
+        malformed: /malformed workspace encryption key/,
+        'bad-proof': /invalid workspace encryption key proof/,
+        'missing-attestation': /missing its workspace encryption-key attestation/,
+        'bad-attestation': /invalid workspace encryption-key attestation/,
+      }[damage];
+      await expect(cache(agent, damaged)).rejects.toThrow(expectedRefusal);
+      expect(await cachedPublicKeys(store, wallet.address)).toEqual([initial.publicEncryptionKey]);
+      await store.close();
+    },
+  );
 });

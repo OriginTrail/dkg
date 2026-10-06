@@ -404,7 +404,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
     expect(beforeDrain).toEqual({
       schemaVersion: 1,
-      consumerVocabularyVersion: 2,
+      consumerVocabularyVersion: 3,
       processEpoch: 'epoch-fixed',
       capturedAtUtc: '2026-09-20T12:00:00.000Z',
       capturedAtMonotonicMs: 123,
@@ -515,9 +515,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   });
 
   it('retains only the frozen code-owned snapshot consumer vocabulary', () => {
-    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(2);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(3);
     expect(Object.isFrozen(RPC_USAGE_SNAPSHOT_CONSUMERS)).toBe(true);
-    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(177);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(179);
     expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toEqual(
       [...new Set(RPC_USAGE_SNAPSHOT_CONSUMERS)].sort(),
     );
@@ -1201,6 +1201,31 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
     expect(usage.ethCallByConsumer['unit.eth_call.retry']).toBe(rawEthCallHits);
   }, 30_000);
+
+  it.each(['provider', 'contract', 'contractWith'] as const)('preserves default, custom and null attribution at the real %s adapter boundary', async seam => {
+    installMeter();
+    const rpc = await startLoopbackRpc(); servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url })); adapters.push(a);
+    const contract = new Contract(HUB, ['function value() view returns (uint256)']);
+    const label = `unit.${seam}.owner`;
+    const read = (options?: { rpcUsageConsumer?: string | null }, humanLabel = label) => seam === 'provider'
+      ? a.readProvider(humanLabel, (p: any) => p.send('eth_call', [{ to: HUB, data: '0x' }, 'latest']), options)
+      : seam === 'contract'
+        ? a.readContractWithOptions(contract, humanLabel, 'value', [], options)
+        : a.readContractWith(contract, humanLabel, (c: any) => c.value(), options);
+    for (const consumer of [undefined, 'unit.custom.owner', null]) {
+      const before = rpc.hits('eth_call');
+      await read(consumer === undefined ? undefined : { rpcUsageConsumer: consumer });
+      const usage = a.drainRpcUsage(), count = rpc.hits('eth_call') - before;
+      expect(count).toBeGreaterThan(0);
+      expect(usage.byMethod.eth_call).toBe(count);
+      expect(usage.ethCallByConsumer).toEqual(consumer === null ? {} : { [consumer ?? label]: count });
+    }
+    const beforeInvalid = rpc.hits('eth_call');
+    expect(() => read({ rpcUsageConsumer: '' })).toThrow(/consumer must be/);
+    expect(() => read(undefined, ' ')).toThrow(/label must be/);
+    expect(rpc.hits('eth_call')).toBe(beforeInvalid);
+  });
 
   it('attributes failover contract-view eth_call attempts to the readContract label', async () => {
     installMeter();

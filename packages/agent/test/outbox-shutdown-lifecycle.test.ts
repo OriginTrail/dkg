@@ -5,6 +5,7 @@ import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-ran
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
 import { RandomSamplingShutdownTimeoutError } from '../src/random-sampling-bind.js';
 import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
@@ -13,6 +14,7 @@ import {
   ContextGraphMembershipPersistScheduler,
   ContextGraphMembershipPersistShutdownTimeoutError,
 } from '../src/context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from '../src/context-graph-subscription-persist-scheduler.js';
 import {
   VmReconcileQueueClosedError,
   VmReconcileShutdownTimeoutError,
@@ -35,8 +37,12 @@ function syntheticShutdownAgent(): any {
   // Object.create deliberately bypasses DKGAgentBase field initializers. Keep
   // the synthetic shutdown fixture aligned with the production lifecycle
   // owners that stop() fences before dependency teardown.
+  agent.gossipSession = new GossipSession();
   agent.rfc64BackgroundWorkDispatcherV1 = new Rfc64BackgroundWorkDispatcherV1();
   agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  // stop() closes and drains this scheduler unconditionally: production always
+  // constructs it, so the fixture does too.
+  agent.contextGraphSubscriptionPersistence = new ContextGraphSubscriptionPersistScheduler();
   return agent;
 }
 

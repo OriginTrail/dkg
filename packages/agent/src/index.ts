@@ -116,11 +116,8 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
-export {
-  resolveSyncReconcilerEnabled,
-  resolveVmReconcileHolderTierEnabled,
-  resolveVmReconcilerEnabled,
-} from './sync/backpressure.js';
+export { resolveSyncReconcilerEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
+export { resolveVmReconcileHolderTierEnabled } from './vm-reconcile-holder-tier-switch.js';
 export {
   FinalizedAuthorityColdResolutionV1,
   finalizedAuthorityColdResolutionOf,
@@ -175,6 +172,12 @@ export {
   ContextGraphMembershipPersistShutdownTimeoutError,
   CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
 } from './context-graph-membership-persist-scheduler.js';
+export {
+  ContextGraphSubscriptionPersistQueueClosedError,
+  ContextGraphSubscriptionPersistQueueFullError,
+  ContextGraphSubscriptionPersistShutdownTimeoutError,
+  CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
+} from './context-graph-subscription-persist-scheduler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,
@@ -523,6 +526,8 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
+// Deprecated compatibility codecs for third-party subscription-store adapters.
+// The recovery runtime does not import this historical persistence surface.
 export {
   createVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,

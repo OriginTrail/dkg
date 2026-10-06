@@ -595,6 +595,110 @@ describe('reconcileContextGraph — sweep', () => {
     ]);
   });
 
+  it.each([
+    {
+      lane: 'recent-first recovery',
+      recentOrdinalsPerPass: 7,
+      inspectedOrdinals: [30, 31, 32, 93, 94, 95, 96, 97, 98, 99],
+      recoveryOrdinals: [99, 98, 97, 96, 95, 94, 93, 30, 31, 32],
+      nextScanOrdinal: 33,
+    },
+    {
+      lane: 'historical-only recovery',
+      recentOrdinalsPerPass: 0,
+      inspectedOrdinals: [30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+      recoveryOrdinals: [30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+      nextScanOrdinal: 40,
+    },
+  ])('retries an admission-deferred historical slice in a larger backlog with $lane', async ({
+    recentOrdinalsPerPass,
+    inspectedOrdinals,
+    recoveryOrdinals,
+    nextScanOrdinal,
+  }) => {
+    const inspections: number[][] = [[], []];
+    const recoveryCalls: number[][] = [];
+    const fetchAttempts: number[] = [];
+    let pass = 0;
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 100,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        inspections[pass]!.push(ordinal);
+        return { status: 'pending', recovery: recoveryTarget(ordinal) };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map(({ ordinal }) => ordinal);
+        recoveryCalls.push(ordinals);
+        if (pass === 0) {
+          return {
+            outcomes: new Map(),
+            attemptedOrdinals: [],
+            continuationOrdinal: targets[0]?.ordinal,
+            hasImmediateRecoveryWork: false,
+            localAdmissionDeferred: true,
+          };
+        }
+        fetchAttempts.push(...ordinals);
+        return {
+          outcomes: new Map(ordinals.map((ordinal) => [
+            ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          attemptedOrdinals: ordinals,
+          continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+    state.scanOrdinal = 30;
+
+    const refused = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(refused).toMatchObject({
+      head: 100,
+      processed: 10,
+      reconciled: 0,
+      pending: 100,
+      watermark: 0,
+      localAdmissionDeferred: true,
+      hasMore: false,
+      shouldContinueImmediately: false,
+    });
+    // No peer was asked, so the pass did not use the node's sync admission.
+    expect(refused.recoveryAttempted).toBeUndefined();
+    expect(inspections[0]).toEqual(inspectedOrdinals);
+    expect(recoveryCalls).toEqual([recoveryOrdinals]);
+    expect(fetchAttempts).toEqual([]);
+    expect(state.scanOrdinal).toBe(30);
+    expect(state.ahead.size).toBe(0);
+    expect(persisted).toEqual([]);
+
+    pass = 1;
+    const admitted = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    // Unvisited candidates remain beyond this pass; refusal must not skip the
+    // historical slice merely because its recent-first continuation is near head.
+    expect(inspections).toEqual([inspectedOrdinals, inspectedOrdinals]);
+    expect(recoveryCalls).toEqual([recoveryOrdinals, recoveryOrdinals]);
+    expect(fetchAttempts).toEqual(recoveryOrdinals);
+    expect(admitted).toMatchObject({
+      processed: 10,
+      reconciled: 10,
+      pending: 90,
+      watermark: 0,
+      hasMore: true,
+      shouldContinueImmediately: true,
+      recoveryAttempted: true,
+    });
+    expect(admitted.localAdmissionDeferred).toBeUndefined();
+    expect(state.scanOrdinal).toBe(nextScanOrdinal);
+    expect(state.ahead.size).toBe(10);
+    expect(persisted).toEqual([]);
+  });
+
   it('keeps the fair scan moving when recovery finds no eligible peer', async () => {
     const attempts: number[][] = [[], []];
     let pass = 0;

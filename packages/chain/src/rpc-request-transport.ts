@@ -24,7 +24,9 @@ import {
   withRpcUsageIssuerContext,
   type RpcUsageIssuerContext,
 } from './rpc-usage.js';
+import { rpcRequestAbortReason } from './rpc-request-abort.js';
 import { chainRpcFetch } from './rpc-http1-dispatcher.js';
+import { recordRpcAdmissionWait, recordRpcEndpointLatency } from './rpc-request-timing.js';
 
 export type RpcRequestClass = 'foreground' | 'background';
 
@@ -132,16 +134,33 @@ function runOwnedRpcRequestContext<T>(
   }, fn);
 }
 
+/**
+ * Run adapter-owned shared work outside every caller's request policy: no
+ * inherited priority, cancellation, observer, attempt accounting or usage
+ * attribution. A request that serves several callers at once has none of
+ * theirs; each of them waits for it under its own.
+ */
+export function withDetachedRpcRequestContext<T>(requestClass: RpcRequestClass, fn: () => T): T {
+  return rpcRequestContext.run({ requestClass }, () => withRpcUsageIssuerContext({}, fn));
+}
+
+/**
+ * Bind `fn` to the request policy and usage attribution active right now, for
+ * work its caller issues but another async context runs later on its behalf.
+ */
+export function bindActiveRpcRequestScope<T>(fn: () => T): () => T {
+  const request = activeRpcRequestContext();
+  const usage = captureRpcUsageIssuerContext();
+  return () => rpcRequestContext.run(request, () => withRpcUsageIssuerContext(usage, fn));
+}
+
 export function activeRpcRequestAbortSignal(): AbortSignal | undefined {
   return activeRpcRequestContext().signal;
 }
 
 /** Normalize caller/deadline cancellation consistently at every transport gate. */
 export function throwRpcRequestAbortReason(signal: AbortSignal): never {
-  if (signal.reason instanceof Error) throw signal.reason;
-  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted');
-  error.name = 'AbortError';
-  throw error;
+  throw rpcRequestAbortReason(signal);
 }
 
 /**
@@ -391,8 +410,11 @@ async function admitAndObserveRpcAttempt(
   const progress = activeRpcRequestContext().attemptProgress;
   if (transport.admission !== undefined) {
     noteAttemptProgress(progress, (attempt) => { attempt.waitingForAdmission += 1; });
+    const waitStartedAt = performance.now();
     try {
       for (const _method of methods) await transport.admission.acquireActiveRequest();
+      // Observation only: a refused or cancelled wait is not an admitted attempt.
+      recordRpcAdmissionWait(activeRpcRequestContext().requestClass, performance.now() - waitStartedAt);
     } finally {
       noteAttemptProgress(progress, (attempt) => { attempt.waitingForAdmission -= 1; });
     }
@@ -424,7 +446,18 @@ function createRpcProviderRequest(
       );
     }
     await admitAndObserveRpcAttempt(methods, config);
-    return cancellableRpcGetUrl(attemptRequest, signal);
+    // Observation only: time the endpoint round trip separately from the local
+    // admission wait above so a slow answer is never mistaken for a throttled one.
+    const requestClass = activeRpcRequestContext().requestClass;
+    const sentAt = performance.now();
+    let answered = false;
+    try {
+      const response = await cancellableRpcGetUrl(attemptRequest, signal);
+      answered = response.statusCode >= 200 && response.statusCode < 300;
+      return response;
+    } finally {
+      recordRpcEndpointLatency(requestClass, performance.now() - sentAt, answered);
+    }
   };
   return request;
 }

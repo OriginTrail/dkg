@@ -223,6 +223,12 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // All three PUBLIC surfaces are mirrored on the mock; this is EVM receipt plumbing over
   // `getTransactionReceiptWithFailover` — same category as the two parse helpers above.
   'readPublishReceipt',
+  // TS-private header-timestamp policy shared by the two publish-receipt parsers above
+  // (`skipBlockTimestamp`: 0 for a caller that never reads it, else the finalized header read).
+  // EVM receipt plumbing — the mock builds its publish results without a block header.
+  'enrichPublishReceipt',
+  'decodeV10PublishReceipt',
+  'decodeV9PublishReceipt',
   // TS-private V10 TRAC-allowance helper backing publish/update. Encodes
   // the `chain.approvalPolicy` dispatch and the `transferFrom(..., 1n)`
   // floor; the mock has no ERC-20 allowance surface to mirror.

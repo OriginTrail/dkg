@@ -35,6 +35,12 @@ interface ContextGraphReadAuthorityDecisionFields {
   reason: string;
   metadataBootstrap: 'eligible' | 'forbidden';
   onChainId?: bigint;
+  /**
+   * Subscription bootstrap's canonical read established source-qualified VM
+   * non-applicability AND allowed the caller. A legacy 'unregistered' read
+   * fallback or a missing id cannot establish it. Transient, never persisted.
+   */
+  registration?: 'unregistered';
 }
 
 /** An authoritative answer: the read is allowed or denied. */
@@ -143,20 +149,50 @@ const unavailable = unavailableContextGraphReadAuthorityDecision;
 export async function resolveContextGraphReadAuthorityDecision(
   input: ContextGraphReadAuthorityInput,
 ): Promise<ContextGraphReadAuthorityDecision> {
+  return (await resolveContextGraphReadAuthorityResolution(input)).decision;
+}
+
+/** Internal combined result; ordinary scoped-read decisions keep their shape. */
+export interface ContextGraphReadAuthorityResolution {
+  decision: ContextGraphReadAuthorityDecision;
+  registration?: 'unregistered';
+}
+
+/** Authorize and derive applicability from one canonical registration read. */
+export async function resolveContextGraphReadAuthorityResolution(
+  input: ContextGraphReadAuthorityInput,
+): Promise<ContextGraphReadAuthorityResolution> {
   if (input.isSystemContextGraph) {
-    return decision('allowed', 'system', 'system-context-graph');
+    return { decision: decision('allowed', 'system', 'system-context-graph') };
   }
 
   let registeredAuthority: RegisteredContextGraphAuthority;
   try {
     registeredAuthority = await input.getRegisteredAuthority();
   } catch (error) {
-    return unavailable(
-      'registered-chain',
-      'registered-authority-error',
-      contextGraphReadAuthorityDependencyOf(error),
-    );
+    return {
+      decision: unavailable(
+        'registered-chain',
+        'registered-authority-error',
+        contextGraphReadAuthorityDependencyOf(error),
+      ),
+    };
   }
+  const authority = await resolveReadAuthorityFromRegistration(input, registeredAuthority);
+  return {
+    decision: authority,
+    ...(authority.outcome === 'allowed'
+      && registeredAuthority.kind === 'unregistered'
+      && registeredAuthority.unregisteredEvidence !== undefined
+      ? { registration: 'unregistered' as const }
+      : {}),
+  };
+}
+
+async function resolveReadAuthorityFromRegistration(
+  input: ContextGraphReadAuthorityInput,
+  registeredAuthority: RegisteredContextGraphAuthority,
+): Promise<ContextGraphReadAuthorityDecision> {
   if (registeredAuthority.kind === 'unavailable') {
     return unavailable(
       'registered-chain',
@@ -193,12 +229,15 @@ export async function resolveContextGraphReadAuthorityDecision(
     return decision('allowed', 'registered-chain', 'chain-participant', registeredAuthority.onChainId);
   }
 
-  const rfc64Roster = input.resolveRfc64PrivateRoster();
+  const approvedPrivateReplica = registeredAuthority.approvedPrivateReplicaAuthority;
+  const rfc64Roster = approvedPrivateReplica?.memberAddresses
+    ?? input.resolveRfc64PrivateRoster();
   if (rfc64Roster !== undefined) {
     if (rfc64Roster === null) {
       return decision('denied', 'rfc64-private', 'invalid-private-policy-roster');
     }
     const effectiveCaller = input.callerAgentAddress
+      ?? approvedPrivateReplica?.approvedAgentAddress
       ?? input.rfc64LocalAgentAddress
       ?? input.defaultAgentAddress;
     return input.isAgentAllowed(effectiveCaller, rfc64Roster)

@@ -245,7 +245,7 @@ describe('Context Graph discovery/subscription boundary', () => {
         expect((agent as any).localContextGraphProvenance.hasLocalCreate(contextGraphId))
           .toBe(true);
         expect(await agent.resolveContextGraphRegistrationBinding(contextGraphId))
-          .toEqual({ kind: 'unregistered' });
+          .toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
         expect(resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
         expect(persistedMemberships.some((record) =>
           record.contextGraphId === contextGraphId
@@ -367,7 +367,7 @@ describe('Context Graph discovery/subscription boundary', () => {
           expect(restarted.getSubscribedContextGraphs().has(id)).toBe(false);
           restarted.subscribeToContextGraph(id);
           await expect(restarted.resolveContextGraphRegistrationBinding(id))
-            .resolves.toEqual({ kind: 'unregistered' });
+            .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
           await expect(restarted.getContextGraphOnChainPolicy(id))
             .resolves.toEqual({});
           expect((restarted as any).localContextGraphProvenance.hasLocalCreate(id))

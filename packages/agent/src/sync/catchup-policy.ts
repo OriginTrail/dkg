@@ -3,6 +3,8 @@ import { normalizeSyncAdmissionSource, type SyncAdmissionSource } from './policy
 export type CatchupMode = 'background' | 'foreground';
 
 export const FOREGROUND_CATCHUP_SYNC_PRIORITY = 2_000;
+/** The admission priority of an exact VM recovery fetch: below a foreground catch-up, above default work. */
+export const VM_RECOVERY_SYNC_PRIORITY = 1_000;
 
 /** First backoff step after a foreground plane is refused by local admission. */
 export const CATCHUP_BACKPRESSURE_BASE_DELAY_MS = 250;

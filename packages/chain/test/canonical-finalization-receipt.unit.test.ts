@@ -21,7 +21,7 @@ function adapter(
     getTransactionWithFailover: vi.fn(async () => null),
     getBlockTimestamp: vi.fn(async () => 1_234_567),
     getFinalizedBlockTimestamp: vi.fn(async () => 1_234_567),
-    parseV10PublishReceipt: vi.fn(async () => null),
+    decodeV10PublishReceipt: vi.fn(() => null),
     // PR #2300 r1 — `resolvePublishTransaction` gates every mined verdict on receipt-block
     // finality; these rows are about receipt PROJECTION, so the gate defaults to satisfied and
     // the dedicated finality rows live in publish-transaction-finality.unit.test.ts.
@@ -29,7 +29,7 @@ function adapter(
     ...overrides,
   }) as PublishMethods;
   if (useProductionV10Parser) {
-    delete (chain as unknown as { parseV10PublishReceipt?: unknown }).parseV10PublishReceipt;
+    delete (chain as unknown as { decodeV10PublishReceipt?: unknown }).decodeV10PublishReceipt;
   }
   return chain;
 }
@@ -264,7 +264,7 @@ describe('canonical finalization receipt capability', () => {
         endKAId: legacyBatchId,
       },
     });
-    expect(chain.parseV10PublishReceipt).not.toHaveBeenCalled();
+    expect((chain as any).decodeV10PublishReceipt).not.toHaveBeenCalled();
     expect((chain as any).getFinalizedBlockTimestamp).toHaveBeenCalledWith(123, BLOCK_HASH, {});
   });
 

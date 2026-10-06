@@ -1,3 +1,4 @@
+import type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
 import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
@@ -490,19 +491,7 @@ export interface LargeLiteralStorageConfig {
   directory?: string;
 }
 
-export interface SharedMemoryPublicSnapshotStorageConfig {
-  enabled?: boolean;
-  directory?: string;
-  gc?: {
-    enabled?: boolean;
-    intervalMs?: number;
-    triggerFreeBytes?: number;
-    targetFreeBytes?: number;
-    hardReserveBytes?: number;
-    minAgeMs?: number;
-    staleTempAgeMs?: number;
-  };
-}
+export type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
 export interface LlmConfig {
@@ -646,7 +635,7 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'vmReconcileHolderTierEnabled'> {
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -825,14 +814,6 @@ export interface DkgConfig {
    * on. A core with it off declines every StorageACK.
    */
   vmReconcilerEnabled?: boolean;
-  /**
-   * VM exact-recovery holder tier: ShardingTable Cores the node is not
-   * connected to, named by an unsigned phonebook profile and bound to a
-   * ShardingTable identity on chain, that recovery dials behind the curator
-   * and connected-peer tiers. Env DKG_VM_RECONCILE_HOLDER_TIER wins (`0` is the
-   * kill switch); default on.
-   */
-  vmReconcileHolderTierEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
@@ -1079,7 +1060,11 @@ export interface DkgConfig {
      */
     postCommitRecoveryIntervalMs?: number;
   };
-  /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
+  /**
+   * Allowed CORS origins. When unset, only the API port's loopback origins
+   * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
+   * are allowed; `apiHost: '0.0.0.0'` keeps the legacy `'*'`.
+   */
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };

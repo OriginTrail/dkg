@@ -19,6 +19,7 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  PublishReceiptReadOptions,
   FinalizedChainProofSnapshot,
   KAUpdateVerification,
   OnChainPublishResult,
@@ -594,7 +595,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async resolvePublishByTxHash(
     txHash: string,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     await this.init();
 
@@ -790,7 +791,7 @@ export class PublishMethods extends EVMChainAdapterBase {
    */
   private async readPublishReceipt(
     txHash: string,
-    options: ChainReadOptions,
+    options: PublishReceiptReadOptions,
     logLabel?: string,
   ): Promise<{
     receipt: ethers.TransactionReceipt | null;
@@ -802,15 +803,11 @@ export class PublishMethods extends EVMChainAdapterBase {
     });
     if (!receipt || receipt.status !== 1) return { receipt, publish: null };
 
-    const v10 = this.contracts.knowledgeAssetStorage
-      ? await this.parseV10PublishReceipt(receipt, options)
-      : null;
-    if (v10) return { receipt, publish: v10 };
-
-    const v9 = this.contracts.knowledgeAssetsStorage
-      ? await this.parseV9PublishReceipt(receipt, options)
-      : null;
-    return { receipt, publish: v9 };
+    const facts = (this.contracts.knowledgeAssetStorage
+      ? this.decodeV10PublishReceipt(receipt) : null)
+      ?? (this.contracts.knowledgeAssetsStorage
+        ? this.decodeV9PublishReceipt(receipt) : null);
+    return { receipt, publish: facts ? await this.enrichPublishReceipt(receipt, facts, options) : null };
   }
 
   /**
@@ -886,10 +883,28 @@ export class PublishMethods extends EVMChainAdapterBase {
       : { status: 'rejected' };
   }
 
+  /** Apply header-read policy once, outside either event-format decoder. */
+  private async enrichPublishReceipt(
+    receipt: Pick<ethers.TransactionReceipt, 'blockNumber' | 'blockHash'>,
+    facts: Omit<OnChainPublishResult, 'blockTimestamp'>,
+    options: PublishReceiptReadOptions,
+  ): Promise<OnChainPublishResult> {
+    const blockTimestamp = options.skipBlockTimestamp === true ? 0
+      : await this.getFinalizedBlockTimestamp(receipt.blockNumber, receipt.blockHash, options);
+    return { ...facts, blockTimestamp };
+  }
+
   async parseV10PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
+    const facts = this.decodeV10PublishReceipt(receipt);
+    return facts ? this.enrichPublishReceipt(receipt, facts, options) : null;
+  }
+
+  private decodeV10PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Omit<OnChainPublishResult, 'blockTimestamp'> | null {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
 
@@ -933,13 +948,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    // When the caller already checked receipt finality, naming this exact hash
-    // reuses that header timestamp; direct parsers safely fall through to RPC.
-    const blockTimestamp = await this.getFinalizedBlockTimestamp(
-      receipt.blockNumber,
-      receipt.blockHash,
-      options,
-    );
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -952,7 +960,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,
-      blockTimestamp,
       publisherAddress,
       authorAddress,
       ...(convictionCostCovered ? { convictionCostCovered } : {}),
@@ -961,8 +968,15 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async parseV9PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
+    const facts = this.decodeV9PublishReceipt(receipt);
+    return facts ? this.enrichPublishReceipt(receipt, facts, options) : null;
+  }
+
+  private decodeV9PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Omit<OnChainPublishResult, 'blockTimestamp'> | null {
     const storage = this.contracts.knowledgeAssetsStorage;
     if (!storage) return null;
 
@@ -999,13 +1013,6 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    // When the caller already checked receipt finality, naming this exact hash
-    // reuses that header timestamp; direct parsers safely fall through to RPC.
-    const blockTimestamp = await this.getFinalizedBlockTimestamp(
-      receipt.blockNumber,
-      receipt.blockHash,
-      options,
-    );
 
     return {
       batchId,
@@ -1015,7 +1022,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,
-      blockTimestamp,
       publisherAddress,
     };
   }

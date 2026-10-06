@@ -235,9 +235,12 @@ graph-scoped (no `kaUal` / `assertionVersion` envelope) with
 `CORE_VM_PROMOTION_DISABLED`: it cannot keep a copy of such a publish that it
 could later promote. Every default publish and update path has sent
 graph-scoped requests since 10.0.7. Raw-lift jobs queued before 10.0.7 (or
-restored with the legacy raw-lift import) and `publishFromSharedMemory` called
-without `contentScopeVersion` still send legacy requests and can no longer
-collect ACKs from 10.0.19 Cores.
+restored with the legacy raw-lift import) still send legacy requests and can
+no longer collect ACKs from 10.0.19 Cores. `publishFromSharedMemory` called
+without `contentScopeVersion` is refused by the publishing node itself
+(`LEGACY_KA_READ_ONLY`), and a node ignores a finalization message that is
+not graph-scoped: its Knowledge Asset reaches Verifiable Memory through chain
+reconcile and sync, not from a local root-entity share.
 
 Chain-driven VM reconciliation has its own switch, on by default:
 

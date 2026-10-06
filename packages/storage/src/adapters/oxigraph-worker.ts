@@ -494,6 +494,11 @@ export class OxigraphWorkerStore implements TripleStore {
       // Route the state transition. close() already moved us to 'closing' and
       // owns the final hop to 'closed', so the intentional case touches nothing.
       if (inMemoryLost) {
+        // The contents are gone and no replacement will load them, so no
+        // revision of this store may be reported stable again. A consumer that
+        // holds a generation-bound memo must go back to the store and meet the
+        // data-loss error, not certify content that no longer exists.
+        this.writeGen.beginWrite({ kind: 'all' }).indeterminate();
         this.setLifecycle('in_memory_lost');
       } else if (!intentional) {
         this.scheduleRespawn();

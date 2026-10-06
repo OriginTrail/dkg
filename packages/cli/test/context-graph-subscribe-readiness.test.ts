@@ -1,10 +1,19 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
+
+interface TestAuthorityDecision {
+  outcome: 'allowed' | 'denied' | 'unavailable';
+  source: 'registered-chain' | 'legacy-local';
+  reason: string;
+  metadataBootstrap: 'eligible' | 'forbidden';
+  onChainId?: bigint;
+  registration?: 'unregistered';
+}
 
 function cleanEmptyResult(): CatchupJobResult {
   return {
@@ -105,6 +114,23 @@ function privateSharedMemoryOnlyResult(): CatchupJobResult {
   return result;
 }
 
+function privateSharedMemoryMetaOnlyResult(): CatchupJobResult {
+  const result = cleanEmptyResult();
+  if (!result.diagnostics || !result.cleanPlaneCompletions) {
+    throw new Error('catch-up evidence missing');
+  }
+  // No VM proof and no payload on either plane. The required SWM plane did
+  // deliver metadata, but metadata is not positive synchronization proof.
+  result.diagnostics.durable.emptyResponses = 0;
+  result.diagnostics.sharedMemory.emptyResponses = 0;
+  result.diagnostics.sharedMemory.fetchedMetaTriples = 7;
+  result.diagnostics.sharedMemory.insertedMetaTriples = 1;
+  result.diagnostics.sharedMemory.bytesReceived = 90;
+  result.cleanPlaneCompletions.durable = { verifiedDataPeers: 0, emptyPeers: 0 };
+  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 0, emptyPeers: 0 };
+  return result;
+}
+
 function publicDurableAndSharedMemoryResult(): CatchupJobResult {
   const result = cleanEmptyResult();
   if (!result.diagnostics?.durable || !result.diagnostics.sharedMemory) {
@@ -151,19 +177,17 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     metadataBootstrapWaitFor?: Promise<void>;
     onMetadataBootstrapStarted?: () => void;
     onCatchupRun?: () => void;
-    authorityDecision?: {
-      outcome: 'allowed' | 'denied' | 'unavailable';
-      source: 'registered-chain' | 'legacy-local';
-      reason: string;
-      metadataBootstrap: 'eligible' | 'forbidden';
-      onChainId?: bigint;
-    };
+    authorityDecision?: TestAuthorityDecision;
+    authorityAfterCatchup?: TestAuthorityDecision;
+    recoverAuthorityForRetry?: boolean;
+    metadataInspectionFailsAfterCatchup?: boolean;
     readiness?: {
       version: number;
       durableVerified: boolean;
       sharedMemoryVerified: boolean;
       updatedAt?: number;
     };
+    readinessDuringCatchup?: { version: number; durableVerified: boolean; sharedMemoryVerified: boolean };
   }): Promise<{
     response: any;
     responseStatus: number;
@@ -182,6 +206,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     patches: Array<Record<string, unknown>>;
     readiness: Record<string, unknown> | undefined;
     statusResponse: any;
+    retryResponseStatus?: number;
   }> {
     const contextGraphId = `readiness-${Math.random().toString(36).slice(2, 8)}`;
     const state = new Map<string, Record<string, any>>();
@@ -192,6 +217,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       latestByContextGraph: new Map<string, string>(),
     };
     let runCalls = 0;
+    let retrying = false;
     let metadataBootstrapCalls = 0;
     const metadataBootstrapProofs: Array<unknown> = [];
     let metadataBootstrapCompleted = false;
@@ -210,6 +236,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       run: async (request) => {
         runCalls += 1;
         opts.onCatchupRun?.();
+        if (opts.readinessDuringCatchup) readiness = { ...opts.readinessDuringCatchup, updatedAt: Date.now() };
         runSawMetadataBootstrap = metadataBootstrapCompleted;
         runRequests.push(request);
         return opts.result ?? cleanEmptyResult();
@@ -218,7 +245,15 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
-      resolveContextGraphSubscriptionBootstrapAuthority: async () => opts.authorityDecision ?? ({
+      resolveContextGraphSubscriptionBootstrapAuthority: async () => (
+        retrying
+          // Model the legacy-local admission guard after the transient store
+          // outage recovers. A wrongly persisted pendingMeta poisons retries.
+          ? state.get(contextGraphId)?.pendingMeta === true
+            ? { outcome: 'unavailable', source: 'legacy-local', reason: 'pending-authoritative-metadata', metadataBootstrap: 'eligible' }
+            : opts.authorityDecision
+          : runCalls > 0 ? opts.authorityAfterCatchup ?? opts.authorityDecision : opts.authorityDecision
+      ) ?? ({
         outcome: 'allowed' as const,
         source: 'legacy-local' as const,
         reason: 'test-public',
@@ -262,6 +297,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         return 'no-accepted-public-policy';
       },
       hasConfirmedMetaState: async () => {
+        if (runCalls > 0 && opts.metadataInspectionFailsAfterCatchup) {
+          throw new Error('transient metadata store failure');
+        }
         return runCalls > 0
           ? opts.hasConfirmedMetaAfterCatchup ?? opts.hasConfirmedMeta
           : opts.hasConfirmedMeta;
@@ -352,6 +390,17 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       ).then((result) => result.json())
       : null;
 
+    let retryResponseStatus: number | undefined;
+    if (opts.recoverAuthorityForRetry) {
+      retrying = true;
+      const retry = await fetch(`http://127.0.0.1:${address.port}/api/context-graph/subscribe`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, includeSharedMemory: true }),
+      });
+      retryResponseStatus = retry.status;
+      await retry.json();
+    }
+
     return {
       response,
       responseStatus: httpResponse.status,
@@ -367,6 +416,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       patches,
       readiness,
       statusResponse,
+      retryResponseStatus,
     };
   }
 
@@ -452,6 +502,26 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.job).toBeUndefined();
     expect(result.state).toEqual({});
     expect(result.patches).toEqual([]);
+  });
+
+  it('logs a bounded unavailable reason without exposing arbitrary decision text', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await subscribe({
+        hasConfirmedMeta: false,
+        authorityDecision: {
+          outcome: 'unavailable', source: 'registered-chain',
+          reason: 'private diagnostic text', metadataBootstrap: 'eligible',
+        },
+      });
+      expect(result.responseStatus).toBe(503);
+      expect(warn).toHaveBeenCalledWith(
+        '[context-graph-subscribe] authority unavailable: reason=other dependency=undefined',
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('private diagnostic text');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('forwards explicit on-demand edge intent without making it always-on', async () => {
@@ -809,6 +879,19 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.readiness).toMatchObject({ durableVerified: false });
   });
 
+  it('preserves newer catalog proof delivered while a foreground metadata-only job runs', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true, isPrivate: true, result: privateMetaOnlyResult(), forceCatchup: true,
+      authorityDecision: { outcome: 'allowed', source: 'legacy-local', reason: 'approved-private-replica', metadataBootstrap: 'eligible', registration: 'unregistered' },
+      initial: { subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: true },
+      readinessDuringCatchup: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+    });
+    expect(result.job.status).toBe('done');
+    expect(result.job.durablePlane).toBe('not-applicable');
+    expect(result.state).toMatchObject({ synced: true, sharedMemorySynced: true });
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: true });
+  });
+
   it('does not promote private data readiness from unrelated empty responders after metadata is local', async () => {
     const result = await subscribe({
       hasConfirmedMeta: true,
@@ -1088,6 +1171,137 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       durableVerified: false,
       sharedMemoryVerified: true,
     });
+  });
+
+  const unregisteredAuthority = {
+    outcome: 'allowed' as const,
+    source: 'legacy-local' as const,
+    reason: 'approved-private-replica',
+    metadataBootstrap: 'eligible' as const,
+    registration: 'unregistered' as const,
+  };
+
+  it('completes an authoritatively unregistered private SWM graph without inventing VM proof', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      result: privateSharedMemoryOnlyResult(),
+    });
+    expect(result.job).toMatchObject({ status: 'done', durablePlane: 'not-applicable' });
+    expect(result.job.error).toBeUndefined();
+    expect(result.statusResponse.durablePlane).toBe('not-applicable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: true });
+  });
+
+  it('re-derives VM applicability for the already-ready shortcut after restart', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      readiness: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+      initial: { subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true },
+    });
+    expect(result.runCalls).toBe(0);
+    expect(result.job).toMatchObject({ status: 'done', durablePlane: 'not-applicable' });
+    expect(result.readiness?.durableVerified).toBe(false);
+  });
+
+  it('keeps VM required for a legacy registered-metadata participant fallback, including the ready shortcut', async () => {
+    const { registration: _registration, ...legacyReadFallback } = unregisteredAuthority;
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: legacyReadFallback,
+      readiness: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+      initial: { subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true },
+      result: privateSharedMemoryOnlyResult(),
+    });
+    expect(result.runCalls).toBe(1);
+    expect(result.job).toMatchObject({ status: 'unreachable', durablePlane: 'required' });
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: true });
+  });
+
+  it('requires VM when the graph registers during catch-up', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      authorityAfterCatchup: {
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+        metadataBootstrap: 'eligible', onChainId: 42n,
+      },
+      result: privateSharedMemoryOnlyResult(),
+    });
+    expect(result.job).toMatchObject({ status: 'unreachable', durablePlane: 'required' });
+    expect(result.readiness?.durableVerified).toBe(false);
+  });
+
+  it.each(['denied', 'unavailable'] as const)('does not carry unregistered readiness through authority becoming %s', async (outcome) => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      authorityAfterCatchup: {
+        outcome, source: 'registered-chain', reason: 'authority-lost', metadataBootstrap: 'forbidden',
+      },
+      result: privateSharedMemoryOnlyResult(),
+    });
+    expect(result.job.status).toBe(outcome === 'denied' ? 'denied' : 'unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state.synced).toBe(false);
+  });
+
+  it.each([true, false])('does not turn metadata-only private SWM into readiness even when VM is inapplicable (typed completions=%s)', async (typedCompletions) => {
+    const metadataOnly = privateSharedMemoryMetaOnlyResult();
+    if (!typedCompletions) delete metadataOnly.cleanPlaneCompletions;
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      authorityDecision: unregisteredAuthority,
+      result: metadataOnly,
+    });
+    expect(result.job).toMatchObject({ status: 'unreachable', durablePlane: 'not-applicable' });
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state.synced).toBe(false);
+    expect(result.state.sharedMemorySynced).toBe(false);
+  });
+
+  it('preserves confirmed metadata after no response and transient completion-authority failure, so recovery admits a retry', async () => {
+    const noResponse = cleanEmptyResult();
+    noResponse.peersResponded = 0;
+    noResponse.peersSucceeded = 0;
+    noResponse.cleanPlaneCompletions = {
+      durable: { verifiedDataPeers: 0, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+    };
+    noResponse.diagnostics!.durable.emptyResponses = 0;
+    noResponse.diagnostics!.sharedMemory.emptyResponses = 0;
+    const result = await subscribe({
+      hasConfirmedMeta: true, isPrivate: true, forceCatchup: true,
+      initial: { subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false },
+      readiness: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+      authorityDecision: unregisteredAuthority,
+      authorityAfterCatchup: { outcome: 'unavailable', source: 'legacy-local', reason: 'store-failure', metadataBootstrap: 'eligible' },
+      result: noResponse, recoverAuthorityForRetry: true,
+    });
+    expect(result.job.status).toBe('unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false, metaSynced: true, pendingMeta: false });
+    expect(result.retryResponseStatus).toBe(200);
+  });
+
+  it('preserves metadata flags when a completion metadata inspection fails', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true, isPrivate: true, forceCatchup: true,
+      initial: { subscribed: true, synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false },
+      readiness: { version: 1, durableVerified: false, sharedMemoryVerified: true },
+      authorityDecision: unregisteredAuthority,
+      result: privateSharedMemoryOnlyResult(), metadataInspectionFailsAfterCatchup: true,
+    });
+    expect(result.job.status).toBe('unreachable');
+    expect(result.readiness).toMatchObject({ durableVerified: false, sharedMemoryVerified: false });
+    expect(result.state).toMatchObject({ synced: false, sharedMemorySynced: false, metaSynced: true, pendingMeta: false });
   });
 
   it('only returns synthetic done when all ready flags include metaSynced=true', async () => {

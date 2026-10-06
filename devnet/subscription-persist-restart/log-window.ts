@@ -1,0 +1,241 @@
+/**
+ * Read only the part of a daemon log written after a recorded point, and say
+ * when the log stopped continuing from that point.
+ *
+ * A suite that asserts "the daemon logged no persistence trouble during this
+ * run" must not compare match COUNTS before and after: a daemon that restarts
+ * three times can rotate its log in between (`rotateDaemonLogIfNeeded` rewrites
+ * an oversized `daemon.log` in place, keeping only its tail), which removes old
+ * matching lines and would make "skip the first N matches" swallow fresh ones.
+ * Instead the window is delimited by a BYTE OFFSET recorded before the first
+ * action, guarded by a fingerprint of the bytes just before it:
+ *
+ *  - The log still continues from the mark when it is at least `offset` bytes
+ *    long and those bytes are unchanged. The window is everything after them.
+ *  - Otherwise it was rotated or truncated (a shorter file, or an in-place
+ *    rewrite that grew back past the offset), the offset means nothing, and the
+ *    WHOLE file is read: every matching line still in it counts as new. That
+ *    reading is incomplete. A rotation keeps only the tail, so a line written
+ *    after the mark and before the kept tail is gone, and nothing left in the
+ *    file can show whether it matched. `rotated` reports this, and a check that
+ *    asserts "no trouble" must fail on it rather than pass on what is left
+ *    ({@link withLogTroubleCheck}, {@link rotatedLogReport}).
+ *
+ * The window always starts on a line boundary. The daemon may be in the middle
+ * of a line when the mark is taken, and the beginning of that line (where a
+ * failure prefix such as "Failed to persist ..." lives) must stay inside the
+ * window, however long the line already is. `markLog` therefore finds the start
+ * of an unterminated last line by scanning backward from the end of the file for
+ * the newline before it, in bounded chunks, and never advances the mark past it.
+ * When no newline lies within {@link LOG_MARK_MAX_LINE_SCAN_BYTES} of the end (or
+ * the file has none), the mark falls back to offset 0 and the whole file is the
+ * window: again only over-reporting, never hiding a line.
+ *
+ * Offsets are bytes, never string indices: the log contains multi-byte
+ * characters, so a character index into decoded text is not a file offset. The
+ * backward scan works on bytes too: 0x0a never occurs inside a multi-byte UTF-8
+ * sequence, so a chunk boundary that splits a character cannot fake a line start.
+ *
+ * `withLogTroubleCheck` runs a body inside such a window and reports what the
+ * daemon logged whether the body passed or failed, so a scenario that fails
+ * midway cannot hide the trouble behind its own assertion error. A log rotated
+ * inside the window fails the check even when no matching line is left.
+ */
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
+
+/** How many bytes before the mark must still match for the log to count as continuous. */
+export const LOG_MARK_FINGERPRINT_BYTES = 4096;
+
+/** How much of the end of the log one step of the backward line-start scan reads. */
+export const LOG_MARK_SCAN_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * How far back from the end of the log `markLog` looks for the newline before an
+ * unterminated last line: a line still being written, up to 1 MiB long, is found;
+ * a longer one (or a log with no newline in that range) makes the mark fall back
+ * to the start of the file. The bound keeps marking cheap however large the log
+ * is (a few reads, never a scan of a 50 MiB file), and 1 MiB is far beyond any
+ * line the daemon's logger writes (an error with its stack is a few KiB). Falling
+ * back can only over-report, so the bound trades a possible false alarm on a
+ * pathological line for a mark that stays O(bound).
+ */
+export const LOG_MARK_MAX_LINE_SCAN_BYTES = 1024 * 1024;
+
+export interface LogMark {
+  /** Byte offset where the window starts: just past the last complete line at mark time (0: the whole file). */
+  readonly offset: number;
+  /** The bytes right before `offset` (at most {@link LOG_MARK_FINGERPRINT_BYTES}). */
+  readonly fingerprint: Buffer;
+}
+
+export interface LogWindow {
+  readonly text: string;
+  /**
+   * True when the log did not continue from the mark. `text` is then the whole
+   * file, and lines the rotation discarded are missing from it.
+   */
+  readonly rotated: boolean;
+}
+
+export interface MatchedLogLines {
+  readonly lines: string[];
+  readonly rotated: boolean;
+}
+
+function readFully(fd: number, into: Buffer, position: number): number {
+  let total = 0;
+  while (total < into.length) {
+    const read = readSync(fd, into, total, into.length - total, position + total);
+    if (read === 0) break;
+    total += read;
+  }
+  return total;
+}
+
+/**
+ * Byte offset just past the last newline of the first `size` bytes of the file,
+ * i.e. where the last (possibly unterminated) line starts; `size` itself when the
+ * file ends on a newline. Scans backward from `size` in chunks and looks at most
+ * {@link LOG_MARK_MAX_LINE_SCAN_BYTES} back. Returns 0 when there is no newline in
+ * that range or the file is shorter than `size` (it changed underneath us): the
+ * window is then the whole file, which can over-report but never hides a line.
+ */
+function startOfLastLine(fd: number, size: number): number {
+  const floor = Math.max(0, size - LOG_MARK_MAX_LINE_SCAN_BYTES);
+  let end = size;
+  while (end > floor) {
+    const start = Math.max(floor, end - LOG_MARK_SCAN_CHUNK_BYTES);
+    const chunk = Buffer.alloc(end - start);
+    if (readFully(fd, chunk, start) !== chunk.length) return 0;
+    const newline = chunk.lastIndexOf(0x0a);
+    if (newline >= 0) return start + newline + 1;
+    end = start;
+  }
+  return 0;
+}
+
+/**
+ * Record where the log stands now: just past its last complete line, so an
+ * unterminated last line is still being written and stays inside the window, read
+ * whole once it completes, however long it already is (see the file header). A
+ * missing file marks offset 0, so a log that appears later is read from its start.
+ */
+export function markLog(file: string): LogMark {
+  const whole: LogMark = { offset: 0, fingerprint: Buffer.alloc(0) };
+  if (!existsSync(file)) return whole;
+  const fd = openSync(file, 'r');
+  try {
+    const offset = startOfLastLine(fd, fstatSync(fd).size);
+    const from = Math.max(0, offset - LOG_MARK_FINGERPRINT_BYTES);
+    const fingerprint = Buffer.alloc(offset - from);
+    if (readFully(fd, fingerprint, from) !== fingerprint.length) return whole;
+    return { offset, fingerprint };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function continuesFromMark(fd: number, mark: LogMark): boolean {
+  if (fstatSync(fd).size < mark.offset) return false;
+  if (mark.fingerprint.length === 0) return true;
+  const before = Buffer.alloc(mark.fingerprint.length);
+  const read = readFully(fd, before, mark.offset - mark.fingerprint.length);
+  return read === before.length && before.equals(mark.fingerprint);
+}
+
+/** The text written after `mark`, or the whole file when the log no longer continues from it. */
+export function readLogSince(file: string, mark: LogMark): LogWindow {
+  if (!existsSync(file)) return { text: '', rotated: mark.offset > 0 };
+  const fd = openSync(file, 'r');
+  try {
+    const rotated = !continuesFromMark(fd, mark);
+    const from = rotated ? 0 : mark.offset;
+    const window = Buffer.alloc(Math.max(0, fstatSync(fd).size - from));
+    const read = readFully(fd, window, from);
+    return { text: window.subarray(0, read).toString('utf8'), rotated };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Lines of the window after `mark` that match any pattern. Patterns must not
+ * carry the `g` or `y` flag: `test` on those is stateful across lines.
+ */
+export function matchingLinesSince(
+  file: string,
+  mark: LogMark,
+  patterns: readonly RegExp[],
+): MatchedLogLines {
+  const { text, rotated } = readLogSince(file, mark);
+  return {
+    lines: text.split('\n').filter((line) => patterns.some((pattern) => pattern.test(line))),
+    rotated,
+  };
+}
+
+/**
+ * Why a window over a rotated log cannot show that the daemon logged no trouble,
+ * with the matching lines the log still holds. `what` names the log.
+ */
+export function rotatedLogReport(what: string, lines: readonly string[]): string {
+  return `${what} was rotated or truncated during the run, so lines written before the rotation are gone `
+    + 'and the absence of persistence trouble cannot be confirmed'
+    + (lines.length === 0
+      ? '; no matching line is left in the log'
+      : `; every matching line left in the log counts as new:\n${lines.join('\n')}`);
+}
+
+/**
+ * Append `report` to a failure's message so it is not lost behind it. An error
+ * whose message cannot be rewritten is wrapped instead, keeping it as the cause.
+ */
+function withReport(error: unknown, report: string): unknown {
+  if (error instanceof Error) {
+    try {
+      error.message = `${error.message}\n\n${report}`;
+      return error;
+    } catch {
+      /* a frozen error: wrap it below */
+    }
+  }
+  return new Error(`${error instanceof Error ? error.message : String(error)}\n\n${report}`, { cause: error });
+}
+
+/**
+ * Run `body` and fail when `file` gained a line matching `patterns` while it ran,
+ * whether `body` passed or threw: the window opens before `body` starts and is
+ * read after it settles.
+ *
+ *  - `body` returned and no line matched: its value is returned.
+ *  - `body` returned and a line matched: the call throws a report of those lines.
+ *  - `body` threw: its error is rethrown with any matching lines appended to its
+ *    message, so an earlier assertion failure never hides trouble the daemon
+ *    logged. With no matching line the error is rethrown untouched.
+ *  - The log was rotated while `body` ran: the window is incomplete, so the call
+ *    fails in the same two ways whether or not a matching line is left.
+ *
+ * `what` names the log in the report (for example "node5 daemon.log").
+ */
+export async function withLogTroubleCheck<T>(
+  file: string,
+  patterns: readonly RegExp[],
+  what: string,
+  body: () => Promise<T>,
+): Promise<T> {
+  const mark = markLog(file);
+  let outcome: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
+  try {
+    outcome = { ok: true, value: await body() };
+  } catch (error) {
+    outcome = { ok: false, error };
+  }
+  const { lines, rotated } = matchingLinesSince(file, mark, patterns);
+  const report = rotated
+    ? rotatedLogReport(what, lines)
+    : lines.length === 0 ? '' : `new persistence trouble in ${what}:\n${lines.join('\n')}`;
+  if (!outcome.ok) throw report === '' ? outcome.error : withReport(outcome.error, report);
+  if (report !== '') throw new Error(report);
+  return outcome.value;
+}
+

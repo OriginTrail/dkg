@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import {
   EVM_SCOPES,
+  INSTALL_HOOK_INPUTS,
   PATH_TRIGGERS,
   SUPPORT_PATH_ROUTES,
   WORKSPACE_OWNING_EVM_SCOPES,
@@ -32,6 +33,8 @@ export { EVM_SCOPES, WORKSPACE_OWNING_EVM_SCOPES, WORKSPACE_OWNING_LANES, WORKSP
 // - `implies`: lanes whose jobs run whenever this lane's does; every plan
 //   records them, so the gate requires those jobs too.
 const LANES = Object.freeze({
+  // Source-only transport tests install and run independently of the Node 22 build.
+  chain_rpc_node26: { job: 'chain-rpc-node26', selfBuilding: true },
   tornado_core: { job: 'tornado-core', nodeTestArtifacts: true },
   tornado_blazegraph: { job: 'tornado-blazegraph' },
   tornado_publisher: { job: 'tornado-publisher', nodeTestArtifacts: true },
@@ -231,7 +234,6 @@ function isDocumentationPath(filePath) {
 function isGlobalFullPath(filePath) {
   return GLOBAL_FULL_PATHS.has(filePath)
     || filePath.startsWith('patches/')
-    || filePath.startsWith('scripts/')
     || /^tsconfig(?:\.[^/]+)?\.json$/.test(filePath);
 }
 
@@ -288,7 +290,7 @@ const INSTALL_LIFECYCLE_SCRIPTS = new Set([
   'dependencies',
 ]);
 
-function isInstallLifecycleScript(name) {
+export function isInstallLifecycleScript(name) {
   return INSTALL_LIFECYCLE_SCRIPTS.has(name) || name.startsWith('pnpm:');
 }
 
@@ -381,7 +383,8 @@ export function parseNameStatusZ(buffer) {
 }
 
 // The routing decision for one changed path. Precedence, first match wins:
-//   1. global CI inputs (lockfile, root configs, patches/, scripts/) -> full CI
+//   1. global CI inputs (lockfile, root configs, patches/) and the files
+//      install hooks run inside workspaces (INSTALL_HOOK_INPUTS) -> full CI
 //   2. a package workspace -> its WORKSPACE_RULES entry; the highest-risk
 //      workspace and install-affecting manifest edits -> full CI
 //   3. a repository support area -> the first matching SUPPORT_PATH_ROUTES
@@ -397,6 +400,7 @@ const fullRoute = (reason) => ({ kind: 'full', reason });
 
 function routePath(filePath, { modifiedFiles, readManifest }) {
   if (isGlobalFullPath(filePath)) return fullRoute(`Global CI input changed: ${filePath}`);
+  if (INSTALL_HOOK_INPUTS.includes(filePath)) return fullRoute(`Install hook input changed: ${filePath}`);
 
   // The area that owns the path: its workspace rule, else a support route. A
   // document reaching here is claimed by PATH_TRIGGERS, so only the lanes that

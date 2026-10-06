@@ -235,7 +235,7 @@ async function snapshotChain(
     tokenAmount: bigint; publisher: string;
   }
   const futureKCs: FutureKC[] = [];
-  const cacheDir = path.join(__dirname, '..', 'snapshots');
+  const cacheDir = path.join(__dirname, '..', 'misc', 'snapshots');
   const cachePath = path.join(cacheDir, `_cache_phase1_${chainName}_epoch${currentEpoch}.json`);
 
   if (existsSync(cachePath)) {
@@ -496,7 +496,7 @@ async function main() {
     process.exit(1);
   }
 
-  const outDir = path.join(__dirname, '..', 'snapshots');
+  const outDir = path.join(__dirname, '..', 'misc', 'snapshots');
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
 
   const unixTs = Math.floor(Date.now() / 1000);

@@ -95,6 +95,40 @@ const resolveBootstrap = (agent: DKGAgent) => (
 );
 
 describe('subscription bootstrap finalized-generation refresh', () => {
+  it('carries explicit unregistered applicability only from the canonical allowed authority read', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({
+      kind: 'unregistered', unregisteredEvidence: 'accepted-rfc64-finalized-absence',
+    });
+    Reflect.set(agent, 'hasAcceptedRfc64PublicUnregisteredAuthorityV1', () => true);
+    const decision = await resolveBootstrap(agent);
+    expect(decision).toMatchObject({
+      outcome: 'allowed', source: 'rfc64-public', registration: 'unregistered',
+    });
+    expect(registeredAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('does not turn a legacy unregistered read fallback into VM non-applicability', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({ kind: 'unregistered' });
+    Reflect.set(agent, 'hasAcceptedRfc64PublicUnregisteredAuthorityV1', () => true);
+    const decision = await resolveBootstrap(agent);
+    expect(decision).toMatchObject({ outcome: 'allowed', source: 'rfc64-public' });
+    expect(decision).not.toHaveProperty('registration');
+    expect(registeredAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('does not attach unregistered applicability to a private non-member denial', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({
+      kind: 'unregistered', unregisteredEvidence: 'approved-private-replica-finalized-absence',
+    });
+    Reflect.set(agent, 'resolveRfc64PrivateReadRosterV1', () => []);
+    const decision = await resolveBootstrap(agent);
+    expect(decision.outcome).toBe('denied');
+    expect(decision).not.toHaveProperty('registration');
+  });
+
   it('refuses admission when the finalized refresh returns no entry for the graph', async () => {
     const { agent, reconcile, refresh, registeredAuthority } = createBootstrapAgent({
       refresh: async () => new Map(),
@@ -127,6 +161,41 @@ describe('subscription bootstrap finalized-generation refresh', () => {
     // re-resolve (a third authority read) never happened.
     expect(registeredAuthority).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    ['declares the graph private', async () => ({ accessPolicy: 'private' }), false],
+    ['cannot be read', async () => { throw new Error('store unavailable'); }, false],
+    ['declares the graph public', async () => ({ accessPolicy: 'public' }), true],
+    ['holds no access policy yet', async () => ({}), true],
+  ] as const)(
+    'with a local join intent, reconciles the signed seed only unless own metadata %s',
+    async (_label, ownMetaFacts, reconciles) => {
+      const { agent, reconcile, registeredAuthority } = createBootstrapAgent({
+        refresh: async () => new Map(),
+      });
+      // Signing a join request records the intent for public and private graphs alike.
+      Reflect.set(agent, 'localApprovedAgentByCG', new Map([[CG_ID, `0x${'ab'.repeat(20)}`]]));
+      const getOwnCgMetaFacts = vi.fn(ownMetaFacts);
+      Reflect.set(agent, 'getOwnCgMetaFacts', getOwnCgMetaFacts);
+
+      const decision = await resolveBootstrap(agent);
+
+      expect(getOwnCgMetaFacts).toHaveBeenCalledExactlyOnceWith(
+        CG_ID,
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(decision.outcome).toBe('unavailable');
+      if (reconciles) {
+        expect(reconcile).toHaveBeenCalledOnce();
+        expect(reconcile.mock.calls[0]?.[2]).toEqual({ kind: 'finalized-absence' });
+      } else {
+        // The failed private join proof stands; no later refresh replaces it.
+        expect(decision).toMatchObject({ reason: 'finalized-name-absence-unaccepted' });
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(registeredAuthority).toHaveBeenCalledOnce();
+      }
+    },
+  );
 
   it.each(['auto', 'finalized-absence'] as const)(
     'refuses admission when the finalized refresh downgrades to a %s request',

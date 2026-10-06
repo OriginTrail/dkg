@@ -1,5 +1,9 @@
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
+import type { VmRecoveryCoreTransportPreferencePolicy } from '../../src/vm-recovery-core-transport-preference.js';
+import type { VmRecoveryTransportBudgetPolicy } from '../../src/vm-recovery-transport-budget-policy.js';
+import type { DurableSyncAdmissionOutcome } from '../../src/sync/requester/admission-boundary.js';
 
 import type {
   OrdinalOutcome,
@@ -9,16 +13,20 @@ import type {
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
 import { DKGAgent } from '../../src/index.js';
-import type { ExactAssetSelection } from '../../src/sync/exact-assets.js';
+import { exactAssetUalsForSelection, type ExactAssetSelection } from '../../src/sync/exact-assets.js';
+import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from '../../src/sync/requester/exact-recovery-transport.js';
 import type {
+  VmRecoveryProviderPolicy,
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
+import type { VmRecoveryRegisteredPublicEvidence } from '../../src/vm-recovery-pass-authority.js';
 
 interface TestPeerId {
   toString(): string;
 }
 
 interface ExactFetchResult {
+  admission: DurableSyncAdmissionOutcome;
   result: {
     fetchedDataTriples: number;
     fetchedMetaTriples: number;
@@ -28,6 +36,9 @@ interface ExactFetchResult {
     deferredBackpressure: number;
   };
   disposition: VmRecoveryUalDisposition;
+  responderCapability?: 'legacy-filter-unsupported';
+  /** Set by a fixture that plays the exact-batch stream; the default fixture never does. */
+  streamOutcome?: ExactBatchStreamOutcome;
 }
 
 /**
@@ -41,13 +52,35 @@ export interface VmRecoveryHostInternals {
   node: {
     peerId: string;
     libp2p: {
-      getConnections(): Array<{ remotePeer: TestPeerId }>;
+      getConnections(): Array<{
+        remotePeer: TestPeerId;
+        direction?: string;
+        timeline?: { open?: number };
+      }>;
     };
   };
   preferredSyncPeers: Map<string, string>;
+  peerCapabilityRegistry: PeerCapabilityRegistry;
+  vmReconcileLifecycleGeneration: number;
+  contextGraphBindingState: { bump(contextGraphId: string): number };
+  selectedVmReconcileCursors: Map<string, { bindingGeneration: number }>;
+  vmReconcilePublicCoreTransportPreferencePolicy: VmRecoveryCoreTransportPreferencePolicy;
+  getSyncReconcilerConnectionKey(peerId: string): string | null;
+  clearVmReconcileRotationStateForContextGraph(localCgId: string): void;
+  closeVmReconcileRotationState(): void;
+  openVmReconcileRotationState(): void;
+  clearNetworkRejectedPeerState(peerId: string): void;
   vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
+  vmReconcileRotationAdmissionCursorByCg: Map<string, number>;
+  vmReconcileTransportBudgetPolicy: VmRecoveryTransportBudgetPolicy;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
+  selectVmReconcileExactCandidate(
+    record: VmReconcileRotationRecord | undefined,
+    fallbackCandidatePeerIds: readonly string[],
+    policy: VmRecoveryProviderPolicy,
+    binding?: { localCgId: string; onChainCgId: string; experimentalStreamPeerIds?: ReadonlySet<string> },
+  ): string | undefined;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
   installVmReconcileActiveFetchCooldown(localCgId: string, now: number): symbol;
   readVmReconcileActiveFetchCooldown(
@@ -76,8 +109,11 @@ export interface VmRecoveryHostInternals {
   syncExactKnowledgeAssetsFromPeerDetailed(
     peerId: string,
     contextGraphId: string,
-    selection: ExactAssetSelection,
-    options?: { signal?: AbortSignal; isCurrent?: () => boolean },
+    selection: readonly string[] | ExactAssetSelection,
+    options?: { signal?: AbortSignal; isCurrent?: () => boolean; onWorkStarted?: () => void;
+      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+      totalTimeoutMs?: number;
+      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
     localCgId: string,
@@ -86,7 +122,6 @@ export interface VmRecoveryHostInternals {
     headBlock: number | undefined,
     options?: {
       isTargetCurrent?: () => boolean;
-      deferActiveFetch?: boolean;
     },
   ): Promise<OrdinalOutcome>;
   executeVmRecoveryBatch(input: {
@@ -108,7 +143,10 @@ export interface VmRecoveryHostInternals {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
-  }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' }>;
+    exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+    legacyAttemptTimeoutMs?: number;
+    registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+  }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' | 'local-admission-deferred' }>;
   recoverVmReconcileBatch(
     localCgId: string,
     onChainCgId: bigint,
@@ -143,6 +181,7 @@ export interface VmRecoveryHostHarnessOptions<TTarget extends OrdinalRecoveryTar
   readonly targetCount: number;
   readonly targetForOrdinal: (ordinal: number) => TTarget;
   readonly sizingUnavailable?: boolean;
+  readonly accessPolicy?: 0 | 1;
   /**
    * Keep MockChainAdapter's prototype implementation so integration tests can
    * exercise the real stateful adapter boundary after seeding KAs with
@@ -168,7 +207,7 @@ export async function createVmRecoveryHostHarness<
 ): Promise<VmRecoveryHostHarness<TTarget>> {
   const chainAdapter = new MockChainAdapter();
   const { contextGraphId } = await chainAdapter.createOnChainContextGraph({
-    accessPolicy: 0,
+    accessPolicy: options.accessPolicy ?? 0,
     publishPolicy: 1,
   });
   if (contextGraphId !== 1n) {
@@ -212,22 +251,26 @@ export async function createVmRecoveryHostHarness<
     chainAdapter.getKnowledgeAssetUpdateContext = async (kaId) => {
       const ordinal = Number(kaId);
       if (options.sizingUnavailable) {
-        return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
+        return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0,
+          minted: 0n, endEpoch: 0n, tokenAmount: 0n, isImmutable: false };
       }
       const footprint = options.footprintForOrdinal?.(ordinal);
       return {
         merkleRootsCount: footprint?.merkleRootsCount ?? 1n,
         byteSize: footprint?.byteSize ?? 1_024n,
         merkleLeafCount: Number(footprint?.merkleLeafCount ?? 8),
+        minted: 1n, endEpoch: 1n, tokenAmount: 0n, isImmutable: false,
       };
     };
   }
   internals.syncExactKnowledgeAssetsFromPeerDetailed = async (
     peerId,
     _contextGraphId,
-    uals,
+    selection,
     requestOptions,
   ) => {
+    const uals = 'kind' in selection ? exactAssetUalsForSelection(selection) : selection;
+    requestOptions?.onWorkStarted?.();
     activeFetches += 1;
     maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
     try {
@@ -244,6 +287,7 @@ export async function createVmRecoveryHostHarness<
         requestOptions?.signal,
       );
       return {
+        admission: 'work-started',
         result: {
           fetchedDataTriples: disposition === 'found' ? requested.length : 0,
           fetchedMetaTriples: disposition === 'found' ? requested.length * 8 : 0,
