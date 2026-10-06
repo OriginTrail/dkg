@@ -4,6 +4,18 @@ import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
 import { normalizeChatAttachmentRefs, stripRdfLiteral, type ChatAttachmentRef, type ChatToolCall } from './chat-literals.js';
 import { foldListedRows, foldSessionRows } from './chat-history-rows.js';
+import { selectGraphDeltaSubjects } from './chat-graph-delta-subjects.js';
+import {
+  CHAT_ATTACHMENT_REFS_PREDICATE,
+  CHAT_NS,
+  CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE,
+  CHAT_TURN_PERSISTENCE_TRANSITION_TYPE,
+  DKG_ONT,
+  MEMORY_NS,
+  RDF_TYPE,
+  SCHEMA,
+  XSD_DATETIME,
+} from './chat-vocabulary.js';
 export { decodeRdfStringLiteral } from './rdf-literal.js';
 
 export interface MemoryToolContext {
@@ -167,16 +179,7 @@ export const AGENT_CONTEXT_GRAPH = 'agent-context';
 export const CHAT_TURNS_ASSERTION = 'chat-turns';
 const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
-const CHAT_NS = 'urn:dkg:chat:';
-const MEMORY_NS = 'urn:dkg:memory:';
-const SCHEMA = 'http://schema.org/';
-const DKG_ONT = 'http://dkg.io/ontology/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
-const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
-const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
-const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
 function parseRdfInt(value: string): number {
   if (!value) return 0;
   const match = value.match(/^"(\d+)"/);
@@ -1247,36 +1250,12 @@ export class ChatMemoryManager {
       };
     }
 
-    // The turn's transitions are part of it: a turn that completes after it was
-    // first written keeps its messages and records the new state and the final
-    // reply on a transition (`recordChatTurnPersistenceTransition`).
-    const relatedSubjectsResult = await this.tools.query(
-      `SELECT DISTINCT ?s WHERE {
-        VALUES ?msg { <${userMsgUri}> <${assistantMsgUri}> }
-        { BIND(<${sessionUri}> AS ?s) }
-        UNION { BIND(<${turnUri}> AS ?s) }
-        UNION { BIND(?msg AS ?s) }
-        UNION {
-          ?s <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
-          ?s <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> <${turnUri}> .
-        }
-        UNION { <${assistantMsgUri}> <${DKG_ONT}usedTool> ?s }
-        UNION { ?s <${DKG_ONT}mentionedIn> ?msg }
-        UNION {
-          ?entity <${DKG_ONT}mentionedIn> ?msg .
-          ?s <${DKG_ONT}contains> ?entity .
-          ?s <${DKG_ONT}extractedFrom> <${sessionUri}> .
-        }
-      } LIMIT 5000`,
-      this.wmReadOpts(),
+    // What hangs off the turn, including its transitions (see the function).
+    const subjects = await selectGraphDeltaSubjects(
+      (sparql) => this.tools.query(sparql, this.wmReadOpts()),
+      { sessionUri, turnUri, userMsgUri, assistantMsgUri },
     );
-    const subjectSet = new Set<string>([sessionUri, turnUri, userMsgUri, assistantMsgUri]);
-    for (const b of relatedSubjectsResult.bindings ?? []) {
-      const iri = String(b.s ?? '').replace(/[<>]/g, '');
-      if (!iri || !isSafeIri(iri)) continue;
-      subjectSet.add(iri);
-    }
-    const values = [...subjectSet]
+    const values = subjects
       .map((iri) => `<${iri}>`)
       .join(' ');
     const deltaResult = await this.tools.query(

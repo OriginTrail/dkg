@@ -806,12 +806,11 @@ describe('ChatMemoryManager', () => {
           },
         ],
       },
-      {
-        bindings: [
-          { s: 'urn:dkg:chat:msg:user-2' },
-          { s: 'urn:dkg:chat:msg:assistant-2' },
-        ],
-      },
+      // The four related-subject relations: transitions, tools, mentions, memories.
+      { bindings: [] },
+      { bindings: [] },
+      { bindings: [{ s: 'urn:dkg:chat:msg:user-2' }, { s: 'urn:dkg:chat:msg:assistant-2' }] },
+      { bindings: [] },
       {
         quads: [
           {
@@ -1364,7 +1363,15 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
     const integer = (n: number) => `"${n}"^^<${XSD_INTEGER}>`;
     const dateTime = (iso: string) => `"${iso}"^^<${XSD_DATETIME_IRI}>`;
 
-    /** The store's answers to a delta request for turn `t2`, whose subject the first lookup names. */
+    const TRANSITION = `${CHAT}turn-transition:aaaa0000`;
+
+    /**
+     * The store's answers to a delta request for turn `t2`, whose subject the
+     * first lookup names, in the order the manager asks: the session's turn count,
+     * the turn, the latest and previous turn, the turn's index, its two messages,
+     * one answer for each of the four related-subject relations (transitions,
+     * tools, mentions, memories) and the CONSTRUCT.
+     */
     function pushDeltaAnswers(turnSubject: string | undefined) {
       mockQuery.returns.push(
         { bindings: [] },
@@ -1374,7 +1381,10 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
         { bindings: [{ previousTurnId: '"t1"' }] },
         { bindings: [{ c: integer(2) }] },
         { bindings: [{ user: `${CHAT}msg:user-2`, assistant: `${CHAT}msg:assistant-2` }] },
-        { bindings: [{ s: `${CHAT}msg:user-2` }, { s: `${CHAT}msg:assistant-2` }] },
+        { bindings: [{ s: TRANSITION }] },
+        { bindings: [] },
+        { bindings: [{ s: `${CHAT}msg:user-2` }] },
+        { bindings: [] },
         { quads: [{ subject: turnSubject ?? '', predicate: `${DKG}turnId`, object: '"t2"' }] },
       );
     }
@@ -1397,8 +1407,10 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
       // ...and then used for everything that hangs off the turn.
       expect(queries[6]).toContain(`<${subject}> <${DKG}hasUserMessage> ?user`);
       expect(queries[6]).toContain(`<${subject}> <${DKG}hasAssistantMessage> ?assistant`);
-      expect(queries[7]).toContain(`BIND(<${subject}> AS ?s)`);
-      expect(queries[8]).toContain(`<${subject}>`);
+      // The transitions are the ones that point at the subject the turn was found under, and are read with it.
+      expect(queries[7]).toContain(`?s <${DKG}updatesTurn> <${subject}>`);
+      expect(queries[11]).toMatch(/^CONSTRUCT/);
+      expect(queries[11]).toContain(`VALUES ?s { <${CHAT}session:s-graph> <${subject}> <${CHAT}msg:user-2> <${CHAT}msg:assistant-2> <${TRANSITION}> }`);
     });
 
     // One case per test: `beforeEach` gives each a fresh mock, so the lookup a
